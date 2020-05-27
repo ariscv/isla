@@ -39,8 +39,16 @@ rv_htif_tohost = "0x0000000080001000"
 rv_insns_per_tick = 10
 
 [reads]
+Read_RISCV_acquire = "A"
+Read_RISCV_strong_acquire = "A"
+Read_RISCV_reserved_acquire = ["A", "X"]
+Read_RISCV_reserved_strong_acquire = ["A", "X"]
 
 [writes]
+Write_RISCV_release = "L"
+Write_RISCV_strong_release = "L"
+Write_RISCV_conditional_release = ["L", "X"]
+Write_RISCV_conditional_strong_release = ["L", "X"]
 
 [cache_ops]
 
