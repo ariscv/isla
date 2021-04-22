@@ -101,7 +101,7 @@ AtomicExp: Exp = {
                 error: ExpParseError::NoAddress { name: symbolic_addr.clone() }
             })
             .map(|address| {
-                let bytes = *symbolic_sizeof.get(&symbolic_addr).unwrap_or(&4);
+                let bytes = *symbolic_sizeof.get(&symbolic_addr).unwrap_or(&8);
                 Exp::Bits64(*address, bytes * 8)
             })
     },      
