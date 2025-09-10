@@ -74,6 +74,9 @@ ignore = [
   "v9Ap2_IMPLEMENTED",
   "v9Ap3_IMPLEMENTED",
   "v9Ap4_IMPLEMENTED",
+  "__isla_vector_gpr",
+  "__monomorphize_writes",
+  "__monomorphize_reads",
 ]
 
 # These registers are set before any symbolic execution occurs
