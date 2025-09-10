@@ -43,7 +43,7 @@ use std::time::Instant;
 
 use isla_axiomatic::footprint_analysis::{footprint_analysis, Footprint};
 use isla_axiomatic::litmus::exp;
-use isla_axiomatic::litmus::Litmus;
+use isla_axiomatic::litmus::{AssembledThread, Litmus, Thread::Assembled};
 use isla_axiomatic::run_litmus;
 use isla_axiomatic::run_litmus::{LitmusRunOpts, LitmusSetup, PCLimitMode};
 use isla_lib::bitvector::{b64::B64, BV};
@@ -261,7 +261,46 @@ fn isla_main() -> i32 {
             .unwrap();
         }
         writeln!(file, ".").unwrap();
+        writeln!(file, "Definition isla_init_mem :=").unwrap();
+        writeln!(file, "  ∅").unwrap();
         write_concrete_memory_rocq(&mut file, &setup.memory);
+        writeln!(file, "  (* symbolic memory *)").unwrap();
+        for (name, addr) in litmus.symbolic_addrs {
+            if name == "page_table_base" || name == "s2_page_table_base" {
+                continue;
+            }
+            if let Some(value) = litmus.locations.get(&addr) {
+                writeln!(file, "  |> mem_insert_bv {:#x}%bv $ Z_to_bv 64 {:#010x}  (* {} *)", addr, value, name)
+                    .unwrap();
+            } else {
+                writeln!(file, "  |> mem_insert_bv {:#x}%bv $ bv_0 64  (* {} *)", addr, name).unwrap();
+            }
+        }
+        writeln!(file, ".").unwrap();
+        writeln!(file, "Definition isla_threads_init_regs := [").unwrap();
+        let mut start = true;
+        for (i, thread) in litmus.threads.iter().enumerate() {
+            if !start {
+                writeln!(file, ";").unwrap();
+                start = false;
+            }
+            writeln!(file, "  isla_init_regs").unwrap();
+            if let Assembled(AssembledThread { address, .. }) = thread {
+                writeln!(file, "  |> reg_insert PC $ {:#010x}%bv", address).unwrap();
+            }
+            let mut remaining_footprint = thread_registers(&fiarch_config, &setup.threads[i]);
+            for (reg, value) in thread.inits() {
+                writeln!(file, "  |> reg_insert {} $ {:#010x}%bv", zencode::decode(symtab.to_str(*reg)), value)
+                    .unwrap();
+                remaining_footprint.remove(reg);
+            }
+            for reg in remaining_footprint {
+                if !reg_state.values.contains_key(&reg) {
+                    writeln!(file, "  |> reg_insert {} inhabitant", zencode::decode(symtab.to_str(reg))).unwrap();
+                }
+            }
+        }
+        writeln!(file, "].").unwrap();
     }
 
     let footprints =
@@ -284,6 +323,33 @@ fn isla_main() -> i32 {
     }
 
     0
+}
+
+fn thread_registers<B>(arch: &InitArchWithConfig<'_, B>, traces: &[EvPath<B>]) -> HashSet<Name> {
+    let mut registers = HashSet::<Name>::new();
+    for trace in traces {
+        // We skip the initialisation and only look at the instructions
+        let mut started = false;
+        for event in trace {
+            if !started {
+                match event {
+                    Event::Cycle => started = true,
+                    _ => (),
+                }
+            } else {
+                match event {
+                    Event::ReadReg(r, _, _) if !arch.isa_config.ignored_registers.contains(r) => {
+                        registers.insert(*r);
+                    }
+                    Event::WriteReg(r, _, _) if !arch.isa_config.ignored_registers.contains(r) => {
+                        registers.insert(*r);
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+    registers
 }
 
 fn segment_to_native_rocq<B: BV>(seg: &BitsSegment<B>, model_values: &HashMap<Sym, Exp<Sym>>) -> String {
@@ -438,8 +504,7 @@ fn value_to_native_rocq<B: BV>(
 // Initial memory output for ArchSem to accompany the initial register output.  Produces a map which can be directly
 // used by the sequential model without going through isla-lang first.
 fn write_concrete_memory_rocq<W: Write, B: BV>(writer: &mut W, memory: &Memory<B>) {
-    writeln!(writer, "Definition isla_init_mem :=").unwrap();
-    writeln!(writer, "  ∅").unwrap();
+    writeln!(writer, "  (* concrete memory *)").unwrap();
     for region in memory.regions() {
         match region {
             Region::Concrete(r, contents) => {
@@ -469,8 +534,7 @@ fn write_concrete_memory_rocq<W: Write, B: BV>(writer: &mut W, memory: &Memory<B
             }
             _ => (),
         }
-    };
-    writeln!(writer, ".").unwrap();
+    }
 }
 
 fn get_simplified_evtree<B: BV>(traces: &[EvPath<B>]) -> Result<EventTree<B>, ()> {
