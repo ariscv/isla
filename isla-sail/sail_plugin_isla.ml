@@ -80,11 +80,8 @@ let isla_rewrites =
     ("atoms_to_singletons", [String_arg "c"; If_mono_arg]);
     ("recheck_defs", [If_mono_arg]);
     ("undefined", [Bool_arg false]);
-    ("vector_string_pats_to_bit_list", []);
     ("remove_not_pats", []);
-    ("remove_vector_concat", []);
-    ("remove_bitvector_pats", []);
-    ("pattern_literals", [Literal_arg "all"]);
+    ("pattern_literals_typed", [Literal_arg "all"]);
     ("tuple_assignments", []);
     ("vector_concat_assignments", []);
     ("simple_struct_assignments", []);
@@ -105,7 +102,6 @@ module Ir_config : Jib_compile.CONFIG = struct
   let rec convert_typ ctx typ =
     let Typ_aux (typ_aux, l) as typ = Env.expand_synonyms ctx.local_env typ in
     match typ_aux with
-    | Typ_id id when string_of_id id = "bit"    -> CT_bit
     | Typ_id id when string_of_id id = "bool"   -> CT_bool
     | Typ_id id when string_of_id id = "int"    -> CT_lint
     | Typ_id id when string_of_id id = "nat"    -> CT_lint
@@ -351,7 +347,7 @@ let isla_initialize () =
   Nl_flow.opt_nl_flow := true;
   Type_check.opt_no_lexp_bounds_check := true;
   Reporting.opt_warnings := false;
-  Initial_check.opt_magic_hash := true;
+  Initial_check.opt_allow_internal := true;
 
   Specialize.add_initial_calls (IdSet.singleton (mk_id "isla_footprint"));
   Specialize.add_initial_calls (IdSet.singleton (mk_id "isla_footprint_no_init"));
