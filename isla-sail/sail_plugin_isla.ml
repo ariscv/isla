@@ -69,6 +69,7 @@ let isla_rewrites =
   [
     ("instantiate_outcomes", [String_arg "isla"]);
     ("realize_mappings", []);
+    ("remove_vector_subrange_pats", []);
     ("toplevel_string_append", []);
     ("pat_string_append", []);
     ("mapping_patterns", []);
