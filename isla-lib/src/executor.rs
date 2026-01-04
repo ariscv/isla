@@ -44,6 +44,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::bitvector::{b64::B64, required_index_bits, BV};
+use crate::dprint::print_instr;
 use crate::error::{ExecError, IslaError};
 use crate::fraction::Fraction;
 use crate::ir::*;
@@ -803,7 +804,7 @@ fn run<'ir, 'task, B: BV>(
     solver: &mut Solver<B>,
 ) -> Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)> {
     let mut frame = unfreeze_frame(frame);
-    match run_loop(
+/*     match run_loop(
         tid,
         task_id,
         task_fraction,
@@ -820,7 +821,8 @@ fn run<'ir, 'task, B: BV>(
             frame.backtrace.push((frame.function_name, frame.pc));
             Err((err, frame.backtrace))
         }
-    }
+    } */
+   Ok((Run::Exit, frame))
 }
 
 // A special primitive can either continue execution, or it can exit
@@ -1019,15 +1021,15 @@ pub enum Run<B> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop<'ir, 'task, B: BV>(
+pub fn run_loop<'ir, 'task, B: BV>(
     tid: usize,
-    task_id: TaskId,
-    task_fraction: &mut Fraction,
-    timeout: Timeout,
-    stop_conditions: Option<&'task StopConditions>,
-    queue: &Worker<Task<'ir, 'task, B>>,
+    // task_id: TaskId,
+    // task_fraction: &mut Fraction,
+    // timeout: Timeout,
+    // stop_conditions: Option<&'task StopConditions>,
+    // queue: &Worker<Task<'ir, 'task, B>>,
     frame: &mut LocalFrame<'ir, B>,
-    task_state: &'task TaskState<B>,
+    // task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<Run<B>, ExecError> {
@@ -1039,9 +1041,9 @@ fn run_loop<'ir, 'task, B: BV>(
             return Ok(Run::Finished(Val::Unit));
         }
 
-        if timeout.timed_out() {
-            return Err(ExecError::Timeout);
-        }
+        // if timeout.timed_out() {
+        //     return Err(ExecError::Timeout);
+        // }
 
         if last_z3_reset.elapsed() > Duration::from_millis(500) {
             //let mut vars = HashSet::default();
@@ -1049,6 +1051,11 @@ fn run_loop<'ir, 'task, B: BV>(
             //solver.reset(vars);
             last_z3_reset = Instant::now()
         };
+
+		{
+            let instr=&frame.instrs[frame.pc];
+            print_instr(frame.pc,instr, &shared_state.symtab,frame.function_name);
+        }
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
@@ -1084,16 +1091,16 @@ fn run_loop<'ir, 'task, B: BV>(
                             let point = checkpoint(solver);
                             let frozen = Frame { pc: frame.pc + 1, ..freeze_frame(frame) };
                             frame.forks += 1;
-                            task_fraction.halve();
-                            queue.push(Task {
-                                id: task_id,
-                                fraction: task_fraction.clone(),
-                                frame: frozen,
-                                checkpoint: point,
-                                fork_cond: Some((Assert(test_false), Event::Fork(frame.forks - 1, v, 1, *info))),
-                                state: task_state,
-                                stop_conditions,
-                            });
+                            // task_fraction.halve();
+                            // queue.push(Task {
+                            //     id: task_id,
+                            //     fraction: task_fraction.clone(),
+                            //     frame: frozen,
+                            //     checkpoint: point,
+                            //     fork_cond: Some((Assert(test_false), Event::Fork(frame.forks - 1, v, 1, *info))),
+                            //     state: task_state,
+                            //     stop_conditions,
+                            // });
 
                             // Track which asserts are assocated with each fork in the trace, so we
                             // can turn a set of traces into a tree later
@@ -1166,7 +1173,7 @@ fn run_loop<'ir, 'task, B: BV>(
             Instr::Call(loc, _, f, args, info) => {
                 match shared_state.functions.get(f) {
                     None => {
-                        match run_special_primop(
+                        /* match run_special_primop(
                             loc,
                             *f,
                             args,
@@ -1180,7 +1187,7 @@ fn run_loop<'ir, 'task, B: BV>(
                         )? {
                             SpecialResult::Continue => (),
                             SpecialResult::Exit => return Ok(Run::Exit),
-                        }
+                        } */
                     }
 
                     Some((params, ret_ty, instrs)) => {
@@ -1202,7 +1209,7 @@ fn run_loop<'ir, 'task, B: BV>(
                             solver.trace_call(*f)
                         }
 
-                        if let Some(s) = stop_conditions {
+                      /*   if let Some(s) = stop_conditions {
                             match s.should_stop(*f, frame.function_name, &frame.backtrace) {
                                 Some(StopAction::Kill) => {
                                     let symbol = zencode::decode(shared_state.symtab.to_str(*f));
@@ -1219,7 +1226,7 @@ fn run_loop<'ir, 'task, B: BV>(
                                 }
                                 None => (),
                             }
-                        }
+                        } */
 
                         if let Some(assumptions) = frame.function_assumptions.get(f) {
                             for (required_args, result) in assumptions {
@@ -1332,7 +1339,8 @@ fn run_loop<'ir, 'task, B: BV>(
             // certain bitvectors are non-symbolic, at the cost of
             // increasing the number of paths.
             Instr::Monomorphize(id, ty, info) => {
-                let val = get_id_and_initialize(
+				panic!("TODO: Instr::Monomorphize({id:?}, {ty:?}, {info:?})(对符号值进行具体化处理)");
+                /* let val = get_id_and_initialize(
                     *id,
                     &mut frame.local_state,
                     shared_state,
@@ -1446,7 +1454,7 @@ fn run_loop<'ir, 'task, B: BV>(
 
                     assign(tid, &Loc::Id(*id), result_val, &mut frame.local_state, shared_state, solver, *info)?;
                 }
-                frame.pc += 1
+                frame.pc += 1 */
             }
 
             // Arbitrary means return any value. It is used in the

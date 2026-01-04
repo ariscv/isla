@@ -27,6 +27,11 @@ architecture specifications.
 """
 
 [[bin]]
+name = "isa"
+path = "src/isa.rs"
+doc = false
+
+[[bin]]
 name = "isla-property"
 path = "src/property.rs"
 doc = false
