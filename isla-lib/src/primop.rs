@@ -1937,6 +1937,10 @@ pub fn eq_anything<B: BV>(
         }
         (Val::Unit, Val::Unit) => Ok(Val::Bool(true)),
 
+        // TODO: hack because C backend uses null for nil
+        (Val::List(lhs), Val::Poison) => Ok(Val::Bool(lhs.is_empty())),
+        (Val::Poison, Val::List(rhs)) => Ok(Val::Bool(rhs.is_empty())),
+
         (lhs, rhs) => Err(ExecError::Type(format!("eq_anything {:?} {:?}", &lhs, &rhs), info)),
     }
 }
