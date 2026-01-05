@@ -57,11 +57,15 @@ open Jib
 open Jib_util
 
 let opt_isla_preserve = ref ([]:string list)
+let opt_isla_output_dir : string option ref = ref None
 
 let isla_options = [
     ( Flag.create ~prefix:["isla"] ~arg:"id" "preserve",
       Arg.String (fun id -> opt_isla_preserve := id :: !opt_isla_preserve),
       "do not remove the provided id when generating IR");
+    ( Flag.create ~prefix:["isla"] ~arg:"directory" "output_dir",
+      Arg.String (fun dir -> opt_isla_output_dir := Some dir),
+      "set a custom directory to output generated Isla IR");
   ]
 
 let isla_rewrites =
@@ -336,10 +340,9 @@ let isla_target out_file { ast; effect_info; env; _ } =
   let cdefs = remove_casts cdefs |> remove_extern_impls |> fix_cons in
   let buf = Buffer.create 256 in
   Jib_ir.Flat_ir_formatter.output_defs buf cdefs;
-  let out_chan = open_out out_file in
-  output_string out_chan (Buffer.contents buf);
-  flush out_chan;
-  close_out out_chan
+  let out_info = Util.open_output_with_check ?directory:!opt_isla_output_dir out_file in
+  output_string out_info.channel (Buffer.contents buf);
+  Util.close_output_with_check out_info
 
 let isla_initialize () =
   Preprocess.add_symbol "SYMBOLIC";
