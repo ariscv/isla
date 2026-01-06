@@ -57,11 +57,15 @@ open Jib
 open Jib_util
 
 let opt_isla_preserve = ref ([]:string list)
+let opt_isla_output_dir : string option ref = ref None
 
 let isla_options = [
     ( Flag.create ~prefix:["isla"] ~arg:"id" "preserve",
       Arg.String (fun id -> opt_isla_preserve := id :: !opt_isla_preserve),
       "do not remove the provided id when generating IR");
+    ( Flag.create ~prefix:["isla"] ~arg:"directory" "output_dir",
+      Arg.String (fun dir -> opt_isla_output_dir := Some dir),
+      "set a custom directory to output generated Isla IR");
   ]
 
 let isla_rewrites =
@@ -69,6 +73,7 @@ let isla_rewrites =
   [
     ("instantiate_outcomes", [String_arg "isla"]);
     ("realize_mappings", []);
+    ("remove_vector_subrange_pats", []);
     ("toplevel_string_append", []);
     ("pat_string_append", []);
     ("mapping_patterns", []);
@@ -80,11 +85,8 @@ let isla_rewrites =
     ("atoms_to_singletons", [String_arg "c"; If_mono_arg]);
     ("recheck_defs", [If_mono_arg]);
     ("undefined", [Bool_arg false]);
-    ("vector_string_pats_to_bit_list", []);
     ("remove_not_pats", []);
-    ("remove_vector_concat", []);
-    ("remove_bitvector_pats", []);
-    ("pattern_literals", [Literal_arg "all"]);
+    ("pattern_literals_typed", [Literal_arg "all"]);
     ("tuple_assignments", []);
     ("vector_concat_assignments", []);
     ("simple_struct_assignments", []);
@@ -105,7 +107,6 @@ module Ir_config : Jib_compile.CONFIG = struct
   let rec convert_typ ctx typ =
     let Typ_aux (typ_aux, l) as typ = Env.expand_synonyms ctx.local_env typ in
     match typ_aux with
-    | Typ_id id when string_of_id id = "bit"    -> CT_bit
     | Typ_id id when string_of_id id = "bool"   -> CT_bool
     | Typ_id id when string_of_id id = "int"    -> CT_lint
     | Typ_id id when string_of_id id = "nat"    -> CT_lint
@@ -339,10 +340,9 @@ let isla_target out_file { ast; effect_info; env; _ } =
   let cdefs = remove_casts cdefs |> remove_extern_impls |> fix_cons in
   let buf = Buffer.create 256 in
   Jib_ir.Flat_ir_formatter.output_defs buf cdefs;
-  let out_chan = open_out out_file in
-  output_string out_chan (Buffer.contents buf);
-  flush out_chan;
-  close_out out_chan
+  let out_info = Util.open_output_with_check ?directory:!opt_isla_output_dir out_file in
+  output_string out_info.channel (Buffer.contents buf);
+  Util.close_output_with_check out_info
 
 let isla_initialize () =
   Preprocess.add_symbol "SYMBOLIC";
@@ -351,7 +351,7 @@ let isla_initialize () =
   Nl_flow.opt_nl_flow := true;
   Type_check.opt_no_lexp_bounds_check := true;
   Reporting.opt_warnings := false;
-  Initial_check.opt_magic_hash := true;
+  Initial_check.opt_allow_internal := true;
 
   Specialize.add_initial_calls (IdSet.singleton (mk_id "isla_footprint"));
   Specialize.add_initial_calls (IdSet.singleton (mk_id "isla_footprint_no_init"));

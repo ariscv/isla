@@ -74,3 +74,9 @@ Barrier_RISCV_w_r = "Fence.w.r"
 Barrier_RISCV_tso = "Fence.tso"
 Barrier_RISCV_i = "Fence.i"
 
+
+[const_primops]
+plat_term_write = "()"
+match_reservation = "true"
+cancel_reservation = "()"
+load_reservation = "()"
