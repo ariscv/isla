@@ -1,0 +1,73 @@
+{
+    "version": "0.2.0",
+	"configurations": [
+		{
+			"name": "cargo try.rs",
+			"type": "lldb",
+			"request": "launch",
+			"cargo": {
+				"args": [
+					"run",
+					"--bin=try",
+					"--package=isla",
+					
+				]
+			},
+			"args": [				"-A",
+				 "../isla-snapshots/armv9p4.ir",
+				 "-C",
+				 "configs/armv9p4.toml",
+				 "-i",
+				 "add x0, x1, #3",
+				 "-s",]
+		},
+		
+        {
+            "name": "Debug Rust Program",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/isla-footprint",  // 替换为你的程序名称
+            "args": [
+				"-A",
+				 "../isla-snapshots/armv9p4.ir",
+				 "-C",
+				 "configs/armv9p4.toml",
+				 "-i",
+				 "add x0, x1, #3",
+				 "-s",
+			],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build",  // 确保在调试前构建程序
+			"initCommands": [
+				// "breakpoint set --name main",  // 在 Rust main 函数停住
+				// "breakpoint set --name isla_footprint::main"  // 完整的模块路径
+
+			],
+            // "stopAtEntry": false,
+            // "runInTerminal": true
+        },
+		{
+            "name": "try.rs",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/try",  // 替换为你的程序名称
+            "args": [
+				"-A",
+				 "../isla-snapshots/armv9p4.ir",
+				 "-C",
+				 "configs/armv9p4.toml",
+				 "-i",
+				 "add x0, x1, #3",
+				 "-s",
+			],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build",  // 确保在调试前构建程序
+			"initCommands": [
+				// "breakpoint set --name main",  // 在 Rust main 函数停住
+				// "breakpoint set --name isla_footprint::main"  // 完整的模块路径
+
+			],
+
+        }
+    ]
+}

@@ -44,6 +44,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::bitvector::{b64::B64, required_index_bits, BV};
+use crate::dprint::print_instr;
 use crate::error::{ExecError, IslaError};
 use crate::fraction::Fraction;
 use crate::ir::*;
@@ -1447,6 +1448,480 @@ fn run_loop<'ir, 'task, B: BV>(
                     assign(tid, &Loc::Id(*id), result_val, &mut frame.local_state, shared_state, solver, *info)?;
                 }
                 frame.pc += 1
+            }
+
+            // Arbitrary means return any value. It is used in the
+            // Sail->C compilation for exceptional control flow paths
+            // to avoid compiler warnings (which would also be UB in
+            // C++ compilers). The value should never be used, so we
+            // return Val::Poison here.
+            Instr::Arbitrary => {
+                if frame.local_state.should_probe(shared_state, &frame.function_name) {
+                    let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
+                    log_from!(
+                        tid,
+                        log::PROBE,
+                        &format!("Returning via arbitrary {}[{:?}] = poison", symbol, frame.function_name)
+                    );
+                }
+
+                if shared_state.trace_functions.contains(&frame.function_name) {
+                    solver.trace_return(frame.function_name)
+                }
+
+                let caller = match &frame.stack_call {
+                    None => return Ok(Run::Finished(Val::Poison)),
+                    Some(caller) => Arc::clone(caller),
+                };
+                (*caller)(Val::Poison, frame, shared_state, solver)?
+            }
+
+            Instr::Exit(cause, info) => {
+                return match cause {
+                    ExitCause::MatchFailure => Err(ExecError::MatchFailure(*info)),
+                    ExitCause::AssertionFailure => Err(ExecError::AssertionFailure(None, *info)),
+                    ExitCause::Explicit => Ok(Run::Exit),
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_loop1<'ir, 'task, B: BV>(
+    tid: usize,
+    // task_id: TaskId,
+    // task_fraction: &mut Fraction,
+    // timeout: Timeout,
+    // stop_conditions: Option<&'task StopConditions>,
+    // queue: &Worker<Task<'ir, 'task, B>>,
+    frame: &mut LocalFrame<'ir, B>,
+    // task_state: &'task TaskState<B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<Run<B>, ExecError> {
+    let mut last_z3_reset = Instant::now();
+
+    'main_loop: loop {
+        if frame.pc >= frame.instrs.len() {
+            // Currently this happens when evaluating letbindings.
+            return Ok(Run::Finished(Val::Unit));
+        }
+
+        // if timeout.timed_out() {
+        //     return Err(ExecError::Timeout);
+        // }
+
+        if last_z3_reset.elapsed() > Duration::from_millis(500) {
+            //let mut vars = HashSet::default();
+            //frame.collect_symbolic_variables(&mut vars);
+            //solver.reset(vars);
+            last_z3_reset = Instant::now()
+        };
+
+        {
+            let instr=&frame.instrs[frame.pc];
+            print_instr(frame.pc,instr, &shared_state.symtab,frame.function_name);
+        }
+
+        match &frame.instrs[frame.pc] {
+            Instr::Decl(v, ty, _) => {
+                frame.vars_mut().insert(*v, UVal::Uninit(ty));
+                frame.pc += 1;
+            }
+
+            Instr::Init(var, _, exp, info) => {
+                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                frame.vars_mut().insert(*var, UVal::Init(value));
+                frame.pc += 1;
+            }
+
+            Instr::Jump(exp, target, info) => {
+                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
+                match *value.as_ref() {
+                    Val::Symbolic(v) => {
+                        use smtlib::Def::*;
+                        use smtlib::Exp::*;
+
+                        let test_true = Var(v);
+                        let test_false = Not(Box::new(Var(v)));
+
+                        let can_be_true = solver.check_sat_with(&test_true, *info).is_sat()?;
+                        let can_be_false = solver.check_sat_with(&test_false, *info).is_sat()?;
+
+                        if can_be_true && can_be_false {
+                            if_logging!(log::FORK, {
+                                log_from!(tid, log::FORK, info.location_string(shared_state.symtab.files()));
+                                probe::taint_info(log::FORK, v, Some(shared_state), solver)
+                            });
+
+                            let point = checkpoint(solver);
+                            let frozen = Frame { pc: frame.pc + 1, ..freeze_frame(frame) };
+                            frame.forks += 1;
+                            // task_fraction.halve();
+                            // queue.push(Task {
+                            //     id: task_id,
+                            //     fraction: task_fraction.clone(),
+                            //     frame: frozen,
+                            //     checkpoint: point,
+                            //     fork_cond: Some((Assert(test_false), Event::Fork(frame.forks - 1, v, 1, *info))),
+                            //     state: task_state,
+                            //     stop_conditions,
+                            // });
+
+                            // Track which asserts are assocated with each fork in the trace, so we
+                            // can turn a set of traces into a tree later
+                            solver.add_event(Event::Fork(frame.forks - 1, v, 0, *info));
+
+                            solver.add(Assert(test_true));
+                            frame.pc = *target
+                        } else if can_be_true {
+                            solver.add(Assert(test_true));
+                            frame.pc = *target
+                        } else if can_be_false {
+                            solver.add(Assert(test_false));
+                            frame.pc += 1
+                        } else {
+                            return Ok(Run::Dead);
+                        }
+                    }
+                    Val::Bool(jump) => {
+                        if jump {
+                            frame.pc = *target
+                        } else {
+                            frame.pc += 1
+                        }
+                    }
+                    _ => {
+                        return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info));
+                    }
+                }
+            }
+
+            Instr::Goto(target) => frame.pc = *target,
+
+            Instr::Copy(loc, exp, info) => {
+                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                frame.pc += 1;
+            }
+
+            Instr::PrimopUnary(loc, f, arg, info) => {
+                let arg = eval_exp(arg, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                let value = f(arg, solver, *info)?;
+                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                frame.pc += 1;
+            }
+
+            Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
+                let arg1 = eval_exp(arg1, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                let arg2 = eval_exp(arg2, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                let value = f(arg1, arg2, solver, *info)?;
+                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                frame.pc += 1;
+            }
+
+            Instr::PrimopVariadic(loc, f, args, info) => {
+                let args = args
+                    .iter()
+                    .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, *info).map(Cow::into_owned))
+                    .collect::<Result<_, _>>()?;
+                let value = f(args, solver, frame, *info)?;
+                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                frame.pc += 1;
+            }
+
+            Instr::PrimopReset(loc, reset, info) => {
+                let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
+                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                frame.pc += 1;
+            }
+
+            Instr::Call(loc, _, f, args, info) => {
+                match shared_state.functions.get(f) {
+                    None => {
+                        /* match run_special_primop(
+                            loc,
+                            *f,
+                            args,
+                            *info,
+                            tid,
+                            task_id,
+                            frame,
+                            task_state,
+                            shared_state,
+                            solver,
+                        )? {
+                            SpecialResult::Continue => (),
+                            SpecialResult::Exit => return Ok(Run::Exit),
+                        } */
+                    }
+
+                    Some((params, ret_ty, instrs)) => {
+                        frame.set_probes(shared_state);
+
+                        let mut args = args
+                            .iter()
+                            .map(|arg| {
+                                eval_exp(arg, &mut frame.local_state, shared_state, solver, *info).map(Cow::into_owned)
+                            })
+                            .collect::<Result<Vec<Val<B>>, _>>()?;
+
+                        if frame.local_state.should_probe(shared_state, f) {
+                            log_from!(tid, log::PROBE, probe::call_info(*f, &args, shared_state, *info));
+                            probe::args_info(tid, &args, shared_state, solver)
+                        }
+
+                        if shared_state.trace_functions.contains(f) {
+                            solver.trace_call(*f)
+                        }
+
+                        /*   if let Some(s) = stop_conditions {
+                              match s.should_stop(*f, frame.function_name, &frame.backtrace) {
+                                  Some(StopAction::Kill) => {
+                                      let symbol = zencode::decode(shared_state.symtab.to_str(*f));
+                                      return Err(ExecError::Stopped(symbol));
+                                  }
+                                  Some(StopAction::Abstract) => {
+                                      solver.add_event(Event::Abstract {
+                                          name: *f,
+                                          args,
+                                          primitive: false,
+                                          return_value: Val::Poison,
+                                      });
+                                      return Ok(Run::Finished(Val::Poison));
+                                  }
+                                  None => (),
+                              }
+                          } */
+
+                        if let Some(assumptions) = frame.function_assumptions.get(f) {
+                            for (required_args, result) in assumptions {
+                                if args.len() == required_args.len()
+                                    && required_args.iter().zip(args.iter()).all(|(req, arg)| {
+                                    primop::eq_anything(req.clone(), arg.clone(), solver, *info)
+                                        .map(|v| match v {
+                                            Val::Symbolic(var) => {
+                                                solver.check_sat_with(
+                                                    &smtlib::Exp::Eq(
+                                                        Box::new(smtlib::Exp::Var(var)),
+                                                        Box::new(smtlib::Exp::Bool(false)),
+                                                    ),
+                                                    *info,
+                                                ) == SmtResult::Unsat
+                                            }
+                                            Val::Bool(b) => b,
+                                            _ => panic!("TODO"),
+                                        })
+                                        .unwrap()
+                                })
+                                {
+                                    assign(
+                                        tid,
+                                        loc,
+                                        result.clone(),
+                                        &mut frame.local_state,
+                                        shared_state,
+                                        solver,
+                                        *info,
+                                    )?;
+                                    solver.add_event(Event::UseFunAssumption {
+                                        name: *f,
+                                        args,
+                                        return_value: result.clone(),
+                                    });
+                                    frame.pc += 1;
+                                    continue 'main_loop;
+                                }
+                            }
+                        }
+
+                        let caller_pc = frame.pc;
+                        let caller_instrs = frame.instrs;
+                        let caller_stack_call = frame.stack_call.clone();
+                        push_call_stack(frame);
+                        frame.backtrace.push((frame.function_name, caller_pc));
+                        frame.function_name = *f;
+                        frame.vars_mut().insert(RETURN, UVal::Uninit(ret_ty));
+
+                        // Set up a closure to restore our state when
+                        // the function we call returns
+                        frame.stack_call = Some(Arc::new(move |ret, frame, shared_state, solver| {
+                            pop_call_stack(frame);
+                            frame.set_probes(shared_state);
+                            // could avoid putting caller_pc into the stack?
+                            if let Some((name, _)) = frame.backtrace.pop() {
+                                frame.function_name = name;
+                            }
+                            frame.pc = caller_pc + 1;
+                            frame.instrs = caller_instrs;
+                            frame.stack_call = caller_stack_call.clone();
+                            assign(tid, &loc.clone(), ret, &mut frame.local_state, shared_state, solver, *info)
+                        }));
+
+                        for (i, arg) in args.drain(..).enumerate() {
+                            frame.vars_mut().insert(params[i].0, UVal::Init(arg));
+                        }
+                        frame.pc = 0;
+                        frame.instrs = instrs;
+                    }
+                }
+            }
+
+            Instr::End => match frame.vars().get(&RETURN) {
+                None => panic!("Return variable missing at end of function"),
+                Some(value) => {
+                    let value = match value {
+                        UVal::Uninit(ty) => symbolic(ty, shared_state, solver, SourceLoc::unknown())?,
+                        UVal::Init(value) => value.clone(),
+                    };
+
+                    if frame.local_state.should_probe(shared_state, &frame.function_name) {
+                        let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
+                        log_from!(
+                            tid,
+                            log::PROBE,
+                            &format!("Returning {} = {}", symbol, value.to_string(shared_state))
+                        );
+                        probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
+                    }
+
+                    if shared_state.trace_functions.contains(&frame.function_name) {
+                        solver.trace_return(frame.function_name)
+                    }
+
+                    let caller = match &frame.stack_call {
+                        None => return Ok(Run::Finished(value)),
+                        Some(caller) => Arc::clone(caller),
+                    };
+                    (*caller)(value, frame, shared_state, solver)?
+                }
+            },
+
+            // The idea beind the Monomorphize operation is it takes a
+            // bitvector identifier, and if that identifer has a
+            // symbolic value, then it uses the SMT solver to find all
+            // the possible values for that bitvector and case splits
+            // (i.e. forks) on them. This allows us to guarantee that
+            // certain bitvectors are non-symbolic, at the cost of
+            // increasing the number of paths.
+            Instr::Monomorphize(id, ty, info) => {
+                panic!("TODO: Instr::Monomorphize({id:?}, {ty:?}, {info:?})(对符号值进行具体化处理)");
+                /* let val = get_id_and_initialize(
+                    *id,
+                    &mut frame.local_state,
+                    shared_state,
+                    solver,
+                    &mut Vec::new(),
+                    *info,
+                    false,
+                )?;
+                if let Val::Symbolic(v) = *val.as_ref() {
+                    use smtlib::bits64;
+                    use smtlib::Def::*;
+                    use smtlib::Exp::*;
+
+                    let point = checkpoint(solver);
+
+                    match ty {
+                        Ty::Bits(len) => {
+                            // For the variable v to appear in the model, there must be some assertion that references it
+                            let sym = solver.declare_const(smtlib::Ty::BitVec(*len), *info);
+                            solver.assert_eq(Var(v), Var(sym));
+                        }
+                        Ty::AnyBits => {
+                            // In this case, get the length from the variable
+                            let len =
+                                solver.length(v).ok_or_else(|| ExecError::Type(format!("No SMT length for monomorphizing {:?}", &v), *info))?;
+                            let sym = solver.declare_const(smtlib::Ty::BitVec(len), *info);
+                            solver.assert_eq(Var(v), Var(sym));
+
+                        }
+                        Ty::Bool => {
+                            let sym = solver.declare_const(smtlib::Ty::Bool, *info);
+                            solver.assert_eq(Var(v), Var(sym));
+                        }
+                        Ty::I128 => {
+                            let sym = solver.declare_const(smtlib::Ty::BitVec(128), *info);
+                            solver.assert_eq(Var(v), Var(sym));
+                        }
+                        _ => panic!("unknown monomorphize type {:?}", ty),
+                    };
+
+                    if solver.check_sat(*info).is_unsat()? {
+                        return Ok(Run::Dead);
+                    }
+
+                    let (result_exp, result_val) = {
+                        let mut model = Model::new(solver);
+                        log_from!(tid, log::FORK, format!("Model: {:?}", model));
+                        match model.get_var(v) {
+                            Ok(ModelVal::Exp(Bits64(bv))) => match ty {
+                                Ty::Bits(len) => {
+                                    assert!(*len == bv.len());
+                                    (bits64(bv.lower_u64(), bv.len()), Val::Bits(B::new(bv.lower_u64(), bv.len())))
+                                }
+                                Ty::AnyBits => {
+                                    (bits64(bv.lower_u64(), bv.len()), Val::Bits(B::new(bv.lower_u64(), bv.len())))
+                                }
+                                _ => panic!("failed to interpret monomorphized value"),
+                            },
+
+                            Ok(ModelVal::Exp(Bits(bv))) => match ty {
+                                Ty::I128 => {
+                                    assert!(bv.len() == 128);
+                                    let i = i128_from_bits(&bv);
+                                    (Bits(bv), Val::I128(i))
+                                }
+                                _ => panic!("failed to interpret monomorphized value"),
+                            },
+
+                            Ok(ModelVal::Exp(Bool(b))) => (Bool(b), Val::Bool(b)),
+
+                            // __monomorphize should have a 'n <= 64 constraint in Sail
+                            Ok(ModelVal::Exp(other)) => {
+                                return Err(ExecError::Type(format!("__monomorphize {:?}", &other), *info))
+                            }
+
+                            Ok(ModelVal::Arbitrary(_)) => match ty {
+                                Ty::Bits(len) => (bits64(0, *len), Val::Bits(B::new(0, *len))),
+                                Ty::Bool => (Bool(false), Val::Bool(false)),
+                                Ty::I128 => (Bits(vec![false; 128]), Val::I128(0)),
+                                _ => panic!("failed to interpret monomorphized value"),
+                            },
+
+                            Err(error) => return Err(error),
+                        }
+                    };
+
+                    log_from!(tid, log::FORK, format!("Fork @ monomorphizing v{} : {:?}", v, ty));
+
+                    frame.forks += 1;
+
+                    // Because we will likely case-split more times in the task we add to the queue,
+                    // give it a larger part of the fraction (otherwise the denominator becomes
+                    // small very fast).
+                    let child_frac = task_fraction.min_split(6);
+                    queue.push(Task {
+                        id: task_id,
+                        fraction: child_frac,
+                        frame: freeze_frame(frame),
+                        checkpoint: point,
+                        fork_cond: Some((
+                            Assert(Neq(Box::new(Var(v)), Box::new(result_exp.clone()))),
+                            Event::Fork(frame.forks - 1, v, 1, *info),
+                        )),
+                        state: task_state,
+                        stop_conditions,
+                    });
+
+                    solver.add_event(Event::Fork(frame.forks - 1, v, 0, *info));
+
+                    solver.assert_eq(Var(v), result_exp);
+
+                    assign(tid, &Loc::Id(*id), result_val, &mut frame.local_state, shared_state, solver, *info)?;
+                }
+                frame.pc += 1 */
             }
 
             // Arbitrary means return any value. It is used in the
