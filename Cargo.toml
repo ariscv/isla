@@ -32,6 +32,11 @@ path = "src/isa.rs"
 doc = false
 
 [[bin]]
+name = "isa-try"
+path = "src/isa-try.rs"
+doc = false
+
+[[bin]]
 name = "isla-property"
 path = "src/property.rs"
 doc = false
