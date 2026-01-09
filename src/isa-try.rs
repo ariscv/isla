@@ -27,27 +27,12 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crossbeam::queue::SegQueue;
-use sha2::digest::generic_array::functional;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::fs::File;
-use std::io::{BufWriter, Read, Write};
 use std::process::exit;
-use std::sync::Arc;
 use std::time::Instant;
-
-use isla_axiomatic::footprint_analysis::footprint_analysis;
-use isla_axiomatic::litmus::assemble_instruction;
-use isla_axiomatic::page_table;
-use isla_axiomatic::page_table::setup::PageTableSetup;
-use isla_elf::arch::AArch64;
-use isla_elf::elf;
-use isla_elf::relocation_types::SymbolicRelocation;
 use isla_lib::bitvector::{b129::B129, BV};
-use isla_lib::error::IslaError;
-use isla_lib::{d, d1, d2, d3, executor};
 use isla_lib::executor::{start_single, LocalFrame, LocalState, StopAction, StopConditions, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
 use isla_lib::ir::*;
@@ -304,7 +289,7 @@ fn isla_main() -> i32 {
     let now = Instant::now();
 
     let mut opts = opts::common_opts();
-    opts.reqopt("i", "instruction", "display footprint of instruction", "<instruction>");
+    opts.optopt("i", "instruction", "display footprint of instruction", "<instruction>");
     opts.optopt("e", "endianness", "instruction encoding endianness (default: little)", "big/little");
     opts.optopt("", "elf", "load an elf file, and use instructions from it", "<file>");
     opts.optflag("d", "dependency", "view instruction dependency info");
@@ -343,7 +328,7 @@ fn isla_main() -> i32 {
         eprintln!("Unexpected arguments: {}", matches.free.join(" "));
         exit(1)
     }
-    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path } =
+    let CommonOpts { num_threads: _, mut arch, symtab, type_info, isa_config, source_path: _ } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
 
@@ -360,9 +345,9 @@ fn isla_main() -> i32 {
 
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");
     let iarch = initialize_architecture(&mut arch, symtab, type_info, &isa_config, assertion_mode, use_model_reg_init);
-    let iarch_config = InitArchWithConfig::from_initialized(&iarch, &isa_config);
+    let _iarch_config = InitArchWithConfig::from_initialized(&iarch, &isa_config);
     let regs = &iarch.regs;
-    let lets = &iarch.lets;
+    let _lets = &iarch.lets;
     let shared_state = &&iarch.shared_state;
 
     log!(log::VERBOSE, &format!("Parsing took: {}ms", now.elapsed().as_millis()));
@@ -370,11 +355,10 @@ fn isla_main() -> i32 {
 
 
 
-
     // let (initial_checkpoint, mut solver)= {
     let solver_cfg = smt::Config::new();
     let solver_ctx = smt::Context::new(solver_cfg);
-    let mut solver = Solver::<B129>::new(&solver_ctx);;
+    let mut solver = Solver::<B129>::new(&solver_ctx);
 
     // Record register assumptions from defaults; others are recorded at reset-registers
     let mut sorted_regs: Vec<(&Name, &Register<_>)> = regs.iter().collect();
@@ -395,14 +379,17 @@ fn isla_main() -> i32 {
 	// let function_id = shared_state.symtab.lookup("execute_aarch64_instrs_memory_literal_simdfp");
     // let function_initvalue = Some([Val::<B129>::I128(2),Val::<B129>::I128(2)].as_slice());
 
-	let function_id = shared_state.symtab.lookup("zneq_int");
-    let function_initvalue = Some([Val::<B129>::I128(2),Val::<B129>::I128(2)].as_slice());
+	// let function_id = shared_state.symtab.lookup("zneq_int");
+    // let function_initvalue = Some([Val::<B129>::I128(2),Val::<B129>::I128(2)].as_slice());
+
+	let function_id = shared_state.symtab.lookup("zexecute");
+    let function_initvalue = None;
 
     //d1!(id,shared_state.symtab.to_str(Name::from_u32(29)));
     let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
     // let mut frame = LocalFrame::new(function_id, args, ret_ty, None, instrs);
 
-    let mut frame =  LocalFrame::new(
+    let mut frame = LocalFrame::new(
         function_id ,args,ret_ty,
 		
 		// 初始化函数的两个形式参数
@@ -415,33 +402,24 @@ fn isla_main() -> i32 {
     // frame.vars_mut().insert(shared_state.symtab.lookup("zn"), UVal::Init(Val::I128(2)) );
     // frame.vars_mut().insert(shared_state.symtab.lookup("zm"), UVal::Init(Val::I128(2)) );
 
+    // 创建符号执行任务，并添加已初始化的寄存器和lets
+    let task_state_for_exec = TaskState::new();
+    let symbolic_task = frame
+        .add_regs(regs)
+        .add_lets(_lets)
+        .task(TaskId::fresh(), &task_state_for_exec);
 
-
-
-    let task_state = TaskState::new();
-    let task = {
-        LocalFrame::new(REGISTER_INIT, &[], &Ty::Unit, None, instrs)
-            .task(TaskId::fresh(), &task_state)
-    };
-
-    start_single(
-        task,
+    // 执行符号执行并构建CFG
+    println!("\n=== 开始符号执行 ===");
+    let cfg_tree = cfg::symbolic_execute_and_build_cfg(
+        symbolic_task,
         shared_state,
-        &(),
-        &move |_tid, _task_id, result, _shared_state, _solver, _| match result {
-            Ok((_, frame)) => {
-                println!("okkkkkkk");
-            }
-            Err(err) => log!(log::VERBOSE, &format!("Failed to evaluate register initialiser: {:?}", err)),
-        },
+        instrs,
     );
 
-
-	shared_state.functions.keys().into_iter().for_each(|k|{
-		let zname=shared_state.symtab.to_str(*k);
-
-		println!("{}",zencode::decode(zname));
-	}) ;
+    // 打印CFG树
+    println!("\n=== 符号执行完成 ===");
+    cfg_tree.print(shared_state);
 
     0
 }

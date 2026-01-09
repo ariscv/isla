@@ -350,6 +350,19 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
         self.local_state.probes.probe_this_function = should_probe_here
     }
+
+    // 公共访问器方法：用于CFG生成
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
+
+    pub fn pc(&self) -> usize {
+        self.pc
+    }
+
+    pub fn function_name(&self) -> Name {
+        self.function_name
+    }
 }
 
 pub(super) fn push_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
