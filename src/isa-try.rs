@@ -412,7 +412,7 @@ fn isla_main() -> i32 {
 	// let function_id = shared_state.symtab.lookup("zneq_int");  // 2 个参数: %i, %i
 	// let function_id = shared_state.symtab.lookup("zsign_extend");  // 2 个参数: %i, %i
 	// let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 默认测试函数
-	let function_id = shared_state.symtab.lookup("znot_bit");
+	let function_id = shared_state.symtab.lookup("zfloat_is_zzero");
 
 
     //d1!(id,shared_state.symtab.to_str(Name::from_u32(29)));
@@ -449,17 +449,13 @@ fn isla_main() -> i32 {
         .add_lets(_lets)
         .task(TaskId::fresh(), &task_state_for_exec);
 
-    // 执行符号执行并构建CFG
-    println!("\n=== 开始符号执行 ===");
-    let cfg_tree = cfg::symbolic_execute_and_build_cfg(
-        symbolic_task,
-        shared_state,
-        instrs,
-    );
+    // 构建静态 CFG（基于指令列表，不需要执行）
+    println!("\n=== 构建静态 CFG ===");
+    let cfg = cfg::build_static_cfg(function_id, instrs);
 
-    // 打印CFG树
-    println!("\n=== 符号执行完成 ===");
-    cfg_tree.print(shared_state);
+    // 打印 CFG
+    println!("\n=== CFG 构建完成 ===");
+    cfg.print(&shared_state.symtab);
 
     0
 }
