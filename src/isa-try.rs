@@ -49,6 +49,7 @@ use isla_lib::zencode;
 use isla_lib::dprint::*;
 use isla_lib::fraction::Fraction;
 use isla_lib::ir::Val;
+use isla_lib::primop_util;
 
 mod opts;
 use opts::CommonOpts;
@@ -64,6 +65,30 @@ fn main() {
 
 pub fn hex_bytes(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16)).collect()
+}
+
+/// 根据函数参数类型自动生成符号值
+/// 支持任意数量、任意类型的参数
+fn make_symbolic_args<'ir, B: BV>(
+    args: &[(Name, &'ir Ty<Name>)],
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Vec<Val<B>> {
+    args.iter()
+        .enumerate()
+        .map(|(i, (_name, ty))| {
+            match primop_util::symbolic(ty, shared_state, solver, SourceLoc::unknown()) {
+                Ok(val) => {
+                    eprintln!("  参数 {}: {:?} -> 符号值", i, ty);
+                    val
+                }
+                Err(e) => {
+                    eprintln!("警告: 无法为参数 {:?} 创建符号值: {:?}，使用 Poison", ty, e);
+                    Val::Poison
+                }
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -382,21 +407,36 @@ fn isla_main() -> i32 {
 	// let function_id = shared_state.symtab.lookup("zneq_int");
     // let function_initvalue = Some([Val::<B129>::I128(2),Val::<B129>::I128(2)].as_slice());
 
-	let function_id = shared_state.symtab.lookup("zexecute");
-    let function_initvalue = None;
+	// 可以切换不同的函数来测试
+	// let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 1 个参数: %bv2
+	// let function_id = shared_state.symtab.lookup("zneq_int");  // 2 个参数: %i, %i
+	// let function_id = shared_state.symtab.lookup("zsign_extend");  // 2 个参数: %i, %i
+	// let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 默认测试函数
+	let function_id = shared_state.symtab.lookup("znot_bit");
+
 
     //d1!(id,shared_state.symtab.to_str(Name::from_u32(29)));
     let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
-    // let mut frame = LocalFrame::new(function_id, args, ret_ty, None, instrs);
+
+    // 打印函数签名信息
+    eprintln!("\n=== 函数信息 ===");
+    eprintln!("函数名: {}", shared_state.symtab.to_str(function_id));
+    eprintln!("参数数量: {}", args.len());
+    for (i, (name, ty)) in args.iter().enumerate() {
+        eprintln!("  参数 {}: {} : {:?}", i, shared_state.symtab.to_str(*name), ty);
+    }
+    eprintln!("返回类型: {:?}", ret_ty);
+
+    // 自动生成符号参数：根据函数参数的类型和数量自动创建符号值
+    eprintln!("\n=== 生成符号参数 ===");
+    let symbolic_args = make_symbolic_args(args, shared_state, &mut solver);
+
+    // 将符号参数转换为引用切片传递给 LocalFrame::new
+    let function_initvalue = Some(symbolic_args.as_slice());
 
     let mut frame = LocalFrame::new(
         function_id ,args,ret_ty,
-		
-		// 初始化函数的两个形式参数
-		// Some(&[Val::I128(2),Val::I128(2)]),
-		// Some(&[Val::Symbolic(Sym::from_u32(1000)),Val::Symbolic(Sym::from_u32(1001)) ]),
 		function_initvalue,
-
         instrs,
     );
     // frame.vars_mut().insert(shared_state.symtab.lookup("zn"), UVal::Init(Val::I128(2)) );

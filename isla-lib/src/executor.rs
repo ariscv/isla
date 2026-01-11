@@ -1082,6 +1082,9 @@ fn run_loop<'ir, 'task, B: BV>(
                                 probe::taint_info(log::FORK, v, Some(shared_state), solver)
                             });
 
+                            eprintln!("[itrace] 线程 {} 在 PC {} 发现路径分叉 (符号变量 v{})，创建新任务",
+                                tid, frame.pc, v);
+
                             let point = checkpoint(solver);
                             let frozen = Frame { pc: frame.pc + 1, ..freeze_frame(frame) };
                             frame.forks += 1;
@@ -1095,6 +1098,9 @@ fn run_loop<'ir, 'task, B: BV>(
                                 state: task_state,
                                 stop_conditions,
                             });
+
+                            eprintln!("[itrace] 线程 {} 将新任务推送到队列，当前 forks = {}",
+                                tid, frame.forks);
 
                             // Track which asserts are assocated with each fork in the trace, so we
                             // can turn a set of traces into a tree later
@@ -1981,6 +1987,7 @@ pub fn start_single<'ir, B: BV, R>(
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
+		println!("============queue.pop()");
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2026,6 +2033,9 @@ fn do_work<'ir, 'task, B: BV, R>(
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) -> Fraction {
+    eprintln!("[itrace] 线程 {} 开始执行任务 {} (fork: {})",
+        tid, task.id.as_usize(), task.fork_cond.is_some());
+
     let cfg = Config::new();
     let ctx = Context::new(cfg);
     let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
@@ -2045,6 +2055,19 @@ fn do_work<'ir, 'task, B: BV, R>(
         shared_state,
         &mut solver,
     );
+
+    // 打印执行结果
+    match &result {
+        Ok((_run_result, frame)) => {
+            eprintln!("[itrace] 线程 {} 完成任务 {}, backtrace 长度 = {}",
+                tid, task.id.as_usize(), frame.backtrace().len());
+        }
+        Err((err, backtrace)) => {
+            eprintln!("[itrace] 线程 {} 任务 {} 出错: {:?}, backtrace 长度 = {}",
+                tid, task.id.as_usize(), err, backtrace.len());
+        }
+    }
+
     collector(tid, task.id, result, shared_state, solver, collected);
     task.fraction
 }
@@ -2080,8 +2103,11 @@ pub fn start_multi<'ir, B: BV, R>(
     let mut progress: HashMap<TaskId, Fraction, ahash::RandomState> = HashMap::default();
 
     for task in tasks {
+        eprintln!("[itrace] 初始任务 {} 被添加到全局队列", task.id.as_usize());
         global.push(task);
     }
+
+    eprintln!("[itrace] 启动 {} 个工作线程", num_threads);
 
     thread::scope(|scope| {
         let mut poke_txs = Vec::new();
@@ -2104,8 +2130,10 @@ pub fn start_multi<'ir, B: BV, R>(
                     let mut stealers = stealers.write().unwrap();
                     stealers.push(q.stealer());
                 }
+                eprintln!("[itrace] 线程 {} 已启动并等待任务", tid);
                 loop {
                     while let Some(task) = find_task(&q, &global, &stealers) {
+                        eprintln!("[itrace] 线程 {} 从队列中获取到任务 {}", tid, task.id.as_usize());
                         let task_id = task.id;
                         let frac = do_work(tid, timeout, &q, task, shared_state, collected.as_ref(), collector);
                         thread_tx.send(Progress::Finished { tid, task_id, frac }).unwrap();
@@ -2120,18 +2148,40 @@ pub fn start_multi<'ir, B: BV, R>(
         }
 
         let mut is_idle = vec![false; num_threads];
+        let mut iteration = 0;
         loop {
             loop {
                 match rx.try_recv() {
                     Ok(Progress::Finished { tid, task_id, frac }) => {
                         let current_fraction = progress.entry(task_id).or_insert(Fraction::zero());
+                        let was_one = current_fraction.is_one();
                         *current_fraction += frac;
-                        is_idle[tid] = false
+                        let is_one = current_fraction.is_one();
+                        is_idle[tid] = false;
+                        if !was_one && is_one {
+                            eprintln!("[itrace] 线程 {} 完成任务 {}", tid, task_id.as_usize());
+                        } else if !was_one {
+                            eprintln!("[itrace] 线程 {} 完成任务 {} 的一部分", tid, task_id.as_usize());
+                        }
                     }
-                    Ok(Progress::Idle { tid }) => is_idle[tid] = true,
+                    Ok(Progress::Idle { tid }) => {
+                        if !is_idle[tid] {
+                            eprintln!("[itrace] 线程 {} 变为空闲", tid);
+                        }
+                        is_idle[tid] = true;
+                    }
                     Err(_) => break,
                 }
             }
+
+            // 每100次迭代打印一次状态
+            iteration += 1;
+            if iteration % 100 == 0 {
+                let active_count = is_idle.iter().filter(|&&idle| !idle).count();
+                eprintln!("[itrace] 状态检查: {}/{} 线程活跃, {} 个任务在进行中",
+                    active_count, num_threads, progress.len());
+            }
+
             // Try to wake up any idle threads
             for (tid, idle) in is_idle.iter().enumerate() {
                 if *idle {
@@ -2145,6 +2195,7 @@ pub fn start_multi<'ir, B: BV, R>(
                 }
             }
             if all_tasks_complete {
+                eprintln!("[itrace] 所有任务完成，终止所有线程");
                 for poke_tx in poke_txs.iter() {
                     poke_tx.send(Response::Kill).unwrap()
                 }

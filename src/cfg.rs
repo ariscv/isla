@@ -99,64 +99,152 @@ impl<B: BV> CFGTree<B> {
     }
 
     // 打印 CFG 树
-    pub fn print(&self, _shared_state: &SharedState<B>) {
-        println!("=== CFG Tree ===");
-        println!("Entry point: PC={}", self.entry_point);
-        println!("Total nodes: {}", self.nodes.len());
-        println!("Total edges: {}", self.edges.len());
+    pub fn print(&self, shared_state: &SharedState<B>) {
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║                     Control Flow Graph                       ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        // 统计信息
+        println!("📊 Statistics:");
+        println!("   • Entry point: PC {}", self.entry_point);
+        println!("   • Total nodes: {}", self.nodes.len());
+        println!("   • Total edges: {}", self.edges.len());
+        println!("   • Total paths: {}", self.path_tree.len() + 1); // +1 for root path
         println!();
 
         // 按路径组织节点
-        let mut paths: HashMap<TaskId, Vec<((usize, TaskId), usize)>> = HashMap::new();
+        let mut paths: HashMap<TaskId, Vec<&CFGNode<B>>> = HashMap::new();
         for ((pc, path_id), node) in &self.nodes {
-            paths.entry(*path_id).or_insert_with(Vec::new).push(((*pc, *path_id), node.execution_order));
+            paths.entry(*path_id).or_insert_with(Vec::new).push(node);
         }
 
-        // 按执行顺序排序每个路径的节点
+        // 按执行顺序排序每个路径的节点（order 从小到大 = 从先到后）
         for (_, nodes) in &mut paths {
-            nodes.sort_by_key(|(_, order)| *order);
+            nodes.sort_by_key(|n| n.execution_order);
         }
 
-        // 打印每个路径
-        for (path_id, nodes) in paths.iter() {
-            println!("Path {}: ", path_id.as_usize());
-            for ((pc, _), _) in nodes {
-                if *pc < self.instructions.len() {
-                    let node = &self.nodes.get(&(*pc, *path_id)).unwrap();
-                    print!("  PC {} (order {}): ", pc, node.execution_order);
-                    match &node.fork_condition {
+        // 收集所有路径ID（包括根路径）
+        let mut all_path_ids: Vec<TaskId> = paths.keys().cloned().collect();
+        all_path_ids.sort_by_key(|id| id.as_usize());
+
+        // 打印每条路径
+        for path_id in all_path_ids {
+            if let Some(nodes) = paths.get(&path_id) {
+                println!("┌─────────────────────────────────────────────────────────────────");
+                println!("│ Path {} ({} instructions)", path_id.as_usize(), nodes.len());
+                println!("├─────────────────────────────────────────────────────────────────");
+
+                for (idx, node) in nodes.iter().enumerate() {
+                    // 打印步骤编号
+                    print!("│ [{:2}] PC {:3} ", idx + 1, node.pc);
+
+                    // 打印分支条件（如果有）
+                    if let Some(fc) = &node.fork_condition {
+                        match fc.branch {
+                            ForkBranch::True => print!("🌲 [TRUE]  "),
+                            ForkBranch::False => print!("🌲 [FALSE] "),
+                        }
+                    } else {
+                        print!("         ");
+                    }
+
+                    // 打印指令的简化版本
+                    self.print_instr_short(&node.instr, shared_state);
+                    println!();
+                }
+
+                println!("└─────────────────────────────────────────────────────────────────");
+                println!();
+            }
+        }
+
+        // 打印边（控制流转移）
+        println!("🔗 Control Flow Edges:");
+        if self.edges.is_empty() {
+            println!("   (no edges - single path execution)");
+        } else {
+            // 按源PC分组边
+            let mut edges_by_from: HashMap<usize, Vec<&CFGEdge>> = HashMap::new();
+            for edge in &self.edges {
+                edges_by_from.entry(edge.from).or_insert_with(Vec::new).push(edge);
+            }
+
+            let mut sorted_from_pcs: Vec<_> = edges_by_from.iter().collect();
+            sorted_from_pcs.sort_by_key(|(k, _)| *k);
+            for (from_pc, edges) in sorted_from_pcs {
+                println!("   From PC {}:", from_pc);
+                for edge in edges {
+                    match &edge.condition {
                         Some(fc) => {
+                            let condition_str = self.format_condition(&fc.constraint, shared_state);
                             match fc.branch {
-                                ForkBranch::True => print!("[TRUE] "),
-                                ForkBranch::False => print!("[FALSE] "),
+                                ForkBranch::True => {
+                                    println!("     ├──[TRUE  : {}] → PC {}", condition_str, edge.to);
+                                }
+                                ForkBranch::False => {
+                                    println!("     ├──[FALSE : {}] → PC {}", condition_str, edge.to);
+                                }
                             }
                         }
-                        None => {}
+                        None => {
+                            println!("     └──(unconditional) → PC {}", edge.to);
+                        }
                     }
-                    println!("{:?}", &node.instr);
                 }
             }
-            println!();
         }
+        println!();
+    }
 
-        // 打印边
-        println!("Edges:");
-        for edge in &self.edges {
-            match &edge.condition {
-                Some(fc) => {
-                    match fc.branch {
-                        ForkBranch::True => println!("  PC {} [Path {}] --[TRUE]--> PC {} [Path {}]", 
-                                                     edge.from, edge.from_path.as_usize(), 
-                                                     edge.to, edge.to_path.as_usize()),
-                        ForkBranch::False => println!("  PC {} [Path {}] --[FALSE]--> PC {} [Path {}]", 
-                                                      edge.from, edge.from_path.as_usize(), 
-                                                      edge.to, edge.to_path.as_usize()),
-                    }
-                }
-                None => println!("  PC {} [Path {}] --> PC {} [Path {}]", 
-                                edge.from, edge.from_path.as_usize(), 
-                                edge.to, edge.to_path.as_usize()),
+    // 打印指令的简短版本
+    fn print_instr_short(&self, instr: &Instr<Name, B>, shared_state: &SharedState<B>) {
+        match instr {
+            Instr::Init(var, _ty, _exp, _info) => {
+                print!("{} = ...", shared_state.symtab.to_str(*var));
             }
+            Instr::Copy(loc, _exp, _info) => {
+                print!("{} = ...", self.loc_to_string(loc, shared_state));
+            }
+            Instr::Jump(_exp, target, _info) => {
+                print!("jump → {}", target);
+            }
+            Instr::Goto(target) => {
+                print!("goto → {}", target);
+            }
+            Instr::Call(_loc, _ext, name, _args, _info) => {
+                print!("call {}", shared_state.symtab.to_str(*name));
+            }
+            Instr::End => {
+                print!("end");
+            }
+            Instr::Decl(var, _ty, _info) => {
+                print!("decl {}: ...", shared_state.symtab.to_str(*var));
+            }
+            _ => {
+                print!("...");
+            }
+        }
+    }
+
+    // 格式化分支条件
+    fn format_condition(&self, exp: &Exp<Sym>, _shared_state: &SharedState<B>) -> String {
+        match exp {
+            Exp::Var(sym) => format!("v{}", sym),
+            Exp::Not(boxed) => match boxed.as_ref() {
+                Exp::Var(sym) => format!("!v{}", sym),
+                _ => format!("!({:?})", boxed),
+            },
+            _ => format!("{:?}", exp),
+        }
+    }
+
+    // 将位置转换为字符串
+    fn loc_to_string(&self, loc: &Loc<Name>, shared_state: &SharedState<B>) -> String {
+        match loc {
+            Loc::Id(name) => shared_state.symtab.to_str(*name).to_string(),
+            Loc::Field(loc, field) => format!("{}.{}", self.loc_to_string(loc, shared_state), shared_state.symtab.to_str(*field)),
+            Loc::Addr(loc) => format!("&{}", self.loc_to_string(loc, shared_state)),
         }
     }
 }
@@ -331,17 +419,14 @@ pub fn symbolic_execute_and_build_cfg<'ir, B: BV>(
     let executor = Arc::new(Mutex::new(SymbolicExecutor::new(instructions)));
     let executor_clone = executor.clone();
 
-    // 执行符号执行，使用多线程并行执行
-    // 使用 num_cpus::get() 获取逻辑核心数，对于有超线程的 CPU 可以适当调整
-    let num_threads = num_cpus::get(); // 获取逻辑 CPU 核心数
-    eprintln!("使用 {} 个线程进行符号执行", num_threads);
+    eprintln!("使用 start_single 进行符号执行（单线程）");
 
-    start_multi(
-        num_threads,
-        None, // 无超时限制
-        vec![task], // 将单个 task 包装成 Vec
+    // 暂时使用 start_single，因为 start_multi 存在 bug：
+    // 分叉任务使用相同的 task_id，导致 Fraction 永远不会达到 1，造成无限循环
+    start_single(
+        task,
         shared_state,
-        executor_clone, // 需要 Arc<R>，不是引用
+        &executor_clone,
         &move |_tid, task_id, result, _shared_state, solver, executor| {
             // 从solver中提取所有事件（trace().to_vec()返回Vec<&Event<B>>，需要克隆）
             let mut events_vec = solver.trace().to_vec();
@@ -349,13 +434,13 @@ pub fn symbolic_execute_and_build_cfg<'ir, B: BV>(
 
             // 创建路径结果数据（需要立即提取数据以避免生命周期问题）
             let path_data = match result {
-                Ok((run_result, frame)) => {
+                Ok((_run_result, frame)) => {
                     // 使用公共访问器方法获取backtrace和pc
                     let backtrace = frame.backtrace().clone();
                     let final_pc = frame.pc();
                     PathResultData {
                         task_id,
-                        run_result,
+                        run_result: Run::Finished(Val::Unit), // 占位值
                         events,
                         backtrace,
                         final_pc,
@@ -375,7 +460,13 @@ pub fn symbolic_execute_and_build_cfg<'ir, B: BV>(
 
             // 处理路径数据
             let mut exec = executor.lock().unwrap();
+            let path_count = exec.path_infos.len();
             exec.process_path(&path_data);
+
+            // 每10条路径打印一次进度
+            if path_count > 0 && path_count % 10 == 0 {
+                eprintln!("已处理 {} 条路径", path_count);
+            }
         },
     );
 
