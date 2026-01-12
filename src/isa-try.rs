@@ -412,7 +412,8 @@ fn isla_main() -> i32 {
 	// let function_id = shared_state.symtab.lookup("zneq_int");  // 2 个参数: %i, %i
 	// let function_id = shared_state.symtab.lookup("zsign_extend");  // 2 个参数: %i, %i
 	// let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 默认测试函数
-	let function_id = shared_state.symtab.lookup("zfloat_is_zzero");
+	let function_id = shared_state.symtab.lookup("zfloat_is_zzero");  // AnyBits 类型不支持符号值
+	// let function_id = shared_state.symtab.lookup("znot_bit");
 
 
     //d1!(id,shared_state.symtab.to_str(Name::from_u32(29)));
@@ -430,6 +431,21 @@ fn isla_main() -> i32 {
     // 自动生成符号参数：根据函数参数的类型和数量自动创建符号值
     eprintln!("\n=== 生成符号参数 ===");
     let symbolic_args = make_symbolic_args(args, shared_state, &mut solver);
+
+    // 收集符号变量映射：参数名 -> 符号变量名
+    let mut symbolic_mapping = cfg::SymbolicMapping::new();
+    for (i, (arg_name, _ty)) in args.iter().enumerate() {
+        let arg_name_str = shared_state.symtab.to_str(*arg_name);
+        eprintln!("  参数值: {:?} = {:?}", arg_name_str, symbolic_args[i]);
+        // 从符号值中提取符号变量名
+        if let Val::Symbolic(sym) = &symbolic_args[i] {
+            // 使用格式 v0, v1 等显示符号变量
+            symbolic_mapping.add_mapping(*arg_name, format!("v{}", sym));
+            eprintln!("  映射: {} -> v{}", arg_name_str, sym);
+        } else {
+            eprintln!("  参数 {} 不是符号值", arg_name_str);
+        }
+    }
 
     // 将符号参数转换为引用切片传递给 LocalFrame::new
     let function_initvalue = Some(symbolic_args.as_slice());
@@ -451,7 +467,50 @@ fn isla_main() -> i32 {
 
     // 构建静态 CFG（基于指令列表，不需要执行）
     println!("\n=== 构建静态 CFG ===");
-    let cfg = cfg::build_static_cfg(function_id, instrs);
+    let mut cfg = cfg::build_static_cfg(function_id, instrs);
+
+    // 注册所有 IR 定义的函数到 symbolic_mapping
+    // 这样可以递归展开函数调用
+    for (func_id, (func_args, _ret_ty, func_instrs)) in &shared_state.functions {
+        let func_name = shared_state.symtab.to_str(*func_id).to_string();
+        // 提取形参列表
+        let params: Vec<Name> = func_args.iter().map(|(n, _)| *n).collect();
+
+        // 找到函数的返回值变量
+        // 函数体中的指令是倒序的，第一条指令（不含 end）通常是返回值
+        // 跳过 end 指令，找到第一个实际的赋值指令
+        let return_var = func_instrs.iter()
+            .rev()
+            .skip_while(|instr| matches!(instr, Instr::End))
+            .find_map(|instr| {
+                match instr {
+                    Instr::Copy(Loc::Id(name), _, _) => Some(*name),
+                    Instr::Init(name, _, _, _) => Some(*name),
+                    Instr::PrimopUnary(Loc::Id(name), _, _, _) => Some(*name),
+                    Instr::PrimopBinary(Loc::Id(name), _, _, _, _) => Some(*name),
+                    Instr::PrimopVariadic(Loc::Id(name), _, _, _) => Some(*name),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| func_args.get(0).map(|(n, _)| *n).unwrap_or(Name::from_u32(0)));
+
+        // 将指令转换为 Instr<Name, ()> 格式（使用 clone 和 map 转换）
+        let func_body: Vec<Instr<Name, ()>> = func_instrs.iter()
+            .map(|instr| {
+                // 简化：直接克隆并忽略位宽参数的差异
+                // 实际使用时可能需要更复杂的转换
+                unsafe { std::mem::transmute_copy(instr) }
+            })
+            .collect();
+
+        symbolic_mapping.add_ir_function(func_name, params, return_var, func_body);
+    }
+
+    // 设置符号映射
+    cfg.set_symbolic_mapping(symbolic_mapping);
+
+    // 分析数据流，建立变量定义映射
+    cfg.analyze_dataflow(&shared_state.symtab, args);
 
     // 打印 CFG
     println!("\n=== CFG 构建完成 ===");
