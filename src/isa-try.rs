@@ -411,8 +411,8 @@ fn isla_main() -> i32 {
 	// let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 1 个参数: %bv2
 	// let function_id = shared_state.symtab.lookup("zneq_int");  // 2 个参数: %i, %i
 	// let function_id = shared_state.symtab.lookup("zsign_extend");  // 2 个参数: %i, %i
-	// let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 默认测试函数
-	let function_id = shared_state.symtab.lookup("znot_bit");
+	let function_id = shared_state.symtab.lookup("zhex_bits_2_forwards");  // 默认测试函数
+	// let function_id = shared_state.symtab.lookup("znot_bit");
 
 
     //d1!(id,shared_state.symtab.to_str(Name::from_u32(29)));

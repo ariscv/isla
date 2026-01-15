@@ -4,7 +4,7 @@ use isla_lib::ir::*;
 use isla_lib::executor::*;
 use isla_lib::executor::Backtrace;
 use isla_lib::smt::{Event, Sym};
-use isla_lib::smt::smtlib::Exp;
+use isla_lib::smt::smtlib::Exp as SmtExp;
 use isla_lib::bitvector::BV;
 
 
@@ -24,7 +24,7 @@ pub struct CFGNode<B: BV> {
 pub struct ForkCondition {
     pub symbolic_var: Sym,           // 符号变量
     pub branch: ForkBranch,          // 分支（true/false）
-    pub constraint: Exp<Sym>,         // SMT 约束（简化表示）
+    pub constraint: SmtExp<Sym>,     // SMT 约束（简化表示）
 }
 
 #[derive(Debug, Clone)]
@@ -98,10 +98,10 @@ impl<B: BV> CFGTree<B> {
         });
     }
 
-    // 打印 CFG 树
+    // 打印 CFG 树（树状图格式）
     pub fn print(&self, shared_state: &SharedState<B>) {
         println!("╔═══════════════════════════════════════════════════════════════╗");
-        println!("║                     Control Flow Graph                       ║");
+        println!("║                   Control Flow Tree (树状图)                  ║");
         println!("╚═══════════════════════════════════════════════════════════════╝");
         println!();
 
@@ -110,132 +110,233 @@ impl<B: BV> CFGTree<B> {
         println!("   • Entry point: PC {}", self.entry_point);
         println!("   • Total nodes: {}", self.nodes.len());
         println!("   • Total edges: {}", self.edges.len());
-        println!("   • Total paths: {}", self.path_tree.len() + 1); // +1 for root path
         println!();
 
-        // 按路径组织节点
-        let mut paths: HashMap<TaskId, Vec<&CFGNode<B>>> = HashMap::new();
-        for ((pc, path_id), node) in &self.nodes {
-            paths.entry(*path_id).or_insert_with(Vec::new).push(node);
-        }
-
-        // 按执行顺序排序每个路径的节点（order 从小到大 = 从先到后）
-        for (_, nodes) in &mut paths {
-            nodes.sort_by_key(|n| n.execution_order);
-        }
-
-        // 收集所有路径ID（包括根路径）
-        let mut all_path_ids: Vec<TaskId> = paths.keys().cloned().collect();
-        all_path_ids.sort_by_key(|id| id.as_usize());
-
-        // 打印每条路径
-        for path_id in all_path_ids {
-            if let Some(nodes) = paths.get(&path_id) {
-                println!("┌─────────────────────────────────────────────────────────────────");
-                println!("│ Path {} ({} instructions)", path_id.as_usize(), nodes.len());
-                println!("├─────────────────────────────────────────────────────────────────");
-
-                for (idx, node) in nodes.iter().enumerate() {
-                    // 打印步骤编号
-                    print!("│ [{:2}] PC {:3} ", idx + 1, node.pc);
-
-                    // 打印分支条件（如果有）
-                    if let Some(fc) = &node.fork_condition {
-                        match fc.branch {
-                            ForkBranch::True => print!("🌲 [TRUE]  "),
-                            ForkBranch::False => print!("🌲 [FALSE] "),
-                        }
-                    } else {
-                        print!("         ");
-                    }
-
-                    // 打印指令的简化版本
-                    self.print_instr_short(&node.instr, shared_state);
-                    println!();
-                }
-
-                println!("└─────────────────────────────────────────────────────────────────");
-                println!();
+        // 构建从根开始的树结构
+        // 找到根路径（没有父路径的路径）
+        let mut path_to_parent: HashMap<TaskId, Option<TaskId>> = HashMap::new();
+        for ((_pc, path_id), node) in &self.nodes {
+            if !path_to_parent.contains_key(path_id) {
+                path_to_parent.insert(*path_id, node.parent_path);
             }
         }
 
-        // 打印边（控制流转移）
-        println!("🔗 Control Flow Edges:");
-        if self.edges.is_empty() {
-            println!("   (no edges - single path execution)");
+        // 找到根路径（TaskId最小的）
+        let root_path = path_to_parent.iter()
+            .filter(|(_, parent)| parent.is_none())
+            .min_by_key(|(id, _)| id.as_usize())
+            .map(|(id, _)| *id)
+            .or_else(|| path_to_parent.keys().copied().min_by_key(|id| id.as_usize()));
+
+        println!("🌲 CFG Tree Structure:");
+        println!();
+
+        if let Some(root) = root_path {
+            self.print_tree_recursive(root, "", shared_state, &mut HashSet::new());
         } else {
-            // 按源PC分组边
-            let mut edges_by_from: HashMap<usize, Vec<&CFGEdge>> = HashMap::new();
-            for edge in &self.edges {
-                edges_by_from.entry(edge.from).or_insert_with(Vec::new).push(edge);
-            }
-
-            let mut sorted_from_pcs: Vec<_> = edges_by_from.iter().collect();
-            sorted_from_pcs.sort_by_key(|(k, _)| *k);
-            for (from_pc, edges) in sorted_from_pcs {
-                println!("   From PC {}:", from_pc);
-                for edge in edges {
-                    match &edge.condition {
-                        Some(fc) => {
-                            let condition_str = self.format_condition(&fc.constraint, shared_state);
-                            match fc.branch {
-                                ForkBranch::True => {
-                                    println!("     ├──[TRUE  : {}] → PC {}", condition_str, edge.to);
-                                }
-                                ForkBranch::False => {
-                                    println!("     ├──[FALSE : {}] → PC {}", condition_str, edge.to);
-                                }
-                            }
-                        }
-                        None => {
-                            println!("     └──(unconditional) → PC {}", edge.to);
-                        }
-                    }
-                }
+            // 如果没有明确的根，直接打印所有路径
+            let mut all_path_ids: Vec<TaskId> = self.nodes.values()
+                .map(|n| n.path_id)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            all_path_ids.sort_by_key(|id| id.as_usize());
+            for path_id in all_path_ids {
+                self.print_tree_recursive(path_id, "", shared_state, &mut HashSet::new());
             }
         }
-        println!();
     }
 
-    // 打印指令的简短版本
-    fn print_instr_short(&self, instr: &Instr<Name, B>, shared_state: &SharedState<B>) {
+    // 递归打印树状结构
+    fn print_tree_recursive(&self, path_id: TaskId, prefix: &str, shared_state: &SharedState<B>, printed: &mut HashSet<TaskId>) {
+        // 防止重复打印
+        if !printed.insert(path_id) {
+            return;
+        }
+
+        // 收集该路径的所有节点
+        let nodes: Vec<&CFGNode<B>> = self.nodes.values()
+            .filter(|n| n.path_id == path_id)
+            .collect();
+
+        if nodes.is_empty() {
+            return;
+        }
+
+        // 按执行顺序反向排序（从入口到出口）
+        let mut sorted_nodes: Vec<_> = nodes.iter().collect();
+        sorted_nodes.sort_by_key(|n| n.execution_order);
+        sorted_nodes.reverse(); // 反转，使入口在顶部
+
+        // 打印该路径的节点
+        for (idx, node) in sorted_nodes.iter().enumerate() {
+            let is_last = idx == sorted_nodes.len() - 1;
+            let (line_prefix, child_prefix) = if is_last {
+                ("└── ", format!("{}    ", prefix))
+            } else {
+                ("├── ", format!("{}│   ", prefix))
+            };
+
+            // 打印分支条件
+            if let Some(fc) = &node.fork_condition {
+                let branch_symbol = match fc.branch {
+                    ForkBranch::True => "✓ TRUE",
+                    ForkBranch::False => "✗ FALSE",
+                };
+                let condition_str = self.format_smt_condition(&fc.constraint);
+                println!("{}{}{} [{}] v{}", prefix, line_prefix, branch_symbol, condition_str, fc.symbolic_var);
+            } else {
+                println!("{}{}PC {}", prefix, line_prefix, node.pc);
+            }
+
+            // 打印指令内容（带缩进）
+            let instr_str = self.instr_to_string(&node.instr, shared_state);
+            for line in instr_str.lines() {
+                println!("{}{}    {}", child_prefix, line_prefix, line);
+            }
+        }
+
+        // 递归打印子路径
+        if let Some(children) = self.path_tree.get(&path_id) {
+            let mut sorted_children: Vec<_> = children.iter().collect();
+            sorted_children.sort_by_key(|id| id.as_usize());
+
+            for (idx, &child_path) in sorted_children.iter().enumerate() {
+                let is_last = idx == sorted_children.len() - 1;
+                let new_prefix = if is_last {
+                    format!("{}    ", prefix)
+                } else {
+                    format!("{}│   ", prefix)
+                };
+
+                // 打印子路径标题
+                println!("{}{}┌── Path {} (子路径)", prefix, if is_last { " " } else { "│" }, child_path.as_usize());
+
+                self.print_tree_recursive(*child_path, &new_prefix, shared_state, printed);
+
+                // 打印子路径结束标记
+                if idx < sorted_children.len() - 1 {
+                    println!("{}{}│", prefix, if is_last { " " } else { "│" });
+                }
+            }
+        }
+    }
+
+    // 将指令转换为多行字符串
+    fn instr_to_string(&self, instr: &Instr<Name, B>, shared_state: &SharedState<B>) -> String {
         match instr {
-            Instr::Init(var, _ty, _exp, _info) => {
-                print!("{} = ...", shared_state.symtab.to_str(*var));
+            Instr::Init(var, _ty, exp, _info) => {
+                format!("{} = {}", shared_state.symtab.to_str(*var), self.exp_to_string(exp, shared_state))
             }
-            Instr::Copy(loc, _exp, _info) => {
-                print!("{} = ...", self.loc_to_string(loc, shared_state));
+            Instr::Copy(loc, exp, _info) => {
+                format!("{} = {}", self.loc_to_string(loc, shared_state), self.exp_to_string(exp, shared_state))
             }
-            Instr::Jump(_exp, target, _info) => {
-                print!("jump → {}", target);
+            Instr::Jump(exp, target, _info) => {
+                format!("jump if {} -> PC {}", self.exp_to_string(exp, shared_state), target)
             }
             Instr::Goto(target) => {
-                print!("goto → {}", target);
+                format!("goto -> PC {}", target)
             }
-            Instr::Call(_loc, _ext, name, _args, _info) => {
-                print!("call {}", shared_state.symtab.to_str(*name));
+            Instr::Call(_loc, _ext, name, args, _info) => {
+                let args_str: Vec<String> = args.iter()
+                    .map(|a| self.exp_to_string(a, shared_state))
+                    .collect();
+                format!("call {}({})", shared_state.symtab.to_str(*name), args_str.join(", "))
             }
             Instr::End => {
-                print!("end");
+                "end".to_string()
             }
-            Instr::Decl(var, _ty, _info) => {
-                print!("decl {}: ...", shared_state.symtab.to_str(*var));
+            Instr::Decl(var, ty, _info) => {
+                format!("decl {}: {:?}", shared_state.symtab.to_str(*var), ty)
+            }
+            Instr::Exit(cause, _info) => {
+                format!("exit {:?}", cause)
+            }
+            Instr::Arbitrary => {
+                "arbitrary".to_string()
             }
             _ => {
-                print!("...");
+                format!("{:?}", instr)
             }
         }
     }
 
-    // 格式化分支条件
-    fn format_condition(&self, exp: &Exp<Sym>, _shared_state: &SharedState<B>) -> String {
+    // 将 Op 转换为字符串
+    fn op_to_string(op: &Op) -> String {
+        match op {
+            Op::Not => "not".to_string(),
+            Op::Or => "or".to_string(),
+            Op::And => "and".to_string(),
+            Op::Eq => "==".to_string(),
+            Op::Neq => "!=".to_string(),
+            Op::Lteq => "<=".to_string(),
+            Op::Lt => "<".to_string(),
+            Op::Gteq => ">=".to_string(),
+            Op::Gt => ">".to_string(),
+            Op::Add => "+".to_string(),
+            Op::Sub => "-".to_string(),
+            Op::Slice(n) => format!("slice[{}]", n),
+            Op::SetSlice => "set_slice".to_string(),
+            Op::Signed(n) => format!("signed[{}]", n),
+            Op::Unsigned(n) => format!("unsigned[{}]", n),
+            Op::ZeroExtend(n) => format!("zext[{}]", n),
+            Op::Bvnot => "bvnot".to_string(),
+            Op::Bvor => "bvor".to_string(),
+            Op::Bvxor => "bvxor".to_string(),
+            Op::Bvand => "bvand".to_string(),
+            Op::Bvadd => "bvadd".to_string(),
+            Op::Bvsub => "bvsub".to_string(),
+            Op::Bvaccess => "bvaccess".to_string(),
+            Op::Concat => "++".to_string(),
+            Op::Head => "head".to_string(),
+            Op::Tail => "tail".to_string(),
+            Op::IsEmpty => "is_empty".to_string(),
+        }
+    }
+
+    // 将表达式转换为字符串
+    fn exp_to_string(&self, exp: &Exp<Name>, shared_state: &SharedState<B>) -> String {
         match exp {
-            Exp::Var(sym) => format!("v{}", sym),
-            Exp::Not(boxed) => match boxed.as_ref() {
-                Exp::Var(sym) => format!("!v{}", sym),
-                _ => format!("!({:?})", boxed),
-            },
-            _ => format!("{:?}", exp),
+            Exp::Id(name) => shared_state.symtab.to_str(*name).to_string(),
+            Exp::Ref(name) => format!("&{}", shared_state.symtab.to_str(*name)),
+            Exp::Bool(b) => format!("{}", b),
+            Exp::Bits(bv) => format!("{}", bv),
+            Exp::String(s) => format!("\"{}\"", s),
+            Exp::Unit => "()".to_string(),
+            Exp::I64(i) => format!("{}", i),
+            Exp::I128(i) => format!("{}", i),
+            Exp::Undefined(_ty) => "undefined".to_string(),
+            Exp::Call(op, args) => {
+                let op_str = Self::op_to_string(op);
+                let args_str: Vec<String> = args.iter()
+                    .map(|a| self.exp_to_string(a, shared_state))
+                    .collect();
+                match args.len() {
+                    0 => op_str,
+                    1 => format!("{}({})", op_str, args_str.join(", ")),
+                    2 => {
+                        // 对于二元操作，使用中缀表示法
+                        format!("({} {} {})", args_str[0], op_str, args_str[1])
+                    }
+                    _ => format!("{}({})", op_str, args_str.join(", ")),
+                }
+            }
+            Exp::Struct(name, fields) => {
+                let struct_name = shared_state.symtab.to_str(*name);
+                let fields_str: Vec<String> = fields.iter()
+                    .map(|(f, e)| format!("{}: {}", shared_state.symtab.to_str(*f), self.exp_to_string(e, shared_state)))
+                    .collect();
+                format!("{}.struct({{{})}}", struct_name, fields_str.join(", "))
+            }
+            Exp::Kind(name, exp) => {
+                format!("{}({})", shared_state.symtab.to_str(*name), self.exp_to_string(exp, shared_state))
+            }
+            Exp::Unwrap(name, exp) => {
+                format!("unwrap({}, {})", shared_state.symtab.to_str(*name), self.exp_to_string(exp, shared_state))
+            }
+            Exp::Field(exp, name) => {
+                format!("{}.{}", self.exp_to_string(exp, shared_state), shared_state.symtab.to_str(*name))
+            }
         }
     }
 
@@ -245,6 +346,18 @@ impl<B: BV> CFGTree<B> {
             Loc::Id(name) => shared_state.symtab.to_str(*name).to_string(),
             Loc::Field(loc, field) => format!("{}.{}", self.loc_to_string(loc, shared_state), shared_state.symtab.to_str(*field)),
             Loc::Addr(loc) => format!("&{}", self.loc_to_string(loc, shared_state)),
+        }
+    }
+
+    // 格式化 SMT 表达式条件
+    fn format_smt_condition(&self, exp: &SmtExp<Sym>) -> String {
+        match exp {
+            SmtExp::Var(sym) => format!("v{}", sym),
+            SmtExp::Not(boxed) => match boxed.as_ref() {
+                SmtExp::Var(sym) => format!("!v{}", sym),
+                _ => format!("!({:?})", boxed),
+            },
+            _ => format!("{:?}", exp),
         }
     }
 }
@@ -365,7 +478,7 @@ impl<B: BV> SymbolicExecutor<B> {
                     ForkCondition {
                         symbolic_var: *sym,
                         branch: branch.clone(),
-                        constraint: Exp::Var(*sym), // 简化：实际应该从solver获取完整约束
+                        constraint: SmtExp::Var(*sym), // 简化：实际应该从solver获取完整约束
                     }
                 });
 
@@ -394,7 +507,7 @@ impl<B: BV> SymbolicExecutor<B> {
                     ForkCondition {
                         symbolic_var: *sym,
                         branch: branch.clone(),
-                        constraint: Exp::Var(*sym),
+                        constraint: SmtExp::Var(*sym),
                     }
                 });
 

@@ -1987,7 +1987,6 @@ pub fn start_single<'ir, B: BV, R>(
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
-		println!("============queue.pop()");
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
