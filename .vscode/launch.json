@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+	"configurations": [
+		{
+			"name": "RV64 list-instructions",
+			"type": "lldb",
+			"request": "launch",
+			"cargo": {
+				"args": [
+					"run",
+					"--bin=isarch",
+					"--package=isla",
+					
+				]
+			},
+			"args": [				"-A",
+				 "../isla-snapshots/rv64d.ir",
+				 "-C",
+				 "configs/riscv64.toml",
+				 "list-instructions",
+				 ]
+		},
+		
+       
+
+       
+    ]
+}

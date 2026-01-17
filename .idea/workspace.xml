@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="CargoProjects">
+    <cargoProject FILE="$PROJECT_DIR$/Cargo.toml">
+      <package file="$PROJECT_DIR$">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/isla-axiomatic">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/isla-cat">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/isla-elf">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/isla-lib">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/isla-mml">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/isla-sexp">
+        <feature name="default" enabled="true" />
+      </package>
+    </cargoProject>
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="421773b5-cf8f-4f2c-a9ee-cb52403f075c" name="更改" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.vscode/launch.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/isla-lib/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/isla-lib/src/lib.rs" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Rust File" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="MacroExpansionManager">
+    <option name="directoryName" value="S1jhXkcN" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 7
+}</component>
+  <component name="ProjectId" id="37HdrW51Nt4IDa3S1ZuZjJxBzXj" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Cargo.Install evcxr_repl.executor": "Run",
+    "Cargo.Run ARM.executor": "Debug",
+    "Cargo.Run RV32 list-instructions.executor": "Debug",
+    "Cargo.Run RV32.executor": "Run",
+    "Cargo.Run RV64 list-instructions.executor": "Debug",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.rust.reset.selective.auto.import": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "last_opened_file_path": "/home/baiyifan/workplace-local/sail_runner/workdir/isla1",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "org.rust.cargo.project.model.PROJECT_DISCOVERY": "true",
+    "org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon": "",
+    "org.rust.first.attach.projects": "true",
+    "settings.editor.selected.configurable": "language.rust.cargo.check",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="RdControllerToolWindowsLayoutState" isNewUi="true">
+    <layout>
+      <window_info id="Bookmarks" side_tool="true" />
+      <window_info id="Merge Requests" />
+      <window_info id="Backup and Sync History" />
+      <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.129174" />
+      <window_info id="Commit" order="1" weight="0.129174" />
+      <window_info id="Structure" order="2" side_tool="true" weight="0.25" />
+      <window_info id="Pull Requests" order="3" weight="0.16823253" />
+      <window_info anchor="bottom" id="Database Changes" />
+      <window_info anchor="bottom" id="TypeScript" />
+      <window_info anchor="bottom" id="TODO" />
+      <window_info anchor="bottom" id="Messages" />
+      <window_info anchor="bottom" id="File Transfer" />
+      <window_info anchor="bottom" id="Version Control" order="0" />
+      <window_info anchor="bottom" id="Problems" order="1" />
+      <window_info anchor="bottom" id="Problems View" order="2" weight="0.035596933" />
+      <window_info anchor="bottom" id="Terminal" order="3" />
+      <window_info anchor="bottom" id="Services" order="4" />
+      <window_info anchor="bottom" id="Build" order="5" weight="0.36856517" />
+      <window_info anchor="bottom" id="Debug" order="6" weight="0.36856517" />
+      <window_info active="true" anchor="bottom" id="Run" order="7" visible="true" weight="0.36856517" />
+      <window_info anchor="bottom" id="Find" order="7" weight="0.33023" />
+      <window_info anchor="right" id="Coverage" side_tool="true" />
+      <window_info anchor="right" content_ui="combo" id="Notifications" order="0" weight="0.25" />
+      <window_info anchor="right" id="AIAssistant" order="1" weight="0.25" />
+      <window_info anchor="right" id="Database" order="2" weight="0.25" />
+      <window_info anchor="right" id="Gradle" order="3" weight="0.25" />
+      <window_info anchor="right" id="Maven" order="4" weight="0.25" />
+      <window_info anchor="right" id="Cargo" order="5" weight="0.2" />
+      <window_info anchor="right" id="RustCargo" order="6" weight="0.2" />
+    </layout>
+  </component>
+  <component name="RunManager" selected="Cargo.Run RV64 list-instructions">
+    <configuration name="Run RV32 list-instructions" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="buildProfileId" value="dev" />
+      <option name="command" value="run --bin isarch -- -A ./rv32d.ir -C ./configs/riscv32.toml list-instructions" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run isla-axiomatic" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="buildProfileId" value="dev" />
+      <option name="command" value="run --package isla --bin isla-axiomatic" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Test isla" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="test --workspace" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <list>
+      <item itemvalue="Cargo.Run ARM" />
+      <item itemvalue="Cargo.Run RV64 list-instructions" />
+      <item itemvalue="Cargo.Run RV32 list-instructions" />
+      <item itemvalue="Cargo.Run RV64" />
+      <item itemvalue="Cargo.Run isla-axiomatic" />
+      <item itemvalue="Cargo.Test isla" />
+    </list>
+  </component>
+  <component name="RustProjectSettings">
+    <option name="toolchainHomeDirectory" value="/usr/bin" />
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="默认任务">
+      <changelist id="421773b5-cf8f-4f2c-a9ee-cb52403f075c" name="更改" comment="" />
+      <created>1766564129737</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1766564129737</updated>
+      <workItem from="1766564130739" duration="2048000" />
+      <workItem from="1766647614829" duration="4583000" />
+      <workItem from="1767517814832" duration="11094000" />
+      <workItem from="1767889976293" duration="1909000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="XDebuggerManager">
+    <breakpoint-manager>
+      <breakpoints>
+        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
+          <url>file://$PROJECT_DIR$/src/isarch.rs</url>
+          <line>78</line>
+          <option name="timeStamp" value="24" />
+        </line-breakpoint>
+      </breakpoints>
+    </breakpoint-manager>
+  </component>
+  <component name="XSLT-Support.FileAssociations.UIState">
+    <expand />
+    <select />
+  </component>
+</project>
