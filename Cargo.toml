@@ -76,6 +76,11 @@ name = "zencode"
 path = "src/zencode.rs"
 doc = false
 
+[[bin]]
+name = "isarch"
+path = "src/isarch.rs"
+doc = false
+
 [dependencies]
 crossbeam = "0.8.1"
 getopts = "0.2.21"
@@ -96,7 +101,7 @@ isla-elf = { path = "isla-elf", version = "0.2.0" }
 smtperf = ["isla-lib/smtperf"]
 
 [profile.dev]
-opt-level = 1
+opt-level = 0
 
 [profile.release]
 opt-level = 3
