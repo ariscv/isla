@@ -36,6 +36,8 @@
 
 use std::any::type_name;
 use std::collections::HashMap;
+use std::str::FromStr;
+use std::vec;
 use sha2::{Digest, Sha256};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
@@ -51,6 +53,8 @@ use isla_lib::register::RegisterBindings;
 mod opts;
 use opts::CommonOpts;
 
+/* ==重构start== */
+
 /// 通用的IR函数执行API
 /// 执行指定的IR函数并返回结果
 fn execute_ir_function<B: BV>(
@@ -60,6 +64,8 @@ fn execute_ir_function<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Option<Val<B>> {
+    use isla_lib::error::ExecError;
+
     let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
 
     // 获取函数信息
@@ -91,8 +97,19 @@ fn execute_ir_function<B: BV>(
                 }
             }
             Err((error, backtrace)) => {
-                eprintln!("执行错误: {:?}", error);
-                eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                // MatchFailure 可能由于以下原因发生：
+                // 1. IR 文件包含了特定架构的指令（如 RV32 指令在 RV64 IR 中）
+                // 2. 这些指令存在于 zinstruction union 中，但在 zassembly_forwards 中没有处理
+                // 这是 IR 文件的设计特性，不是代码错误
+                match &error {
+                    ExecError::MatchFailure(_) => {
+                        // 静默处理 - 指令没有汇编名称映射
+                    }
+                    _ => {
+                        eprintln!("执行错误: {:?}", error);
+                        eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                    }
+                }
             }
         }
     });
@@ -154,30 +171,80 @@ fn get_assembly_name<B: BV>(
         &shared_state.symtab.lookup("zinstruction")
     );
 
-    let arg_value = if let Some(union_members) = instruction_union {
-        // 查找当前构造函数的类型
-        let ctor_ty = union_members.iter()
-            .find(|(n, _ty)| *n == ctor_name)
-            .map(|(_, ty)| ty);
+    let Some(union_members) = instruction_union else {
+        // zinstruction union 不存在
+		panic!("get_assembly_name: 在symtab中没找到符号'zinstruction'");
+    };
 
-        match ctor_ty {
-            Some(Ty::Unit) => Val::Unit,
-            Some(ty) => generate_default_value(ty, *shared_state),
-            None => Val::Unit,
-        }
-    } else {
-        Val::Unit
+    // 查找当前构造函数的类型
+    let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
+        // 指令不在 zinstruction union 中（可能是其他架构的指令）
+        return None;
+    };
+
+    // 根据构造函数的参数类型生成默认值
+    let arg_value = match ctor_ty {
+        Ty::Unit => Val::Unit,
+        ty => generate_default_value(ty, *shared_state),
     };
 
     // 构造指令值
     let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value));
 
     // 执行 zassembly_forwards 函数
+    // MatchFailure 错误会被 execute_ir_function 静默处理
     match execute_ir_function("zassembly_forwards", &[instr_value], shared_state, regs, lets) {
         Some(Val::String(s)) => Some(s),
         _ => None,
     }
 }
+fn get_instruction_list<B: BV>(
+    shared_state: &&SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+)  -> HashMap<String, (isla_lib::ir::Name, isla_lib::ir::Ty<isla_lib::ir::Name>, String)> {
+		let results: Vec<_> = shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap()
+            .iter().map(
+                |(n,ty)| {
+
+					let inst_union_name_str=String::from_str(shared_state.symtab.to_str(*n)).unwrap();
+					let s=&inst_union_name_str;
+					//直接执行zassembly_forwards函数，执行zMRET、zADD这样的CTOR（构造函数），得到具体的汇编，比如add x1,x2,x3
+					let inst_assembly=get_assembly_name::<B>(s, shared_state, regs, lets);
+					(inst_assembly.clone(),(*n,ty.clone(),inst_union_name_str.clone()))
+				}
+            )
+            .collect::<Vec<_>>();
+
+	// 找出没有汇编名称的指令
+	let no_assembly:Vec<_> = results.iter().filter(|(asm,_)| asm.is_none()).map(|(inst_assembly,(n,ty,inst_union_name_str))| inst_union_name_str.clone()).collect();
+	if !no_assembly.is_empty() {
+		eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", no_assembly.len());
+		for name in &no_assembly {
+			// 调试：检查指令类型
+			if let Some(union_members) = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")) {
+				if let Some((_, ty)) = union_members.iter().find(|(n, _)| shared_state.symtab.to_str(*n) == *name) {
+					eprintln!("  - {} (类型: {:?})", name, ty);
+				} else {
+					eprintln!("  - {} (不在 union 中)", name);
+				}
+			}
+		}
+	}
+
+	let instruction_list=results.iter().filter_map(
+			|(k,v)| 
+				k.as_ref().map(|key|
+					 (key.clone(), v.clone())
+					)
+		).collect::<HashMap<_,_>>();
+	// println!("{:?}", instruction_list);
+
+	// instruction_list
+	instruction_list
+}
+
+/* ==重构end== */
 
 fn main() {
     let code = isla_main();
@@ -342,16 +409,10 @@ fn isla_main() -> i32 {
 
 	//======
 
-	println!("{:?}",
-		shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap()
-            .iter().map(
-                |(n,ty)| shared_state.symtab.to_str(*n)
-            )
-            .map(
-                |s| get_assembly_name::<B129>(s, shared_state, regs, lets)
-            )
-            .collect::<Vec<_>>()
-	);
+
+	let instruction_list = get_instruction_list(shared_state, regs, lets);
+
+	// println!("是否存在mret：{:?}",instruction_list.contains(&String::from_str("mret").unwrap()));
 
     match subcommand {
         "list-instructions" => 0 /* cmd_list_instructions(matches, shared_state,regs,lets, iarch_config, source_path) */,
