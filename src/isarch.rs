@@ -114,9 +114,10 @@ fn print_usage(opts: &getopts::Options) -> ! {
 
 fn cmd_tree<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
-    iarch: &isla_lib::init::Initialized<B>,
-    arch: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
-    isa_config: isla_lib::config::ISAConfig<B>,
+    shared_state: &&isla_lib::ir::SharedState<B>,
+    regs: &isla_lib::register::RegisterBindings<B>,
+    lets: &Bindings<B>,
+    iarch_config: isla_lib::init::InitArchWithConfig<B>,
     source_path: Option<std::path::PathBuf>,
 ) -> i32 {
     use isla_lib::isarch;
@@ -131,11 +132,11 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
     eprintln!("这需要实现符号执行引擎来探索执行路径");
 
     // Placeholder output
-    if graphviz {
+/*     if graphviz {
         println!("{}", isarch::format_tree_graphviz::<B129>(&[]));
     } else {
         println!("{}", isarch::format_tree_ascii::<B129>(&[]));
-    }
+    } */
 
     0
 }
@@ -235,7 +236,7 @@ fn isla_main() -> i32 {
 			}
 			0
 		},
-        /* "tree" => {
+        "tree" => {
             if matches.free.len() < 2 {
                 eprintln!("Error: 'tree' command requires an instruction argument");
                 println!("\nUsage: isarch [options] tree <instruction>");
@@ -244,7 +245,7 @@ fn isla_main() -> i32 {
             } else {
                 cmd_tree(matches, &iarch, arch, isa_config, source_path)
             }
-        } */
+        }
         /* "solve-state" => {
             if matches.free.len() < 2 {
                 eprintln!("Error: 'solve-state' command requires an instruction argument");

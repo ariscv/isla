@@ -333,7 +333,7 @@ pub fn execute_instruction<B: BV>(
     // This will:
     // 1. Find the instruction in the IR
     // 2. Create a task for execution
-    // 3. Use executor::start_multi to explore paths
+    // 3. Use executor::start_single to explore paths
     // 4. Collect paths using a custom collector
     Ok(Vec::new())
 }
