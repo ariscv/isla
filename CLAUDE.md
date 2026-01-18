@@ -169,3 +169,6 @@ cargo run --bin isarch --release -- -A ./rv32d.ir -C configs/riscv32.toml solve-
 - `tree`: 🚧 In progress - requires symbolic execution integration
 - `solve-state`: ⏳ Planned - requires Z3 solver integration
 
+## 活跃的开发文件
+- `src/isarch.rs`: 主要的入口文件
+- `isla-lib/src/isarch.rs`: 当需要`isla-lib::`库中私有的方法成员时，可以选择把实现放在这里，但还是优先使用`src/isarch.rs`

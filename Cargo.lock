@@ -361,6 +361,7 @@ dependencies = [
 name = "isla"
 version = "0.2.0"
 dependencies = [
+ "ahash",
  "bincode",
  "crossbeam",
  "getopts",
