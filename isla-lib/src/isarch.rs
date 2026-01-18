@@ -32,11 +32,214 @@
 use crate::bitvector::BV;
 use crate::config::ISAConfig;
 use crate::error::ExecError;
+use crate::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use crate::ir::*;
+use crate::register::RegisterBindings;
 use crate::smt::{Solver, Sym};
 use crate::zencode;
 use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
+/**
+ * instruction list gen
+  */
+
+/* ==重构start== */
+
+/// 通用的IR函数执行API
+/// 执行指定的IR函数并返回结果
+pub fn execute_ir_function<B: BV>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &&SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Option<Val<B>> {
+    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+
+    // 创建任务
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task(task_id, &task_state);
+
+    // 执行任务
+    let collected: Vec<Val<B>> = Vec::new();
+    let collected = Arc::new(collected);
+
+    start_single(task, shared_state, &collected, &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
+        match exec_result {
+            Ok((run, _frame)) => {
+                match run {
+                    Run::Finished(ret_val) => {
+                        *result.lock().unwrap() = Some(ret_val);
+                    }
+                    _ => {}
+                }
+            }
+            Err((error, backtrace)) => {
+                // MatchFailure 可能由于以下原因发生：
+                // 1. IR 文件包含了特定架构的指令（如 RV32 指令在 RV64 IR 中）
+                // 2. 这些指令存在于 zinstruction union 中，但在 zassembly_forwards 中没有处理
+                // 这是 IR 文件的设计特性，不是代码错误
+                match &error {
+                    ExecError::MatchFailure(_) => {
+                        // 静默处理 - 指令没有汇编名称映射
+                    }
+                    _ => {
+                        eprintln!("执行错误: {:?}", error);
+                        eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                    }
+                }
+            }
+        }
+    });
+
+    let res = result.lock().unwrap().as_ref().cloned();
+    res
+}
+
+/// 根据类型生成默认值
+pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Val<B> {
+    match ty {
+        Ty::Unit => Val::Unit,
+        Ty::I64 => Val::I64(0),
+        Ty::I128 => Val::I128(0),
+        Ty::Bool => Val::Bool(false),
+        Ty::Bits(n) => Val::Bits(B::zeros(*n)),
+        Ty::String => Val::String(String::new()),
+        Ty::Vector(elem_ty) => Val::Vector(vec![generate_default_value(elem_ty, shared_state)]),
+        Ty::List(elem_ty) => Val::List(vec![generate_default_value(elem_ty, shared_state)]),
+        Ty::Enum(enum_name) => {
+            // 获取枚举的第一个成员作为默认值
+            if let Some(_members) = shared_state.type_info.enums.get(enum_name) {
+                Val::Enum(crate::smt::EnumId::from_name(*enum_name).first_member())
+            } else {
+                Val::Poison
+            }
+        }
+        Ty::Struct(struct_name) => {
+            // 为结构体的每个字段生成默认值
+            let mut fields: std::collections::HashMap<Name, Val<B>> = std::collections::HashMap::new();
+            if let Some(struct_def) = shared_state.type_info.structs.get(struct_name) {
+                for (field_name, field_ty) in struct_def {
+                    fields.insert(*field_name, generate_default_value(field_ty, shared_state));
+                }
+            }
+            // 转换为 ahash::HashMap 类型以匹配 Val::Struct 的要求
+            let ahash_fields: ahash::HashMap<Name, Val<B>> =
+                fields.into_iter().collect();
+            Val::Struct(ahash_fields)
+        }
+        _ => Val::Unit, // 对于其他类型，使用 Unit 作为默认值
+    }
+}
+
+/// 获取zassembly_forwards函数的执行结果
+/// 传入指令名称，返回对应的汇编名称
+pub fn get_assembly_name<B: BV>(
+    instruction_name: &str,
+    shared_state: &&SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Option<String> {
+    // 查找指令的构造函数名称
+    let encoded_name = format!("{}", instruction_name);
+    let ctor_name = shared_state.symtab.lookup(&encoded_name);
+
+    // 从 union 类型信息中获取构造函数的参数类型
+    let instruction_union = shared_state.type_info.unions.get(
+        &shared_state.symtab.lookup("zinstruction")
+    );
+
+    let Some(union_members) = instruction_union else {
+        // zinstruction union 不存在
+		panic!("get_assembly_name: 在symtab中没找到符号'zinstruction'");
+    };
+
+    // 查找当前构造函数的类型
+    let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
+        // 指令不在 zinstruction union 中（可能是其他架构的指令）
+        return None;
+    };
+
+    // 根据构造函数的参数类型生成默认值
+    let arg_value = match ctor_ty {
+        Ty::Unit => Val::Unit,
+        ty => generate_default_value(ty, *shared_state),
+    };
+
+    // 构造指令值
+    let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value));
+
+    // 执行 zassembly_forwards 函数
+    // MatchFailure 错误会被 execute_ir_function 静默处理
+    match execute_ir_function("zassembly_forwards", &[instr_value], shared_state, regs, lets) {
+        Some(Val::String(s)) => Some(s),
+        _ => None,
+    }
+}
+pub fn get_instruction_list<B: BV>(
+    shared_state: &&SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+)  -> HashMap<String, (Name, Ty<Name>, String)> {
+		let results: Vec<_> = shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap()
+            .iter().map(
+                |(n,ty)| {
+
+					let inst_union_name_str=String::from_str(shared_state.symtab.to_str(*n)).unwrap();
+					let s=&inst_union_name_str;
+					//直接执行zassembly_forwards函数，执行zMRET、zADD这样的CTOR（构造函数），得到具体的汇编，比如add x1,x2,x3
+					let inst_assembly=get_assembly_name::<B>(s, shared_state, regs, lets);
+					(inst_assembly.clone(),(*n,ty.clone(),inst_union_name_str.clone()))
+				}
+            )
+            .collect::<Vec<_>>();
+
+	// 找出没有汇编名称的指令
+	let no_assembly:Vec<_> = results.iter().filter(|(asm,_)| asm.is_none()).map(|(inst_assembly,(n,ty,inst_union_name_str))| inst_union_name_str.clone()).collect();
+	if !no_assembly.is_empty() {
+		eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", no_assembly.len());
+		for name in &no_assembly {
+			// 调试：检查指令类型
+			if let Some(union_members) = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")) {
+				if let Some((_, ty)) = union_members.iter().find(|(n, _)| shared_state.symtab.to_str(*n) == *name) {
+					eprintln!("  - {} (类型: {:?})", name, ty);
+				} else {
+					eprintln!("  - {} (不在 union 中)", name);
+				}
+			}
+		}
+	}
+
+	let instruction_list=results.iter().filter_map(
+			|(k,v)| 
+				k.as_ref().map(|key|
+					 (key.clone(), v.clone())
+					)
+		).collect::<HashMap<_,_>>();
+	// println!("{:?}", instruction_list);
+
+	// instruction_list
+	instruction_list
+}
+
+/* ==重构end== */
+
+
+/**
+ * 符号执行部分
+  */
 /// Information about an instruction extracted from the IR
 #[derive(Clone, Debug)]
 pub struct InstructionInfo {
@@ -119,52 +322,6 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// Build a dictionary of instructions from the IR
-///
-/// This scans the IR for instructions by:
-/// 1. Finding the zexecute function
-/// 2. Extracting instruction dispatch tags (e.g., "jump zmergez3var is zMRET goto")
-/// 3. Looking up assembly names via zassembly_forwards
-pub fn build_instruction_dict<'ir, B: BV>(
-    _arch: &[Def<Name, B>],
-    symtab: &'ir Symtab<'ir>,
-) -> Result<HashMap<String, InstructionInfo>, BuildError> {
-    let mut instructions = HashMap::new();
-
-    // Look for common RISC-V instructions in the symbol table
-    // We encode the instruction name and look it up
-    let known_instructions = [
-        "mret", "sret", "uret", "ecall", "ebreak",
-        "add", "sub", "mul", "div", "rem", "remu",
-        "addi", "slti", "sltiu", "andi", "ori", "xori",
-        "lw", "lh", "lb", "lhu", "lbu",
-        "sw", "sh", "sb",
-        "beq", "bne", "blt", "bge", "bltu", "bgeu",
-        "jal", "jalr",
-        "lui", "auipc",
-        "slt", "sltu",
-    ];
-
-    for &instr_name in &known_instructions {
-        // Try both lowercase and uppercase encodings
-        for name_to_try in &[instr_name, &instr_name.to_uppercase()] {
-            let encoded = zencode::encode(name_to_try);
-            if let Some(name_id) = symtab.get(&encoded) {
-                instructions.insert(
-                    instr_name.to_string(), // Use lowercase as the key
-                    InstructionInfo {
-                        encoded_name: encoded,
-                        assembly_name: instr_name.to_string(),
-                        function_id: name_id,
-                    },
-                );
-                break;
-            }
-        }
-    }
-
-    Ok(instructions)
-}
 
 /// Execute an instruction symbolically and collect execution paths
 pub fn execute_instruction<B: BV>(
@@ -190,6 +347,10 @@ pub struct ExecOptions {
     /// Number of threads
     pub num_threads: usize,
 }
+
+/**
+ * 数据依赖追踪
+ */
 
 /// Solve a path's constraints to get concrete values
 pub fn solve_path<B: BV>(
