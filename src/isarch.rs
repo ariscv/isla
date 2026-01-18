@@ -34,18 +34,91 @@
 //! - `tree <instruction>`: Show the execution path tree for an instruction
 //! - `solve-state <instruction>`: Solve for concrete ISA state values
 
+use std::any::type_name;
+use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 
 use isla_lib::bitvector::b129::B129;
-use isla_lib::executor::{backtrace_string, start_single, LocalFrame, TaskId, TaskState};
+use isla_lib::bitvector::BV;
+use isla_lib::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
-use isla_lib::ir::{AssertionMode, Bindings, Name};
+use isla_lib::ir::{AssertionMode, Bindings, FPTy, Name, SharedState, Val};
 use isla_lib::log;
+use isla_lib::register::RegisterBindings;
 
 mod opts;
 use opts::CommonOpts;
+
+/// 通用的IR函数执行API
+/// 执行指定的IR函数并返回结果
+fn execute_ir_function<B: BV>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &&SharedState<B>,
+    regs: &RegisterBindings<B>,
+) -> Option<Val<B>> {
+    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+
+    // 创建任务
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task(task_id, &task_state);
+
+    // 执行任务
+    let collected: Vec<Val<B>> = Vec::new();
+    let collected = Arc::new(collected);
+
+    start_single(task, shared_state, &collected, &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
+        match exec_result {
+            Ok((run, _frame)) => {
+                match run {
+                    Run::Finished(ret_val) => {
+                        *result.lock().unwrap() = Some(ret_val);
+                    }
+                    _ => {}
+                }
+            }
+            Err((error, backtrace)) => {
+                eprintln!("执行错误: {:?}", error);
+                eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+            }
+        }
+    });
+
+    let res = result.lock().unwrap().as_ref().cloned();
+    res
+}
+
+/// 获取zassembly_forwards函数的执行结果
+/// 传入指令名称，返回对应的汇编名称
+fn get_assembly_name<B: BV>(
+    instruction_name: &str,
+    shared_state: &&SharedState<B>,
+    regs: &RegisterBindings<B>,
+) -> Option<String> {
+    // 查找指令的构造函数名称
+    let encoded_name = format!("{}", instruction_name);
+    let ctor_name = shared_state.symtab.lookup(&encoded_name);
+
+    // 构造指令值
+    let instr_value = Val::<B>::Ctor(ctor_name, Box::new(Val::Unit));
+
+    // 执行 zassembly_forwards 函数
+    match execute_ir_function("zassembly_forwards", &[instr_value], shared_state, regs) {
+        Some(Val::String(s)) => Some(s),
+        _ => None,
+    }
+}
 
 fn main() {
     let code = isla_main();
@@ -181,90 +254,45 @@ fn isla_main() -> i32 {
 
     let subcommand = matches.free[0].as_str();
 
-	/* 提取功能start */
-    // 用于存储执行结果
-    let assembly_result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-
-	//add code here: 1.获得zassembly_forwards函数
-    let function_id = shared_state.symtab.lookup("zassembly_forwards");
-    let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
-    // 打印函数签名信息
-    println!("zassembly_forwards 函数信息:");
-    println!("  参数: {:?}", args.iter().map(|(n, _)| shared_state.symtab.to_str(*n)).collect::<Vec<_>>());
-    println!("  返回类型: {:?}", ret_ty);
-	// println!("{:?},{:?}",shared_state.symtab.to_str(args[0].0), shared_state.symtab.to_str(Name::from_u32(1666)) );
-
-	//add code here: 2.将mret函数作为参数传入zassembly_forwards执行
-    // 查找 zMRET 的 Name
-    let zmret_name = shared_state.symtab.lookup("zMRET");
-
-    // 构造 MRET 指令值 (zMRET 是一个 unit 类型的构造函数)
-    let mret_value = isla_lib::ir::Val::<B129>::Ctor(zmret_name, Box::new(isla_lib::ir::Val::Unit));
-
-	//add code here: 3.获取执行的字符串结果，打印出来
-    println!("zMRET Name: {:?}", shared_state.symtab.to_str(zmret_name));
-    println!("MRET value constructed: {:?}", mret_value);
-    println!("\n开始执行 zassembly_forwards 函数...");
-
-    // 获取 zassembly_forwards 函数信息
-    let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
-
-    // 创建初始帧，将 mret_value 作为参数传入
-    let mut initial_frame = LocalFrame::new(function_id, args, ret_ty, Some(&[mret_value]), instrs);
-    initial_frame.add_regs(regs);
-
-    // 创建任务状态
-    let task_state = TaskState::new();
-
-    // 创建任务
-    let task_id = TaskId::fresh();
-    let task = initial_frame.task(task_id, &task_state);
-
-    // 使用单线程执行器执行任务
-    let collected: Vec<isla_lib::ir::Val<B129>> = Vec::new();
-    let collected = Arc::new(collected);
-
-    start_single(task, shared_state, &collected, &|_thread, _task_id, result, shared_state, _solver, _collected| {
-        match result {
-            Ok((run, _frame)) => {
-                println!("执行完成！");
-                // 检查执行状态
-                use isla_lib::executor::Run;
-                match run {
-                    Run::Finished(ret_val) => {
-                        println!("函数返回值: {:?}", ret_val);
-                        // 如果是字符串值，存储到外部变量
-                        if let isla_lib::ir::Val::String(s) = ret_val {
-                            println!("Assembly string: {}", s);
-                            *assembly_result.lock().unwrap() = Some(s);
-                        }
-                    }
-                    Run::Exit => {
-                        println!("函数提前退出");
-                    }
-                    Run::Dead => {
-                        println!("执行进入不一致状态");
-                    }
-                    Run::Suspended => {
-                        println!("执行被挂起");
-                    }
-                }
-            }
-            Err((error, backtrace)) => {
-                eprintln!("执行错误: {:?}", error);
-                eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
-            }
-        }
-    });
-
-    // 在 isla_main 作用域中获取执行结果
-    if let Some(result) = assembly_result.lock().unwrap().as_ref() {
-        println!("\n===== isla_main 作用域中获取到的结果 =====");
-        println!("Assembly result: {}", result);
-        println!("==========================================");
+    // 测试 get_assembly_name
+    if let Some(assembly_name) = get_assembly_name::<B129>("zMRET", shared_state, regs) {
+        println!("MRET 的汇编名称: {}", assembly_name);
     }
 
-	/* 提取功能end */
+    //
+    let instruction_list = &shared_state.type_info;
+    let instruction_id=shared_state.symtab.lookup("zinstruction");
+    let MRET_id=shared_state.symtab.lookup("zMRET");
+    // println!("ins_id={:?},MRET_id={:?}",instruction_id,MRET_id);
+    // let instructions_union=shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap();
+    //let instruction_union_ctors=&shared_state.type_info.union_ctors;
+    /* println!("{:?}",instructions_union.iter()
+        .map(
+            |(n,ty)| {
+                (shared_state.symtab.to_str(*n), match ty {
+
+                    isla_lib::ir::Ty::Enum(  ty_name) => isla_lib::ir::Ty::Enum(  shared_state.symtab.to_str(*ty_name)),
+                    isla_lib::ir::Ty::Struct(ty_name) => isla_lib::ir::Ty::Struct(shared_state.symtab.to_str(*ty_name)),
+                    isla_lib::ir::Ty::Union( ty_name) => isla_lib::ir::Ty::Union( shared_state.symtab.to_str(*ty_name)),
+                    _ => isla_lib::ir::Ty::RoundingMode
+                })
+            }
+        ).collect::<HashMap<_,_>>()
+    ); */
+    //println!("{:?}",instruction_union_ctors.iter().map(|e|{shared_state.symtab.to_str(*e)}).collect::<Vec<_>>() );
+
+	//======
+
+	println!("{:?}",
+		shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap()
+            .iter().map(
+                |(n,ty)| shared_state.symtab.to_str(*n)
+            )
+            .map(
+                |s| get_assembly_name::<B129>(s, shared_state, regs)
+            )
+            .collect::<Vec<_>>()
+	);
 
     match subcommand {
         "list-instructions" => cmd_list_instructions(matches, shared_state,regs,lets, iarch_config, source_path),
