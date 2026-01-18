@@ -44,7 +44,7 @@ use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
 use isla_lib::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
-use isla_lib::ir::{AssertionMode, Bindings, FPTy, Name, SharedState, Val};
+use isla_lib::ir::{AssertionMode, Bindings, FPTy, Name, SharedState, Ty, Val};
 use isla_lib::log;
 use isla_lib::register::RegisterBindings;
 
@@ -58,6 +58,7 @@ fn execute_ir_function<B: BV>(
     args: &[Val<B>],
     shared_state: &&SharedState<B>,
     regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
 ) -> Option<Val<B>> {
     let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
 
@@ -68,6 +69,7 @@ fn execute_ir_function<B: BV>(
     // 创建初始帧
     let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
     initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
 
     // 创建任务
     let task_state = TaskState::new();
@@ -99,22 +101,79 @@ fn execute_ir_function<B: BV>(
     res
 }
 
+/// 根据类型生成默认值
+fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Val<B> {
+    match ty {
+        Ty::Unit => Val::Unit,
+        Ty::I64 => Val::I64(0),
+        Ty::I128 => Val::I128(0),
+        Ty::Bool => Val::Bool(false),
+        Ty::Bits(n) => Val::Bits(B::zeros(*n)),
+        Ty::String => Val::String(String::new()),
+        Ty::Vector(elem_ty) => Val::Vector(vec![generate_default_value(elem_ty, shared_state)]),
+        Ty::List(elem_ty) => Val::List(vec![generate_default_value(elem_ty, shared_state)]),
+        Ty::Enum(enum_name) => {
+            // 获取枚举的第一个成员作为默认值
+            if let Some(_members) = shared_state.type_info.enums.get(enum_name) {
+                Val::Enum(isla_lib::smt::EnumId::from_name(*enum_name).first_member())
+            } else {
+                Val::Poison
+            }
+        }
+        Ty::Struct(struct_name) => {
+            // 为结构体的每个字段生成默认值
+            let mut fields: std::collections::HashMap<Name, Val<B>> = std::collections::HashMap::new();
+            if let Some(struct_def) = shared_state.type_info.structs.get(struct_name) {
+                for (field_name, field_ty) in struct_def {
+                    fields.insert(*field_name, generate_default_value(field_ty, shared_state));
+                }
+            }
+            // 转换为 ahash::HashMap 类型以匹配 Val::Struct 的要求
+            let ahash_fields: ahash::HashMap<Name, Val<B>> =
+                fields.into_iter().collect();
+            Val::Struct(ahash_fields)
+        }
+        _ => Val::Unit, // 对于其他类型，使用 Unit 作为默认值
+    }
+}
+
 /// 获取zassembly_forwards函数的执行结果
 /// 传入指令名称，返回对应的汇编名称
 fn get_assembly_name<B: BV>(
     instruction_name: &str,
     shared_state: &&SharedState<B>,
     regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
 ) -> Option<String> {
     // 查找指令的构造函数名称
     let encoded_name = format!("{}", instruction_name);
     let ctor_name = shared_state.symtab.lookup(&encoded_name);
 
+    // 从 union 类型信息中获取构造函数的参数类型
+    let instruction_union = shared_state.type_info.unions.get(
+        &shared_state.symtab.lookup("zinstruction")
+    );
+
+    let arg_value = if let Some(union_members) = instruction_union {
+        // 查找当前构造函数的类型
+        let ctor_ty = union_members.iter()
+            .find(|(n, _ty)| *n == ctor_name)
+            .map(|(_, ty)| ty);
+
+        match ctor_ty {
+            Some(Ty::Unit) => Val::Unit,
+            Some(ty) => generate_default_value(ty, *shared_state),
+            None => Val::Unit,
+        }
+    } else {
+        Val::Unit
+    };
+
     // 构造指令值
-    let instr_value = Val::<B>::Ctor(ctor_name, Box::new(Val::Unit));
+    let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value));
 
     // 执行 zassembly_forwards 函数
-    match execute_ir_function("zassembly_forwards", &[instr_value], shared_state, regs) {
+    match execute_ir_function("zassembly_forwards", &[instr_value], shared_state, regs, lets) {
         Some(Val::String(s)) => Some(s),
         _ => None,
     }
@@ -255,9 +314,9 @@ fn isla_main() -> i32 {
     let subcommand = matches.free[0].as_str();
 
     // 测试 get_assembly_name
-    if let Some(assembly_name) = get_assembly_name::<B129>("zMRET", shared_state, regs) {
+    /* if let Some(assembly_name) = get_assembly_name::<B129>("zMRET", shared_state, regs) {
         println!("MRET 的汇编名称: {}", assembly_name);
-    }
+    } */
 
     //
     let instruction_list = &shared_state.type_info;
@@ -289,13 +348,13 @@ fn isla_main() -> i32 {
                 |(n,ty)| shared_state.symtab.to_str(*n)
             )
             .map(
-                |s| get_assembly_name::<B129>(s, shared_state, regs)
+                |s| get_assembly_name::<B129>(s, shared_state, regs, lets)
             )
             .collect::<Vec<_>>()
 	);
 
     match subcommand {
-        "list-instructions" => cmd_list_instructions(matches, shared_state,regs,lets, iarch_config, source_path),
+        "list-instructions" => 0 /* cmd_list_instructions(matches, shared_state,regs,lets, iarch_config, source_path) */,
         /* "tree" => {
             if matches.free.len() < 2 {
                 eprintln!("Error: 'tree' command requires an instruction argument");
