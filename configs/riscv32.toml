@@ -8,10 +8,10 @@ ifetch = "Read_ifetch"
 read_exclusives = []
 write_exclusives = []
 
-assembler = "riscv32-elf-as -march=rv32imac"
-objdump = "riscv32-elf-objdump"
-linker = "riscv32-elf-ld"
-nm = "riscv32-elf-nm"
+assembler = "riscv64-unknown-elf-as -march=rv32imac"
+objdump = "riscv64-unknown-elf-objdump"
+linker = "riscv64-unknown-elf-ld"
+nm = "riscv64-unknown-elf-nm"
 
 # Currently not used for RISC-V
 [mmu]
