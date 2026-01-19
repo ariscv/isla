@@ -5,6 +5,7 @@
 *.irx
 *.symtab
 /*.ir
+out/
 libz3.so
 /isla-axiomatic/target
 /isla-axiomatic/Cargo.lock

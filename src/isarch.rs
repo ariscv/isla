@@ -121,24 +121,73 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
     source_path: Option<std::path::PathBuf>,
 ) -> i32 {
     use isla_lib::isarch;
+    use std::fs::create_dir_all;
+    use std::io::Write;
+    use std::process::Command;
 
     let instruction = &matches.free[1];
     let graphviz = matches.opt_present("graphviz");
 
     log!(log::VERBOSE, &format!("Analyzing instruction: {}", instruction));
 
-    // TODO: Implement symbolic execution
-    eprintln!("警告: 'tree' 命令尚未实现");
-    eprintln!("这需要实现符号执行引擎来探索执行路径");
+    // Execute symbolic execution to build execution tree
+    match isarch::execute_instruction_tree::<B>(instruction, shared_state, regs, lets) {
+        Ok(result) => {
+            if graphviz {
+                // Generate Graphviz DOT output
+                let dot_output = isarch::format_tree_graphviz(&result);
 
-    // Placeholder output
-/*     if graphviz {
-        println!("{}", isarch::format_tree_graphviz::<B129>(&[]));
-    } else {
-        println!("{}", isarch::format_tree_ascii::<B129>(&[]));
-    } */
+                // Create output directory
+                if let Err(e) = create_dir_all("out") {
+                    eprintln!("错误: 无法创建 out 目录: {}", e);
+                    return 1;
+                }
 
-    0
+                // Write DOT file
+                let dot_filename = format!("out/{}.dot", instruction);
+                if let Err(e) = std::fs::File::create(&dot_filename)
+                    .and_then(|mut f| f.write_all(dot_output.as_bytes()))
+                {
+                    eprintln!("错误: 无法写入 DOT 文件 {}: {}", dot_filename, e);
+                    return 1;
+                }
+                println!("DOT 文件已保存到: {}", dot_filename);
+
+                // Generate PNG using dot command
+                let png_filename = format!("out/{}.png", instruction);
+                match Command::new("dot")
+                    .arg("-Tpng")
+                    .arg(&dot_filename)
+                    .arg("-o")
+                    .arg(&png_filename)
+                    .output()
+                {
+                    Ok(output) => {
+                        if output.status.success() {
+                            println!("图片已保存到: {}", png_filename);
+                        } else {
+                            eprintln!("警告: dot 命令执行失败: {}", String::from_utf8_lossy(&output.stderr));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("警告: 无法执行 dot 命令生成图片: {}", e);
+                        eprintln!("请安装 graphviz: apt install graphviz");
+                    }
+                }
+
+                // Also print DOT to stdout
+                println!("\n--- DOT 输出 ---\n");
+                println!("{}", dot_output);
+            } else {
+                println!("{}", isarch::format_tree_ascii(&result));
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("错误: 符号执行失败: {:?}", e);
+            1
+        }
+    }
 }
 
 fn cmd_solve_state<B: isla_lib::bitvector::BV>(
@@ -243,7 +292,7 @@ fn isla_main() -> i32 {
                 println!("\nExample: isarch -A ./rv32d.ir -C configs/riscv32.toml tree mret");
                 1
             } else {
-                cmd_tree(matches, &iarch, arch, isa_config, source_path)
+                cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path)
             }
         }
         /* "solve-state" => {
