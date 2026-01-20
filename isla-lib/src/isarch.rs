@@ -1027,7 +1027,9 @@ pub struct LeafNodeInfo<'a, B> {
 /// 表示在符号执行过程中，对某个符号变量施加的约束。
 #[derive(Clone, Debug)]
 pub struct PathConstraint {
-    /// 符号变量名称
+    /// 符号变量 ID（用于追踪到寄存器）
+    pub sym_id: Option<u32>,
+    /// 符号变量名称（用于显示）
     pub variable: String,
     /// 约束条件（例如 "x = true" 或 "x = false"）
     pub constraint: String,
@@ -1039,11 +1041,13 @@ impl PathConstraint {
     /// 创建一个新的路径约束
     ///
     /// # 参数
+    /// * `sym_id` - 符号变量 ID（可选）
     /// * `variable` - 符号变量名称
     /// * `constraint` - 约束条件的字符串表示
     /// * `branch_num` - 分支编号（0 表示真分支，1 表示假分支）
-    pub fn new(variable: String, constraint: String, branch_num: u32) -> Self {
+    pub fn new(sym_id: Option<u32>, variable: String, constraint: String, branch_num: u32) -> Self {
         PathConstraint {
+            sym_id,
             variable,
             constraint,
             branch_num,
@@ -1053,9 +1057,11 @@ impl PathConstraint {
     /// 创建一个真值约束（变量为 true）
     ///
     /// # 参数
+    /// * `sym_id` - 符号变量 ID（可选）
     /// * `variable` - 符号变量名称
-    pub fn true_constraint(variable: String) -> Self {
+    pub fn true_constraint(sym_id: Option<u32>, variable: String) -> Self {
         PathConstraint {
+            sym_id,
             variable,
             constraint: "true".to_string(),
             branch_num: 0,
@@ -1065,9 +1071,11 @@ impl PathConstraint {
     /// 创建一个假值约束（变量为 false）
     ///
     /// # 参数
+    /// * `sym_id` - 符号变量 ID（可选）
     /// * `variable` - 符号变量名称
-    pub fn false_constraint(variable: String) -> Self {
+    pub fn false_constraint(sym_id: Option<u32>, variable: String) -> Self {
         PathConstraint {
+            sym_id,
             variable,
             constraint: "false".to_string(),
             branch_num: 1,
@@ -1216,6 +1224,7 @@ pub fn execute_instruction_tree<B: BV>(
     let sym_to_reg = Arc::new(Mutex::new(std::collections::HashMap::<u32, String>::new()));
     let sym_dependencies = Arc::new(Mutex::new(std::collections::HashMap::<u32, Vec<u32>>::new()));
     let sym_to_value = Arc::new(Mutex::new(std::collections::HashMap::<u32, bool>::new()));
+    let sym_names = Arc::new(Mutex::new(std::collections::HashMap::<u32, String>::new()));
 
     // 使用自定义收集器执行
     let collected: Vec<Val<B>> = Vec::new();
@@ -1228,6 +1237,7 @@ pub fn execute_instruction_tree<B: BV>(
     let sym_to_reg_clone = Arc::clone(&sym_to_reg);
     let sym_dependencies_clone = Arc::clone(&sym_dependencies);
     let sym_to_value_clone = Arc::clone(&sym_to_value);
+    let sym_names_clone = Arc::clone(&sym_names);
     let graph_clone = Arc::clone(&graph);
 
     let collector = move |_thread: usize, _task_id: TaskId, exec_result: Result<(Run<B>, LocalFrame<B>), (ExecError, Vec<(Name, usize)>)>, shared_state: &SharedState<B>, solver: Solver<B>, _collected: &Arc<Vec<Val<B>>>| {
@@ -1243,6 +1253,7 @@ pub fn execute_instruction_tree<B: BV>(
                 let mut sym_to_reg_guard = sym_to_reg_clone.lock().unwrap();
                 let mut sym_dependencies_guard = sym_dependencies_clone.lock().unwrap();
                 let mut sym_to_value_guard = sym_to_value_clone.lock().unwrap();
+                let mut sym_names_guard = sym_names_clone.lock().unwrap();
 
                 // 第一遍：处理所有事件以建立符号变量依赖图
                 for event in &events {
@@ -1282,6 +1293,46 @@ pub fn execute_instruction_tree<B: BV>(
                     }
                 }
 
+                // 为符号变量生成有意义的名称
+                for event in &events {
+                    match event {
+                        Event::ReadReg(reg_name, _accessor, value) => {
+                            if let Val::Symbolic(sym) = value {
+                                let reg_str = shared_state.symtab.to_str(*reg_name).to_string();
+                                // 如果还没有名称，使用寄存器名称
+                                sym_names_guard.entry(sym.id).or_insert_with(|| reg_str.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // 迭代地为依赖链中的所有符号变量生成名称
+                // 因为可能有多个层次的依赖，需要多次迭代才能传播完整
+                let mut changed = true;
+                let mut max_iterations = 10; // 防止无限循环
+                while changed && max_iterations > 0 {
+                    changed = false;
+                    max_iterations -= 1;
+
+                    for (sym_id, deps) in sym_dependencies_guard.iter() {
+                        // 如果这个符号变量已经有名称，跳过
+                        if sym_names_guard.contains_key(sym_id) {
+                            continue;
+                        }
+
+                        // 如果这个符号变量依赖另一个符号变量
+                        if deps.len() == 1 {
+                            let dep_id = deps[0];
+                            // 如果依赖的符号变量有名称（通常是寄存器），则使用该名称
+                            if let Some(dep_name) = sym_names_guard.get(&dep_id).cloned() {
+                                sym_names_guard.insert(*sym_id, dep_name);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+
                 // 第二遍：处理事件以构建图结构
                 for event in events {
                     match event {
@@ -1295,11 +1346,15 @@ pub fn execute_instruction_tree<B: BV>(
                             }
                         }
                         Event::Fork(fork_id, sym, branch_num, loc) => {
-                            let var_name = sym.to_string();
+                            // 尝试使用符号变量的有意义名称，否则使用 ID
+                            let var_name = sym_names_guard.get(&sym.id)
+                                .cloned()
+                                .unwrap_or_else(|| sym.to_string());
                             let location = loc.location_string(shared_state.symtab.files());
 
                             // 创建路径约束
                             let constraint = PathConstraint::new(
+                                Some(sym.id),
                                 var_name.clone(),
                                 if *branch_num == 0 { "true" } else { "false" }.to_string(),
                                 *branch_num,
@@ -1375,7 +1430,7 @@ pub fn execute_instruction_tree<B: BV>(
                         // 需要通过依赖链追踪符号变量到寄存器
                         let mut register_constraints = std::collections::HashMap::new();
                         for constraint in constraints_guard.iter() {
-                            if let Some(sym_id) = constraint.variable.parse::<u32>().ok() {
+                            if let Some(sym_id) = constraint.sym_id {
                                 // 递归追踪符号变量到寄存器
                                 let constraint_value = constraint.is_true_branch();
                                 trace_symbol_to_register(
@@ -1431,7 +1486,7 @@ pub fn execute_instruction_tree<B: BV>(
                         // 需要通过依赖链追踪符号变量到寄存器
                         let mut register_constraints = std::collections::HashMap::new();
                         for constraint in constraints_guard.iter() {
-                            if let Some(sym_id) = constraint.variable.parse::<u32>().ok() {
+                            if let Some(sym_id) = constraint.sym_id {
                                 // 递归追踪符号变量到寄存器
                                 let constraint_value = constraint.is_true_branch();
                                 trace_symbol_to_register(
