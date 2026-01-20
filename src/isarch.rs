@@ -282,8 +282,8 @@ fn isla_main() -> i32 {
 			let mut instructions: Vec<_> = instruction_list.iter().collect();
 			instructions.sort_by(|a, b| a.0.cmp(b.0));
 
-			for e in instructions{
-				//println!("{:?}",e);
+			for (assembly, (_n, _ty, inst_str, _params, _constraints)) in instructions {
+				println!("{} <- {}", assembly, inst_str);
 			}
 			/* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
 				println!("指令: {}", assembly);
