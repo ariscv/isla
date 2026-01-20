@@ -127,6 +127,7 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
 
     let instruction = &matches.free[1];
     let graphviz = matches.opt_present("graphviz");
+    let show_constraints = matches.opt_present("constraints");
 
     log!(log::VERBOSE, &format!("Analyzing instruction: {}", instruction));
 
@@ -178,6 +179,8 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
                 // Also print DOT to stdout
                 println!("\n--- DOT 输出 ---\n");
                 println!("{}", dot_output);
+            } else if show_constraints {
+                println!("{}", isarch::format_tree_ascii_with_constraints(&result));
             } else {
                 println!("{}", isarch::format_tree_ascii(&result));
             }
@@ -215,6 +218,7 @@ fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
+    opts.optflag("c", "constraints", "显示路径约束信息");
     opts.optopt("", "timeout", "超时时间（秒）", "<n>");
 
     let mut hasher = Sha256::new();

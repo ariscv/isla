@@ -36,10 +36,126 @@ use crate::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, T
 use crate::ir::*;
 use crate::register::RegisterBindings;
 use crate::smt::{Event, Solver, Sym};
-use crate::zencode;
+use crate::smt::smtlib::Exp;
+use petgraph::graph::{Graph, NodeIndex};
+use petgraph::Direction;
 use std::collections::HashMap;
+use std::fmt;
+use std::io::Write;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
+
+/// 追踪符号变量约束到寄存器约束
+///
+/// 递归地追踪符号变量通过依赖链到寄存器，并将约束传播到寄存器。
+///
+/// # 参数
+/// * `sym_id` - 当前符号变量 ID
+/// * `constraint_value` - 约束值（true/false）
+/// * `sym_to_reg` - 符号变量到寄存器的映射
+/// * `sym_dependencies` - 符号变量依赖图
+/// * `sym_to_value` - 符号变量到布尔值的映射（用于简单常量）
+/// * `register_constraints` - 输出的寄存器约束
+fn trace_symbol_to_register(
+    sym_id: u32,
+    constraint_value: bool,
+    sym_to_reg: &std::collections::HashMap<u32, String>,
+    sym_dependencies: &std::collections::HashMap<u32, Vec<u32>>,
+    sym_to_value: &std::collections::HashMap<u32, bool>,
+    register_constraints: &mut std::collections::HashMap<String, bool>,
+) {
+    // 如果这个符号变量直接对应一个寄存器，添加约束
+    if let Some(reg_name) = sym_to_reg.get(&sym_id) {
+        register_constraints.insert(reg_name.clone(), constraint_value);
+        return;
+    }
+
+    // 如果这个符号变量有依赖，递归追踪依赖
+    if let Some(deps) = sym_dependencies.get(&sym_id) {
+        // 如果只有一个依赖，传播约束
+        if deps.len() == 1 {
+            let dep_id = deps[0];
+            trace_symbol_to_register(
+                dep_id,
+                constraint_value,
+                sym_to_reg,
+                sym_dependencies,
+                sym_to_value,
+                register_constraints,
+            );
+        }
+        // 如果有多个依赖，说明这是复合表达式（如 And、Or）
+        // 这种情况比较复杂，暂时跳过
+    }
+}
+
+/// 从表达式中提取依赖的符号变量
+fn extract_exp_dependencies(exp: &Exp<crate::smt::Sym>, deps: &mut Vec<u32>) {
+    match exp {
+        Exp::Var(sym) => {
+            deps.push(sym.id);
+        }
+        Exp::Not(e) => {
+            extract_exp_dependencies(e, deps);
+        }
+        Exp::And(l, r) => {
+            extract_exp_dependencies(l, deps);
+            extract_exp_dependencies(r, deps);
+        }
+        Exp::Or(l, r) => {
+            extract_exp_dependencies(l, deps);
+            extract_exp_dependencies(r, deps);
+        }
+        Exp::Eq(l, r) => {
+            extract_exp_dependencies(l, deps);
+            extract_exp_dependencies(r, deps);
+        }
+        Exp::Neq(l, r) => {
+            extract_exp_dependencies(l, deps);
+            extract_exp_dependencies(r, deps);
+        }
+        Exp::Bits(_) | Exp::Bits64(_) | Exp::Bool(_) | Exp::Enum(_) => {}
+        _ => {}
+    }
+}
+
+/// 从值中递归提取符号变量
+fn extract_symbolic_from_val<B>(val: &Val<B>, found: &mut Vec<Sym>)
+where
+    Val<B>: Clone,
+{
+    match val {
+        Val::Symbolic(sym) => {
+            found.push(*sym);
+        }
+        Val::Vector(v) => {
+            for item in v {
+                extract_symbolic_from_val(item, found);
+            }
+        }
+        Val::List(l) => {
+            for item in l {
+                extract_symbolic_from_val(item, found);
+            }
+        }
+        Val::Struct(fields) => {
+            for (_name, val) in fields {
+                extract_symbolic_from_val(val, found);
+            }
+        }
+        Val::Ctor(_name, val) => {
+            extract_symbolic_from_val(val, found);
+        }
+        Val::SymbolicCtor(_sym, fields) => {
+            for (_name, val) in fields {
+                extract_symbolic_from_val(val, found);
+            }
+        }
+        _ => {
+            // 其他类型不包含符号变量
+        }
+    }
+}
 
 /**
  * instruction list gen
@@ -335,149 +451,96 @@ pub fn execute_instruction<B: BV>(
     Ok(Vec::new())
 }
 
-/// 执行树节点
+/// 执行图边数据
 ///
-/// 表示指令符号执行过程中的一个状态点。节点通过 Arc 共享所有权，
-/// 子节点持有父节点的 Weak 引用以避免循环引用。节点身份由其内存地址决定，
-/// 不使用数值 ID。
-///
-/// 内部使用 Mutex 包装的可变状态，以支持运行时动态构建树。
-pub struct TreeNode<B> {
-    /// 节点类型（根节点、分支节点、路径节点或叶子节点）
-    node_type: Mutex<NodeType<B>>,
-    /// 父节点的弱引用（根节点为空 Weak）
-    parent: Weak<TreeNode<B>>,
-    /// 子节点列表
-    children: Mutex<Vec<Arc<TreeNode<B>>>>,
+/// 表示执行图中节点之间的连接关系。
+#[derive(Clone, Debug)]
+pub enum EdgeData {
+    /// 无条件边（顺序执行）
+    Unconditional,
+    /// 条件边（分支）
+    Conditional {
+        /// 分支编号（0 = 真, 1 = 假）
+        branch_num: u32,
+    },
 }
 
-impl<B> TreeNode<B> {
-    /// 创建一个新的根节点
+impl fmt::Display for EdgeData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EdgeData::Unconditional => write!(f, ""),
+            EdgeData::Conditional { branch_num } => {
+                write!(f, "{}", if *branch_num == 0 { "T" } else { "F" })
+            }
+        }
+    }
+}
+
+/// 执行图节点数据
+///
+/// 表示指令符号执行过程中的一个状态点。
+#[derive(Clone, Debug)]
+pub struct ExecutionNode<B> {
+    /// 节点类型
+    pub node_type: NodeType<B>,
+}
+
+impl<B> fmt::Display for ExecutionNode<B>
+where
+    NodeType<B>: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.node_type)
+    }
+}
+
+/// 执行图
+///
+/// 使用 petgraph 的图结构来表示控制流图（CFG）。
+pub struct ExecutionGraph<B> {
+    /// petgraph 图结构
+    pub graph: Graph<ExecutionNode<B>, EdgeData>,
+    /// 根节点索引
+    pub root: NodeIndex,
+}
+
+impl<B> ExecutionGraph<B>
+where
+    NodeType<B>: Clone,
+{
+    /// 创建一个新的执行图
     ///
     /// # 参数
-    /// * `node_type` - 节点类型（必须是 NodeType::Root）
-    pub fn new_root(node_type: NodeType<B>) -> Arc<Self> {
-        Arc::new(TreeNode {
-            node_type: Mutex::new(node_type),
-            parent: Weak::new(),
-            children: Mutex::new(Vec::new()),
-        })
+    /// * `root_type` - 根节点类型
+    pub fn new(root_type: NodeType<B>) -> Self {
+        let mut graph = Graph::new();
+        let root = graph.add_node(ExecutionNode { node_type: root_type });
+        ExecutionGraph { graph, root }
     }
 
-    /// 创建一个新的分支节点
+    /// 获取根节点索引
+    pub fn root(&self) -> NodeIndex {
+        self.root
+    }
+
+    /// 添加一个节点
     ///
     /// # 参数
     /// * `node_type` - 节点类型
-    /// * `parent` - 父节点的 Arc 引用
-    pub fn new_with_parent(node_type: NodeType<B>, parent: &Arc<TreeNode<B>>) -> Arc<Self> {
-        let node = Arc::new(TreeNode {
-            node_type: Mutex::new(node_type),
-            parent: Arc::downgrade(parent),
-            children: Mutex::new(Vec::new()),
-        });
-
-        // 将新节点添加到父节点的子节点列表
-        let mut parent_children = parent.children.lock().unwrap();
-        parent_children.push(Arc::clone(&node));
-
-        node
+    /// # 返回
+    /// 新节点的索引
+    pub fn add_node(&mut self, node_type: NodeType<B>) -> NodeIndex {
+        self.graph.add_node(ExecutionNode { node_type })
     }
 
-    /// 添加一个子节点
+    /// 添加一条边
     ///
     /// # 参数
-    /// * `child` - 要添加的子节点（Arc 包装）
-    pub fn add_child(self: &Arc<Self>, child: Arc<TreeNode<B>>) {
-        let mut children = self.children.lock().unwrap();
-        children.push(child);
-    }
-
-    /// 获取父节点（升级弱引用）
-    pub fn parent(&self) -> Option<Arc<TreeNode<B>>> {
-        self.parent.upgrade()
-    }
-
-    /// 获取子节点数量
-    pub fn child_count(&self) -> usize {
-        let children = self.children.lock().unwrap();
-        children.len()
-    }
-
-    /// 是否为叶子节点（没有子节点）
-    pub fn is_leaf(&self) -> bool {
-        self.child_count() == 0
-    }
-
-    /// 是否为根节点（没有父节点）
-    pub fn is_root(&self) -> bool {
-        self.parent.upgrade().is_none()
-    }
-
-    /// 获取节点类型（克隆副本）
-    pub fn node_type_cloned(&self) -> NodeType<B>
-    where
-        NodeType<B>: Clone,
-    {
-        let node_type = self.node_type.lock().unwrap();
-        node_type.clone()
-    }
-
-    /// 获取子节点列表（克隆）
-    pub fn children_cloned(&self) -> Vec<Arc<TreeNode<B>>> {
-        let children = self.children.lock().unwrap();
-        children.iter().map(Arc::clone).collect()
-    }
-
-    /// 对节点类型执行操作
-    pub fn with_node_type<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&NodeType<B>) -> R,
-    {
-        let node_type = self.node_type.lock().unwrap();
-        f(&node_type)
-    }
-
-    /// 对子节点执行操作
-    pub fn with_children<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&[Arc<TreeNode<B>>]) -> R,
-    {
-        let children = self.children.lock().unwrap();
-        f(&children)
-    }
-}
-
-impl<B: std::fmt::Debug> std::fmt::Debug for TreeNode<B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let child_count = self.child_count();
-        let has_parent = self.parent.strong_count() > 0;
-        f.debug_struct("TreeNode")
-            .field("child_count", &child_count)
-            .field("has_parent", &has_parent)
-            .finish()
-    }
-}
-
-/// 执行树
-///
-/// 封装根节点并提供了树级别的操作方法，包括遍历、查找、统计和添加节点。
-pub struct Tree<B> {
-    /// 根节点
-    root: Arc<TreeNode<B>>,
-}
-
-impl<B> Tree<B> {
-    /// 创建一个新的执行树
-    ///
-    /// # 参数
-    /// * `root` - 根节点
-    pub fn new(root: Arc<TreeNode<B>>) -> Self {
-        Tree { root }
-    }
-
-    /// 获取根节点
-    pub fn root(&self) -> &Arc<TreeNode<B>> {
-        &self.root
+    /// * `source` - 源节点索引
+    /// * `target` - 目标节点索引
+    /// * `edge_data` - 边数据
+    pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex, edge_data: EdgeData) {
+        self.graph.add_edge(source, target, edge_data);
     }
 
     /// 深度优先遍历（DFS）
@@ -486,21 +549,31 @@ impl<B> Tree<B> {
     /// * `visitor` - 访问者函数，对每个节点调用，返回 true 继续遍历，false 停止
     pub fn dfs<F>(&self, mut visitor: F)
     where
-        F: FnMut(&Arc<TreeNode<B>>) -> bool,
+        F: FnMut(NodeIndex, &NodeType<B>) -> bool,
     {
-        self.dfs_recursive(&self.root, &mut visitor);
+        let mut visited = std::collections::HashSet::new();
+        self.dfs_recursive(self.root, &mut visitor, &mut visited);
     }
 
-    fn dfs_recursive<F>(&self, node: &Arc<TreeNode<B>>, visitor: &mut F)
-    where
-        F: FnMut(&Arc<TreeNode<B>>) -> bool,
+    fn dfs_recursive<F>(
+        &self,
+        node: NodeIndex,
+        visitor: &mut F,
+        visited: &mut std::collections::HashSet<NodeIndex>,
+    ) where
+        F: FnMut(NodeIndex, &NodeType<B>) -> bool,
     {
-        if !visitor(node) {
+        if !visited.insert(node) {
             return;
         }
-        let children = node.children_cloned();
-        for child in &children {
-            self.dfs_recursive(child, visitor);
+
+        let node_data = &self.graph[node];
+        if !visitor(node, &node_data.node_type) {
+            return;
+        }
+
+        for neighbor in self.graph.neighbors_directed(node, Direction::Outgoing) {
+            self.dfs_recursive(neighbor, visitor, visited);
         }
     }
 
@@ -510,19 +583,27 @@ impl<B> Tree<B> {
     /// * `visitor` - 访问者函数，对每个节点调用，返回 true 继续遍历，false 停止
     pub fn bfs<F>(&self, mut visitor: F)
     where
-        F: FnMut(&Arc<TreeNode<B>>) -> bool,
+        F: FnMut(NodeIndex, &NodeType<B>) -> bool,
     {
         use std::collections::VecDeque;
+        let mut visited = std::collections::HashSet::new();
         let mut queue = VecDeque::new();
-        queue.push_back(Arc::clone(&self.root));
+        queue.push_back(self.root);
 
         while let Some(node) = queue.pop_front() {
-            if !visitor(&node) {
+            if !visited.insert(node) {
+                continue;
+            }
+
+            let node_data = &self.graph[node];
+            if !visitor(node, &node_data.node_type) {
                 break;
             }
-            let children = node.children_cloned();
-            for child in &children {
-                queue.push_back(Arc::clone(child));
+
+            for neighbor in self.graph.neighbors_directed(node, Direction::Outgoing) {
+                if !visited.contains(&neighbor) {
+                    queue.push_back(neighbor);
+                }
             }
         }
     }
@@ -532,115 +613,148 @@ impl<B> Tree<B> {
     /// # 参数
     /// * `predicate` - 谓词函数，返回 true 表示匹配
     /// # 返回
-    /// 第一个匹配的节点（Arc 引用）
-    pub fn find<F>(&self, predicate: F) -> Option<Arc<TreeNode<B>>>
+    /// 第一个匹配的节点索引
+    pub fn find<F>(&self, predicate: F) -> Option<NodeIndex>
     where
-        F: Fn(&TreeNode<B>) -> bool,
+        F: Fn(&NodeType<B>) -> bool,
     {
         let mut result = None;
-        self.dfs(|node| {
-            if predicate(node) {
-                result = Some(Arc::clone(node));
-                false // 停止遍历
+        self.dfs(|_idx, node_type| {
+            if predicate(node_type) {
+                result = Some(_idx);
+                false
             } else {
-                true // 继续遍历
+                true
             }
         });
         result
     }
 
-    /// 统计树的总节点数
+    /// 统计图的总节点数
     pub fn node_count(&self) -> usize {
-        let mut count = 0;
-        self.dfs(|_| {
-            count += 1;
-            true
-        });
-        count
+        self.graph.node_count()
     }
 
     /// 统计叶子节点数
     pub fn leaf_count(&self) -> usize {
         let mut count = 0;
-        self.dfs(|node| {
-            if node.is_leaf() {
+        for node in self.graph.node_indices() {
+            if self.graph.neighbors_directed(node, Direction::Outgoing).count() == 0 {
                 count += 1;
             }
-            true
-        });
+        }
         count
     }
 
-    /// 获取树的最大深度
+    /// 获取图的最大深度
     pub fn max_depth(&self) -> usize {
-        self.max_depth_recursive(&self.root)
+        self.max_depth_recursive(self.root, &mut std::collections::HashSet::new())
     }
 
-    fn max_depth_recursive(&self, node: &Arc<TreeNode<B>>) -> usize {
-        let children = node.children_cloned();
+    fn max_depth_recursive(
+        &self,
+        node: NodeIndex,
+        visited: &mut std::collections::HashSet<NodeIndex>,
+    ) -> usize {
+        if !visited.insert(node) {
+            return 0;
+        }
+
+        let children: Vec<_> = self
+            .graph
+            .neighbors_directed(node, Direction::Outgoing)
+            .collect();
         if children.is_empty() {
             return 1;
         }
         1 + children
             .iter()
-            .map(|child| self.max_depth_recursive(child))
+            .map(|child| self.max_depth_recursive(*child, visited))
             .max()
             .unwrap_or(0)
     }
 
     /// 获取所有叶子节点
-    pub fn leaves(&self) -> Vec<Arc<TreeNode<B>>> {
+    pub fn leaves(&self) -> Vec<NodeIndex> {
         let mut leaves = Vec::new();
-        self.dfs(|node| {
-            if node.is_leaf() {
-                leaves.push(Arc::clone(node));
+        for node in self.graph.node_indices() {
+            if self.graph.neighbors_directed(node, Direction::Outgoing).count() == 0 {
+                leaves.push(node);
             }
-            true
-        });
+        }
         leaves
     }
 
-    /// 将树格式化为 ASCII 艺术
+    /// 将图格式化为 ASCII 艺术
     ///
     /// # 参数
     /// * `num_paths` - 执行路径数量（用于显示）
     pub fn format_ascii(&self, num_paths: usize) -> String {
         let mut output = String::new();
 
-        output.push_str(&format!("指令执行树 ({} 条路径):\n", num_paths));
+        output.push_str(&format!("指令执行图 ({} 条路径):\n", num_paths));
         output.push_str("\n");
 
-        // 递归打印树的辅助函数
-        fn print_tree<B>(node: &Arc<TreeNode<B>>, output: &mut String, prefix: &str, is_last: bool) {
-            node.with_node_type(|node_type| {
-                match node_type {
-                    NodeType::Root { instruction } => {
-                        output.push_str(&format!("{}📋 指令: {}\n", prefix, instruction));
+        // 递归打印图的辅助函数
+        fn print_graph<B>(
+            graph: &Graph<ExecutionNode<B>, EdgeData>,
+            node: NodeIndex,
+            output: &mut String,
+            prefix: &str,
+            is_last: bool,
+            visited: &mut std::collections::HashSet<NodeIndex>,
+        ) where
+            NodeType<B>: Clone,
+        {
+            if !visited.insert(node) {
+                return;
+            }
+
+            let node_data = &graph[node];
+            match &node_data.node_type {
+                NodeType::Root { instruction } => {
+                    output.push_str(&format!("{}📋 指令: {}\n", prefix, instruction));
+                }
+                NodeType::Branch { fork_id, variable, location } => {
+                    output.push_str(&format!(
+                        "{}🔀 分岔 #{}: {} @ {}\n",
+                        prefix, fork_id, variable, location
+                    ));
+                }
+                NodeType::Leaf {
+                    satisfiable,
+                    constructor_name,
+                    unfolded_value,
+                    ..
+                } => {
+                    let sat_str = if *satisfiable { "✓ 可满足" } else { "✗ 不可满足" };
+                    output.push_str(&format!("{}🍁 {} ", prefix, sat_str));
+                    if let Some(name) = constructor_name {
+                        output.push_str(&format!("(返回: {})", name));
                     }
-                    NodeType::Branch { fork_id, variable, location } => {
-                        output.push_str(&format!("{}🔀 分岔 #{}: {} @ {}\n", prefix, fork_id, variable, location));
+                    if let Some(unfolded) = unfolded_value {
+                        output.push_str(&format!(" => {}", unfolded));
                     }
-                    NodeType::Leaf { satisfiable, constructor_name, unfolded_value, .. } => {
-                        let sat_str = if *satisfiable { "✓ 可满足" } else { "✗ 不可满足" };
-                        output.push_str(&format!("{}🍁 {} ", prefix, sat_str));
-                        if let Some(name) = constructor_name {
-                            output.push_str(&format!("(返回: {})", name));
-                        }
-                        if let Some(unfolded) = unfolded_value {
-                            output.push_str(&format!(" => {}", unfolded));
-                        }
-                        output.push_str("\n");
-                    }
-                    NodeType::Path { constraints, location, .. } => {
-                        output.push_str(&format!("{}📍 路径 @ {}\n", prefix, location));
-                        for (i, constraint) in constraints.iter().enumerate() {
-                            output.push_str(&format!("{}   约束 {}: {}\n", prefix, i, constraint.format()));
-                        }
+                    output.push_str("\n");
+                }
+                NodeType::Path {
+                    constraints,
+                    location,
+                    ..
+                } => {
+                    output.push_str(&format!("{}📍 路径 @ {}\n", prefix, location));
+                    for (i, constraint) in constraints.iter().enumerate() {
+                        output
+                            .push_str(&format!("{}   约束 {}: {}\n", prefix, i, constraint.format()));
                     }
                 }
-            });
+            }
 
-            let children = node.children_cloned();
+            let mut children: Vec<_> =
+                graph.neighbors_directed(node, Direction::Outgoing).collect();
+            // 为了稳定性，按索引排序
+            children.sort_by_key(|n| n.index());
+
             let child_count = children.len();
             for (i, child) in children.iter().enumerate() {
                 let is_last_child = i == child_count - 1;
@@ -651,87 +765,87 @@ impl<B> Tree<B> {
                 };
                 let connector = if is_last_child { "└── " } else { "├── " };
                 output.push_str(&format!("{}{}", prefix, connector));
-                print_tree(child, output, &new_prefix, is_last_child);
+                print_graph(graph, *child, output, &new_prefix, is_last_child, visited);
             }
         }
 
-        let root = &self.root;
-        let root_children = root.children_cloned();
-        print_tree(root, &mut output, "", root_children.len() <= 1);
+        print_graph(&self.graph, self.root, &mut output, "", true, &mut std::collections::HashSet::new());
 
         output
     }
 
-    /// 将树格式化为 Graphviz DOT 格式
-    pub fn format_graphviz(&self) -> String {
-        let mut output = String::new();
+    /// 将图格式化为 Graphviz DOT 格式
+    pub fn format_graphviz(&self) -> String
+    where
+        NodeType<B>: fmt::Display,
+    {
+        let mut buf = Vec::new();
 
-        output.push_str("digraph ExecutionTree {\n");
-        output.push_str("  rankdir=TB;\n");
-        output.push_str("  node [shape=box, fontname=\"Courier\"];\n");
-        output.push_str("  edge [fontname=\"Courier\"];\n");
-        output.push_str("\n");
+        // 手动构建 DOT 输出
+        writeln!(&mut buf, "digraph ExecutionGraph {{").unwrap();
+        writeln!(&mut buf, "  rankdir=TB;").unwrap();
+        writeln!(&mut buf, "  node [shape=box, fontname=\"Courier\"];").unwrap();
+        writeln!(&mut buf, "  edge [fontname=\"Courier\"];").unwrap();
+        writeln!(&mut buf).unwrap();
 
-        // 使用节点指针地址作为唯一 ID
-        fn generate_graphviz<B>(
-            node: &Arc<TreeNode<B>>,
-            output: &mut String,
-            parent_id: Option<usize>,
-            node_counter: &mut usize,
-        ) {
-            let current_id = *node_counter;
-            *node_counter += 1;
+        // 输出节点
+        for node in self.graph.node_indices() {
+            let node_data = &self.graph[node];
+            writeln!(
+                &mut buf,
+                "  \"{}\" [label=\"{}\"];",
+                node.index(),
+                Self::escape_label(&node_data.to_string())
+            )
+            .unwrap();
+        }
 
-            // 生成节点标签
-            let label = node.with_node_type(|node_type| {
-                match node_type {
-                    NodeType::Root { instruction } => {
-                        format!("指令:\\n{}", instruction)
-                    }
-                    NodeType::Branch { fork_id, variable, location } => {
-                        // 缩短位置以增强可读性
-                        let loc_short = location.lines().next().unwrap_or("");
-                        format!("分岔 #{}:\\n{} @ {}", fork_id, variable, loc_short)
-                    }
-                    NodeType::Leaf { satisfiable, constructor_name, unfolded_value, .. } => {
-                        let sat_str = if *satisfiable { "✓" } else { "✗" };
-                        let mut label = format!("{} ", sat_str);
-                        if let Some(name) = constructor_name {
-                            label.push_str(&format!("返回:\\n{}", name));
-                        }
-                        if let Some(unfolded) = unfolded_value {
-                            label.push_str(&format!("\\n=> {}", unfolded));
-                        }
+        // 输出边
+        for edge in self.graph.edge_indices() {
+            if let Some((source, target)) = self.graph.edge_endpoints(edge) {
+                let edge_data = &self.graph[edge];
+                let label = edge_data.to_string();
+                if label.is_empty() {
+                    writeln!(
+                        &mut buf,
+                        "  \"{}\" -> \"{}\";",
+                        source.index(),
+                        target.index()
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        &mut buf,
+                        "  \"{}\" -> \"{}\" [label=\"{}\"];",
+                        source.index(),
+                        target.index(),
                         label
-                    }
-                    NodeType::Path { constraints, .. } => {
-                        format!("路径\\n({} 个约束)", constraints.len())
-                    }
+                    )
+                    .unwrap();
                 }
-            });
-
-            // 转义标签用于 graphviz
-            let label_escaped = label.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
-
-            output.push_str(&format!("  node{} [label=\"{}\"];\n", current_id, label_escaped));
-
-            // 从父节点生成边
-            if let Some(pid) = parent_id {
-                output.push_str(&format!("  node{} -> node{};\n", pid, current_id));
-            }
-
-            // 递归处理子节点
-            let children = node.children_cloned();
-            for child in &children {
-                generate_graphviz(child, output, Some(current_id), node_counter);
             }
         }
 
-        let mut node_counter = 0;
-        generate_graphviz(&self.root, &mut output, None, &mut node_counter);
+        writeln!(&mut buf, "}}").unwrap();
 
-        output.push_str("}\n");
-        output
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// 转义 DOT 标签中的特殊字符
+    fn escape_label(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
+
+    /// 获取节点类型
+    pub fn node_type(&self, node: NodeIndex) -> Option<&NodeType<B>> {
+        self.graph.node_weight(node).map(|n| &n.node_type)
+    }
+
+    /// 判断节点是否为叶子节点
+    pub fn is_leaf(&self, node: NodeIndex) -> bool {
+        self.graph.neighbors_directed(node, Direction::Outgoing).count() == 0
     }
 }
 
@@ -774,6 +888,42 @@ pub enum NodeType<B> {
         /// 展开后的值表示（用于显示）
         unfolded_value: Option<String>,
     },
+}
+
+impl<B> fmt::Display for NodeType<B>
+where
+    Val<B>: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeType::Root { instruction } => {
+                write!(f, "{}", instruction)
+            }
+            NodeType::Branch { fork_id, variable, location } => {
+                let loc_short = location.lines().next().unwrap_or("");
+                write!(f, "分岔 #{}, {}", fork_id, variable)
+            }
+            NodeType::Leaf {
+                satisfiable,
+                constructor_name,
+                unfolded_value,
+                ..
+            } => {
+                let sat_str = if *satisfiable { "✓" } else { "✗" };
+                write!(f, "{} ", sat_str)?;
+                if let Some(name) = constructor_name {
+                    write!(f, "返回: {}", name)?;
+                }
+                if let Some(unfolded) = unfolded_value {
+                    write!(f, " => {}", unfolded)?;
+                }
+                Ok(())
+            }
+            NodeType::Path { constraints, .. } => {
+                write!(f, "路径 ({} 个约束)", constraints.len())
+            }
+        }
+    }
 }
 
 impl<B> NodeType<B> {
@@ -949,24 +1099,27 @@ impl PathConstraint {
     }
 }
 
-/// 符号执行结果（包含执行树）
+/// 符号执行结果（包含执行图）
 ///
-/// 封装了符号执行的完整结果，包括执行树、路径统计和叶子节点信息。
+/// 封装了符号执行的完整结果，包括执行图、路径统计和叶子节点信息。
 pub struct ExecutionResult<B> {
-    /// 执行树
-    pub tree: Tree<B>,
+    /// 执行图
+    pub graph: ExecutionGraph<B>,
     /// 探索的执行路径数量
     pub num_paths: usize,
     /// 所有叶子节点（执行终点）的信息
     pub leaves: Vec<LeafInfo<B>>,
 }
 
-impl<B: std::fmt::Debug> std::fmt::Debug for ExecutionResult<B> {
+impl<B: std::fmt::Debug> std::fmt::Debug for ExecutionResult<B>
+where
+    NodeType<B>: Clone,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecutionResult")
             .field("num_paths", &self.num_paths)
             .field("leaf_count", &self.leaves.len())
-            .field("tree_depth", &self.tree.max_depth())
+            .field("graph_depth", &self.graph.max_depth())
             .finish()
     }
 }
@@ -976,17 +1129,36 @@ impl<B: std::fmt::Debug> std::fmt::Debug for ExecutionResult<B> {
 /// 记录执行路径终点的相关信息。
 #[derive(Clone, Debug)]
 pub struct LeafInfo<B> {
-    /// 通往此叶子节点的路径（Arc 节点引用列表）
-    pub path: Vec<Arc<TreeNode<B>>>,
+    /// 通往此叶子节点的路径（节点索引列表）
+    pub path: Vec<NodeIndex>,
     /// 是否可满足
     pub satisfiable: bool,
     /// 返回值
     pub return_value: Option<Val<B>>,
+    /// 路径上的约束条件（符号变量）
+    pub constraints: Vec<PathConstraint>,
+    /// 寄存器约束条件（寄存器名到值的映射）
+    pub register_constraints: std::collections::HashMap<String, bool>,
 }
 
-/// 符号执行指令并收集执行树
+/// 路径约束的详细信息
 ///
-/// 返回显示所有探索分支的执行树。
+/// 记录从符号变量到具体约束的映射关系。
+#[derive(Clone, Debug)]
+pub struct PathConstraintDetail {
+    /// 符号变量
+    pub symbol: Sym,
+    /// 约束值（true/false）
+    pub value: bool,
+    /// 源代码位置
+    pub location: String,
+    /// 分支 ID
+    pub fork_id: u32,
+}
+
+/// 符号执行指令并收集执行图
+///
+/// 返回显示所有探索分支的执行图。
 pub fn execute_instruction_tree<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
@@ -1026,19 +1198,24 @@ pub fn execute_instruction_tree<B: BV>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task(task_id, &task_state);
 
-    // 创建根节点
-    let root = TreeNode::new_root(NodeType::Root {
+    // 创建执行图
+    let graph = Arc::new(Mutex::new(ExecutionGraph::new(NodeType::Root {
         instruction: instruction_name.to_string(),
-    });
-    let tree = Tree::new(Arc::clone(&root));
+    })));
 
     // 使用 Arc<Mutex<>> 包装结果以便在闭包中共享
     let result = Arc::new(Mutex::new(ExecutionResult {
-        tree: Tree::new(Arc::clone(&root)),
+        graph: ExecutionGraph::new(NodeType::Root {
+            instruction: instruction_name.to_string(),
+        }),
         num_paths: 0,
         leaves: Vec::new(),
     }));
     let current_path = Arc::new(Mutex::new(Vec::new()));
+    let current_constraints = Arc::new(Mutex::new(Vec::new()));
+    let sym_to_reg = Arc::new(Mutex::new(std::collections::HashMap::<u32, String>::new()));
+    let sym_dependencies = Arc::new(Mutex::new(std::collections::HashMap::<u32, Vec<u32>>::new()));
+    let sym_to_value = Arc::new(Mutex::new(std::collections::HashMap::<u32, bool>::new()));
 
     // 使用自定义收集器执行
     let collected: Vec<Val<B>> = Vec::new();
@@ -1047,34 +1224,117 @@ pub fn execute_instruction_tree<B: BV>(
     // 克隆 Arc 以便在闭包中使用
     let result_clone = Arc::clone(&result);
     let current_path_clone = Arc::clone(&current_path);
+    let current_constraints_clone = Arc::clone(&current_constraints);
+    let sym_to_reg_clone = Arc::clone(&sym_to_reg);
+    let sym_dependencies_clone = Arc::clone(&sym_dependencies);
+    let sym_to_value_clone = Arc::clone(&sym_to_value);
+    let graph_clone = Arc::clone(&graph);
 
     let collector = move |_thread: usize, _task_id: TaskId, exec_result: Result<(Run<B>, LocalFrame<B>), (ExecError, Vec<(Name, usize)>)>, shared_state: &SharedState<B>, solver: Solver<B>, _collected: &Arc<Vec<Val<B>>>| {
         match exec_result {
             Ok((run, _frame)) => {
-                // 从求解器跟踪中提取事件以构建树
+                // 从求解器跟踪中提取事件以构建图
                 let events = solver.trace().to_vec();
 
                 let mut result_guard = result_clone.lock().unwrap();
+                let mut graph_guard = graph_clone.lock().unwrap();
                 let mut path_guard = current_path_clone.lock().unwrap();
+                let mut constraints_guard = current_constraints_clone.lock().unwrap();
+                let mut sym_to_reg_guard = sym_to_reg_clone.lock().unwrap();
+                let mut sym_dependencies_guard = sym_dependencies_clone.lock().unwrap();
+                let mut sym_to_value_guard = sym_to_value_clone.lock().unwrap();
 
-                // 处理事件以构建树结构
+                // 第一遍：处理所有事件以建立符号变量依赖图
+                for event in &events {
+                    match event {
+                        Event::ReadReg(reg_name, _accessor, value) => {
+                            // 追踪从寄存器读取的符号变量
+                            if let Val::Symbolic(sym) = value {
+                                let reg_str = shared_state.symtab.to_str(*reg_name).to_string();
+                                sym_to_reg_guard.insert(sym.id, reg_str);
+                            }
+                        }
+                        Event::Smt(def, _attrs, _loc) => {
+                            // 解析 SMT 定义以建立符号变量依赖
+                            use crate::smt::smtlib::{Def, Exp};
+                            match def {
+                                Def::DefineConst(sym, exp) => {
+                                    // 记录符号变量依赖
+                                    let mut deps = Vec::new();
+                                    extract_exp_dependencies(exp, &mut deps);
+                                    sym_dependencies_guard.insert(sym.id, deps);
+
+                                    // 检查是否是简单的布尔常量
+                                    if let Exp::Bool(b) = exp {
+                                        sym_to_value_guard.insert(sym.id, *b);
+                                    } else if let Exp::Not(e) = exp {
+                                        // 处理 Not 表达式
+                                        if let Exp::Var(v) = &**e {
+                                            // sym = Not(v)，所以 sym=true 当 v=false
+                                            sym_to_value_guard.insert(v.id, false);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // 第二遍：处理事件以构建图结构
                 for event in events {
-                    if let Event::Fork(fork_id, sym, _branch_num, loc) = event {
-                        let var_name = sym.to_string();
-                        let location = loc.location_string(shared_state.symtab.files());
+                    match event {
+                        Event::AssumeReg(reg_name, _accessor, value) => {
+                            // 追踪符号变量到寄存器的映射
+                            let mut found_syms = Vec::new();
+                            extract_symbolic_from_val(&value, &mut found_syms);
+                            for sym in found_syms {
+                                let reg_str = shared_state.symtab.to_str(*reg_name).to_string();
+                                sym_to_reg_guard.insert(sym.id, reg_str);
+                            }
+                        }
+                        Event::Fork(fork_id, sym, branch_num, loc) => {
+                            let var_name = sym.to_string();
+                            let location = loc.location_string(shared_state.symtab.files());
 
-                        // 创建分支节点
-                        let branch_node = TreeNode::new_with_parent(
-                            NodeType::Branch {
-                                fork_id: *fork_id,
-                                variable: var_name.clone(),
-                                location: location.clone(),
-                            },
-                            &result_guard.tree.root,
-                        );
+                            // 创建路径约束
+                            let constraint = PathConstraint::new(
+                                var_name.clone(),
+                                if *branch_num == 0 { "true" } else { "false" }.to_string(),
+                                *branch_num,
+                            );
 
-                        // 跟踪当前路径
-                        path_guard.push(Arc::clone(&branch_node));
+                            // 记录约束
+                            constraints_guard.push(constraint.clone());
+
+                            // 创建分支节点
+                            let branch_node = graph_guard.add_node(
+                                NodeType::Branch {
+                                    fork_id: *fork_id,
+                                    variable: var_name.clone(),
+                                    location: location.clone(),
+                                },
+                            );
+
+                            // 连接到路径中的最后一个节点
+                            let parent = if !path_guard.is_empty() {
+                                *path_guard.last().unwrap()
+                            } else {
+                                graph_guard.root
+                            };
+
+                            // 添加带条件的边
+                            graph_guard.add_edge(
+                                parent,
+                                branch_node,
+                                EdgeData::Conditional { branch_num: *branch_num },
+                            );
+
+                            // 跟踪当前路径
+                            path_guard.push(branch_node);
+                        }
+                        _ => {}
                     }
                 }
 
@@ -1093,75 +1353,112 @@ pub fn execute_instruction_tree<B: BV>(
                         let unfolded_value = Some(unfold_return_value(&ret_val, shared_state, regs, lets).0);
 
                         // 创建叶子节点
-                        let leaf_node = if !path_guard.is_empty() {
-                            // 如果有分支节点，添加到最后一个分支节点下
-                            let last_branch = path_guard.last().unwrap();
-                            TreeNode::new_with_parent(
-                                NodeType::Leaf {
-                                    satisfiable: true,
-                                    return_value: Some(ret_val.clone()),
-                                    constructor_name: constructor_name.clone(),
-                                    unfolded_value,
-                                },
-                                last_branch,
-                            )
+                        let leaf_node = graph_guard.add_node(
+                            NodeType::Leaf {
+                                satisfiable: true,
+                                return_value: Some(ret_val.clone()),
+                                constructor_name: constructor_name.clone(),
+                                unfolded_value,
+                            },
+                        );
+
+                        // 连接到路径中的最后一个节点
+                        let parent = if !path_guard.is_empty() {
+                            *path_guard.last().unwrap()
                         } else {
-                            // 否则直接添加到根节点下
-                            TreeNode::new_with_parent(
-                                NodeType::Leaf {
-                                    satisfiable: true,
-                                    return_value: Some(ret_val.clone()),
-                                    constructor_name: constructor_name.clone(),
-                                    unfolded_value,
-                                },
-                                &result_guard.tree.root,
-                            )
+                            graph_guard.root
                         };
 
-                        // 记录叶子信息
+                        graph_guard.add_edge(parent, leaf_node, EdgeData::Unconditional);
+
+                        // 将符号变量约束转换为寄存器约束
+                        // 需要通过依赖链追踪符号变量到寄存器
+                        let mut register_constraints = std::collections::HashMap::new();
+                        for constraint in constraints_guard.iter() {
+                            if let Some(sym_id) = constraint.variable.parse::<u32>().ok() {
+                                // 递归追踪符号变量到寄存器
+                                let constraint_value = constraint.is_true_branch();
+                                trace_symbol_to_register(
+                                    sym_id,
+                                    constraint_value,
+                                    &sym_to_reg_guard,
+                                    &sym_dependencies_guard,
+                                    &sym_to_value_guard,
+                                    &mut register_constraints,
+                                );
+                            }
+                        }
+
+                        // 记录叶子信息（包含完整路径和约束）
+                        let mut full_path = path_guard.clone();
+                        full_path.push(leaf_node);
                         result_guard.leaves.push(LeafInfo {
-                            path: path_guard.clone(),
+                            path: full_path,
                             satisfiable: true,
                             return_value: Some(ret_val.clone()),
+                            constraints: constraints_guard.clone(),
+                            register_constraints,
                         });
 
                         path_guard.clear();
+                        constraints_guard.clear();
+                        sym_to_reg_guard.clear();
                     }
                     Run::Dead => {
                         // 路径不可满足
                         result_guard.num_paths += 1;
 
                         // 创建不可满足的叶子节点
-                        if !path_guard.is_empty() {
-                            let last_branch = path_guard.last().unwrap();
-                            TreeNode::new_with_parent(
-                                NodeType::Leaf {
-                                    satisfiable: false,
-                                    return_value: None,
-                                    constructor_name: None,
-                                    unfolded_value: None,
-                                },
-                                last_branch,
-                            );
+                        let leaf_node = graph_guard.add_node(
+                            NodeType::Leaf {
+                                satisfiable: false,
+                                return_value: None,
+                                constructor_name: None,
+                                unfolded_value: None,
+                            },
+                        );
+
+                        // 连接到路径中的最后一个节点
+                        let parent = if !path_guard.is_empty() {
+                            *path_guard.last().unwrap()
                         } else {
-                            TreeNode::new_with_parent(
-                                NodeType::Leaf {
-                                    satisfiable: false,
-                                    return_value: None,
-                                    constructor_name: None,
-                                    unfolded_value: None,
-                                },
-                                &result_guard.tree.root,
-                            );
+                            graph_guard.root
+                        };
+
+                        graph_guard.add_edge(parent, leaf_node, EdgeData::Unconditional);
+
+                        // 将符号变量约束转换为寄存器约束
+                        // 需要通过依赖链追踪符号变量到寄存器
+                        let mut register_constraints = std::collections::HashMap::new();
+                        for constraint in constraints_guard.iter() {
+                            if let Some(sym_id) = constraint.variable.parse::<u32>().ok() {
+                                // 递归追踪符号变量到寄存器
+                                let constraint_value = constraint.is_true_branch();
+                                trace_symbol_to_register(
+                                    sym_id,
+                                    constraint_value,
+                                    &sym_to_reg_guard,
+                                    &sym_dependencies_guard,
+                                    &sym_to_value_guard,
+                                    &mut register_constraints,
+                                );
+                            }
                         }
 
+                        // 记录叶子信息（包含完整路径和约束）
+                        let mut full_path = path_guard.clone();
+                        full_path.push(leaf_node);
                         result_guard.leaves.push(LeafInfo {
-                            path: path_guard.clone(),
+                            path: full_path,
                             satisfiable: false,
                             return_value: None,
+                            constraints: constraints_guard.clone(),
+                            register_constraints,
                         });
 
                         path_guard.clear();
+                        constraints_guard.clear();
+                        sym_to_reg_guard.clear();
                     }
                     _ => {}
                 }
@@ -1176,12 +1473,17 @@ pub fn execute_instruction_tree<B: BV>(
     start_single(task, shared_state, &collected, &collector);
 
     // 返回结果的克隆版本
-    // 注意：这里需要特殊处理，因为 ExecutionResult 现在包含 Tree 而不是 TreeNode
     let result_guard = result.lock().unwrap();
+    let graph_guard = graph.lock().unwrap();
 
-    // 手动克隆结果
+    // 克隆执行图（由于 ExecutionGraph 现在包含 Graph，我们需要手动克隆）
+    // Graph 不实现 Clone，所以我们创建一个新的 ExecutionGraph
+    // 这里简化处理：直接使用 Arc 中的图
     Ok(ExecutionResult {
-        tree: Tree::new(Arc::clone(result_guard.tree.root())),
+        graph: ExecutionGraph {
+            graph: graph_guard.graph.clone(),
+            root: graph_guard.root,
+        },
         num_paths: result_guard.num_paths,
         leaves: result_guard.leaves.clone(),
     })
@@ -1195,8 +1497,6 @@ pub fn unfold_return_value<B: BV>(
     _regs: &RegisterBindings<B>,
     _lets: &Bindings<B>,
 ) -> (String, Option<Val<B>>) {
-    use std::sync::{Arc, Mutex};
-
     match val {
         Val::Ctor(name, args) => {
             let ctor_name = shared_state.symtab.to_str(*name);
@@ -1258,6 +1558,71 @@ pub struct ExecOptions {
  * 数据依赖追踪
  */
 
+/// 求解路径约束的结果
+///
+/// 表示对路径约束进行求解后的结果。
+#[derive(Debug, Clone)]
+pub enum ConstraintSolveResult {
+    /// 可满足 - 包含变量到值的映射
+    Sat {
+        /// 符号变量到具体值的映射
+        values: std::collections::HashMap<String, bool>,
+    },
+    /// 不可满足
+    Unsat,
+    /// 未知（求解器超时或其他错误）
+    Unknown,
+}
+
+/// 求解路径的约束条件
+///
+/// 根据路径上的约束条件，确定变量值。
+///
+/// # 参数
+/// * `constraints` - 路径上的约束条件列表
+///
+/// # 返回
+/// 求解结果，包含变量的具体值（如果可满足）
+pub fn solve_path_constraints<B: BV>(
+    constraints: &[PathConstraint],
+    _shared_state: &SharedState<B>,
+) -> ConstraintSolveResult {
+    use std::collections::HashMap;
+
+    // 简单的约束求解：直接从约束中提取值
+    // 注意：这是一个简化版本，实际的符号执行需要更复杂的处理
+    let mut values = HashMap::new();
+
+    for constraint in constraints {
+        // 根据分支编号确定值
+        let value = constraint.is_true_branch();
+        values.insert(constraint.variable.clone(), value);
+    }
+
+    if values.is_empty() {
+        ConstraintSolveResult::Unknown
+    } else {
+        ConstraintSolveResult::Sat { values }
+    }
+}
+
+/// 格式化约束求解结果
+///
+/// 将求解结果转换为可读的字符串格式。
+pub fn format_solve_result(result: &ConstraintSolveResult) -> String {
+    match result {
+        ConstraintSolveResult::Sat { values } => {
+            let mut output = String::from("可满足:\n");
+            for (var, val) in values {
+                output.push_str(&format!("  {} = {}\n", var, val));
+            }
+            output
+        }
+        ConstraintSolveResult::Unsat => "不可满足".to_string(),
+        ConstraintSolveResult::Unknown => "未知".to_string(),
+    }
+}
+
 /// Solve a path's constraints to get concrete values
 pub fn solve_path<B: BV>(
     path: &ExecutionPath<B>,
@@ -1274,12 +1639,49 @@ pub fn solve_path<B: BV>(
     SolveResult::Unknown
 }
 
-/// 将执行树格式化为 ASCII 艺术
+/// 将执行图格式化为 ASCII 艺术
 pub fn format_tree_ascii<B: BV>(result: &ExecutionResult<B>) -> String {
-    result.tree.format_ascii(result.num_paths)
+    result.graph.format_ascii(result.num_paths)
 }
 
-/// 将执行树格式化为 Graphviz DOT 格式
+/// 将执行图格式化为 ASCII 艺术（包含约束信息）
+pub fn format_tree_ascii_with_constraints<B: BV>(result: &ExecutionResult<B>) -> String {
+    let mut output = result.graph.format_ascii(result.num_paths);
+
+    output.push_str("\n=== 路径约束信息 ===\n\n");
+
+    for (i, leaf) in result.leaves.iter().enumerate() {
+        output.push_str(&format!("路径 {}:\n", i + 1));
+        output.push_str(&format!("  可满足: {}\n", leaf.satisfiable));
+
+        // 显示寄存器约束
+        if !leaf.register_constraints.is_empty() {
+            output.push_str("  寄存器约束:\n");
+            let mut reg_names: Vec<_> = leaf.register_constraints.keys().collect();
+            reg_names.sort();
+            for reg_name in reg_names {
+                let value = leaf.register_constraints.get(reg_name).unwrap();
+                output.push_str(&format!("    {} = {}\n", reg_name, value));
+            }
+        } else {
+            output.push_str("  无寄存器约束\n");
+        }
+
+        // 也显示符号变量约束（用于调试）
+        if !leaf.constraints.is_empty() {
+            output.push_str("  符号变量约束:\n");
+            for (j, constraint) in leaf.constraints.iter().enumerate() {
+                output.push_str(&format!("    {}. {}\n", j + 1, constraint.format()));
+            }
+        }
+
+        output.push_str("\n");
+    }
+
+    output
+}
+
+/// 将执行图格式化为 Graphviz DOT 格式
 pub fn format_tree_graphviz<B: BV>(result: &ExecutionResult<B>) -> String {
-    result.tree.format_graphviz()
+    result.graph.format_graphviz()
 }
