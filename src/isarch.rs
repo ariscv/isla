@@ -276,13 +276,32 @@ fn isla_main() -> i32 {
         "list-instructions" => {
 			println!("");
 			println!("一共有{}条指令",instruction_list.len());
-			for i in instruction_list.iter().map(|(asm,(n,ty,inst_str))|{
-					(asm,inst_str)
-				}
-			).collect::<Vec<_>>()
-			{
-				println!("{:?}",i);
+			println!();
+
+			// 将 HashMap 转换为 Vec 并按汇编名称排序
+			let mut instructions: Vec<_> = instruction_list.iter().collect();
+			instructions.sort_by(|a, b| a.0.cmp(b.0));
+
+			for e in instructions{
+				//println!("{:?}",e);
 			}
+			/* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
+				println!("指令: {}", assembly);
+
+				// 将符号化参数和约束放在同一行显示
+				if !params.is_empty() && !constraints.is_empty() {
+					for (param, (_var, ty)) in params.iter().zip(constraints.iter()) {
+						println!("  {} : {}", param, ty);
+					}
+				} else if !params.is_empty() {
+					for param in params {
+						println!("  {}", param);
+					}
+				}
+
+				println!();
+			} */
+
 			0
 		},
         "tree" => {
