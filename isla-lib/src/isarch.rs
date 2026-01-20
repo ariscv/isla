@@ -35,7 +35,7 @@ use crate::error::ExecError;
 use crate::executor::{backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState};
 use crate::ir::*;
 use crate::register::RegisterBindings;
-use crate::smt::{Event, Solver, Sym};
+use crate::smt::{Checkpoint, Event, Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
 use std::collections::HashMap;
@@ -105,6 +105,36 @@ pub fn execute_ir_function_val<B: BV>(
 
     let res = result.lock().unwrap().as_ref().cloned();
     res
+}
+
+/// 使用checkpoint执行IR函数
+/// 允许在执行前预先设置符号化变量
+pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &&SharedState<'ir,B>,
+    regs: &RegisterBindings<'ir,B>,
+    lets: &Bindings<'ir,B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    checkpoint: Checkpoint<B>,
+) {
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+
+    // 创建任务，使用传入的checkpoint
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+
+    start_single(task, shared_state, collected, collector);
+
 }
 
 /// 根据类型生成默认值
@@ -198,11 +228,9 @@ pub fn generate_symbolic_value<B: BV>(
             Val::List(vec![elem_val])
         }
         Ty::Enum(enum_name) => {
-            if let Some(_members) = shared_state.type_info.enums.get(enum_name) {
-                Val::Enum(crate::smt::EnumId::from_name(*enum_name).first_member())
-            } else {
-                Val::Poison
-            }
+            // 对枚举类型进行符号化
+            let enum_name_str = shared_state.symtab.to_str(*enum_name);
+            symbolic(ty, shared_state, solver, info)?
         }
         Ty::Struct(struct_name) => {
             let mut fields: std::collections::HashMap<Name, Val<B>> = std::collections::HashMap::new();
@@ -220,21 +248,8 @@ pub fn generate_symbolic_value<B: BV>(
             Val::Struct(ahash_fields)
         }
         Ty::Union(union_name) => {
-            // Union 类型：选择第一个构造函数并递归处理其参数类型
-            if let Some(ctor_types) = shared_state.typedefs().unions.get(union_name) {
-                if let Some((first_ctor, first_ty)) = ctor_types.iter().next() {
-                    let ctor_name_str = shared_state.symtab.to_str(*first_ctor);
-                    let (arg_val, arg_constraints) = generate_symbolic_value(first_ty, shared_state, solver, info)?;
-                    for (var_name, ty_str) in arg_constraints {
-                        constraints.push((format!("{}.{}", ctor_name_str, var_name), ty_str));
-                    }
-                    Val::Ctor(*first_ctor, Box::new(arg_val))
-                } else {
-                    Val::Unit
-                }
-            } else {
-                Val::Unit
-            }
+            // 对Union类型进行符号化
+            symbolic(ty, shared_state, solver, info)?
         }
         _ => Val::Unit,
     };
@@ -244,6 +259,7 @@ pub fn generate_symbolic_value<B: BV>(
 
 /// 获取zassembly_forwards函数的执行结果
 /// 传入指令名称，返回对应的汇编名称
+/// 使用checkpoint机制来共享符号化变量
 pub fn get_assembly_name<B: BV>(
     instruction_name: &str,
     shared_state: &&SharedState<B>,
@@ -252,6 +268,8 @@ pub fn get_assembly_name<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Option<String> {
+    use crate::smt::checkpoint;
+
     // 查找指令的构造函数名称
     let encoded_name = format!("{}", instruction_name);
     let ctor_name = shared_state.symtab.lookup(&encoded_name);
@@ -272,58 +290,66 @@ pub fn get_assembly_name<B: BV>(
         return None;
     };
 
-
-    /* ==================== */
-    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-
-
-
+    // 生成符号化参数
     let arg_value = match ctor_ty {
         Ty::Unit => Val::Unit,
         ty => generate_symbolic_value(ty, *shared_state, solver, info).unwrap().0,
     };
+
     // 构造指令值
     let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value));
 
+    // 创建checkpoint，包含符号化变量
+    let cp = checkpoint(solver);
 
-    // 执行任务
+    // 使用checkpoint执行函数
+    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
     let collected: Vec<Val<B>> = Vec::new();
     let collected = Arc::new(collected);
 
-
-
-    execute_ir_function("zassembly_forwards",&[instr_value], shared_state, regs, lets,&collected,
-                        &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
-        match exec_result {
-            Ok((run, _frame)) => {
-                match run {
-                    Run::Finished(ret_val) => {
-                        *result.lock().unwrap() = Some(ret_val);
-                    }
-                    _ => {}
-                }
-            }
-            Err((error, backtrace)) => {
-                // MatchFailure 可能由于以下原因发生：
-                // 1. IR 文件包含了特定架构的指令（如 RV32 指令在 RV64 IR 中）
-                // 2. 这些指令存在于 zinstruction union 中，但在 zassembly_forwards 中没有处理
-                // 这是 IR 文件的设计特性，不是代码错误
-                match &error {
-                    ExecError::MatchFailure(_) => {
-                        // 静默处理 - 指令没有汇编名称映射
-                    }
-                    _ => {
-                        eprintln!("执行错误: {:?}", error);
-                        eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+    execute_ir_function_with_checkpoint(
+        "zassembly_forwards",
+        &[instr_value],
+        shared_state,
+        regs,
+        lets,
+        &collected,
+        &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
+            match exec_result {
+                Ok((run, _frame)) => {
+                    match run {
+                        Run::Finished(ret_val) => {
+                            *result.lock().unwrap() = Some(ret_val);
+                        }
+                        _ => {}
                     }
                 }
+                Err((error, backtrace)) => {
+                    match &error {
+                        ExecError::MatchFailure(_) => {
+                            // 静默处理
+                        }
+                        _ => {
+                            eprintln!("执行错误: {:?}", error);
+                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                        }
+                    }
+                }
             }
+        },
+        cp,
+    );
+
+    // 提取字符串结果
+    let res = match result.lock().unwrap().as_ref() {
+        Some(Val::String(s)) => Some(s.clone()),
+        Some(v) => {
+            eprintln!("警告: zassembly_forwards 返回非字符串值: {:?}", v);
+            None
         }
-    });
-
-    let res = result.lock().unwrap().as_ref().cloned();
-    println!("{:?}", res);
-    None
+        None => None,
+    };
+    res
 }
 /// 提取类型的参数信息，返回 (参数名列表, 约束列表)
 fn extract_type_params<B: BV>(
