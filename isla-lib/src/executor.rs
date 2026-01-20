@@ -62,6 +62,7 @@ mod task;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+use crate::register::RegisterBindings;
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -2026,4 +2027,33 @@ pub fn footprint_collector<'ir, B: BV>(
             collected.push(Err(TraceError::exec(err, backtrace_string(&backtrace, &shared_state.symtab))))
         }
     }
+}
+
+pub fn execute_ir_function<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &&SharedState<'ir,B>,
+    regs: &RegisterBindings<'ir,B>,
+    lets: &Bindings<'ir,B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+) {
+
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+
+    // 创建任务
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task(task_id, &task_state);
+
+    // 执行任务
+    start_single(task, shared_state, collected, collector);
+
 }
