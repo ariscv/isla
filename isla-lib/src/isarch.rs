@@ -1032,30 +1032,30 @@ pub fn execute_instruction_tree<B: BV>(
     });
     let tree = Tree::new(Arc::clone(&root));
 
+    // TreeCollector 收集器上下文结构
+    struct TreeCollectorContext<B> {
+        result: Mutex<ExecutionResult<B>>,
+        current_path: Mutex<Vec<Arc<TreeNode<B>>>>,
+    }
+
     // 使用 Arc<Mutex<>> 包装结果以便在闭包中共享
-    let result = Arc::new(Mutex::new(ExecutionResult {
-        tree: Tree::new(Arc::clone(&root)),
-        num_paths: 0,
-        leaves: Vec::new(),
-    }));
-    let current_path = Arc::new(Mutex::new(Vec::new()));
+    let collected: Arc<TreeCollectorContext<B>> = Arc::new(TreeCollectorContext {
+        result: Mutex::new(ExecutionResult {
+            tree: Tree::new(Arc::clone(&root)),
+            num_paths: 0,
+            leaves: Vec::new(),
+        }),
+        current_path: Mutex::new(Vec::new()),
+    });
 
-    // 使用自定义收集器执行
-    let collected: Vec<Val<B>> = Vec::new();
-    let collected = Arc::new(collected);
-
-    // 克隆 Arc 以便在闭包中使用
-    let result_clone = Arc::clone(&result);
-    let current_path_clone = Arc::clone(&current_path);
-
-    let collector = move |_thread: usize, _task_id: TaskId, exec_result: Result<(Run<B>, LocalFrame<B>), (ExecError, Vec<(Name, usize)>)>, shared_state: &SharedState<B>, solver: Solver<B>, _collected: &Arc<Vec<Val<B>>>| {
+    let collector = | _thread: usize, _task_id: TaskId, exec_result: Result<(Run<B>, LocalFrame<B>), (ExecError, Vec<(Name, usize)>)>, shared_state: &SharedState<B>, solver: Solver<B>, collected: &Arc<TreeCollectorContext<B>>| {
         match exec_result {
             Ok((run, _frame)) => {
                 // 从求解器跟踪中提取事件以构建树
                 let events = solver.trace().to_vec();
 
-                let mut result_guard = result_clone.lock().unwrap();
-                let mut path_guard = current_path_clone.lock().unwrap();
+                let mut result_guard = collected.result.lock().unwrap();
+                let mut path_guard = collected.current_path.lock().unwrap();
 
                 // 处理事件以构建树结构
                 for event in events {
@@ -1177,7 +1177,7 @@ pub fn execute_instruction_tree<B: BV>(
 
     // 返回结果的克隆版本
     // 注意：这里需要特殊处理，因为 ExecutionResult 现在包含 Tree 而不是 TreeNode
-    let result_guard = result.lock().unwrap();
+    let result_guard = collected.result.lock().unwrap();
 
     // 手动克隆结果
     Ok(ExecutionResult {
