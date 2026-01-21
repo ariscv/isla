@@ -1516,7 +1516,7 @@ impl ModelVal {
     pub fn unwrap_exp(self) -> Exp<Sym> {
         match self {
             ModelVal::Exp(e) => e,
-            ModelVal::Arbitrary(_) => panic!("Attempting to unwrap arbitrary ModelVal")
+            ModelVal::Arbitrary(_) => panic!("Attempting to unwrap arbitrary ModelVal"),
         }
     }
 

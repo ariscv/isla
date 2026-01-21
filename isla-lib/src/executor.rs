@@ -59,10 +59,10 @@ use crate::zencode;
 mod frame;
 mod task;
 
+use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
-use crate::register::RegisterBindings;
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1357,11 +1357,11 @@ fn run_loop<'ir, 'task, B: BV>(
                         }
                         Ty::AnyBits => {
                             // In this case, get the length from the variable
-                            let len =
-                                solver.length(v).ok_or_else(|| ExecError::Type(format!("No SMT length for monomorphizing {:?}", &v), *info))?;
+                            let len = solver.length(v).ok_or_else(|| {
+                                ExecError::Type(format!("No SMT length for monomorphizing {:?}", &v), *info)
+                            })?;
                             let sym = solver.declare_const(smtlib::Ty::BitVec(len), *info);
                             solver.assert_eq(Var(v), Var(sym));
-
                         }
                         Ty::Bool => {
                             let sym = solver.declare_const(smtlib::Ty::Bool, *info);
@@ -2032,13 +2032,12 @@ pub fn footprint_collector<'ir, B: BV>(
 pub fn execute_ir_function<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
-    shared_state: &&SharedState<'ir,B>,
-    regs: &RegisterBindings<'ir,B>,
-    lets: &Bindings<'ir,B>,
+    shared_state: &&SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) {
-
     // 获取函数信息
     let function_id = shared_state.symtab.lookup(function_name);
     let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
@@ -2055,15 +2054,14 @@ pub fn execute_ir_function<'ir, B: BV, R>(
 
     // 执行任务
     start_single(task, shared_state, collected, collector);
-
 }
 
 pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
-    shared_state: &&SharedState<'ir,B>,
-    regs: &RegisterBindings<'ir,B>,
-    lets: &Bindings<'ir,B>,
+    shared_state: &&SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
     collected: &R,
     collector: &Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,

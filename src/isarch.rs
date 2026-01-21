@@ -34,13 +34,13 @@
 //! - `tree <instruction>`: Show the execution path tree for an instruction
 //! - `solve-state <instruction>`: Solve for concrete ISA state values
 
+use sha2::{Digest, Sha256};
 use std::any::type_name;
 use std::collections::HashMap;
-use std::str::FromStr;
-use std::vec;
-use sha2::{Digest, Sha256};
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::vec;
 
 use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
@@ -51,8 +51,8 @@ use isla_lib::log;
 use isla_lib::register::RegisterBindings;
 
 mod opts;
-use opts::CommonOpts;
 use isla_lib::isarch;
+use opts::CommonOpts;
 
 fn main() {
     let code = isla_main();
@@ -132,64 +132,64 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
 
     // Execute symbolic execution to build execution tree
     /* match isarch::execute_instruction_tree::<B>(instruction, shared_state, regs, lets) {
-        Ok(result) => {
-            if graphviz {
-                // Generate Graphviz DOT output
-                let dot_output = isarch::format_tree_graphviz(&result);
+           Ok(result) => {
+               if graphviz {
+                   // Generate Graphviz DOT output
+                   let dot_output = isarch::format_tree_graphviz(&result);
 
-                // Create output directory
-                if let Err(e) = create_dir_all("out") {
-                    eprintln!("错误: 无法创建 out 目录: {}", e);
-                    return 1;
-                }
+                   // Create output directory
+                   if let Err(e) = create_dir_all("out") {
+                       eprintln!("错误: 无法创建 out 目录: {}", e);
+                       return 1;
+                   }
 
-                // Write DOT file
-                let dot_filename = format!("out/{}.dot", instruction);
-                if let Err(e) = std::fs::File::create(&dot_filename)
-                    .and_then(|mut f| f.write_all(dot_output.as_bytes()))
-                {
-                    eprintln!("错误: 无法写入 DOT 文件 {}: {}", dot_filename, e);
-                    return 1;
-                }
-                println!("DOT 文件已保存到: {}", dot_filename);
+                   // Write DOT file
+                   let dot_filename = format!("out/{}.dot", instruction);
+                   if let Err(e) = std::fs::File::create(&dot_filename)
+                       .and_then(|mut f| f.write_all(dot_output.as_bytes()))
+                   {
+                       eprintln!("错误: 无法写入 DOT 文件 {}: {}", dot_filename, e);
+                       return 1;
+                   }
+                   println!("DOT 文件已保存到: {}", dot_filename);
 
-                // Generate PNG using dot command
-                let png_filename = format!("out/{}.png", instruction);
-                match Command::new("dot")
-                    .arg("-Tpng")
-                    .arg(&dot_filename)
-                    .arg("-o")
-                    .arg(&png_filename)
-                    .output()
-                {
-                    Ok(output) => {
-                        if output.status.success() {
-                            println!("图片已保存到: {}", png_filename);
-                        } else {
-                            eprintln!("警告: dot 命令执行失败: {}", String::from_utf8_lossy(&output.stderr));
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("警告: 无法执行 dot 命令生成图片: {}", e);
-                        eprintln!("请安装 graphviz: apt install graphviz");
-                    }
-                }
+                   // Generate PNG using dot command
+                   let png_filename = format!("out/{}.png", instruction);
+                   match Command::new("dot")
+                       .arg("-Tpng")
+                       .arg(&dot_filename)
+                       .arg("-o")
+                       .arg(&png_filename)
+                       .output()
+                   {
+                       Ok(output) => {
+                           if output.status.success() {
+                               println!("图片已保存到: {}", png_filename);
+                           } else {
+                               eprintln!("警告: dot 命令执行失败: {}", String::from_utf8_lossy(&output.stderr));
+                           }
+                       }
+                       Err(e) => {
+                           eprintln!("警告: 无法执行 dot 命令生成图片: {}", e);
+                           eprintln!("请安装 graphviz: apt install graphviz");
+                       }
+                   }
 
-                // Also print DOT to stdout
-                println!("\n--- DOT 输出 ---\n");
-                println!("{}", dot_output);
-            } else {
-                println!("{}", isarch::format_tree_ascii(&result));
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("错误: 符号执行失败: {:?}", e);
-            1
-        }
-    }
- */
-	0
+                   // Also print DOT to stdout
+                   println!("\n--- DOT 输出 ---\n");
+                   println!("{}", dot_output);
+               } else {
+                   println!("{}", isarch::format_tree_ascii(&result));
+               }
+               0
+           }
+           Err(e) => {
+               eprintln!("错误: 符号执行失败: {:?}", e);
+               1
+           }
+       }
+    */
+    0
 }
 
 fn cmd_solve_state<B: isla_lib::bitvector::BV>(
@@ -247,8 +247,8 @@ fn isla_main() -> i32 {
 
     //
     let instruction_list = &shared_state.type_info;
-    let instruction_id=shared_state.symtab.lookup("zinstruction");
-    let MRET_id=shared_state.symtab.lookup("zMRET");
+    let instruction_id = shared_state.symtab.lookup("zinstruction");
+    let MRET_id = shared_state.symtab.lookup("zMRET");
     // println!("ins_id={:?},MRET_id={:?}",instruction_id,MRET_id);
     // let instructions_union=shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap();
     //let instruction_union_ctors=&shared_state.type_info.union_ctors;
@@ -267,50 +267,47 @@ fn isla_main() -> i32 {
     ); */
     //println!("{:?}",instruction_union_ctors.iter().map(|e|{shared_state.symtab.to_str(*e)}).collect::<Vec<_>>() );
 
-	//======
+    //======
 
+    // let instruction_list = isarch::get_instruction_list(shared_state, regs, lets);
 
-	// let instruction_list = isarch::get_instruction_list(shared_state, regs, lets);
+    // println!("是否存在mret：{:?}",instruction_list.contains(&String::from_str("mret").unwrap()));
 
-	// println!("是否存在mret：{:?}",instruction_list.contains(&String::from_str("mret").unwrap()));
-
-	#[cfg(feature = "debug_instruction")]
-        isla_lib::isarch::test_instruction_list_main(shared_state, regs, lets);
-    
-    
+    #[cfg(feature = "debug_instruction")]
+    isla_lib::isarch::test_instruction_list_main(shared_state, regs, lets);
 
     match subcommand {
         "list-instructions" => {
-			println!("");
-			// println!("一共有{}条指令",instruction_list.len());
-			println!();
+            println!("");
+            // println!("一共有{}条指令",instruction_list.len());
+            println!();
 
-			// 将 HashMap 转换为 Vec 并按汇编名称排序
-			/* let mut instructions: Vec<_> = instruction_list.iter().collect();
-			instructions.sort_by(|a, b| a.0.cmp(b.0));
+            // 将 HashMap 转换为 Vec 并按汇编名称排序
+            /* let mut instructions: Vec<_> = instruction_list.iter().collect();
+            instructions.sort_by(|a, b| a.0.cmp(b.0));
 
-			for (assembly, (_n, _ty, inst_str, _params, _constraints)) in instructions {
-				println!("{} <- {}", assembly, inst_str);
-			} */
-			/* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
-				println!("指令: {}", assembly);
+            for (assembly, (_n, _ty, inst_str, _params, _constraints)) in instructions {
+                println!("{} <- {}", assembly, inst_str);
+            } */
+            /* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
+                println!("指令: {}", assembly);
 
-				// 将符号化参数和约束放在同一行显示
-				if !params.is_empty() && !constraints.is_empty() {
-					for (param, (_var, ty)) in params.iter().zip(constraints.iter()) {
-						println!("  {} : {}", param, ty);
-					}
-				} else if !params.is_empty() {
-					for param in params {
-						println!("  {}", param);
-					}
-				}
+                // 将符号化参数和约束放在同一行显示
+                if !params.is_empty() && !constraints.is_empty() {
+                    for (param, (_var, ty)) in params.iter().zip(constraints.iter()) {
+                        println!("  {} : {}", param, ty);
+                    }
+                } else if !params.is_empty() {
+                    for param in params {
+                        println!("  {}", param);
+                    }
+                }
 
-				println!();
-			} */
+                println!();
+            } */
 
-			0
-		},
+            0
+        }
         "tree" => {
             if matches.free.len() < 2 {
                 eprintln!("Error: 'tree' command requires an instruction argument");
