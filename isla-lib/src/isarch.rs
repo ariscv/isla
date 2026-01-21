@@ -7,6 +7,7 @@ use crate::executor::{
 use crate::ir::*;
 use crate::log;
 use crate::register::RegisterBindings;
+use crate::smt::checkpoint;
 use crate::smt::{Checkpoint, Event, Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::{d2, dlog, zencode};
@@ -168,8 +169,6 @@ pub fn get_assembly_names_all<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Vec<String> {
-    use crate::smt::checkpoint;
-
     // 查找指令的构造函数名称
     let encoded_name = format!("{}", instruction_name);
     let ctor_name = shared_state.symtab.lookup(&encoded_name);
@@ -242,16 +241,13 @@ pub fn get_assembly_names_all<B: BV>(
     assembly_names
 }
 
-/// 获取zassembly_forwards函数的执行结果
-/// 传入指令名称，返回对应的汇编名称
-/// 使用checkpoint机制来共享符号化变量
-pub fn get_assembly_name<B: BV>(
+///当参数是enum时，转成Sym值，比如Sym(14)，
+/// 那就会报“Could not get Z3 func_decl 14”的错
+pub fn get_assembly_names<B: BV>(
     instruction_name: &str,
     shared_state: &&SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
 ) -> Vec<String> {
     use crate::smt::checkpoint;
 
@@ -275,51 +271,49 @@ pub fn get_assembly_name<B: BV>(
 
     // 使用 enumerate_possible_values 来获取所有可能的值
     {
-        // 对于复杂类型，先尝试获取枚举值并探索所有可能性
-        if let Ok((arg_values, _constraints)) = enumerate_possible_values(ctor_ty, *shared_state) {
+        // 创建新的 solver 和 checkpoint
+        let cfg = crate::smt::Config::new();
+        let ctx = crate::smt::Context::new(cfg);
+        let mut new_solver = Solver::new(&ctx);
+        let cp = checkpoint(&mut new_solver);
+
+        if let Ok(arg_value) = generate_symbolic_value(ctor_ty, *shared_state, &mut new_solver, SourceLoc::unknown()) {
             // 对于每个可能的值，执行一次
-            for arg_value in arg_values {
-                dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
-                let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
 
-                // 创建新的 solver 和 checkpoint
-                let cfg = crate::smt::Config::new();
-                let ctx = crate::smt::Context::new(cfg);
-                let mut new_solver = Solver::new(&ctx);
-                let cp = checkpoint(&mut new_solver);
+            dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
+            let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
 
-                let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-                let collected: Vec<Val<B>> = Vec::new();
-                let collected = Arc::new(collected);
+            let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+            let collected: Vec<Val<B>> = Vec::new();
+            let collected = Arc::new(collected);
 
-                crate::executor::execute_ir_function_with_checkpoint(
-                    "zassembly_forwards",
-                    &[instr_value],
-                    shared_state,
-                    regs,
-                    lets,
-                    &collected,
-                    &|_thread, _task_id, exec_result, shared_state, _solver, _collected| match exec_result {
-                        Ok((run, _frame)) => {
-                            if let Run::Finished(ret_val) = run {
-                                *result.lock().unwrap() = Some(ret_val);
-                            }
+            crate::executor::execute_ir_function_with_checkpoint(
+                "zassembly_forwards",
+                &[instr_value],
+                shared_state,
+                regs,
+                lets,
+                &collected,
+                &|_thread, _task_id, exec_result, shared_state, _solver, _collected| match exec_result {
+                    Ok((run, _frame)) => {
+                        if let Run::Finished(ret_val) = run {
+                            *result.lock().unwrap() = Some(ret_val);
                         }
-                        Err((error, backtrace)) => match &error {
-                            ExecError::MatchFailure(_) => {}
-                            _ => {
-                                eprintln!("执行错误: {:?}", error);
-                                eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
-                            }
-                        },
+                    }
+                    Err((error, backtrace)) => match &error {
+                        ExecError::MatchFailure(_) => {}
+                        _ => {
+                            eprintln!("执行错误: {:?}", error);
+                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                        }
                     },
-                    cp,
-                );
+                },
+                cp,
+            );
 
-                let res = { result.lock().unwrap().as_ref().cloned() };
-                if let Some(Val::String(s)) = &res {
-                    assembly_names.push(s.clone());
-                }
+            let res = { result.lock().unwrap().as_ref().cloned() };
+            if let Some(Val::String(s)) = &res {
+                assembly_names.push(s.clone());
             }
         }
     }
@@ -445,7 +439,7 @@ pub fn test_instruction_list_main<B: BV>(
 ) {
     println!("test_instruction_list_main");
 
-    let assembly_names = get_assembly_names_all("zECALL", shared_state, regs, lets);
+    let assembly_names = get_assembly_names("zRTYPE", shared_state, regs, lets);
 
     println!("{:?}", assembly_names);
     ()
