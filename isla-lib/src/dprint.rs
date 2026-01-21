@@ -1,11 +1,9 @@
-use std::fmt;
-use crate::ir::{Instr, Name, Symtab, Val, BitsSegment, SharedState};
-use crate::ir::Instr::{Arbitrary, End};
-use crate::smt::{Sym, EnumMember};
 use crate::bitvector::BV;
+use crate::ir::Instr::{Arbitrary, End};
+use crate::ir::{BitsSegment, Instr, Name, SharedState, Symtab, Val};
+use crate::smt::{EnumMember, Sym};
 use crate::zencode;
-
-
+use std::fmt;
 
 #[macro_export]
 macro_rules! d {
@@ -122,14 +120,14 @@ macro_rules! dlog {
 
 }
 
-use Instr::*;
 use std::fmt::Write;
+use Instr::*;
 
 /// 解码字符串中的所有 zencoded 部分
 fn decode_recursive(input: &str) -> String {
     // 首先尝试对整个字符串解码
     if let Ok(decoded) = zencode::try_decode(input) {
-		dlog!("====={}",decoded);
+        dlog!("====={}", decoded);
         // 解码成功后，继续处理解码结果中可能存在的其他编码部分
         // 但要避免无限递归：只处理一次后跳到下面的逻辑
         let mut result = decoded.clone();
@@ -151,20 +149,15 @@ fn decode_recursive(input: &str) -> String {
                 let c = result.chars().nth(i).unwrap();
                 if c == 'z' {
                     // 检查这是否是编码字符串的开始
-                    let prev_char = if i > 0 {
-                        result[..i].chars().last()
-                    } else {
-                        None
-                    };
+                    let prev_char = if i > 0 { result[..i].chars().last() } else { None };
 
                     let is_boundary = prev_char.map_or(true, |c| !c.is_alphanumeric() && c != '_');
 
                     if is_boundary {
                         // 尝试从这个位置解码
                         let remaining = &result[i..];
-                        let encode_end = remaining
-                            .find(|c: char| !c.is_alphanumeric() && c != '_')
-                            .unwrap_or(remaining.len());
+                        let encode_end =
+                            remaining.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(remaining.len());
 
                         let encoded_part = &remaining[..encode_end];
                         if let Ok(decoded_part) = zencode::try_decode(encoded_part) {
@@ -201,20 +194,14 @@ fn decode_recursive(input: &str) -> String {
         let c = input.chars().nth(i).unwrap();
         if c == 'z' {
             // 检查这是否是编码字符串的开始
-            let prev_char = if i > 0 {
-                input[..i].chars().last()
-            } else {
-                None
-            };
+            let prev_char = if i > 0 { input[..i].chars().last() } else { None };
 
             let is_boundary = prev_char.map_or(true, |c| !c.is_alphanumeric() && c != '_');
 
             if is_boundary {
                 // 尝试从这个位置解码
                 let remaining = &input[i..];
-                let encode_end = remaining
-                    .find(|c: char| !c.is_alphanumeric() && c != '_')
-                    .unwrap_or(remaining.len());
+                let encode_end = remaining.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(remaining.len());
 
                 let encoded_part = &remaining[..encode_end];
                 if let Ok(decoded) = zencode::try_decode(encoded_part) {
@@ -240,182 +227,220 @@ fn decode_recursive(input: &str) -> String {
 }
 
 impl<B: BV> Val<B> {
-	/// 单行格式化（紧凑，无缩进换行）
-	pub fn to_str(&self, shared_state: &&SharedState<B>) -> String {
-		self.to_str_internal(shared_state, 0, false)
-	}
+    /// 单行格式化（紧凑，无缩进换行）
+    pub fn to_str(&self, shared_state: &&SharedState<B>) -> String {
+        self.to_str_internal(shared_state, 0, false)
+    }
 
-	/// 多行格式化（带缩进换行）
-	pub fn to_str_fmt(&self, shared_state: &&SharedState<B>) -> String {
-		self.to_str_internal(shared_state, 0, true)
-	}
+    /// 多行格式化（带缩进换行）
+    pub fn to_str_fmt(&self, shared_state: &&SharedState<B>) -> String {
+        self.to_str_internal(shared_state, 0, true)
+    }
 
-	/// 核心实现函数
-	/// indent: 缩进层级
-	/// multi_line: 是否多行格式化（true=带换行缩进，false=单行紧凑）
-	fn to_str_internal(&self, shared_state: &&SharedState<B>, indent: usize, multi_line: bool) -> String {
-		let indent_str = "  ".repeat(indent);
-		match self {
-			Val::Symbolic(sym) => format!("{}Sym({})", indent_str, sym),
-			Val::I64(n) => format!("{}{}i64", indent_str, n),
-			Val::I128(n) => format!("{}{}i128", indent_str, n),
-			Val::Bool(b) => format!("{}{}", indent_str, b),
-			Val::Bits(bv) => format!("{}{}", indent_str, bv),
-			Val::MixedBits(segments) => {
-				let parts: Vec<String> = segments.iter().map(|seg| match seg {
-					BitsSegment::Symbolic(s) => format!("Sym({})", s),
-					BitsSegment::Concrete(b) => format!("{}", b),
-				}).collect();
-				format!("{}[{}]", indent_str, parts.join(", "))
-			},
-			Val::String(s) => format!("{}\"{}\"", indent_str, s),
-			Val::Unit => format!("{}()", indent_str),
-			Val::Vector(vec) => {
-				if vec.is_empty() {
-					format!("{}[]", indent_str)
-				} else if !multi_line {
-					let elems: Vec<String> = vec.iter().map(|v| v.to_str_internal(shared_state, indent, false)).collect();
-					format!("{}[{}]", indent_str, elems.join(", "))
-				} else {
-					let mut result = format!("{}[\n", indent_str);
-					for elem in vec {
-						result.push_str(&elem.to_str_internal(shared_state, indent + 1, true));
-						result.push_str(",\n");
-					}
-					result.push_str(&indent_str);
-					result.push(']');
-					result
-				}
-			},
-			Val::List(vec) => {
-				if vec.is_empty() {
-					format!("{}List[]", indent_str)
-				} else if !multi_line {
-					let elems: Vec<String> = vec.iter().map(|v| v.to_str_internal(shared_state, indent, false)).collect();
-					format!("{}List[{}]", indent_str, elems.join(", "))
-				} else {
-					let mut result = format!("{}List[\n", indent_str);
-					for elem in vec {
-						result.push_str(&elem.to_str_internal(shared_state, indent + 1, true));
-						result.push_str(",\n");
-					}
-					result.push_str(&indent_str);
-					result.push(']');
-					result
-				}
-			},
-			Val::Enum(member) => {
-				let enum_name = decode_recursive(shared_state.symtab.to_str(member.enum_id.to_name()));
-				// 获取枚举成员名称
-				let member_name = shared_state.type_info.enums
-					.get(&member.enum_id.to_name())
-					.and_then(|members| members.iter().nth(member.member))
-					.map(|name| shared_state.symtab.to_str(*name).to_string())
-					.unwrap_or_else(|| format!("<member {}>", member.member));
-				format!("{}{}::{}(EnumMember.member:{})", indent_str, enum_name, member_name,member.member)
-			},
-			Val::Struct(fields) => {
-				if fields.is_empty() {
-					format!("{}{{}}", indent_str)
-				} else if !multi_line {
-					let field_strs: Vec<String> = fields.iter()
-						.map(|(name, val)| {
-							let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
-							format!("{}: {}", name_decoded, val.to_str_internal(shared_state, indent, false))
-						})
-						.collect();
-					format!("{{{}}}", field_strs.join(", "))
-				} else {
-					let mut result = format!("{}{{\n", indent_str);
-					for (name, val) in fields {
-						let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
-						result.push_str(&format!("{}  {}: ", indent_str, name_decoded));
-						// 对于单行值，不额外缩进
-						match val {
-							Val::Symbolic(_) | Val::I64(_) | Val::I128(_) | Val::Bool(_) |
-							Val::Bits(_) | Val::Unit | Val::Enum(_) | Val::Ref(_) |
-							Val::Poison | Val::String(_) | Val::MixedBits(_) => {
-								result.push_str(&val.to_str_internal(shared_state, 0, false));
-							},
-							_ => {
-								result.push_str(&val.to_str_internal(shared_state, indent + 2, true));
-							}
-						}
-						result.push_str(",\n");
-					}
-					result.push_str(&indent_str);
-					result.push('}');
-					result
-				}
-			},
-			Val::Ctor(name, val) => {
-				let name_str = decode_recursive(shared_state.symtab.to_str(*name));
-				if !multi_line {
-					format!("{}{}({})", indent_str, name_str, val.to_str_internal(shared_state, indent, false))
-				} else {
-					match val.as_ref() {
-						Val::Symbolic(_) | Val::I64(_) | Val::I128(_) | Val::Bool(_) |
-						Val::Bits(_) | Val::Unit | Val::Enum(_) | Val::Ref(_) |
-						Val::Poison | Val::String(_) | Val::MixedBits(_) => {
-							format!("{}{}({})", indent_str, name_str, val.to_str_internal(shared_state, 0, false))
-						},
-						_ => {
-							format!("{}{}(\n{}\n{})", indent_str, name_str, val.to_str_internal(shared_state, indent + 1, true), indent_str)
-						}
-					}
-				}
-			},
-			Val::SymbolicCtor(sym, fields) => {
-				if fields.is_empty() {
-					format!("{}SymCtor({{}})", indent_str)
-				} else if !multi_line {
-					let field_strs: Vec<String> = fields.iter()
-						.map(|(name, val)| {
-							let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
-							format!("{}: {}", name_decoded, val.to_str_internal(shared_state, indent, false))
-						})
-						.collect();
-					format!("{}SymCtor({}, {{{}}})", indent_str, sym, field_strs.join(", "))
-				} else {
-					let mut result = format!("{}SymCtor({}, {{\n", indent_str, sym);
-					for (name, val) in fields {
-						let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
-						result.push_str(&format!("{}  {}: ", indent_str, name_decoded));
-						match val {
-							Val::Symbolic(_) | Val::I64(_) | Val::I128(_) | Val::Bool(_) |
-							Val::Bits(_) | Val::Unit | Val::Enum(_) | Val::Ref(_) |
-							Val::Poison | Val::String(_) | Val::MixedBits(_) => {
-								result.push_str(&val.to_str_internal(shared_state, 0, false));
-							},
-							_ => {
-								result.push_str(&val.to_str_internal(shared_state, indent + 2, true));
-							}
-						}
-						result.push_str(",\n");
-					}
-					result.push_str(&indent_str);
-					result.push_str("})");
-					result
-				}
-			},
-			Val::Ref(name) => {
-				let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
-				format!("{}&{}", indent_str, name_decoded)
-			},
-			Val::Poison => format!("{}<poison>", indent_str),
-		}
-	}
+    /// 核心实现函数
+    /// indent: 缩进层级
+    /// multi_line: 是否多行格式化（true=带换行缩进，false=单行紧凑）
+    fn to_str_internal(&self, shared_state: &&SharedState<B>, indent: usize, multi_line: bool) -> String {
+        let indent_str = "  ".repeat(indent);
+        match self {
+            Val::Symbolic(sym) => format!("{}Sym({})", indent_str, sym),
+            Val::I64(n) => format!("{}{}i64", indent_str, n),
+            Val::I128(n) => format!("{}{}i128", indent_str, n),
+            Val::Bool(b) => format!("{}{}", indent_str, b),
+            Val::Bits(bv) => format!("{}{}", indent_str, bv),
+            Val::MixedBits(segments) => {
+                let parts: Vec<String> = segments
+                    .iter()
+                    .map(|seg| match seg {
+                        BitsSegment::Symbolic(s) => format!("Sym({})", s),
+                        BitsSegment::Concrete(b) => format!("{}", b),
+                    })
+                    .collect();
+                format!("{}[{}]", indent_str, parts.join(", "))
+            }
+            Val::String(s) => format!("{}\"{}\"", indent_str, s),
+            Val::Unit => format!("{}()", indent_str),
+            Val::Vector(vec) => {
+                if vec.is_empty() {
+                    format!("{}[]", indent_str)
+                } else if !multi_line {
+                    let elems: Vec<String> =
+                        vec.iter().map(|v| v.to_str_internal(shared_state, indent, false)).collect();
+                    format!("{}[{}]", indent_str, elems.join(", "))
+                } else {
+                    let mut result = format!("{}[\n", indent_str);
+                    for elem in vec {
+                        result.push_str(&elem.to_str_internal(shared_state, indent + 1, true));
+                        result.push_str(",\n");
+                    }
+                    result.push_str(&indent_str);
+                    result.push(']');
+                    result
+                }
+            }
+            Val::List(vec) => {
+                if vec.is_empty() {
+                    format!("{}List[]", indent_str)
+                } else if !multi_line {
+                    let elems: Vec<String> =
+                        vec.iter().map(|v| v.to_str_internal(shared_state, indent, false)).collect();
+                    format!("{}List[{}]", indent_str, elems.join(", "))
+                } else {
+                    let mut result = format!("{}List[\n", indent_str);
+                    for elem in vec {
+                        result.push_str(&elem.to_str_internal(shared_state, indent + 1, true));
+                        result.push_str(",\n");
+                    }
+                    result.push_str(&indent_str);
+                    result.push(']');
+                    result
+                }
+            }
+            Val::Enum(member) => {
+                let enum_name = decode_recursive(shared_state.symtab.to_str(member.enum_id.to_name()));
+                // 获取枚举成员名称
+                let member_name = shared_state
+                    .type_info
+                    .enums
+                    .get(&member.enum_id.to_name())
+                    .and_then(|members| members.iter().nth(member.member))
+                    .map(|name| shared_state.symtab.to_str(*name).to_string())
+                    .unwrap_or_else(|| format!("<member {}>", member.member));
+                format!("{}{}::{}(EnumMember.member:{})", indent_str, enum_name, member_name, member.member)
+            }
+            Val::Struct(fields) => {
+                if fields.is_empty() {
+                    format!("{}{{}}", indent_str)
+                } else if !multi_line {
+                    let field_strs: Vec<String> = fields
+                        .iter()
+                        .map(|(name, val)| {
+                            let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
+                            format!("{}: {}", name_decoded, val.to_str_internal(shared_state, indent, false))
+                        })
+                        .collect();
+                    format!("{{{}}}", field_strs.join(", "))
+                } else {
+                    let mut result = format!("{}{{\n", indent_str);
+                    for (name, val) in fields {
+                        let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
+                        result.push_str(&format!("{}  {}: ", indent_str, name_decoded));
+                        // 对于单行值，不额外缩进
+                        match val {
+                            Val::Symbolic(_)
+                            | Val::I64(_)
+                            | Val::I128(_)
+                            | Val::Bool(_)
+                            | Val::Bits(_)
+                            | Val::Unit
+                            | Val::Enum(_)
+                            | Val::Ref(_)
+                            | Val::Poison
+                            | Val::String(_)
+                            | Val::MixedBits(_) => {
+                                result.push_str(&val.to_str_internal(shared_state, 0, false));
+                            }
+                            _ => {
+                                result.push_str(&val.to_str_internal(shared_state, indent + 2, true));
+                            }
+                        }
+                        result.push_str(",\n");
+                    }
+                    result.push_str(&indent_str);
+                    result.push('}');
+                    result
+                }
+            }
+            Val::Ctor(name, val) => {
+                let name_str = decode_recursive(shared_state.symtab.to_str(*name));
+                if !multi_line {
+                    format!("{}{}({})", indent_str, name_str, val.to_str_internal(shared_state, indent, false))
+                } else {
+                    match val.as_ref() {
+                        Val::Symbolic(_)
+                        | Val::I64(_)
+                        | Val::I128(_)
+                        | Val::Bool(_)
+                        | Val::Bits(_)
+                        | Val::Unit
+                        | Val::Enum(_)
+                        | Val::Ref(_)
+                        | Val::Poison
+                        | Val::String(_)
+                        | Val::MixedBits(_) => {
+                            format!("{}{}({})", indent_str, name_str, val.to_str_internal(shared_state, 0, false))
+                        }
+                        _ => {
+                            format!(
+                                "{}{}(\n{}\n{})",
+                                indent_str,
+                                name_str,
+                                val.to_str_internal(shared_state, indent + 1, true),
+                                indent_str
+                            )
+                        }
+                    }
+                }
+            }
+            Val::SymbolicCtor(sym, fields) => {
+                if fields.is_empty() {
+                    format!("{}SymCtor({{}})", indent_str)
+                } else if !multi_line {
+                    let field_strs: Vec<String> = fields
+                        .iter()
+                        .map(|(name, val)| {
+                            let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
+                            format!("{}: {}", name_decoded, val.to_str_internal(shared_state, indent, false))
+                        })
+                        .collect();
+                    format!("{}SymCtor({}, {{{}}})", indent_str, sym, field_strs.join(", "))
+                } else {
+                    let mut result = format!("{}SymCtor({}, {{\n", indent_str, sym);
+                    for (name, val) in fields {
+                        let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
+                        result.push_str(&format!("{}  {}: ", indent_str, name_decoded));
+                        match val {
+                            Val::Symbolic(_)
+                            | Val::I64(_)
+                            | Val::I128(_)
+                            | Val::Bool(_)
+                            | Val::Bits(_)
+                            | Val::Unit
+                            | Val::Enum(_)
+                            | Val::Ref(_)
+                            | Val::Poison
+                            | Val::String(_)
+                            | Val::MixedBits(_) => {
+                                result.push_str(&val.to_str_internal(shared_state, 0, false));
+                            }
+                            _ => {
+                                result.push_str(&val.to_str_internal(shared_state, indent + 2, true));
+                            }
+                        }
+                        result.push_str(",\n");
+                    }
+                    result.push_str(&indent_str);
+                    result.push_str("})");
+                    result
+                }
+            }
+            Val::Ref(name) => {
+                let name_decoded = decode_recursive(shared_state.symtab.to_str(*name));
+                format!("{}&{}", indent_str, name_decoded)
+            }
+            Val::Poison => format!("{}<poison>", indent_str),
+        }
+    }
 }
 
-pub fn print_instr_toString<'a, B>(f: &'a mut String,instr: &'a  Instr<Name, B>, symtab: &Symtab) -> &'a mut String{
-
+pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>, symtab: &Symtab) -> &'a mut String {
     macro_rules! s {
-    ($id:expr) => {
-        symtab.to_str_demangled($id)
-    };
-}
+        ($id:expr) => {
+            symtab.to_str_demangled($id)
+        };
+    }
 
-    let res=match instr {
+    let res = match instr {
         Decl(id, ty, info) => write!(f, "Decl {} : {:?} ` {:?}", s!(*id), ty, info),
         Init(id, ty, exp, info) => write!(f, "Init {} : {:?} = {:?} ` {:?}", s!(*id), ty, exp, info),
         Jump(exp, target, info) => write!(f, "jump {:?} to {:?} ` {:?}", exp, target, info),
@@ -433,14 +458,15 @@ pub fn print_instr_toString<'a, B>(f: &'a mut String,instr: &'a  Instr<Name, B>,
         PrimopReset(loc, reset, info) => {
             write!(f, "PrimopReset {:?} = {:p} ` {:?}", loc, reset, info)
         }
-        PrimopVariadic(loc, fptr, args, info) => write!(f, "PrimopVariadic {:?} = {:p}({:?}) ` {:?}", loc, fptr, args, info),
+        PrimopVariadic(loc, fptr, args, info) => {
+            write!(f, "PrimopVariadic {:?} = {:p}({:?}) ` {:?}", loc, fptr, args, info)
+        }
     };
 
     f
 }
-pub fn print_instr<B>(pc:usize,instr: &Instr<Name, B>, symtab: &Symtab,function_name: Name) {
-
+pub fn print_instr<B>(pc: usize, instr: &Instr<Name, B>, symtab: &Symtab, function_name: Name) {
     let mut binding = String::new();
-    let s=print_instr_toString(&mut binding,instr,symtab);
-    println!("[{}:{}]{:?}",symtab.to_str(function_name),pc, s);
+    let s = print_instr_toString(&mut binding, instr, symtab);
+    println!("[{}:{}]{:?}", symtab.to_str(function_name), pc, s);
 }

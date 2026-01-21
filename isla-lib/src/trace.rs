@@ -58,14 +58,12 @@ pub struct RegisterState<B> {
 fn update_field<'a, B: BV, T: Iterator<Item = &'a Accessor>>(mut acc: T, old: &mut Val<B>, v: &Val<B>) {
     match acc.next() {
         None => *old = v.clone(),
-        Some(Accessor::Field(name)) => {
-            match old {
-                Val::Struct(fields) => {
-                    update_field(acc, fields.get_mut(&name).unwrap(), v);
-                }
-                _ => panic!("Bad field update"),
+        Some(Accessor::Field(name)) => match old {
+            Val::Struct(fields) => {
+                update_field(acc, fields.get_mut(&name).unwrap(), v);
             }
-        }
+            _ => panic!("Bad field update"),
+        },
     }
 }
 

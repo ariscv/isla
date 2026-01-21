@@ -1,8 +1,11 @@
 use crate::bitvector::BV;
 use crate::config::ISAConfig;
 use crate::error::ExecError;
-use crate::executor::{backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState};
+use crate::executor::{
+    backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState,
+};
 use crate::ir::*;
+use crate::log;
 use crate::register::RegisterBindings;
 use crate::smt::{Checkpoint, Event, Solver, Sym};
 use crate::source_loc::SourceLoc;
@@ -10,12 +13,10 @@ use crate::{d2, dlog, zencode};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
-use crate::log;
 
 /**
  * instruction list gen
-  */
-
+ */
 
 /// 根据类型生成默认值
 pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Val<B> {
@@ -45,12 +46,11 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
                 }
             }
             // 转换为 ahash::HashMap 类型以匹配 Val::Struct 的要求
-            let ahash_fields: ahash::HashMap<Name, Val<B>> =
-                fields.into_iter().collect();
+            let ahash_fields: ahash::HashMap<Name, Val<B>> = fields.into_iter().collect();
             Val::Struct(ahash_fields)
         }
         Ty::Union(_) => Val::Unit, // Union 类型使用第一个构造函数的默认值
-        _ => Val::Unit, // 对于其他类型，使用 Unit 作为默认值
+        _ => Val::Unit,            // 对于其他类型，使用 Unit 作为默认值
     }
 }
 
@@ -90,9 +90,8 @@ pub fn enumerate_possible_values<B: BV>(
             // 对于结构体类型，检查是否有枚举字段
             if let Some(struct_def) = shared_state.type_info.structs.get(struct_name) {
                 // 收集所有枚举字段
-                let enum_fields: Vec<_> = struct_def.iter()
-                    .filter(|(_, field_ty)| matches!(field_ty, Ty::Enum(_)))
-                    .collect();
+                let enum_fields: Vec<_> =
+                    struct_def.iter().filter(|(_, field_ty)| matches!(field_ty, Ty::Enum(_))).collect();
 
                 if !enum_fields.is_empty() {
                     // 有枚举字段，需要生成所有可能的组合
@@ -155,80 +154,10 @@ pub fn generate_symbolic_value<B: BV>(
     shared_state: &SharedState<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-) -> Result<(Val<B>, Vec<(String, String)>), ExecError> {
+) -> Result<Val<B>, ExecError> {
     use crate::primop_util::symbolic;
 
-    let mut constraints = Vec::new();
-
-    let val = match ty {
-        Ty::Unit => Val::Unit,
-        Ty::I64 => {
-            let val = symbolic(&Ty::I64, shared_state, solver, info)?;
-            if let Val::Symbolic(sym) = val {
-                constraints.push((format!("x{}", sym), "i64".to_string()));
-            }
-            val
-        }
-        Ty::I128 => {
-            let val = symbolic(&Ty::I128, shared_state, solver, info)?;
-            if let Val::Symbolic(sym) = val {
-                constraints.push((format!("x{}", sym), "i128".to_string()));
-            }
-            val
-        }
-        Ty::Bool => {
-            let val = symbolic(&Ty::Bool, shared_state, solver, info)?;
-            if let Val::Symbolic(sym) = val {
-                constraints.push((format!("x{}", sym), "bool".to_string()));
-            }
-            val
-        }
-        Ty::Bits(n) => {
-            let val = symbolic(ty, shared_state, solver, info)?;
-            if let Val::Symbolic(sym) = val {
-                constraints.push((format!("x{}", sym), format!("bits({})", n)));
-            }
-            val
-        }
-        Ty::String => Val::String(String::new()),
-        Ty::Vector(elem_ty) => {
-            let (elem_val, elem_constraints) = generate_symbolic_value(elem_ty, shared_state, solver, info)?;
-            constraints.extend(elem_constraints);
-            Val::Vector(vec![elem_val])
-        }
-        Ty::List(elem_ty) => {
-            let (elem_val, elem_constraints) = generate_symbolic_value(elem_ty, shared_state, solver, info)?;
-            constraints.extend(elem_constraints);
-            Val::List(vec![elem_val])
-        }
-        Ty::Enum(enum_name) => {
-            // 对枚举类型进行符号化
-            let enum_name_str = shared_state.symtab.to_str(*enum_name);
-            symbolic(ty, shared_state, solver, info)?
-        }
-        Ty::Struct(struct_name) => {
-            let mut fields: std::collections::HashMap<Name, Val<B>> = std::collections::HashMap::new();
-            if let Some(struct_def) = shared_state.type_info.structs.get(struct_name) {
-                for (field_name, field_ty) in struct_def {
-                    let (field_val, field_constraints) = generate_symbolic_value(field_ty, shared_state, solver, info)?;
-                    let field_name_str = shared_state.symtab.to_str(*field_name);
-                    for (var_name, ty_str) in field_constraints {
-                        constraints.push((format!("{}.{}", field_name_str, var_name), ty_str));
-                    }
-                    fields.insert(*field_name, field_val);
-                }
-            }
-            let ahash_fields: ahash::HashMap<Name, Val<B>> = fields.into_iter().collect();
-            Val::Struct(ahash_fields)
-        }
-        Ty::Union(union_name) => {
-            // 对Union类型进行符号化
-            symbolic(ty, shared_state, solver, info)?
-        }
-        _ => Val::Unit,
-    };
-
-    Ok((val, constraints))
+    Ok(symbolic(ty, shared_state, solver, info)?)
 }
 
 /// 获取指令的所有可能汇编名称
@@ -246,9 +175,7 @@ pub fn get_assembly_names_all<B: BV>(
     let ctor_name = shared_state.symtab.lookup(&encoded_name);
 
     // 从 union 类型信息中获取构造函数的参数类型
-    let instruction_union = shared_state.type_info.unions.get(
-        &shared_state.symtab.lookup("zinstruction")
-    );
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
 
     let Some(union_members) = instruction_union else {
         panic!("get_assembly_names_all: 在symtab中没找到符号'zinstruction'");
@@ -262,99 +189,51 @@ pub fn get_assembly_names_all<B: BV>(
     let mut assembly_names = Vec::new();
 
     // 使用 enumerate_possible_values 来获取所有可能的值
-    match ctor_ty {
-        Ty::Unit => {
-            dlog!("{}：Ctor是Ty::Unit",instruction_name);
-            // 无参数，直接执行
-            let instr_value = Val::<B>::Ctor(ctor_name, Box::new(Val::Unit));
+    {
+        // 对于复杂类型，先尝试获取枚举值并探索所有可能性
+        if let Ok((arg_values, _constraints)) = enumerate_possible_values(ctor_ty, *shared_state) {
+            // 对于每个可能的值，执行一次
+            for arg_value in arg_values {
+                dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
+                let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
 
-            let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-            let collected: Vec<Val<B>> = Vec::new();
-            let collected = Arc::new(collected);
+                // 创建新的 solver 和 checkpoint
+                let cfg = crate::smt::Config::new();
+                let ctx = crate::smt::Context::new(cfg);
+                let mut new_solver = Solver::new(&ctx);
+                let cp = checkpoint(&mut new_solver);
 
-            crate::executor::execute_ir_function(
-                "zassembly_forwards",
-                &[instr_value],
-                shared_state,
-                regs,
-                lets,
-                &collected,
-                &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
-                    match exec_result {
+                let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+                let collected: Vec<Val<B>> = Vec::new();
+                let collected = Arc::new(collected);
+
+                crate::executor::execute_ir_function_with_checkpoint(
+                    "zassembly_forwards",
+                    &[instr_value],
+                    shared_state,
+                    regs,
+                    lets,
+                    &collected,
+                    &|_thread, _task_id, exec_result, shared_state, _solver, _collected| match exec_result {
                         Ok((run, _frame)) => {
                             if let Run::Finished(ret_val) = run {
                                 *result.lock().unwrap() = Some(ret_val);
                             }
                         }
-                        Err((error, backtrace)) => {
-                            match &error {
-                                ExecError::MatchFailure(_) => {}
-                                _ => {
-                                    eprintln!("执行错误: {:?}", error);
-                                    eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
-                                }
-                            }
-                        }
-                    }
-                },
-            );
-
-            let res = { result.lock().unwrap().as_ref().cloned() };
-            if let Some(Val::String(s)) = &res {
-                assembly_names.push(s.clone());
-            }
-        }
-        _ => {
-            // 对于复杂类型，先尝试获取枚举值并探索所有可能性
-            if let Ok((arg_values, _constraints)) = enumerate_possible_values(ctor_ty, *shared_state) {
-
-                // 对于每个可能的值，执行一次
-                for arg_value in arg_values {
-					dlog!("{}：Ctor是有参数的{:?},\n{}",instruction_name,ctor_ty,arg_value.to_str_fmt(shared_state));
-                    let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
-
-                    // 创建新的 solver 和 checkpoint
-                    let cfg = crate::smt::Config::new();
-                    let ctx = crate::smt::Context::new(cfg);
-                    let mut new_solver = Solver::new(&ctx);
-                    let cp = checkpoint(&mut new_solver);
-
-                    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-                    let collected: Vec<Val<B>> = Vec::new();
-                    let collected = Arc::new(collected);
-
-                    crate::executor::execute_ir_function_with_checkpoint(
-                        "zassembly_forwards",
-                        &[instr_value],
-                        shared_state,
-                        regs,
-                        lets,
-                        &collected,
-                        &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
-                            match exec_result {
-                                Ok((run, _frame)) => {
-                                    if let Run::Finished(ret_val) = run {
-                                        *result.lock().unwrap() = Some(ret_val);
-                                    }
-                                }
-                                Err((error, backtrace)) => {
-                                    match &error {
-                                        ExecError::MatchFailure(_) => {}
-                                        _ => {
-                                            eprintln!("执行错误: {:?}", error);
-                                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
-                                        }
-                                    }
-                                }
+                        Err((error, backtrace)) => match &error {
+                            ExecError::MatchFailure(_) => {}
+                            _ => {
+                                eprintln!("执行错误: {:?}", error);
+                                eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
                             }
                         },
-                        cp,
-                    );
+                    },
+                    cp,
+                );
 
-                    let res = { result.lock().unwrap().as_ref().cloned() };
-                    if let Some(Val::String(s)) = &res {
-                        assembly_names.push(s.clone());
-                    }
+                let res = { result.lock().unwrap().as_ref().cloned() };
+                if let Some(Val::String(s)) = &res {
+                    assembly_names.push(s.clone());
                 }
             }
         }
@@ -373,7 +252,7 @@ pub fn get_assembly_name<B: BV>(
     lets: &Bindings<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-) -> Option<String> {
+) -> Vec<String> {
     use crate::smt::checkpoint;
 
     // 查找指令的构造函数名称
@@ -381,83 +260,73 @@ pub fn get_assembly_name<B: BV>(
     let ctor_name = shared_state.symtab.lookup(&encoded_name);
 
     // 从 union 类型信息中获取构造函数的参数类型
-    let instruction_union = shared_state.type_info.unions.get(
-        &shared_state.symtab.lookup("zinstruction")
-    );
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
 
     let Some(union_members) = instruction_union else {
-        // zinstruction union 不存在
-		panic!("get_assembly_name: 在symtab中没找到符号'zinstruction'");
+        panic!("get_assembly_names_all: 在symtab中没找到符号'zinstruction'");
     };
 
     // 查找当前构造函数的类型
     let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
-        // 指令不在 zinstruction union 中（可能是其他架构的指令）
-        return None;
+        return vec![];
     };
 
-    // 生成参数（暂时使用默认值，测试checkpoint机制）
-    let arg_value = match ctor_ty {
-        Ty::Unit => Val::Unit,
-        ty => generate_default_value(ty, *shared_state),
-    };
+    let mut assembly_names = Vec::new();
 
-    // 构造指令值
-    let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value));
+    // 使用 enumerate_possible_values 来获取所有可能的值
+    {
+        // 对于复杂类型，先尝试获取枚举值并探索所有可能性
+        if let Ok((arg_values, _constraints)) = enumerate_possible_values(ctor_ty, *shared_state) {
+            // 对于每个可能的值，执行一次
+            for arg_value in arg_values {
+                dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
+                let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
 
-    // 创建checkpoint，包含符号化变量
-    let cp = checkpoint(solver);
+                // 创建新的 solver 和 checkpoint
+                let cfg = crate::smt::Config::new();
+                let ctx = crate::smt::Context::new(cfg);
+                let mut new_solver = Solver::new(&ctx);
+                let cp = checkpoint(&mut new_solver);
 
-    // 使用checkpoint执行函数
-    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-    let collected: Vec<Val<B>> = Vec::new();
-    let collected = Arc::new(collected);
+                let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+                let collected: Vec<Val<B>> = Vec::new();
+                let collected = Arc::new(collected);
 
-    crate::executor::execute_ir_function_with_checkpoint(
-        "zassembly_forwards",
-        &[instr_value],
-        shared_state,
-        regs,
-        lets,
-        &collected,
-        &|_thread, _task_id, exec_result, shared_state, _solver, _collected| {
-            match exec_result {
-                Ok((run, _frame)) => {
-                    match run {
-                        Run::Finished(ret_val) => {
-                            *result.lock().unwrap() = Some(ret_val);
+                crate::executor::execute_ir_function_with_checkpoint(
+                    "zassembly_forwards",
+                    &[instr_value],
+                    shared_state,
+                    regs,
+                    lets,
+                    &collected,
+                    &|_thread, _task_id, exec_result, shared_state, _solver, _collected| match exec_result {
+                        Ok((run, _frame)) => {
+                            if let Run::Finished(ret_val) = run {
+                                *result.lock().unwrap() = Some(ret_val);
+                            }
                         }
-                        _ => {}
-                    }
-                }
-                Err((error, backtrace)) => {
-                    match &error {
-                        ExecError::MatchFailure(_) => {
-                            // 静默处理
-                        }
-                        _ => {
-                            eprintln!("执行错误: {:?}", error);
-                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
-                        }
-                    }
+                        Err((error, backtrace)) => match &error {
+                            ExecError::MatchFailure(_) => {}
+                            _ => {
+                                eprintln!("执行错误: {:?}", error);
+                                eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                            }
+                        },
+                    },
+                    cp,
+                );
+
+                let res = { result.lock().unwrap().as_ref().cloned() };
+                if let Some(Val::String(s)) = &res {
+                    assembly_names.push(s.clone());
                 }
             }
-        },
-        cp,
-    );
-
-    // 提取字符串结果
-    let res = match result.lock().unwrap().as_ref() {
-        Some(Val::String(s)) => Some(s.clone()),
-        Some(v) => {
-            eprintln!("警告: zassembly_forwards 返回非字符串值: {:?}", v);
-            None
         }
-        None => None,
-    };
-    res
+    }
+
+    assembly_names
 }
-/// 提取类型的参数信息，返回 (参数名列表, 约束列表)
+/* /// 提取类型的参数信息，返回 (参数名列表, 约束列表)
 fn extract_type_params<B: BV>(
     ty: &Ty<Name>,
     shared_state: &SharedState<B>,
@@ -499,7 +368,7 @@ pub fn get_instruction_list<B: BV>(
 )  -> HashMap<String, (Name, Ty<Name>, String, Vec<String>, Vec<(String, String)>)> {
     use crate::smt::{Config, Context, Solver};
 
-		let mut results: Vec<(Option<String>, (Name, Ty<Name>, String, Vec<String>, Vec<(String, String)>))> = Vec::new();
+        let mut results: Vec<(Option<String>, (Name, Ty<Name>, String, Vec<String>, Vec<(String, String)>))> = Vec::new();
 
     for (n, ty) in shared_state.type_info.unions.get(
         &shared_state.symtab.lookup("zinstruction")
@@ -539,45 +408,45 @@ pub fn get_instruction_list<B: BV>(
         }
     }
 
-	// 找出没有汇编名称的指令
-	let no_assembly: Vec<_> = results.iter()
+    // 找出没有汇编名称的指令
+    let no_assembly: Vec<_> = results.iter()
         .filter(|(asm, _)| asm.is_none())
         .map(|(_, (_n, _ty, inst_union_name_str, _params, _constraints))| inst_union_name_str.clone())
         .collect();
 
-	if !no_assembly.is_empty() {
-		eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", no_assembly.len());
-		for name in &no_assembly {
-			// 调试：检查指令类型
-			if let Some(union_members) = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")) {
-				if let Some((_, ty)) = union_members.iter().find(|(n, _)| shared_state.symtab.to_str(*n) == *name) {
-					eprintln!("  - {} (类型: {:?})", name, ty);
-				} else {
-					eprintln!("  - {} (不在 union 中)", name);
-				}
-			}
-		}
-	}
+    if !no_assembly.is_empty() {
+        eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", no_assembly.len());
+        for name in &no_assembly {
+            // 调试：检查指令类型
+            if let Some(union_members) = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")) {
+                if let Some((_, ty)) = union_members.iter().find(|(n, _)| shared_state.symtab.to_str(*n) == *name) {
+                    eprintln!("  - {} (类型: {:?})", name, ty);
+                } else {
+                    eprintln!("  - {} (不在 union 中)", name);
+                }
+            }
+        }
+    }
 
-	let instruction_list = results.iter().filter_map(
-			|(k, v)|
-				k.as_ref().map(|key| (key.clone(), v.clone()))
-		).collect::<HashMap<_,_>>();
+    let instruction_list = results.iter().filter_map(
+            |(k, v)|
+                k.as_ref().map(|key| (key.clone(), v.clone()))
+        ).collect::<HashMap<_,_>>();
 
-	instruction_list
+    instruction_list
 }
-
+ */
 
 #[cfg(feature = "debug_instruction")]
 pub fn test_instruction_list_main<B: BV>(
     shared_state: &&SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-){
-	println!("test_instruction_list_main");
+) {
+    println!("test_instruction_list_main");
 
-	let assembly_names = get_assembly_names_all("zRTYPE", shared_state, regs, lets);
+    let assembly_names = get_assembly_names_all("zECALL", shared_state, regs, lets);
 
     println!("{:?}", assembly_names);
-	()
+    ()
 }
