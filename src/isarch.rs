@@ -131,7 +131,7 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
     log!(log::VERBOSE, &format!("Analyzing instruction: {}", instruction));
 
     // Execute symbolic execution to build execution tree
-    match isarch::execute_instruction_tree::<B>(instruction, shared_state, regs, lets) {
+    /* match isarch::execute_instruction_tree::<B>(instruction, shared_state, regs, lets) {
         Ok(result) => {
             if graphviz {
                 // Generate Graphviz DOT output
@@ -188,6 +188,8 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
             1
         }
     }
+ */
+	0
 }
 
 fn cmd_solve_state<B: isla_lib::bitvector::BV>(
@@ -268,23 +270,28 @@ fn isla_main() -> i32 {
 	//======
 
 
-	let instruction_list = isarch::get_instruction_list(shared_state, regs, lets);
+	// let instruction_list = isarch::get_instruction_list(shared_state, regs, lets);
 
 	// println!("是否存在mret：{:?}",instruction_list.contains(&String::from_str("mret").unwrap()));
+
+	#[cfg(feature = "debug_instruction")]
+        isla_lib::isarch::test_instruction_list_main(shared_state, regs, lets);
+    
+    
 
     match subcommand {
         "list-instructions" => {
 			println!("");
-			println!("一共有{}条指令",instruction_list.len());
+			// println!("一共有{}条指令",instruction_list.len());
 			println!();
 
 			// 将 HashMap 转换为 Vec 并按汇编名称排序
-			let mut instructions: Vec<_> = instruction_list.iter().collect();
+			/* let mut instructions: Vec<_> = instruction_list.iter().collect();
 			instructions.sort_by(|a, b| a.0.cmp(b.0));
 
 			for (assembly, (_n, _ty, inst_str, _params, _constraints)) in instructions {
 				println!("{} <- {}", assembly, inst_str);
-			}
+			} */
 			/* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
 				println!("指令: {}", assembly);
 

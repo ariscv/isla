@@ -62,5 +62,6 @@ pub mod source_loc;
 pub mod trace;
 pub mod zencode;
 pub mod isarch;
+mod dprint;
 
 pub const ISLA_VERSION: &str = env!("ISLA_VERSION");

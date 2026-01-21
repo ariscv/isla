@@ -2057,3 +2057,30 @@ pub fn execute_ir_function<'ir, B: BV, R>(
     start_single(task, shared_state, collected, collector);
 
 }
+
+pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &&SharedState<'ir,B>,
+    regs: &RegisterBindings<'ir,B>,
+    lets: &Bindings<'ir,B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    checkpoint: Checkpoint<B>,
+) {
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+
+    // 创建任务，使用传入的checkpoint
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+
+    start_single(task, shared_state, collected, collector);
+}
