@@ -47,6 +47,7 @@ use isla_lib::bitvector::BV;
 use isla_lib::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
 use isla_lib::ir::{AssertionMode, Bindings, FPTy, Name, SharedState, Ty, Val};
+use isla_lib::isarch_args::test_clause_args_main;
 use isla_lib::log;
 use isla_lib::register::RegisterBindings;
 
@@ -274,7 +275,10 @@ fn isla_main() -> i32 {
     // println!("是否存在mret：{:?}",instruction_list.contains(&String::from_str("mret").unwrap()));
 
     #[cfg(feature = "debug_instruction")]
-    isla_lib::isarch::test_instruction_list_main(shared_state, regs, lets);
+    isarch::test_instruction_list_main(shared_state, regs, lets);
+
+    #[cfg(feature = "debug_clause_args")]
+    test_clause_args_main(shared_state, regs, lets);
 
     match subcommand {
         "list-instructions" => {

@@ -2032,7 +2032,7 @@ pub fn footprint_collector<'ir, B: BV>(
 pub fn execute_ir_function<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
-    shared_state: &&SharedState<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
     regs: &RegisterBindings<'ir, B>,
     lets: &Bindings<'ir, B>,
     collected: &R,
@@ -2059,7 +2059,7 @@ pub fn execute_ir_function<'ir, B: BV, R>(
 pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
-    shared_state: &&SharedState<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
     regs: &RegisterBindings<'ir, B>,
     lets: &Bindings<'ir, B>,
     collected: &R,
