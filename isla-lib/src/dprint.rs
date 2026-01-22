@@ -121,6 +121,7 @@ macro_rules! dlog {
 }
 
 use std::fmt::Write;
+use std::str::FromStr;
 use Instr::*;
 
 /// 解码字符串中的所有 zencoded 部分
@@ -225,7 +226,11 @@ fn decode_recursive(input: &str) -> String {
 
     result
 }
-
+impl Name {
+    pub fn to_str<B: BV>(&self, shared_state: &&SharedState<B>) -> String {
+        String::from_str(shared_state.symtab.to_str(**&self)).unwrap_or_else(|e| panic!("cannot get str of Name:{}", e))
+    }
+}
 impl<B: BV> Val<B> {
     /// 单行格式化（紧凑，无缩进换行）
     pub fn to_str(&self, shared_state: &&SharedState<B>) -> String {
