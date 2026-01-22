@@ -227,25 +227,25 @@ fn decode_recursive(input: &str) -> String {
     result
 }
 impl Name {
-    pub fn to_str<B: BV>(&self, shared_state: &&SharedState<B>) -> String {
+    pub fn to_str<B: BV>(&self, shared_state: &SharedState<B>) -> String {
         String::from_str(shared_state.symtab.to_str(**&self)).unwrap_or_else(|e| panic!("cannot get str of Name:{}", e))
     }
 }
 impl<B: BV> Val<B> {
     /// 单行格式化（紧凑，无缩进换行）
-    pub fn to_str(&self, shared_state: &&SharedState<B>) -> String {
+    pub fn to_str(&self, shared_state: &SharedState<B>) -> String {
         self.to_str_internal(shared_state, 0, false)
     }
 
     /// 多行格式化（带缩进换行）
-    pub fn to_str_fmt(&self, shared_state: &&SharedState<B>) -> String {
+    pub fn to_str_fmt(&self, shared_state: &SharedState<B>) -> String {
         self.to_str_internal(shared_state, 0, true)
     }
 
     /// 核心实现函数
     /// indent: 缩进层级
     /// multi_line: 是否多行格式化（true=带换行缩进，false=单行紧凑）
-    fn to_str_internal(&self, shared_state: &&SharedState<B>, indent: usize, multi_line: bool) -> String {
+    fn to_str_internal(&self, shared_state: &SharedState<B>, indent: usize, multi_line: bool) -> String {
         let indent_str = "  ".repeat(indent);
         match self {
             Val::Symbolic(sym) => format!("{}Sym({})", indent_str, sym),

@@ -1,0 +1,19 @@
+instr:
+  add:
+    clause: zRTYPE
+    args: [Sym,Sym,Sym,enum(zrop.zADD)]
+  sub:
+    clause: zRTYPE
+    args: [Sym,Sym,Sym,enum(zrop.zSUB)]
+  sb:
+    clause: zSTORE
+    args: [Sym,Sym,Sym,i64(1)]
+  sh:
+    clause: zSTORE
+    args: [Sym,Sym,Sym,i64(2)]
+  sw:
+    clause: zSTORE
+    args: [Sym,Sym,Sym,i64(3)]
+  sd:
+    clause: zSTORE
+    args: [Sym,Sym,Sym,i64(4)]

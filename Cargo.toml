@@ -92,6 +92,7 @@ sha2 = "0.8.1"
 rand = "0.7.3"
 id-arena = "2"
 ahash = "0.8.11"
+serde-saphyr = "0.0.16"
 isla-axiomatic = { path = "isla-axiomatic", version = "0.2.0" }
 isla-cat = { path = "isla-cat", version = "0.2.0" }
 isla-mml = { path = "isla-mml", version = "0.2.0" }
@@ -101,7 +102,8 @@ isla-elf = { path = "isla-elf", version = "0.2.0" }
 [features]
 smtperf = ["isla-lib/smtperf"]
 debug_instruction=["isla-lib/debug_instruction"]
-default = ["debug_instruction"]
+debug_clause_args=["isla-lib/debug_clause_args"]
+default = ["debug_clause_args"]
 
 [profile.dev]
 opt-level = 0
