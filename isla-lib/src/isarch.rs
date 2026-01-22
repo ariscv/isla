@@ -7,7 +7,7 @@ use crate::executor::{
 use crate::ir::*;
 use crate::log;
 use crate::register::RegisterBindings;
-use crate::smt::checkpoint;
+use crate::smt::{checkpoint, Config, Context};
 use crate::smt::{Checkpoint, Event, Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::{d2, dlog, zencode};
@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
  */
 
 /// 根据类型生成默认值
-pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Val<B> {
+pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &&SharedState<B>) -> Val<B> {
     match ty {
         Ty::Unit => Val::Unit,
         Ty::I64 => Val::I64(0),
@@ -59,8 +59,8 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
 /// 对于枚举类型，返回所有可能的值；对于其他类型，返回包含单个默认值的向量
 pub fn enumerate_possible_values<B: BV>(
     ty: &Ty<Name>,
-    shared_state: &SharedState<B>,
-) -> Result<(Vec<Val<B>>, Vec<(String, String)>), ExecError> {
+    shared_state: &&SharedState<B>,
+) -> Result<(Vec<(Val<B>, Checkpoint<B>)>, Vec<(String, String)>), ExecError> {
     let mut constraints = Vec::new();
 
     match ty {
@@ -70,7 +70,13 @@ pub fn enumerate_possible_values<B: BV>(
                 let num_members = members.len();
                 let mut values = Vec::new();
 
+                //num_members是enum可能取值的个数，对每一种取值进行遍历
                 for i in 0..num_members {
+                    //为每一种enum取值可能性创建一个独立solver/checkpoint
+                    let mut cfg = Config::new();
+                    cfg.set_param_value("model", "true");
+                    let ctx = Context::new(cfg);
+                    let mut solver = Solver::new(&ctx);
                     // 使用默认方式创建枚举值
                     let enum_id = crate::smt::EnumId::from_name(*enum_name);
                     let enum_member = crate::smt::EnumMember { enum_id, member: i };
@@ -79,12 +85,13 @@ pub fn enumerate_possible_values<B: BV>(
                     let member_name = members.iter().nth(i).copied().unwrap_or(*enum_name);
                     let member_name_str = shared_state.symtab.to_str(member_name);
                     constraints.push((member_name_str.to_string(), format!("enum({})", member_name_str)));
-                    values.push(member_val);
+                    values.push((member_val, checkpoint(&mut solver)));
                 }
 
                 Ok((values, constraints))
             } else {
-                Ok((vec![Val::Poison], vec![]))
+                panic!("Enum {}{} not found", enum_name.to_str(shared_state), enum_name);
+                //Ok((vec![Val::Poison], vec![]))
             }
         }
         Ty::Struct(struct_name) => {
@@ -121,29 +128,49 @@ pub fn enumerate_possible_values<B: BV>(
                     // 为非枚举字段添加默认值
                     let mut values = Vec::new();
                     for mut combo in combinations {
+                        //为每一种enum取值可能性创建一个独立solver/checkpoint
+                        let mut cfg = Config::new();
+                        cfg.set_param_value("model", "true");
+                        let ctx = Context::new(cfg);
+                        let mut solver = Solver::new(&ctx);
+                        //把值加进去
                         for (field_name, field_ty) in struct_def {
                             if !combo.contains_key(field_name) {
-                                combo.insert(*field_name, generate_default_value(field_ty, shared_state));
+                                combo.insert(
+                                    *field_name,
+                                    generate_symbolic_value(field_ty, shared_state, &mut solver, SourceLoc::unknown())?,
+                                );
                             }
                         }
-                        values.push(Val::Struct(combo));
+                        values.push((Val::Struct(combo), checkpoint(&mut solver)));
                     }
 
                     Ok((values, constraints))
                 } else {
                     // 没有枚举字段，使用默认值
-                    let val = generate_default_value(ty, shared_state);
-                    Ok((vec![val], constraints))
+                    let mut cfg = Config::new();
+                    cfg.set_param_value("model", "true");
+                    let ctx = Context::new(cfg);
+                    let mut solver = Solver::new(&ctx);
+
+                    let val = generate_symbolic_value(ty, shared_state, &mut solver, SourceLoc::unknown())?;
+                    Ok((vec![(val, checkpoint(&mut solver))], constraints))
                 }
             } else {
-                let val = generate_default_value(ty, shared_state);
-                Ok((vec![val], constraints))
+                let mut cfg = Config::new();
+                cfg.set_param_value("model", "true");
+                let ctx = Context::new(cfg);
+                let mut solver = Solver::new(&ctx);
+
+                let val = generate_symbolic_value(ty, shared_state, &mut solver, SourceLoc::unknown())?;
+                Ok((vec![(val, checkpoint(&mut solver))], constraints))
             }
         }
         _ => {
-            // 对于其他类型，使用默认值（不使用符号化值，因为会导致跨solver上下文问题）
-            let val = generate_default_value(ty, shared_state);
-            Ok((vec![val], constraints))
+            // 对于其他类型，如果有就pannic
+            panic!("TODO enumerate_possible_values: Ctor参数类型({:?})枚举化未实现", ty);
+            /* let val = generate_default_value(ty, shared_state);
+            Ok((vec![val], constraints)) */
         }
     }
 }
@@ -152,13 +179,13 @@ pub fn enumerate_possible_values<B: BV>(
 /// 返回 (符号化值, 约束列表: (变量名, 类型描述))
 pub fn generate_symbolic_value<B: BV>(
     ty: &Ty<Name>,
-    shared_state: &SharedState<B>,
+    shared_state: &&SharedState<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     use crate::primop_util::symbolic;
 
-    Ok(symbolic(ty, shared_state, solver, info)?)
+    symbolic(ty, shared_state, solver, info)
 }
 
 /// 获取指令的所有可能汇编名称
@@ -190,17 +217,17 @@ pub fn get_assembly_names_all<B: BV>(
     // 使用 enumerate_possible_values 来获取所有可能的值
     {
         // 对于复杂类型，先尝试获取枚举值并探索所有可能性
-        if let Ok((arg_values, _constraints)) = enumerate_possible_values(ctor_ty, *shared_state) {
+        if let Ok((arg_values_and_checkpoints, _constraints)) = enumerate_possible_values(ctor_ty, shared_state) {
             // 对于每个可能的值，执行一次
-            for arg_value in arg_values {
+            for (arg_value, checkpoint) in arg_values_and_checkpoints {
                 dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
                 let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
 
                 // 创建新的 solver 和 checkpoint
-                let cfg = crate::smt::Config::new();
-                let ctx = crate::smt::Context::new(cfg);
-                let mut new_solver = Solver::new(&ctx);
-                let cp = checkpoint(&mut new_solver);
+                //let cfg = crate::smt::Config::new();
+                //let ctx = crate::smt::Context::new(cfg);
+                //let mut new_solver = Solver::new(&ctx);
+                //let cp = checkpoint(&mut new_solver);
 
                 let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
                 let collected: Vec<Val<B>> = Vec::new();
@@ -227,7 +254,7 @@ pub fn get_assembly_names_all<B: BV>(
                             }
                         },
                     },
-                    cp,
+                    checkpoint.clone(),
                 );
 
                 let res = { result.lock().unwrap().as_ref().cloned() };
@@ -277,7 +304,7 @@ pub fn get_assembly_names<B: BV>(
         let mut new_solver = Solver::new(&ctx);
         let cp = checkpoint(&mut new_solver);
 
-        if let Ok(arg_value) = generate_symbolic_value(ctor_ty, *shared_state, &mut new_solver, SourceLoc::unknown()) {
+        if let Ok(arg_value) = generate_symbolic_value(ctor_ty, shared_state, &mut new_solver, SourceLoc::unknown()) {
             // 对于每个可能的值，执行一次
 
             dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
@@ -323,7 +350,7 @@ pub fn get_assembly_names<B: BV>(
 /* /// 提取类型的参数信息，返回 (参数名列表, 约束列表)
 fn extract_type_params<B: BV>(
     ty: &Ty<Name>,
-    shared_state: &SharedState<B>,
+    shared_state: &&SharedState<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<(Vec<String>, Vec<(String, String)>), ExecError> {
@@ -439,7 +466,7 @@ pub fn test_instruction_list_main<B: BV>(
 ) {
     println!("test_instruction_list_main");
 
-    let assembly_names = get_assembly_names("zRTYPE", shared_state, regs, lets);
+    let assembly_names = get_assembly_names_all("zRTYPE", shared_state, regs, lets);
 
     println!("{:?}", assembly_names);
     ()
