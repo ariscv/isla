@@ -60,6 +60,7 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
 /// 枚举类型的所有可能值
 /// 对于枚举类型，返回所有可能的值；对于其他类型，返回包含单个默认值的向量
 pub fn enumerate_possible_values<'ir, B: BV>(
+    clause_name: Option<&str>,
     ty: &Ty<Name>,
     shared_state: &'ir SharedState<'ir, B>,
 ) -> Result<(Vec<ArgStruct<'ir, B>>, Vec<(String, String)>), ExecError> {
@@ -90,7 +91,10 @@ pub fn enumerate_possible_values<'ir, B: BV>(
                     values.push((member_val, checkpoint(&mut solver)));
                 }
 
-                Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, shared_state)).collect(), constraints))
+                Ok((
+                    values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(),
+                    constraints,
+                ))
             } else {
                 panic!("Enum {}{} not found", enum_name.to_str(shared_state), enum_name);
                 //Ok((vec![Val::Poison], vec![]))
@@ -147,7 +151,10 @@ pub fn enumerate_possible_values<'ir, B: BV>(
                         values.push((Val::Struct(combo), checkpoint(&mut solver)));
                     }
 
-                    Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, shared_state)).collect(), constraints))
+                    Ok((
+                        values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(),
+                        constraints,
+                    ))
                 } else {
                     // 没有枚举字段，使用默认值
                     let mut cfg = Config::new();
@@ -159,7 +166,10 @@ pub fn enumerate_possible_values<'ir, B: BV>(
 
                     //没有枚举，所以只有一种情况
                     let values = vec![(val, checkpoint(&mut solver))];
-                    Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, shared_state)).collect(), constraints))
+                    Ok((
+                        values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(),
+                        constraints,
+                    ))
                 }
             } else {
                 let mut cfg = Config::new();
@@ -171,7 +181,10 @@ pub fn enumerate_possible_values<'ir, B: BV>(
 
                 //没有枚举，所以只有一种情况
                 let values = vec![(val, checkpoint(&mut solver))];
-                Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, shared_state)).collect(), constraints))
+                Ok((
+                    values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(),
+                    constraints,
+                ))
             }
         }
         _ => {
@@ -196,6 +209,36 @@ pub fn generate_symbolic_value<B: BV>(
     symbolic(ty, shared_state, solver, info)
 }
 
+pub fn get_symbolic_arg_all<'ir, B: BV>(
+    instruction_name: &str, //like "zRTYPE/zMRET/zSTORE"
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Vec<ArgStruct<'ir, B>> {
+    // 查找指令的构造函数名称
+    let encoded_name = format!("{}", instruction_name);
+    let ctor_name = shared_state.symtab.lookup(&encoded_name);
+
+    // 从 union 类型信息中获取构造函数的参数类型
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
+
+    let Some(union_members) = instruction_union else {
+        panic!("get_assembly_names_all: 在symtab中没找到符号'zinstruction'");
+    };
+
+    // 查找当前构造函数的类型
+    let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
+        return vec![];
+    };
+
+    // 使用 enumerate_possible_values 来获取所有可能的值
+
+    // 对于复杂类型，先尝试获取枚举值并探索所有可能性
+    let (arg_values_and_checkpoints, _constraints) =
+        enumerate_possible_values(Some(instruction_name), ctor_ty, shared_state).unwrap();
+
+    arg_values_and_checkpoints
+}
 /// 获取指令的所有可能汇编名称
 /// 探索所有枚举值的可能性，返回所有可能的汇编名称列表
 pub fn get_assembly_names_all<B: BV>(
@@ -225,7 +268,7 @@ pub fn get_assembly_names_all<B: BV>(
     // 使用 enumerate_possible_values 来获取所有可能的值
 
     // 对于复杂类型，先尝试获取枚举值并探索所有可能性
-    let (arg_values_and_checkpoints, _constraints) = enumerate_possible_values(ctor_ty, shared_state).unwrap();
+    let arg_values_and_checkpoints = get_symbolic_arg_all(instruction_name, shared_state, regs, lets);
     // 对于每个可能的值，执行一次
     for ArgStruct { arg_value, checkpoint, .. } in arg_values_and_checkpoints {
         dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));

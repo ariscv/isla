@@ -5,7 +5,7 @@ use crate::executor::{
     backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState,
 };
 use crate::ir::*;
-use crate::isarch::get_assembly_names_all;
+use crate::isarch::{get_assembly_names_all, get_symbolic_arg_all};
 use crate::log;
 use crate::register::RegisterBindings;
 use crate::smt::{checkpoint, Config, Context};
@@ -15,10 +15,14 @@ use crate::{d2, dlog, zencode};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
+use std::{ fs};
+use serde::{Deserialize,Serialize};
+
 
 #[derive(Clone)]
 pub struct ArgStruct<'ir, B> {
     pub arg_value: Val<B>,
+    pub clause_name: Option<String>,
     pub checkpoint: Checkpoint<B>,
     shared_state: &'ir SharedState<'ir, B>,
 }
@@ -26,15 +30,47 @@ pub struct ArgStruct<'ir, B> {
 impl<'ir, B: BV> ArgStruct<'ir, B> {
     pub fn new(
         arg_value: Val<B>,
-        clause: Option<String>,
+        clause_name: Option<String>,
         checkpoint: Checkpoint<B>,
         shared_state: &'ir SharedState<'_, B>,
     ) -> Self {
-        ArgStruct { arg_value, checkpoint, shared_state }
+        ArgStruct { arg_value, clause_name, checkpoint, shared_state }
     }
-    pub fn from_tuple(tupple: (Val<B>, Checkpoint<B>), shared_state: &'ir SharedState<'_, B>) -> Self {
+    pub fn from_tuple(
+        tupple: (Val<B>, Checkpoint<B>),
+        clause_name: Option<&str>,
+        shared_state: &'ir SharedState<'_, B>,
+    ) -> Self {
         let (arg_value, checkpoint) = tupple;
-        Self::new(arg_value, None, checkpoint, shared_state)
+        Self::new(
+            arg_value,
+            match clause_name {
+                Some(s) => Some(s.to_string()),
+                None => None,
+            },
+            checkpoint,
+            shared_state,
+        )
+    }
+}
+
+impl<'ir, B: BV> std::fmt::Display for ArgStruct<'ir, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "arg_value={}, clause_name={:?}", self.arg_value.to_str_fmt(self.shared_state), self.clause_name)
+    }
+}
+
+impl<'ir, B: BV> std::fmt::Debug for ArgStruct<'ir, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // arg_value 使用 Display 风格（保留换行），clause_name 使用 Debug 风格
+        let arg_value_str = self.arg_value.to_str_fmt(self.shared_state);
+        // 对每一行添加缩进，使其与 "arg_value: " 对齐
+        let indented = arg_value_str
+            .lines()
+            .map(|line| format!("        {}", line)) // 8 空格缩进对齐
+            .collect::<Vec<_>>()
+            .join("\n");
+        write!(f, "ArgStruct {{\n    arg_value: {},\n    clause_name: {:?},\n}}", indented, self.clause_name)
     }
 }
 struct InstructionMap<'ir, B> {
@@ -75,17 +111,46 @@ impl<'ir, B: BV> InstructionMap<'ir, B> {
     }
 }
 
+/**
+    YAML
+*/
+#[derive(Deserialize, Serialize)]
+pub struct YAMLSerializerBuilder {
+    pub arg_value: Vec<String>,
+    pub clause_name: Option<String>,
+}
+
+impl YAMLSerializerBuilder {
+    pub fn new(
+        arg_value: Vec<String>,
+        clause_name: Option<String>,
+    ) -> Self {
+        YAMLSerializerBuilder { arg_value, clause_name}
+    }
+    pub fn from_ArgStruct<B>(
+        arg:&ArgStruct<B>
+    ) -> Self {
+        Self::new(   , arg.clause_name.clone())
+    }
+}
+
 #[cfg(feature = "debug_clause_args")]
 pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_instruction_list_main");
 
-    let assembly_names = get_assembly_names_all("zRTYPE", shared_state, regs, lets);
+    let assembly_names = get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
     // let assembly_names = get_assembly_names_all("zSTORE", shared_state, regs, lets);
 
     /* assembly_names.iter().for_each(|name| {
         println!("{}", name);
     }); */
-    println!("{:?}", assembly_names);
+    //println!("{:#?}", assembly_names);
+
+    //let yaml_str = fs::read_to_string("conf.yml").unwrap();
+    //let map: HashMap<String, serde_saphyr::Value> = serde_saphyr::from_str(&yaml_str)?;
+
+    let yaml = serde_saphyr::to_string(&assembly_names.iter().map(|x|YAMLSerializerBuilder::from_ArgStruct(x)).collect() ).unwrap() ;
+    println!("{}", yaml);
 
     ()
 }

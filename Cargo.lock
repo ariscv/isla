@@ -482,6 +482,7 @@ dependencies = [
  "petgraph 0.5.1",
  "regex",
  "serde",
+ "serde-saphyr",
  "sha2",
  "toml",
  "z3-sys",
