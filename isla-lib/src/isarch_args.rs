@@ -1,6 +1,7 @@
 use crate::bitvector::BV;
+use crate::dlog;
 use crate::ir::*;
-use crate::isarch::get_symbolic_arg_all;
+use crate::isarch::{get_symbolic_arg_all, ir_assembly_names_to_InstructionMap};
 use crate::register::RegisterBindings;
 use crate::smt::Checkpoint;
 use crate::zencode;
@@ -61,7 +62,9 @@ impl<'ir, B: BV> std::fmt::Debug for ArgStruct<'ir, B> {
         write!(f, "ArgStruct {{\n    arg_value: {},\n    clause_name: {:?},\n}}", indented, self.clause_name)
     }
 }
-struct InstructionMap<'ir, B> {
+
+#[derive(Clone)]
+pub struct InstructionMap<'ir, B> {
     table: Vec<(String, ArgStruct<'ir, B>)>,
     shared_state: &'ir SharedState<'ir, B>,
 }
@@ -103,23 +106,23 @@ impl<'ir, B: BV> InstructionMap<'ir, B> {
     YAML
 */
 #[derive(Deserialize, Serialize)]
-pub struct YAMLSerializerBuilder {
-    pub arg_value: Vec<String>,
+pub struct YAMLSerializerBuilder_PerInst {
+    pub arg_value: Vec<HashMap<String, String>>,
     pub clause_name: Option<String>,
 }
 
-impl YAMLSerializerBuilder {
-    pub fn new(arg_value: Vec<String>, clause_name: Option<String>) -> Self {
-        YAMLSerializerBuilder { arg_value, clause_name }
+impl YAMLSerializerBuilder_PerInst {
+    pub fn new(arg_value: Vec<HashMap<String, String>>, clause_name: Option<String>) -> Self {
+        YAMLSerializerBuilder_PerInst { arg_value, clause_name }
     }
 
     /// 从 ArgStruct 转换为 YAML 序列化结构
     /// 将 Val<B> 转换为 YAML 格式的字符串向量
     /// 对于 Struct/Vector/List 类型，会展开为扁平的字符串向量
-    pub fn from_ArgStruct<B: BV>(arg: &ArgStruct<B>) -> Self {
+    /* pub fn from_ArgStruct<B: BV>(arg: &ArgStruct<B>) -> Self {
         let arg_value = Self::val_to_yaml_strings_flat(&arg.arg_value, arg.shared_state);
         Self::new(arg_value, arg.clause_name.clone())
-    }
+    } */
 
     /// 将 Val<B> 转换为扁平的字符串向量（用于 Struct 内部字段的展开）
     fn val_to_yaml_strings_flat<B: BV>(val: &Val<B>, shared_state: &SharedState<B>) -> Vec<String> {
@@ -222,6 +225,12 @@ impl YAMLSerializerBuilder {
 pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_instruction_list_main");
 
+    /* {
+        let func_id = shared_state.symtab.lookup("zMRET");
+        let (func_args, ret, instr) = shared_state.functions.get(&func_id).unwrap();
+
+        dlog!("{:?}", (func_args, ret, instr.len()));
+    } */
     let assembly_names = get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
     // let assembly_names = get_assembly_names_all("zSTORE", shared_state, regs, lets);
 
@@ -233,11 +242,13 @@ pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &Regist
     //let yaml_str = fs::read_to_string("conf.yml").unwrap();
     //let map: HashMap<String, serde_saphyr::Value> = serde_saphyr::from_str(&yaml_str)?;
 
-    let yaml = serde_saphyr::to_string(
-        &assembly_names.iter().map(|x| YAMLSerializerBuilder::from_ArgStruct(x)).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    println!("{}", yaml);
+    //let yaml = serde_saphyr::to_string(
+    //    &assembly_names.iter().map(|x| YAMLSerializerBuilder_PerInst::from_ArgStruct(x)).collect::<Vec<_>>(),
+    //)
+    //.unwrap();
+    //println!("{}", yaml);
+
+    let out = ir_assembly_names_to_InstructionMap("zSTORE", shared_state, regs, lets);
 
     ()
 }

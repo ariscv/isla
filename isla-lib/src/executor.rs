@@ -2080,5 +2080,5 @@ pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_single(task, shared_state, collected, collector);
+    start_single(task, &shared_state, collected, collector);
 }

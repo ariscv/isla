@@ -1,7 +1,11 @@
 instr:
   add:
     clause: zRTYPE
-    args: [Sym,Sym,Sym,enum(zrop.zADD)]
+    args: 
+      "tuple#%bv5_%bv5_%bv5_%enum zrop1": Sym
+      "tuple#%bv5_%bv5_%bv5_%enum zrop0": Sym
+      "tuple#%bv5_%bv5_%bv5_%enum zrop2": Sym
+      "tuple#%bv5_%bv5_%bv5_%enum zrop3": zADD
   sub:
     clause: zRTYPE
     args: [Sym,Sym,Sym,enum(zrop.zSUB)]
