@@ -77,47 +77,49 @@ pub mod colors {
     pub const BG_CYAN: &str = "\x1b[46m";
     pub const BG_WHITE: &str = "\x1b[47m";
 }
+/// 日志宏：带颜色和位置信息的调试输出
+///
+/// # 用法
+/// - `dlog!("format", args...)` - 使用默认蓝色
+/// - `dlog!(colors::RED, "format", args...)` - 使用自定义颜色
 #[macro_export]
 macro_rules! dlog {
-    // 带日志级别的基础版本
-    ($($arg:tt)*) => {{
-        // 获取调用位置信息
+    // 内部实现分支：颜色 + 格式化字符串 + 参数
+    (@impl $color:expr, $fmt:literal $($arg:tt)*) => {{
         let file = file!();
         let line = line!();
         let column = column!();
 
-        // 尝试获取函数名（nightly特性，需要启用 #![feature(backtrace)]）
-        //#[cfg(feature = "backtrace")]
         let function_name = {
-            fn __f() {} // 一个局部零大小函数
+            fn __f() {}
             std::any::type_name_of_val(&__f)
                 .trim_end_matches("::__f")
                 .trim_end_matches("::{{closure}}")
-                .rsplit_once("::")        // 从右边切最后一次
-                .map(|(_, name)| name)    // 只保留最后一段
-                .unwrap_or("unknown")     // 兜底
+                .rsplit_once("::")
+                .map(|(_, name)| name)
+                .unwrap_or("unknown")
         };
 
-        //#[cfg(not(feature = "backtrace"))]
-        //let function_name = {
-        //    // 使用module_path!作为替代
-        //    module_path!()
-        //};
-
-        // 输出格式：文件:行:列 在大多数IDE中是可点击的
-        // 格式为：级别 [文件:行:列] 消息
-        println!("{}[{}:{}:{} {}]: {} {}",
-            $crate::dprint::colors::BLUE,
+        /* println!("{}[{}:{}:{} {}]: {} {}",
+            $color,
             file,
             line,
             column,
             function_name,
-            format_args!($($arg)*),
+            format_args!($fmt $($arg)*),
             $crate::dprint::colors::RESET,
-        );
+        ); */
     }};
 
+    // 带自定义颜色的版本: dlog(colors::COLOR, "format", args...)
+    ($color:expr, $fmt:literal $($arg:tt)*) => {
+        $crate::dlog!(@impl $color, $fmt $($arg)*)
+    };
 
+    // 默认蓝色版本: dlog("format", args...)
+    ($fmt:literal $($arg:tt)*) => {
+        $crate::dlog!(@impl $crate::dprint::colors::BLUE, $fmt $($arg)*)
+    };
 }
 
 use std::fmt::Write;
@@ -433,6 +435,29 @@ impl<B: BV> Val<B> {
                 format!("{}&{}", indent_str, name_decoded)
             }
             Val::Poison => format!("{}<poison>", indent_str),
+        }
+    }
+
+    ///输出类型信息
+    pub fn type_string(&self) -> String {
+        use Val::*;
+        match self {
+            Symbolic(_) => "Symbolic".to_string(),
+            I64(_) => "I64".to_string(),
+            I128(_) => "I128".to_string(),
+            Bool(_) => "Bool".to_string(),
+            Bits(_) => "Bits".to_string(),
+            MixedBits(_) => "MixedBits".to_string(),
+            String(_) => "String".to_string(),
+            Enum(_) => "Enum".to_string(),
+            Unit => "Unit".to_string(),
+            List(_) => "List".to_string(),
+            Vector(_) => "Vector".to_string(),
+            Struct(_) => "Struct".to_string(),
+            Ctor(_, _) => "Ctor".to_string(),
+            SymbolicCtor(_, _) => "SymbolicCtor".to_string(),
+            Ref(_) => "Ref".to_string(),
+            Poison => "Poison".to_string(),
         }
     }
 }

@@ -1,17 +1,19 @@
 use crate::bitvector::BV;
 use crate::config::ISAConfig;
+use crate::dprint::colors;
 use crate::error::ExecError;
 use crate::executor::{
     backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState,
 };
-use crate::ir::*;
-use crate::isarch_args::ArgStruct;
+use crate::ir::UVal;
+use crate::isarch_args::{ArgStruct, InstructionMap};
 use crate::log;
 use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context};
+use crate::smt::{checkpoint, Config, Context, EnumMember, Model};
 use crate::smt::{Checkpoint, Event, Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::{d2, dlog, zencode};
+use crate::{ir::*, smt};
 use sha2::digest::generic_array::functional::FunctionalSequence;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -54,6 +56,100 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
         }
         Ty::Union(_) => Val::Unit, // Union 类型使用第一个构造函数的默认值
         _ => Val::Unit,            // 对于其他类型，使用 Unit 作为默认值
+    }
+}
+
+/// 打印 frame 中函数参数的符号变量值
+fn print_frame_args<B: BV>(
+    function_name: &str,
+    frame: &LocalFrame<B>,
+    shared_state: &SharedState<B>,
+    mut solver: Solver<B>,
+) {
+    let mut found = false;
+
+    // 首先调用 check_sat 来确保 solver 有可用的模型
+    if solver.check_sat(SourceLoc::unknown()) != crate::smt::SmtResult::Sat {
+        dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
+        return;
+    }
+
+    let mut model = Model::new(&solver);
+
+    // 获取函数的参数名
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, _, _) = shared_state.functions.get(&function_id).unwrap();
+    for (arg_name, _arg_ty) in func_args.iter() {
+        if let Some(uval) = frame.vars().get(arg_name) {
+            if let UVal::Init(val) = uval {
+                // 递归查找符号变量
+                let mut syms = Vec::new();
+                collect_syms(val, &mut syms);
+                if !syms.is_empty() {
+                    if !found {
+                        dlog!("=== 函数参数符号变量求解结果 [{}] ===", function_name);
+                        found = true;
+                    }
+                    let arg_name_str = shared_state.symtab.to_str(*arg_name);
+                    dlog!("  {} = {}", arg_name_str, val.to_str_fmt(shared_state));
+
+                    // 求解每个符号变量的值
+                    for sym in &syms {
+                        match model.get_var(*sym) {
+                            Ok(model_val) => match model_val {
+                                crate::smt::ModelVal::Exp(exp) => {
+                                    dlog!("    |||Sym({:?}) = {:?}", sym, exp);
+                                }
+                                crate::smt::ModelVal::Arbitrary(ty) => {
+                                    dlog!("    Sym({:?}) = Arbitrary ({:?})", sym, ty);
+                                }
+                            },
+                            Err(e) => {
+                                dlog!("    Sym({:?}) = Error: {:?}", sym, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if found {
+        dlog!("==============================");
+    }
+}
+
+/// 收集符号变量
+fn collect_syms<B: BV>(val: &Val<B>, syms: &mut Vec<Sym>) {
+    match val {
+        Val::Symbolic(s) => {
+            if !syms.contains(s) {
+                syms.push(*s);
+            }
+        }
+        Val::MixedBits(segs) => {
+            for seg in segs {
+                if let BitsSegment::Symbolic(s) = seg {
+                    if !syms.contains(s) {
+                        syms.push(*s);
+                    }
+                }
+            }
+        }
+        Val::Vector(vs) | Val::List(vs) => {
+            for v in vs {
+                collect_syms(v, syms);
+            }
+        }
+        Val::Struct(fields) => {
+            for (_, v) in fields {
+                collect_syms(v, syms);
+            }
+        }
+        Val::Ctor(_, v) => {
+            collect_syms(v, syms);
+        }
+        _ => {}
     }
 }
 
@@ -187,6 +283,18 @@ pub fn enumerate_possible_values<'ir, B: BV>(
                 ))
             }
         }
+        Ty::Unit => {
+            let mut cfg = Config::new();
+            cfg.set_param_value("model", "true");
+            let ctx = Context::new(cfg);
+            let mut solver = Solver::new(&ctx);
+
+            let val = generate_symbolic_value(ty, shared_state, &mut solver, SourceLoc::unknown())?;
+
+            //没有枚举，所以只有一种情况
+            let values = vec![(val, checkpoint(&mut solver))];
+            Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(), constraints))
+        }
         _ => {
             // 对于其他类型，如果有就pannic
             panic!("TODO enumerate_possible_values: Ctor参数类型({:?})枚举化未实现", ty);
@@ -291,8 +399,8 @@ pub fn get_assembly_names_all<B: BV>(
             regs,
             lets,
             &collected,
-            &|_thread, _task_id, exec_result, shared_state, _solver, collected| match exec_result {
-                Ok((run, _frame)) => {
+            &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
+                Ok((run, frame)) => {
                     if let Run::Finished(ret_val) = run {
                         dlog!(
                             "||||:_thread={:?},_task_id={:?},Ok((Run::Finished(ret_val:{}), _frame)) ",
@@ -300,6 +408,7 @@ pub fn get_assembly_names_all<B: BV>(
                             _task_id,
                             ret_val.clone().to_str_fmt(&shared_state)
                         );
+                        print_frame_args("zassembly_forwards", &frame, shared_state, solver);
                         collected.lock().unwrap().push(ret_val.clone().to_str_fmt(&shared_state));
                         *result.lock().unwrap() = Some(ret_val);
                     }
@@ -325,16 +434,12 @@ pub fn get_assembly_names_all<B: BV>(
     assembly_names
 }
 
-///当参数是enum时，转成Sym值，比如Sym(14)，
-/// 那就会报“Could not get Z3 func_decl 14”的错
-pub fn get_assembly_names<B: BV>(
+pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
     instruction_name: &str,
-    shared_state: &SharedState<B>,
+    shared_state: &'ir SharedState<'ir, B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-) -> Vec<String> {
-    use crate::smt::checkpoint;
-
+) -> Vec<(String, ArgStruct<'ir, B>)> {
     // 查找指令的构造函数名称
     let encoded_name = format!("{}", instruction_name);
     let ctor_name = shared_state.symtab.lookup(&encoded_name);
@@ -347,62 +452,144 @@ pub fn get_assembly_names<B: BV>(
     };
 
     // 查找当前构造函数的类型
-    let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
-        return vec![];
-    };
+    let (_, ctor_ty) = union_members.iter().find(|(n, _ty)| *n == ctor_name).unwrap();
 
-    let mut assembly_names = Vec::new();
+    let mut arg_structs = Vec::new();
 
     // 使用 enumerate_possible_values 来获取所有可能的值
-    {
-        // 创建新的 solver 和 checkpoint
-        let cfg = crate::smt::Config::new();
-        let ctx = crate::smt::Context::new(cfg);
-        let mut new_solver = Solver::new(&ctx);
-        let cp = checkpoint(&mut new_solver);
 
-        if let Ok(arg_value) = generate_symbolic_value(ctor_ty, shared_state, &mut new_solver, SourceLoc::unknown()) {
-            // 对于每个可能的值，执行一次
+    // 对于复杂类型，先尝试获取枚举值并探索所有可能性
+    let arg_values_and_checkpoints = get_symbolic_arg_all(instruction_name, shared_state, regs, lets);
+    // 对于每个可能的值，执行一次
+    for ArgStruct { arg_value, checkpoint, .. } in arg_values_and_checkpoints {
+        // clone arg_value 以避免闭包中的生命周期问题
+        let arg_value = arg_value.clone();
+        dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
+        let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
 
-            dlog!("{}：Ctor是有参数的{:?},\n{}", instruction_name, ctor_ty, arg_value.to_str_fmt(shared_state));
-            let instr_value = Val::<B>::Ctor(ctor_name, Box::new(arg_value.clone()));
+        // 闭包只收集 (assembly_str, checkpoint)，不包含 shared_state 引用
+        let collected: Arc<Mutex<Vec<(String, Checkpoint<B>)>>> = Arc::new(Mutex::new(Vec::new()));
 
-            let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-            let collected: Vec<Val<B>> = Vec::new();
-            let collected = Arc::new(collected);
+        crate::executor::execute_ir_function_with_checkpoint(
+            "zassembly_forwards",
+            &[instr_value],
+            &shared_state,
+            regs,
+            lets,
+            &collected,
+            &|_thread, _task_id, exec_result, shared_state, mut solver, collected| match exec_result {
+                Ok((run, _frame)) => match run {
+                    Run::Finished(ret_val) => {
+                        dlog!(
+                            "||||:_thread={:?},_task_id={:?},Ok((Run::Finished(ret_val:{}), _frame)) ",
+                            _thread,
+                            _task_id,
+                            ret_val.clone().to_str_fmt(&shared_state)
+                        );
+                        let assembly_str = match ret_val.clone() {
+                            Val::String(s) => s,
+                            _ => panic!("return value error: {:#?}", &ret_val),
+                        };
 
-            crate::executor::execute_ir_function_with_checkpoint(
-                "zassembly_forwards",
-                &[instr_value],
-                shared_state,
-                regs,
-                lets,
-                &collected,
-                &|_thread, _task_id, exec_result, shared_state, _solver, _collected| match exec_result {
-                    Ok((run, _frame)) => {
-                        if let Run::Finished(ret_val) = run {
-                            *result.lock().unwrap() = Some(ret_val);
+                        /* if solver.check_sat(SourceLoc::unknown()) != crate::smt::SmtResult::Sat {
+                            dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
+                            return;
                         }
+                        let mut model = Model::new(&solver); */
+                        match arg_value.clone() {
+                            Val::Struct(map) => {
+                                dlog!(
+                                    colors::YELLOW,
+                                    "{:#?}",
+                                    map.iter()
+                                        .map(|(n, v)| (zencode::decode(&n.to_str(&shared_state)), v))
+                                        .collect::<HashMap<_, _>>()
+                                );
+                            }
+                            Val::Unit => {
+                                dlog!(colors::YELLOW, "Unit",);
+                            }
+                            _ => {
+                                panic!("TODO: 未考虑周全的参数类型{}:\n{:#?}", arg_value.type_string(), &arg_value);
+                            }
+                        }
+                        let cp = smt::checkpoint(&mut solver);
+                        // 只收集 (assembly_str, checkpoint)，不在闭包内创建 ArgStruct
+                        collected.lock().unwrap().push((assembly_str, cp));
                     }
-                    Err((error, backtrace)) => match &error {
-                        ExecError::MatchFailure(_) => {}
-                        _ => {
-                            eprintln!("执行错误: {:?}", error);
-                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
-                        }
-                    },
+                    _ => {
+                        eprintln!(
+                            "执行异常终止: {}",
+                            match run {
+                                Run::Dead => "Run::Dead",
+                                Run::Exit => "Run::Exit",
+                                Run::Suspended => "Run::Suspended",
+                                _ => "Unkown type",
+                            }
+                        );
+                    }
                 },
-                cp,
-            );
+                Err((error, backtrace)) => match &error {
+                    ExecError::MatchFailure(_) => {}
+                    _ => {
+                        eprintln!("执行错误: {:?}", error);
+                        eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                    }
+                },
+            },
+            checkpoint.clone(),
+        );
 
-            let res = { result.lock().unwrap().as_ref().cloned() };
-            if let Some(Val::String(s)) = &res {
-                assembly_names.push(s.clone());
-            }
+        /*let res = { result.lock().unwrap().as_ref().cloned() };
+        if let Some(Val::String(s)) = &res {
+            assembly_names.push(s.clone());
+        }*/
+        // 将收集到的 (assembly_str, checkpoint) 转换为 ArgStruct 并收集
+
+        for (assembly_str, cp) in collected.lock().unwrap().drain(..) {
+            let arg_struct = ArgStruct::new(arg_value.clone(), Some(instruction_name.to_string()), cp, shared_state);
+            arg_structs.push((assembly_str, arg_struct));
         }
     }
 
-    assembly_names
+    arg_structs
+}
+pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
+    instruction_name: &str,
+    shared_state: &SharedState<'ir, B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+    arg_structs: Vec<(String, ArgStruct<'ir, B>)>,
+) /*-> InstructionMap<'ir, B>*/
+{
+    let arg_structs_splited = arg_structs
+        .iter()
+        .map(|(assembly_str, arg_struct)| (assembly_str.split_whitespace().next(), arg_struct))
+        .collect::<Vec<_>>();
+
+    let arg_structs_merged: Vec<(String, ArgStruct<'ir, B>)> = Vec::new();
+    for inst_name_and_arg_struct in arg_structs_splited {
+        let (inst_name_option, arg_struct) = inst_name_and_arg_struct;
+        //在arg_structs_merged的key中，如果inst_name_option在里面没找到，说明是个新的，整个inst_name_and_arg_struct加进arg_structs_merged；
+        //如果找到了，说明表里面有，就
+
+		//note:先翻译Val::xxx，后merge吧
+
+        // arg_structs_merged.iter().collect::<HashMap<String, ArgStruct<'ir, B>>>();
+    }
+    ()
+}
+
+pub fn ir_assembly_names_to_InstructionMap<'ir, B: BV>(
+    instruction_name: &str,
+    shared_state: &SharedState<'ir, B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) /*-> InstructionMap<'ir, B>*/
+{
+    let step1_ret = ir_assembly_names_to_InstructionMap_step1_symbolic_exec(instruction_name, shared_state, regs, lets);
+    let step2_ret =
+        ir_assembly_names_to_InstructionMap_step2_merge(instruction_name, shared_state, regs, lets, step1_ret);
 }
 /* /// 提取类型的参数信息，返回 (参数名列表, 约束列表)
 fn extract_type_params<B: BV>(

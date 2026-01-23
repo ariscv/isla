@@ -64,12 +64,12 @@ use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
 
-use crate::bitvector::b64::B64;
 use crate::bitvector::BV;
 use crate::error::ExecError;
-use crate::ir::{Loc, Name, Symtab, Val};
+use crate::ir::{IRTypeInfo, Loc, Name, Symtab, Val};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
+use crate::{bitvector::b64::B64, ir::SharedState};
 
 /// A newtype wrapper for symbolic variables, which are `u32` under
 /// the hood.
@@ -119,6 +119,49 @@ impl EnumId {
 
     pub fn first_member(self) -> EnumMember {
         EnumMember { enum_id: self, member: 0 }
+    }
+}
+
+impl EnumMember {
+    /// 从成员序号获取对应的符号表名称
+    ///
+    /// 返回枚举成员在符号表(symtab/type_info都可以，效果是一样的)中的 `Name`
+    ///
+    /// # 参数
+    /// * `type_info` - 包含枚举类型信息的 `IRTypeInfo`
+    ///
+    /// # 返回
+    /// * `Some(Name)` - 如果找到对应的枚举和成员
+    /// * `None` - 如果枚举不存在或成员序号越界
+    pub fn to_name<B>(&self, shared_state: &SharedState<B>) -> Name {
+        shared_state
+            .type_info
+            .enums
+            .get(&self.enum_id.to_name())
+            .and_then(|members| members.get(self.member).copied())
+            .unwrap_or_else(|| panic!("Can't find in typeinfo: {:?}", self))
+    }
+
+    /// 从符号表名称获取对应的枚举成员
+    ///
+    /// 返回 `EnumMember`，这是 `to_name` 的反向操作
+    ///
+    /// # 参数
+    /// * `member_name` - 枚举成员在符号表中的 `Name`
+    /// * `shared_state` - 包含类型信息的共享状态
+    ///
+    /// # 返回
+    /// * `Some(EnumMember)` - 如果找到对应的枚举成员
+    /// * `None` - 如果该名称不是任何枚举的成员
+    pub fn from_name<B: BV>(member_name: Name, shared_state: &SharedState<B>) -> Self {
+        shared_state
+            .type_info
+            .enum_members
+            .get(&member_name)
+            .map(|&(member, enum_size, enum_name)| EnumMember { enum_id: EnumId::from_name(enum_name), member })
+            .unwrap_or_else(|| {
+                panic!("Can't find '{}' in typeinfo: {:?}", member_name.to_str(&shared_state), member_name)
+            })
     }
 }
 
