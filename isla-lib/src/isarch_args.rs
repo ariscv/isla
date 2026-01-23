@@ -1,23 +1,11 @@
 use crate::bitvector::BV;
-use crate::config::ISAConfig;
-use crate::error::ExecError;
-use crate::executor::{
-    backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState,
-};
 use crate::ir::*;
-use crate::isarch::{get_assembly_names_all, get_symbolic_arg_all};
-use crate::log;
+use crate::isarch::get_symbolic_arg_all;
 use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context};
-use crate::smt::{Checkpoint, Event, Solver, Sym};
-use crate::source_loc::SourceLoc;
-use crate::{d2, dlog, zencode};
+use crate::smt::Checkpoint;
+use crate::zencode;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
-use std::{ fs};
-use serde::{Deserialize,Serialize};
-
 
 #[derive(Clone)]
 pub struct ArgStruct<'ir, B> {
@@ -121,16 +109,112 @@ pub struct YAMLSerializerBuilder {
 }
 
 impl YAMLSerializerBuilder {
-    pub fn new(
-        arg_value: Vec<String>,
-        clause_name: Option<String>,
-    ) -> Self {
-        YAMLSerializerBuilder { arg_value, clause_name}
+    pub fn new(arg_value: Vec<String>, clause_name: Option<String>) -> Self {
+        YAMLSerializerBuilder { arg_value, clause_name }
     }
-    pub fn from_ArgStruct<B>(
-        arg:&ArgStruct<B>
-    ) -> Self {
-        Self::new(   , arg.clause_name.clone())
+
+    /// 从 ArgStruct 转换为 YAML 序列化结构
+    /// 将 Val<B> 转换为 YAML 格式的字符串向量
+    /// 对于 Struct/Vector/List 类型，会展开为扁平的字符串向量
+    pub fn from_ArgStruct<B: BV>(arg: &ArgStruct<B>) -> Self {
+        let arg_value = Self::val_to_yaml_strings_flat(&arg.arg_value, arg.shared_state);
+        Self::new(arg_value, arg.clause_name.clone())
+    }
+
+    /// 将 Val<B> 转换为扁平的字符串向量（用于 Struct 内部字段的展开）
+    fn val_to_yaml_strings_flat<B: BV>(val: &Val<B>, shared_state: &SharedState<B>) -> Vec<String> {
+        match val {
+            Val::Struct(fields) => {
+                // 对于元组/结构体，按照字段顺序展开
+                // 先获取字段名并排序（保持一致的顺序）
+                let mut field_names: Vec<_> = fields.keys().collect();
+                field_names.sort_by_key(|k| shared_state.symtab.to_str(**k));
+                // 展开所有字段的值
+                field_names
+                    .iter()
+                    .flat_map(|name| Self::val_to_yaml_strings_flat(&fields[*name], shared_state))
+                    .collect()
+            }
+            Val::Vector(vec) => vec.iter().flat_map(|v| Self::val_to_yaml_strings_flat(v, shared_state)).collect(),
+            Val::List(vec) => vec.iter().flat_map(|v| Self::val_to_yaml_strings_flat(v, shared_state)).collect(),
+            _ => Self::val_to_yaml_strings(val, shared_state),
+        }
+    }
+
+    /// 将 Val<B> 递归转换为 YAML 格式的字符串向量
+    fn val_to_yaml_strings<B: BV>(val: &Val<B>, shared_state: &SharedState<B>) -> Vec<String> {
+        match val {
+            Val::Symbolic(sym) => {
+                // 对于符号变量，输出为 "Sym"（不带 ID）
+                vec!["Sym".to_string()]
+            }
+            Val::I64(n) => vec![format!("i64({})", n)],
+            Val::I128(n) => vec![format!("i128({})", n)],
+            Val::Bool(b) => vec![b.to_string()],
+            Val::Bits(bv) => vec![format!("{}", bv)],
+            Val::Enum(member) => {
+                // 保持 z-encoded 格式，不做解码
+                let enum_name = shared_state.symtab.to_str(member.enum_id.to_name());
+                let member_name = shared_state
+                    .type_info
+                    .enums
+                    .get(&member.enum_id.to_name())
+                    .and_then(|members| members.iter().nth(member.member))
+                    .map(|name| shared_state.symtab.to_str(*name).to_string())
+                    .unwrap_or_else(|| format!("<member {}>", member.member));
+                vec![format!("enum({}.{})", enum_name, member_name)]
+            }
+            Val::String(s) => vec![format!("\"{}\"", s)],
+            Val::Unit => vec!["()".to_string()],
+            Val::Vector(vec) => vec.iter().flat_map(|v| Self::val_to_yaml_strings(v, shared_state)).collect(),
+            Val::List(vec) => vec.iter().flat_map(|v| Self::val_to_yaml_strings(v, shared_state)).collect(),
+            Val::Struct(fields) => {
+                let mut result = String::from("{");
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, val)| {
+                        let name_decoded = zencode::decode(shared_state.symtab.to_str(*name));
+                        let val_strings = Self::val_to_yaml_strings(val, shared_state);
+                        format!("{}: {}", name_decoded, val_strings.join(", "))
+                    })
+                    .collect();
+                result.push_str(&field_strs.join(", "));
+                result.push('}');
+                vec![result]
+            }
+            Val::Ctor(name, val) => {
+                let name_decoded = zencode::decode(shared_state.symtab.to_str(*name));
+                let inner = Self::val_to_yaml_strings(val, shared_state);
+                vec![format!("{}({})", name_decoded, inner.join(", "))]
+            }
+            Val::SymbolicCtor(discriminant, fields) => {
+                let disc_str = format!("Sym({})", discriminant);
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, val)| {
+                        let name_decoded = zencode::decode(shared_state.symtab.to_str(*name));
+                        let val_strings = Self::val_to_yaml_strings(val, shared_state);
+                        format!("{}: {}", name_decoded, val_strings.join(", "))
+                    })
+                    .collect();
+                vec![format!("{}({{{}}})", disc_str, field_strs.join(", "))]
+            }
+            Val::Ref(name) => {
+                let name_decoded = zencode::decode(shared_state.symtab.to_str(*name));
+                vec![format!("ref({})", name_decoded)]
+            }
+            Val::MixedBits(segments) => {
+                let parts: Vec<String> = segments
+                    .iter()
+                    .map(|seg| match seg {
+                        BitsSegment::Symbolic(s) => format!("Sym({})", s),
+                        BitsSegment::Concrete(b) => format!("{}", b),
+                    })
+                    .collect();
+                vec![format!("[{}]", parts.join(", "))]
+            }
+            Val::Poison => vec!["<poison>".to_string()],
+        }
     }
 }
 
@@ -149,7 +233,10 @@ pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &Regist
     //let yaml_str = fs::read_to_string("conf.yml").unwrap();
     //let map: HashMap<String, serde_saphyr::Value> = serde_saphyr::from_str(&yaml_str)?;
 
-    let yaml = serde_saphyr::to_string(&assembly_names.iter().map(|x|YAMLSerializerBuilder::from_ArgStruct(x)).collect() ).unwrap() ;
+    let yaml = serde_saphyr::to_string(
+        &assembly_names.iter().map(|x| YAMLSerializerBuilder::from_ArgStruct(x)).collect::<Vec<_>>(),
+    )
+    .unwrap();
     println!("{}", yaml);
 
     ()
