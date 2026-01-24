@@ -53,6 +53,7 @@ pub mod ir;
 pub mod ir_lexer;
 pub mod isarch;
 pub mod isarch_args;
+pub mod isarch_args_yaml;
 pub mod lexer;
 pub mod memory;
 pub mod primop;

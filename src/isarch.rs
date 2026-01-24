@@ -47,13 +47,18 @@ use isla_lib::bitvector::BV;
 use isla_lib::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
 use isla_lib::ir::{AssertionMode, Bindings, FPTy, Name, SharedState, Ty, Val};
-use isla_lib::isarch_args::test_clause_args_main;
+
 use isla_lib::log;
 use isla_lib::register::RegisterBindings;
 
 mod opts;
 use isla_lib::isarch;
 use opts::CommonOpts;
+
+#[cfg(feature = "debug_clause_args")]
+use isla_lib::isarch_args_yaml::test_clause_args_main;
+#[cfg(feature = "debug_clause_args_yaml")]
+use isla_lib::isarch_args_yaml::test_clause_args_yaml_main;
 
 fn main() {
     let code = isla_main();
@@ -279,6 +284,9 @@ fn isla_main() -> i32 {
 
     #[cfg(feature = "debug_clause_args")]
     test_clause_args_main(shared_state, regs, lets);
+
+    #[cfg(feature = "debug_clause_args_yaml")]
+    test_clause_args_yaml_main(shared_state, regs, lets);
 
     match subcommand {
         "list-instructions" => {

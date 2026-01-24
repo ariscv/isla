@@ -1,23 +1,29 @@
-instr:
-  add:
-    clause: zRTYPE
-    args: 
-      "tuple#%bv5_%bv5_%bv5_%enum zrop1": Sym
-      "tuple#%bv5_%bv5_%bv5_%enum zrop0": Sym
-      "tuple#%bv5_%bv5_%bv5_%enum zrop2": Sym
-      "tuple#%bv5_%bv5_%bv5_%enum zrop3": zADD
-  sub:
-    clause: zRTYPE
-    args: [Sym,Sym,Sym,enum(zrop.zSUB)]
-  sb:
-    clause: zSTORE
-    args: [Sym,Sym,Sym,i64(1)]
-  sh:
-    clause: zSTORE
-    args: [Sym,Sym,Sym,i64(2)]
+instrs:
   sw:
     clause: zSTORE
-    args: [Sym,Sym,Sym,i64(3)]
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 4 }"
   sd:
     clause: zSTORE
-    args: [Sym,Sym,Sym,i64(4)]
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: Sym
+  sh:
+    clause: zSTORE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+  sb:
+    clause: zSTORE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
