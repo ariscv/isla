@@ -15,7 +15,7 @@ use crate::source_loc::SourceLoc;
 use crate::{d2, dlog, zencode};
 use crate::{ir::*, smt};
 use sha2::digest::generic_array::functional::FunctionalSequence;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -57,6 +57,35 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
         Ty::Union(_) => Val::Unit, // Union 类型使用第一个构造函数的默认值
         _ => Val::Unit,            // 对于其他类型，使用 Unit 作为默认值
     }
+}
+pub fn get_default_arg_all<'ir, B: BV>(
+    instruction_name: &str, //like "zRTYPE/zMRET/zSTORE"
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Vec<ArgStruct<'ir, B>> {
+    // 查找指令的构造函数名称
+    let encoded_name = format!("{}", instruction_name);
+    let ctor_name = shared_state.symtab.lookup(&encoded_name);
+
+    // 从 union 类型信息中获取构造函数的参数类型
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
+
+    let Some(union_members) = instruction_union else {
+        panic!("get_assembly_names_all: 在symtab中没找到符号'zinstruction'");
+    };
+
+    // 查找当前构造函数的类型
+    let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
+        return vec![];
+    };
+
+    // 使用 enumerate_possible_values 来获取所有可能的值
+
+    // 对于复杂类型，先尝试获取枚举值并探索所有可能性
+
+    let val = generate_default_value(ctor_ty, &shared_state);
+    vec![ArgStruct::new(val, Some(instruction_name.to_string()), Checkpoint::new(), &shared_state)]
 }
 
 /// 打印 frame 中函数参数的符号变量值
@@ -556,43 +585,58 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
 }
 pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
     instruction_name: &str,
-    shared_state: &SharedState<'ir, B>,
+    shared_state: &'ir SharedState<'ir, B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
     arg_structs: Vec<(String, ArgStruct<'ir, B>)>,
-) /*-> InstructionMap<'ir, B>*/
-{
+) -> InstructionMap<'ir, B> {
     let arg_structs_splited = arg_structs
         .iter()
         .map(|(assembly_str, arg_struct)| (assembly_str.split_whitespace().next(), arg_struct))
         .collect::<Vec<_>>();
 
-    let arg_structs_merged: Vec<(String, ArgStruct<'ir, B>)> = Vec::new();
+    let mut arg_structs_merged: Vec<(String, Vec<ArgStruct<'ir, B>>)> = Vec::new();
+    let mut clause_has_no_inst_name: HashSet<String> = HashSet::new();
+
     for inst_name_and_arg_struct in arg_structs_splited {
         let (inst_name_option, arg_struct) = inst_name_and_arg_struct;
         //在arg_structs_merged的key中，如果inst_name_option在里面没找到，说明是个新的，整个inst_name_and_arg_struct加进arg_structs_merged；
-        //如果找到了，说明表里面有，就
+        //如果找到了，说明表里面有，就把arg_struct加到inst_name_option那一条里面去
 
-		//note:先翻译Val::xxx，后merge吧
-
-        // arg_structs_merged.iter().collect::<HashMap<String, ArgStruct<'ir, B>>>();
+        if let Some(inst_name) = inst_name_option {
+            // 查找是否已存在该指令名
+            if let Some(existing_entry) = arg_structs_merged.iter_mut().find(|(name, _)| name == inst_name) {
+                // 找到了，把 arg_struct 加进去
+                existing_entry.1.push(arg_struct.clone());
+            } else {
+                // 没找到，创建新条目
+                arg_structs_merged.push((inst_name.to_string(), vec![arg_struct.clone()]));
+            }
+        } else {
+            clause_has_no_inst_name.insert(arg_struct.clause_name.clone().unwrap());
+        }
     }
-    ()
-}
 
+    eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", clause_has_no_inst_name.len());
+    clause_has_no_inst_name.iter().for_each(|name| {
+        eprintln!("  - {}", name);
+    });
+    InstructionMap::from_vec_with_shared_state(&arg_structs_merged,&shared_state)
+}
+///给yaml用的
 pub fn ir_assembly_names_to_InstructionMap<'ir, B: BV>(
     instruction_name: &str,
-    shared_state: &SharedState<'ir, B>,
+    shared_state: &'ir SharedState<'ir, B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-) /*-> InstructionMap<'ir, B>*/
-{
+) -> InstructionMap<'ir, B> {
     let step1_ret = ir_assembly_names_to_InstructionMap_step1_symbolic_exec(instruction_name, shared_state, regs, lets);
     let step2_ret =
         ir_assembly_names_to_InstructionMap_step2_merge(instruction_name, shared_state, regs, lets, step1_ret);
+    step2_ret
 }
-/* /// 提取类型的参数信息，返回 (参数名列表, 约束列表)
-fn extract_type_params<B: BV>(
+/// 提取类型的参数信息，返回 (参数名列表, 约束列表)
+/* fn extract_type_params<B: BV>(
     ty: &Ty<Name>,
     shared_state: &SharedState<B>,
     solver: &mut Solver<B>,
@@ -625,8 +669,9 @@ fn extract_type_params<B: BV>(
         }
     }
 }
+ */
 
-pub fn get_instruction_list<B: BV>(
+/* pub fn get_instruction_list<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
