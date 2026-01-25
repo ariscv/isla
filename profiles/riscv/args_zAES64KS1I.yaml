@@ -1,0 +1,7 @@
+instrs:
+  aes64ks1i:
+    clause: zAES64KS1I
+    args:
+      ztuplez3z5bv4_z5bv5_z5bv51: Sym
+      ztuplez3z5bv4_z5bv5_z5bv50: Arbitrary
+      ztuplez3z5bv4_z5bv5_z5bv52: Sym

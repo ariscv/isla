@@ -1,0 +1,6 @@
+instrs:
+  fli.h:
+    clause: zFLI_H
+    args:
+      ztuplez3z5bv5_z5bv50: Arbitrary
+      ztuplez3z5bv5_z5bv51: Sym

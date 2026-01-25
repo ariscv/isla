@@ -1,0 +1,7 @@
+instrs:
+  vcompress.vm:
+    clause: zMVVCOMPRESS
+    args:
+      ztuplez3z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5bv5_z5bv5_z5bv50: Sym

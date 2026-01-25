@@ -1,0 +1,10 @@
+instrs:
+  vsetivli:
+    clause: zVSETIVLI
+    args:
+      ztuplez3z5bv1_z5bv1_z5bv3_z5bv3_z5bv5_z5bv55: Sym
+      ztuplez3z5bv1_z5bv1_z5bv3_z5bv3_z5bv5_z5bv53: Sym
+      ztuplez3z5bv1_z5bv1_z5bv3_z5bv3_z5bv5_z5bv54: Arbitrary
+      ztuplez3z5bv1_z5bv1_z5bv3_z5bv3_z5bv5_z5bv51: Sym
+      ztuplez3z5bv1_z5bv1_z5bv3_z5bv3_z5bv5_z5bv52: Sym
+      ztuplez3z5bv1_z5bv1_z5bv3_z5bv3_z5bv5_z5bv50: Sym

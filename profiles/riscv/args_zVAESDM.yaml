@@ -1,0 +1,13 @@
+instrs:
+  vaesdm.vs:
+    clause: zVAESDM
+    args:
+      ztuplez3z5enumz0zzzzzzvk_vaesdm_funct6_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzzzzzvk_vaesdm_funct6_z5bv5_z5bv50: zzzvk_vaesdm_funct6::zZVK_VAESDM_VS
+      ztuplez3z5enumz0zzzzzzvk_vaesdm_funct6_z5bv5_z5bv52: Sym
+  vaesdm.vv:
+    clause: zVAESDM
+    args:
+      ztuplez3z5enumz0zzzzzzvk_vaesdm_funct6_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzzzzzvk_vaesdm_funct6_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzzzzzvk_vaesdm_funct6_z5bv5_z5bv50: zzzvk_vaesdm_funct6::zZVK_VAESDM_VV

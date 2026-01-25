@@ -1,0 +1,17 @@
+instrs:
+  vnsrl.wi:
+    clause: zNISTYPE
+    args:
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Arbitrary
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv50: znisfunct6::zNIS_VNSRL
+  vnsra.wi:
+    clause: zNISTYPE
+    args:
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Arbitrary
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zznisfunct6_z5bv1_z5bv5_z5bv5_z5bv50: znisfunct6::zNIS_VNSRA

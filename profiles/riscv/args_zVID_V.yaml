@@ -1,0 +1,6 @@
+instrs:
+  vid.v:
+    clause: zVID_V
+    args:
+      ztuplez3z5bv1_z5bv51: Sym
+      ztuplez3z5bv1_z5bv50: Sym

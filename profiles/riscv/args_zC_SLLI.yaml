@@ -1,0 +1,6 @@
+instrs:
+  c.slli:
+    clause: zC_SLLI
+    args:
+      ztuplez3z5bv6_z5bv50: Arbitrary
+      ztuplez3z5bv6_z5bv51: Sym

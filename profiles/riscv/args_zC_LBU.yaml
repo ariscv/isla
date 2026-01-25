@@ -1,0 +1,7 @@
+instrs:
+  c.lbu:
+    clause: zC_LBU
+    args:
+      ztuplez3z5bv2_z5bv3_z5bv31: Sym
+      ztuplez3z5bv2_z5bv3_z5bv32: Sym
+      ztuplez3z5bv2_z5bv3_z5bv30: Arbitrary

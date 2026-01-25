@@ -1,0 +1,29 @@
+instrs:
+  vfclass.v:
+    clause: zVFUNARY1
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv52: zvfunary1::zFVV_VCLASS
+  vfrec7.v:
+    clause: zVFUNARY1
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv52: zvfunary1::zFVV_VREC7
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv53: Sym
+  vfsqrt.v:
+    clause: zVFUNARY1
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv52: zvfunary1::zFVV_VSQRT
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv50: Sym
+  vfrsqrt7.v:
+    clause: zVFUNARY1
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv52: zvfunary1::zFVV_VRSQRT7
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfunary1_z5bv53: Sym

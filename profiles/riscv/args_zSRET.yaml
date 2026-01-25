@@ -1,0 +1,4 @@
+instrs:
+  sret:
+    clause: zSRET
+    args: {}

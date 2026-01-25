@@ -1,0 +1,29 @@
+instrs:
+  bclri:
+    clause: zZBS_IOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs3: zbiop_zzbs::zBCLRI
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs0: Arbitrary
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs1: Sym
+  binvi:
+    clause: zZBS_IOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs1: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs3: zbiop_zzbs::zBINVI
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs0: Arbitrary
+  bseti:
+    clause: zZBS_IOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs0: Arbitrary
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs1: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs3: zbiop_zzbs::zBSETI
+  bexti:
+    clause: zZBS_IOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs3: zbiop_zzbs::zBEXTI
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs1: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzbiop_zzzzbs0: Arbitrary

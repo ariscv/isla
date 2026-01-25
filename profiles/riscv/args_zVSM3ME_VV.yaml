@@ -1,0 +1,7 @@
+instrs:
+  vsm3me.vv:
+    clause: zVSM3ME_VV
+    args:
+      ztuplez3z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5bv5_z5bv5_z5bv50: Sym
+      ztuplez3z5bv5_z5bv5_z5bv51: Sym

@@ -1,0 +1,6 @@
+instrs:
+  c.beqz:
+    clause: zC_BEQZ
+    args:
+      ztuplez3z5bv8_z5bv31: Sym
+      ztuplez3z5bv8_z5bv30: Sym

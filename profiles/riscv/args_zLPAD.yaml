@@ -1,0 +1,5 @@
+instrs:
+  lpad:
+    clause: zLPAD
+    args:
+      value: Arbitrary

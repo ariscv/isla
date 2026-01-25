@@ -1,0 +1,13 @@
+instrs:
+  vsm.v:
+    clause: zVMTYPE
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzvmlsop1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzvmlsop0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzvmlsop2: zvmlsop::zVSM
+  vlm.v:
+    clause: zVMTYPE
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzvmlsop1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzvmlsop0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzvmlsop2: zvmlsop::zVLM

@@ -1,0 +1,6 @@
+instrs:
+  vmv.s.x:
+    clause: zVMVSX
+    args:
+      ztuplez3z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv50: Sym

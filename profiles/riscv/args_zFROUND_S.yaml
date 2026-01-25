@@ -1,0 +1,7 @@
+instrs:
+  fround.s:
+    clause: zFROUND_S
+    args:
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv51: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv52: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv50: Sym

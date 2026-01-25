@@ -1,0 +1,6 @@
+instrs:
+  c.lui:
+    clause: zC_LUI
+    args:
+      ztuplez3z5bv6_z5bv50: Sym
+      ztuplez3z5bv6_z5bv51: Sym

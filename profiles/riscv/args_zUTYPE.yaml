@@ -1,0 +1,13 @@
+instrs:
+  auipc:
+    clause: zUTYPE
+    args:
+      ztuplez3z5bv20_z5bv5_z5enumz0zzuop2: zuop::zAUIPC
+      ztuplez3z5bv20_z5bv5_z5enumz0zzuop1: Sym
+      ztuplez3z5bv20_z5bv5_z5enumz0zzuop0: Sym
+  lui:
+    clause: zUTYPE
+    args:
+      ztuplez3z5bv20_z5bv5_z5enumz0zzuop0: Sym
+      ztuplez3z5bv20_z5bv5_z5enumz0zzuop1: Sym
+      ztuplez3z5bv20_z5bv5_z5enumz0zzuop2: zuop::zLUI

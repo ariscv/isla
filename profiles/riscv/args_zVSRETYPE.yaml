@@ -1,0 +1,25 @@
+instrs:
+  vs8r.v:
+    clause: zVSRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5bv50: Sym
+      ztuplez3z5i64_z5bv5_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5bv52: Sym
+  vs4r.v:
+    clause: zVSRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5bv50: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5i64_z5bv5_z5bv52: Sym
+      ztuplez3z5i64_z5bv5_z5bv51: Sym
+  vs2r.v:
+    clause: zVSRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5bv52: Sym
+      ztuplez3z5i64_z5bv5_z5bv50: "B64 { len: 64, bits: 2 }"
+  vs1r.v:
+    clause: zVSRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5bv52: Sym
+      ztuplez3z5i64_z5bv5_z5bv50: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5i64_z5bv5_z5bv51: Sym

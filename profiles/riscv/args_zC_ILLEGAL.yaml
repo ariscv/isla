@@ -1,0 +1,5 @@
+instrs:
+  c.illegal:
+    clause: zC_ILLEGAL
+    args:
+      value: Arbitrary

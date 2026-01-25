@@ -1,0 +1,5 @@
+instrs:
+  c.j:
+    clause: zC_J
+    args:
+      value: Sym

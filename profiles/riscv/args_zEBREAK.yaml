@@ -1,0 +1,4 @@
+instrs:
+  ebreak:
+    clause: zEBREAK
+    args: {}

@@ -1,0 +1,5 @@
+instrs:
+  c.mop.[2]:
+    clause: zZCMOP
+    args:
+      value: Arbitrary

@@ -1,0 +1,6 @@
+instrs:
+  c.addi:
+    clause: zC_ADDI
+    args:
+      ztuplez3z5bv6_z5bv51: Sym
+      ztuplez3z5bv6_z5bv50: Sym

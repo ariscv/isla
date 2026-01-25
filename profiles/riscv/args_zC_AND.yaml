@@ -1,0 +1,6 @@
+instrs:
+  c.and:
+    clause: zC_AND
+    args:
+      ztuplez3z5bv3_z5bv30: Sym
+      ztuplez3z5bv3_z5bv31: Sym

@@ -1,0 +1,4 @@
+instrs:
+  fence.tso:
+    clause: zFENCE_TSO
+    args: {}

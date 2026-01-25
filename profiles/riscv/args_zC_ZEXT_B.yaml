@@ -1,0 +1,5 @@
+instrs:
+  c.zext.b:
+    clause: zC_ZEXT_B
+    args:
+      value: Sym

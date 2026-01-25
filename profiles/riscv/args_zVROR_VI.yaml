@@ -1,0 +1,8 @@
+instrs:
+  vror.vi:
+    clause: zVROR_VI
+    args:
+      ztuplez3z5bv1_z5bv5_z5bv6_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5bv6_z5bv52: Arbitrary
+      ztuplez3z5bv1_z5bv5_z5bv6_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5bv6_z5bv51: Sym

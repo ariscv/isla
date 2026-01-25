@@ -1,0 +1,13 @@
+instrs:
+  vsm4r.vs:
+    clause: zZVKSM4RTYPE
+    args:
+      ztuplez3z5enumz0zzzzzzvk_vsm4r_funct6_z5bv5_z5bv50: zzzvk_vsm4r_funct6::zZVK_VSM4R_VS
+      ztuplez3z5enumz0zzzzzzvk_vsm4r_funct6_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzzzzzvk_vsm4r_funct6_z5bv5_z5bv52: Sym
+  vsm4r.vv:
+    clause: zZVKSM4RTYPE
+    args:
+      ztuplez3z5enumz0zzzzzzvk_vsm4r_funct6_z5bv5_z5bv50: zzzvk_vsm4r_funct6::zZVK_VSM4R_VV
+      ztuplez3z5enumz0zzzzzzvk_vsm4r_funct6_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzzzzzvk_vsm4r_funct6_z5bv5_z5bv51: Sym

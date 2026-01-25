@@ -1,0 +1,6 @@
+instrs:
+  c.fsdsp:
+    clause: zC_FSDSP
+    args:
+      ztuplez3z5bv6_z5bv50: Arbitrary
+      ztuplez3z5bv6_z5bv51: Sym

@@ -1,0 +1,5 @@
+instrs:
+  c.jr:
+    clause: zC_JR
+    args:
+      value: Sym

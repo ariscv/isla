@@ -1,0 +1,7 @@
+instrs:
+  vsm4k.vi:
+    clause: zVSM4K_VI
+    args:
+      ztuplez3z5bv5_z5bv5_z5bv50: Sym
+      ztuplez3z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5bv5_z5bv5_z5bv51: Arbitrary

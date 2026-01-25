@@ -1,0 +1,6 @@
+instrs:
+  fcvtmod.w.d:
+    clause: zFCVTMOD_W_D
+    args:
+      ztuplez3z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv50: Sym

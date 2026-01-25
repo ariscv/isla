@@ -1,0 +1,5 @@
+instrs:
+  c.nop:
+    clause: zC_NOP
+    args:
+      value: Sym

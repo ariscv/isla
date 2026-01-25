@@ -1,0 +1,5 @@
+instrs:
+  c.jalr:
+    clause: zC_JALR
+    args:
+      value: Sym

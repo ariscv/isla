@@ -1,0 +1,7 @@
+instrs:
+  vfncvtbf16.f.f.w:
+    clause: zVFNCVTBF16_F_F_W
+    args:
+      ztuplez3z5bv1_z5bv5_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5bv52: Sym

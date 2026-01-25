@@ -1,0 +1,4 @@
+instrs:
+  sfence.w.inval:
+    clause: zSFENCE_W_INVAL
+    args: {}

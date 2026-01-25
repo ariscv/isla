@@ -1,0 +1,13 @@
+instrs:
+  fclass.d:
+    clause: zF_UN_X_TYPE_D
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_D2: zf_un_x_op_D::zFCLASS_D
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_D0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_D1: Sym
+  fmv.x.d:
+    clause: zF_UN_X_TYPE_D
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_D2: zf_un_x_op_D::zFMV_X_D
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_D0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_D1: Sym

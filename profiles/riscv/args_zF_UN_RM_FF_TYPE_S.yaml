@@ -1,0 +1,8 @@
+instrs:
+  fsqrt.s:
+    clause: zF_UN_RM_FF_TYPE_S
+    args:
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_ff_op_S1: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_ff_op_S0: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_ff_op_S3: zf_un_rm_ff_op_S::zFSQRT_S
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_ff_op_S2: Sym

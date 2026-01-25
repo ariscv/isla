@@ -1,0 +1,4 @@
+instrs:
+  wfi:
+    clause: zWFI
+    args: {}

@@ -1,0 +1,49 @@
+instrs:
+  vmseq.vi:
+    clause: zVICMPTYPE
+    args:
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvicmpfunct6::zVICMP_VMSEQ
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+  vmsgtu.vi:
+    clause: zVICMPTYPE
+    args:
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvicmpfunct6::zVICMP_VMSGTU
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+  vmsgt.vi:
+    clause: zVICMPTYPE
+    args:
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvicmpfunct6::zVICMP_VMSGT
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+  vmsleu.vi:
+    clause: zVICMPTYPE
+    args:
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvicmpfunct6::zVICMP_VMSLEU
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+  vmsne.vi:
+    clause: zVICMPTYPE
+    args:
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvicmpfunct6::zVICMP_VMSNE
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+  vmsle.vi:
+    clause: zVICMPTYPE
+    args:
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvicmpfunct6::zVICMP_VMSLE
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zzvicmpfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym

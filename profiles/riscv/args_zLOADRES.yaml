@@ -1,0 +1,129 @@
+instrs:
+  lr.w.aqrl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+  lr.w.rl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+  lr.d.aqrl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+  lr.d.rl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+  lr.d:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+  lr.d.aq:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+  lr.w:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 4 }"
+  lr.b:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 1 }"
+  lr.h.aq:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+  lr.b.rl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+  lr.b.aqrl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+  lr.b.aq:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 1 }"
+  lr.h:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 2 }"
+  lr.w.aq:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 4 }"
+  lr.h.rl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(false)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+  lr.h.aqrl:
+    clause: zLOADRES
+    args:
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv54: Sym
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv53: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv51: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv50: Bool(true)
+      ztuplez3z5bool_z5bool_z5bv5_z5i64_z5bv52: Sym

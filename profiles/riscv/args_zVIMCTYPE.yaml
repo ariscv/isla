@@ -1,0 +1,8 @@
+instrs:
+  vmadc.vi:
+    clause: zVIMCTYPE
+    args:
+      ztuplez3z5enumz0zzvimcfunct6_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvimcfunct6_z5bv5_z5bv5_z5bv50: zvimcfunct6::zVIMC_VMADC
+      ztuplez3z5enumz0zzvimcfunct6_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvimcfunct6_z5bv5_z5bv5_z5bv53: Sym

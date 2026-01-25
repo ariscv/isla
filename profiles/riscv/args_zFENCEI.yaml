@@ -1,0 +1,7 @@
+instrs:
+  fence.i:
+    clause: zFENCEI
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv52: "B64 { len: 5, bits: 0 }"
+      ztuplez3z5bv12_z5bv5_z5bv50: "B64 { len: 12, bits: 0 }"
+      ztuplez3z5bv12_z5bv5_z5bv51: "B64 { len: 5, bits: 0 }"

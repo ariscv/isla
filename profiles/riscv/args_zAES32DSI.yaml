@@ -1,0 +1,8 @@
+instrs:
+  aes32dsi:
+    clause: zAES32DSI
+    args:
+      ztuplez3z5bv2_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5bv2_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5bv2_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5bv2_z5bv5_z5bv5_z5bv50: Arbitrary

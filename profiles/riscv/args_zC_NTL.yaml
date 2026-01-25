@@ -1,0 +1,17 @@
+instrs:
+  c.ntl.all:
+    clause: zC_NTL
+    args:
+      value: zntl_type::zNTL_ALL
+  c.ntl.pall:
+    clause: zC_NTL
+    args:
+      value: zntl_type::zNTL_PALL
+  c.ntl.p1:
+    clause: zC_NTL
+    args:
+      value: zntl_type::zNTL_P1
+  c.ntl.s1:
+    clause: zC_NTL
+    args:
+      value: zntl_type::zNTL_S1

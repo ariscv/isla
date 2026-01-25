@@ -1,0 +1,4 @@
+instrs:
+  c.ebreak:
+    clause: zC_EBREAK
+    args: {}

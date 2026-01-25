@@ -1,0 +1,29 @@
+instrs:
+  fcvt.w.d:
+    clause: zF_UN_RM_FX_TYPE_D
+    args:
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D1: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D2: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D0: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D3: zf_un_rm_fx_op_D::zFCVT_W_D
+  fcvt.wu.d:
+    clause: zF_UN_RM_FX_TYPE_D
+    args:
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D1: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D2: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D3: zf_un_rm_fx_op_D::zFCVT_WU_D
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D0: Sym
+  fcvt.l.d:
+    clause: zF_UN_RM_FX_TYPE_D
+    args:
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D0: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D1: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D2: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D3: zf_un_rm_fx_op_D::zFCVT_L_D
+  fcvt.lu.d:
+    clause: zF_UN_RM_FX_TYPE_D
+    args:
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D0: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D3: zf_un_rm_fx_op_D::zFCVT_LU_D
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D2: Sym
+      ztuplez3z5bv5_z5enumz0zzrounding_mode_z5bv5_z5enumz0zzf_un_rm_fx_op_D1: Sym

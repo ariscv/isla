@@ -1,0 +1,25 @@
+instrs:
+  vslideup.vi:
+    clause: zVISG
+    args:
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvisgfunct6::zVI_VSLIDEUP
+  vslidedown.vi:
+    clause: zVISG
+    args:
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvisgfunct6::zVI_VSLIDEDOWN
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+  vrgather.vi:
+    clause: zVISG
+    args:
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv50: zvisgfunct6::zVI_VRGATHER
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv53: Sym
+      ztuplez3z5enumz0zzvisgfunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym

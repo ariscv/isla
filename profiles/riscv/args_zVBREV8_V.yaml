@@ -1,0 +1,7 @@
+instrs:
+  vbrev8.v:
+    clause: zVBREV8_V
+    args:
+      ztuplez3z5bv1_z5bv5_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5bv52: Sym
+      ztuplez3z5bv1_z5bv5_z5bv50: Sym

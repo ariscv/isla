@@ -1,0 +1,5 @@
+instrs:
+  cbo.zero:
+    clause: zZICBOZ
+    args:
+      value: Sym

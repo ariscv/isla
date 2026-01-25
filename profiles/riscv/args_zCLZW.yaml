@@ -1,0 +1,6 @@
+instrs:
+  clzw:
+    clause: zCLZW
+    args:
+      ztuplez3z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv50: Sym

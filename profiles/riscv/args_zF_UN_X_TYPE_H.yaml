@@ -1,0 +1,13 @@
+instrs:
+  fclass.h:
+    clause: zF_UN_X_TYPE_H
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_H0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_H1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_H2: zf_un_x_op_H::zFCLASS_H
+  fmv.x.h:
+    clause: zF_UN_X_TYPE_H
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_H2: zf_un_x_op_H::zFMV_X_H
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_H1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_x_op_H0: Sym

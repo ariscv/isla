@@ -1,0 +1,6 @@
+instrs:
+  c.addi4spn:
+    clause: zC_ADDI4SPN
+    args:
+      ztuplez3z5bv3_z5bv80: Sym
+      ztuplez3z5bv3_z5bv81: "B64 { len: 8, bits: 255 }"

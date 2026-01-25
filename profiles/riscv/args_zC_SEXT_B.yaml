@@ -1,0 +1,5 @@
+instrs:
+  c.sext.b:
+    clause: zC_SEXT_B
+    args:
+      value: Sym

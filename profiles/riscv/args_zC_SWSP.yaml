@@ -1,0 +1,6 @@
+instrs:
+  c.swsp:
+    clause: zC_SWSP
+    args:
+      ztuplez3z5bv6_z5bv51: Sym
+      ztuplez3z5bv6_z5bv50: Arbitrary

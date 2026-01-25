@@ -1,0 +1,4 @@
+instrs:
+  pause:
+    clause: zPAUSE
+    args: {}

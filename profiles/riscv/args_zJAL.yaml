@@ -1,0 +1,6 @@
+instrs:
+  jal:
+    clause: zJAL
+    args:
+      ztuplez3z5bv21_z5bv51: Sym
+      ztuplez3z5bv21_z5bv50: Sym

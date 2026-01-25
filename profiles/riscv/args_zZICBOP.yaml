@@ -1,0 +1,19 @@
+instrs:
+  prefetch.i:
+    clause: zZICBOP
+    args:
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv122: Arbitrary
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv120: zcbop_zzicbop::zPREFETCH_I
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv121: Sym
+  prefetch.w:
+    clause: zZICBOP
+    args:
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv122: Arbitrary
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv121: Sym
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv120: zcbop_zzicbop::zPREFETCH_W
+  prefetch.r:
+    clause: zZICBOP
+    args:
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv122: Arbitrary
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv121: Sym
+      ztuplez3z5enumz0zzcbop_zzzzicbop_z5bv5_z5bv120: zcbop_zzicbop::zPREFETCH_R

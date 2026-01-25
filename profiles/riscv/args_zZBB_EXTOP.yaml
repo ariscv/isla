@@ -1,0 +1,19 @@
+instrs:
+  sext.h:
+    clause: zZBB_EXTOP
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb2: zextop_zzbb::zSEXTH
+  zext.h:
+    clause: zZBB_EXTOP
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb2: zextop_zzbb::zZEXTH
+  sext.b:
+    clause: zZBB_EXTOP
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzextop_zzzzbb2: zextop_zzbb::zSEXTB

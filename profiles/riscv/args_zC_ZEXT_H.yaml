@@ -1,0 +1,5 @@
+instrs:
+  c.zext.h:
+    clause: zC_ZEXT_H
+    args:
+      value: Sym

@@ -1,0 +1,29 @@
+instrs:
+  fld:
+    clause: zLOAD_FP
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+  flh:
+    clause: zLOAD_FP
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+  flw:
+    clause: zLOAD_FP
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+  flb:
+    clause: zLOAD_FP
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym

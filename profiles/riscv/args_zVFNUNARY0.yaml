@@ -1,0 +1,57 @@
+instrs:
+  vfncvt.f.xu.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_F_XU
+  vfncvt.f.x.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_F_X
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+  vfncvt.rod.f.f.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_ROD_F_F
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+  vfncvt.rtz.xu.f.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_RTZ_XU_F
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+  vfncvt.x.f.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_X_F
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+  vfncvt.f.f.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_F_F
+  vfncvt.rtz.x.f.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_RTZ_X_F
+  vfncvt.xu.f.w:
+    clause: zVFNUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfnunary0_z5bv52: zvfnunary0::zFNV_CVT_XU_F

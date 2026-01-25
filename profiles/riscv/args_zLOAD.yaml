@@ -1,0 +1,65 @@
+instrs:
+  ldu:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(true)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: Sym
+  lh:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(false)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: "B64 { len: 64, bits: 2 }"
+  lbu:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(true)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+  lwu:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(true)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+  lb:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(false)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+  lw:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(false)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: "B64 { len: 64, bits: 4 }"
+  lhu:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(true)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+  ld:
+    clause: zLOAD
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i643: Bool(false)
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5bool_z5i644: Sym

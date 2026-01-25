@@ -1,0 +1,6 @@
+instrs:
+  sha512sig0:
+    clause: zSHA512SIG0
+    args:
+      ztuplez3z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv50: Sym

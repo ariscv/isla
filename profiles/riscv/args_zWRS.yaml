@@ -1,0 +1,9 @@
+instrs:
+  wrs.sto:
+    clause: zWRS
+    args:
+      value: zwrsop::zWRS_STO
+  wrs.nto:
+    clause: zWRS
+    args:
+      value: zwrsop::zWRS_NTO

@@ -1,0 +1,5 @@
+instrs:
+  c.addi16sp:
+    clause: zC_ADDI16SP
+    args:
+      value: Sym

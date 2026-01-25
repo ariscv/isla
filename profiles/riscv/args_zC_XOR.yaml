@@ -1,0 +1,6 @@
+instrs:
+  c.xor:
+    clause: zC_XOR
+    args:
+      ztuplez3z5bv3_z5bv31: Sym
+      ztuplez3z5bv3_z5bv30: Sym

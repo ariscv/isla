@@ -1,0 +1,9 @@
+instrs:
+  fence:
+    clause: zFENCE
+    args:
+      ztuplez3z5bv4_z5bv4_z5bv4_z5bv5_z5bv51: Sym
+      ztuplez3z5bv4_z5bv4_z5bv4_z5bv5_z5bv50: "B64 { len: 4, bits: 0 }"
+      ztuplez3z5bv4_z5bv4_z5bv4_z5bv5_z5bv53: "B64 { len: 5, bits: 0 }"
+      ztuplez3z5bv4_z5bv4_z5bv4_z5bv5_z5bv52: Sym
+      ztuplez3z5bv4_z5bv4_z5bv4_z5bv5_z5bv54: "B64 { len: 5, bits: 0 }"

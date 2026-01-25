@@ -1,0 +1,50 @@
+instrs:
+  vfwcvt.xu.f.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_XU_F
+  vfwcvt.x.f.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_X_F
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+  vfwcvt.rtz.xu.f.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_RTZ_XU_F
+  vfwcvt.f.x.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_F_X
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym
+  vfwcvt.f.f.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_F_F
+  vfwcvt.rtz.x.f.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_RTZ_X_F
+  vfwcvt.f.xu.v:
+    clause: zVFWUNARY0
+    args:
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv51: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv52: zvfwunary0::zFWV_CVT_F_XU
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv50: Sym
+      ztuplez3z5bv1_z5bv5_z5enumz0zzvfwunary0_z5bv53: Sym

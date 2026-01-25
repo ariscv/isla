@@ -1,0 +1,5 @@
+instrs:
+  c.sext.h:
+    clause: zC_SEXT_H
+    args:
+      value: Sym

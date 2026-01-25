@@ -1,0 +1,7 @@
+instrs:
+  fmv.w.x:
+    clause: zF_UN_TYPE_F_S
+    args:
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_op_f_S1: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_op_f_S0: Sym
+      ztuplez3z5bv5_z5bv5_z5enumz0zzf_un_op_f_S2: zf_un_op_f_S::zFMV_W_X

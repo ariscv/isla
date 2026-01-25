@@ -1,0 +1,7 @@
+instrs:
+  c.fsw:
+    clause: zC_FSW
+    args:
+      ztuplez3z5bv5_z5bv3_z5bv30: Arbitrary
+      ztuplez3z5bv5_z5bv3_z5bv32: Sym
+      ztuplez3z5bv5_z5bv3_z5bv31: Sym

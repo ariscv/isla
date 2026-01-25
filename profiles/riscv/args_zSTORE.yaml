@@ -1,0 +1,29 @@
+instrs:
+  sw:
+    clause: zSTORE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 4 }"
+  sb:
+    clause: zSTORE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 1 }"
+  sd:
+    clause: zSTORE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: Sym
+  sh:
+    clause: zSTORE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i640: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i643: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i641: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5i642: Sym

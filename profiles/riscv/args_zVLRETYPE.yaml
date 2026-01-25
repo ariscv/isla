@@ -1,0 +1,113 @@
+instrs:
+  vl2re16.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE16
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+  vl4re16.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE16
+  vl8re64.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE64
+  vl2re32.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE32
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 2 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+  vl4re64.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE64
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+  vl8re32.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE32
+  vl8re8.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE8
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+  vl1re64.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE64
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 1 }"
+  vl2re8.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE8
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 2 }"
+  vl1re8.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE8
+  vl8re16.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE16
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: Sym
+  vl4re32.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE32
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 4 }"
+  vl1re16.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE16
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+  vl4re8.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 4 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE8
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+  vl1re32.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE32
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 1 }"
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+  vl2re64.v:
+    clause: zVLRETYPE
+    args:
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv53: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv51: Sym
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv52: zvlewidth::zVLE64
+      ztuplez3z5i64_z5bv5_z5enumz0zzvlewidth_z5bv50: "B64 { len: 64, bits: 2 }"

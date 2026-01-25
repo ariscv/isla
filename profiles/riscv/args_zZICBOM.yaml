@@ -1,0 +1,16 @@
+instrs:
+  cbo.flush:
+    clause: zZICBOM
+    args:
+      ztuplez3z5enumz0zzcbop_zzzzicbom_z5bv51: Sym
+      ztuplez3z5enumz0zzcbop_zzzzicbom_z5bv50: zcbop_zzicbom::zCBO_FLUSH
+  cbo.inval:
+    clause: zZICBOM
+    args:
+      ztuplez3z5enumz0zzcbop_zzzzicbom_z5bv50: zcbop_zzicbom::zCBO_INVAL
+      ztuplez3z5enumz0zzcbop_zzzzicbom_z5bv51: Sym
+  cbo.clean:
+    clause: zZICBOM
+    args:
+      ztuplez3z5enumz0zzcbop_zzzzicbom_z5bv50: zcbop_zzicbom::zCBO_CLEAN
+      ztuplez3z5enumz0zzcbop_zzzzicbom_z5bv51: Sym

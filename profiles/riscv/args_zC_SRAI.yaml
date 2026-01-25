@@ -1,0 +1,6 @@
+instrs:
+  c.srai:
+    clause: zC_SRAI
+    args:
+      ztuplez3z5bv6_z5bv30: Arbitrary
+      ztuplez3z5bv6_z5bv31: Sym

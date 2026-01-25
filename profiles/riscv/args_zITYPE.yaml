@@ -1,0 +1,43 @@
+instrs:
+  addi:
+    clause: zITYPE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop1: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop0: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop3: ziop::zADDI
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop2: Sym
+  slti:
+    clause: zITYPE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop0: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop2: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop3: ziop::zSLTI
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop1: Sym
+  andi:
+    clause: zITYPE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop1: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop3: ziop::zANDI
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop0: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop2: Sym
+  sltiu:
+    clause: zITYPE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop0: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop2: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop3: ziop::zSLTIU
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop1: Sym
+  xori:
+    clause: zITYPE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop0: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop3: ziop::zXORI
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop2: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop1: Sym
+  ori:
+    clause: zITYPE
+    args:
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop3: ziop::zORI
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop1: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop0: Sym
+      ztuplez3z5bv12_z5bv5_z5bv5_z5enumz0zziop2: Sym

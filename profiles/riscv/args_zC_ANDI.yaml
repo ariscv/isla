@@ -1,0 +1,6 @@
+instrs:
+  c.andi:
+    clause: zC_ANDI
+    args:
+      ztuplez3z5bv6_z5bv31: Sym
+      ztuplez3z5bv6_z5bv30: Sym

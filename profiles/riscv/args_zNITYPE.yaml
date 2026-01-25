@@ -1,0 +1,17 @@
+instrs:
+  vnclipu.wi:
+    clause: zNITYPE
+    args:
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv50: znifunct6::zNI_VNCLIPU
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv53: Arbitrary
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+  vnclip.wi:
+    clause: zNITYPE
+    args:
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv52: Sym
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv51: Sym
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv53: Arbitrary
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv50: znifunct6::zNI_VNCLIP
+      ztuplez3z5enumz0zznifunct6_z5bv1_z5bv5_z5bv5_z5bv54: Sym

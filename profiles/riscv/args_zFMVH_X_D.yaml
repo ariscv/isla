@@ -1,0 +1,6 @@
+instrs:
+  fmvh.x.d:
+    clause: zFMVH_X_D
+    args:
+      ztuplez3z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv50: Sym

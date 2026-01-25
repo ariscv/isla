@@ -1,0 +1,5 @@
+instrs:
+  illegal:
+    clause: zILLEGAL
+    args:
+      value: Arbitrary

@@ -1,0 +1,22 @@
+instrs:
+  srai:
+    clause: zSHIFTIOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop1: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop3: zsop::zSRAI
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop0: Arbitrary
+  slli:
+    clause: zSHIFTIOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop1: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop0: Arbitrary
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop3: zsop::zSLLI
+  srli:
+    clause: zSHIFTIOP
+    args:
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop3: zsop::zSRLI
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop2: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop1: Sym
+      ztuplez3z5bv6_z5bv5_z5bv5_z5enumz0zzsop0: Arbitrary

@@ -1,0 +1,6 @@
+instrs:
+  sm3p0:
+    clause: zSM3P0
+    args:
+      ztuplez3z5bv5_z5bv51: Sym
+      ztuplez3z5bv5_z5bv50: Sym

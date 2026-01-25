@@ -1,0 +1,4 @@
+instrs:
+  ecall:
+    clause: zECALL
+    args: {}
