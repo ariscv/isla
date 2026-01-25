@@ -288,6 +288,9 @@ fn isla_main() -> i32 {
     #[cfg(feature = "debug_clause_args_yaml")]
     test_clause_args_yaml_main(shared_state, regs, lets);
 
+    #[cfg(feature = "debug_exec")]
+    isla_lib::isarch_exec::test_exec_main(shared_state, regs, lets);
+
     match subcommand {
         "list-instructions" => {
             println!("");
