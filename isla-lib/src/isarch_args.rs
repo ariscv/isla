@@ -72,8 +72,10 @@ impl<'ir, B: BV> InstructionMap<'ir, B> {
     pub fn new(table: Vec<(String, Vec<ArgStruct<'ir, B>>)>, shared_state: &'ir SharedState<'_, B>) -> Self {
         InstructionMap { table, shared_state }
     }
-	pub fn from_vec_with_shared_state(vec: &Vec<(String, Vec<ArgStruct<'ir, B>>)>,shared_state: &'ir SharedState<'ir, B>) -> Self {
-
+    pub fn from_vec_with_shared_state(
+        vec: &Vec<(String, Vec<ArgStruct<'ir, B>>)>,
+        shared_state: &'ir SharedState<'ir, B>,
+    ) -> Self {
         let all_same =
             vec.iter().all(|(_, arg_vec)| arg_vec.iter().all(|arg| std::ptr::eq(shared_state, arg.shared_state)));
 
@@ -86,7 +88,7 @@ impl<'ir, B: BV> InstructionMap<'ir, B> {
     pub fn from_vec(vec: &Vec<(String, Vec<ArgStruct<'ir, B>>)>) -> Self {
         // 验证所有元素的 shared_state 指向同一个对象
         let shared_state = match vec.first() {
-            None => panic!("from_vec: empty vec, 传进来的是个空列表{:?}, 建议用from_vec_with_shared_state",vec),
+            None => panic!("from_vec: empty vec, 传进来的是个空列表{:?}, 建议用from_vec_with_shared_state", vec),
             Some((_, first_vec)) => match first_vec.first() {
                 None => panic!("from_vec: empty inner vec"),
                 Some(first) => first.shared_state,

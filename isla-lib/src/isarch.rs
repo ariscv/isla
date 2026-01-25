@@ -621,7 +621,7 @@ pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
     clause_has_no_inst_name.iter().for_each(|name| {
         eprintln!("  - {}", name);
     });
-    InstructionMap::from_vec_with_shared_state(&arg_structs_merged,&shared_state)
+    InstructionMap::from_vec_with_shared_state(&arg_structs_merged, &shared_state)
 }
 ///给yaml用的
 pub fn ir_assembly_names_to_InstructionMap<'ir, B: BV>(

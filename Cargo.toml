@@ -104,7 +104,8 @@ smtperf = ["isla-lib/smtperf"]
 debug_instruction=["isla-lib/debug_instruction"]
 debug_clause_args=["isla-lib/debug_clause_args"]
 debug_clause_args_yaml=["isla-lib/debug_clause_args_yaml"]
-default = ["debug_clause_args_yaml"]
+debug_exec=["isla-lib/debug_exec"]
+default = ["debug_exec"]
 
 [profile.dev]
 opt-level = 0
