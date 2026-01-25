@@ -324,11 +324,24 @@ pub fn enumerate_possible_values<'ir, B: BV>(
             let values = vec![(val, checkpoint(&mut solver))];
             Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(), constraints))
         }
+        // 处理Bits、I64、I128、Bool等非枚举、非结构体类型
+        // 这些类型不需要枚举，直接生成符号化值即可
+        Ty::Bits(_) | Ty::I64 | Ty::I128 | Ty::Bool | Ty::String | Ty::Vector(_) | Ty::List(_) => {
+            let mut cfg = Config::new();
+            cfg.set_param_value("model", "true");
+            let ctx = Context::new(cfg);
+            let mut solver = Solver::new(&ctx);
+
+            let val = generate_symbolic_value(ty, shared_state, &mut solver, SourceLoc::unknown())?;
+
+            // 这些类型只有一种情况（符号化值）
+            let values = vec![(val, checkpoint(&mut solver))];
+            Ok((values.into_iter().map(|t| ArgStruct::from_tuple(t, clause_name, shared_state)).collect(), constraints))
+        }
         _ => {
-            // 对于其他类型，如果有就pannic
+            // 对于其他类型（如Union等），如果有就panic
+            // TODO: 实现Union等其他类型的处理
             panic!("TODO enumerate_possible_values: Ctor参数类型({:?})枚举化未实现", ty);
-            /* let val = generate_default_value(ty, shared_state);
-            Ok((vec![val], constraints)) */
         }
     }
 }
@@ -537,6 +550,14 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
                             }
                             Val::Unit => {
                                 dlog!(colors::YELLOW, "Unit",);
+                            }
+                            // 处理符号化值类型（如Bits等）
+                            Val::Symbolic(_) => {
+                                dlog!(colors::YELLOW, "Symbolic",);
+                            }
+                            // 处理枚举值类型
+                            Val::Enum(_) => {
+                                dlog!(colors::YELLOW, "Enum",);
                             }
                             _ => {
                                 panic!("TODO: 未考虑周全的参数类型{}:\n{:#?}", arg_value.type_string(), &arg_value);

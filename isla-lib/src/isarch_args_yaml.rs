@@ -13,6 +13,8 @@ use crate::smt::{Checkpoint, Event, Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
 use core::slice;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -87,11 +89,29 @@ impl Sym {
                         Exp::Bits64(b64) => format!("{:?}", b64),
                         Exp::Enum(enum_member) => format!("{:?}", &exp),
                         Exp::Bool(b) => format!("{:?}", &exp),
-                        _ => panic!("不知道怎么处理的符号表达式Exp:{:?}", &exp),
+                        // 对于复合表达式（如Eq, And等），返回"Sym"表示需要符号化处理
+                        // 这些表达式通常包含多个变量或复杂逻辑，不适合简单的字符串表示
+                        Exp::Eq(_, _) | Exp::Neq(_, _) | Exp::And(_, _) | Exp::Or(_, _) | Exp::Not(_) |
+                        Exp::Bvnot(_) | Exp::Bvand(_, _) | Exp::Bvor(_, _) | Exp::Bvxor(_, _) |
+                        Exp::Bvnand(_, _) | Exp::Bvnor(_, _) | Exp::Bvxnor(_, _) | Exp::Bvneg(_) |
+                        Exp::Bvadd(_, _) | Exp::Bvsub(_, _) | Exp::Bvmul(_, _) | Exp::Bvudiv(_, _) |
+                        Exp::Bvsdiv(_, _) | Exp::Bvurem(_, _) | Exp::Bvsrem(_, _) | Exp::Bvsmod(_, _) |
+                        Exp::Bvult(_, _) | Exp::Bvslt(_, _) | Exp::Bvule(_, _) | Exp::Bvsle(_, _) |
+                        Exp::Bvuge(_, _) | Exp::Bvsge(_, _) | Exp::Bvugt(_, _) | Exp::Bvsgt(_, _) |
+                        Exp::Extract(_, _, _) | Exp::ZeroExtend(_, _) | Exp::SignExtend(_, _) |
+                        Exp::Bvshl(_, _) | Exp::Bvlshr(_, _) | Exp::Bvashr(_, _) | Exp::Concat(_, _) |
+                        Exp::Ite(_, _, _) | Exp::App(_, _) | Exp::Select(_, _) | Exp::Store(_, _, _) |
+                        Exp::Distinct(_) | Exp::FPConstant(_, _, _) | Exp::FPRoundingMode(_) |
+                        Exp::FPUnary(_, _) | Exp::FPRoundingUnary(_, _, _) | Exp::FPBinary(_, _, _) |
+                        Exp::FPRoundingBinary(_, _, _, _) | Exp::FPfma(_, _, _, _) => {
+                            "Sym".to_string()
+                        }
                     }
                 }
                 crate::smt::ModelVal::Arbitrary(ty) => {
-                    panic!("    不知道怎么处理的符号变量Sym({:?}) = Arbitrary ({:?})", sym, ty);
+                    // 当模型无法给出具体值时，返回一个通用的符号表示
+                    dlog!("    符号变量Sym({:?})的值为Arbitrary ({:?})，将返回'Sym'", sym, ty);
+                    "Arbitrary".to_string()
                 }
             },
             Err(e) => {
@@ -163,6 +183,22 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<isarch_args::ArgStruct<'ir, B>
                                 k.to_str(&shared_state),
                                 match &v {
                                     Val::Symbolic(sym) => v.sym_solve_str(&point, &shared_state),
+                                    // 处理枚举类型字段
+                                    Val::Enum(enum_member) => {
+                                        // 获取枚举名称
+                                        let enum_name = shared_state.symtab.to_str(enum_member.enum_id.to_name());
+                                        // 获取成员名称（如果有成员定义）
+                                        let member_name = if let Some(members) = shared_state.type_info.enums.get(&enum_member.enum_id.to_name()) {
+                                            if let Some(&name) = members.get(enum_member.member) {
+                                                shared_state.symtab.to_str(name)
+                                            } else {
+                                                &format!("{}", enum_member.member)
+                                            }
+                                        } else {
+                                            &format!("{}", enum_member.member)
+                                        };
+                                        format!("{}::{}", enum_name, member_name)
+                                    }
                                     _ => panic!("TODO:还要加其他类型的实现：{:#?}", v),
                                 },
                             )
@@ -171,7 +207,37 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<isarch_args::ArgStruct<'ir, B>
                     //println!("[Struct]:{:#?}", yaml_map)
                     yaml_map_vec.push(yaml_map);
                 }
-                _ => (panic!("这是什么类型？{:?}", arg_value)),
+                // Val::Unit 表示无参数的指令，创建一个空的HashMap
+                Val::Unit => {
+                    // 对于Unit类型，创建一个空的HashMap
+                    yaml_map_vec.push(HashMap::new());
+                }
+                // 处理符号化值类型（如Bits等）
+                // 对于符号化值，创建一个包含键值对的单元素HashMap
+                Val::Symbolic(sym) => {
+                    let mut yaml_map = HashMap::new();
+                    yaml_map.insert("value".to_string(), sym.sym_solve_str(&point, &shared_state));
+                    yaml_map_vec.push(yaml_map);
+                }
+                // 处理枚举值类型
+                Val::Enum(enum_member) => {
+                    let mut yaml_map = HashMap::new();
+                    // 获取枚举名称
+                    let enum_name = shared_state.symtab.to_str(enum_member.enum_id.to_name());
+                    // 获取成员名称（如果有成员定义）
+                    let member_name = if let Some(members) = shared_state.type_info.enums.get(&enum_member.enum_id.to_name()) {
+                        if let Some(&name) = members.get(enum_member.member) {
+                            shared_state.symtab.to_str(name)
+                        } else {
+                            &format!("{}", enum_member.member)
+                        }
+                    } else {
+                        &format!("{}", enum_member.member)
+                    };
+                    yaml_map.insert("value".to_string(), format!("{}::{}", enum_name, member_name));
+                    yaml_map_vec.push(yaml_map);
+                }
+                _ => panic!("TODO: 未处理的参数类型，类型为{}:\n{:#?}", arg_value.type_string(), &arg_value),
             }
         }
 
@@ -237,17 +303,50 @@ pub fn test_clause_args_yaml_main<B: BV>(
 ) {
     println!("test_clause_args_yaml_main");
 
-    for (n, ty) in shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap().iter() {
-        let inst_union_name_str = shared_state.symtab.to_str(*n);
-        let clause_name = &inst_union_name_str;
+    let clause_names = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap();
+    println!("一共有{}种clause_name", clause_names.len());
 
-        let out = ir_assembly_names_to_InstructionMap(clause_name, shared_state, regs, lets);
+    // 创建进度条
+    let progress = ProgressBar::new(clause_names.len() as u64);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    progress.set_message("正在处理指令...");
 
-        // 将结果写入 YAML 文件
-        let file_name = &format!("profiles/riscv/args_{}.yaml", clause_name);
-        match write_instruction_map_to_yaml(&out, file_name) {
-            Ok(_) => println!("YAML 文件已成功写入到 {}", file_name),
-            Err(e) => eprintln!("写入 YAML 文件({})失败: {}", file_name, e),
+    // 收集所有需要处理的指令名称
+    let instruction_names: Vec<String> = clause_names
+        .iter()
+        .map(|(n, _)| shared_state.symtab.to_str(*n).to_string())
+        .collect();
+
+    // 使用 Rayon 并行处理
+    let results: Vec<(String, Result<(), String>)> = instruction_names
+        .into_par_iter() // 并行迭代器
+        .map(|clause_name| {
+            let out = ir_assembly_names_to_InstructionMap(&clause_name, shared_state, regs, lets);
+
+            // 将结果写入 YAML 文件
+            let file_name = format!("profiles/riscv/args_{}.yaml", clause_name);
+            let result = write_instruction_map_to_yaml(&out, &file_name).map_err(|e| e.to_string());
+            (clause_name, result)
+        })
+        .collect();
+
+    // 更新进度条并输出结果
+    for (clause_name, result) in results {
+        match result {
+            Ok(_) => {
+                progress.set_message(format!("{} 完成", clause_name));
+            }
+            Err(e) => {
+                progress.println(format!("写入 YAML 文件(args_{}.yaml)失败: {}", clause_name, e));
+            }
         }
+        progress.inc(1);
     }
+
+    progress.finish_with_message("所有指令处理完成!");
 }
