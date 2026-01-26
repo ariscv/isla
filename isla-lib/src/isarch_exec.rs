@@ -8,6 +8,7 @@ use crate::executor::{
 use crate::ir::UVal;
 use crate::isarch_args::{ArgStruct, InstructionMap};
 use crate::log;
+use crate::primop_util::symbolic;
 use crate::register::RegisterBindings;
 use crate::smt::{checkpoint, Config, Context, EnumMember, Model};
 use crate::smt::{Checkpoint, Event, Solver, Sym};
@@ -19,121 +20,106 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
 
-/// 提取类型的参数信息，返回 (参数名列表, 约束列表)
-/* fn extract_type_params<B: BV>(
-    ty: &Ty<Name>,
-    shared_state: &SharedState<B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-) -> Result<(Vec<String>, Vec<(String, String)>), ExecError> {
-    match ty {
-        Ty::Unit => Ok((vec![], vec![])),
-        Ty::Struct(struct_name) => {
-            let mut param_names = Vec::new();
-            let mut all_constraints = Vec::new();
-
-            if let Some(struct_def) = shared_state.type_info.structs.get(struct_name) {
-                for (field_name, field_ty) in struct_def {
-                    let field_name_str = shared_state.symtab.to_str(*field_name).to_string();
-                    let (_field_val, field_constraints) = generate_symbolic_value(field_ty, shared_state, solver, info)?;
-
-                    for (var_name, ty_str) in field_constraints {
-                        param_names.push(format!("{}.{}", field_name_str, var_name));
-                        all_constraints.push((format!("{}.{}", field_name_str, var_name), ty_str));
-                    }
-                }
-            }
-
-            Ok((param_names, all_constraints))
-        }
-        _ => {
-            let (val, constraints) = generate_symbolic_value(ty, shared_state, solver, info)?;
-            let param_names = constraints.iter().map(|(name, _)| name.clone()).collect();
-            Ok((param_names, constraints))
-        }
-    }
-}
- */
-
-/* pub fn get_instruction_list<B: BV>(
+pub fn run_symbolic_execute<B: BV>(
+    instruction_name: &str,
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-)  -> HashMap<String, (Name, Ty<Name>, String, Vec<String>, Vec<(String, String)>)> {
-    use crate::smt::{Config, Context, Solver};
+) -> Option<String> {
+    use crate::smt::checkpoint;
 
-        let mut results: Vec<(Option<String>, (Name, Ty<Name>, String, Vec<String>, Vec<(String, String)>))> = Vec::new();
+    // 查找指令的构造函数名称
+    let encoded_name = format!("{}", instruction_name);
+    let ctor_name = shared_state.symtab.lookup(&encoded_name);
 
-    for (n, ty) in shared_state.type_info.unions.get(
-        &shared_state.symtab.lookup("zinstruction")
-    ).unwrap().iter() {
-        let inst_union_name_str = String::from_str(shared_state.symtab.to_str(*n)).unwrap();
-        let s = &inst_union_name_str;
+    // 从 union 类型信息中获取构造函数的参数类型
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
 
-        // 生成参数和约束
-        let cfg = Config::new();
-        let ctx = Context::new(cfg);
-        let mut solver = Solver::new(&ctx);
-        let info = SourceLoc::unknown();
+    let Some(union_members) = instruction_union else {
+        // zinstruction union 不存在
+        panic!("get_assembly_name: 在symtab中没找到符号'zinstruction'");
+    };
 
-        // 获取所有可能的汇编名称
-        let assembly_names = get_assembly_names_all(s, shared_state, regs, lets);
+    // 查找当前构造函数的类型
+    let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
+        // 指令不在 zinstruction union 中（可能是其他架构的指令）
+        return None;
+    };
 
-        // 获取参数类型信息
-        let (params, constraints) = extract_type_params(ty, shared_state, &mut solver, info).unwrap_or((vec![], vec![]));
+    let mut cfg = Config::new();
+    cfg.set_param_value("model", "true");
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::new(&ctx);
 
-        // 检查是否有汇编名称
-        let has_assembly = !assembly_names.is_empty();
+    let (args, ret, instrs) = shared_state.functions.get(&shared_state.symtab.lookup("zexecute")).unwrap();
+    //let ctor=shared_state.type_info.union_ctors.get();
+    let fun_args = args
+        .iter()
+        .map(|(name, ty_name)| symbolic(ty_name, shared_state, &mut solver, SourceLoc::unknown()).unwrap())
+        .collect::<Vec<_>>();
+    println!("{:?}", fun_args);
 
-        // 为每个汇编名称创建一个条目
-        for assembly_name in assembly_names {
-            results.push((
-                Some(assembly_name.clone()),
-                (*n, ty.clone(), inst_union_name_str.clone(), params.clone(), constraints.clone())
-            ));
-        }
+    // 生成参数（暂时使用默认值，测试checkpoint机制）
 
-        // 如果没有找到任何汇编名称，仍然记录这个指令（使用None）
-        if !has_assembly {
-            results.push((
-                None,
-                (*n, ty.clone(), inst_union_name_str.clone(), params, constraints)
-            ));
-        }
-    }
+    // 构造指令值
 
-    // 找出没有汇编名称的指令
-    let no_assembly: Vec<_> = results.iter()
-        .filter(|(asm, _)| asm.is_none())
-        .map(|(_, (_n, _ty, inst_union_name_str, _params, _constraints))| inst_union_name_str.clone())
-        .collect();
+    // 创建checkpoint，包含符号化变量
+    let cp = checkpoint(&mut solver);
 
-    if !no_assembly.is_empty() {
-        eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", no_assembly.len());
-        for name in &no_assembly {
-            // 调试：检查指令类型
-            if let Some(union_members) = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")) {
-                if let Some((_, ty)) = union_members.iter().find(|(n, _)| shared_state.symtab.to_str(*n) == *name) {
-                    eprintln!("  - {} (类型: {:?})", name, ty);
-                } else {
-                    eprintln!("  - {} (不在 union 中)", name);
+    // 使用checkpoint执行函数
+    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+    let collected: Vec<Val<B>> = Vec::new();
+    let collected = Arc::new(collected);
+
+    crate::executor::execute_ir_function_with_checkpoint_multi_thread(
+        "zassembly_forwards",
+        &fun_args,
+        shared_state,
+        regs,
+        lets,
+        &result,
+        &|_thread, _task_id, exec_result, shared_state, solver, _collected| {
+            match exec_result {
+                Ok((run, frame)) => match run {
+                    Run::Finished(ret_val) => {
+                        *result.lock().unwrap() = Some(ret_val);
+                        println!("执行好一条路径，fork={}", frame.forks)
+                    }
+                    _ => {}
+                },
+                Err((error, backtrace)) => {
+                    match &error {
+                        ExecError::MatchFailure(_) => {
+                            // 静默处理
+                        }
+                        _ => {
+                            eprintln!("执行错误: {:?}", error);
+                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                        }
+                    }
                 }
             }
+        },
+        cp,
+    );
+
+    // 提取字符串结果
+    let res = match result.lock().unwrap().as_ref() {
+        Some(Val::String(s)) => Some(s.clone()),
+        Some(v) => {
+            eprintln!("警告: zassembly_forwards 返回非字符串值: {:?}", v);
+            None
         }
-    }
-
-    let instruction_list = results.iter().filter_map(
-            |(k, v)|
-                k.as_ref().map(|key| (key.clone(), v.clone()))
-        ).collect::<HashMap<_,_>>();
-
-    instruction_list
+        None => None,
+    };
+    res
 }
- */
 
 #[cfg(feature = "debug_exec")]
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_exec_main");
+
+    run_symbolic_execute("zRTYPE", &shared_state, regs, lets);
 
     ()
 }

@@ -144,7 +144,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
 pub struct LocalFrame<'ir, B> {
     pub(super) function_name: Name,
     pub(super) pc: usize,
-    pub(super) forks: u32,
+    pub forks: u32,
     pub(super) backjumps: u32,
     pub(super) local_state: LocalState<'ir, B>,
     pub(super) memory: Memory<B>,
