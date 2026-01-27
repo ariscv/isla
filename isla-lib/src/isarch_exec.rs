@@ -71,19 +71,19 @@ pub fn run_symbolic_execute<B: BV>(
     let collected: Vec<Val<B>> = Vec::new();
     let collected = Arc::new(collected);
 
-    crate::executor::execute_ir_function_with_checkpoint_multi_thread(
+    crate::executor::execute_ir_function_with_checkpoint(
         "zassembly_forwards",
         &fun_args,
         shared_state,
         regs,
         lets,
         &result,
-        &|_thread, _task_id, exec_result, shared_state, solver, _collected| {
+        &|thread, _task_id, exec_result, shared_state, solver, _collected| {
             match exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(ret_val) => {
                         *result.lock().unwrap() = Some(ret_val);
-                        println!("执行好一条路径，fork={}", frame.forks)
+                        println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks)
                     }
                     _ => {}
                 },
