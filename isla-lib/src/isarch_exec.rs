@@ -1,24 +1,18 @@
 use crate::bitvector::BV;
-use crate::config::ISAConfig;
 use crate::dprint::colors;
 use crate::error::ExecError;
-use crate::executor::{
-    backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState,
-};
+use crate::executor::{backtrace_string, LocalFrame, Run};
 use crate::ir::UVal;
-use crate::isarch_args::{ArgStruct, InstructionMap};
 use crate::log;
 use crate::primop_util::symbolic;
 use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context, EnumMember, Model};
-use crate::smt::{Checkpoint, Event, Solver, Sym};
+use crate::smt::Solver;
+use crate::smt::{checkpoint, Config, Context, Model, ModelVal};
 use crate::source_loc::SourceLoc;
-use crate::{d2, dlog, zencode};
+use crate::zencode;
 use crate::{ir::*, smt};
-use sha2::digest::generic_array::functional::FunctionalSequence;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 pub fn run_symbolic_execute<B: BV>(
     instruction_name: &str,
@@ -73,7 +67,7 @@ pub fn run_symbolic_execute<B: BV>(
         regs,
         lets,
         &result,
-        &|thread, _task_id, exec_result, shared_state, solver, collected| {
+        &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
             match exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(ret_val) => {
@@ -83,6 +77,137 @@ pub fn run_symbolic_execute<B: BV>(
                             frame.forks,
                             ret_val.to_str(shared_state)
                         );
+
+                        // 获取ISA状态（寄存器、lets变量等）
+                        // 首先检查solver是否可满足
+                        if solver.check_sat(SourceLoc::unknown()) == crate::smt::SmtResult::Sat {
+                            if let Ok(mut model) =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
+                            {
+                                println!("=== ISA State (Thread {}) ===", thread);
+
+                                // 遍历所有寄存器
+                                for (reg_name, reg) in frame.regs().iter() {
+                                    let reg_name_str = shared_state.symtab.to_str(*reg_name);
+                                    if let Some(val) = reg.read_last_if_initialized() {
+                                        match val {
+                                            Val::Symbolic(sym) => match model.get_var(*sym) {
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits64(bv))) => {
+                                                    println!(
+                                                        "  {} = 0x{:x} ({} bits)",
+                                                        reg_name_str,
+                                                        bv.lower_u64(),
+                                                        bv.len()
+                                                    );
+                                                }
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits(bv))) => {
+                                                    let hex_str: String = bv
+                                                        .chunks(4)
+                                                        .rev()
+                                                        .map(|chunk: &[bool]| {
+                                                            let mut n = 0u8;
+                                                            for (i, bit) in chunk.iter().enumerate() {
+                                                                if *bit {
+                                                                    n |= 1 << i;
+                                                                }
+                                                            }
+                                                            format!("{:x}", n)
+                                                        })
+                                                        .collect();
+                                                    println!("  {} = 0b{} ({} bits)", reg_name_str, hex_str, bv.len());
+                                                }
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bool(b))) => {
+                                                    println!("  {} = {}", reg_name_str, b);
+                                                }
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Enum(
+                                                    member,
+                                                ))) => {
+                                                    let name = member.to_name(shared_state);
+                                                    println!(
+                                                        "  {} = {}",
+                                                        reg_name_str,
+                                                        shared_state.symtab.to_str(name)
+                                                    );
+                                                }
+                                                Ok(crate::smt::ModelVal::Arbitrary(ty)) => {
+                                                    println!("  {} = <arbitrary: {:?}>", reg_name_str, ty);
+                                                }
+                                                Err(e) => {
+                                                    println!("  {} = <error: {:?}>", reg_name_str, e);
+                                                }
+                                                _ => {
+                                                    println!("  {} = {:?}", reg_name_str, val);
+                                                }
+                                            },
+                                            Val::Bits(bv) => {
+                                                println!("  {} = 0x{:x}", reg_name_str, bv.lower_u64());
+                                            }
+                                            Val::Bool(b) => {
+                                                println!("  {} = {}", reg_name_str, b);
+                                            }
+                                            _ => {
+                                                println!("  {} = {:?}", reg_name_str, val);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 遍历lets中的特殊变量（如current_privilege等）
+                                for (let_name, let_val) in frame.lets().iter() {
+                                    let let_name_str = shared_state.symtab.to_str(*let_name);
+                                    // 过滤掉一些内部变量
+                                    if !let_name_str.starts_with("__") && let_name_str != "NULL" {
+                                        match let_val {
+                                            UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits64(bv))) => {
+                                                    println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
+                                                }
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits(bv))) => {
+                                                    let hex_str: String = bv
+                                                        .chunks(4)
+                                                        .rev()
+                                                        .map(|chunk: &[bool]| {
+                                                            let mut n = 0u8;
+                                                            for (i, bit) in chunk.iter().enumerate() {
+                                                                if *bit {
+                                                                    n |= 1 << i;
+                                                                }
+                                                            }
+                                                            format!("{:x}", n)
+                                                        })
+                                                        .collect();
+                                                    println!("  let {} = 0b{}", let_name_str, hex_str);
+                                                }
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bool(b))) => {
+                                                    println!("  let {} = {}", let_name_str, b);
+                                                }
+                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Enum(
+                                                    member,
+                                                ))) => {
+                                                    let name = member.to_name(shared_state);
+                                                    println!(
+                                                        "  let {} = {}",
+                                                        let_name_str,
+                                                        shared_state.symtab.to_str(name)
+                                                    );
+                                                }
+                                                _ => {}
+                                            },
+                                            UVal::Init(Val::Bits(bv)) => {
+                                                println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
+                                            }
+                                            UVal::Init(Val::Bool(b)) => {
+                                                println!("  let {} = {}", let_name_str, b);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+
+                                println!("==============================\n");
+                            }
+                        }
+
                         *collected.lock().unwrap() = Some(ret_val);
                     }
                     Run::Exit => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
@@ -122,5 +247,5 @@ pub fn run_symbolic_execute<B: BV>(
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_exec_main");
 
-    run_symbolic_execute("zMRET", &shared_state, regs, lets);
+    run_symbolic_execute("zSTORE", &shared_state, regs, lets);
 }
