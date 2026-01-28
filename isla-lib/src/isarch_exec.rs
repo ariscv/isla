@@ -29,8 +29,7 @@ pub fn run_symbolic_execute<B: BV>(
     use crate::smt::checkpoint;
 
     // 查找指令的构造函数名称
-    let encoded_name = format!("{}", instruction_name);
-    let ctor_name = shared_state.symtab.lookup(&encoded_name);
+    let ctor_name = shared_state.symtab.lookup(instruction_name);
 
     // 从 union 类型信息中获取构造函数的参数类型
     let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
@@ -51,13 +50,11 @@ pub fn run_symbolic_execute<B: BV>(
     let ctx = Context::new(cfg);
     let mut solver = Solver::new(&ctx);
 
-    let (args, ret, instrs) = shared_state.functions.get(&shared_state.symtab.lookup("zexecute")).unwrap();
-    //let ctor=shared_state.type_info.union_ctors.get();
-    let fun_args = args
-        .iter()
-        .map(|(name, ty_name)| symbolic(ty_name, shared_state, &mut solver, SourceLoc::unknown()).unwrap())
-        .collect::<Vec<_>>();
-    println!("{:?}", fun_args);
+    let fun_args = vec![Val::<B>::Ctor(
+        ctor_name,
+        Box::new(symbolic(ctor_ty, shared_state, &mut solver, SourceLoc::unknown()).unwrap()),
+    )];
+    println!("fun_args:{:?}", fun_args);
 
     // 生成参数（暂时使用默认值，测试checkpoint机制）
 
@@ -68,24 +65,30 @@ pub fn run_symbolic_execute<B: BV>(
 
     // 使用checkpoint执行函数
     let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
-    let collected: Vec<Val<B>> = Vec::new();
-    let collected = Arc::new(collected);
 
-    crate::executor::execute_ir_function_with_checkpoint(
-        "zassembly_forwards",
+    crate::executor::execute_ir_function_with_checkpoint_multi_thread(
+        "zexecute",
         &fun_args,
         shared_state,
         regs,
         lets,
         &result,
-        &|thread, _task_id, exec_result, shared_state, solver, _collected| {
+        &|thread, _task_id, exec_result, shared_state, solver, collected| {
             match exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(ret_val) => {
-                        *result.lock().unwrap() = Some(ret_val);
-                        println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks)
+                        println!(
+                            "tid:{} 执行好一条路径，fork={}，ret_val={}",
+                            thread,
+                            frame.forks,
+                            ret_val.to_str(shared_state)
+                        );
+                        *collected.lock().unwrap() = Some(ret_val);
                     }
-                    _ => {}
+                    Run::Exit => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
+                    Run::Dead => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
+
+                    Run::Suspended => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
                 },
                 Err((error, backtrace)) => {
                     match &error {
@@ -119,7 +122,5 @@ pub fn run_symbolic_execute<B: BV>(
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_exec_main");
 
-    run_symbolic_execute("zRTYPE", &shared_state, regs, lets);
-
-    ()
+    run_symbolic_execute("zMRET", &shared_state, regs, lets);
 }
