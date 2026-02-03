@@ -22,7 +22,52 @@ use std::sync::{Arc, Mutex, Weak};
 /**
  * instruction list gen
  */
+pub fn get_assembly_name<B: BV>(
+    arg: Val<B>,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Option<String> {
+    // 根据构造函数的参数类型生成默认值
+    let arg_value = arg;
 
+    // 执行 zassembly_forwards 函数
+    // MatchFailure 错误会被 execute_ir_function 静默处理
+    let collected = None;
+    let collected = Arc::new(Mutex::new(collected));
+    execute_ir_function(
+        "zassembly_forwards",
+        &[arg_value],
+        shared_state,
+        regs,
+        lets,
+        &collected,
+        &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
+            Ok((run, frame)) => {
+                if let Run::Finished(ret_val) = run {
+                    print_frame_args("zassembly_forwards", &frame, shared_state, solver);
+
+                    *collected.lock().unwrap() = Some(ret_val);
+                }
+            }
+            Err((error, backtrace)) => match &error {
+                ExecError::MatchFailure(_) => {}
+                _ => {
+                    eprintln!("执行错误: {:?}", error);
+                    eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                }
+            },
+        },
+    );
+    let ret_val: Option<Val<B>> = collected.lock().unwrap().clone();
+    ret_val.and_then(|val| match val {
+        Val::String(s) => Some(s),
+        _ => {
+            eprint!("Warning: get_assembly_name中，zassembly_forwards返回值非字符串");
+            None
+        }
+    })
+}
 /// 根据类型生成默认值
 pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Val<B> {
     match ty {
