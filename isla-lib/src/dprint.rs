@@ -305,13 +305,14 @@ impl<B: BV> Val<B> {
             Val::Enum(member) => {
                 let enum_name = decode_recursive(shared_state.symtab.to_str(member.enum_id.to_name()));
                 // 获取枚举成员名称
-                let member_name = shared_state
-                    .type_info
-                    .enums
-                    .get(&member.enum_id.to_name())
-                    .and_then(|members| members.iter().nth(member.member))
-                    .map(|name| shared_state.symtab.to_str(*name).to_string())
-                    .unwrap_or_else(|| format!("<member {}>", member.member));
+                let member_name = member.to_name(shared_state).to_str(shared_state);
+                /* let member_name = shared_state
+                .type_info
+                .enums
+                .get(&member.enum_id.to_name())
+                .and_then(|members| members.iter().nth(member.member))
+                .map(|name| shared_state.symtab.to_str(*name).to_string())
+                .unwrap_or_else(|| format!("<member {}>", member.member)); */
                 format!("{}{}::{}(EnumMember.member:{})", indent_str, enum_name, member_name, member.member)
             }
             Val::Struct(fields) => {

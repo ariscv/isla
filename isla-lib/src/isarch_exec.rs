@@ -3,11 +3,12 @@ use crate::dprint::colors;
 use crate::error::ExecError;
 use crate::executor::{backtrace_string, LocalFrame, Run};
 use crate::ir::UVal;
+use crate::isarch::{self, get_assembly_name};
 use crate::log;
 use crate::primop_util::symbolic;
 use crate::register::RegisterBindings;
 use crate::smt::Solver;
-use crate::smt::{checkpoint, Config, Context, Model, ModelVal};
+use crate::smt::{checkpoint, Config, Context, Event, Model, ModelVal};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
 use crate::{ir::*, smt};
@@ -77,6 +78,28 @@ pub fn run_symbolic_execute<B: BV>(
                             frame.forks,
                             ret_val.to_str(shared_state)
                         );
+                        /* let assembly = {
+                            // 获取 zexecute 函数的参数信息
+                            let execute_fn_id = shared_state.symtab.lookup("zexecute");
+                            let (fn_args, _, _) = shared_state.functions.get(&execute_fn_id).unwrap();
+
+                            // 提取第一个参数（指令）的值
+                            match fn_args.first() {
+                                Some((arg_name, _)) => {
+                                    match frame.vars().get(arg_name) {
+                                        // arg_val 就是指令的参数值
+                                        Some(UVal::Init(arg_val)) => {
+                                            println!("{:#?}", arg_val);
+                                            isarch::get_assembly_name(arg_val.clone(), &shared_state, regs, lets)
+                                        }
+                                        _ => panic!(""),
+                                    }
+                                }
+                                _ => panic!(""),
+                            }
+                        };
+                        println!("assembly:{:#?}", assembly); */
+                        // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, regs, lets);
 
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
@@ -124,9 +147,10 @@ pub fn run_symbolic_execute<B: BV>(
                                                 ))) => {
                                                     let name = member.to_name(shared_state);
                                                     println!(
-                                                        "  {} = {}",
+                                                        "  [enum]{} = {} | {:?}",
                                                         reg_name_str,
-                                                        shared_state.symtab.to_str(name)
+                                                        shared_state.symtab.to_str(name),
+                                                        member
                                                     );
                                                 }
                                                 Ok(crate::smt::ModelVal::Arbitrary(ty)) => {
@@ -146,7 +170,12 @@ pub fn run_symbolic_execute<B: BV>(
                                                 println!("  {} = {}", reg_name_str, b);
                                             }
                                             _ => {
-                                                println!("  {} = {:?}", reg_name_str, val);
+                                                println!(
+                                                    "  {} = {} | {:?}",
+                                                    reg_name_str,
+                                                    val.to_str(shared_state),
+                                                    val
+                                                );
                                             }
                                         }
                                     }
@@ -204,8 +233,14 @@ pub fn run_symbolic_execute<B: BV>(
                                     }
                                 }
 
+                                let mut events_vec = solver.trace().to_vec();
+                                let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
+                                for envent in events {
+                                    println!(" [event]{} {:?}", Name::from_u32(2037).to_str(shared_state), envent);
+                                }
                                 println!("==============================\n");
                             }
+                            solver.dump_solver("solver.dump");
                         }
 
                         *collected.lock().unwrap() = Some(ret_val);
@@ -247,5 +282,5 @@ pub fn run_symbolic_execute<B: BV>(
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_exec_main");
 
-    run_symbolic_execute("zSTORE", &shared_state, regs, lets);
+    run_symbolic_execute("zMRET", &shared_state, regs, lets);
 }
