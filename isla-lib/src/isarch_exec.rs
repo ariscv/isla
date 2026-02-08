@@ -31,7 +31,7 @@ pub fn run_symbolic_execute<B: BV>(
 
     let Some(union_members) = instruction_union else {
         // zinstruction union 不存在
-        panic!("get_assembly_name: 在symtab中没找到符号'zinstruction'");
+        panic!("run_symbolic_execute: 在symtab中没找到符号'zinstruction'");
     };
 
     // 查找当前构造函数的类型
@@ -235,8 +235,13 @@ pub fn run_symbolic_execute<B: BV>(
 
                                 let mut events_vec = solver.trace().to_vec();
                                 let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
-                                for envent in events {
-                                    println!(" [event]{} {:?}", Name::from_u32(2037).to_str(shared_state), envent);
+                                for event in events {
+                                    match event {
+                                        Event::Fork(fork_id, sym, branch_number, _) => {
+                                            println!(" [event] Fork({}, {:?}, {}, _ )", fork_id, sym, branch_number)
+                                        }
+                                        _ => println!(" [event] {:?}", event),
+                                    }
                                 }
                                 println!("==============================\n");
                             }
@@ -270,7 +275,7 @@ pub fn run_symbolic_execute<B: BV>(
     let res = match result.lock().unwrap().as_ref() {
         Some(Val::String(s)) => Some(s.clone()),
         Some(v) => {
-            eprintln!("警告: zassembly_forwards 返回非字符串值: {:?}", v);
+            eprintln!("警告: zexecute 返回非字符串值: {:?}", v);
             None
         }
         None => None,

@@ -1083,7 +1083,13 @@ fn run_loop<'ir, 'task, B: BV>(
                             });
 
                             let point = checkpoint(solver);
-                            let frozen = Frame { pc: frame.pc + 1, ..freeze_frame(frame) };
+
+                            // 为 fork 路径创建条件列表
+                            let mut fork_conditions = frame.branch_conditions.clone();
+                            fork_conditions.push(test_false.clone());
+
+                            let frozen =
+                                Frame { pc: frame.pc + 1, branch_conditions: fork_conditions, ..freeze_frame(frame) };
                             frame.forks += 1;
                             task_fraction.halve();
                             queue.push(Task {
@@ -1100,7 +1106,11 @@ fn run_loop<'ir, 'task, B: BV>(
                             // can turn a set of traces into a tree later
                             solver.add_event(Event::Fork(frame.forks - 1, v, 0, *info));
 
-                            solver.add(Assert(test_true));
+                            solver.add(Assert(test_true.clone()));
+
+                            // 当前路径的条件
+                            frame.branch_conditions.push(test_true);
+
                             frame.pc = *target
                         } else if can_be_true {
                             solver.add(Assert(test_true));

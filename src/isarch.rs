@@ -46,11 +46,9 @@ use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
 use isla_lib::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
-use isla_lib::ir::{AssertionMode, Bindings, FPTy, Name, SharedState, Ty, Val};
-
+use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings, FPTy, Name, SharedState, Ty, Val};
 use isla_lib::log;
 use isla_lib::register::RegisterBindings;
-
 mod opts;
 use isla_lib::isarch;
 use opts::CommonOpts;
@@ -243,6 +241,8 @@ fn isla_main() -> i32 {
     let regs = &iarch.regs;
     let lets = &iarch.lets;
     let shared_state = &&iarch.shared_state;
+
+    set_global_shared_state(*shared_state);
 
     let subcommand = matches.free[0].as_str();
 

@@ -64,7 +64,44 @@ pub mod partial_linearize;
 pub mod serialize;
 pub mod ssa;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+use std::sync::{OnceLock, RwLock};
+
+/// 全局 SharedState，用于在各个模块中访问共享状态
+static GLOBAL_SHARED_STATE: OnceLock<RwLock<Option<usize>>> = OnceLock::new();
+
+/// 设置全局 SharedState
+///
+/// # Safety
+/// 调用者必须确保 shared_state 在使用期间保持有效
+pub fn set_global_shared_state<B>(shared_state: &SharedState<B>) {
+    // SAFETY: 我们假设 shared_state 在程序运行期间保持有效
+    let ptr_addr = shared_state as *const SharedState<B> as usize;
+    let rwlock = GLOBAL_SHARED_STATE.get_or_init(|| RwLock::new(None));
+    *rwlock.write().unwrap() = Some(ptr_addr);
+}
+
+/// 获取全局 SharedState
+pub fn get_global_shared_state<B>() -> Option<&'static SharedState<'static, B>> {
+    GLOBAL_SHARED_STATE
+        .get()
+        .and_then(|rwlock| rwlock.read().ok())
+        .and_then(|opt| opt.map(|ptr| unsafe { &*(ptr as *const SharedState<'static, B>) }))
+}
+impl fmt::Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // 尝试从全局 SharedState 获取 Symtab 来解析名称
+        if let Some(shared_state) = get_global_shared_state::<u32>() {
+            let name = shared_state.symtab.to_str(*self);
+            // let name = zencode::decode(name);
+            f.debug_tuple("Name").field(&name).finish()
+        } else {
+            // 如果没有设置全局 SharedState，只显示 id
+            f.debug_struct("Name").field("id", &self.id).finish()
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct Name {
     id: u32,
 }
@@ -559,6 +596,59 @@ impl<A: Hash + Eq + Clone> Exp<A> {
             Exp::Struct(_, fields) => 1 + fields.iter().map(|(_, exp)| exp.size_heuristic()).sum::<usize>(),
             Exp::Kind(_, exp) | Exp::Unwrap(_, exp) | Exp::Field(exp, _) => 1 + exp.size_heuristic(),
             _ => 1,
+        }
+    }
+}
+
+/// 专门针对 Exp<Name> 的字符串格式化实现
+impl Exp<Name> {
+    /// 将表达式转换为可读字符串
+    pub fn to_str(&self, symtab: &Symtab) -> String {
+        use Exp::*;
+        match self {
+            Id(id) => {
+                let name = symtab.to_str(*id);
+                crate::zencode::decode(name).to_string()
+            }
+            Ref(id) => {
+                let name = symtab.to_str(*id);
+                format!("&{}", crate::zencode::decode(name))
+            }
+            Bool(b) => b.to_string(),
+            Bits(bv) => format!("0x{:x}", bv.lower_u64()),
+            String(s) => format!("\"{}\"", s),
+            Unit => "()".to_string(),
+            I64(n) => format!("{}i64", n),
+            I128(n) => format!("{}i128", n),
+            Undefined(ty) => format!("<undefined: {:?}>", ty),
+            Struct(name, fields) => {
+                let name_str = crate::zencode::decode(symtab.to_str(*name));
+                let field_strs: Vec<std::string::String> = fields
+                    .iter()
+                    .map(|(fname, fexp)| {
+                        format!("{}: {}", crate::zencode::decode(symtab.to_str(*fname)), fexp.to_str(symtab))
+                    })
+                    .collect();
+                format!("{} {{ {} }}", name_str, field_strs.join(", "))
+            }
+            Kind(name, exp) => {
+                format!("{}::<{}>", exp.to_str(symtab), crate::zencode::decode(symtab.to_str(*name)))
+            }
+            Unwrap(name, exp) => {
+                format!("unwrap::<{}>({})", crate::zencode::decode(symtab.to_str(*name)), exp.to_str(symtab))
+            }
+            Field(exp, name) => {
+                format!("{}.{}", exp.to_str(symtab), crate::zencode::decode(symtab.to_str(*name)))
+            }
+            Call(op, exps) => {
+                let exp_strs: Vec<std::string::String> = exps.iter().map(|e| e.to_str(symtab)).collect();
+                match (op, exps.as_slice()) {
+                    (Op::Not, [e]) => format!("!{}", e.to_str(symtab)),
+                    (Op::And, _) => format!("({})", exp_strs.join(" && ")),
+                    (Op::Or, _) => format!("({})", exp_strs.join(" || ")),
+                    _ => format!("{:?}({})", op, exp_strs.join(", ")),
+                }
+            }
         }
     }
 }
