@@ -1,0 +1,319 @@
+test_exec_main
+fun_args:[Ctor(Name { id: 1836 }, Unit)]
+tid:0 执行好一条路径，fork=1，ret_val=Illegal_Instruction(())
+=== ISA State (Thread 0) ===
+  zmstatus = {bits: #x0000000000000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })})
+  zmimpid = 0x0
+  [enum]zcur_privilege = zUser | EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 0 }
+  zmenvcfg = {bits: #x0000000000000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })})
+  zmarchid = 0x0
+  zhtif_tohost_base = None<b>(()) | Ctor(Name { id: 381 }, Unit)
+  zpma_regions = List[{attributes: {write_idempotent: true, cacheable: true, supports_cbo_zero: true, writable: true, readable: true, coherent: true, reservability: Reservability::zRsrvEventual(EnumMember.member:2), misaligned_fault: misaligned_fault::zNoFault(EnumMember.member:0), executable: true, read_idempotent: true}, base: #x0000000080000000, size: #x0000000080000000, include_in_device_tree: true}, {attributes: {misaligned_fault: misaligned_fault::zAlignmentFault(EnumMember.member:2), executable: false, readable: true, coherent: true, cacheable: false, supports_cbo_zero: false, writable: true, read_idempotent: false, reservability: Reservability::zRsrvNone(EnumMember.member:0), write_idempotent: false}, base: #x0000000002000000, include_in_device_tree: false, size: #x0000000002000000}, {base: #x0000000000001000, include_in_device_tree: false, size: #x0000000000001000, attributes: {executable: false, supports_cbo_zero: false, cacheable: true, reservability: Reservability::zRsrvNone(EnumMember.member:0), misaligned_fault: misaligned_fault::zNoFault(EnumMember.member:0), readable: true, writable: false, read_idempotent: true, write_idempotent: true, coherent: true}}] | List([Struct({Name { id: 2099 }: Struct({Name { id: 2097 }: Bool(true), Name { id: 2089 }: Bool(true), Name { id: 2095 }: Bool(true), Name { id: 2096 }: Bool(true), Name { id: 2093 }: Bool(true), Name { id: 2090 }: Bool(true), Name { id: 2094 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 2028 } }, member: 2 }), Name { id: 456 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 456 } }, member: 0 }), Name { id: 2091 }: Bool(true), Name { id: 2092 }: Bool(true)}), Name { id: 2100 }: Bits(B129 { tag: false, bits: 2147483648, len: 64 }), Name { id: 2102 }: Bits(B129 { tag: false, bits: 2147483648, len: 64 }), Name { id: 2101 }: Bool(true)}), Struct({Name { id: 2099 }: Struct({Name { id: 456 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 456 } }, member: 2 }), Name { id: 2091 }: Bool(false), Name { id: 2093 }: Bool(true), Name { id: 2090 }: Bool(true), Name { id: 2089 }: Bool(false), Name { id: 2095 }: Bool(false), Name { id: 2096 }: Bool(true), Name { id: 2092 }: Bool(false), Name { id: 2094 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 2028 } }, member: 0 }), Name { id: 2097 }: Bool(false)}), Name { id: 2100 }: Bits(B129 { tag: false, bits: 33554432, len: 64 }), Name { id: 2101 }: Bool(false), Name { id: 2102 }: Bits(B129 { tag: false, bits: 33554432, len: 64 })}), Struct({Name { id: 2100 }: Bits(B129 { tag: false, bits: 4096, len: 64 }), Name { id: 2101 }: Bool(false), Name { id: 2102 }: Bits(B129 { tag: false, bits: 4096, len: 64 }), Name { id: 2099 }: Struct({Name { id: 2091 }: Bool(false), Name { id: 2095 }: Bool(false), Name { id: 2089 }: Bool(true), Name { id: 2094 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 2028 } }, member: 0 }), Name { id: 456 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 456 } }, member: 0 }), Name { id: 2093 }: Bool(true), Name { id: 2096 }: Bool(false), Name { id: 2092 }: Bool(true), Name { id: 2097 }: Bool(true), Name { id: 2090 }: Bool(true)})})])
+  zmvendorid = 0x0
+  zpc_reset_address = 0x0
+  z__monomorphizze_reads = false
+  zsenvcfg = {bits: #x00000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 32 })})
+  zmseccfg = {bits: #x0000000000000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })})
+  zmconfigptr = 0x0
+  zmisa = {bits: #x40000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 1073741824, len: 32 })})
+  z__monomorphizze_writes = false
+  ztlb = [None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(())] | Vector([Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit)])
+  zhart_state = HART_ACTIVE(()) | Ctor(Name { id: 2148 }, Unit)
+  zmhartid = 0x0
+  let zmisaligned_fetch_writes_xtval = true
+  let zzzero_freg = 0x0
+  let zsoftware_breakpoint_writes_xtval = true
+  let zsoftware_check_fault_writes_xtval = true
+  let zzzero_reg = 0x0
+  let zfp_eflag_invalid = 0x1
+  let zMTIME_BASE_HI = 0xbffc
+  let zMTIMECMP_BASE = 0x4000
+  let zfetch_access_fault_writes_xtval = true
+  let zsys_enable_writable_misa = true
+  let have_exception = false
+  let zsamo_access_fault_writes_xtval = true
+  let zplat_enable_dirty_update = false
+  let zfp_eflag_oveflow = 0x4
+  let zillegal_instruction_writes_xtval = true
+  let zMTIME_BASE = 0xbff8
+  let zhardware_breakpoint_writes_xtval = true
+  let zvl_use_ceil = false
+  let zreserved_exceptions_write_xtval = false
+  let zzzvreg = 0x0
+  let zsys_writable_hpm_counters = 0xffffffff
+  let zfp_rounding_rup = 0x4
+  let zfp_eflag_inexact = 0x10
+  let zsys_misaligned_byte_by_byte = false
+  let zfp_eflag_divide_by_zzero = 0x2
+  let zdefault_sv32_ext_pte = 0x0
+  let zmisaligned_samo_writes_xtval = true
+  let zplat_enable_misaligned_access = true
+  let zload_page_fault_writes_xtval = true
+  let zfp_rounding_rna = 0x2
+  let zplat_clint_sizze = 0xc0000
+  let zsp = 0x2
+  let zMSIP_BASE = 0x0
+  let zload_access_fault_writes_xtval = true
+  let zmisaligned_load_writes_xtval = true
+  let zfp_eflag_underflow = 0x8
+  let zsys_misaligned_order_decreasing = false
+  let zra = 0x1
+  let zVLENB = 0x20
+  let zbase_E_enabled = false
+  let zplat_clint_base = 0x2000000
+  let zMTIMECMP_BASE_HI = 0x4004
+  let zfp_rounding_default = 0x1
+  let zfp_rounding_rtzz = 0x5
+  let zfp_rounding_rdn = 0x3
+  let zfetch_page_fault_writes_xtval = true
+  let zfp_rounding_rne = 0x1
+  let zzzreg = 0x0
+  let zfp_eflag_none = 0x0
+  let zfp_eflag_overflow_and_inexact = 0x14
+  let zsys_enable_writable_fiom = true
+  let zsamo_page_fault_writes_xtval = true
+ [event]zPrivilege Function { name: Name { id: 4237 }, call: false }
+ [event]zPrivilege Smt(Assert(Var(Sym { id: 8 })), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+ [event]zPrivilege Fork(0, Sym { id: 8 }, 0, SourceLoc { file: 68, line1: 562, char1: 2, line2: 569, char2: 3 })
+ [event]zPrivilege Function { name: Name { id: 2429 }, call: false }
+ [event]zPrivilege Smt(DefineConst(Sym { id: 8 }, Not(Var(Sym { id: 7 }))), DefAttrs { attrs: 0 }, SourceLoc { file: 3, line1: 61, char1: 30, line2: 61, char2: 57 })
+ [event]zPrivilege Smt(DefineConst(Sym { id: 7 }, Eq(Enum(EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 4 }), Var(Sym { id: 6 }))), DefAttrs { attrs: 0 }, SourceLoc { file: 3, line1: 61, char1: 39, line2: 61, char2: 56 })
+ [event]zPrivilege Function { name: Name { id: 2429 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3128 }, [], Symbolic(Sym { id: 6 }))
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 6 }, Enum(EnumId { id: Name { id: 2037 } })), DefAttrs { attrs: 0 }, SourceLoc { file: 68, line1: 562, char1: 7, line2: 562, char2: 31 })
+ [event]zPrivilege Smt(DefineEnum(Name { id: 2037 }, 5), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+==============================
+
+tid:0 执行好一条路径，fork=0，ret_val=Retire_Success(())
+=== ISA State (Thread 0) ===
+  zmstatus = {bits: #x0000000000001880} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })})
+  zmimpid = 0x0
+  zcur_privilege = Privilege::zUser(EnumMember.member:0) | Enum(EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 0 })
+  zPC = <arbitrary: BitVec(32)>
+  zmenvcfg = {bits: #x0000000000000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })})
+  zmarchid = 0x0
+  zhtif_tohost_base = None<b>(()) | Ctor(Name { id: 381 }, Unit)
+  znextPC = <arbitrary: BitVec(32)>
+  zpma_regions = List[{attributes: {write_idempotent: true, cacheable: true, supports_cbo_zero: true, writable: true, readable: true, coherent: true, reservability: Reservability::zRsrvEventual(EnumMember.member:2), misaligned_fault: misaligned_fault::zNoFault(EnumMember.member:0), executable: true, read_idempotent: true}, base: #x0000000080000000, size: #x0000000080000000, include_in_device_tree: true}, {attributes: {misaligned_fault: misaligned_fault::zAlignmentFault(EnumMember.member:2), executable: false, readable: true, coherent: true, cacheable: false, supports_cbo_zero: false, writable: true, read_idempotent: false, reservability: Reservability::zRsrvNone(EnumMember.member:0), write_idempotent: false}, base: #x0000000002000000, include_in_device_tree: false, size: #x0000000002000000}, {base: #x0000000000001000, include_in_device_tree: false, size: #x0000000000001000, attributes: {executable: false, supports_cbo_zero: false, cacheable: true, reservability: Reservability::zRsrvNone(EnumMember.member:0), misaligned_fault: misaligned_fault::zNoFault(EnumMember.member:0), readable: true, writable: false, read_idempotent: true, write_idempotent: true, coherent: true}}] | List([Struct({Name { id: 2099 }: Struct({Name { id: 2097 }: Bool(true), Name { id: 2089 }: Bool(true), Name { id: 2095 }: Bool(true), Name { id: 2096 }: Bool(true), Name { id: 2093 }: Bool(true), Name { id: 2090 }: Bool(true), Name { id: 2094 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 2028 } }, member: 2 }), Name { id: 456 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 456 } }, member: 0 }), Name { id: 2091 }: Bool(true), Name { id: 2092 }: Bool(true)}), Name { id: 2100 }: Bits(B129 { tag: false, bits: 2147483648, len: 64 }), Name { id: 2102 }: Bits(B129 { tag: false, bits: 2147483648, len: 64 }), Name { id: 2101 }: Bool(true)}), Struct({Name { id: 2099 }: Struct({Name { id: 456 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 456 } }, member: 2 }), Name { id: 2091 }: Bool(false), Name { id: 2093 }: Bool(true), Name { id: 2090 }: Bool(true), Name { id: 2089 }: Bool(false), Name { id: 2095 }: Bool(false), Name { id: 2096 }: Bool(true), Name { id: 2092 }: Bool(false), Name { id: 2094 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 2028 } }, member: 0 }), Name { id: 2097 }: Bool(false)}), Name { id: 2100 }: Bits(B129 { tag: false, bits: 33554432, len: 64 }), Name { id: 2101 }: Bool(false), Name { id: 2102 }: Bits(B129 { tag: false, bits: 33554432, len: 64 })}), Struct({Name { id: 2100 }: Bits(B129 { tag: false, bits: 4096, len: 64 }), Name { id: 2101 }: Bool(false), Name { id: 2102 }: Bits(B129 { tag: false, bits: 4096, len: 64 }), Name { id: 2099 }: Struct({Name { id: 2091 }: Bool(false), Name { id: 2095 }: Bool(false), Name { id: 2089 }: Bool(true), Name { id: 2094 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 2028 } }, member: 0 }), Name { id: 456 }: Enum(EnumMember { enum_id: EnumId { id: Name { id: 456 } }, member: 0 }), Name { id: 2093 }: Bool(true), Name { id: 2096 }: Bool(false), Name { id: 2092 }: Bool(true), Name { id: 2097 }: Bool(true), Name { id: 2090 }: Bool(true)})})])
+  zmvendorid = 0x0
+  zpc_reset_address = 0x0
+  z__monomorphizze_reads = false
+  zsenvcfg = {bits: #x00000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 32 })})
+  zelp = 0x0
+  zmepc = <arbitrary: BitVec(32)>
+  zmseccfg = {bits: #x0000000000000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })})
+  zmconfigptr = 0x0
+  zmisa = {bits: #x40000000} | Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 1073741824, len: 32 })})
+  z__monomorphizze_writes = false
+  ztlb = [None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(()), None<RTLB_Entry>(())] | Vector([Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit), Ctor(Name { id: 914 }, Unit)])
+  zhart_state = HART_ACTIVE(()) | Ctor(Name { id: 2148 }, Unit)
+  zmhartid = 0x0
+  let zmisaligned_fetch_writes_xtval = true
+  let zzzero_freg = 0x0
+  let zsoftware_breakpoint_writes_xtval = true
+  let zsoftware_check_fault_writes_xtval = true
+  let zzzero_reg = 0x0
+  let zfp_eflag_invalid = 0x1
+  let zMTIME_BASE_HI = 0xbffc
+  let zMTIMECMP_BASE = 0x4000
+  let zfetch_access_fault_writes_xtval = true
+  let zsys_enable_writable_misa = true
+  let have_exception = false
+  let zsamo_access_fault_writes_xtval = true
+  let zplat_enable_dirty_update = false
+  let zfp_eflag_oveflow = 0x4
+  let zillegal_instruction_writes_xtval = true
+  let zMTIME_BASE = 0xbff8
+  let zhardware_breakpoint_writes_xtval = true
+  let zvl_use_ceil = false
+  let zreserved_exceptions_write_xtval = false
+  let zzzvreg = 0x0
+  let zsys_writable_hpm_counters = 0xffffffff
+  let zfp_rounding_rup = 0x4
+  let zfp_eflag_inexact = 0x10
+  let zsys_misaligned_byte_by_byte = false
+  let zfp_eflag_divide_by_zzero = 0x2
+  let zdefault_sv32_ext_pte = 0x0
+  let zmisaligned_samo_writes_xtval = true
+  let zplat_enable_misaligned_access = true
+  let zload_page_fault_writes_xtval = true
+  let zfp_rounding_rna = 0x2
+  let zplat_clint_sizze = 0xc0000
+  let zsp = 0x2
+  let zMSIP_BASE = 0x0
+  let zload_access_fault_writes_xtval = true
+  let zmisaligned_load_writes_xtval = true
+  let zfp_eflag_underflow = 0x8
+  let zsys_misaligned_order_decreasing = false
+  let zra = 0x1
+  let zVLENB = 0x20
+  let zbase_E_enabled = false
+  let zplat_clint_base = 0x2000000
+  let zMTIMECMP_BASE_HI = 0x4004
+  let zfp_rounding_default = 0x1
+  let zfp_rounding_rtzz = 0x5
+  let zfp_rounding_rdn = 0x3
+  let zfetch_page_fault_writes_xtval = true
+  let zfp_rounding_rne = 0x1
+  let zzzreg = 0x0
+  let zfp_eflag_none = 0x0
+  let zfp_eflag_overflow_and_inexact = 0x14
+  let zsys_enable_writable_fiom = true
+  let zsamo_page_fault_writes_xtval = true
+ [event]zPrivilege Function { name: Name { id: 4237 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3124 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3006 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3006 }, call: true }
+ [event]zPrivilege WriteReg(Name { id: 3026 }, [], Symbolic(Sym { id: 126 }))
+ [event]zPrivilege Branch { address: Symbolic(Sym { id: 126 }) }
+ [event]zPrivilege Function { name: Name { id: 3124 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3967 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3488 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3486 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3297 }, call: false }
+ [event]zPrivilege Smt(DefineConst(Sym { id: 126 }, Bvor(Bvand(Var(Sym { id: 125 }), Bvnot(Bits64(B64 { len: 32, bits: 3 }))), ZeroExtend(30, Bits64(B64 { len: 2, bits: 0 })))), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+ [event]zPrivilege Function { name: Name { id: 2623 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2623 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2589 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2589 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3135 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3135 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3156 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 1073741824, len: 32 })}))
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3297 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3295 }, [], Symbolic(Sym { id: 125 }))
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 125 }, BitVec(32)), DefAttrs { attrs: 0 }, SourceLoc { file: 40, line1: 43, char1: 25, line2: 43, char2: 39 })
+ [event]zPrivilege Function { name: Name { id: 3486 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3488 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2605 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2605 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3019 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3014 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2994 }, call: false }
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 124 }, BitVec(32)), DefAttrs { attrs: 0 }, SourceLoc { file: 31, line1: 35, char1: 33, line2: 35, char2: 34 })
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 123 }, BitVec(12)), DefAttrs { attrs: 0 }, SourceLoc { file: 31, line1: 35, char1: 33, line2: 35, char2: 34 })
+ [event]zPrivilege Function { name: Name { id: 2994 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2957 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2957 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3014 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3014 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2994 }, call: false }
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 122 }, BitVec(32)), DefAttrs { attrs: 0 }, SourceLoc { file: 31, line1: 35, char1: 33, line2: 35, char2: 34 })
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 121 }, BitVec(12)), DefAttrs { attrs: 0 }, SourceLoc { file: 31, line1: 35, char1: 33, line2: 35, char2: 34 })
+ [event]zPrivilege Function { name: Name { id: 2994 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2957 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2957 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3014 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3019 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [Field(Name { id: 478 })], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 3917 }, call: false }
+ [event]zPrivilege WriteReg(Name { id: 3907 }, [], Bits(B129 { tag: false, bits: 0, len: 1 }))
+ [event]zPrivilege Function { name: Name { id: 3908 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3908 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3906 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2631 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2631 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3231 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3231 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3248 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3150 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3150 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3156 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 1073741824, len: 32 })}))
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3906 }, call: true }
+ [event]zPrivilege WriteReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 3908 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3908 }, call: true }
+ [event]zPrivilege Smt(DefineEnum(Name { id: 464 }, 2), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [Field(Name { id: 478 })], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 3173 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3173 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 3917 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3128 }, [], Enum(EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 0 }))
+ [event]zPrivilege Smt(DefineEnum(Name { id: 48 }, 2), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege WriteReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [Field(Name { id: 478 })], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 2429 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2429 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3128 }, [], Enum(EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 0 }))
+ [event]zPrivilege WriteReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 6272, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 128, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 2909 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2906 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2906 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2909 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3152 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3152 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3156 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 1073741824, len: 32 })}))
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2855 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 2856 }, call: true }
+ [event]zPrivilege Smt(DefineEnum(Name { id: 697 }, 104), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [Field(Name { id: 478 })], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 128, len: 64 })}))
+ [event]zPrivilege WriteReg(Name { id: 3128 }, [], Enum(EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 0 }))
+ [event]zPrivilege Function { name: Name { id: 2905 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2905 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3177 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3177 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 128, len: 64 })}))
+ [event]zPrivilege WriteReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 128, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [Field(Name { id: 478 })], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege WriteReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege Function { name: Name { id: 3175 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3175 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3209 }, [Field(Name { id: 478 })], Struct({Name { id: 478 }: Bits(B129 { tag: false, bits: 0, len: 64 })}))
+ [event]zPrivilege ReadReg(Name { id: 3128 }, [], Symbolic(Sym { id: 6 }))
+ [event]zPrivilege Function { name: Name { id: 3967 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3025 }, [], Symbolic(Sym { id: 9 }))
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 9 }, BitVec(32)), DefAttrs { attrs: 0 }, SourceLoc { file: 68, line1: 567, char1: 16, line2: 567, char2: 64 })
+ [event]zPrivilege ReadReg(Name { id: 3128 }, [], Symbolic(Sym { id: 6 }))
+ [event]zPrivilege Function { name: Name { id: 2589 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 2589 }, call: true }
+ [event]zPrivilege Function { name: Name { id: 3479 }, call: false }
+ [event]zPrivilege Function { name: Name { id: 3479 }, call: true }
+ [event]zPrivilege Smt(Assert(Not(Var(Sym { id: 8 }))), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+ [event]zPrivilege Fork(0, Sym { id: 8 }, 1, SourceLoc { file: 68, line1: 562, char1: 2, line2: 569, char2: 3 })
+ [event]zPrivilege Function { name: Name { id: 2429 }, call: false }
+ [event]zPrivilege Smt(DefineConst(Sym { id: 8 }, Not(Var(Sym { id: 7 }))), DefAttrs { attrs: 0 }, SourceLoc { file: 3, line1: 61, char1: 30, line2: 61, char2: 57 })
+ [event]zPrivilege Smt(DefineConst(Sym { id: 7 }, Eq(Enum(EnumMember { enum_id: EnumId { id: Name { id: 2037 } }, member: 4 }), Var(Sym { id: 6 }))), DefAttrs { attrs: 0 }, SourceLoc { file: 3, line1: 61, char1: 39, line2: 61, char2: 56 })
+ [event]zPrivilege Function { name: Name { id: 2429 }, call: true }
+ [event]zPrivilege ReadReg(Name { id: 3128 }, [], Symbolic(Sym { id: 6 }))
+ [event]zPrivilege Smt(DeclareConst(Sym { id: 6 }, Enum(EnumId { id: Name { id: 2037 } })), DefAttrs { attrs: 0 }, SourceLoc { file: 68, line1: 562, char1: 7, line2: 562, char2: 31 })
+ [event]zPrivilege Smt(DefineEnum(Name { id: 2037 }, 5), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+==============================
+
+
+
