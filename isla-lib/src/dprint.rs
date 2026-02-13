@@ -100,7 +100,7 @@ macro_rules! dlog {
                 .unwrap_or("unknown")
         };
 
-        /* println!("{}[{}:{}:{} {}]: {} {}",
+        eprintln!("{}[{}:{}:{} {}]: {} {}",
             $color,
             file,
             line,
@@ -108,7 +108,7 @@ macro_rules! dlog {
             function_name,
             format_args!($fmt $($arg)*),
             $crate::dprint::colors::RESET,
-        ); */
+        );
     }};
 
     // 带自定义颜色的版本: dlog(colors::COLOR, "format", args...)
