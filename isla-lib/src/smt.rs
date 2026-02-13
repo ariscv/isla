@@ -101,7 +101,7 @@ pub struct EnumId {
     id: Name,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct EnumMember {
     pub enum_id: EnumId,
     pub member: usize,
@@ -165,6 +165,20 @@ impl EnumMember {
     }
 }
 
+impl fmt::Debug for EnumMember {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // 尝试从全局 SharedState 获取 Symtab 来解析名称
+        if let Some(shared_state) = crate::ir::get_global_shared_state::<u32>() {
+            let name = self.to_name(shared_state);
+            let name_str: &str = &format!("{}|{}", &self.member, shared_state.symtab.to_str(name));
+            // let name_str = zencode::decode(name_str);
+            f.debug_struct("EnumMember").field("enum_id", &self.enum_id).field("member", &name_str).finish()
+        } else {
+            // 如果没有设置全局 SharedState，只显示 enum_id 和 member
+            f.debug_struct("EnumMember").field("enum_id", &self.enum_id).field("member", &self.member).finish()
+        }
+    }
+}
 pub mod smtlib;
 use smtlib::*;
 
@@ -1550,6 +1564,7 @@ impl<B> fmt::Debug for Model<'_, B> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub enum ModelVal {
     Arbitrary(Ty),
     Exp(Exp<Sym>),

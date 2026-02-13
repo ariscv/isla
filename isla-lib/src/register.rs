@@ -85,13 +85,13 @@ use crate::smt::{Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum RelaxedVal<'ir, B> {
     Uninit(&'ir Ty<Name>),
     Init { last_write: Val<B>, last_read: Option<Val<B>>, old_writes: Vec<Val<B>> },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Register<'ir, B> {
     relaxed: bool,
     value: RelaxedVal<'ir, B>,
@@ -245,6 +245,27 @@ impl<'ir, B: BV> Register<'ir, B> {
         if self.relaxed {
             self.value.forget_last_read()
         }
+    }
+    pub fn read_old_if_initialized(&self) -> Option<&Vec<Val<B>>> {
+        match &self.value {
+            RelaxedVal::Init { old_writes, .. } => Some(old_writes),
+            RelaxedVal::Uninit(_) => None,
+        }
+    }
+    /// 读取寄存器的初始值（如果已初始化）。
+    /// 对于 relaxed 寄存器，返回历史写入记录中的第一个值（最早的写入）；
+    /// 如果没有历史写入记录，则返回当前的 last_write 值。
+    /// 如果寄存器未初始化，返回 None。
+    pub fn read_init_value_if_initialized(&self) -> Option<&Val<B>> {
+        // 如果未初始化则返回None
+        self.read_old_if_initialized().and_then(|value_vec| {
+            // 条件：历史写入记录为空 → 返回当前值（这是唯一的写入）
+            // 条件：历史写入记录非空 → 返回最早的值（初始值）
+            match value_vec.is_empty() {
+                true => self.read_last_if_initialized(),
+                false => Some(&value_vec[0]),
+            }
+        })
     }
 }
 

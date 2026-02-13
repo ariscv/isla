@@ -1,19 +1,50 @@
 use crate::bitvector::BV;
-use crate::dprint::colors;
+use crate::dprint::{self, colors};
 use crate::error::ExecError;
 use crate::executor::{backtrace_string, LocalFrame, Run};
 use crate::ir::UVal;
 use crate::isarch::{self, get_assembly_name};
-use crate::log;
 use crate::primop_util::symbolic;
 use crate::register::RegisterBindings;
-use crate::smt::Solver;
 use crate::smt::{checkpoint, Config, Context, Event, Model, ModelVal};
+use crate::smt::{Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
+use crate::{dlog, log};
 use crate::{ir::*, smt};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+
+pub trait Target
+where
+    Self: Sync + Default,
+{
+    fn isa_state(&self) -> Vec<String> {
+        vec![String::new()]
+    }
+}
+
+// Marker trait 表示这是 RISC-V 架构
+pub trait RISCV: Target {}
+
+#[derive(Default)]
+pub struct RISCV32 {}
+#[derive(Default)]
+pub struct RISCV64 {}
+
+// 为所有 RISCV 类型提供默认实现
+impl<T: RISCV> Target for T {
+    fn isa_state(&self) -> Vec<String> {
+        let mut regs: Vec<String> = (1..31).map(|r| format!("x{}", r)).collect();
+        regs.extend((1..31).map(|r| format!("f{}", r)));
+        regs.push("cur_privilege".to_string());
+        regs
+    }
+}
+
+// 标记为 RISCV 类型
+impl RISCV for RISCV32 {}
+impl RISCV for RISCV64 {}
 
 pub fn run_symbolic_execute<B: BV>(
     instruction_name: &str,
@@ -23,6 +54,7 @@ pub fn run_symbolic_execute<B: BV>(
 ) -> Option<String> {
     use crate::smt::checkpoint;
 
+    let target = RISCV32::default();
     // 查找指令的构造函数名称
     let ctor_name = shared_state.symtab.lookup(instruction_name);
 
@@ -50,6 +82,7 @@ pub fn run_symbolic_execute<B: BV>(
         Box::new(symbolic(ctor_ty, shared_state, &mut solver, SourceLoc::unknown()).unwrap()),
     )];
     println!("fun_args:{:?}", fun_args);
+    println!("{:?}", target.isa_state());
 
     // 生成参数（暂时使用默认值，测试checkpoint机制）
 
@@ -108,61 +141,25 @@ pub fn run_symbolic_execute<B: BV>(
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
                                 println!("=== ISA State (Thread {}) ===", thread);
+                                let test = Sym::from_u32(6);
+                                dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
 
                                 // 遍历所有寄存器
                                 for (reg_name, reg) in frame.regs().iter() {
-                                    let reg_name_str = shared_state.symtab.to_str(*reg_name);
-                                    if let Some(val) = reg.read_last_if_initialized() {
+                                    let reg_name_str: &str = shared_state.symtab.to_str(*reg_name);
+                                    let reg_name_str: &str = &zencode::decode(reg_name_str);
+                                    /* dlog!(
+                                        "{}:(read_init_value_if_initialized){:?},(read_old_if_initialized){:?},(read_last_if_initialized){:?}",
+                                        reg_name_str,
+                                        reg.read_init_value_if_initialized(),
+                                        reg.read_old_if_initialized(),
+                                        reg.read_last_if_initialized()
+                                    ); */
+                                    if let Some(val) = reg.read_init_value_if_initialized() {
                                         match val {
-                                            Val::Symbolic(sym) => match model.get_var(*sym) {
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits64(bv))) => {
-                                                    println!(
-                                                        "  {} = 0x{:x} ({} bits)",
-                                                        reg_name_str,
-                                                        bv.lower_u64(),
-                                                        bv.len()
-                                                    );
-                                                }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits(bv))) => {
-                                                    let hex_str: String = bv
-                                                        .chunks(4)
-                                                        .rev()
-                                                        .map(|chunk: &[bool]| {
-                                                            let mut n = 0u8;
-                                                            for (i, bit) in chunk.iter().enumerate() {
-                                                                if *bit {
-                                                                    n |= 1 << i;
-                                                                }
-                                                            }
-                                                            format!("{:x}", n)
-                                                        })
-                                                        .collect();
-                                                    println!("  {} = 0b{} ({} bits)", reg_name_str, hex_str, bv.len());
-                                                }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bool(b))) => {
-                                                    println!("  {} = {}", reg_name_str, b);
-                                                }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Enum(
-                                                    member,
-                                                ))) => {
-                                                    let name = member.to_name(shared_state);
-                                                    println!(
-                                                        "  [enum]{} = {} | {:?}",
-                                                        reg_name_str,
-                                                        shared_state.symtab.to_str(name),
-                                                        member
-                                                    );
-                                                }
-                                                Ok(crate::smt::ModelVal::Arbitrary(ty)) => {
-                                                    println!("  {} = <arbitrary: {:?}>", reg_name_str, ty);
-                                                }
-                                                Err(e) => {
-                                                    println!("  {} = <error: {:?}>", reg_name_str, e);
-                                                }
-                                                _ => {
-                                                    println!("  {} = {:?}", reg_name_str, val);
-                                                }
-                                            },
+                                            Val::Symbolic(sym) => {
+                                                println!("  {} = {:?}", reg_name_str, model.get_var(*sym).unwrap());
+                                            }
                                             Val::Bits(bv) => {
                                                 println!("  {} = 0x{:x}", reg_name_str, bv.lower_u64());
                                             }
@@ -238,7 +235,12 @@ pub fn run_symbolic_execute<B: BV>(
                                 for event in events {
                                     match event {
                                         Event::Fork(fork_id, sym, branch_number, _) => {
-                                            println!(" [event] Fork({}, {:?}, {}, _ )", fork_id, sym, branch_number)
+                                            println!(
+                                                " [event] Fork({}, {:?}, {}, _ )",
+                                                fork_id,
+                                                model.get_var(sym).unwrap(),
+                                                branch_number
+                                            )
                                         }
                                         _ => println!(" [event] {:?}", event),
                                     }
