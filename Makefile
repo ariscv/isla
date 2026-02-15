@@ -1,5 +1,10 @@
 .PHONY: all isla-sail isla-litmus isla web test fmt clean install uninstall update
 
+run:
+	cargo fmt && cp log log.1 \
+		&&RUST_BACKTRACE=1 cargo run --bin isarch --release \
+		-- -A ./rv32d.ir -C ./configs/riscv32.toml --verbose --probe-all --trace-all list-instructions > log
+
 all: isla
 
 isla:
