@@ -144,6 +144,15 @@ pub fn run_symbolic_execute<B: BV>(
                                 let test = Sym::from_u32(6);
                                 // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
+                                println!(
+                                    "当前汇编：{:?}",
+                                    isarch::get_assembly_name(
+                                        model.get_val(&fun_args[0]).unwrap().clone(),
+                                        shared_state,
+                                        regs,
+                                        lets,
+                                    ),
+                                );
 
                                 // 遍历所有寄存器
                                 for (reg_name, reg) in frame.regs().iter() {
