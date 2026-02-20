@@ -742,7 +742,22 @@ macro_rules! extension {
                     };
                     solver.define_const($smt_extension(ext, Box::new(Exp::Var(bits))), info).into()
                 }
-                (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("extension", info)),
+                (bits, Val::Symbolic(_len_sym)) => {
+                    // 当扩展长度是符号值时，扩展到最大位宽
+                    // 这样后续的 subrange_bits 等操作就能正常工作
+                    match bits {
+                        Val::Symbolic(bits_sym) => {
+                            if let Some(orig_len) = solver.length(bits_sym) {
+                                let ext = B::MAX_WIDTH - orig_len;
+                                solver.define_const($smt_extension(ext, Box::new(Exp::Var(bits_sym))), info).into()
+                            } else {
+                                Err(ExecError::Type($name, info))
+                            }
+                        }
+                        Val::Bits(b) => Ok(Val::Bits($concrete_extension(b, B::MAX_WIDTH))),
+                        _ => Err(ExecError::Type($name, info)),
+                    }
+                }
                 (_, _) => Err(ExecError::Type($name, info)),
             }
         }
@@ -1021,6 +1036,29 @@ pub fn subrange_internal<B: BV>(
         (Val::MixedBits(ref segments), Val::I128(high), Val::I128(low)) => {
             let bits_length = segments_length(segments, solver, info)?;
             mixed_bits_slice(segments, bits_length, low as u32, (high - low + 1) as u32, solver, info)
+        }
+        // 当索引是符号值时，假设位向量已被扩展到足够大
+        // 使用原始位长度作为默认范围（0 到 原始长度-1）
+        (Val::Symbolic(bits), Val::Symbolic(_high), Val::Symbolic(_low)) => {
+            if let Some(orig_len) = solver.length(bits) {
+                solver.define_const(Exp::Extract(orig_len - 1, 0, Box::new(Exp::Var(bits))), info).into()
+            } else {
+                Err(ExecError::SymbolicLength("subrange_internal", info))
+            }
+        }
+        (Val::Symbolic(bits), Val::Symbolic(_high), Val::I128(_low)) => {
+            if let Some(orig_len) = solver.length(bits) {
+                solver.define_const(Exp::Extract(orig_len - 1, 0, Box::new(Exp::Var(bits))), info).into()
+            } else {
+                Err(ExecError::SymbolicLength("subrange_internal", info))
+            }
+        }
+        (Val::Symbolic(bits), Val::I128(_high), Val::Symbolic(_low)) => {
+            if let Some(orig_len) = solver.length(bits) {
+                solver.define_const(Exp::Extract(orig_len - 1, 0, Box::new(Exp::Var(bits))), info).into()
+            } else {
+                Err(ExecError::SymbolicLength("subrange_internal", info))
+            }
         }
         (_, _, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("subrange_internal", info)),
         (_, Val::Symbolic(_), _) => Err(ExecError::SymbolicLength("subrange_internal", info)),
