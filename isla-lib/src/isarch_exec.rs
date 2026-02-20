@@ -142,7 +142,8 @@ pub fn run_symbolic_execute<B: BV>(
                             {
                                 println!("=== ISA State (Thread {}) ===", thread);
                                 let test = Sym::from_u32(6);
-                                dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
+                                // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
+                                // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
 
                                 // 遍历所有寄存器
                                 for (reg_name, reg) in frame.regs().iter() {
@@ -155,7 +156,9 @@ pub fn run_symbolic_execute<B: BV>(
                                         reg.read_old_if_initialized(),
                                         reg.read_last_if_initialized()
                                     ); */
-                                    if let Some(val) = reg.read_init_value_if_initialized() {
+
+                                    // print reg
+                                    /* if let Some(val) = reg.read_init_value_if_initialized() {
                                         match val {
                                             Val::Symbolic(sym) => {
                                                 println!("  {} = {:?}", reg_name_str, model.get_var(*sym).unwrap());
@@ -175,11 +178,11 @@ pub fn run_symbolic_execute<B: BV>(
                                                 );
                                             }
                                         }
-                                    }
+                                    } */
                                 }
 
                                 // 遍历lets中的特殊变量（如current_privilege等）
-                                for (let_name, let_val) in frame.lets().iter() {
+                                /* for (let_name, let_val) in frame.lets().iter() {
                                     let let_name_str = shared_state.symtab.to_str(*let_name);
                                     // 过滤掉一些内部变量
                                     if !let_name_str.starts_with("__") && let_name_str != "NULL" {
@@ -228,9 +231,10 @@ pub fn run_symbolic_execute<B: BV>(
                                             _ => {}
                                         }
                                     }
-                                }
+                                } */
 
-                                let mut events_vec = solver.trace().to_vec();
+                                // events
+                                /* let mut events_vec = solver.trace().to_vec();
                                 let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
                                 for event in events {
                                     match event {
@@ -244,7 +248,7 @@ pub fn run_symbolic_execute<B: BV>(
                                         }
                                         _ => println!(" [event] {:?}", event),
                                     }
-                                }
+                                } */
                                 println!("==============================\n");
                             }
                             solver.dump_solver("solver.dump");
@@ -264,7 +268,7 @@ pub fn run_symbolic_execute<B: BV>(
                         }
                         _ => {
                             eprintln!("执行错误: {:?}", error);
-                            eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                            eprintln!("调用栈: {}", backtrace_string(&backtrace, &shared_state.symtab));
                         }
                     }
                 }
@@ -289,5 +293,5 @@ pub fn run_symbolic_execute<B: BV>(
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
     println!("test_exec_main");
 
-    run_symbolic_execute("zMRET", &shared_state, regs, lets);
+    run_symbolic_execute("zRTYPE", &shared_state, regs, lets);
 }

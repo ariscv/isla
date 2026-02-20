@@ -1637,6 +1637,145 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.get_ast(ast)
     }
 
+    pub fn get_val(&mut self, var: &Val<B>) -> Result<Val<B>, ExecError> {
+        use crate::ir::Val::*;
+        match var {
+            Symbolic(sym) => {
+                let model_val = self.get_var(*sym)?;
+                match model_val {
+                    ModelVal::Exp(Exp::Bits64(bv)) => Ok(Val::Bits(B::new(bv.lower_u64(), bv.len()))),
+                    ModelVal::Exp(Exp::Bool(b)) => Ok(Val::Bool(b)),
+                    ModelVal::Exp(Exp::Enum(m)) => Ok(Val::Enum(m)),
+                    ModelVal::Exp(Exp::Bits(bv)) => {
+                        // 对于大的位向量（> MAX_WIDTH），暂时返回错误
+                        Err(ExecError::Type(
+                            format!("Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH)", bv.len()),
+                            SourceLoc::unknown(),
+                        ))
+                    }
+                    ModelVal::Exp(exp) => {
+                        // 对于其他复杂的表达式，返回错误
+                        Err(ExecError::Type(
+                            format!("Unsupported Exp type in get_val: {:?}", exp),
+                            SourceLoc::unknown(),
+                        ))
+                    }
+                    ModelVal::Arbitrary(ty) => match ty {
+                        smtlib::Ty::BitVec(len) => Ok(Val::Bits(B::new(0, len))),
+                        smtlib::Ty::Bool => Ok(Val::Bool(false)),
+                        smtlib::Ty::Enum(_) => Err(ExecError::Type(
+                            format!("Cannot create default enum value for {:?}", ty),
+                            SourceLoc::unknown(),
+                        )),
+                        _ => Err(ExecError::Type(
+                            format!("Unsupported type in ModelVal::Arbitrary: {:?}", ty),
+                            SourceLoc::unknown(),
+                        )),
+                    },
+                }
+            }
+            I64(i) => Ok(I64(*i)),
+            I128(i) => Ok(I128(*i)),
+            Bool(b) => Ok(Bool(*b)),
+            Bits(b) => Ok(Bits(*b)),
+            String(s) => Ok(String(s.clone())),
+            Unit => Ok(Unit),
+            Enum(e) => Ok(Enum(*e)),
+            Ref(n) => Ok(Ref(*n)),
+            Poison => Ok(Poison),
+
+            // 递归处理复合类型
+            Vector(vals) => {
+                let mut new_vals = Vec::with_capacity(vals.len());
+                for val in vals {
+                    new_vals.push(self.get_val(val)?);
+                }
+                Ok(Vector(new_vals))
+            }
+
+            List(vals) => {
+                let mut new_vals = Vec::with_capacity(vals.len());
+                for val in vals {
+                    new_vals.push(self.get_val(val)?);
+                }
+                Ok(List(new_vals))
+            }
+
+            Struct(fields) => {
+                let mut new_fields = ahash::HashMap::with_capacity_and_hasher(fields.len(), ahash::RandomState::new());
+                for (name, val) in fields {
+                    new_fields.insert(*name, self.get_val(&val)?);
+                }
+                Ok(Struct(new_fields))
+            }
+
+            Ctor(name, val) => Ok(Ctor(*name, Box::new(self.get_val(val)?))),
+
+            MixedBits(segments) => {
+                let mut new_segments = Vec::with_capacity(segments.len());
+                for segment in segments {
+                    match segment {
+                        crate::ir::BitsSegment::Symbolic(sym) => {
+                            let model_val = self.get_var(*sym)?;
+                            match model_val {
+                                ModelVal::Exp(Exp::Bits64(bv)) => {
+                                    new_segments
+                                        .push(crate::ir::BitsSegment::Concrete(B::new(bv.lower_u64(), bv.len())));
+                                }
+                                ModelVal::Exp(Exp::Bits(bv)) => {
+                                    return Err(ExecError::Type(
+                                        format!(
+                                            "Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH)",
+                                            bv.len()
+                                        ),
+                                        SourceLoc::unknown(),
+                                    ));
+                                }
+                                ModelVal::Arbitrary(smtlib::Ty::BitVec(len)) => {
+                                    new_segments.push(crate::ir::BitsSegment::Concrete(B::new(0, len)));
+                                }
+                                _ => {
+                                    return Err(ExecError::Type(
+                                        format!("Unsupported model value for BitsSegment: {:?}", model_val),
+                                        SourceLoc::unknown(),
+                                    ));
+                                }
+                            }
+                        }
+                        crate::ir::BitsSegment::Concrete(bv) => {
+                            new_segments.push(crate::ir::BitsSegment::Concrete(*bv));
+                        }
+                    }
+                }
+                Ok(MixedBits(new_segments))
+            }
+
+            SymbolicCtor(sym, fields) => {
+                // 对于符号构造器，获取其枚举成员并递归处理字段
+                let model_val = self.get_var(*sym)?;
+                match model_val {
+                    ModelVal::Exp(Exp::Enum(enum_member)) => {
+                        let mut new_fields =
+                            ahash::HashMap::with_capacity_and_hasher(fields.len(), ahash::RandomState::new());
+                        for (name, val) in fields {
+                            new_fields.insert(*name, self.get_val(&val)?);
+                        }
+                        // 这里需要确定枚举成员对应的 Name
+                        // 假设我们可以从 enum_member 获取对应的名称
+                        Err(ExecError::Type(
+                            format!("SymbolicCtor resolution not fully implemented for {:?}", enum_member),
+                            SourceLoc::unknown(),
+                        ))
+                    }
+                    _ => Err(ExecError::Type(
+                        format!("Expected enum member for SymbolicCtor, got: {:?}", model_val),
+                        SourceLoc::unknown(),
+                    )),
+                }
+            }
+        }
+    }
+
     // Requiring the model to be mutable as I expect Z3 will alter the underlying data
     fn get_ast(&mut self, var_ast: Ast) -> Result<ModelVal, ExecError> {
         unsafe {
