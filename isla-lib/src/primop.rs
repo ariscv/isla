@@ -87,6 +87,10 @@ pub fn smt_zeros<V>(i: i128) -> Exp<V> {
     }
 }
 
+/* pub fn smt_zeros_sym<V>(i: Sym) -> Exp<V> {
+    Exp::Bits(vec![false; i as usize])
+} */
+
 pub fn smt_ones<V>(i: i128) -> Exp<V> {
     if i <= 64 {
         Exp::Bits64(B64::ones(i as u32))
@@ -696,7 +700,7 @@ fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
                 solver.define_const(smt_zeros(len), info).into()
             }
         }
-        Val::Symbolic(_) => Err(ExecError::SymbolicLength("zeros", info)),
+        Val::Symbolic(sym) => Err(ExecError::SymbolicLength("zeros", info)),
         _ => Err(ExecError::Type(format!("zeros {:?}", &len), info)),
     }
 }

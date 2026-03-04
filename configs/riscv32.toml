@@ -47,6 +47,7 @@ relaxed = [
 ]
 
 [registers.defaults]
+"__isla_vector_gpr" = true
 rv_enable_writable_misa = true
 rv_enable_rvc = true
 rv_enable_fdext = false
