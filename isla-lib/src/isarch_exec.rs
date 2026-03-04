@@ -91,8 +91,8 @@ pub fn run_symbolic_execute<B: BV>(
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
 
-    // 使用checkpoint执行函数
-    let result: Arc<Mutex<Option<Val<B>>>> = Arc::new(Mutex::new(None));
+    // 使用checkpoint执行函数，支持错误传播
+    let result: Arc<Mutex<Result<Option<Val<B>>, ExecError>>> = Arc::new(Mutex::new(Ok(None)));
 
     crate::executor::execute_ir_function_with_checkpoint_multi_thread(
         "zexecute",
@@ -144,15 +144,18 @@ pub fn run_symbolic_execute<B: BV>(
                                 let test = Sym::from_u32(6);
                                 // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
-                                println!(
-                                    "当前汇编：{:?}",
-                                    isarch::get_assembly_name(
-                                        model.get_val(&fun_args[0])?,
-                                        shared_state,
-                                        regs,
-                                        lets,
-                                    ),
-                                );
+                                match model.get_val(&fun_args[0]) {
+                                    Ok(arg_val) => {
+                                        println!(
+                                            "当前汇编：{:?}",
+                                            isarch::get_assembly_name(arg_val, shared_state, regs, lets,),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        *collected.lock().unwrap() = Err(e);
+                                        return;
+                                    }
+                                }
 
                                 // 遍历所有寄存器
                                 for (reg_name, reg) in frame.regs().iter() {
@@ -263,7 +266,7 @@ pub fn run_symbolic_execute<B: BV>(
                             solver.dump_solver("solver.dump");
                         }
 
-                        *collected.lock().unwrap() = Some(ret_val);
+                        *collected.lock().unwrap() = Ok(Some(ret_val));
                     }
                     Run::Exit => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
                     Run::Dead => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
@@ -287,15 +290,15 @@ pub fn run_symbolic_execute<B: BV>(
     );
 
     // 提取字符串结果
-    let res = match result.lock().unwrap().as_ref() {
-        Some(Val::String(s)) => Some(s.clone()),
-        Some(v) => {
+    match Arc::try_unwrap(result).expect("result has multiple owners").into_inner().unwrap() {
+        Ok(Some(Val::String(s))) => Ok(Some(s)),
+        Ok(Some(v)) => {
             eprintln!("警告: zexecute 返回非字符串值: {:?}", v);
-            None
+            Ok(None)
         }
-        None => None,
-    };
-    Ok(res)
+        Ok(None) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(feature = "debug_exec")]
@@ -303,15 +306,17 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     use std::process::exit;
 
     println!("test_exec_main");
-    match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
+    /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
         Ok(_) => {}
         Err(e) => {
             eprintln!("test_exec_main: 运行错误 {}", e)
         }
-    };
+    }; */
     // exit(0);
 
-    let instruction_table = [
+    let mut instruction_table = Vec::new();
+    //能全部执行结束的
+    let excute_through_instruction_table = [
         "zADDIW",
         "zAES32DSI",
         "zAES32DSMI",
@@ -328,7 +333,21 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         "zBITYPE",
         "zBREV8",
         "zBTYPE",
+    ];
+    // instruction_table.extend( excute_through_instruction_table.to_vec());
+
+    //运行过程有问题的
+    let failed_instruction_table = [
+        /*
+        zCLMUL的问题在于carryless_mul函数，这个函数用循环做了个无进位乘法。
+
+        */
         "zCLMUL",
+    ];
+    instruction_table.extend(failed_instruction_table.to_vec());
+
+    //待测试的
+    let todo_instruction_table = [
         "zCLMULH",
         "zCLMULR",
         "zCLZ",
@@ -660,6 +679,8 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         "zZVKSM4RTYPE",
         "zZVWABDATYPE",
     ];
+    // instruction_table.extend( todo_instruction_table.to_vec());
+
     for ins_name in instruction_table {
         match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
             Ok(_) => {}
