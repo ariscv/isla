@@ -2534,6 +2534,151 @@ fn count_trailing_zeros<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceL
     }
 }
 
+/// Generate SMT expression for carry-less multiplication.
+/// This avoids branching by using bitwise operations directly.
+fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, info: SourceLoc) -> Sym {
+    let result_len = len * 2;
+
+    // Zero extend b to result_len
+    let b_extended = solver.define_const(Exp::ZeroExtend(result_len, Box::new(Exp::Var(b))), info);
+
+    // Initialize result to zeros
+    let mut result = solver.define_const(smt_zeros(result_len as i128), info);
+
+    // For each bit position i in a:
+    // - Extract bit a[i]
+    // - If a[i] = 1, XOR (b << i) into result
+    // - If a[i] = 0, XOR nothing (zeros)
+    //
+    // We implement this without branching by using:
+    //   term = (a[i] * (b << i))  where * is bitwise AND with replicated bit
+    //   result = result ^ term
+    for i in 0..len {
+        // Extract bit i from a
+        let bit_i = solver.define_const(
+            Exp::Extract(0, 0, Box::new(Exp::Bvlshr(Box::new(Exp::Var(a)), Box::new(smt_i128(i as i128))))),
+            info,
+        );
+
+        // Replicate bit_i to result_len bits
+        // If bit_i = 1, mask = all_ones, else mask = all_zeros
+        let mask = solver.define_const(
+            Exp::Ite(
+                Box::new(Exp::Eq(Box::new(Exp::Var(bit_i)), Box::new(bits64(1, 1)))),
+                Box::new(smt_ones(result_len as i128)),
+                Box::new(smt_zeros(result_len as i128)),
+            ),
+            info,
+        );
+
+        // Shift b_extended by i positions
+        let shifted =
+            solver.define_const(Exp::Bvshl(Box::new(Exp::Var(b_extended)), Box::new(smt_i128(i as i128))), info);
+
+        // Mask the shifted value: if bit_i = 1, we get (b << i), else 0
+        let term = solver.define_const(Exp::Bvand(Box::new(Exp::Var(shifted)), Box::new(Exp::Var(mask))), info);
+
+        // XOR into result
+        result = solver.define_const(Exp::Bvxor(Box::new(Exp::Var(result)), Box::new(Exp::Var(term))), info);
+    }
+
+    result
+}
+
+/// Carry-less multiplication (GF(2) polynomial multiplication).
+/// For two bitvectors a and b, computes the polynomial product in GF(2).
+/// This is used by the RISC-V CLMUL instruction.
+fn carryless_mul<B: BV>(a: Val<B>, b: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    panic!("arrive carryless_mul!!");
+    match (replace_mixed_bits(a, solver, info)?, replace_mixed_bits(b, solver, info)?) {
+        (Val::Bits(a), Val::Bits(b)) => {
+            // Concrete case: compute carry-less multiplication directly
+            let len = a.len();
+            assert_eq!(len, b.len(), "carryless_mul: operands must have same length");
+            let result_len = len * 2;
+
+            // Check if result fits in BV::MAX_WIDTH
+            if result_len > B::MAX_WIDTH {
+                // Fallback to symbolic computation for large results
+                let a_sym = solver.define_const(smt_sbits(a), info);
+                let b_sym = solver.define_const(smt_sbits(b), info);
+                return smt_carryless_mul::<Sym>(a_sym, b_sym, len, solver, info).into();
+            }
+
+            // Perform carry-less multiplication using BV operations
+            let mut result = B::zeros(result_len);
+            for i in 0..len {
+                // Extract bit i from a
+                let bit_set = (a.shiftr(i as i128).lower_u64() & 1) == 1;
+                if bit_set {
+                    // Shift b by i and XOR into result
+                    let b_extended = b.zero_extend(result_len);
+                    let shifted = b_extended.shiftl(i as i128);
+                    result = result ^ shifted;
+                }
+            }
+            Ok(Val::Bits(result))
+        }
+        (Val::Symbolic(a), Val::Symbolic(b)) => {
+            // Symbolic case: generate SMT expression without branching
+            if let Some(len) = solver.length(a) {
+                smt_carryless_mul::<Sym>(a, b, len, solver, info).into()
+            } else {
+                Err(ExecError::Type("carryless_mul (solver could not determine length)".to_string(), info))
+            }
+        }
+        (Val::Bits(a), Val::Symbolic(b)) => {
+            // Mixed case: if a is all zeros, result is zeros
+            if a.is_zero() {
+                let len = a.len() * 2;
+                Ok(Val::Symbolic(solver.define_const(smt_zeros(len as i128), info)))
+            } else if a.to_vec().iter().filter(|&&x| x).count() == 1 {
+                // If a has only one bit set, we just need to shift b
+                let bit_pos = a.trailing_zeros();
+                let len = a.len() * 2;
+                let b_extended = solver.define_const(Exp::ZeroExtend(len as u32, Box::new(Exp::Var(b))), info);
+                let result = solver.define_const(
+                    Exp::Bvshl(Box::new(Exp::Var(b_extended)), Box::new(smt_i128(bit_pos as i128))),
+                    info,
+                );
+                Ok(Val::Symbolic(result))
+            } else {
+                // Fallback: treat both as symbolic
+                if let Some(len) = solver.length(b) {
+                    let a_sym = solver.define_const(smt_sbits(a), info);
+                    smt_carryless_mul::<Sym>(a_sym, b, len, solver, info).into()
+                } else {
+                    Err(ExecError::Type("carryless_mul (solver could not determine length)".to_string(), info))
+                }
+            }
+        }
+        (Val::Symbolic(a), Val::Bits(b)) => {
+            // Mixed case (symmetric to above)
+            if b.is_zero() {
+                let len = b.len() * 2;
+                Ok(Val::Symbolic(solver.define_const(smt_zeros(len as i128), info)))
+            } else if b.to_vec().iter().filter(|&&x| x).count() == 1 {
+                let bit_pos = b.trailing_zeros();
+                let len = b.len() * 2;
+                let a_extended = solver.define_const(Exp::ZeroExtend(len as u32, Box::new(Exp::Var(a))), info);
+                let result = solver.define_const(
+                    Exp::Bvshl(Box::new(Exp::Var(a_extended)), Box::new(smt_i128(bit_pos as i128))),
+                    info,
+                );
+                Ok(Val::Symbolic(result))
+            } else {
+                if let Some(len) = solver.length(a) {
+                    let b_sym = solver.define_const(smt_sbits(b), info);
+                    smt_carryless_mul::<Sym>(a, b_sym, len, solver, info).into()
+                } else {
+                    Err(ExecError::Type("carryless_mul (solver could not determine length)".to_string(), info))
+                }
+            }
+        }
+        _ => Err(ExecError::Type("carryless_mul: invalid value types".to_string(), info)),
+    }
+}
+
 fn primop_ite<B: BV>(
     args: Vec<Val<B>>,
     solver: &mut Solver<B>,
@@ -2669,6 +2814,7 @@ pub fn binary_primops<B: BV>() -> HashMap<String, Binary<B>> {
     primops.insert("address_announce".to_string(), address_announce as Binary<B>);
     primops.insert("mark_register".to_string(), mark_register as Binary<B>);
     primops.insert("vector_init".to_string(), vector_init as Binary<B>);
+    primops.insert("carryless_mul".to_string(), carryless_mul as Binary<B>);
     primops.extend(float::binary_primops());
     primops
 }
