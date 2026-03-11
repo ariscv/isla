@@ -1,9 +1,9 @@
 use crate::bitvector::BV;
 use crate::ir::Instr::{Arbitrary, End};
 use crate::ir::{BitsSegment, Instr, Name, SharedState, Symtab, Val};
-use crate::smt::{EnumMember, Sym};
+use crate::smt::{EnumId, EnumMember, Sym};
 use crate::zencode;
-use std::fmt;
+use ahash;
 
 #[macro_export]
 macro_rules! d {
@@ -461,6 +461,320 @@ impl<B: BV> Val<B> {
             Poison => "Poison".to_string(),
         }
     }
+
+    pub fn from_str(s: &str, shared_state: &SharedState<B>) -> Result<Self, String> {
+        let s = s.trim();
+        let chars: Vec<char> = s.chars().collect();
+
+        // Symbolic: Sym(name)
+        if s.starts_with("Sym(") && s.ends_with(')') {
+            let inner = &s[4..s.len() - 1];
+            let id = inner.parse::<u32>().map_err(|_| format!("无效的Sym ID: {}", inner))?;
+            return Ok(Val::Symbolic(Sym::from_u32(id)));
+        }
+
+        // I64: 构造函数格式 "I64(42)"
+        if s.starts_with("I64(") && s.ends_with(')') {
+            let inner = &s[4..s.len() - 1];
+            let n = inner.parse::<i64>().map_err(|_| format!("无效的I64格式: {}", inner))?;
+            return Ok(Val::I64(n));
+        }
+
+        // I128: 构造函数格式 "I128(123)"
+        if s.starts_with("I128(") && s.ends_with(')') {
+            let inner = &s[5..s.len() - 1];
+            let n = inner.parse::<i128>().map_err(|_| format!("无效的I128格式: {}", inner))?;
+            return Ok(Val::I128(n));
+        }
+
+        // Bool: 支持两种格式 "true"/"false" 和 "Bool(true)"/"Bool(false)"
+        if s == "true" {
+            return Ok(Val::Bool(true));
+        }
+        if s == "false" {
+            return Ok(Val::Bool(false));
+        }
+        if s == "Bool(true)" {
+            return Ok(Val::Bool(true));
+        }
+        if s == "Bool(false)" {
+            return Ok(Val::Bool(false));
+        }
+
+        // Unit: 支持 "()" 和 "Unit"
+        if s == "()" {
+            return Ok(Val::Unit);
+        }
+        if s == "Unit" {
+            return Ok(Val::Unit);
+        }
+
+        // Poison
+        if s == "<poison>" || s == "Poison" {
+            return Ok(Val::Poison);
+        }
+
+        // String: 简单格式 "\"...\""
+        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            let inner = &s[1..s.len() - 1];
+            return Ok(Val::String(inner.to_string()));
+        }
+
+        // Ref: &name
+        if s.starts_with('&') {
+            let name_str = &s[1..];
+            let name = shared_state.symtab.get(name_str).ok_or_else(|| format!("未知的引用名称: {}", name_str))?;
+            return Ok(Val::Ref(name));
+        }
+
+        // Vector: 简单格式 "[...]"
+        if s.starts_with('[') {
+            if s == "[]" {
+                return Ok(Val::Vector(vec![]));
+            }
+            // 解析向量内容
+            let inner = &s[1..s.len() - 1];
+            let mut vals = Vec::new();
+            let mut current = String::new();
+            let mut depth = 0;
+            for c in inner.chars() {
+                match c {
+                    '[' | '{' => {
+                        depth += 1;
+                        current.push(c);
+                    }
+                    ']' | '}' => {
+                        depth -= 1;
+                        current.push(c);
+                    }
+                    ',' if depth == 0 => {
+                        if !current.trim().is_empty() {
+                            vals.push(Val::from_str(current.trim(), shared_state)?);
+                        }
+                        current = String::new();
+                    }
+                    _ => {
+                        current.push(c);
+                    }
+                }
+            }
+            if !current.trim().is_empty() {
+                vals.push(Val::from_str(current.trim(), shared_state)?);
+            }
+            return Ok(Val::Vector(vals));
+        }
+
+        // List: 简单格式 "List[...]"
+        if s.starts_with("List[") {
+            if s == "List[]" {
+                return Ok(Val::List(vec![]));
+            }
+            let inner = &s[5..s.len() - 1];
+            let mut vals = Vec::new();
+            let mut current = String::new();
+            let mut depth = 0;
+            for c in inner.chars() {
+                match c {
+                    '[' | '{' => {
+                        depth += 1;
+                        current.push(c);
+                    }
+                    ']' | '}' => {
+                        depth -= 1;
+                        current.push(c);
+                    }
+                    ',' if depth == 0 => {
+                        if !current.trim().is_empty() {
+                            vals.push(Val::from_str(current.trim(), shared_state)?);
+                        }
+                        current = String::new();
+                    }
+                    _ => {
+                        current.push(c);
+                    }
+                }
+            }
+            if !current.trim().is_empty() {
+                vals.push(Val::from_str(current.trim(), shared_state)?);
+            }
+            return Ok(Val::List(vals));
+        }
+
+        // Struct: {...}
+        if s.starts_with('{') && s.ends_with('}') {
+            if s == "{}" {
+                return Ok(Val::Struct(ahash::HashMap::default()));
+            }
+            let inner = &s[1..s.len() - 1];
+            let mut fields: ahash::HashMap<Name, Val<B>> = ahash::HashMap::default();
+            let mut current = String::new();
+            let mut depth = 0;
+            for c in inner.chars() {
+                match c {
+                    '[' | '{' => {
+                        depth += 1;
+                        current.push(c);
+                    }
+                    ']' | '}' => {
+                        depth -= 1;
+                        current.push(c);
+                    }
+                    ',' if depth == 0 => {
+                        if !current.trim().is_empty() {
+                            // 解析 "name: value" 格式
+                            let parts: Vec<&str> = current.trim().splitn(2, ": ").collect();
+                            if parts.len() == 2 {
+                                let name = shared_state
+                                    .symtab
+                                    .get(parts[0].trim())
+                                    .ok_or_else(|| format!("未知的结构体字段名: {}", parts[0]))?;
+                                let val = Val::from_str(parts[1].trim(), shared_state)?;
+                                fields.insert(name, val);
+                            }
+                        }
+                        current = String::new();
+                    }
+                    _ => {
+                        current.push(c);
+                    }
+                }
+            }
+            if !current.trim().is_empty() {
+                let parts: Vec<&str> = current.trim().splitn(2, ": ").collect();
+                if parts.len() == 2 {
+                    let name = shared_state
+                        .symtab
+                        .get(parts[0].trim())
+                        .ok_or_else(|| format!("未知的结构体字段名: {}", parts[0]))?;
+                    let val = Val::from_str(parts[1].trim(), shared_state)?;
+                    fields.insert(name, val);
+                }
+            }
+            return Ok(Val::Struct(fields));
+        }
+
+        // Ctor: Name(value) 或 Name(value) 多行格式
+        if let Some(paren_pos) = s.find('(') {
+            if s.ends_with(')') {
+                let name_str = &s[..paren_pos];
+                let inner = &s[paren_pos + 1..s.len() - 1];
+                let name =
+                    shared_state.symtab.get(name_str).ok_or_else(|| format!("未知的构造函数名: {}", name_str))?;
+                let val = Box::new(Val::from_str(inner.trim(), shared_state)?);
+                return Ok(Val::Ctor(name, val));
+            }
+        }
+
+        // Enum: EnumName::MemberName(EnumMember.member:N)
+        if let Some(double_colon_pos) = s.find("::") {
+            if let Some(paren_pos) = s.find('(') {
+                let _enum_name = &s[..double_colon_pos];
+                let member_part = &s[double_colon_pos + 2..paren_pos];
+                let inner = &s[paren_pos + 1..s.len() - 1]; // EnumMember.member:N
+
+                // 解析 EnumMember.member:N
+                if let Some(dot_pos) = inner.rfind('.') {
+                    let enum_id_name = &inner[..dot_pos];
+                    let member_index =
+                        inner[dot_pos + 1..].parse::<usize>().map_err(|_| format!("无效的枚举成员索引: {}", inner))?;
+
+                    // 从 symtab 获取 enum_id (Name)，然后转换为 EnumId
+                    let enum_name = shared_state
+                        .symtab
+                        .get(enum_id_name)
+                        .ok_or_else(|| format!("未知的枚举ID: {}", enum_id_name))?;
+                    let enum_id = EnumId::from_name(enum_name);
+
+                    return Ok(Val::Enum(EnumMember { enum_id, member: member_index }));
+                }
+            }
+        }
+
+        // SymCtor: SymCtor(Sym, {...})
+        if s.starts_with("SymCtor(") {
+            let inner = &s[8..s.len() - 1]; // 去掉 SymCtor( 和 )
+                                            // 解析 Sym, {...}
+            if let Some(comma_pos) = inner.find(", {") {
+                let sym_str = &inner[..comma_pos];
+                let fields_str = &inner[comma_pos + 2..]; // 去掉 ", {"
+                let fields_str = &fields_str[..fields_str.len() - 1]; // 去掉 }
+
+                // 解析 Sym(id)
+                let sym_inner = sym_str
+                    .trim()
+                    .strip_prefix("Sym(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .ok_or_else(|| format!("无效的Sym格式: {}", sym_str))?;
+                let id = sym_inner.parse::<u32>().map_err(|_| format!("无效的Sym ID: {}", sym_inner))?;
+                let sym = Sym::from_u32(id);
+
+                let fields: ahash::HashMap<Name, Val<B>> = if fields_str.trim().is_empty() {
+                    ahash::HashMap::default()
+                } else {
+                    // 解析字段 {key: val, ...}
+                    let mut field_map: ahash::HashMap<Name, Val<B>> = ahash::HashMap::default();
+                    let mut current = String::new();
+                    let mut depth = 0;
+                    for c in fields_str.chars() {
+                        match c {
+                            '[' | '{' => {
+                                depth += 1;
+                                current.push(c);
+                            }
+                            ']' | '}' => {
+                                depth -= 1;
+                                current.push(c);
+                            }
+                            ',' if depth == 0 => {
+                                if !current.trim().is_empty() {
+                                    let parts: Vec<&str> = current.trim().splitn(2, ": ").collect();
+                                    if parts.len() == 2 {
+                                        let name = shared_state
+                                            .symtab
+                                            .get(parts[0].trim())
+                                            .ok_or_else(|| format!("未知的SymCtor字段名: {}", parts[0]))?;
+                                        let val = Val::from_str(parts[1].trim(), shared_state)?;
+                                        field_map.insert(name, val);
+                                    }
+                                }
+                                current = String::new();
+                            }
+                            _ => {
+                                current.push(c);
+                            }
+                        }
+                    }
+                    if !current.trim().is_empty() {
+                        let parts: Vec<&str> = current.trim().splitn(2, ": ").collect();
+                        if parts.len() == 2 {
+                            let name = shared_state
+                                .symtab
+                                .get(parts[0].trim())
+                                .ok_or_else(|| format!("未知的SymCtor字段名: {}", parts[0]))?;
+                            let val = Val::from_str(parts[1].trim(), shared_state)?;
+                            field_map.insert(name, val);
+                        }
+                    }
+                    field_map
+                };
+
+                return Ok(Val::SymbolicCtor(sym, fields));
+            }
+        }
+
+        // Bits - 位向量解析
+        // 注意：由于 BV trait 没有 from_str_radix，这里只做基本的格式识别
+        // 实际的位向量解析需要具体的 BV 类型实现
+        if s.starts_with("0x") || s.starts_with("0b") {
+            // 暂时跳过位向量解析，返回错误
+            return Err(format!("位向量解析需要具体的BV类型支持: {}", s));
+        }
+
+        // MixedBits: [Sym(...), 123, ...]
+        // 这个需要更复杂的解析，暂时跳过
+
+        Err(format!("无法解析的Val格式: {}", s))
+    }
 }
 
 pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>, symtab: &Symtab) -> &'a mut String {
@@ -499,4 +813,222 @@ pub fn print_instr<B>(pc: usize, instr: &Instr<Name, B>, symtab: &Symtab, functi
     let mut binding = String::new();
     let s = print_instr_toString(&mut binding, instr, symtab);
     println!("[{}:{}]{:?}", symtab.to_str(function_name), pc, s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::IRTypeInfo;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    /// 创建一个用于测试的最小 SharedState
+    ///
+    /// 注意：此项目使用 Ruby 测试框架而非 Rust 标准测试框架。
+    /// 这些测试函数作为文档和示例代码提供，展示如何使用 from_str 方法。
+    fn create_test_shared_state<'ir, B: BV>() -> SharedState<'ir, B> {
+        let mut symtab = Symtab::new();
+        // 添加一些测试用的符号
+        symtab.intern("x");
+        symtab.intern("y");
+        symtab.intern("field1");
+        symtab.intern("field2");
+        symtab.intern("SomeCtor");
+        symtab.intern("TestEnum");
+        symtab.intern("TestStruct");
+        symtab.intern("Member1");
+
+        SharedState {
+            functions: HashMap::default(),
+            externs: HashMap::default(),
+            symtab,
+            type_info: IRTypeInfo {
+                structs: HashMap::default(),
+                enums: HashMap::default(),
+                enum_members: HashMap::default(),
+                unions: HashMap::default(),
+                union_ctors: HashSet::default(),
+            },
+            registers: HashMap::default(),
+            probes: HashSet::new(),
+            probe_functions: HashSet::new(),
+            trace_functions: HashSet::new(),
+            reset_registers: Vec::new(),
+            reset_constraints: Vec::new(),
+            function_assumptions: Vec::new(),
+        }
+    }
+
+    /// 示例：解析 I64 值
+    ///
+    /// ```ignore
+    /// let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+    /// let val = Val::from_str("I64(42)", &shared_state).unwrap();
+    /// assert!(matches!(val, Val::I64(42)));
+    /// ```
+    #[test]
+    fn test_val_from_str_i64() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 构造函数格式 I64(42)
+        let val = Val::from_str("I64(42)", &shared_state).unwrap();
+        assert!(matches!(val, Val::I64(42)));
+
+        // 测试负数
+        let val = Val::from_str("I64(-123)", &shared_state).unwrap();
+        assert!(matches!(val, Val::I64(-123)));
+    }
+
+    /// 示例：解析 I128 值
+    #[test]
+    fn test_val_from_str_i128() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        let val = Val::from_str("I128(456)", &shared_state).unwrap();
+        assert!(matches!(val, Val::I128(456)));
+    }
+
+    /// 示例：解析 Bool 值
+    #[test]
+    fn test_val_from_str_bool() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 构造函数格式
+        let val = Val::from_str("Bool(true)", &shared_state).unwrap();
+        assert!(matches!(val, Val::Bool(true)));
+
+        let val = Val::from_str("Bool(false)", &shared_state).unwrap();
+        assert!(matches!(val, Val::Bool(false)));
+
+        // 简单格式
+        let val = Val::from_str("true", &shared_state).unwrap();
+        assert!(matches!(val, Val::Bool(true)));
+
+        let val = Val::from_str("false", &shared_state).unwrap();
+        assert!(matches!(val, Val::Bool(false)));
+    }
+
+    /// 示例：解析 Unit 值
+    #[test]
+    fn test_val_from_str_unit() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        let val = Val::from_str("()", &shared_state).unwrap();
+        assert!(matches!(val, Val::Unit));
+
+        let val = Val::from_str("Unit", &shared_state).unwrap();
+        assert!(matches!(val, Val::Unit));
+    }
+
+    /// 示例：解析 Poison 值
+    #[test]
+    fn test_val_from_str_poison() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        let val = Val::from_str("<poison>", &shared_state).unwrap();
+        assert!(matches!(val, Val::Poison));
+
+        let val = Val::from_str("Poison", &shared_state).unwrap();
+        assert!(matches!(val, Val::Poison));
+    }
+
+    /// 示例：解析 String 值
+    #[test]
+    fn test_val_from_str_string() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 简单格式
+        let val = Val::from_str("\"hello world\"", &shared_state).unwrap();
+        assert!(matches!(val, Val::String(_)));
+        if let Val::String(s) = val {
+            assert_eq!(s, "hello world");
+        }
+    }
+
+    /// 示例：解析 Vector 值
+    #[test]
+    fn test_val_from_str_vector() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 空向量
+        let val = Val::from_str("[]", &shared_state).unwrap();
+        assert!(matches!(val, Val::Vector(_)));
+        if let Val::Vector(v) = val {
+            assert_eq!(v.len(), 0);
+        }
+
+        // 非空向量
+        let val = Val::from_str("[I64(1), I64(2), I64(3)]", &shared_state).unwrap();
+        assert!(matches!(val, Val::Vector(_)));
+        if let Val::Vector(v) = val {
+            assert_eq!(v.len(), 3);
+        }
+    }
+
+    /// 示例：解析 List 值
+    #[test]
+    fn test_val_from_str_list() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 空列表
+        let val = Val::from_str("List[]", &shared_state).unwrap();
+        assert!(matches!(val, Val::List(_)));
+        if let Val::List(v) = val {
+            assert_eq!(v.len(), 0);
+        }
+
+        // 非空列表
+        let val = Val::from_str("List[Bool(true), Bool(false)]", &shared_state).unwrap();
+        assert!(matches!(val, Val::List(_)));
+        if let Val::List(v) = val {
+            assert_eq!(v.len(), 2);
+        }
+    }
+
+    /// 示例：解析 Struct 值
+    #[test]
+    fn test_val_from_str_struct() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 空结构体
+        let val = Val::from_str("{}", &shared_state).unwrap();
+        assert!(matches!(val, Val::Struct(_)));
+        if let Val::Struct(m) = val {
+            assert_eq!(m.len(), 0);
+        }
+
+        // 非空结构体
+        let val = Val::from_str("{field1: 1i64, field2: 2i64}", &shared_state).unwrap();
+        assert!(matches!(val, Val::Struct(_)));
+        if let Val::Struct(m) = val {
+            assert_eq!(m.len(), 2);
+        }
+    }
+
+    /// 示例：to_str 和 from_str 往返转换测试
+    ///
+    /// 注意：from_str 支持构造函数格式，to_str 输出紧凑格式
+    /// 往返转换测试仅检查兼容的类型
+    #[test]
+    fn test_val_from_str_constructor_format() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 测试构造函数格式
+        assert!(matches!(Val::from_str("I64(42)", &shared_state).unwrap(), Val::I64(42)));
+        assert!(matches!(Val::from_str("I128(123)", &shared_state).unwrap(), Val::I128(123)));
+        assert!(matches!(Val::from_str("Bool(true)", &shared_state).unwrap(), Val::Bool(true)));
+        assert!(matches!(Val::from_str("Unit", &shared_state).unwrap(), Val::Unit));
+        assert!(matches!(Val::from_str("Poison", &shared_state).unwrap(), Val::Poison));
+    }
+
+    /// 示例：无效输入的错误处理
+    #[test]
+    fn test_val_from_str_invalid() {
+        let shared_state = create_test_shared_state::<crate::bitvector::b64::B64>();
+
+        // 测试无效输入
+        assert!(Val::from_str("invalid_format", &shared_state).is_err());
+        assert!(Val::from_str("I64()", &shared_state).is_err()); // 空括号
+        assert!(Val::from_str("I64(abc)", &shared_state).is_err()); // 非数字
+        assert!(Val::from_str("&nonexistent", &shared_state).is_err());
+    }
 }

@@ -1,6 +1,6 @@
 use crate::bitvector::BV;
 use crate::dprint::{self, colors};
-use crate::error::ExecError;
+use crate::error::{ExecError, IslaError};
 use crate::executor::{backtrace_string, LocalFrame, Run};
 use crate::ir::UVal;
 use crate::isarch::{self, get_assembly_name};
@@ -14,6 +14,30 @@ use crate::{dlog, log};
 use crate::{ir::*, smt};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+
+#[macro_export]
+macro_rules! hashmap {
+    // 空 map
+    () => {
+        ::std::collections::HashMap::new()
+    };
+
+    // 单个键值对，无尾随逗号
+    ($key:tt: $value:expr) => {{
+        let mut _map = ::std::collections::HashMap::new();
+        _map.insert($key, $value);
+        _map
+    }};
+
+    // 多个键值对，支持尾随逗号
+    ($($key:tt: $value:expr),+ $(,)?) => {{
+        let mut _map = ::std::collections::HashMap::new();
+        $(
+            _map.insert($key, $value);
+        )+
+        _map
+    }};
+}
 
 pub trait Target
 where
@@ -46,15 +70,13 @@ impl<T: RISCV> Target for T {
 impl RISCV for RISCV32 {}
 impl RISCV for RISCV64 {}
 
-pub fn run_symbolic_execute<B: BV>(
+fn symbolic_args_from_TYPEs<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-) -> Result<Option<String>, ExecError> {
-    use crate::smt::checkpoint;
-
-    let target = RISCV32::default();
+    solver: &mut Solver<B>,
+) -> Result<Val<B>, ExecError> {
     // 查找指令的构造函数名称
     let ctor_name = shared_state.symtab.lookup(instruction_name);
 
@@ -69,17 +91,74 @@ pub fn run_symbolic_execute<B: BV>(
     // 查找当前构造函数的类型
     let Some((_, ctor_ty)) = union_members.iter().find(|(n, _ty)| *n == ctor_name) else {
         // 指令不在 zinstruction union 中（可能是其他架构的指令）
-        return Ok(None);
+        return Err(ExecError::Type(
+            format!("指令 '{}' 不在 zinstruction union 中", instruction_name),
+            SourceLoc::unknown(),
+        ));
     };
 
+    //hook: zSTORE
+    if (instruction_name == "zSTORE") {
+        eprintln!("hook(zSTORE):ctor_ty={:#?}", ctor_ty);
+    }
+
+    let mut ret_val = symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())?;
+
+    //hook: zSTORE
+
+    let hook_overwrite_map = hashmap! {
+        "zSTORE":hashmap!{
+            "tuple#%bv12_%bv5_%bv5_%i643":"I64(4)"
+        },
+        "zLOAD":hashmap!{
+            "tuple#%bv12_%bv5_%bv5_%bool_%i644":"I64(4)"
+        }
+    };
+    // 当在hook_overwrite_map表中发现了要hook的名字，并获取要覆写的参数字段，比如zSTORE.keys()
+    if let Some(zTYPE_name_map) = hook_overwrite_map.get(instruction_name) {
+        for (&target_arg_type, &target_arg_value) in zTYPE_name_map {
+            //hook: 检查类型名 ztuplez3z5bv12_z5bv5_z5bv5_z5i643
+            let target_arg_ztype = zencode::encode(target_arg_type);
+            match &mut ret_val {
+                Val::Struct(name) => {
+                    name.iter_mut().for_each(|(n, v)| {
+                        let field_name = shared_state.symtab.to_str(*n);
+
+                        if field_name == target_arg_ztype {
+                            *v = Val::from_str(target_arg_value, shared_state).unwrap();
+                            eprintln!("hook(field_name={target_arg_ztype}): value={:#?}", v);
+                        }
+                    });
+                }
+                _ => panic!("未预期类型的ret_val: {:?}", ret_val),
+            }
+            eprintln!("hook:ret_val={:#?}", ret_val);
+        }
+    }
+
+    Ok(ret_val)
+}
+
+pub fn run_symbolic_execute<B: BV>(
+    instruction_name: &str,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Result<Option<String>, ExecError> {
+    use crate::smt::checkpoint;
+
+    let target = RISCV32::default();
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
     let ctx = Context::new(cfg);
     let mut solver = Solver::new(&ctx);
 
+    // 使用 symbolic_args_from_TYPEs 生成符号化参数
+    let ctor_name = shared_state.symtab.lookup(instruction_name);
+
     let fun_args = vec![Val::<B>::Ctor(
         ctor_name,
-        Box::new(symbolic(ctor_ty, shared_state, &mut solver, SourceLoc::unknown()).unwrap()),
+        Box::new(symbolic_args_from_TYPEs(instruction_name, shared_state, regs, lets, &mut solver)?),
     )];
     println!("fun_args:{:?}", fun_args);
     println!("{:?}", target.isa_state());
@@ -106,7 +185,7 @@ pub fn run_symbolic_execute<B: BV>(
                 Ok((run, frame)) => match run {
                     Run::Finished(ret_val) => {
                         println!(
-                            "tid:{} 执行好一条路径，fork={}，ret_val={}",
+                            "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
                             thread,
                             frame.forks,
                             ret_val.to_str(shared_state)
@@ -140,7 +219,7 @@ pub fn run_symbolic_execute<B: BV>(
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
-                                println!("=== ISA State (Thread {}) ===", thread);
+                                println!("2. === ISA State (Thread {}) ===", thread);
                                 let test = Sym::from_u32(6);
                                 // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
@@ -261,17 +340,17 @@ pub fn run_symbolic_execute<B: BV>(
                                         _ => println!(" [event] {:?}", event),
                                     }
                                 } */
-                                println!("==============================\n");
+                                println!("3. ==============================\n");
                             }
                             solver.dump_solver("solver.dump");
                         }
 
                         *collected.lock().unwrap() = Ok(Some(ret_val));
                     }
-                    Run::Exit => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
-                    Run::Dead => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
+                    Run::Exit => println!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks),
+                    Run::Dead => println!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks),
 
-                    Run::Suspended => println!("tid:{} 执行好一条路径，fork={}", thread, frame.forks),
+                    Run::Suspended => println!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks),
                 },
                 Err((error, backtrace)) => {
                     match &error {
@@ -279,7 +358,12 @@ pub fn run_symbolic_execute<B: BV>(
                             // 静默处理
                         }
                         _ => {
-                            eprintln!("执行错误: {:?}", error);
+                            eprintln!(
+                                "执行错误: {}({:?})[{}]",
+                                error,
+                                error,
+                                error.source_loc().location_string(shared_state.symtab.files())
+                            );
                             eprintln!("调用栈: {}", backtrace_string(&backtrace, &shared_state.symtab));
                         }
                     }
@@ -303,7 +387,7 @@ pub fn run_symbolic_execute<B: BV>(
 
 #[cfg(feature = "debug_exec")]
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
-    use std::process::exit;
+    use std::{process::exit, vec};
 
     println!("test_exec_main");
     /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
@@ -344,7 +428,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         */
         "zCLMUL",
     ];
-    instruction_table.extend(failed_instruction_table.to_vec());
+    // instruction_table.extend(failed_instruction_table.to_vec());
 
     //待测试的
     let todo_instruction_table = [
@@ -681,11 +765,37 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     ];
     // instruction_table.extend( todo_instruction_table.to_vec());
 
+    let ext_i_instruction_table = [
+        "zADDIW",
+        "zBTYPE",
+        "zEBREAK",
+        "zECALL",
+        "zFENCE",
+        "zFENCE_TSO",
+        "zITYPE",
+        "zJAL",
+        "zJALR",
+        // "zLOAD",
+        "zMRET",
+        "zRTYPE",
+        "zRTYPEW",
+        "zSFENCE_VMA",
+        "zSHIFTIOP",
+        "zSHIFTIWOP",
+        "zSRET",
+        // "zSTORE",
+        "zUTYPE",
+        "zWFI",
+    ];
+    instruction_table.extend(ext_i_instruction_table.to_vec());
+
+    // instruction_table.extend(vec!["zLOAD"]);
+
     for ins_name in instruction_table {
         match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("test_exec_main: 运行错误 {}", e)
+                eprintln!("test_exec_main: {}运行错误 {}", ins_name, e)
             }
         };
     }
