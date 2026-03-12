@@ -173,7 +173,7 @@ pub fn run_symbolic_execute<B: BV>(
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<Result<Option<Val<B>>, ExecError>>> = Arc::new(Mutex::new(Ok(None)));
 
-    crate::executor::execute_ir_function_with_checkpoint_multi_thread(
+    crate::executor::execute_ir_function_with_checkpoint(
         "zexecute",
         &fun_args,
         shared_state,
@@ -249,8 +249,17 @@ pub fn run_symbolic_execute<B: BV>(
                                     ); */
 
                                     // print reg
-                                    /* if let Some(val) = reg.read_init_value_if_initialized() {
-                                        match val {
+                                    let filter_list = ["pma_regions", "tlb"];
+                                    if filter_list.contains(&reg_name_str) || reg_name_str.starts_with("__") {
+                                        continue;
+                                    };
+                                    if let Some(val) = reg.read_init_value_if_initialized() {
+                                        println!(
+                                            "  {} = {}",
+                                            reg_name_str,
+                                            model.get_val(val).unwrap().to_str(shared_state)
+                                        );
+                                        /* match val {
                                             Val::Symbolic(sym) => {
                                                 println!("  {} = {:?}", reg_name_str, model.get_var(*sym).unwrap());
                                             }
@@ -268,8 +277,8 @@ pub fn run_symbolic_execute<B: BV>(
                                                     val
                                                 );
                                             }
-                                        }
-                                    } */
+                                        } */
+                                    }
                                 }
 
                                 // 遍历lets中的特殊变量（如current_privilege等）

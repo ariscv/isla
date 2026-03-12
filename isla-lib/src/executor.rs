@@ -1005,6 +1005,42 @@ fn run_special_primop<'ir, B: BV>(
     Ok(SpecialResult::Continue)
 }
 
+fn is_zero_test_exp(exp: &Exp<Name>) -> bool {
+    match exp {
+        Exp::Bits(bits) => bits.lower_u64() == 0,
+        Exp::I64(n) => *n == 0,
+        Exp::I128(n) => *n == 0,
+        _ => false,
+    }
+}
+
+fn x0_branch_side(exp: &Exp<Name>) -> Option<bool> {
+    match exp {
+        Exp::Call(Op::Eq, exps) if exps.len() == 2 => {
+            if is_zero_test_exp(&exps[0]) || is_zero_test_exp(&exps[1]) {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        Exp::Call(Op::Neq, exps) if exps.len() == 2 => {
+            if is_zero_test_exp(&exps[0]) || is_zero_test_exp(&exps[1]) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Exp::Call(Op::Not, exps) if exps.len() == 1 => x0_branch_side(&exps[0]).map(|is_true_branch| !is_true_branch),
+        _ => None,
+    }
+}
+
+fn in_x_function_stack<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) -> bool {
+    let workaround_list = ["X", "rX", "wX"];
+    let is_x = |name: Name| zencode::decode(shared_state.symtab.to_str(name)) == "X";
+    is_x(frame.function_name) || frame.backtrace.iter().any(|(name, _)| is_x(*name))
+}
+
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
@@ -1077,6 +1113,27 @@ fn run_loop<'ir, 'task, B: BV>(
                         let can_be_false = solver.check_sat_with(&test_false, *info).is_sat()?;
 
                         if can_be_true && can_be_false {
+                            /* if in_x_function_stack(frame, shared_state) {
+                                //先检查条件表达式是不是显式的 == 0 / != 0 / not(...) 这类形式
+                                if let Some(x0_is_true_branch) = x0_branch_side(exp) {
+                                    /*
+                                    如果命中：
+                                        x == 0 这种，直接丢掉 true 分支，只保留 false
+                                        x != 0 这种，直接丢掉 false 分支，只保留 true
+                                     */
+                                    if x0_is_true_branch {
+                                        solver.add(Assert(test_false.clone()));
+                                        frame.branch_conditions.push(test_false);
+                                        frame.pc += 1;
+                                    } else {
+                                        solver.add(Assert(test_true.clone()));
+                                        frame.branch_conditions.push(test_true);
+                                        frame.pc = *target;
+                                    }
+                                    continue 'main_loop;
+                                }
+                            } */
+
                             if_logging!(log::FORK, {
                                 log_from!(tid, log::FORK, info.location_string(shared_state.symtab.files()));
                                 probe::taint_info(log::FORK, v, Some(shared_state), solver)
