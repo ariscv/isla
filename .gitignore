@@ -24,3 +24,5 @@ libz3.so
 callgrind.*
 z3_problems
 .merlin
+
+output/

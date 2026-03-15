@@ -13,7 +13,10 @@ use crate::source_loc::SourceLoc;
 use crate::zencode;
 use crate::{dlog, log};
 use crate::{ir::*, smt};
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[macro_export]
@@ -105,67 +108,54 @@ impl RISCV for RISCV64 {
     }
 }
 
-#[derive(Debug)]
-enum SnapshotValue {
-    String(String),
-    Map(HashMap<String, SnapshotValue>),
+#[derive(Serialize, Deserialize)]
+struct AssemGen_Json_Item {
+    arch: BTreeMap<String, String>,
+    #[serde(rename = "test-ins")]
+    test_ins: String,
+    #[serde(rename = "isa-state")]
+    isa_state: BTreeMap<String, String>,
+    ret_val: String,
 }
-
-fn format_snapshot_val<B: BV>(model: &mut Model<B>, val: &Val<B>, shared_state: &SharedState<B>) -> String {
-    model.get_fmtval(val).map(|fmt_val| fmt_val.to_str(shared_state)).unwrap_or_else(|_| val.to_str(shared_state))
+impl AssemGen_Json_Item {
+    pub fn new<T: Target>(target: &T, test_ins: String, isa_state: BTreeMap<String, String>, ret_val: String) -> Self {
+        let mut arch = BTreeMap::new();
+        arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
+        arch.insert("name".to_string(), target.arch_name().to_string());
+        arch.insert("xlen".to_string(), target.xlen().to_string());
+        arch.insert("ext".to_string(), "IMACFD".to_string());
+        AssemGen_Json_Item { arch, test_ins, isa_state, ret_val }
+    }
 }
-
-fn collect_branch_snapshot<'ir, B: BV, T: Target>(
-    target: &T,
-    instruction_name: &str,
-    instruction: &Val<B>,
-    frame: &LocalFrame<'ir, B>,
-    model: &mut Model<B>,
-    shared_state: &SharedState<'ir, B>,
-    regs: &RegisterBindings<'ir, B>,
-    lets: &Bindings<'ir, B>,
-) -> HashMap<String, SnapshotValue> {
-    let mut arch = HashMap::new();
-    arch.insert("pretty-name".to_string(), SnapshotValue::String(target.arch_pretty_name().to_string()));
-    arch.insert("name".to_string(), SnapshotValue::String(target.arch_name().to_string()));
-    arch.insert("xlen".to_string(), SnapshotValue::String(target.xlen().to_string()));
-
-    let mut isa_state = HashMap::new();
-    let mut csrs = HashMap::new();
-    let tracked_state: HashSet<_> = target.isa_state_list().into_iter().collect();
-
-    for (reg_name, reg) in frame.regs().iter() {
-        let reg_name = zencode::decode(shared_state.symtab.to_str(*reg_name));
-        let filter_list = ["pma_regions", "tlb"];
-        if filter_list.contains(&reg_name.as_str()) || reg_name.starts_with("__") || reg_name.starts_with("htif_") {
-            continue;
-        }
-
-        let Some(val) = reg.read_init_value_if_initialized() else {
-            continue;
-        };
-
-        let formatted = SnapshotValue::String(format_snapshot_val(model, val, shared_state));
-        if tracked_state.contains(&reg_name) {
-            isa_state.insert(reg_name, formatted);
-        } else {
-            csrs.insert(reg_name, formatted);
-        }
+trait ToJSON: Serialize {
+    fn to_json_str(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap()
     }
-
-    if !csrs.is_empty() {
-        isa_state.insert("csrs".to_string(), SnapshotValue::Map(csrs));
+    fn to_json(&self, file_path: Option<String>) {
+        let json = serde_json::to_string_pretty(self).unwrap();
+        // 若未指定输出路径，则默认写到当前目录下的 assem_gen.json
+        let path = file_path.unwrap_or_else(|| "assem_gen.json".to_string());
+        // 支持类似 "output/a/b.json" 的路径：先提取父目录并递归创建（等价 mkdir -p）
+        if let Some(parent) = Path::new(&path).parent() {
+            // parent 可能为空（例如仅文件名 "a.json"），空路径时无需创建目录
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).unwrap();
+            }
+        }
+        // 目录准备好之后再写文件
+        fs::write(path, json).unwrap();
     }
-
-    let test_ins = isarch::get_assembly_name(instruction.clone(), shared_state, regs, lets)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| instruction_name.to_string());
-
-    let mut snapshot = HashMap::new();
-    snapshot.insert("arch".to_string(), SnapshotValue::Map(arch));
-    snapshot.insert("test-ins".to_string(), SnapshotValue::String(test_ins));
-    snapshot.insert("isa-state".to_string(), SnapshotValue::Map(isa_state));
-    snapshot
+}
+#[derive(Serialize, Deserialize)]
+struct AssemGen_Json {
+    gen: Vec<AssemGen_Json_Item>,
+}
+impl ToJSON for AssemGen_Json {}
+impl ToJSON for AssemGen_Json_Item {}
+impl AssemGen_Json {
+    fn new(gen: Vec<AssemGen_Json_Item>) -> Self {
+        AssemGen_Json { gen }
+    }
 }
 
 fn symbolic_args_from_TYPEs<B: BV>(
@@ -268,7 +258,7 @@ pub fn run_symbolic_execute<B: BV>(
     let cp = checkpoint(&mut solver);
 
     // 使用checkpoint执行函数，支持错误传播
-    let result: Arc<Mutex<Result<Option<Val<B>>, ExecError>>> = Arc::new(Mutex::new(Ok(None)));
+    let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
 
     crate::executor::execute_ir_function_with_checkpoint(
         "zexecute",
@@ -280,6 +270,9 @@ pub fn run_symbolic_execute<B: BV>(
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
             match exec_result {
                 Ok((run, frame)) => match run {
+                    Run::Finished(Val::Poison) => {
+                        eprintln!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_",instruction_name)
+                    }
                     Run::Finished(ret_val) => {
                         println!(
                             "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
@@ -310,6 +303,8 @@ pub fn run_symbolic_execute<B: BV>(
                         println!("assembly:{:#?}", assembly); */
                         // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, regs, lets);
 
+                        let mut test_ins = String::new();
+                        let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
                         if solver.check_sat(SourceLoc::unknown()) == crate::smt::SmtResult::Sat {
@@ -322,19 +317,21 @@ pub fn run_symbolic_execute<B: BV>(
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                 match model.get_val(&fun_args[0]) {
                                     Ok(arg_val) => {
-                                        println!(
-                                            "当前汇编：{:?}",
-                                            isarch::get_assembly_name(arg_val, shared_state, regs, lets,),
-                                        );
+                                        let asm_opt = isarch::get_assembly_name(arg_val, shared_state, regs, lets);
+                                        println!("当前汇编：{:?}", asm_opt);
+                                        match asm_opt {
+                                            Some(asm) => test_ins = asm.clone(),
+                                            None => return,
+                                        }
                                     }
                                     Err(e) => {
-                                        *collected.lock().unwrap() = Err(e);
+                                        eprintln!("警告: {}没有汇编 {:?}", instruction_name, e);
+                                        //*collected.lock().unwrap() = Err(e);
                                         return;
                                     }
                                 }
 
                                 // 遍历所有寄存器
-                                let mut isa_state: HashMap<String, String> = HashMap::new();
                                 for (reg_name, reg) in frame.regs().iter() {
                                     let reg_name_str: &str = shared_state.symtab.to_str(*reg_name);
                                     let reg_name_decoded = zencode::decode(reg_name_str);
@@ -377,7 +374,7 @@ pub fn run_symbolic_execute<B: BV>(
                                     }
                                 }
 
-                                println!("isa_state={:#?}", isa_state);
+                                println!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap());
                                 // 遍历lets中的特殊变量（如current_privilege等）
                                 /* for (let_name, let_val) in frame.lets().iter() {
                                     let let_name_str = shared_state.symtab.to_str(*let_name);
@@ -450,8 +447,14 @@ pub fn run_symbolic_execute<B: BV>(
                             }
                             solver.dump_solver("solver.dump");
                         }
-
-                        *collected.lock().unwrap() = Ok(Some(ret_val));
+                        let single_instruction_json = AssemGen_Json_Item::new(
+                            &target,
+                            test_ins,
+                            isa_state,
+                            ret_val.to_str(shared_state).to_string(),
+                        );
+                        let mut instruction_json = collected.lock().unwrap();
+                        instruction_json.gen.push(single_instruction_json);
                     }
                     Run::Exit => println!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks),
                     Run::Dead => println!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks),
@@ -480,14 +483,12 @@ pub fn run_symbolic_execute<B: BV>(
     );
 
     // 提取字符串结果
-    match Arc::try_unwrap(result).expect("result has multiple owners").into_inner().unwrap() {
-        Ok(Some(Val::String(s))) => Ok(Some(s)),
-        Ok(Some(v)) => {
-            eprintln!("警告: zexecute 返回非字符串值: {}", v.to_str(shared_state));
-            Ok(None)
-        }
-        Ok(None) => Ok(None),
-        Err(e) => Err(e),
+    if let Ok(result_mutex) = Arc::try_unwrap(result) {
+        result_mutex.lock().unwrap().to_json(Some(format!("output/rv32d_{}.json", instruction_name)));
+        Ok(None)
+    } else {
+        eprintln!("警告: {}无法获取 result 收集器", instruction_name);
+        Ok(None)
     }
 }
 
