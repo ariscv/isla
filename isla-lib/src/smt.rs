@@ -578,6 +578,13 @@ impl Config {
     }
 }
 
+fn fresh_random_seed() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(1)
+}
+
 pub fn global_set_param_value(id: &str, value: &str) {
     let id = CString::new(id).unwrap();
     let value = CString::new(value).unwrap();
@@ -1876,6 +1883,7 @@ impl SmtResult {
 }
 
 static QFAUFBV_STR: &[u8] = b"qfaufbv\0";
+static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub fn new(ctx: &'ctx Context) -> Self {
@@ -1893,6 +1901,22 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Z3_tactic_inc_ref(ctx.z3_ctx, qfaufbv_tactic);
             let z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, qfaufbv_tactic);
             Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
+            Z3_tactic_dec_ref(ctx.z3_ctx, qfaufbv_tactic);
+
+            // 创建 solver 参数对象，用来设置 random_seed，并手动管理它的引用计数。
+            let z3_params = Z3_mk_params(ctx.z3_ctx);
+            Z3_params_inc_ref(ctx.z3_ctx, z3_params);
+
+            // 把参数名 "random_seed" 转成 Z3 可识别的 symbol。
+            let random_seed =
+                Z3_mk_string_symbol(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(RANDOM_SEED_STR).as_ptr());
+
+            // 为当前 solver 设置一个随机 seed。
+            Z3_params_set_uint(ctx.z3_ctx, z3_params, random_seed, fresh_random_seed());
+            Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
+
+            // 参数已经交给 solver 使用，这里释放本地这份 params 引用。
+            Z3_params_dec_ref(ctx.z3_ctx, z3_params);
 
             Solver {
                 ctx,

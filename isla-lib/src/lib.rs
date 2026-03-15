@@ -47,6 +47,7 @@ pub mod config;
 pub mod dprint;
 pub mod error;
 pub mod executor;
+pub mod fmtval;
 pub mod fraction;
 pub mod init;
 pub mod ir;
