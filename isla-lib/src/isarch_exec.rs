@@ -2,6 +2,7 @@ use crate::bitvector::BV;
 use crate::dprint::{self, colors};
 use crate::error::{ExecError, IslaError};
 use crate::executor::{backtrace_string, LocalFrame, Run};
+use crate::fmtval::FmtVal;
 use crate::ir::UVal;
 use crate::isarch::{self, get_assembly_name};
 use crate::primop_util::symbolic;
@@ -43,13 +44,17 @@ pub trait Target
 where
     Self: Sync + Default,
 {
-    fn isa_state(&self) -> Vec<String> {
-        vec![String::new()]
-    }
+    fn arch_name(&self) -> &'static str;
+    fn arch_pretty_name(&self) -> &'static str;
+    fn xlen(&self) -> &'static str;
+    fn isa_state_list(&self) -> Vec<String>;
 }
 
 // Marker trait 表示这是 RISC-V 架构
-pub trait RISCV: Target {}
+pub trait RISCV: Target {
+    fn xlen_bits(&self) -> &'static str;
+    fn xlen_name(&self) -> &'static str;
+}
 
 #[derive(Default)]
 pub struct RISCV32 {}
@@ -58,17 +63,110 @@ pub struct RISCV64 {}
 
 // 为所有 RISCV 类型提供默认实现
 impl<T: RISCV> Target for T {
-    fn isa_state(&self) -> Vec<String> {
-        let mut regs: Vec<String> = (1..31).map(|r| format!("x{}", r)).collect();
-        regs.extend((1..31).map(|r| format!("f{}", r)));
+    fn arch_name(&self) -> &'static str {
+        "riscv"
+    }
+
+    fn arch_pretty_name(&self) -> &'static str {
+        self.xlen_name()
+    }
+
+    fn xlen(&self) -> &'static str {
+        self.xlen_bits()
+    }
+
+    fn isa_state_list(&self) -> Vec<String> {
+        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
+        regs.extend((0..32).map(|r| format!("f{}", r)));
+        regs.push("PC".to_string());
         regs.push("cur_privilege".to_string());
         regs
     }
 }
 
 // 标记为 RISCV 类型
-impl RISCV for RISCV32 {}
-impl RISCV for RISCV64 {}
+impl RISCV for RISCV32 {
+    fn xlen_bits(&self) -> &'static str {
+        "32"
+    }
+
+    fn xlen_name(&self) -> &'static str {
+        "rv32d"
+    }
+}
+
+impl RISCV for RISCV64 {
+    fn xlen_bits(&self) -> &'static str {
+        "64"
+    }
+
+    fn xlen_name(&self) -> &'static str {
+        "rv64d"
+    }
+}
+
+#[derive(Debug)]
+enum SnapshotValue {
+    String(String),
+    Map(HashMap<String, SnapshotValue>),
+}
+
+fn format_snapshot_val<B: BV>(model: &mut Model<B>, val: &Val<B>, shared_state: &SharedState<B>) -> String {
+    model.get_fmtval(val).map(|fmt_val| fmt_val.to_str(shared_state)).unwrap_or_else(|_| val.to_str(shared_state))
+}
+
+fn collect_branch_snapshot<'ir, B: BV, T: Target>(
+    target: &T,
+    instruction_name: &str,
+    instruction: &Val<B>,
+    frame: &LocalFrame<'ir, B>,
+    model: &mut Model<B>,
+    shared_state: &SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+) -> HashMap<String, SnapshotValue> {
+    let mut arch = HashMap::new();
+    arch.insert("pretty-name".to_string(), SnapshotValue::String(target.arch_pretty_name().to_string()));
+    arch.insert("name".to_string(), SnapshotValue::String(target.arch_name().to_string()));
+    arch.insert("xlen".to_string(), SnapshotValue::String(target.xlen().to_string()));
+
+    let mut isa_state = HashMap::new();
+    let mut csrs = HashMap::new();
+    let tracked_state: HashSet<_> = target.isa_state_list().into_iter().collect();
+
+    for (reg_name, reg) in frame.regs().iter() {
+        let reg_name = zencode::decode(shared_state.symtab.to_str(*reg_name));
+        let filter_list = ["pma_regions", "tlb"];
+        if filter_list.contains(&reg_name.as_str()) || reg_name.starts_with("__") || reg_name.starts_with("htif_") {
+            continue;
+        }
+
+        let Some(val) = reg.read_init_value_if_initialized() else {
+            continue;
+        };
+
+        let formatted = SnapshotValue::String(format_snapshot_val(model, val, shared_state));
+        if tracked_state.contains(&reg_name) {
+            isa_state.insert(reg_name, formatted);
+        } else {
+            csrs.insert(reg_name, formatted);
+        }
+    }
+
+    if !csrs.is_empty() {
+        isa_state.insert("csrs".to_string(), SnapshotValue::Map(csrs));
+    }
+
+    let test_ins = isarch::get_assembly_name(instruction.clone(), shared_state, regs, lets)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| instruction_name.to_string());
+
+    let mut snapshot = HashMap::new();
+    snapshot.insert("arch".to_string(), SnapshotValue::Map(arch));
+    snapshot.insert("test-ins".to_string(), SnapshotValue::String(test_ins));
+    snapshot.insert("isa-state".to_string(), SnapshotValue::Map(isa_state));
+    snapshot
+}
 
 fn symbolic_args_from_TYPEs<B: BV>(
     instruction_name: &str,
@@ -138,7 +236,6 @@ fn symbolic_args_from_TYPEs<B: BV>(
 
     Ok(ret_val)
 }
-
 pub fn run_symbolic_execute<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
@@ -161,7 +258,7 @@ pub fn run_symbolic_execute<B: BV>(
         Box::new(symbolic_args_from_TYPEs(instruction_name, shared_state, regs, lets, &mut solver)?),
     )];
     println!("fun_args:{:?}", fun_args);
-    println!("{:?}", target.isa_state());
+    println!("{:?}", target.isa_state_list());
 
     // 生成参数（暂时使用默认值，测试checkpoint机制）
 
@@ -237,9 +334,10 @@ pub fn run_symbolic_execute<B: BV>(
                                 }
 
                                 // 遍历所有寄存器
+                                let mut isa_state: HashMap<String, String> = HashMap::new();
                                 for (reg_name, reg) in frame.regs().iter() {
                                     let reg_name_str: &str = shared_state.symtab.to_str(*reg_name);
-                                    let reg_name_str: &str = &zencode::decode(reg_name_str);
+                                    let reg_name_decoded = zencode::decode(reg_name_str);
                                     /* dlog!(
                                         "{}:(read_init_value_if_initialized){:?},(read_old_if_initialized){:?},(read_last_if_initialized){:?}",
                                         reg_name_str,
@@ -250,37 +348,36 @@ pub fn run_symbolic_execute<B: BV>(
 
                                     // print reg
                                     let filter_list = ["pma_regions", "tlb"];
-                                    if filter_list.contains(&reg_name_str) || reg_name_str.starts_with("__") {
+                                    if filter_list.contains(&reg_name_decoded.as_str())
+                                        || reg_name_decoded.starts_with("__")
+                                        || reg_name_decoded.starts_with("htif_")
+                                    {
                                         continue;
                                     };
                                     if let Some(val) = reg.read_init_value_if_initialized() {
-                                        println!(
-                                            "  {} = {}",
-                                            reg_name_str,
-                                            model.get_val(val).unwrap().to_str(shared_state)
-                                        );
-                                        /* match val {
-                                            Val::Symbolic(sym) => {
-                                                println!("  {} = {:?}", reg_name_str, model.get_var(*sym).unwrap());
+                                        let formatted = model
+                                            .get_fmtval(val)
+                                            .map(|fmt_val| fmt_val.to_str(shared_state))
+                                            .unwrap_or_else(|_| val.to_str(shared_state));
+                                        let fv = model.get_fmtval(val);
+                                        match fv {
+                                            Err(ExecError) => continue,
+                                            Ok(fmt_val) => {
+                                                // println!("  {} = {}", reg_name_decoded, formatted);
+                                                if fmt_val.is_arbitrary() {
+                                                    continue;
+                                                }
+
+                                                if target.isa_state_list().contains(&reg_name_decoded.to_string()) {
+                                                    let formatted = fmt_val.to_str(shared_state);
+                                                    isa_state.insert(reg_name_decoded.to_string(), formatted.clone());
+                                                }
                                             }
-                                            Val::Bits(bv) => {
-                                                println!("  {} = 0x{:x}", reg_name_str, bv.lower_u64());
-                                            }
-                                            Val::Bool(b) => {
-                                                println!("  {} = {}", reg_name_str, b);
-                                            }
-                                            _ => {
-                                                println!(
-                                                    "  {} = {} | {:?}",
-                                                    reg_name_str,
-                                                    val.to_str(shared_state),
-                                                    val
-                                                );
-                                            }
-                                        } */
+                                        }
                                     }
                                 }
 
+                                println!("isa_state={:#?}", isa_state);
                                 // 遍历lets中的特殊变量（如current_privilege等）
                                 /* for (let_name, let_val) in frame.lets().iter() {
                                     let let_name_str = shared_state.symtab.to_str(*let_name);
@@ -386,7 +483,7 @@ pub fn run_symbolic_execute<B: BV>(
     match Arc::try_unwrap(result).expect("result has multiple owners").into_inner().unwrap() {
         Ok(Some(Val::String(s))) => Ok(Some(s)),
         Ok(Some(v)) => {
-            eprintln!("警告: zexecute 返回非字符串值: {:?}", v);
+            eprintln!("警告: zexecute 返回非字符串值: {}", v.to_str(shared_state));
             Ok(None)
         }
         Ok(None) => Ok(None),
