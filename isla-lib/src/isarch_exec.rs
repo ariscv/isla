@@ -83,6 +83,7 @@ impl<T: RISCV> Target for T {
         regs.extend((0..32).map(|r| format!("f{}", r)));
         regs.push("PC".to_string());
         regs.push("cur_privilege".to_string());
+        regs.extend(["mstatus".to_string()]);
         regs
     }
 }
@@ -113,18 +114,26 @@ struct AssemGen_Json_Item {
     arch: BTreeMap<String, String>,
     #[serde(rename = "test-ins")]
     test_ins: String,
+    #[serde(rename = "test-ins-encdec")]
+    test_ins_encdec: String,
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
     ret_val: String,
 }
 impl AssemGen_Json_Item {
-    pub fn new<T: Target>(target: &T, test_ins: String, isa_state: BTreeMap<String, String>, ret_val: String) -> Self {
+    pub fn new<T: Target>(
+        target: &T,
+        test_ins: String,
+        test_ins_encdec: String,
+        isa_state: BTreeMap<String, String>,
+        ret_val: String,
+    ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGen_Json_Item { arch, test_ins, isa_state, ret_val }
+        AssemGen_Json_Item { arch, test_ins, test_ins_encdec, isa_state, ret_val }
     }
 }
 trait ToJSON: Serialize {
@@ -304,6 +313,7 @@ pub fn run_symbolic_execute<B: BV>(
                         // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, regs, lets);
 
                         let mut test_ins = String::new();
+                        let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
@@ -317,10 +327,21 @@ pub fn run_symbolic_execute<B: BV>(
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                 match model.get_val(&fun_args[0]) {
                                     Ok(arg_val) => {
-                                        let asm_opt = isarch::get_assembly_name(arg_val, shared_state, regs, lets);
+                                        let asm_opt =
+                                            isarch::get_assembly_name(arg_val.clone(), shared_state, regs, lets);
                                         println!("当前汇编：{:?}", asm_opt);
                                         match asm_opt {
                                             Some(asm) => test_ins = asm.clone(),
+                                            None => return,
+                                        }
+                                        let asm_encdec_opt =
+                                            isarch::get_assembly_encdec(arg_val.clone(), shared_state, regs, lets);
+                                        let asm_encdec_opt = asm_encdec_opt.map(|val| {
+                                            FmtVal::from_val(&val, &mut model).unwrap().to_str(shared_state)
+                                        });
+                                        println!("当前汇编encdec：{:?}", asm_encdec_opt);
+                                        match asm_encdec_opt {
+                                            Some(encdec) => test_ins_encdec = encdec,
                                             None => return,
                                         }
                                     }
@@ -450,6 +471,7 @@ pub fn run_symbolic_execute<B: BV>(
                         let single_instruction_json = AssemGen_Json_Item::new(
                             &target,
                             test_ins,
+                            test_ins_encdec,
                             isa_state,
                             ret_val.to_str(shared_state).to_string(),
                         );
