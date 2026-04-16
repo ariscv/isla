@@ -544,7 +544,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     }; */
     // exit(0);
 
-    let mut instruction_table = Vec::new();
+    let mut instruction_table: Vec<&str> = Vec::new();
     //能全部执行结束的
     let excute_through_instruction_table = [
         "zADDIW",
@@ -911,7 +911,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     ];
     // instruction_table.extend( todo_instruction_table.to_vec());
 
-    let ext_i_instruction_table = [
+    /*     let ext_i_instruction_table = [
         "zADDIW",
         "zBTYPE",
         "zEBREAK",
@@ -933,7 +933,70 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         "zUTYPE",
         "zWFI",
     ];
-    instruction_table.extend(ext_i_instruction_table.to_vec());
+    instruction_table.extend(ext_i_instruction_table.to_vec()); */
+
+    let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
+        .into_iter()
+        .map(|name| zencode::encode(name))
+        .collect::<Vec<String>>();
+    instruction_table.extend(ext_m_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
+
+    /*     let ext_a_instruction_table =
+        ["AMO", "LOADRES", "STORECON"].into_iter().map(|name| zencode::encode(name)).collect::<Vec<String>>();
+    instruction_table.extend(ext_a_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>()); */
+
+    let ext_c_instruction_table = [
+        "C_NOP",
+        "C_ADDI4SPN",
+        "C_LW",
+        "C_LD",
+        "C_SW",
+        "C_SD",
+        "C_ADDI",
+        "C_JAL",
+        "C_ADDIW",
+        "C_LI",
+        "C_ADDI16SP",
+        "C_LUI",
+        "C_SRLI",
+        "C_SRAI",
+        "C_ANDI",
+        "C_SUB",
+        "C_XOR",
+        "C_OR",
+        "C_AND",
+        "C_SUBW",
+        "C_ADDW",
+        "C_J",
+        "C_BEQZ",
+        "C_BNEZ",
+        "C_SLLI",
+        "C_LWSP",
+        "C_LDSP",
+        "C_SWSP",
+        "C_SDSP",
+        "C_JR",
+        "C_JALR",
+        "C_MV",
+        "C_EBREAK",
+        "C_ADD",
+        "C_LBU",
+        "C_LHU",
+        "C_LH",
+        "C_SB",
+        "C_SH",
+        "C_ZEXT_B",
+        "C_SEXT_B",
+        "C_ZEXT_H",
+        "C_SEXT_H",
+        "C_ZEXT_W",
+        "C_NOT",
+        "C_MUL",
+    ]
+    .into_iter()
+    .map(|name| zencode::encode(name))
+    .collect::<Vec<String>>();
+    instruction_table.extend(ext_c_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
 
     // instruction_table.extend(vec!["zLOAD"]);
 
