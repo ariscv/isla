@@ -43,7 +43,8 @@ relaxed = [
 	"f16", "f17", "f18", "f19", "f20", "f21", "f22", 
 	"f23", "f24", "f25", "f26", "f27", "f28", "f29", 
 	"f30", "f31", 
-	"cur_privilege"
+	"cur_privilege",
+	"mstatus"
 ]
 
 [registers.defaults]
