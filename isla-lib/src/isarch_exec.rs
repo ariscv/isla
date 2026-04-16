@@ -45,7 +45,7 @@ macro_rules! hashmap {
 
 pub trait Target
 where
-    Self: Sync + Default,
+    Self: Sync,
 {
     fn arch_name(&self) -> &'static str;
     fn arch_pretty_name(&self) -> &'static str;
@@ -58,11 +58,6 @@ pub trait RISCV: Target {
     fn xlen_bits(&self) -> &'static str;
     fn xlen_name(&self) -> &'static str;
 }
-
-#[derive(Default)]
-pub struct RISCV32 {}
-#[derive(Default)]
-pub struct RISCV64 {}
 
 // 为所有 RISCV 类型提供默认实现
 impl<T: RISCV> Target for T {
@@ -88,24 +83,35 @@ impl<T: RISCV> Target for T {
     }
 }
 
-// 标记为 RISCV 类型
-impl RISCV for RISCV32 {
-    fn xlen_bits(&self) -> &'static str {
-        "32"
-    }
+/// 根据 xlen 值动态选择 RISC-V target
+pub enum RISCVTarget {
+    RV32,
+    RV64,
+}
 
-    fn xlen_name(&self) -> &'static str {
-        "rv32d"
+impl RISCVTarget {
+    pub fn from_xlen(xlen: u32) -> Self {
+        match xlen {
+            32 => RISCVTarget::RV32,
+            64 => RISCVTarget::RV64,
+            _ => panic!("from_xlen(xlen={xlen})的值不是64或者32的其中一个，你是不是IR文件选错了或者配置给错了?"),
+        }
     }
 }
 
-impl RISCV for RISCV64 {
+impl RISCV for RISCVTarget {
     fn xlen_bits(&self) -> &'static str {
-        "64"
+        match self {
+            RISCVTarget::RV32 => "32",
+            RISCVTarget::RV64 => "64",
+        }
     }
 
     fn xlen_name(&self) -> &'static str {
-        "rv64d"
+        match self {
+            RISCVTarget::RV32 => "rv32d",
+            RISCVTarget::RV64 => "rv64d",
+        }
     }
 }
 
@@ -243,7 +249,17 @@ pub fn run_symbolic_execute<B: BV>(
 ) -> Result<Option<String>, ExecError> {
     use crate::smt::checkpoint;
 
-    let target = RISCV32::default();
+    // 从 lets 绑定中读取 zxlen 值
+    let xlen = shared_state
+        .symtab
+        .get("zxlen")
+        .and_then(|name| lets.get(&name))
+        .and_then(|uval| match uval {
+            UVal::Init(Val::I64(n)) => Some(*n as u32),
+            _ => None,
+        })
+        .unwrap();
+    let target = RISCVTarget::from_xlen(xlen);
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
     let ctx = Context::new(cfg);
@@ -506,7 +522,8 @@ pub fn run_symbolic_execute<B: BV>(
 
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        result_mutex.lock().unwrap().to_json(Some(format!("output/rv32d_{}.json", instruction_name)));
+        let xlen_name = target.xlen_name();
+        result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name, instruction_name)));
         Ok(None)
     } else {
         eprintln!("警告: {}无法获取 result 收集器", instruction_name);

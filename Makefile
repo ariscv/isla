@@ -3,7 +3,7 @@
 run:
 	cargo fmt && cp log log.1 \
 		&& bash -c "RUST_BACKTRACE=1 cargo run --bin isarch --release \
-		-- -A ./rv32d.ir -C ./configs/riscv32.toml --verbose --probe-all --trace-all list-instructions  >log 2> >(tee -a log >&2) "
+		-- -A ./rv64d.ir -C ./configs/riscv64.toml --verbose --probe-all --trace-all list-instructions  >log 2> >(tee -a log >&2) "
 
 all: isla
 
