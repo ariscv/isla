@@ -69,22 +69,17 @@ pub fn get_assembly_name<B: BV>(
     })
 }
 
-pub fn get_assembly_encdec<B: BV>(
+fn get_assembly_encdec_forwards<B: BV>(
+    function_name: &'static str,
     arg: Val<B>,
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Option<Val<B>> {
-    // 根据构造函数的参数类型生成默认值
-    let arg_value = arg;
-
-    // 执行 zassembly_forwards 函数
-    // MatchFailure 错误会被 execute_ir_function 静默处理
-    let collected = None;
-    let collected = Arc::new(Mutex::new(collected));
+    let collected = Arc::new(Mutex::new(None));
     execute_ir_function(
-        "zencdec_forwards",
-        &[arg_value],
+        function_name,
+        &[arg],
         shared_state,
         regs,
         lets,
@@ -92,8 +87,7 @@ pub fn get_assembly_encdec<B: BV>(
         &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
             Ok((run, frame)) => {
                 if let Run::Finished(ret_val) = run {
-                    print_frame_args("zencdec_forwards", &frame, shared_state, solver);
-
+                    print_frame_args(function_name, &frame, shared_state, solver);
                     *collected.lock().unwrap() = Some(ret_val);
                 }
             }
@@ -106,8 +100,18 @@ pub fn get_assembly_encdec<B: BV>(
             },
         },
     );
-    let ret_val: Option<Val<B>> = collected.lock().unwrap().clone();
+    let ret_val = collected.lock().unwrap().clone();
     ret_val
+}
+
+pub fn get_assembly_encdec<B: BV>(
+    arg: Val<B>,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Option<Val<B>> {
+    get_assembly_encdec_forwards("zencdec_forwards", arg.clone(), shared_state, regs, lets)
+        .or_else(|| get_assembly_encdec_forwards("zencdec_compressed_forwards", arg, shared_state, regs, lets))
 }
 
 /// 根据类型生成默认值
