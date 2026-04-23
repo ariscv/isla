@@ -939,7 +939,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         .into_iter()
         .map(|name| zencode::encode(name))
         .collect::<Vec<String>>();
-    instruction_table.extend(ext_m_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
+    // instruction_table.extend(ext_m_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
 
     /*     let ext_a_instruction_table =
         ["AMO", "LOADRES", "STORECON"].into_iter().map(|name| zencode::encode(name)).collect::<Vec<String>>();
@@ -996,9 +996,15 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     .into_iter()
     .map(|name| zencode::encode(name))
     .collect::<Vec<String>>();
-    instruction_table.extend(ext_c_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
+    // instruction_table.extend(ext_c_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
 
     // instruction_table.extend(vec!["zLOAD"]);
+
+	let excute_through_instruction_table = [
+        "zSTORE",
+        "zLOAD",
+    ];
+    // instruction_table.extend( excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
         match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
