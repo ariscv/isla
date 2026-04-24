@@ -1,20 +1,20 @@
 use crate::bitvector::BV;
-use crate::dprint::{self, colors};
+use crate::config::ISAConfig;
 use crate::error::{ExecError, IslaError};
-use crate::executor::{backtrace_string, LocalFrame, Run};
+use crate::executor::{backtrace_string, Run};
 use crate::fmtval::FmtVal;
 use crate::ir::UVal;
-use crate::isarch::{self, get_assembly_name};
+use crate::ir::*;
+use crate::isarch::{self};
+use crate::memory::Memory;
 use crate::primop_util::symbolic;
+use crate::primop_util::{length_bits, smt_sbits, smt_value};
 use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context, Event, Model, ModelVal};
-use crate::smt::{Solver, Sym};
+use crate::smt::{Config, Context, Event, Model, Solver};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
-use crate::{dlog, log};
-use crate::{ir::*, smt};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -116,6 +116,19 @@ impl RISCV for RISCVTarget {
 }
 
 #[derive(Serialize, Deserialize)]
+struct AssemGenMemoryEvent {
+    kind: String,
+    region: String,
+    bytes: u32,
+    address: String,
+    address_model: Option<String>,
+    value: Option<String>,
+    data: Option<String>,
+    is_ifetch: bool,
+    is_exclusive: bool,
+}
+
+#[derive(Serialize, Deserialize)]
 struct AssemGen_Json_Item {
     arch: BTreeMap<String, String>,
     #[serde(rename = "test-ins")]
@@ -124,6 +137,8 @@ struct AssemGen_Json_Item {
     test_ins_encdec: String,
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
+    #[serde(rename = "memory-events")]
+    memory_events: Vec<AssemGenMemoryEvent>,
     ret_val: String,
 }
 impl AssemGen_Json_Item {
@@ -132,6 +147,7 @@ impl AssemGen_Json_Item {
         test_ins: String,
         test_ins_encdec: String,
         isa_state: BTreeMap<String, String>,
+        memory_events: Vec<AssemGenMemoryEvent>,
         ret_val: String,
     ) -> Self {
         let mut arch = BTreeMap::new();
@@ -139,13 +155,14 @@ impl AssemGen_Json_Item {
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGen_Json_Item { arch, test_ins, test_ins_encdec, isa_state, ret_val }
+        AssemGen_Json_Item { arch, test_ins, test_ins_encdec, isa_state, memory_events, ret_val }
     }
 }
 trait ToJSON: Serialize {
     fn to_json_str(&self) -> String {
         serde_json::to_string_pretty(self).unwrap()
     }
+
     fn to_json(&self, file_path: Option<String>) {
         let json = serde_json::to_string_pretty(self).unwrap();
         // 若未指定输出路径，则默认写到当前目录下的 assem_gen.json
@@ -171,6 +188,101 @@ impl AssemGen_Json {
     fn new(gen: Vec<AssemGen_Json_Item>) -> Self {
         AssemGen_Json { gen }
     }
+}
+
+fn constrain_symbolic_address<B: BV>(
+    solver: &mut Solver<B>,
+    address: &Val<B>,
+    isa_config: &ISAConfig<B>,
+) -> Result<(), ExecError> {
+    use crate::smt::smtlib::Exp::{Bvsub, Bvuge, Bvult, Bvurem, Eq};
+
+    if isa_config.symbolic_addr_top <= isa_config.symbolic_addr_base {
+        return Ok(());
+    }
+
+    let info = SourceLoc::unknown();
+    let address_len = length_bits(address, solver, info)?;
+    let address_exp = smt_value(address, info)?;
+    let base_exp = smt_sbits(B::new(isa_config.symbolic_addr_base, address_len));
+    let top_exp = smt_sbits(B::new(isa_config.symbolic_addr_top, address_len));
+
+    solver.assert(Bvuge(Box::new(address_exp.clone()), Box::new(base_exp.clone())));
+    solver.assert(Bvult(Box::new(address_exp.clone()), Box::new(top_exp)));
+
+    if isa_config.symbolic_addr_stride > 1 {
+        let stride_exp = smt_sbits(B::new(isa_config.symbolic_addr_stride, address_len));
+        let zero_exp = smt_sbits(B::zeros(address_len));
+        solver.assert(Eq(
+            Box::new(Bvurem(Box::new(Bvsub(Box::new(address_exp), Box::new(base_exp))), Box::new(stride_exp))),
+            Box::new(zero_exp),
+        ));
+    }
+
+    Ok(())
+}
+
+fn constrain_trace_memory_addresses<B: BV>(
+    solver: &mut Solver<B>,
+    isa_config: &ISAConfig<B>,
+) -> Result<usize, ExecError> {
+    let addresses: Vec<_> = solver
+        .trace()
+        .to_vec()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ReadMem { address, opts, .. } if !opts.is_ifetch => Some(address.clone()),
+            Event::WriteMem { address, .. } => Some(address.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for address in &addresses {
+        constrain_symbolic_address(solver, address, isa_config)?;
+    }
+
+    Ok(addresses.len())
+}
+
+fn collect_memory_events<B: BV>(
+    solver: &Solver<B>,
+    model: &mut Model<B>,
+    shared_state: &SharedState<B>,
+) -> Vec<AssemGenMemoryEvent> {
+    solver
+        .trace()
+        .to_vec()
+        .into_iter()
+        .rev()
+        .filter_map(|event| {
+            let is_exclusive = event.is_exclusive();
+            match event {
+                Event::ReadMem { value, address, bytes, opts, region, .. } => Some(AssemGenMemoryEvent {
+                    kind: "read".to_string(),
+                    region: (*region).to_string(),
+                    bytes: *bytes,
+                    address: address.to_string(shared_state),
+                    address_model: model.get_val(address).ok().map(|v| v.to_string(shared_state)),
+                    value: model.get_val(value).ok().map(|v| v.to_string(shared_state)),
+                    data: None,
+                    is_ifetch: opts.is_ifetch,
+                    is_exclusive: opts.is_exclusive,
+                }),
+                Event::WriteMem { value, address, data, bytes, opts: _, region, .. } => Some(AssemGenMemoryEvent {
+                    kind: "write".to_string(),
+                    region: (*region).to_string(),
+                    bytes: *bytes,
+                    address: address.to_string(shared_state),
+                    address_model: model.get_val(address).ok().map(|v| v.to_string(shared_state)),
+                    value: model.get_var(*value).ok().map(|v| v.to_str()),
+                    data: model.get_val(data).ok().map(|v| v.to_string(shared_state)),
+                    is_ifetch: false,
+                    is_exclusive,
+                }),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn symbolic_args_from_TYPEs<B: BV>(
@@ -201,7 +313,7 @@ fn symbolic_args_from_TYPEs<B: BV>(
     };
 
     //hook: zSTORE
-    if (instruction_name == "zSTORE") {
+    if instruction_name == "zSTORE" {
         eprintln!("hook(zSTORE):ctor_ty={:#?}", ctor_ty);
     }
 
@@ -246,6 +358,7 @@ pub fn run_symbolic_execute<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
+    isa_config: &ISAConfig<B>,
 ) -> Result<Option<String>, ExecError> {
     use crate::smt::checkpoint;
 
@@ -260,6 +373,7 @@ pub fn run_symbolic_execute<B: BV>(
         })
         .unwrap();
     let target = RISCVTarget::from_xlen(xlen);
+    let isa_state_list = target.isa_state_list();
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
     let ctx = Context::new(cfg);
@@ -273,11 +387,16 @@ pub fn run_symbolic_execute<B: BV>(
         Box::new(symbolic_args_from_TYPEs(instruction_name, shared_state, regs, lets, &mut solver)?),
     )];
     println!("fun_args:{:?}", fun_args);
-    println!("{:?}", target.isa_state_list());
+    println!("{:?}", isa_state_list);
 
     // 生成参数（暂时使用默认值，测试checkpoint机制）
 
     // 构造指令值
+
+    let mut memory = Memory::new();
+    if isa_config.symbolic_addr_top > isa_config.symbolic_addr_base {
+        memory.add_symbolic_region(isa_config.symbolic_addr_base..isa_config.symbolic_addr_top);
+    }
 
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
@@ -285,12 +404,13 @@ pub fn run_symbolic_execute<B: BV>(
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
 
-    crate::executor::execute_ir_function_with_checkpoint(
+    crate::executor::execute_ir_function_with_checkpoint_and_memory_multi_thread(
         "zexecute",
         &fun_args,
         shared_state,
         regs,
         lets,
+        memory,
         &result,
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
             match exec_result {
@@ -331,42 +451,40 @@ pub fn run_symbolic_execute<B: BV>(
                         let mut test_ins = String::new();
                         let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
+                        let mut memory_events = Vec::new();
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
+                        if let Err(err) = constrain_trace_memory_addresses(&mut solver, isa_config) {
+                            eprintln!("警告: {}添加 symbolic memory 约束失败: {:?}", instruction_name, err);
+                            return;
+                        }
                         if solver.check_sat(SourceLoc::unknown()) == crate::smt::SmtResult::Sat {
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
                                 println!("2. === ISA State (Thread {}) ===", thread);
-                                let test = Sym::from_u32(6);
-                                // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
-                                match model.get_val(&fun_args[0]) {
-                                    Ok(arg_val) => {
-                                        let asm_opt =
-                                            isarch::get_assembly_name(arg_val.clone(), shared_state, regs, lets);
-                                        println!("当前汇编：{:?}", asm_opt);
-                                        match asm_opt {
-                                            Some(asm) => test_ins = asm.clone(),
-                                            None => return,
-                                        }
-                                        let asm_encdec_opt =
-                                            isarch::get_assembly_encdec(arg_val.clone(), shared_state, regs, lets);
-                                        let asm_encdec_opt = asm_encdec_opt.map(|val| {
-                                            FmtVal::from_val(&val, &mut model).unwrap().to_str(shared_state)
-                                        });
-                                        println!("当前汇编encdec：{:?}", asm_encdec_opt);
-                                        match asm_encdec_opt {
-                                            Some(encdec) => test_ins_encdec = encdec,
-                                            None => return,
-                                        }
-                                    }
+                                let arg_val = match model.get_val(&fun_args[0]) {
+                                    Ok(arg_val) => arg_val,
                                     Err(e) => {
                                         eprintln!("警告: {}没有汇编 {:?}", instruction_name, e);
-                                        //*collected.lock().unwrap() = Err(e);
                                         return;
                                     }
-                                }
+                                };
+                                let Some(asm) = isarch::get_assembly_name(arg_val.clone(), shared_state, regs, lets)
+                                else {
+                                    return;
+                                };
+                                println!("当前汇编：{:?}", asm);
+                                test_ins = asm;
+
+                                let asm_encdec_opt = isarch::get_assembly_encdec(arg_val, shared_state, regs, lets)
+                                    .map(|val| FmtVal::from_val(&val, &mut model).unwrap().to_str(shared_state));
+                                println!("当前汇编encdec：{:?}", asm_encdec_opt);
+                                let Some(encdec) = asm_encdec_opt else {
+                                    return;
+                                };
+                                test_ins_encdec = encdec;
 
                                 // 遍历所有寄存器
                                 for (reg_name, reg) in frame.regs().iter() {
@@ -389,29 +507,26 @@ pub fn run_symbolic_execute<B: BV>(
                                         continue;
                                     };
                                     if let Some(val) = reg.read_init_value_if_initialized() {
-                                        let formatted = model
-                                            .get_fmtval(val)
-                                            .map(|fmt_val| fmt_val.to_str(shared_state))
-                                            .unwrap_or_else(|_| val.to_str(shared_state));
-                                        let fv = model.get_fmtval(val);
-                                        match fv {
-                                            Err(ExecError) => continue,
-                                            Ok(fmt_val) => {
-                                                // println!("  {} = {}", reg_name_decoded, formatted);
-                                                if fmt_val.is_arbitrary() {
-                                                    continue;
-                                                }
+                                        let fmt_val = match model.get_fmtval(val) {
+                                            Err(_exec_error) => continue,
+                                            Ok(fmt_val) => fmt_val,
+                                        };
+                                        if fmt_val.is_arbitrary() {
+                                            continue;
+                                        }
 
-                                                if target.isa_state_list().contains(&reg_name_decoded.to_string()) {
-                                                    let formatted = fmt_val.to_str(shared_state);
-                                                    isa_state.insert(reg_name_decoded.to_string(), formatted.clone());
-                                                }
-                                            }
+                                        if isa_state_list.contains(&reg_name_decoded) {
+                                            let formatted = fmt_val.to_str(shared_state);
+                                            isa_state.insert(reg_name_decoded, formatted);
                                         }
                                     }
                                 }
 
                                 println!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap());
+                                let trace_len = solver.trace().to_vec().len();
+                                memory_events = collect_memory_events(&solver, &mut model, shared_state);
+                                println!("trace_len={}, memory_event_count={}", trace_len, memory_events.len());
+                                println!("memory_events={}", serde_json::to_string_pretty(&memory_events).unwrap());
                                 // 遍历lets中的特殊变量（如current_privilege等）
                                 /* for (let_name, let_val) in frame.lets().iter() {
                                     let let_name_str = shared_state.symtab.to_str(*let_name);
@@ -489,6 +604,7 @@ pub fn run_symbolic_execute<B: BV>(
                             test_ins,
                             test_ins_encdec,
                             isa_state,
+                            memory_events,
                             ret_val.to_str(shared_state).to_string(),
                         );
                         let mut instruction_json = collected.lock().unwrap();
@@ -521,22 +637,27 @@ pub fn run_symbolic_execute<B: BV>(
     );
 
     // 提取字符串结果
-    if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        let xlen_name = target.xlen_name();
-        result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name, instruction_name)));
-        Ok(None)
-    } else {
-        eprintln!("警告: {}无法获取 result 收集器", instruction_name);
-        Ok(None)
+    match Arc::try_unwrap(result) {
+        Ok(result_mutex) => {
+            let xlen_name = target.xlen_name();
+            result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name, instruction_name)));
+        }
+        Err(_) => eprintln!("警告: {}无法获取 result 收集器", instruction_name),
     }
+    Ok(None)
 }
 
 #[cfg(feature = "debug_exec")]
-pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
+pub fn test_exec_main<B: BV>(
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+    isa_config: &ISAConfig<B>,
+) {
     use std::{process::exit, vec};
 
     println!("test_exec_main");
-    /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
+    /* match run_symbolic_execute("zLOAD", shared_state, regs, lets, isa_config) {
         Ok(_) => {}
         Err(e) => {
             eprintln!("test_exec_main: 运行错误 {}", e)
@@ -1000,14 +1121,11 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
 
     // instruction_table.extend(vec!["zLOAD"]);
 
-	let excute_through_instruction_table = [
-        "zSTORE",
-        "zLOAD",
-    ];
-    // instruction_table.extend( excute_through_instruction_table.to_vec());
+    let execute_through_instruction_table = ["zSTORE", "zLOAD"];
+    instruction_table.extend(execute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
-        match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
+        match run_symbolic_execute(ins_name, shared_state, regs, lets, isa_config) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("test_exec_main: {}运行错误 {}", ins_name, e)
