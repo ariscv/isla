@@ -285,7 +285,7 @@ pub fn run_symbolic_execute<B: BV>(
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
 
-    crate::executor::execute_ir_function_with_checkpoint(
+    crate::executor::execute_ir_function_with_checkpoint_multi_thread(
         "zexecute",
         &fun_args,
         shared_state,
@@ -574,7 +574,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         */
         "zCLMUL",
     ];
-    // instruction_table.extend(failed_instruction_table.to_vec());
+    instruction_table.extend(failed_instruction_table.to_vec());
 
     //待测试的
     let todo_instruction_table = [
@@ -1000,10 +1000,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
 
     // instruction_table.extend(vec!["zLOAD"]);
 
-	let excute_through_instruction_table = [
-        "zSTORE",
-        "zLOAD",
-    ];
+    let excute_through_instruction_table = ["zSTORE", "zLOAD"];
     // instruction_table.extend( excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
