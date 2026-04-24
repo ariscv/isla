@@ -825,6 +825,47 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     }
 }
 
+fn call_isla_implemented_function<B: BV>(
+    f: Name,
+    args: &[Val<B>],
+    frame: &mut LocalFrame<B>,
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<Val<B>>, ExecError> {
+    let function_name = shared_state.symtab.to_str(f);
+    match zencode::decode(function_name).as_str() {
+        "vmem_write_addr" => {
+            if args.len() != 7 {
+                return Err(ExecError::Type(format!("vmem_write_addr expected 7 arguments, got {}", args.len()), info));
+            }
+
+            let opts = match args[6] {
+                Val::Bool(true) => WriteOpts::exclusive(),
+                _ => WriteOpts::default(),
+            };
+            let write_success =
+                frame.memory_mut().write(args[3].clone(), args[0].clone(), args[2].clone(), solver, None, opts)?;
+            let ok_ctor = shared_state.symtab.lookup("zOkzIozCUExecutionResultzK");
+            Ok(Some(Val::Ctor(ok_ctor, Box::new(write_success))))
+        }
+        "vmem_read_addr" => {
+            if args.len() != 7 {
+                return Err(ExecError::Type(format!("vmem_read_addr expected 7 arguments, got {}", args.len()), info));
+            }
+
+            let opts = match args[6] {
+                Val::Bool(true) => ReadOpts::exclusive(),
+                _ => ReadOpts::default(),
+            };
+            let value = frame.memory().read(args[3].clone(), args[0].clone(), args[2].clone(), solver, false, opts)?;
+            let ok_ctor = shared_state.symtab.lookup("zOkzIbzCUExecutionResultzK");
+            Ok(Some(Val::Ctor(ok_ctor, Box::new(value))))
+        }
+        _ => Ok(None),
+    }
+}
+
 // A special primitive can either continue execution, or it can exit
 enum SpecialResult {
     Exit,
@@ -1460,6 +1501,14 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             })
                             .collect::<Result<Vec<Val<B>>, _>>()?;
 
+                        if let Some(result) =
+                            call_isla_implemented_function(*f, &args, frame, shared_state, solver, *info)?
+                        {
+                            assign(tid, loc, result, &mut frame.local_state, shared_state, solver, *info)?;
+                            frame.pc += 1;
+                            continue 'main_loop;
+                        }
+
                         if frame.local_state.should_probe(shared_state, f) {
                             log_from!(tid, log::PROBE, probe::call_info(*f, &args, shared_state, *info));
                             probe::args_info(tid, &args, shared_state, solver)
@@ -1855,13 +1904,13 @@ enum Progress {
 
 /// Start symbolically executing a Task across `num_threads` new threads, collecting the results
 /// using the given collector.
-pub fn start_multi<'ir, B: BV, R>(
+pub fn start_multi<'ir, 'task, B: BV, R>(
     num_threads: usize,
     timeout: Option<u64>,
-    tasks: Vec<Task<'ir, '_, B>>,
-    shared_state: &SharedState<'ir, B>,
+    tasks: Vec<Task<'ir, 'task, B>>,
+    shared_state: &'ir SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &Collector<'ir, B, R>,
+    collector: &'ir Collector<'ir, B, R>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -2328,7 +2377,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(110, None, vec![task], shared_state, collected.clone(), collector);
 }
 pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(
     function_name: &str,
@@ -2381,5 +2430,5 @@ pub fn execute_ir_function_with_checkpoint_and_memory_multi_thread<'ir, B: BV, R
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(110, None, vec![task], shared_state, collected.clone(), collector);
 }

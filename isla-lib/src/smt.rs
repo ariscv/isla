@@ -2171,6 +2171,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
+    pub fn simplify_exp_to_u64(&self, exp: &Exp<Sym>) -> Option<u64> {
+        let mut ast = self.translate_exp(exp);
+        ast.simplify();
+        ast.get_numeral_u64().ok()
+    }
+
     pub fn is_bitvector(&mut self, v: Sym) -> bool {
         match self.decls.get(&v) {
             Some(ast) => unsafe {
