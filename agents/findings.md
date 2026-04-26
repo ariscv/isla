@@ -109,6 +109,7 @@
 - 对 RISC-V `vmem_read_addr`，Isla 侧可直接调用 `LocalFrame::memory().read(...)` 产生 `ReadMem` 事件，再返回 `zOkzIbzCUExecutionResultzK(value)`；这绕过了 `vmem_read_addr` 中对 `zeros(8 * n * bytes)` 的符号长度需求。
 - `rv64d.ir` 中 `zresultzIozCUExecutionResultzK` 的 `Ok` 构造器虽然名字里有 `o`，其 payload 是 `%bool`；`zresultzIbzCUExecutionResultzK` 的 `Ok` payload 是 `%bv`。手写返回值时必须使用 IR 中实际构造器名，否则上层 `match Ok/Err` 会报 constructor mismatch。
 - `isla-lib/src/primop.rs::subrange_internal(...)` 可以处理“结果位宽可化简成常量”的动态 low/high：用 `bvlshr(bits, low)` 加固定宽 `extract` 把动态偏移留给 SMT。但如果 Sail 表达式的结果位宽本身随路径变化，例如 misaligned 分裂后的 `bytes` 为 1/2/4，则 SMT bitvector sort 无法表示动态宽度，更适合在更高层函数实现或抽象。
+- `vmem_write_addr` / `vmem_read_addr` 的 `plain-ram` builtin 必须先通过显式假设校验（identity translation、PMP permits、plain RAM、普通 Data 访问、非 reservation、可证明对齐）再绕过 Sail VMEM；具体 misaligned、权限、翻译等语义默认应回落到 Sail 路径，避免测试 hook 在默认入口改写架构语义。
 
 ## 关于内存符号化参考的例子
 参考`isla-testgen`仓库，可能的位置在`../../isla-testgen`，如果没有及时提醒用户，或者去GitHub自行下载
@@ -116,7 +117,7 @@
 ## `make run` 与 `zSTORE` 产物的当前关系
 
 - `Makefile` 的 `run` 目标当前固定执行：
-  `cargo run --bin isarch --release -- -A ./rv64d.ir -C ./configs/riscv64.toml --verbose --probe-all --trace-all list-instructions`
+  `cargo run --bin isarch --release -- -A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --probe-all --trace-all list-instructions`
   因此它的显式子命令是 `list-instructions`，不是某个单独的 `zSTORE` 执行命令。
 - 根包 `Cargo.toml` 的默认 feature 包含 `debug_exec`，所以 `src/isarch.rs` 会在处理子命令前先调用 `isla_lib::isarch_exec::test_exec_main(...)`。
 - `isla-lib/src/isarch_exec.rs` 的 `run_symbolic_execute(...)` 在成功完成某条指令后，会调用 `to_json(Some(format!("output/{}_{}.json", ...)))`，并由 `ToJSON::to_json(...)` 自动创建 `output/` 目录。

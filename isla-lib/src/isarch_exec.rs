@@ -190,6 +190,92 @@ impl AssemGen_Json {
     }
 }
 
+#[derive(Serialize)]
+struct ForkProfileSite {
+    location: String,
+    innermost_function: String,
+    stack: String,
+    hits: usize,
+}
+
+#[derive(Serialize)]
+struct ForkProfilePath {
+    asm: String,
+    ret_val: String,
+    fork_events: usize,
+    unique_sites: usize,
+    trace_len: usize,
+    top_sites: Vec<ForkProfileSite>,
+}
+
+fn profile_forks_enabled() -> bool {
+    matches!(
+        std::env::var("ISLA_RISCV_PROFILE_FORKS"),
+        Ok(value) if matches!(value.as_str(), "1" | "true" | "True" | "TRUE" | "on" | "On" | "ON")
+    )
+}
+
+fn decoded_symbol<B: BV>(name: Name, shared_state: &SharedState<B>) -> String {
+    zencode::decode(shared_state.symtab.to_str(name))
+}
+
+fn fork_profile_for_trace<B: BV>(
+    solver: &Solver<B>,
+    shared_state: &SharedState<B>,
+    asm: &str,
+    ret_val: &str,
+) -> ForkProfilePath {
+    let events = solver.trace().to_vec();
+    let mut stack = Vec::new();
+    let mut sites: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    let mut fork_events = 0;
+
+    for event in events.iter().rev() {
+        match event {
+            Event::Function { name, call: true } => stack.push(*name),
+            Event::Function { name, call: false } => {
+                if let Some(pos) = stack.iter().rposition(|stack_name| stack_name == name) {
+                    stack.truncate(pos);
+                }
+            }
+            Event::Fork(_, _, _, info) => {
+                fork_events += 1;
+                let stack_names = stack
+                    .iter()
+                    .map(|name| decoded_symbol(*name, shared_state))
+                    .collect::<Vec<_>>();
+                let innermost_function = stack_names.last().cloned().unwrap_or_else(|| "<unknown>".to_string());
+                let stack_string = stack_names.join(" -> ");
+                let location = info.location_string(shared_state.symtab.files());
+                *sites.entry((location, innermost_function, stack_string)).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let unique_sites = sites.len();
+    let mut top_sites = sites
+        .into_iter()
+        .map(|((location, innermost_function, stack), hits)| ForkProfileSite {
+            location,
+            innermost_function,
+            stack,
+            hits,
+        })
+        .collect::<Vec<_>>();
+    top_sites.sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| a.stack.cmp(&b.stack)).then_with(|| a.location.cmp(&b.location)));
+    top_sites.truncate(20);
+
+    ForkProfilePath {
+        asm: asm.to_string(),
+        ret_val: ret_val.to_string(),
+        fork_events,
+        unique_sites,
+        trace_len: events.len(),
+        top_sites,
+    }
+}
+
 fn constrain_symbolic_address<B: BV>(
     solver: &mut Solver<B>,
     address: &Val<B>,
@@ -333,7 +419,6 @@ fn apply_instruction_arg_overrides<B: BV>(
 ) -> Result<(), ExecError> {
     let overrides = match instruction_name {
         "zSTORE" => &[
-            ("tuple#%bv12_%bv5_%bv5_%i643", None, FixedInstructionFieldKind::I64, "4"),
             (
                 "tuple#%bv12_%bv5_%bv5_%i640",
                 Some("ISLA_RISCV_TEST_ZSTORE_IMM"),
@@ -345,7 +430,6 @@ fn apply_instruction_arg_overrides<B: BV>(
             ("tuple#%bv12_%bv5_%bv5_%i643", Some("ISLA_RISCV_TEST_ZSTORE_WIDTH"), FixedInstructionFieldKind::I64, ""),
         ][..],
         "zLOAD" => &[
-            ("tuple#%bv12_%bv5_%bv5_%bool_%i644", None, FixedInstructionFieldKind::I64, "4"),
             (
                 "tuple#%bv12_%bv5_%bv5_%bool_%i640",
                 Some("ISLA_RISCV_TEST_ZLOAD_IMM"),
@@ -651,6 +735,11 @@ pub fn run_symbolic_execute<B: BV>(
                                 memory_events = collect_memory_events(&solver, &mut model, shared_state);
                                 println!("trace_len={}, memory_event_count={}", trace_len, memory_events.len());
                                 println!("memory_events={}", serde_json::to_string_pretty(&memory_events).unwrap());
+                                if profile_forks_enabled() {
+                                    let ret_val_str = ret_val.to_str(shared_state).to_string();
+                                    let profile = fork_profile_for_trace(&solver, shared_state, &test_ins, &ret_val_str);
+                                    println!("fork_profile={}", serde_json::to_string(&profile).unwrap());
+                                }
                                 // 遍历lets中的特殊变量（如current_privilege等）
                                 /* for (let_name, let_val) in frame.lets().iter() {
                                     let let_name_str = shared_state.symtab.to_str(*let_name);

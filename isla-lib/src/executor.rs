@@ -50,7 +50,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
 use crate::primop;
-use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_value, symbolic};
+use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_i128, smt_sbits, smt_value, symbolic};
 use crate::probe;
 use crate::smt::smtlib::{Def, Exp as SmtExp};
 use crate::smt::*;
@@ -835,6 +835,51 @@ fn call_isla_implemented_function<B: BV>(
 ) -> Result<Option<Val<B>>, ExecError> {
     let function_name = shared_state.symtab.to_str(f);
     match zencode::decode(function_name).as_str() {
+        "range_subset" => {
+            if args.len() != 4 {
+                return Err(ExecError::Type(format!("range_subset expected 4 arguments, got {}", args.len()), info));
+            }
+            if !env_flag_default_true("ISLA_RISCV_BUILTIN_RANGE_SUBSET") {
+                return Ok(None);
+            }
+            range_subset_builtin(args, solver, info)
+        }
+        "split_misaligned" => {
+            if args.len() != 2 {
+                return Err(ExecError::Type(format!("split_misaligned expected 2 arguments, got {}", args.len()), info));
+            }
+            if !env_flag_default_true("ISLA_RISCV_BUILTIN_SPLIT_MISALIGNED") {
+                return Ok(None);
+            }
+            split_misaligned_builtin(args, shared_state, solver, info)
+        }
+        "pmpMatchAddr" => {
+            if args.len() != 5 {
+                return Err(ExecError::Type(format!("pmpMatchAddr expected 5 arguments, got {}", args.len()), info));
+            }
+            if !env_flag("ISLA_RISCV_BUILTIN_PMP_MATCH_ADDR") {
+                return Ok(None);
+            }
+            pmp_match_addr_builtin(args, frame, shared_state, solver, info)
+        }
+        "pmpRangeMatch" => {
+            if args.len() != 4 {
+                return Err(ExecError::Type(format!("pmpRangeMatch expected 4 arguments, got {}", args.len()), info));
+            }
+            if !env_flag_default_true("ISLA_RISCV_BUILTIN_PMP_RANGE_MATCH") {
+                return Ok(None);
+            }
+            pmp_range_match_builtin(args, shared_state, solver, info)
+        }
+        "pmpCheck" => {
+            if args.len() != 4 {
+                return Err(ExecError::Type(format!("pmpCheck expected 4 arguments, got {}", args.len()), info));
+            }
+            if !env_flag("ISLA_RISCV_ASSUME_PMP_OFF") {
+                return Ok(None);
+            }
+            pmp_check_off_builtin(args, shared_state, info)
+        }
         "vmem_write_addr" => {
             if args.len() != 7 {
                 return Err(ExecError::Type(format!("vmem_write_addr expected 7 arguments, got {}", args.len()), info));
@@ -859,22 +904,21 @@ fn call_isla_implemented_function<B: BV>(
                         None,
                         opts,
                     )?;
-                    let ok_ctor = shared_state.symtab.lookup("zOkzIozCUExecutionResultzK");
+                    let ok_ctor = lookup_required_vmem_symbol("zOkzIozCUExecutionResultzK", shared_state, info)?;
                     Ok(Some(Val::Ctor(ok_ctor, Box::new(write_success))))
                 }
                 RiscvVmemBuiltinMode::PlainRam => {
-                    if is_concretely_misaligned(&args[0], &args[1]) {
-                        log!(log::VERBOSE, "vmem_write_addr builtin returning concrete alignment exception");
-                        return Ok(Some(vmem_alignment_exception(
-                            args[0].clone(),
-                            "zE_SAMO_Addr_Align",
-                            "zErrzIozCUExecutionResultzK",
-                            shared_state,
-                            info,
-                        )?));
-                    }
-
                     if let Some(reason) = validate_plain_vmem_write(args, shared_state, solver, info)? {
+                        if reason == PLAIN_VMEM_MISALIGNED && env_flag("ISLA_RISCV_VMEM_ASSUME_MISALIGNED_FAULTS") {
+                            log!(log::VERBOSE, "vmem_write_addr builtin returning concrete alignment exception");
+                            return Ok(Some(vmem_alignment_exception(
+                                args[0].clone(),
+                                "zE_SAMO_Addr_Align",
+                                "zErrzIozCUExecutionResultzK",
+                                shared_state,
+                                info,
+                            )?));
+                        }
                         log!(log::VERBOSE, &format!("vmem_write_addr builtin fallback: {}", reason));
                         return Ok(None);
                     }
@@ -890,7 +934,7 @@ fn call_isla_implemented_function<B: BV>(
                     if let Val::Symbolic(success) = write_success {
                         solver.add(Def::Assert(SmtExp::Var(success)));
                     }
-                    let ok_ctor = shared_state.symtab.lookup("zOkzIozCUExecutionResultzK");
+                    let ok_ctor = lookup_required_vmem_symbol("zOkzIozCUExecutionResultzK", shared_state, info)?;
                     Ok(Some(Val::Ctor(ok_ctor, Box::new(Val::Bool(true)))))
                 }
             }
@@ -913,22 +957,21 @@ fn call_isla_implemented_function<B: BV>(
                     };
                     let value =
                         frame.memory().read(args[3].clone(), args[0].clone(), args[2].clone(), solver, false, opts)?;
-                    let ok_ctor = shared_state.symtab.lookup("zOkzIbzCUExecutionResultzK");
+                    let ok_ctor = lookup_required_vmem_symbol("zOkzIbzCUExecutionResultzK", shared_state, info)?;
                     Ok(Some(Val::Ctor(ok_ctor, Box::new(value))))
                 }
                 RiscvVmemBuiltinMode::PlainRam => {
-                    if is_concretely_misaligned(&args[0], &args[2]) {
-                        log!(log::VERBOSE, "vmem_read_addr builtin returning concrete alignment exception");
-                        return Ok(Some(vmem_alignment_exception(
-                            args[0].clone(),
-                            "zE_Load_Addr_Align",
-                            "zErrzIbzCUExecutionResultzK",
-                            shared_state,
-                            info,
-                        )?));
-                    }
-
                     if let Some(reason) = validate_plain_vmem_read(args, shared_state, solver, info)? {
+                        if reason == PLAIN_VMEM_MISALIGNED && env_flag("ISLA_RISCV_VMEM_ASSUME_MISALIGNED_FAULTS") {
+                            log!(log::VERBOSE, "vmem_read_addr builtin returning concrete alignment exception");
+                            return Ok(Some(vmem_alignment_exception(
+                                args[0].clone(),
+                                "zE_Load_Addr_Align",
+                                "zErrzIbzCUExecutionResultzK",
+                                shared_state,
+                                info,
+                            )?));
+                        }
                         log!(log::VERBOSE, &format!("vmem_read_addr builtin fallback: {}", reason));
                         return Ok(None);
                     }
@@ -941,7 +984,7 @@ fn call_isla_implemented_function<B: BV>(
                         false,
                         ReadOpts::default(),
                     )?;
-                    let ok_ctor = shared_state.symtab.lookup("zOkzIbzCUExecutionResultzK");
+                    let ok_ctor = lookup_required_vmem_symbol("zOkzIbzCUExecutionResultzK", shared_state, info)?;
                     Ok(Some(Val::Ctor(ok_ctor, Box::new(value))))
                 }
             }
@@ -988,6 +1031,360 @@ fn env_flag(name: &str) -> bool {
     matches!(std::env::var(name), Ok(value) if matches!(value.as_str(), "1" | "true" | "True" | "TRUE" | "on" | "On" | "ON"))
 }
 
+fn env_flag_default_true(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => !matches!(value.as_str(), "0" | "false" | "False" | "FALSE" | "off" | "Off" | "OFF"),
+        Err(_) => true,
+    }
+}
+
+fn range_subset_builtin<B: BV>(
+    args: &[Val<B>],
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<Val<B>>, ExecError> {
+    let Some(width) = range_subset_width(args, solver) else {
+        log!(log::VERBOSE, "range_subset builtin fallback: unsupported argument width");
+        return Ok(None);
+    };
+    if width == 0 {
+        log!(log::VERBOSE, "range_subset builtin fallback: zero-width bitvector");
+        return Ok(None);
+    }
+
+    let a_begin = smt_value(&args[0], info)?;
+    let a_size = smt_value(&args[1], info)?;
+    let b_begin = smt_value(&args[2], info)?;
+    let b_size = smt_value(&args[3], info)?;
+
+    let a_end = SmtExp::Bvsub(
+        Box::new(SmtExp::Bvadd(Box::new(a_begin.clone()), Box::new(a_size))),
+        Box::new(b_begin.clone()),
+    );
+    let b_end = SmtExp::Bvsub(
+        Box::new(SmtExp::Bvadd(Box::new(b_begin.clone()), Box::new(b_size))),
+        Box::new(b_begin.clone()),
+    );
+    let a_begin = SmtExp::Bvsub(Box::new(a_begin), Box::new(b_begin));
+
+    let result = SmtExp::And(
+        Box::new(SmtExp::Bvule(Box::new(a_begin.clone()), Box::new(b_end.clone()))),
+        Box::new(SmtExp::And(
+            Box::new(SmtExp::Bvule(Box::new(a_end.clone()), Box::new(b_end))),
+            Box::new(SmtExp::Bvule(Box::new(a_begin), Box::new(a_end))),
+        )),
+    );
+
+    Ok(Some(smt_exp_to_value(result, solver)?))
+}
+
+fn range_subset_width<B: BV>(args: &[Val<B>], solver: &mut Solver<B>) -> Option<u32> {
+    let mut width = None;
+    for arg in args {
+        let arg_width = bitvector_width(arg, solver)?;
+        match width {
+            Some(width) if width != arg_width => return None,
+            Some(_) => {}
+            None => width = Some(arg_width),
+        }
+    }
+    width
+}
+
+fn bitvector_width<B: BV>(value: &Val<B>, solver: &mut Solver<B>) -> Option<u32> {
+    match value {
+        Val::Bits(bits) => Some(bits.len()),
+        Val::Symbolic(sym) => solver.length(*sym),
+        _ => None,
+    }
+}
+
+fn split_misaligned_builtin<B: BV>(
+    args: &[Val<B>],
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<Val<B>>, ExecError> {
+    let Some(width) = concrete_width_bytes(&args[1]) else {
+        log!(log::VERBOSE, "split_misaligned builtin fallback: symbolic width");
+        return Ok(None);
+    };
+    if width == 0 {
+        log!(log::VERBOSE, "split_misaligned builtin fallback: zero width");
+        return Ok(None);
+    }
+
+    match is_concretely_aligned(&args[0], width) {
+        Some(true) => split_misaligned_single_access(width, shared_state, info).map(Some),
+        Some(false) => {
+            log!(log::VERBOSE, "split_misaligned builtin fallback: concrete misaligned address");
+            Ok(None)
+        }
+        None if env_flag("ISLA_RISCV_VMEM_ASSUME_ALIGNED") => {
+            assert_plain_vmem_alignment(&args[0], width, solver, info)?;
+            split_misaligned_single_access(width, shared_state, info).map(Some)
+        }
+        None => {
+            log!(log::VERBOSE, "split_misaligned builtin fallback: symbolic alignment");
+            Ok(None)
+        }
+    }
+}
+
+fn split_misaligned_single_access<B: BV>(
+    width: u32,
+    shared_state: &SharedState<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    let n_field = lookup_required_vmem_symbol("ztuplez3z5i_z5i0", shared_state, info)?;
+    let bytes_field = lookup_required_vmem_symbol("ztuplez3z5i_z5i1", shared_state, info)?;
+    let mut fields = HashMap::default();
+    fields.insert(n_field, Val::I128(1));
+    fields.insert(bytes_field, Val::I128(i128::from(width)));
+    Ok(Val::Struct(fields))
+}
+
+fn pmp_match_addr_builtin<B: BV>(
+    args: &[Val<B>],
+    frame: &LocalFrame<B>,
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<Val<B>>, ExecError> {
+    match concrete_i64_let("zsys_pmp_grain", frame, shared_state) {
+        Some(0) => {}
+        Some(_) => {
+            log!(log::VERBOSE, "pmpMatchAddr builtin fallback: non-zero PMP grain");
+            return Ok(None);
+        }
+        None => {
+            log!(log::VERBOSE, "pmpMatchAddr builtin fallback: unknown PMP grain");
+            return Ok(None);
+        }
+    }
+
+    let Some((addr_bv, addr_width)) = bitvector_exp_and_width(&args[0], solver, info)? else {
+        log!(log::VERBOSE, "pmpMatchAddr builtin fallback: unsupported address");
+        return Ok(None);
+    };
+    let Some((width_bv, width_width)) = bitvector_exp_and_width(&args[1], solver, info)? else {
+        log!(log::VERBOSE, "pmpMatchAddr builtin fallback: unsupported width");
+        return Ok(None);
+    };
+    let Some((pmpaddr_bv, pmpaddr_width)) = bitvector_exp_and_width(&args[3], solver, info)? else {
+        log!(log::VERBOSE, "pmpMatchAddr builtin fallback: unsupported pmpaddr");
+        return Ok(None);
+    };
+    let Some((prev_pmpaddr_bv, prev_pmpaddr_width)) = bitvector_exp_and_width(&args[4], solver, info)? else {
+        log!(log::VERBOSE, "pmpMatchAddr builtin fallback: unsupported prev_pmpaddr");
+        return Ok(None);
+    };
+    if addr_width != 64 || width_width != 64 || pmpaddr_width != 64 || prev_pmpaddr_width != 64 {
+        log!(log::VERBOSE, "pmpMatchAddr builtin fallback: non-64-bit argument");
+        return Ok(None);
+    }
+
+    let Some(a_bits) = pmpcfg_a_bits(&args[2], shared_state, solver, info)? else {
+        log!(log::VERBOSE, "pmpMatchAddr builtin fallback: unsupported pmpcfg entry");
+        return Ok(None);
+    };
+
+    let no_match = pmp_addr_match_enum("zPMP_NoMatch", shared_state, info)?;
+    let partial_match = pmp_addr_match_enum("zPMP_PartialMatch", shared_state, info)?;
+    let full_match = pmp_addr_match_enum("zPMP_Match", shared_state, info)?;
+
+    let addr = unsigned_bv_exp_to_i128(addr_bv, addr_width)?;
+    let width = unsigned_bv_exp_to_i128(width_bv, width_width)?;
+    let pmpaddr = unsigned_bv_exp_to_i128(pmpaddr_bv.clone(), pmpaddr_width)?;
+    let prev_pmpaddr = unsigned_bv_exp_to_i128(prev_pmpaddr_bv.clone(), prev_pmpaddr_width)?;
+
+    let four = smt_i128(4);
+    let tor_begin = SmtExp::Bvmul(Box::new(prev_pmpaddr), Box::new(four.clone()));
+    let tor_end = SmtExp::Bvmul(Box::new(pmpaddr.clone()), Box::new(four.clone()));
+    let tor_result = SmtExp::Ite(
+        Box::new(SmtExp::Bvuge(Box::new(prev_pmpaddr_bv.clone()), Box::new(pmpaddr_bv.clone()))),
+        Box::new(no_match.clone()),
+        Box::new(pmp_range_match_exp(tor_begin, tor_end, addr.clone(), width.clone(), &no_match, &partial_match, &full_match)),
+    );
+
+    let na4_begin = SmtExp::Bvmul(Box::new(pmpaddr.clone()), Box::new(four.clone()));
+    let na4_end = SmtExp::Bvadd(Box::new(na4_begin.clone()), Box::new(four.clone()));
+    let na4_result = pmp_range_match_exp(na4_begin, na4_end, addr.clone(), width.clone(), &no_match, &partial_match, &full_match);
+
+    let one_bv64 = smt_sbits(B::new(1, 64));
+    let pmpaddr_plus_one = SmtExp::Bvadd(Box::new(pmpaddr_bv.clone()), Box::new(one_bv64));
+    let mask_bv = SmtExp::Bvxor(Box::new(pmpaddr_bv.clone()), Box::new(pmpaddr_plus_one));
+    let begin_words_bv = SmtExp::Bvand(
+        Box::new(pmpaddr_bv),
+        Box::new(SmtExp::Bvnot(Box::new(mask_bv.clone()))),
+    );
+    let begin_words = unsigned_bv_exp_to_i128(begin_words_bv, 64)?;
+    let mask = unsigned_bv_exp_to_i128(mask_bv, 64)?;
+    let end_words = SmtExp::Bvadd(
+        Box::new(SmtExp::Bvadd(Box::new(begin_words.clone()), Box::new(mask))),
+        Box::new(smt_i128(1)),
+    );
+    let napot_begin = SmtExp::Bvmul(Box::new(begin_words), Box::new(four.clone()));
+    let napot_end = SmtExp::Bvmul(Box::new(end_words), Box::new(four));
+    let napot_result = pmp_range_match_exp(napot_begin, napot_end, addr, width, &no_match, &partial_match, &full_match);
+
+    let result = SmtExp::Ite(
+        Box::new(SmtExp::Eq(Box::new(a_bits.clone()), Box::new(smt_sbits(B::new(0, 2))))),
+        Box::new(no_match),
+        Box::new(SmtExp::Ite(
+            Box::new(SmtExp::Eq(Box::new(a_bits.clone()), Box::new(smt_sbits(B::new(1, 2))))),
+            Box::new(tor_result),
+            Box::new(SmtExp::Ite(
+                Box::new(SmtExp::Eq(Box::new(a_bits), Box::new(smt_sbits(B::new(2, 2))))),
+                Box::new(na4_result),
+                Box::new(napot_result),
+            )),
+        )),
+    );
+
+    Ok(Some(smt_exp_to_value(result, solver)?))
+}
+
+fn pmp_range_match_builtin<B: BV>(
+    args: &[Val<B>],
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<Val<B>>, ExecError> {
+    let begin = int_value_exp(&args[0], info)?;
+    let end = int_value_exp(&args[1], info)?;
+    let addr = int_value_exp(&args[2], info)?;
+    let width = int_value_exp(&args[3], info)?;
+
+    let no_match = pmp_addr_match_enum("zPMP_NoMatch", shared_state, info)?;
+    let partial_match = pmp_addr_match_enum("zPMP_PartialMatch", shared_state, info)?;
+    let full_match = pmp_addr_match_enum("zPMP_Match", shared_state, info)?;
+
+    Ok(Some(smt_exp_to_value(
+        pmp_range_match_exp(begin, end, addr, width, &no_match, &partial_match, &full_match),
+        solver,
+    )?))
+}
+
+fn pmp_check_off_builtin<B: BV>(
+    args: &[Val<B>],
+    shared_state: &SharedState<B>,
+    info: SourceLoc,
+) -> Result<Option<Val<B>>, ExecError> {
+    if !is_enum_member(&args[3], "zMachine", shared_state) {
+        log!(log::VERBOSE, "pmpCheck off builtin fallback: privilege is not concrete Machine");
+        return Ok(None);
+    }
+    let none_ctor = lookup_required_symbol("zNonezIUExceptionTypezK", shared_state, info)?;
+    Ok(Some(Val::Ctor(none_ctor, Box::new(Val::Unit))))
+}
+
+fn is_enum_member<B: BV>(value: &Val<B>, expected: &str, shared_state: &SharedState<B>) -> bool {
+    match value {
+        Val::Enum(member) => shared_state.symtab.to_str(member.to_name(shared_state)) == expected,
+        _ => false,
+    }
+}
+
+fn int_value_exp<B: BV>(value: &Val<B>, info: SourceLoc) -> Result<SmtExp<Sym>, ExecError> {
+    match value {
+        Val::I128(value) => Ok(smt_i128(*value)),
+        Val::I64(value) => Ok(smt_i128(i128::from(*value))),
+        Val::Symbolic(sym) => Ok(SmtExp::Var(*sym)),
+        _ => Err(ExecError::Type(format!("integer expression {:?}", value), info)),
+    }
+}
+
+fn concrete_i64_let<B: BV>(name: &str, frame: &LocalFrame<B>, shared_state: &SharedState<B>) -> Option<i64> {
+    shared_state.symtab.get(name).and_then(|name| match frame.lets().get(&name) {
+        Some(UVal::Init(Val::I64(value))) => Some(*value),
+        _ => None,
+    })
+}
+
+fn bitvector_exp_and_width<B: BV>(
+    value: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<(SmtExp<Sym>, u32)>, ExecError> {
+    let Some(width) = bitvector_width(value, solver) else {
+        return Ok(None);
+    };
+    Ok(Some((smt_value(value, info)?, width)))
+}
+
+fn pmpcfg_a_bits<B: BV>(
+    ent: &Val<B>,
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<SmtExp<Sym>>, ExecError> {
+    let Val::Struct(fields) = ent else {
+        return Ok(None);
+    };
+    let bits_field = lookup_required_symbol("zbits", shared_state, info)?;
+    let Some(bits) = fields.get(&bits_field) else {
+        return Ok(None);
+    };
+    let Some((bits, width)) = bitvector_exp_and_width(bits, solver, info)? else {
+        return Ok(None);
+    };
+    if width != 8 {
+        return Ok(None);
+    }
+    Ok(Some(SmtExp::Extract(4, 3, Box::new(bits))))
+}
+
+fn pmp_addr_match_enum<B: BV>(
+    symbol: &str,
+    shared_state: &SharedState<B>,
+    info: SourceLoc,
+) -> Result<SmtExp<Sym>, ExecError> {
+    let member = lookup_required_symbol(symbol, shared_state, info)?;
+    Ok(SmtExp::Enum(EnumMember::from_name(member, shared_state)))
+}
+
+fn unsigned_bv_exp_to_i128(exp: SmtExp<Sym>, width: u32) -> Result<SmtExp<Sym>, ExecError> {
+    if width > 128 {
+        Err(ExecError::Type(format!("pmpMatchAddr cannot zero-extend {}-bit value to int", width), SourceLoc::unknown()))
+    } else if width == 128 {
+        Ok(exp)
+    } else {
+        Ok(SmtExp::ZeroExtend(128 - width, Box::new(exp)))
+    }
+}
+
+fn pmp_range_match_exp(
+    begin: SmtExp<Sym>,
+    end: SmtExp<Sym>,
+    addr: SmtExp<Sym>,
+    width: SmtExp<Sym>,
+    no_match: &SmtExp<Sym>,
+    partial_match: &SmtExp<Sym>,
+    full_match: &SmtExp<Sym>,
+) -> SmtExp<Sym> {
+    let addr_end = SmtExp::Bvadd(Box::new(addr.clone()), Box::new(width));
+    let no_match_cond = SmtExp::Or(
+        Box::new(SmtExp::Bvsle(Box::new(addr_end.clone()), Box::new(begin.clone()))),
+        Box::new(SmtExp::Bvsle(Box::new(end.clone()), Box::new(addr.clone()))),
+    );
+    let full_match_cond = SmtExp::And(
+        Box::new(SmtExp::Bvsle(Box::new(begin), Box::new(addr))),
+        Box::new(SmtExp::Bvsle(Box::new(addr_end), Box::new(end))),
+    );
+    SmtExp::Ite(
+        Box::new(no_match_cond),
+        Box::new(no_match.clone()),
+        Box::new(SmtExp::Ite(
+            Box::new(full_match_cond),
+            Box::new(full_match.clone()),
+            Box::new(partial_match.clone()),
+        )),
+    )
+}
+
+const PLAIN_VMEM_MISALIGNED: &str = "misaligned concrete address";
+
 fn vmem_alignment_exception<B: BV>(
     address: Val<B>,
     exception_ctor_name: &str,
@@ -1032,10 +1429,18 @@ fn lookup_required_vmem_symbol<B: BV>(
     shared_state: &SharedState<B>,
     info: SourceLoc,
 ) -> Result<Name, ExecError> {
+    lookup_required_symbol(symbol, shared_state, info)
+}
+
+fn lookup_required_symbol<B: BV>(
+    symbol: &str,
+    shared_state: &SharedState<B>,
+    info: SourceLoc,
+) -> Result<Name, ExecError> {
     shared_state
         .symtab
         .get(symbol)
-        .ok_or_else(|| ExecError::Type(format!("vmem builtin expected IR symbol {}", symbol), info))
+        .ok_or_else(|| ExecError::Type(format!("builtin expected IR symbol {}", symbol), info))
 }
 
 fn validate_plain_vmem_write<B: BV>(
@@ -1135,7 +1540,7 @@ fn validate_plain_vmem_common<B: BV>(
 
     match is_concretely_aligned(address, width) {
         Some(true) => Ok(None),
-        Some(false) => Ok(Some("misaligned concrete address")),
+        Some(false) => Ok(Some(PLAIN_VMEM_MISALIGNED)),
         None if env_flag("ISLA_RISCV_VMEM_ASSUME_ALIGNED") => {
             assert_plain_vmem_alignment(address, width, solver, info)?;
             Ok(None)
@@ -1178,13 +1583,6 @@ fn is_concretely_aligned<B: BV>(address: &Val<B>, width: u32) -> Option<bool> {
     match address {
         Val::Bits(addr) => Some(addr.lower_u64() % u64::from(width) == 0),
         _ => None,
-    }
-}
-
-fn is_concretely_misaligned<B: BV>(address: &Val<B>, width: &Val<B>) -> bool {
-    match concrete_width_bytes(width) {
-        Some(width) if width != 0 => matches!(is_concretely_aligned(address, width), Some(false)),
-        _ => false,
     }
 }
 
@@ -1836,6 +2234,14 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             })
                             .collect::<Result<Vec<Val<B>>, _>>()?;
 
+                        if let Some(result) =
+                            call_isla_implemented_function(*f, &args, frame, shared_state, solver, *info)?
+                        {
+                            assign(tid, loc, result, &mut frame.local_state, shared_state, solver, *info)?;
+                            frame.pc += 1;
+                            continue 'main_loop;
+                        }
+
                         if frame.local_state.should_probe(shared_state, f) {
                             log_from!(tid, log::PROBE, probe::call_info(*f, &args, shared_state, *info));
                             probe::args_info(tid, &args, shared_state, solver)
@@ -2231,13 +2637,13 @@ enum Progress {
 
 /// Start symbolically executing a Task across `num_threads` new threads, collecting the results
 /// using the given collector.
-pub fn start_multi<'ir, B: BV, R>(
+pub fn start_multi<'ir, 'task, B: BV, R>(
     num_threads: usize,
     timeout: Option<u64>,
-    tasks: Vec<Task<'ir, '_, B>>,
-    shared_state: &SharedState<'ir, B>,
+    tasks: Vec<Task<'ir, 'task, B>>,
+    shared_state: &'ir SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &Collector<'ir, B, R>,
+    collector: &'ir Collector<'ir, B, R>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -2704,7 +3110,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(110, None, vec![task], shared_state, collected.clone(), collector);
 }
 pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(
     function_name: &str,
@@ -2757,5 +3163,5 @@ pub fn execute_ir_function_with_checkpoint_and_memory_multi_thread<'ir, B: BV, R
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(110, None, vec![task], shared_state, collected.clone(), collector);
 }
