@@ -52,7 +52,7 @@ use crate::log;
 use crate::primop;
 use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_value, symbolic};
 use crate::probe;
-use crate::smt::smtlib::Def;
+use crate::smt::smtlib::{Def, Exp as SmtExp};
 use crate::smt::*;
 use crate::source_loc::SourceLoc;
 use crate::zencode;
@@ -840,29 +840,364 @@ fn call_isla_implemented_function<B: BV>(
                 return Err(ExecError::Type(format!("vmem_write_addr expected 7 arguments, got {}", args.len()), info));
             }
 
-            let opts = match args[6] {
-                Val::Bool(true) => WriteOpts::exclusive(),
-                _ => WriteOpts::default(),
-            };
-            let write_success =
-                frame.memory_mut().write(args[3].clone(), args[0].clone(), args[2].clone(), solver, None, opts)?;
-            let ok_ctor = shared_state.symtab.lookup("zOkzIozCUExecutionResultzK");
-            Ok(Some(Val::Ctor(ok_ctor, Box::new(write_success))))
+            if !riscv_vmem_builtin_enabled("vmem_write_addr") {
+                return Ok(None);
+            }
+
+            match riscv_vmem_builtin_mode() {
+                RiscvVmemBuiltinMode::Off => Ok(None),
+                RiscvVmemBuiltinMode::Legacy => {
+                    let opts = match args[6] {
+                        Val::Bool(true) => WriteOpts::exclusive(),
+                        _ => WriteOpts::default(),
+                    };
+                    let write_success = frame.memory_mut().write(
+                        args[3].clone(),
+                        args[0].clone(),
+                        args[2].clone(),
+                        solver,
+                        None,
+                        opts,
+                    )?;
+                    let ok_ctor = shared_state.symtab.lookup("zOkzIozCUExecutionResultzK");
+                    Ok(Some(Val::Ctor(ok_ctor, Box::new(write_success))))
+                }
+                RiscvVmemBuiltinMode::PlainRam => {
+                    if is_concretely_misaligned(&args[0], &args[1]) {
+                        log!(log::VERBOSE, "vmem_write_addr builtin returning concrete alignment exception");
+                        return Ok(Some(vmem_alignment_exception(
+                            args[0].clone(),
+                            "zE_SAMO_Addr_Align",
+                            "zErrzIozCUExecutionResultzK",
+                            shared_state,
+                            info,
+                        )?));
+                    }
+
+                    if let Some(reason) = validate_plain_vmem_write(args, shared_state, solver, info)? {
+                        log!(log::VERBOSE, &format!("vmem_write_addr builtin fallback: {}", reason));
+                        return Ok(None);
+                    }
+
+                    let write_success = frame.memory_mut().write(
+                        args[3].clone(),
+                        args[0].clone(),
+                        args[2].clone(),
+                        solver,
+                        None,
+                        WriteOpts::default(),
+                    )?;
+                    if let Val::Symbolic(success) = write_success {
+                        solver.add(Def::Assert(SmtExp::Var(success)));
+                    }
+                    let ok_ctor = shared_state.symtab.lookup("zOkzIozCUExecutionResultzK");
+                    Ok(Some(Val::Ctor(ok_ctor, Box::new(Val::Bool(true)))))
+                }
+            }
         }
         "vmem_read_addr" => {
             if args.len() != 7 {
                 return Err(ExecError::Type(format!("vmem_read_addr expected 7 arguments, got {}", args.len()), info));
             }
 
-            let opts = match args[6] {
-                Val::Bool(true) => ReadOpts::exclusive(),
-                _ => ReadOpts::default(),
-            };
-            let value = frame.memory().read(args[3].clone(), args[0].clone(), args[2].clone(), solver, false, opts)?;
-            let ok_ctor = shared_state.symtab.lookup("zOkzIbzCUExecutionResultzK");
-            Ok(Some(Val::Ctor(ok_ctor, Box::new(value))))
+            if !riscv_vmem_builtin_enabled("vmem_read_addr") {
+                return Ok(None);
+            }
+
+            match riscv_vmem_builtin_mode() {
+                RiscvVmemBuiltinMode::Off => Ok(None),
+                RiscvVmemBuiltinMode::Legacy => {
+                    let opts = match args[6] {
+                        Val::Bool(true) => ReadOpts::exclusive(),
+                        _ => ReadOpts::default(),
+                    };
+                    let value =
+                        frame.memory().read(args[3].clone(), args[0].clone(), args[2].clone(), solver, false, opts)?;
+                    let ok_ctor = shared_state.symtab.lookup("zOkzIbzCUExecutionResultzK");
+                    Ok(Some(Val::Ctor(ok_ctor, Box::new(value))))
+                }
+                RiscvVmemBuiltinMode::PlainRam => {
+                    if is_concretely_misaligned(&args[0], &args[2]) {
+                        log!(log::VERBOSE, "vmem_read_addr builtin returning concrete alignment exception");
+                        return Ok(Some(vmem_alignment_exception(
+                            args[0].clone(),
+                            "zE_Load_Addr_Align",
+                            "zErrzIbzCUExecutionResultzK",
+                            shared_state,
+                            info,
+                        )?));
+                    }
+
+                    if let Some(reason) = validate_plain_vmem_read(args, shared_state, solver, info)? {
+                        log!(log::VERBOSE, &format!("vmem_read_addr builtin fallback: {}", reason));
+                        return Ok(None);
+                    }
+
+                    let value = frame.memory().read(
+                        args[3].clone(),
+                        args[0].clone(),
+                        args[2].clone(),
+                        solver,
+                        false,
+                        ReadOpts::default(),
+                    )?;
+                    let ok_ctor = shared_state.symtab.lookup("zOkzIbzCUExecutionResultzK");
+                    Ok(Some(Val::Ctor(ok_ctor, Box::new(value))))
+                }
+            }
         }
         _ => Ok(None),
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum RiscvVmemBuiltinMode {
+    Off,
+    Legacy,
+    PlainRam,
+}
+
+fn riscv_vmem_builtin_mode() -> RiscvVmemBuiltinMode {
+    match std::env::var("ISLA_RISCV_VMEM_BUILTIN_MODE") {
+        Ok(mode) if mode.eq_ignore_ascii_case("off") => RiscvVmemBuiltinMode::Off,
+        Ok(mode) if mode.eq_ignore_ascii_case("plain-ram") => RiscvVmemBuiltinMode::PlainRam,
+        Ok(mode) if mode.eq_ignore_ascii_case("plain_ram") => RiscvVmemBuiltinMode::PlainRam,
+        Ok(mode) if mode.eq_ignore_ascii_case("legacy") => RiscvVmemBuiltinMode::Legacy,
+        Ok(mode) => {
+            log!(log::VERBOSE, &format!("unknown ISLA_RISCV_VMEM_BUILTIN_MODE={}; using plain-ram", mode));
+            RiscvVmemBuiltinMode::PlainRam
+        }
+        Err(_) => RiscvVmemBuiltinMode::PlainRam,
+    }
+}
+
+fn riscv_vmem_builtin_enabled(function_name: &str) -> bool {
+    let key = match function_name {
+        "vmem_write_addr" => "ISLA_RISCV_BUILTIN_VMEM_WRITE_ADDR",
+        "vmem_read_addr" => "ISLA_RISCV_BUILTIN_VMEM_READ_ADDR",
+        _ => return false,
+    };
+
+    match std::env::var(key) {
+        Ok(value) => !matches!(value.as_str(), "0" | "false" | "False" | "FALSE" | "off" | "Off" | "OFF"),
+        Err(_) => true,
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(std::env::var(name), Ok(value) if matches!(value.as_str(), "1" | "true" | "True" | "TRUE" | "on" | "On" | "ON"))
+}
+
+fn vmem_alignment_exception<B: BV>(
+    address: Val<B>,
+    exception_ctor_name: &str,
+    result_err_ctor_name: &str,
+    shared_state: &SharedState<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    let exception_ctor = lookup_required_vmem_symbol(exception_ctor_name, shared_state, info)?;
+    let memory_exception_ctor = lookup_required_vmem_symbol("zMemory_Exception", shared_state, info)?;
+    let result_err_ctor = lookup_required_vmem_symbol(result_err_ctor_name, shared_state, info)?;
+    let address_len = match &address {
+        Val::Bits(address) => address.len(),
+        _ => {
+            return Err(ExecError::Type(
+                format!("vmem alignment exception requires concrete address, got {:?}", address),
+                info,
+            ))
+        }
+    };
+    let address_field = lookup_required_vmem_symbol(
+        &format!("ztuplez3z5bv{}_z5unionz0zzExceptionType0", address_len),
+        shared_state,
+        info,
+    )?;
+    let exception_field = lookup_required_vmem_symbol(
+        &format!("ztuplez3z5bv{}_z5unionz0zzExceptionType1", address_len),
+        shared_state,
+        info,
+    )?;
+
+    let exception = Val::Ctor(exception_ctor, Box::new(Val::Unit));
+    let mut memory_exception_fields = HashMap::default();
+    memory_exception_fields.insert(address_field, address);
+    memory_exception_fields.insert(exception_field, exception);
+    let memory_exception = Val::Ctor(memory_exception_ctor, Box::new(Val::Struct(memory_exception_fields)));
+
+    Ok(Val::Ctor(result_err_ctor, Box::new(memory_exception)))
+}
+
+fn lookup_required_vmem_symbol<B: BV>(
+    symbol: &str,
+    shared_state: &SharedState<B>,
+    info: SourceLoc,
+) -> Result<Name, ExecError> {
+    shared_state
+        .symtab
+        .get(symbol)
+        .ok_or_else(|| ExecError::Type(format!("vmem builtin expected IR symbol {}", symbol), info))
+}
+
+fn validate_plain_vmem_write<B: BV>(
+    args: &[Val<B>],
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<&'static str>, ExecError> {
+    if let Some(reason) = validate_plain_vmem_common(
+        &args[0],
+        &args[1],
+        &args[3],
+        &args[4],
+        &args[5],
+        &args[6],
+        "zStorezIEmem_payloadz5zK",
+        shared_state,
+        solver,
+        info,
+    )? {
+        return Ok(Some(reason));
+    }
+
+    let width = match concrete_width_bytes(&args[1]) {
+        Some(width) => width,
+        None => return Ok(Some("non-concrete write width")),
+    };
+    let data_bits = crate::primop_util::length_bits(&args[2], solver, info)?;
+    if data_bits != width * 8 {
+        return Ok(Some("write data length does not match width"));
+    }
+
+    Ok(None)
+}
+
+fn validate_plain_vmem_read<B: BV>(
+    args: &[Val<B>],
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<&'static str>, ExecError> {
+    validate_plain_vmem_common(
+        &args[0],
+        &args[2],
+        &args[3],
+        &args[4],
+        &args[5],
+        &args[6],
+        "zLoadzIEmem_payloadz5zK",
+        shared_state,
+        solver,
+        info,
+    )
+}
+
+fn validate_plain_vmem_common<B: BV>(
+    address: &Val<B>,
+    width: &Val<B>,
+    access: &Val<B>,
+    aq: &Val<B>,
+    rl: &Val<B>,
+    res: &Val<B>,
+    expected_access_ctor: &str,
+    shared_state: &SharedState<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<&'static str>, ExecError> {
+    if *aq != Val::Bool(false) {
+        return Ok(Some("aq is not false"));
+    }
+    if *rl != Val::Bool(false) {
+        return Ok(Some("rl is not false"));
+    }
+    if *res != Val::Bool(false) {
+        return Ok(Some("reservation access is not supported"));
+    }
+    if !is_data_access_ctor(access, expected_access_ctor, shared_state) {
+        return Ok(Some("access is not ordinary Data load/store"));
+    }
+    if !env_flag("ISLA_RISCV_VMEM_ASSUME_IDENTITY_TRANSLATION") {
+        return Ok(Some("identity translation is not explicitly assumed"));
+    }
+    if !env_flag("ISLA_RISCV_VMEM_ASSUME_PMP_PERMITS") {
+        return Ok(Some("PMP permission is not explicitly assumed"));
+    }
+    if !env_flag("ISLA_RISCV_VMEM_ASSUME_PLAIN_RAM") {
+        return Ok(Some("plain RAM region is not explicitly assumed"));
+    }
+
+    let width = match concrete_width_bytes(width) {
+        Some(width) => width,
+        None => return Ok(Some("non-concrete access width")),
+    };
+    if width == 0 {
+        return Err(ExecError::Type("vmem builtin received zero-width access".to_string(), SourceLoc::unknown()));
+    }
+
+    match is_concretely_aligned(address, width) {
+        Some(true) => Ok(None),
+        Some(false) => Ok(Some("misaligned concrete address")),
+        None if env_flag("ISLA_RISCV_VMEM_ASSUME_ALIGNED") => {
+            assert_plain_vmem_alignment(address, width, solver, info)?;
+            Ok(None)
+        }
+        None => Ok(Some("alignment is not proven")),
+    }
+}
+
+fn assert_plain_vmem_alignment<B: BV>(
+    address: &Val<B>,
+    width: u32,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    if width == 1 {
+        return Ok(());
+    }
+    if !width.is_power_of_two() {
+        return Err(ExecError::Type(
+            format!("vmem builtin cannot assert non-power-of-two alignment width {}", width),
+            info,
+        ));
+    }
+
+    let align_bits = width.trailing_zeros();
+    let low_bits = SmtExp::Extract(align_bits - 1, 0, Box::new(smt_value(address, info)?));
+    let zero = SmtExp::Bits64(B64::zeros(align_bits));
+    solver.add(Def::Assert(SmtExp::Eq(Box::new(low_bits), Box::new(zero))));
+    Ok(())
+}
+
+fn concrete_width_bytes<B: BV>(width: &Val<B>) -> Option<u32> {
+    match width.clone().widen_int() {
+        Val::I128(width) => u32::try_from(width).ok(),
+        _ => None,
+    }
+}
+
+fn is_concretely_aligned<B: BV>(address: &Val<B>, width: u32) -> Option<bool> {
+    match address {
+        Val::Bits(addr) => Some(addr.lower_u64() % u64::from(width) == 0),
+        _ => None,
+    }
+}
+
+fn is_concretely_misaligned<B: BV>(address: &Val<B>, width: &Val<B>) -> bool {
+    match concrete_width_bytes(width) {
+        Some(width) if width != 0 => matches!(is_concretely_aligned(address, width), Some(false)),
+        _ => false,
+    }
+}
+
+fn is_data_access_ctor<B: BV>(access: &Val<B>, expected_ctor: &str, shared_state: &SharedState<B>) -> bool {
+    match access {
+        Val::Ctor(ctor, payload) if shared_state.symtab.to_str(*ctor) == expected_ctor => match payload.as_ref() {
+            Val::Enum(member) => {
+                let enum_name = shared_state.symtab.to_str(member.enum_id.to_name());
+                enum_name == "zmem_payload" && member.member == 0
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1501,14 +1836,6 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             })
                             .collect::<Result<Vec<Val<B>>, _>>()?;
 
-                        if let Some(result) =
-                            call_isla_implemented_function(*f, &args, frame, shared_state, solver, *info)?
-                        {
-                            assign(tid, loc, result, &mut frame.local_state, shared_state, solver, *info)?;
-                            frame.pc += 1;
-                            continue 'main_loop;
-                        }
-
                         if frame.local_state.should_probe(shared_state, f) {
                             log_from!(tid, log::PROBE, probe::call_info(*f, &args, shared_state, *info));
                             probe::args_info(tid, &args, shared_state, solver)
@@ -1904,13 +2231,13 @@ enum Progress {
 
 /// Start symbolically executing a Task across `num_threads` new threads, collecting the results
 /// using the given collector.
-pub fn start_multi<'ir, 'task, B: BV, R>(
+pub fn start_multi<'ir, B: BV, R>(
     num_threads: usize,
     timeout: Option<u64>,
-    tasks: Vec<Task<'ir, 'task, B>>,
-    shared_state: &'ir SharedState<'ir, B>,
+    tasks: Vec<Task<'ir, '_, B>>,
+    shared_state: &SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &'ir Collector<'ir, B, R>,
+    collector: &Collector<'ir, B, R>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -2377,7 +2704,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], shared_state, collected.clone(), collector);
+    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
 }
 pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(
     function_name: &str,
@@ -2430,5 +2757,5 @@ pub fn execute_ir_function_with_checkpoint_and_memory_multi_thread<'ir, B: BV, R
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], shared_state, collected.clone(), collector);
+    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
 }

@@ -1004,47 +1004,6 @@ fn slice<B: BV>(
     slice_internal(args[0].clone(), args[1].clone(), args[2].clone(), solver, info)
 }
 
-fn int_to_smt_exp<B: BV>(value: &Val<B>, info: SourceLoc) -> Result<Exp<Sym>, ExecError> {
-    match value {
-        Val::I128(n) => Ok(smt_i128(*n)),
-        Val::I64(n) => Ok(smt_i128(i128::from(*n))),
-        Val::Symbolic(sym) => Ok(Exp::Var(*sym)),
-        _ => Err(ExecError::Type(format!("integer expression {:?}", value), info)),
-    }
-}
-
-fn shift_amount_exp(bits_length: u32, n: Exp<Sym>) -> Exp<Sym> {
-    if bits_length < 128 {
-        Exp::Extract(bits_length - 1, 0, Box::new(n))
-    } else if bits_length > 128 {
-        Exp::ZeroExtend(bits_length - 128, Box::new(n))
-    } else {
-        n
-    }
-}
-
-fn subrange_result_len<B: BV>(
-    high: &Val<B>,
-    low: &Val<B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-) -> Result<u32, ExecError> {
-    match (high, low) {
-        (Val::I128(high), Val::I128(low)) if high >= low => Ok((high - low + 1) as u32),
-        (Val::I64(high), Val::I64(low)) if high >= low => Ok((high - low + 1) as u32),
-        _ => {
-            let len = Exp::Bvadd(
-                Box::new(Exp::Bvsub(Box::new(int_to_smt_exp(high, info)?), Box::new(int_to_smt_exp(low, info)?))),
-                Box::new(smt_i128(1)),
-            );
-            match solver.simplify_exp_to_u64(&len).and_then(|len| u32::try_from(len).ok()) {
-                Some(len) => Ok(len),
-                None => Err(ExecError::SymbolicLength("subrange_internal", info)),
-            }
-        }
-    }
-}
-
 pub fn subrange_internal<B: BV>(
     bits: Val<B>,
     high: Val<B>,
@@ -1067,27 +1026,8 @@ pub fn subrange_internal<B: BV>(
             let bits_length = segments_length(segments, solver, info)?;
             mixed_bits_slice(segments, bits_length, low as u32, (high - low + 1) as u32, solver, info)
         }
-        (bits, high, low) if matches!(high, Val::Symbolic(_)) || matches!(low, Val::Symbolic(_)) => {
-            let bits_length = length_bits(&bits, solver, info)?;
-            let result_len = subrange_result_len(&high, &low, solver, info)?;
-            if result_len == 0 {
-                Ok(Val::Bits(B::zeros(0)))
-            } else if result_len > bits_length {
-                Err(ExecError::Type(
-                    format!("subrange_internal (invalid symbolic width) {:?} {:?} {:?}", &bits, &high, &low),
-                    info,
-                ))
-            } else {
-                let bits_smt = mixed_bits_to_smt(bits, solver, info)?;
-                let low = shift_amount_exp(bits_length, int_to_smt_exp(&low, info)?);
-                solver
-                    .define_const(
-                        Exp::Extract(result_len - 1, 0, Box::new(Exp::Bvlshr(Box::new(bits_smt), Box::new(low)))),
-                        info,
-                    )
-                    .into()
-            }
-        }
+        (_, _, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("subrange_internal", info)),
+        (_, Val::Symbolic(_), _) => Err(ExecError::SymbolicLength("subrange_internal", info)),
         (bits, high, low) => {
             Err(ExecError::Type(format!("subrange_internal {:?} {:?} {:?}", &bits, &high, &low), info))
         }

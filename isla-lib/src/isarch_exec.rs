@@ -312,46 +312,170 @@ fn symbolic_args_from_TYPEs<B: BV>(
         ));
     };
 
-    //hook: zSTORE
-    if instruction_name == "zSTORE" {
-        eprintln!("hook(zSTORE):ctor_ty={:#?}", ctor_ty);
-    }
-
     let mut ret_val = symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())?;
 
-    //hook: zSTORE
-
-    let hook_overwrite_map = hashmap! {
-        "zSTORE":hashmap!{
-            "tuple#%bv12_%bv5_%bv5_%i643":"I64(4)"
-        },
-        "zLOAD":hashmap!{
-            "tuple#%bv12_%bv5_%bv5_%bool_%i644":"I64(4)"
-        }
-    };
-    // 当在hook_overwrite_map表中发现了要hook的名字，并获取要覆写的参数字段，比如zSTORE.keys()
-    if let Some(zTYPE_name_map) = hook_overwrite_map.get(instruction_name) {
-        for (&target_arg_type, &target_arg_value) in zTYPE_name_map {
-            //hook: 检查类型名 ztuplez3z5bv12_z5bv5_z5bv5_z5i643
-            let target_arg_ztype = zencode::encode(target_arg_type);
-            match &mut ret_val {
-                Val::Struct(name) => {
-                    name.iter_mut().for_each(|(n, v)| {
-                        let field_name = shared_state.symtab.to_str(*n);
-
-                        if field_name == target_arg_ztype {
-                            *v = Val::from_str(target_arg_value, shared_state).unwrap();
-                            eprintln!("hook(field_name={target_arg_ztype}): value={:#?}", v);
-                        }
-                    });
-                }
-                _ => panic!("未预期类型的ret_val: {:?}", ret_val),
-            }
-            eprintln!("hook:ret_val={:#?}", ret_val);
-        }
-    }
+    apply_instruction_arg_overrides(instruction_name, &mut ret_val, shared_state)?;
 
     Ok(ret_val)
+}
+
+#[derive(Copy, Clone)]
+enum FixedInstructionFieldKind {
+    Bits(u32),
+    I64,
+    Bool,
+}
+
+fn apply_instruction_arg_overrides<B: BV>(
+    instruction_name: &str,
+    instruction_arg: &mut Val<B>,
+    shared_state: &SharedState<B>,
+) -> Result<(), ExecError> {
+    let overrides = match instruction_name {
+        "zSTORE" => &[
+            ("tuple#%bv12_%bv5_%bv5_%i643", None, FixedInstructionFieldKind::I64, "4"),
+            (
+                "tuple#%bv12_%bv5_%bv5_%i640",
+                Some("ISLA_RISCV_TEST_ZSTORE_IMM"),
+                FixedInstructionFieldKind::Bits(12),
+                "",
+            ),
+            ("tuple#%bv12_%bv5_%bv5_%i641", Some("ISLA_RISCV_TEST_ZSTORE_RS2"), FixedInstructionFieldKind::Bits(5), ""),
+            ("tuple#%bv12_%bv5_%bv5_%i642", Some("ISLA_RISCV_TEST_ZSTORE_RS1"), FixedInstructionFieldKind::Bits(5), ""),
+            ("tuple#%bv12_%bv5_%bv5_%i643", Some("ISLA_RISCV_TEST_ZSTORE_WIDTH"), FixedInstructionFieldKind::I64, ""),
+        ][..],
+        "zLOAD" => &[
+            ("tuple#%bv12_%bv5_%bv5_%bool_%i644", None, FixedInstructionFieldKind::I64, "4"),
+            (
+                "tuple#%bv12_%bv5_%bv5_%bool_%i640",
+                Some("ISLA_RISCV_TEST_ZLOAD_IMM"),
+                FixedInstructionFieldKind::Bits(12),
+                "",
+            ),
+            (
+                "tuple#%bv12_%bv5_%bv5_%bool_%i641",
+                Some("ISLA_RISCV_TEST_ZLOAD_RS1"),
+                FixedInstructionFieldKind::Bits(5),
+                "",
+            ),
+            (
+                "tuple#%bv12_%bv5_%bv5_%bool_%i642",
+                Some("ISLA_RISCV_TEST_ZLOAD_RD"),
+                FixedInstructionFieldKind::Bits(5),
+                "",
+            ),
+            (
+                "tuple#%bv12_%bv5_%bv5_%bool_%i643",
+                Some("ISLA_RISCV_TEST_ZLOAD_IS_UNSIGNED"),
+                FixedInstructionFieldKind::Bool,
+                "",
+            ),
+            (
+                "tuple#%bv12_%bv5_%bv5_%bool_%i644",
+                Some("ISLA_RISCV_TEST_ZLOAD_WIDTH"),
+                FixedInstructionFieldKind::I64,
+                "",
+            ),
+        ][..],
+        _ => &[][..],
+    };
+
+    for (field_name, env_name, field_kind, default_value) in overrides {
+        let value = match env_name {
+            Some(env_name) => match std::env::var(env_name) {
+                Ok(value) => value,
+                Err(_) => continue,
+            },
+            None => default_value.to_string(),
+        };
+        let parsed = parse_fixed_instruction_field_value(&value, *field_kind, shared_state)?;
+        set_instruction_struct_field(instruction_arg, field_name, parsed, shared_state)?;
+    }
+
+    Ok(())
+}
+
+fn parse_fixed_instruction_field_value<B: BV>(
+    value: &str,
+    field_kind: FixedInstructionFieldKind,
+    shared_state: &SharedState<B>,
+) -> Result<Val<B>, ExecError> {
+    match field_kind {
+        FixedInstructionFieldKind::Bits(width) => parse_fixed_bits(value, width),
+        FixedInstructionFieldKind::I64 => value.parse::<i64>().map(Val::I64).map_err(|err| {
+            ExecError::Type(format!("invalid fixed instruction i64 value '{}': {}", value, err), SourceLoc::unknown())
+        }),
+        FixedInstructionFieldKind::Bool => match value {
+            "1" | "true" | "True" | "TRUE" => Ok(Val::Bool(true)),
+            "0" | "false" | "False" | "FALSE" => Ok(Val::Bool(false)),
+            _ => Val::from_str(value, shared_state).map_err(|err| {
+                ExecError::Type(
+                    format!("invalid fixed instruction bool value '{}': {}", value, err),
+                    SourceLoc::unknown(),
+                )
+            }),
+        },
+    }
+}
+
+fn parse_fixed_bits<B: BV>(value: &str, width: u32) -> Result<Val<B>, ExecError> {
+    if width > B::MAX_WIDTH {
+        return Err(ExecError::Type(
+            format!("fixed instruction bitvector width {} exceeds BV max width {}", width, B::MAX_WIDTH),
+            SourceLoc::unknown(),
+        ));
+    }
+
+    if value.starts_with("0x") || value.starts_with("#x") || value.starts_with("0b") || value.starts_with("#b") {
+        let bits = B::from_str(value).ok_or_else(|| {
+            ExecError::Type(format!("invalid fixed instruction bitvector value '{}'", value), SourceLoc::unknown())
+        })?;
+        if bits.len() != width {
+            return Err(ExecError::Type(
+                format!("fixed instruction bitvector value '{}' has width {}, expected {}", value, bits.len(), width),
+                SourceLoc::unknown(),
+            ));
+        }
+        return Ok(Val::Bits(bits));
+    }
+
+    let raw = value.parse::<u64>().map_err(|err| {
+        ExecError::Type(format!("invalid fixed instruction bitvector value '{}': {}", value, err), SourceLoc::unknown())
+    })?;
+    if width < 64 && raw >= (1_u64 << width) {
+        return Err(ExecError::Type(
+            format!("fixed instruction bitvector value {} does not fit in {} bits", raw, width),
+            SourceLoc::unknown(),
+        ));
+    }
+    Ok(Val::Bits(B::new(raw, width)))
+}
+
+fn set_instruction_struct_field<B: BV>(
+    instruction_arg: &mut Val<B>,
+    field_name: &str,
+    value: Val<B>,
+    shared_state: &SharedState<B>,
+) -> Result<(), ExecError> {
+    let encoded_field_name = zencode::encode(field_name);
+    let Val::Struct(fields) = instruction_arg else {
+        return Err(ExecError::Type(
+            format!("fixed instruction override expected struct argument, got {:?}", instruction_arg),
+            SourceLoc::unknown(),
+        ));
+    };
+
+    let Some((_, field_value)) =
+        fields.iter_mut().find(|(name, _)| shared_state.symtab.to_str(**name) == encoded_field_name)
+    else {
+        return Err(ExecError::Type(
+            format!("fixed instruction override field {} not found", encoded_field_name),
+            SourceLoc::unknown(),
+        ));
+    };
+
+    *field_value = value;
+    Ok(())
 }
 pub fn run_symbolic_execute<B: BV>(
     instruction_name: &str,
