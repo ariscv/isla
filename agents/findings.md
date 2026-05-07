@@ -105,6 +105,9 @@
 ## RISC-V VMEM 热路径的 Isla 侧实现点
 
 - `isla-lib/src/executor.rs` 的普通函数调用路径可以在真正进入 IR 函数体前识别特定 Sail 函数，并用 Rust/Isla 侧实现直接返回对应 `Val`。
+- 当前 RISC-V / `sail-riscv` 相关 builtin 化的统一分派入口是 `isla-lib/src/executor.rs::call_isla_implemented_function(...)`；它在 `Instr::Call` 已经求值完实参、进入原 IR 函数体之前按 z-encoded 函数名 decode 后拦截。
+- 直接被该入口识别的 Sail/RISC-V 函数包括：`range_subset`、`split_misaligned`、`pmpAddrMatchType_encdec_backwards` / `pmpAddrMatchType_encdec_backwards_infallible`、`pmpCheckRWX`、`pmpLocked`、`pmpMatchAddr`、`pmpRangeMatch`、`pmpCheck`、`pmaCheck`、`phys_access_check`、`within_clint`、`clint_load`、`within_mmio_readable` / `within_mmio_writable`、`vmem_write_addr`、`vmem_read_addr`。
+- 这些 builtin 大致分为几类：PMP 地址/权限匹配、PMA 区域/权限检查、物理访存异常合并、MMIO/CLINT predicate 或 concrete load、VMEM plain-RAM 读写 fast path，以及 `range_subset` / `split_misaligned` 这类访存链路中的纯辅助函数。
 - 对 RISC-V `vmem_write_addr`，Isla 侧可直接调用 `LocalFrame::memory_mut().write(...)` 产生 `WriteMem` 事件，再返回 `zOkzIozCUExecutionResultzK(write_success)`；这绕过了 `sys/vmem_utils.sail` 内部的 misaligned split、地址翻译、权限检查和动态 subrange。
 - 对 RISC-V `vmem_read_addr`，Isla 侧可直接调用 `LocalFrame::memory().read(...)` 产生 `ReadMem` 事件，再返回 `zOkzIbzCUExecutionResultzK(value)`；这绕过了 `vmem_read_addr` 中对 `zeros(8 * n * bytes)` 的符号长度需求。
 - `rv64d.ir` 中 `zresultzIozCUExecutionResultzK` 的 `Ok` 构造器虽然名字里有 `o`，其 payload 是 `%bool`；`zresultzIbzCUExecutionResultzK` 的 `Ok` payload 是 `%bv`。手写返回值时必须使用 IR 中实际构造器名，否则上层 `match Ok/Err` 会报 constructor mismatch。

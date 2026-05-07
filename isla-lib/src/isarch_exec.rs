@@ -16,7 +16,7 @@ use crate::zencode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[macro_export]
@@ -139,6 +139,8 @@ struct AssemGen_Json_Item {
     isa_state: BTreeMap<String, String>,
     #[serde(rename = "memory-events")]
     memory_events: Vec<AssemGenMemoryEvent>,
+    #[serde(rename = "solver-dump", skip_serializing_if = "Option::is_none")]
+    solver_dump: Option<String>,
     ret_val: String,
 }
 impl AssemGen_Json_Item {
@@ -148,6 +150,7 @@ impl AssemGen_Json_Item {
         test_ins_encdec: String,
         isa_state: BTreeMap<String, String>,
         memory_events: Vec<AssemGenMemoryEvent>,
+        solver_dump: Option<String>,
         ret_val: String,
     ) -> Self {
         let mut arch = BTreeMap::new();
@@ -155,7 +158,7 @@ impl AssemGen_Json_Item {
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGen_Json_Item { arch, test_ins, test_ins_encdec, isa_state, memory_events, ret_val }
+        AssemGen_Json_Item { arch, test_ins, test_ins_encdec, isa_state, memory_events, solver_dump, ret_val }
     }
 }
 trait ToJSON: Serialize {
@@ -215,6 +218,436 @@ fn profile_forks_enabled() -> bool {
     )
 }
 
+fn solver_dump_per_path_enabled() -> bool {
+    matches!(
+        std::env::var("ISLA_RISCV_DUMP_SOLVER_PER_PATH"),
+        Ok(value) if matches!(value.as_str(), "1" | "true" | "True" | "TRUE" | "on" | "On" | "ON")
+    )
+}
+
+fn solver_dump_dir() -> String {
+    std::env::var("ISLA_RISCV_SOLVER_DUMP_DIR").unwrap_or_else(|_| "output/solver-dumps".to_string())
+}
+
+fn solver_dump_ret_kind(ret_val: &str) -> &'static str {
+    if ret_val.starts_with("Retire_Success") {
+        "success"
+    } else if ret_val.starts_with("Memory_Exception") {
+        "exception"
+    } else {
+        "other"
+    }
+}
+
+fn solver_dump_path(dir: impl AsRef<Path>, instruction_name: &str, path_index: usize, ret_val: &str) -> PathBuf {
+    let file_name = format!("{}_{:04}_{}.smt2", instruction_name, path_index, solver_dump_ret_kind(ret_val));
+    dir.as_ref().join(file_name)
+}
+
+#[cfg(any(feature = "debug_exec", test))]
+fn encoded_instruction_table(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| zencode::encode(name)).collect()
+}
+
+#[cfg(any(feature = "debug_exec", test))]
+fn riscv_instruction_tables() -> BTreeMap<&'static str, Vec<String>> {
+    let mut tables = BTreeMap::new();
+
+    tables.insert(
+        "I",
+        encoded_instruction_table(&[
+            "UTYPE",
+            "JAL",
+            "JALR",
+            "BTYPE",
+            "ITYPE",
+            "SHIFTIOP",
+            "RTYPE",
+            "LOAD",
+            "STORE",
+            "ADDIW",
+            "RTYPEW",
+            "SHIFTIWOP",
+            "FENCE_TSO",
+            "FENCE",
+            "ECALL",
+            "MRET",
+            "SRET",
+            "EBREAK",
+            "WFI",
+            "SFENCE_VMA",
+        ]),
+    );
+    tables.insert("M", encoded_instruction_table(&["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]));
+    tables.insert("A", encoded_instruction_table(&["AMO", "LOADRES", "STORECON"]));
+    tables.insert(
+        "C",
+        encoded_instruction_table(&[
+            "C_NOP",
+            "C_ADDI4SPN",
+            "C_LW",
+            "C_LD",
+            "C_SW",
+            "C_SD",
+            "C_ADDI",
+            "C_JAL",
+            "C_ADDIW",
+            "C_LI",
+            "C_ADDI16SP",
+            "C_LUI",
+            "C_SRLI",
+            "C_SRAI",
+            "C_ANDI",
+            "C_SUB",
+            "C_XOR",
+            "C_OR",
+            "C_AND",
+            "C_SUBW",
+            "C_ADDW",
+            "C_J",
+            "C_BEQZ",
+            "C_BNEZ",
+            "C_SLLI",
+            "C_LWSP",
+            "C_LDSP",
+            "C_SWSP",
+            "C_SDSP",
+            "C_JR",
+            "C_JALR",
+            "C_MV",
+            "C_EBREAK",
+            "C_ADD",
+            "C_LBU",
+            "C_LHU",
+            "C_LH",
+            "C_SB",
+            "C_SH",
+            "C_ZEXT_B",
+            "C_SEXT_B",
+            "C_ZEXT_H",
+            "C_SEXT_H",
+            "C_ZEXT_W",
+            "C_NOT",
+            "C_MUL",
+            "C_NTL",
+            "C_FLDSP",
+            "C_FSDSP",
+            "C_FLD",
+            "C_FSD",
+            "C_FLWSP",
+            "C_FSWSP",
+            "C_FLW",
+            "C_FSW",
+            "C_ILLEGAL",
+        ]),
+    );
+    tables.insert(
+        "FD",
+        encoded_instruction_table(&[
+            "LOAD_FP",
+            "STORE_FP",
+            "F_MADD_TYPE_S",
+            "F_BIN_RM_TYPE_S",
+            "F_UN_RM_FF_TYPE_S",
+            "F_UN_RM_FX_TYPE_S",
+            "F_UN_RM_XF_TYPE_S",
+            "F_BIN_TYPE_F_S",
+            "F_BIN_TYPE_X_S",
+            "F_UN_TYPE_F_S",
+            "F_UN_TYPE_X_S",
+            "F_MADD_TYPE_D",
+            "F_BIN_RM_TYPE_D",
+            "F_UN_RM_FF_TYPE_D",
+            "F_UN_RM_XF_TYPE_D",
+            "F_UN_RM_FX_TYPE_D",
+            "F_BIN_F_TYPE_D",
+            "F_BIN_X_TYPE_D",
+            "F_UN_X_TYPE_D",
+            "F_UN_F_TYPE_D",
+            "F_BIN_RM_TYPE_H",
+            "F_MADD_TYPE_H",
+            "F_BIN_F_TYPE_H",
+            "F_BIN_X_TYPE_H",
+            "F_UN_RM_FF_TYPE_H",
+            "F_UN_RM_FX_TYPE_H",
+            "F_UN_RM_XF_TYPE_H",
+            "F_UN_F_TYPE_H",
+            "F_UN_X_TYPE_H",
+            "FLI_H",
+            "FLI_S",
+            "FLI_D",
+            "FMINM_H",
+            "FMAXM_H",
+            "FMINM_S",
+            "FMAXM_S",
+            "FMINM_D",
+            "FMAXM_D",
+            "FROUND_H",
+            "FROUNDNX_H",
+            "FROUND_S",
+            "FROUNDNX_S",
+            "FROUND_D",
+            "FROUNDNX_D",
+            "FMVH_X_D",
+            "FMVP_D_X",
+            "FLEQ_H",
+            "FLTQ_H",
+            "FLEQ_S",
+            "FLTQ_S",
+            "FLEQ_D",
+            "FLTQ_D",
+            "FCVTMOD_W_D",
+        ]),
+    );
+    tables.insert(
+        "B",
+        encoded_instruction_table(&[
+            "SLLIUW",
+            "ZBA_RTYPEUW",
+            "ZBA_RTYPE",
+            "RORIW",
+            "RORI",
+            "ZBB_RTYPEW",
+            "ZBB_RTYPE",
+            "ZBB_EXTOP",
+            "REV8",
+            "ORCB",
+            "CPOP",
+            "CPOPW",
+            "CLZ",
+            "CLZW",
+            "CTZ",
+            "CTZW",
+            "CLMUL",
+            "CLMULH",
+            "CLMULR",
+            "ZBS_IOP",
+            "ZBS_RTYPE",
+        ]),
+    );
+    tables.insert(
+        "K",
+        encoded_instruction_table(&[
+            "SHA256SIG0",
+            "SHA256SIG1",
+            "SHA256SUM0",
+            "SHA256SUM1",
+            "AES32ESMI",
+            "AES32ESI",
+            "AES32DSMI",
+            "AES32DSI",
+            "SHA512SIG0L",
+            "SHA512SIG0H",
+            "SHA512SIG1L",
+            "SHA512SIG1H",
+            "SHA512SUM0R",
+            "SHA512SUM1R",
+            "AES64KS1I",
+            "AES64KS2",
+            "AES64IM",
+            "AES64ESM",
+            "AES64ES",
+            "AES64DSM",
+            "AES64DS",
+            "SHA512SIG0",
+            "SHA512SIG1",
+            "SHA512SUM0",
+            "SHA512SUM1",
+            "SM3P0",
+            "SM3P1",
+            "SM4ED",
+            "SM4KS",
+            "ZBKB_RTYPE",
+            "ZBKB_PACKW",
+            "ZIP",
+            "UNZIP",
+            "BREV8",
+            "XPERM8",
+            "XPERM4",
+        ]),
+    );
+    tables.insert(
+        "V",
+        encoded_instruction_table(&[
+            "VSETVLI",
+            "VSETVL",
+            "VSETIVLI",
+            "VVTYPE",
+            "NVSTYPE",
+            "NVTYPE",
+            "MASKTYPEV",
+            "MOVETYPEV",
+            "VXTYPE",
+            "NXSTYPE",
+            "NXTYPE",
+            "VXSG",
+            "MASKTYPEX",
+            "MOVETYPEX",
+            "VITYPE",
+            "NISTYPE",
+            "NITYPE",
+            "VISG",
+            "MASKTYPEI",
+            "MOVETYPEI",
+            "VMVRTYPE",
+            "MVVTYPE",
+            "MVVMATYPE",
+            "WVVTYPE",
+            "WVTYPE",
+            "WMVVTYPE",
+            "VEXTTYPE",
+            "VMVXS",
+            "MVVCOMPRESS",
+            "MVXTYPE",
+            "MVXMATYPE",
+            "WVXTYPE",
+            "WXTYPE",
+            "WMVXTYPE",
+            "VMVSX",
+            "VLSEGTYPE",
+            "VLSEGFFTYPE",
+            "VSSEGTYPE",
+            "VLSSEGTYPE",
+            "VSSSEGTYPE",
+            "VLXSEGTYPE",
+            "VSXSEGTYPE",
+            "VLRETYPE",
+            "VSRETYPE",
+            "VMTYPE",
+            "RFVVTYPE",
+            "RFWVVTYPE",
+            "RIVVTYPE",
+            "RMVVTYPE",
+            "FVVTYPE",
+            "FVVMATYPE",
+            "FWVVTYPE",
+            "FWVVMATYPE",
+            "FWVTYPE",
+            "VFUNARY0",
+            "VFWUNARY0",
+            "VFNUNARY0",
+            "VFUNARY1",
+            "VFMVFS",
+            "FVFTYPE",
+            "FVFMATYPE",
+            "FWVFTYPE",
+            "FWVFMATYPE",
+            "FWFTYPE",
+            "VFMERGE",
+            "VFMV",
+            "VFMVSF",
+            "VVMTYPE",
+            "VVMCTYPE",
+            "VVMSTYPE",
+            "VVCMPTYPE",
+            "VXMTYPE",
+            "VXMCTYPE",
+            "VXMSTYPE",
+            "VXCMPTYPE",
+            "VIMTYPE",
+            "VIMCTYPE",
+            "VIMSTYPE",
+            "VICMPTYPE",
+            "FVVMTYPE",
+            "FVFMTYPE",
+            "MMTYPE",
+            "VCPOP_M",
+            "VFIRST_M",
+            "VMSBF_M",
+            "VMSIF_M",
+            "VMSOF_M",
+            "VIOTA_M",
+            "VID_V",
+        ]),
+    );
+    tables.insert(
+        "vector_crypto",
+        encoded_instruction_table(&[
+            "VANDN_VV",
+            "VANDN_VX",
+            "VBREV_V",
+            "VBREV8_V",
+            "VREV8_V",
+            "VCLZ_V",
+            "VCTZ_V",
+            "VCPOP_V",
+            "VROL_VV",
+            "VROL_VX",
+            "VROR_VV",
+            "VROR_VX",
+            "VROR_VI",
+            "VWSLL_VV",
+            "VWSLL_VX",
+            "VWSLL_VI",
+            "VCLMUL_VV",
+            "VCLMUL_VX",
+            "VCLMULH_VV",
+            "VCLMULH_VX",
+            "VGHSH_VV",
+            "VGMUL_VV",
+            "VSHA2MS_VV",
+            "ZVKSHA2TYPE",
+            "VAESDF",
+            "VAESDM",
+            "VAESEF",
+            "VAESEM",
+            "VAESKF1_VI",
+            "VAESKF2_VI",
+            "VAESZ_VS",
+            "VSM3ME_VV",
+            "VSM3C_VI",
+            "VSM4K_VI",
+            "ZVKSM4RTYPE",
+        ]),
+    );
+    tables.insert(
+        "Zic",
+        encoded_instruction_table(&[
+            "CSRReg",
+            "CSRImm",
+            "FENCEI",
+            "ZICBOM",
+            "ZICBOP",
+            "ZICBOZ",
+            "ZICOND_RTYPE",
+            "BITYPE",
+            "PAUSE",
+            "NTL",
+        ]),
+    );
+    tables.insert("Zawrs", encoded_instruction_table(&["WRS"]));
+    tables.insert("Zimop_Zcmop", encoded_instruction_table(&["ZIMOP_MOP_R", "ZIMOP_MOP_RR", "ZCMOP"]));
+    tables.insert("Svinval", encoded_instruction_table(&["SINVAL_VMA", "SFENCE_W_INVAL", "SFENCE_INVAL_IR"]));
+    tables.insert("Zvabd", encoded_instruction_table(&["VABS_V", "ZVABDTYPE", "ZVWABDATYPE"]));
+    tables.insert(
+        "bfloat16",
+        encoded_instruction_table(&[
+            "FCVT_BF16_S",
+            "FCVT_S_BF16",
+            "VFNCVTBF16_F_F_W",
+            "VFWCVTBF16_F_F_V",
+            "VFWMACCBF16_VV",
+            "VFWMACCBF16_VF",
+        ]),
+    );
+    tables.insert("cfi", encoded_instruction_table(&["LPAD"]));
+    tables.insert("rmem", encoded_instruction_table(&["STOP_FETCHING", "THREAD_START"]));
+    tables.insert("sys", encoded_instruction_table(&["ILLEGAL", "C_ILLEGAL"]));
+
+    tables
+}
+
+#[cfg(feature = "debug_exec")]
+fn configured_instruction_table_extensions() -> Option<Vec<String>> {
+    std::env::var("ISLA_RISCV_TEST_EXTENSIONS").ok().map(|extensions| {
+        extensions
+            .split(',')
+            .map(|extension| extension.trim().to_string())
+            .filter(|extension| !extension.is_empty())
+            .collect()
+    })
+}
+
 fn decoded_symbol<B: BV>(name: Name, shared_state: &SharedState<B>) -> String {
     zencode::decode(shared_state.symtab.to_str(name))
 }
@@ -240,10 +673,7 @@ fn fork_profile_for_trace<B: BV>(
             }
             Event::Fork(_, _, _, info) => {
                 fork_events += 1;
-                let stack_names = stack
-                    .iter()
-                    .map(|name| decoded_symbol(*name, shared_state))
-                    .collect::<Vec<_>>();
+                let stack_names = stack.iter().map(|name| decoded_symbol(*name, shared_state)).collect::<Vec<_>>();
                 let innermost_function = stack_names.last().cloned().unwrap_or_else(|| "<unknown>".to_string());
                 let stack_string = stack_names.join(" -> ");
                 let location = info.location_string(shared_state.symtab.files());
@@ -263,7 +693,9 @@ fn fork_profile_for_trace<B: BV>(
             hits,
         })
         .collect::<Vec<_>>();
-    top_sites.sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| a.stack.cmp(&b.stack)).then_with(|| a.location.cmp(&b.location)));
+    top_sites.sort_by(|a, b| {
+        b.hits.cmp(&a.hits).then_with(|| a.stack.cmp(&b.stack)).then_with(|| a.location.cmp(&b.location))
+    });
     top_sites.truncate(20);
 
     ForkProfilePath {
@@ -737,7 +1169,8 @@ pub fn run_symbolic_execute<B: BV>(
                                 println!("memory_events={}", serde_json::to_string_pretty(&memory_events).unwrap());
                                 if profile_forks_enabled() {
                                     let ret_val_str = ret_val.to_str(shared_state).to_string();
-                                    let profile = fork_profile_for_trace(&solver, shared_state, &test_ins, &ret_val_str);
+                                    let profile =
+                                        fork_profile_for_trace(&solver, shared_state, &test_ins, &ret_val_str);
                                     println!("fork_profile={}", serde_json::to_string(&profile).unwrap());
                                 }
                                 // 遍历lets中的特殊变量（如current_privilege等）
@@ -810,17 +1243,33 @@ pub fn run_symbolic_execute<B: BV>(
                                 } */
                                 println!("3. ==============================\n");
                             }
-                            solver.dump_solver("solver.dump");
                         }
+                        let ret_val_str = ret_val.to_str(shared_state).to_string();
+                        let mut instruction_json = collected.lock().unwrap();
+                        let path_index = instruction_json.gen.len();
+                        let solver_dump = if solver_dump_per_path_enabled() {
+                            let dump_dir = solver_dump_dir();
+                            if let Err(err) = fs::create_dir_all(&dump_dir) {
+                                eprintln!("警告: {}创建 solver dump 目录失败: {:?}", instruction_name, err);
+                                None
+                            } else {
+                                let dump_path = solver_dump_path(&dump_dir, instruction_name, path_index, &ret_val_str);
+                                let dump_path_string = dump_path.to_string_lossy().into_owned();
+                                solver.dump_solver(&dump_path_string);
+                                Some(dump_path_string)
+                            }
+                        } else {
+                            None
+                        };
                         let single_instruction_json = AssemGen_Json_Item::new(
                             &target,
                             test_ins,
                             test_ins_encdec,
                             isa_state,
                             memory_events,
-                            ret_val.to_str(shared_state).to_string(),
+                            solver_dump,
+                            ret_val_str,
                         );
-                        let mut instruction_json = collected.lock().unwrap();
                         instruction_json.gen.push(single_instruction_json);
                     }
                     Run::Exit => println!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks),
@@ -1245,94 +1694,20 @@ pub fn test_exec_main<B: BV>(
     ];
     // instruction_table.extend( todo_instruction_table.to_vec());
 
-    /*     let ext_i_instruction_table = [
-        "zADDIW",
-        "zBTYPE",
-        "zEBREAK",
-        "zECALL",
-        "zFENCE",
-        "zFENCE_TSO",
-        "zITYPE",
-        "zJAL",
-        "zJALR",
-        // "zLOAD",
-        "zMRET",
-        "zRTYPE",
-        "zRTYPEW",
-        "zSFENCE_VMA",
-        "zSHIFTIOP",
-        "zSHIFTIWOP",
-        "zSRET",
-        // "zSTORE",
-        "zUTYPE",
-        "zWFI",
-    ];
-    instruction_table.extend(ext_i_instruction_table.to_vec()); */
-
-    let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
-        .into_iter()
-        .map(|name| zencode::encode(name))
-        .collect::<Vec<String>>();
-    // instruction_table.extend(ext_m_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
-
-    /*     let ext_a_instruction_table =
-        ["AMO", "LOADRES", "STORECON"].into_iter().map(|name| zencode::encode(name)).collect::<Vec<String>>();
-    instruction_table.extend(ext_a_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>()); */
-
-    let ext_c_instruction_table = [
-        "C_NOP",
-        "C_ADDI4SPN",
-        "C_LW",
-        "C_LD",
-        "C_SW",
-        "C_SD",
-        "C_ADDI",
-        "C_JAL",
-        "C_ADDIW",
-        "C_LI",
-        "C_ADDI16SP",
-        "C_LUI",
-        "C_SRLI",
-        "C_SRAI",
-        "C_ANDI",
-        "C_SUB",
-        "C_XOR",
-        "C_OR",
-        "C_AND",
-        "C_SUBW",
-        "C_ADDW",
-        "C_J",
-        "C_BEQZ",
-        "C_BNEZ",
-        "C_SLLI",
-        "C_LWSP",
-        "C_LDSP",
-        "C_SWSP",
-        "C_SDSP",
-        "C_JR",
-        "C_JALR",
-        "C_MV",
-        "C_EBREAK",
-        "C_ADD",
-        "C_LBU",
-        "C_LHU",
-        "C_LH",
-        "C_SB",
-        "C_SH",
-        "C_ZEXT_B",
-        "C_SEXT_B",
-        "C_ZEXT_H",
-        "C_SEXT_H",
-        "C_ZEXT_W",
-        "C_NOT",
-        "C_MUL",
-    ]
-    .into_iter()
-    .map(|name| zencode::encode(name))
-    .collect::<Vec<String>>();
-    // instruction_table.extend(ext_c_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
-
-    // instruction_table.extend(vec!["zLOAD"]);
+    /*     let extension_instruction_tables = riscv_instruction_tables();
+    if let Some(extension_names) = configured_instruction_table_extensions() {
+        for extension_name in extension_names {
+            match extension_instruction_tables.get(extension_name.as_str()) {
+                Some(extension_table) => {
+                    instruction_table.extend(extension_table.iter().map(|name| name.as_str()));
+                }
+                None => eprintln!("警告: 未知指令集扩展 '{}'", extension_name),
+            }
+        }
+    } else {
+        let execute_through_instruction_table = ["zSTORE", "zLOAD"];
+        instruction_table.extend(execute_through_instruction_table.to_vec());
+    } */
 
     let execute_through_instruction_table = ["zSTORE", "zLOAD"];
     instruction_table.extend(execute_through_instruction_table.to_vec());
@@ -1344,5 +1719,45 @@ pub fn test_exec_main<B: BV>(
                 eprintln!("test_exec_main: {}运行错误 {}", ins_name, e)
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solver_dump_file_name_uses_instruction_index_and_ret_kind() {
+        let path = solver_dump_path("output/solver-dumps", "zLOAD", 3, "Retire_Success(())");
+
+        assert_eq!(path.to_string_lossy(), "output/solver-dumps/zLOAD_0003_success.smt2");
+    }
+
+    #[test]
+    fn solver_dump_file_name_marks_memory_exceptions() {
+        let path = solver_dump_path(
+            "output/solver-dumps",
+            "zSTORE",
+            12,
+            "Memory_Exception({tuple#%bv64_%union ExceptionType1: E_SAMO_Access_Fault(())})",
+        );
+
+        assert_eq!(path.to_string_lossy(), "output/solver-dumps/zSTORE_0012_exception.smt2");
+    }
+
+    #[test]
+    fn riscv_instruction_tables_group_common_extensions() {
+        let tables = riscv_instruction_tables();
+
+        assert_eq!(encoded_instruction_table(&["LOAD", "STORE"]), vec!["zLOAD".to_string(), "zSTORE".to_string()]);
+        assert!(tables.get("I").unwrap().contains(&"zLOAD".to_string()));
+        assert!(tables.get("A").unwrap().contains(&"zSTORECON".to_string()));
+        assert!(tables.get("M").unwrap().contains(&"zMULW".to_string()));
+        assert!(tables.get("C").unwrap().contains(&"zC_ADDI4SPN".to_string()));
+        assert!(tables.get("FD").unwrap().contains(&"zF_MADD_TYPE_D".to_string()));
+        assert!(tables.get("B").unwrap().contains(&"zCLMUL".to_string()));
+        assert!(tables.get("K").unwrap().contains(&"zAES64KS1I".to_string()));
+        assert!(tables.get("V").unwrap().contains(&"zVSETVLI".to_string()));
+        assert!(tables.get("vector_crypto").unwrap().contains(&"zVAESKF1_VI".to_string()));
     }
 }
