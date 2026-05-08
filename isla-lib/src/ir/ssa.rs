@@ -215,6 +215,7 @@ pub enum BlockInstr<B> {
     Copy(BlockLoc, Exp<SSAName>, SourceLoc),
     Monomorphize(SSAName, Ty<SSAName>, SourceLoc),
     Call(BlockLoc, bool, Name, Vec<Exp<SSAName>>, SourceLoc),
+    BuildinCall(BlockLoc, Buildin, Name, Vec<Exp<SSAName>>, SourceLoc),
     PrimopUnary(BlockLoc, Unary<B>, Exp<SSAName>, SourceLoc),
     PrimopBinary(BlockLoc, Binary<B>, Exp<SSAName>, Exp<SSAName>, SourceLoc),
     PrimopVariadic(BlockLoc, Variadic<B>, Vec<Exp<SSAName>>, SourceLoc),
@@ -228,6 +229,7 @@ impl<B: BV> BlockInstr<B> {
             Decl(id, _, _) | Init(id, _, _, _) => Some((*id, None)),
             Copy(loc, _, _)
             | Call(loc, _, _, _, _)
+            | BuildinCall(loc, _, _, _, _)
             | PrimopUnary(loc, _, _, _)
             | PrimopBinary(loc, _, _, _, _)
             | PrimopVariadic(loc, _, _, _) => Some(loc.ids()),
@@ -268,7 +270,7 @@ impl<B: BV> BlockInstr<B> {
                 exp.collect_variables(vars)
             }
             Monomorphize(id, _, _) => vars.push(Variable::Usage(id)),
-            Call(loc, _, _, args, _) => {
+            Call(loc, _, _, args, _) | BuildinCall(loc, _, _, args, _) => {
                 loc.collect_variables(vars);
                 args.iter_mut().for_each(|exp| exp.collect_variables(vars))
             }
@@ -296,7 +298,7 @@ impl<B: BV> BlockInstr<B> {
 
     pub fn is_pure(&self, symtab: &Symtab) -> bool {
         match self {
-            BlockInstr::Call(_, _, f, _, _) => {
+            BlockInstr::Call(_, _, f, _, _) | BlockInstr::BuildinCall(_, _, f, _, _) => {
                 if let Some(u) = symtab.get("zUnreachable") {
                     *f != u
                 } else {
@@ -315,7 +317,7 @@ impl<B: BV> BlockInstr<B> {
                 id.write(output, symtab)?;
                 write!(output, " = N")
             }
-            Call(loc, _, _, _, _) => {
+            Call(loc, _, _, _, _) | BuildinCall(loc, _, _, _, _) => {
                 loc.output(output, symtab)?;
                 write!(output, " = C")
             }
@@ -337,6 +339,9 @@ impl<B: fmt::Debug> fmt::Debug for BlockInstr<B> {
             Copy(loc, exp, _) => write!(f, "{:?} = {:?}", loc, exp),
             Monomorphize(id, _, _) => write!(f, "mono {:?}", id),
             Call(loc, ext, id, args, _) => write!(f, "{:?} = {:?}<{:?}>({:?})", loc, id, ext, args),
+            BuildinCall(loc, buildin, fallback, args, _) => {
+                write!(f, "{:?} = {:?} fallback {:?}({:?})", loc, buildin, fallback, args)
+            }
             _ => write!(f, "primop"),
         }
     }
@@ -746,6 +751,9 @@ fn block_instrs<B: BV>(instrs: &[LabeledInstr<B>]) -> Vec<BlockInstr<B>> {
                 Instr::Monomorphize(v, ty, info) => Monomorphize(SSAName::new(*v), block_ty(ty), *info),
                 Instr::Call(loc, ext, f, args, info) => {
                     Call(BlockLoc::from(loc), *ext, *f, args.iter().map(block_exp).collect(), *info)
+                }
+                Instr::BuildinCall(loc, buildin, fallback, args, info) => {
+                    BuildinCall(BlockLoc::from(loc), *buildin, *fallback, args.iter().map(block_exp).collect(), *info)
                 }
                 Instr::PrimopUnary(loc, fptr, exp, info) => {
                     PrimopUnary(BlockLoc::from(loc), *fptr, block_exp(exp), *info)

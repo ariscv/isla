@@ -202,6 +202,7 @@ pub fn initialize_architecture<'ir, B: BV>(
 ) -> Initialized<'ir, B> {
     insert_monomorphize(arch);
     insert_primops(arch, mode, isa_config);
+    insert_buildins(arch, &symtab);
 
     let shared_state = SharedState::new(
         symtab,

@@ -227,6 +227,13 @@ pub(crate) fn unssa_block_instr<B: BV>(
             args.iter().map(|arg| unssa_exp(arg, symtab, names)).collect(),
             *info,
         ),
+        BuildinCall(loc, buildin, fallback, args, info) => Instr::BuildinCall(
+            unssa_loc(loc, symtab, names),
+            *buildin,
+            *fallback,
+            args.iter().map(|arg| unssa_exp(arg, symtab, names)).collect(),
+            *info,
+        ),
         PrimopUnary(loc, fptr, exp, info) => {
             Instr::PrimopUnary(unssa_loc(loc, symtab, names), *fptr, unssa_exp(exp, symtab, names), *info)
         }

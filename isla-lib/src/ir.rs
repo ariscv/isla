@@ -692,6 +692,7 @@ pub enum Instr<A, B> {
     Copy(Loc<A>, Exp<A>, SourceLoc),
     Monomorphize(A, Ty<A>, SourceLoc),
     Call(Loc<A>, bool, A, Vec<Exp<A>>, SourceLoc),
+    BuildinCall(Loc<A>, Buildin, A, Vec<Exp<A>>, SourceLoc),
     PrimopUnary(Loc<A>, Unary<B>, Exp<A>, SourceLoc),
     PrimopBinary(Loc<A>, Binary<B>, Exp<A>, Exp<A>, SourceLoc),
     PrimopVariadic(Loc<A>, Variadic<B>, Vec<Exp<A>>, SourceLoc),
@@ -712,6 +713,9 @@ impl<A: fmt::Debug, B: fmt::Debug> fmt::Debug for Instr<A, B> {
             Copy(loc, exp, info) => write!(f, "{:?} = {:?} ` {:?}", loc, exp, info),
             Monomorphize(id, ty, info) => write!(f, "mono {:?} : {:?} ` {:?}", id, ty, info),
             Call(loc, ext, id, args, info) => write!(f, "{:?} = {:?}<{:?}>({:?}) ` {:?}", loc, id, ext, args, info),
+            BuildinCall(loc, buildin, fallback, args, info) => {
+                write!(f, "{:?} = {:?} fallback {:?}({:?}) ` {:?}", loc, buildin, fallback, args, info)
+            }
             Exit(cause, info) => write!(f, "exit {:?} ` {:?}", cause, info),
             Arbitrary => write!(f, "arbitrary"),
             End => write!(f, "end"),
@@ -1246,6 +1250,201 @@ impl<'ir, B: BV> SharedState<'ir, B> {
 
     pub fn enum_member(&self, member: Name) -> Option<usize> {
         self.type_info.enum_members.get(&member).map(|(pos, _, _)| *pos)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Buildin {
+    RiscvRangeSubset,
+    RiscvSplitMisaligned,
+    RiscvPmpAddrMatchTypeBackwards,
+    RiscvPmpCheckRwx,
+    RiscvPmpLocked,
+    RiscvPmpMatchAddr,
+    RiscvPmpRangeMatch,
+    RiscvPmpCheck,
+    RiscvPmaCheck,
+    RiscvPhysAccessCheck,
+    RiscvWithinClint,
+    RiscvClintLoad,
+    RiscvWithinMmio,
+    RiscvVmemWriteAddr,
+    RiscvVmemReadAddr,
+}
+
+impl Buildin {
+    pub fn from_riscv_function(decoded_name: &str) -> Option<Self> {
+        Some(match decoded_name {
+            "range_subset" => Self::RiscvRangeSubset,
+            "split_misaligned" => Self::RiscvSplitMisaligned,
+            "pmpAddrMatchType_encdec_backwards" | "pmpAddrMatchType_encdec_backwards_infallible" => {
+                Self::RiscvPmpAddrMatchTypeBackwards
+            }
+            "pmpCheckRWX" => Self::RiscvPmpCheckRwx,
+            "pmpLocked" => Self::RiscvPmpLocked,
+            "pmpMatchAddr" => Self::RiscvPmpMatchAddr,
+            "pmpRangeMatch" => Self::RiscvPmpRangeMatch,
+            "pmpCheck" => Self::RiscvPmpCheck,
+            "pmaCheck" => Self::RiscvPmaCheck,
+            "phys_access_check" => Self::RiscvPhysAccessCheck,
+            "within_clint" => Self::RiscvWithinClint,
+            "clint_load" => Self::RiscvClintLoad,
+            "within_mmio_readable" | "within_mmio_writable" => Self::RiscvWithinMmio,
+            "vmem_write_addr" => Self::RiscvVmemWriteAddr,
+            "vmem_read_addr" => Self::RiscvVmemReadAddr,
+            _ => return None,
+        })
+    }
+
+    pub fn function_name(self) -> &'static str {
+        match self {
+            Self::RiscvRangeSubset => "range_subset",
+            Self::RiscvSplitMisaligned => "split_misaligned",
+            Self::RiscvPmpAddrMatchTypeBackwards => "pmpAddrMatchType_encdec_backwards",
+            Self::RiscvPmpCheckRwx => "pmpCheckRWX",
+            Self::RiscvPmpLocked => "pmpLocked",
+            Self::RiscvPmpMatchAddr => "pmpMatchAddr",
+            Self::RiscvPmpRangeMatch => "pmpRangeMatch",
+            Self::RiscvPmpCheck => "pmpCheck",
+            Self::RiscvPmaCheck => "pmaCheck",
+            Self::RiscvPhysAccessCheck => "phys_access_check",
+            Self::RiscvWithinClint => "within_clint",
+            Self::RiscvClintLoad => "clint_load",
+            Self::RiscvWithinMmio => "within_mmio",
+            Self::RiscvVmemWriteAddr => "vmem_write_addr",
+            Self::RiscvVmemReadAddr => "vmem_read_addr",
+        }
+    }
+}
+
+fn is_riscv_target<'ir>(symtab: &Symtab<'ir>) -> bool {
+    symtab.get(&zencode::encode("pmpCheck")).is_some()
+        || symtab.get(&zencode::encode("vmem_read_addr")).is_some()
+        || symtab.get(&zencode::encode("range_subset")).is_some()
+}
+
+pub(crate) fn init_buildin<'ir, B: BV>(defs: &[Def<Name, B>], symtab: &Symtab<'ir>) -> HashMap<Name, Buildin> {
+    let mut buildins = HashMap::new();
+
+    if !is_riscv_target(symtab) {
+        return buildins;
+    }
+
+    for def in defs {
+        if let Def::Fn(f, _, _) = def {
+            let decoded_name = zencode::decode(symtab.to_str(*f));
+            if let Some(buildin) = Buildin::from_riscv_function(decoded_name.as_str()) {
+                buildins.insert(*f, buildin);
+            }
+        }
+    }
+
+    buildins
+}
+
+fn insert_instr_buildins<B: BV>(instr: Instr<Name, B>, buildins: &HashMap<Name, Buildin>) -> Instr<Name, B> {
+    match instr {
+        Instr::Call(loc, _, f, args, info) => match buildins.get(&f) {
+            Some(buildin) => Instr::BuildinCall(loc, *buildin, f, args, info),
+            None => Instr::Call(loc, false, f, args, info),
+        },
+        _ => instr,
+    }
+}
+
+pub(crate) fn insert_buildins<'ir, B: BV>(defs: &mut [Def<Name, B>], symtab: &Symtab<'ir>) {
+    let buildins = init_buildin(defs, symtab);
+    if buildins.is_empty() {
+        return;
+    }
+
+    for def in defs.iter_mut() {
+        match def {
+            Def::Fn(f, args, body) => {
+                *def = Def::Fn(
+                    *f,
+                    args.to_vec(),
+                    body.iter().cloned().map(|instr| insert_instr_buildins(instr, &buildins)).collect(),
+                )
+            }
+            Def::Let(bindings, setup) => {
+                *def = Def::Let(
+                    bindings.clone(),
+                    setup.iter().cloned().map(|instr| insert_instr_buildins(instr, &buildins)).collect(),
+                )
+            }
+            Def::Register(name, ty, setup) => {
+                *def = Def::Register(
+                    *name,
+                    ty.clone(),
+                    setup.iter().cloned().map(|instr| insert_instr_buildins(instr, &buildins)).collect(),
+                )
+            }
+            _ => (),
+        }
+    }
+}
+
+#[cfg(test)]
+mod buildin_tests {
+    use super::*;
+
+    #[test]
+    fn init_buildin_only_registers_riscv_functions() {
+        let mut symtab = Symtab::new();
+        let range_subset = symtab.intern("zrange_subset");
+        let vmem_read_addr = symtab.intern("zvmem_read_addr");
+        let ordinary = symtab.intern("zordinary_function");
+        let defs = vec![
+            Def::<Name, B64>::Fn(range_subset, Vec::new(), Vec::new()),
+            Def::Fn(vmem_read_addr, Vec::new(), Vec::new()),
+            Def::Fn(ordinary, Vec::new(), Vec::new()),
+        ];
+
+        let buildins = init_buildin(&defs, &symtab);
+
+        assert_eq!(buildins.get(&range_subset), Some(&Buildin::RiscvRangeSubset));
+        assert_eq!(buildins.get(&vmem_read_addr), Some(&Buildin::RiscvVmemReadAddr));
+        assert!(!buildins.contains_key(&ordinary));
+    }
+
+    #[test]
+    fn init_buildin_ignores_non_riscv_ir() {
+        let mut symtab = Symtab::new();
+        let ordinary = symtab.intern("zordinary_function");
+        let defs = vec![Def::<Name, B64>::Fn(ordinary, Vec::new(), Vec::new())];
+
+        assert!(init_buildin(&defs, &symtab).is_empty());
+    }
+
+    #[test]
+    fn insert_buildins_lowers_known_calls_and_keeps_fallback() {
+        let mut symtab = Symtab::new();
+        let range_subset = symtab.intern("zrange_subset");
+        let ordinary = symtab.intern("zordinary_function");
+        let result = symtab.intern("zresult");
+        let info = SourceLoc::unknown();
+        let mut defs = vec![
+            Def::<Name, B64>::Fn(range_subset, Vec::new(), Vec::new()),
+            Def::Fn(
+                ordinary,
+                Vec::new(),
+                vec![
+                    Instr::Call(Loc::Id(result), false, range_subset, Vec::new(), info),
+                    Instr::Call(Loc::Id(result), false, ordinary, Vec::new(), info),
+                ],
+            ),
+        ];
+
+        insert_buildins(&mut defs, &symtab);
+
+        let Def::Fn(_, _, body) = &defs[1] else { panic!("expected function definition") };
+        assert!(matches!(
+            &body[0],
+            Instr::BuildinCall(Loc::Id(loc), Buildin::RiscvRangeSubset, fallback, args, _)
+                if *loc == result && *fallback == range_subset && args.is_empty()
+        ));
+        assert!(matches!(&body[1], Instr::Call(_, _, f, _, _) if *f == ordinary));
     }
 }
 

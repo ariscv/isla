@@ -777,7 +777,7 @@ impl<B: BV> Val<B> {
     }
 }
 
-pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>, symtab: &Symtab) -> &'a mut String {
+pub fn print_instr_to_string<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>, symtab: &Symtab) -> &'a mut String {
     macro_rules! s {
         ($id:expr) => {
             symtab.to_str_demangled($id)
@@ -792,6 +792,9 @@ pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>,
         Copy(loc, exp, info) => write!(f, "Copy {:?} = {:?} ` {:?}", loc, exp, info),
         Monomorphize(id, ty, info) => write!(f, "mono {} : {:?} ` {:?}", s!(*id), ty, info),
         Call(loc, ext, id, args, info) => write!(f, "Call {:?} = {}<{:?}>({:?}) ` {:?}", loc, s!(*id), ext, args, info),
+        BuildinCall(loc, buildin, fallback, args, info) => {
+            write!(f, "BuildinCall {:?} = {:?} fallback {}({:?}) ` {:?}", loc, buildin, s!(*fallback), args, info)
+        }
         Exit(cause, info) => write!(f, "exit {:?} ` {:?}", cause, info),
         Arbitrary => write!(f, "arbitrary"),
         End => write!(f, "end"),
@@ -811,7 +814,7 @@ pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>,
 }
 pub fn print_instr<B>(pc: usize, instr: &Instr<Name, B>, symtab: &Symtab, function_name: Name) {
     let mut binding = String::new();
-    let s = print_instr_toString(&mut binding, instr, symtab);
+    let s = print_instr_to_string(&mut binding, instr, symtab);
     println!("[{}:{}]{:?}", symtab.to_str(function_name), pc, s);
 }
 
@@ -819,7 +822,7 @@ pub fn print_instr<B>(pc: usize, instr: &Instr<Name, B>, symtab: &Symtab, functi
 mod tests {
     use super::*;
     use crate::ir::IRTypeInfo;
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{HashMap, HashSet};
 
     /// 创建一个用于测试的最小 SharedState
     ///
