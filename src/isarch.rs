@@ -289,7 +289,7 @@ fn isla_main() -> i32 {
     test_clause_args_yaml_main(shared_state, regs, lets);
 
     #[cfg(feature = "debug_exec")]
-    isla_lib::isarch_exec::test_exec_main(shared_state, regs, lets);
+    isla_lib::isarch_exec::test_exec_main(shared_state, regs, lets, &isa_config);
 
     match subcommand {
         "list-instructions" => {

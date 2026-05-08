@@ -40,7 +40,7 @@ use std::process::exit;
 use std::sync::Arc;
 
 use isla_lib::bitvector::BV;
-use isla_lib::config::ISAConfig;
+use isla_lib::config::{ISAConfig, LinearizationConfig};
 use isla_lib::ir;
 use isla_lib::ir::linearize;
 use isla_lib::ir::partial_linearize;
@@ -159,6 +159,39 @@ pub struct CommonOpts<'ir, B> {
     pub type_info: IRTypeInfo,
     pub isa_config: ISAConfig<B>,
     pub source_path: Option<PathBuf>,
+}
+
+fn effective_linearization_list(cli: Vec<String>, toml: Option<&Vec<String>>) -> Vec<String> {
+    if cli.is_empty() {
+        toml.cloned().unwrap_or_default()
+    } else {
+        cli
+    }
+}
+
+fn effective_partial_linearize(matches: &Matches, linearization: Option<&LinearizationConfig>) -> Vec<String> {
+    effective_linearization_list(
+        matches.opt_strs("partial-linearize"),
+        linearization.map(|config| &config.partial_linearize),
+    )
+}
+
+fn effective_linearize(matches: &Matches, linearization: Option<&LinearizationConfig>) -> Vec<String> {
+    effective_linearization_list(matches.opt_strs("linearize"), linearization.map(|config| &config.linearize))
+}
+
+fn validate_linearization_functions<'ir>(
+    linearize: &[String],
+    partial_linearize: &[String],
+    symtab: &Symtab<'ir>,
+) -> Result<(), String> {
+    for id in linearize.iter().chain(partial_linearize.iter()) {
+        if symtab.get(&zencode::encode(id)).is_none() {
+            return Err(format!("Function {} does not exist in supplied architecture", id));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architecture<B>) {
@@ -379,12 +412,20 @@ pub fn parse_with_arch<'ir, B: BV>(
         }
     });
 
+    let config_linearization = isa_config.linearization.as_ref();
+    let partial_linearize_ids = effective_partial_linearize(matches, config_linearization);
+    let linearize_ids = effective_linearize(matches, config_linearization);
+    if let Err(e) = validate_linearization_functions(&linearize_ids, &partial_linearize_ids, &symtab) {
+        eprintln!("{}", e);
+        exit(1)
+    }
+
     if matches.opt_present("fork-assertions") {
         ir::assertions_to_jumps(&mut arch)
     }
 
     #[rustfmt::skip]
-    matches.opt_strs("partial-linearize").iter().for_each(|id| {
+    partial_linearize_ids.iter().for_each(|id| {
         if let Some(target) = symtab.get(&zencode::encode(id)) {
             let mut arg_tys: Option<&[Ty<Name>]> = None;
             let mut ret_ty: Option<&Ty<Name>> = None;
@@ -447,7 +488,7 @@ pub fn parse_with_arch<'ir, B: BV>(
     });
 
     #[rustfmt::skip]
-    matches.opt_strs("linearize").iter().for_each(|id| {
+    linearize_ids.iter().for_each(|id| {
         if let Some(target) = symtab.get(&zencode::encode(id)) {
             let mut arg_tys: Option<&[Ty<Name>]> = None;
             let mut ret_ty: Option<&Ty<Name>> = None;
@@ -534,4 +575,67 @@ pub fn parse_with_arch<'ir, B: BV>(
     symtab.set_directory(source_path.clone());
 
     CommonOpts { num_threads, arch, symtab, type_info, isa_config, source_path }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linearization_opts() -> Options {
+        let mut opts = Options::new();
+        opts.optmulti("L", "linearize", "rewrite function into linear form", "<id>");
+        opts.optmulti("P", "partial-linearize", "rewrite function into linear form", "<id>");
+        opts
+    }
+
+    fn parse_matches(args: &[&str]) -> Matches {
+        linearization_opts().parse(args).expect("arguments should parse")
+    }
+
+    #[test]
+    fn missing_linearization_uses_empty_effective_lists() {
+        let matches = parse_matches(&[]);
+
+        assert!(effective_linearize(&matches, None).is_empty());
+        assert!(effective_partial_linearize(&matches, None).is_empty());
+    }
+
+    #[test]
+    fn toml_linearization_becomes_effective_when_cli_absent() {
+        let matches = parse_matches(&[]);
+        let linearization =
+            LinearizationConfig { linearize: vec!["foo".to_string()], partial_linearize: vec!["bar".to_string()] };
+
+        assert_eq!(effective_linearize(&matches, Some(&linearization)), vec!["foo".to_string()]);
+        assert_eq!(effective_partial_linearize(&matches, Some(&linearization)), vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn cli_linearization_overrides_toml_lists() {
+        let matches = parse_matches(&["--linearize", "cli_full", "--partial-linearize", "cli_partial"]);
+        let linearization = LinearizationConfig {
+            linearize: vec!["toml_full".to_string()],
+            partial_linearize: vec!["toml_partial".to_string()],
+        };
+
+        assert_eq!(effective_linearize(&matches, Some(&linearization)), vec!["cli_full".to_string()]);
+        assert_eq!(effective_partial_linearize(&matches, Some(&linearization)), vec!["cli_partial".to_string()]);
+    }
+
+    #[test]
+    fn unknown_effective_toml_linearization_function_fails_closed() {
+        let symtab = Symtab::new();
+        let err = validate_linearization_functions(&["missing".to_string()], &[], &symtab)
+            .expect_err("unknown function should fail");
+
+        assert_eq!(err, "Function missing does not exist in supplied architecture");
+    }
+
+    #[test]
+    fn known_effective_toml_linearization_function_validates() {
+        let mut symtab = Symtab::new();
+        symtab.intern("zfoo");
+
+        validate_linearization_functions(&["foo".to_string()], &[], &symtab).expect("known function should validate");
+    }
 }
