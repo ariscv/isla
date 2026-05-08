@@ -306,6 +306,218 @@ fn get_table_string(config: &Value, table: &str, key: &str) -> Result<String, St
         .map(|value| value.to_string())
 }
 
+fn parse_u64_value(value: &Value, context: &str) -> Result<u64, String> {
+    match value.as_str() {
+        Some(value) => if value.len() >= 2 && &value[0..2] == "0x" {
+            u64::from_str_radix(&value[2..], 16)
+        } else {
+            u64::from_str_radix(value, 10)
+        }
+        .map_err(|e| format!("Could not parse {} as a 64-bit unsigned integer in {}: {}", value, context, e)),
+        None => Err(format!("{} should be a string encoding a 64-bit unsigned integer", context)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressRange {
+    pub base: u64,
+    pub top: u64,
+}
+
+impl AddressRange {
+    fn new(base: u64, top: u64, context: &str) -> Result<Self, String> {
+        if base >= top {
+            return Err(format!("{} must define a non-empty range, found [0x{:x}, 0x{:x})", context, base, top));
+        }
+
+        Ok(AddressRange { base, top })
+    }
+
+    fn overlaps(&self, other: &AddressRange) -> bool {
+        self.base < other.top && other.base < self.top
+    }
+}
+
+fn parse_address_range(value: &Value, context: &str) -> Result<AddressRange, String> {
+    let table = value.as_table().ok_or_else(|| format!("{} should be a table with base and top fields", context))?;
+    let base = parse_u64_value(
+        table.get("base").ok_or_else(|| format!("No {}.base found in config", context))?,
+        &format!("{}.base", context),
+    )?;
+    let top = parse_u64_value(
+        table.get("top").ok_or_else(|| format!("No {}.top found in config", context))?,
+        &format!("{}.top", context),
+    )?;
+    AddressRange::new(base, top, context)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTablePreset {
+    Bare,
+    Sv39,
+    Sv48,
+    Sv57,
+}
+
+impl PageTablePreset {
+    fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "bare" => Ok(PageTablePreset::Bare),
+            "sv39" => Ok(PageTablePreset::Sv39),
+            "sv48" => Ok(PageTablePreset::Sv48),
+            "sv57" => Ok(PageTablePreset::Sv57),
+            _ => {
+                Err(format!("Unsupported page table preset {}. Supported presets are bare, sv39, sv48, and sv57", name))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SymbolicMemoryConfig {
+    pub ram_regions: Vec<AddressRange>,
+    pub symbolic_regions: Vec<AddressRange>,
+    pub page_table_preset: PageTablePreset,
+    pub clint_enabled: bool,
+    pub mmio_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearizationConfig {
+    /// Functions to rewrite with full linearization.
+    pub linearize: Vec<String>,
+    /// Functions to rewrite with partial linearization.
+    pub partial_linearize: Vec<String>,
+}
+
+impl LinearizationConfig {
+    pub fn validate_known_functions<'a, I, S>(&self, known_functions: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let known: HashSet<String> = known_functions.into_iter().map(|name| name.as_ref().to_string()).collect();
+
+        for name in self.linearize.iter().chain(self.partial_linearize.iter()) {
+            if !known.contains(name) {
+                return Err(format!("Function {} does not exist in supplied architecture", name));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_string_list(table: &toml::value::Table, key: &str, context: &str) -> Result<Vec<String>, String> {
+    let Some(values) = table.get(key) else { return Ok(Vec::new()) };
+    let Some(values) = values.as_array() else {
+        return Err(format!("{}.{} should be an array of strings", context, key));
+    };
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .map(|value| value.to_string())
+                .ok_or_else(|| format!("{}.{}[{}] should be a string", context, key, index))
+        })
+        .collect()
+}
+
+fn parse_linearization_config(config: &Value) -> Result<Option<LinearizationConfig>, String> {
+    let Some(table) = config.get("linearization") else { return Ok(None) };
+    let Some(table) = table.as_table() else {
+        return Err("linearization should be a table".to_string());
+    };
+
+    allowed_keys(config.get("linearization").unwrap(), "[linearization]", &["linearize", "partial_linearize"])?;
+
+    let linearize = parse_string_list(table, "linearize", "linearization")?;
+    let partial_linearize = parse_string_list(table, "partial_linearize", "linearization")?;
+
+    Ok(Some(LinearizationConfig { linearize, partial_linearize }))
+}
+
+fn parse_address_range_list(config: &toml::value::Table, key: &str) -> Result<Vec<AddressRange>, String> {
+    let Some(values) = config.get(key) else { return Ok(Vec::new()) };
+    let Some(values) = values.as_array() else {
+        return Err(format!("symbolic_memory.{} should be an array of tables", key));
+    };
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| parse_address_range(value, &format!("symbolic_memory.{}[{}]", key, index)))
+        .collect()
+}
+
+fn parse_symbolic_memory_config(config: &Value) -> Result<Option<SymbolicMemoryConfig>, String> {
+    let Some(table) = config.get("symbolic_memory") else { return Ok(None) };
+    let Some(table) = table.as_table() else {
+        return Err("symbolic_memory should be a table".to_string());
+    };
+
+    allowed_keys(
+        config.get("symbolic_memory").unwrap(),
+        "[symbolic_memory]",
+        &["ram_regions", "symbolic_regions", "page_table_preset", "clint_enabled", "mmio_enabled"],
+    )?;
+
+    let page_table_preset = table
+        .get("page_table_preset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "symbolic_memory.page_table_preset must be a string".to_string())
+        .and_then(PageTablePreset::parse)?;
+
+    let clint_enabled = table
+        .get("clint_enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "symbolic_memory.clint_enabled must be a boolean".to_string())?;
+
+    let mmio_enabled = table
+        .get("mmio_enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "symbolic_memory.mmio_enabled must be a boolean".to_string())?;
+
+    let ram_regions = parse_address_range_list(table, "ram_regions")?;
+    let symbolic_regions = parse_address_range_list(table, "symbolic_regions")?;
+
+    let symbolic_memory =
+        SymbolicMemoryConfig { ram_regions, symbolic_regions, page_table_preset, clint_enabled, mmio_enabled };
+    validate_symbolic_memory_config(&symbolic_memory)?;
+
+    Ok(Some(symbolic_memory))
+}
+
+fn validate_symbolic_memory_config(config: &SymbolicMemoryConfig) -> Result<(), String> {
+    let mut regions: Vec<(&str, usize, &AddressRange)> = Vec::new();
+
+    for (index, region) in config.ram_regions.iter().enumerate() {
+        regions.push(("ram_regions", index, region));
+    }
+
+    for (index, region) in config.symbolic_regions.iter().enumerate() {
+        regions.push(("symbolic_regions", index, region));
+    }
+
+    for i in 0..regions.len() {
+        for j in (i + 1)..regions.len() {
+            let (left_kind, left_index, left) = regions[i];
+            let (right_kind, right_index, right) = regions[j];
+            if left.overlaps(right) {
+                return Err(format!(
+                    "symbolic_memory.{}[{}] overlaps symbolic_memory.{}[{}]: [0x{:x}, 0x{:x}) vs [0x{:x}, 0x{:x})",
+                    left_kind, left_index, right_kind, right_index, left.base, left.top, right.base, right.top
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn from_toml_value<B: BV>(value: &Value, symtab: &Symtab<'_>, type_info: &IRTypeInfo) -> Result<Val<B>, String> {
     match value {
         Value::Boolean(b) => Ok(Val::Bool(*b)),
@@ -627,6 +839,11 @@ pub struct ISAConfig<B> {
     pub symbolic_addr_top: u64,
     /// The number of bytes between each symbolic address
     pub symbolic_addr_stride: u64,
+    /// Target-associated symbolic memory configuration for test execution
+    pub symbolic_memory: Option<SymbolicMemoryConfig>,
+    /// Target-associated linearization configuration for test execution.
+    /// Task 6 applies CLI precedence and executes the rewrites; this only records TOML input.
+    pub linearization: Option<LinearizationConfig>,
     /// Default values for specified registers
     pub default_registers: HashMap<Name, Val<B>>,
     /// Reset values for specified registers
@@ -700,6 +917,8 @@ impl<B: BV> ISAConfig<B> {
             symbolic_addr_base: get_table_value(&config, "symbolic_addrs", "base")?,
             symbolic_addr_top: get_table_value(&config, "symbolic_addrs", "top")?,
             symbolic_addr_stride: get_table_value(&config, "symbolic_addrs", "stride")?,
+            symbolic_memory: parse_symbolic_memory_config(&config)?,
+            linearization: parse_linearization_config(&config)?,
             default_registers: get_default_registers(&config, symtab, type_info)?,
             reset_registers: get_reset_registers(&config, symtab, type_info)?,
             reset_constraints: get_reset_constraints(&config)?,
@@ -768,5 +987,200 @@ impl<B: BV> ISAConfig<B> {
             Ok(config) => Ok(config),
             Err(msg) => Err(format!("{}: {}", path.as_ref().display(), msg)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_config(input: &str) -> Value {
+        input.parse::<Value>().expect("valid TOML")
+    }
+
+    #[test]
+    fn symbolic_memory_config_parses_valid_ranges() {
+        let config = parse_config(
+            r#"
+            [symbolic_memory]
+            page_table_preset = "sv39"
+            clint_enabled = true
+            mmio_enabled = false
+
+            [[symbolic_memory.ram_regions]]
+            base = "0x80000000"
+            top = "0x80001000"
+
+            [[symbolic_memory.symbolic_regions]]
+            base = "0x80002000"
+            top = "0x80003000"
+            "#,
+        );
+
+        let symbolic_memory =
+            parse_symbolic_memory_config(&config).expect("config should parse").expect("config should exist");
+
+        assert_eq!(symbolic_memory.page_table_preset, PageTablePreset::Sv39);
+        assert!(symbolic_memory.clint_enabled);
+        assert!(!symbolic_memory.mmio_enabled);
+        assert_eq!(symbolic_memory.ram_regions, vec![AddressRange::new(0x8000_0000, 0x8000_1000, "ram").unwrap()]);
+        assert_eq!(
+            symbolic_memory.symbolic_regions,
+            vec![AddressRange::new(0x8000_2000, 0x8000_3000, "symbolic").unwrap()]
+        );
+        assert_eq!(symbolic_memory.ram_regions[0].base, 0x8000_0000);
+        assert_eq!(symbolic_memory.ram_regions[0].top, 0x8000_1000);
+    }
+
+    #[test]
+    fn symbolic_memory_config_rejects_overlapping_regions() {
+        let config = parse_config(
+            r#"
+            [symbolic_memory]
+            page_table_preset = "sv39"
+            clint_enabled = true
+            mmio_enabled = false
+
+            [[symbolic_memory.ram_regions]]
+            base = "0x80000000"
+            top = "0x80002000"
+
+            [[symbolic_memory.symbolic_regions]]
+            base = "0x80001000"
+            top = "0x80003000"
+            "#,
+        );
+
+        let err = parse_symbolic_memory_config(&config).expect_err("overlap should fail");
+        assert!(err.contains("overlaps"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn symbolic_memory_config_rejects_unsupported_preset() {
+        let unsupported = parse_config(
+            r#"
+            [symbolic_memory]
+            page_table_preset = "sv64"
+            clint_enabled = true
+            mmio_enabled = false
+            "#,
+        );
+        let err = parse_symbolic_memory_config(&unsupported).expect_err("unsupported preset should fail");
+        assert!(err.contains("Unsupported page table preset"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn symbolic_memory_config_rejects_empty_ranges() {
+        let config = parse_config(
+            r#"
+            [symbolic_memory]
+            page_table_preset = "sv39"
+            clint_enabled = true
+            mmio_enabled = false
+
+            [[symbolic_memory.ram_regions]]
+            base = "0x80000000"
+            top = "0x80000000"
+            "#,
+        );
+
+        let err = parse_symbolic_memory_config(&config).expect_err("empty range should fail");
+        assert!(err.contains("must define a non-empty range"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn symbolic_memory_config_rejects_invalid_field_types() {
+        let config = parse_config(
+            r#"
+            [symbolic_memory]
+            page_table_preset = "sv39"
+            clint_enabled = "yes"
+            mmio_enabled = false
+            "#,
+        );
+
+        let err = parse_symbolic_memory_config(&config).expect_err("invalid type should fail");
+        assert!(err.contains("symbolic_memory.clint_enabled must be a boolean"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn symbolic_memory_config_allows_both_toggles_disabled() {
+        let config = parse_config(
+            r#"
+            [symbolic_memory]
+            page_table_preset = "bare"
+            clint_enabled = false
+            mmio_enabled = false
+            "#,
+        );
+
+        let symbolic_memory =
+            parse_symbolic_memory_config(&config).expect("config should parse").expect("config should exist");
+        assert!(!symbolic_memory.clint_enabled);
+        assert!(!symbolic_memory.mmio_enabled);
+    }
+
+    #[test]
+    fn missing_symbolic_memory_preserves_existing_behavior() {
+        let config = parse_config("pc = \"PC\"");
+        assert!(parse_symbolic_memory_config(&config).expect("missing symbolic_memory is allowed").is_none());
+    }
+
+    #[test]
+    fn linearization_config_parses_and_preserves_function_names() {
+        let config = parse_config(
+            r#"
+            [linearization]
+            linearize = ["foo"]
+            partial_linearize = ["bar"]
+            "#,
+        );
+
+        let linearization =
+            parse_linearization_config(&config).expect("config should parse").expect("config should exist");
+        assert_eq!(linearization.linearize, vec!["foo".to_string()]);
+        assert_eq!(linearization.partial_linearize, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn missing_linearization_preserves_existing_behavior() {
+        let config = parse_config("pc = \"PC\"");
+        assert!(parse_linearization_config(&config).expect("missing linearization is allowed").is_none());
+    }
+
+    #[test]
+    fn linearization_config_rejects_unknown_keys() {
+        let config = parse_config(
+            r#"
+            [linearization]
+            linearize = ["foo"]
+            unknown = ["bar"]
+            "#,
+        );
+
+        let err = parse_linearization_config(&config).expect_err("unknown key should fail");
+        assert!(err.contains("Key unknown is not allowed in [linearization]"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn linearization_config_rejects_invalid_value_types() {
+        let config = parse_config(
+            r#"
+            [linearization]
+            linearize = 1
+            "#,
+        );
+
+        let err = parse_linearization_config(&config).expect_err("invalid type should fail");
+        assert!(err.contains("linearization.linearize should be an array of strings"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn linearization_validation_reports_unknown_function() {
+        let linearization =
+            LinearizationConfig { linearize: vec!["foo".to_string()], partial_linearize: vec!["bar".to_string()] };
+        let err = linearization.validate_known_functions(["foo"]).expect_err("missing function should fail validation");
+
+        assert_eq!(err, "Function bar does not exist in supplied architecture");
     }
 }

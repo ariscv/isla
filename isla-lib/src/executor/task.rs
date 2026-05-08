@@ -31,8 +31,10 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::executor::frame::{Backtrace, Frame};
+use crate::executor::RepeatLimitHit;
 use crate::fraction::Fraction;
 use crate::ir::{Loc, Name, Reset, SharedState};
 use crate::smt::{smtlib, Checkpoint, Event};
@@ -79,6 +81,8 @@ pub struct TaskState<B> {
     // of times. Note that this is the architectural PC, not the isla
     // IR program counter in the frame.
     pub(super) pc_limit: Option<(Name, usize)>,
+    pub(super) block_repeat_limit: Option<usize>,
+    pub(super) repeat_limit_hits: Option<Arc<Mutex<Vec<RepeatLimitHit>>>>,
     // Exit if we ever announce an instruction with all bits set to zero
     pub(super) zero_announce_exit: bool,
     pub(super) interrupts: Vec<TaskInterrupt<B>>,
@@ -86,7 +90,14 @@ pub struct TaskState<B> {
 
 impl<B> TaskState<B> {
     pub fn new() -> Self {
-        TaskState { reset_registers: HashMap::new(), pc_limit: None, zero_announce_exit: true, interrupts: Vec::new() }
+        TaskState {
+            reset_registers: HashMap::new(),
+            pc_limit: None,
+            block_repeat_limit: None,
+            repeat_limit_hits: None,
+            zero_announce_exit: true,
+            interrupts: Vec::new(),
+        }
     }
 
     pub fn with_reset_registers(self, reset_registers: HashMap<Loc<Name>, Reset<B>>) -> Self {
@@ -95,6 +106,14 @@ impl<B> TaskState<B> {
 
     pub fn with_pc_limit(self, pc: Name, limit: usize) -> Self {
         TaskState { pc_limit: Some((pc, limit)), ..self }
+    }
+
+    pub fn with_block_repeat_limit(self, limit: usize) -> Self {
+        TaskState { block_repeat_limit: Some(limit), ..self }
+    }
+
+    pub fn with_repeat_limit_hits(self, hits: Arc<Mutex<Vec<RepeatLimitHit>>>) -> Self {
+        TaskState { repeat_limit_hits: Some(hits), ..self }
     }
 
     pub fn with_zero_announce_exit(self, b: bool) -> Self {

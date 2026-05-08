@@ -48,6 +48,7 @@ use crate::error::{ExecError, IslaError};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
+use crate::memory::Memory;
 use crate::primop;
 use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_value, symbolic};
 use crate::probe;
@@ -63,6 +64,47 @@ use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatLimitHit {
+    pub function: String,
+    pub ir_pc: usize,
+    pub arch_pc: Option<u64>,
+    pub repeat_count: usize,
+    pub limit: usize,
+    pub task_id: Option<usize>,
+    pub worker_id: Option<usize>,
+}
+
+impl RepeatLimitHit {
+    fn from_frame<'ir, B: BV>(
+        tid: usize,
+        task_id: TaskId,
+        frame: &LocalFrame<'ir, B>,
+        shared_state: &SharedState<'ir, B>,
+        arch_pc: Option<u64>,
+        repeat_count: usize,
+        limit: usize,
+    ) -> Self {
+        RepeatLimitHit {
+            function: zencode::decode(shared_state.symtab.to_str(frame.function_name)),
+            ir_pc: frame.pc,
+            arch_pc,
+            repeat_count,
+            limit,
+            task_id: Some(task_id.as_usize()),
+            worker_id: Some(tid),
+        }
+    }
+}
+
+fn record_repeat_limit_hit<B>(task_state: &TaskState<B>, hit: RepeatLimitHit) {
+    if let Some(hits) = &task_state.repeat_limit_hits {
+        if let Ok(mut hits) = hits.lock() {
+            hits.push(hit);
+        }
+    }
+}
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1041,6 +1083,57 @@ fn in_x_function_stack<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &Sh
     is_x(frame.function_name) || frame.backtrace.iter().any(|(name, _)| is_x(*name))
 }
 
+fn current_arch_pc<'ir, B: BV>(
+    frame: &mut LocalFrame<'ir, B>,
+    task_state: &TaskState<B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<u64>, ExecError> {
+    if let Some((arch_pc, _)) = task_state.pc_limit {
+        if let Some(reg) = frame.local_state.regs.get(arch_pc, shared_state, solver, info)? {
+            match reg {
+                Val::Bits(bv) => Ok(Some(bv.lower_u64())),
+                _ => Err(ExecError::Type("Program counter contains non-bitvector or symbolic value".to_string(), info)),
+            }
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn check_block_repeat_limit<'ir, B: BV>(
+    tid: usize,
+    task_id: TaskId,
+    frame: &mut LocalFrame<'ir, B>,
+    task_state: &TaskState<B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
+    if let Some(limit) = task_state.block_repeat_limit {
+        let key = (frame.function_name, frame.pc);
+        let count = frame.block_repeat_counts.entry(key).or_insert(0);
+        *count += 1;
+
+        if *count > limit {
+            let repeat_count = *count;
+            let arch_pc = current_arch_pc(frame, task_state, shared_state, solver, SourceLoc::unknown())?;
+            let hit = RepeatLimitHit::from_frame(tid, task_id, frame, shared_state, arch_pc, repeat_count, limit);
+            record_repeat_limit_hit(task_state, hit.clone());
+            return Err(ExecError::RepeatLimitReached {
+                function: hit.function,
+                pc: hit.ir_pc,
+                count: hit.repeat_count,
+                limit: hit.limit,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
@@ -1075,6 +1168,8 @@ fn run_loop<'ir, 'task, B: BV>(
             // Currently this happens when evaluating letbindings.
             return Ok(Run::Finished(Val::Unit));
         }
+
+        check_block_repeat_limit(tid, task_id, frame, task_state, shared_state, solver)?;
 
         if timeout.timed_out() {
             return Err(ExecError::Timeout);
@@ -1562,6 +1657,48 @@ fn run_loop<'ir, 'task, B: BV>(
 pub type Collector<'ir, B, R> = dyn 'ir
     + Sync
     + Fn(usize, TaskId, Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>, &SharedState<'ir, B>, Solver<B>, &R);
+
+fn build_initial_frame<'ir, B: BV>(
+    function_id: Name,
+    func_args: &'ir [(Name, &'ir Ty<Name>)],
+    ret_ty: &'ir Ty<Name>,
+    args: &[Val<B>],
+    instrs: &'ir [Instr<Name, B>],
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    memory: Option<Memory<B>>,
+) -> LocalFrame<'ir, B> {
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+    if let Some(memory) = memory {
+        initial_frame.set_memory(memory);
+    }
+    initial_frame
+}
+
+fn execute_ir_function_with_checkpoint_impl<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    memory: Option<Memory<B>>,
+    checkpoint: Checkpoint<B>,
+) {
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    let initial_frame = build_initial_frame(function_id, func_args, ret_ty, args, instrs, regs, lets, memory);
+
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+
+    start_single(task, shared_state, collected, collector);
+}
 
 /// Start symbolically executing a Task using just the current thread, collecting the results using
 /// the given collector.
@@ -2126,28 +2263,48 @@ pub fn execute_ir_function<'ir, B: BV, R>(
 pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
-    shared_state: &SharedState<'ir, B>,
+    shared_state: &'ir SharedState<'ir, B>,
     regs: &RegisterBindings<'ir, B>,
     lets: &Bindings<'ir, B>,
     collected: &R,
     collector: &Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
 ) {
-    // 获取函数信息
-    let function_id = shared_state.symtab.lookup(function_name);
-    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+    execute_ir_function_with_checkpoint_impl(
+        function_name,
+        args,
+        shared_state,
+        regs,
+        lets,
+        collected,
+        collector,
+        None,
+        checkpoint,
+    );
+}
 
-    // 创建初始帧
-    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
-    initial_frame.add_regs(regs);
-    initial_frame.add_lets(lets);
-
-    // 创建任务，使用传入的checkpoint
-    let task_state = TaskState::new();
-    let task_id = TaskId::fresh();
-    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
-
-    start_single(task, &shared_state, collected, collector);
+pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    memory: Memory<B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    checkpoint: Checkpoint<B>,
+) {
+    execute_ir_function_with_checkpoint_impl(
+        function_name,
+        args,
+        shared_state,
+        regs,
+        lets,
+        collected,
+        collector,
+        Some(memory),
+        checkpoint,
+    );
 }
 pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     function_name: &str,
@@ -2176,4 +2333,156 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
     start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn build_initial_frame_uses_injected_memory() {
+        let function_id = Name::from_u32(1);
+        let arg_name = Name::from_u32(2);
+        let ret_ty = &Ty::Unit;
+        let args = [(arg_name, ret_ty)];
+        let instrs: &[Instr<Name, B64>] = &[];
+        let regs = RegisterBindings::new();
+        let lets = Bindings::default();
+
+        let mut memory = Memory::new();
+        memory.add_zero_region(0..1);
+        memory.add_symbolic_region(4..8);
+
+        let frame = build_initial_frame(function_id, &args, ret_ty, &[], instrs, &regs, &lets, Some(memory));
+
+        assert_eq!(frame.memory().regions().len(), 2);
+    }
+
+    #[test]
+    fn build_initial_frame_preserves_default_memory_path() {
+        let function_id = Name::from_u32(1);
+        let ret_ty = &Ty::Unit;
+        let args: [(Name, &Ty<Name>); 0] = [];
+        let instrs: &[Instr<Name, B64>] = &[];
+        let regs = RegisterBindings::new();
+        let lets = Bindings::default();
+
+        let frame = build_initial_frame(function_id, &args, ret_ty, &[], instrs, &regs, &lets, None);
+
+        assert!(frame.memory().regions().is_empty());
+    }
+
+    #[test]
+    fn new_call_preserves_block_repeat_counts() {
+        let caller_id = Name::from_u32(30);
+        let callee_id = Name::from_u32(31);
+        let ret_ty = &Ty::Unit;
+        let caller_instrs: &[Instr<Name, B64>] = &[];
+        let callee_instrs: &[Instr<Name, B64>] = &[];
+        let mut frame = LocalFrame::new(caller_id, &[], ret_ty, Some(&[]), caller_instrs);
+
+        frame.block_repeat_counts.insert((caller_id, 4), 9);
+
+        let call_frame = frame.new_call(callee_id, &[], ret_ty, Some(&[]), callee_instrs);
+
+        assert_eq!(call_frame.block_repeat_counts.get(&(caller_id, 4)), Some(&9));
+    }
+
+    fn empty_shared_state<'ir>(symtab: Symtab<'ir>) -> SharedState<'ir, B64> {
+        SharedState::new(
+            symtab,
+            &[],
+            IRTypeInfo {
+                structs: HashMap::new(),
+                enums: HashMap::new(),
+                enum_members: HashMap::new(),
+                unions: HashMap::new(),
+                union_ctors: HashSet::new(),
+            },
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn block_repeat_limit_records_hit_stats() {
+        let mut symtab = Symtab::new();
+        let function_id = symtab.intern("zrepeat_test");
+        let shared_state = empty_shared_state(symtab);
+        let ret_ty = &Ty::Unit;
+        let instrs = [Instr::Goto(0)];
+        let mut frame = LocalFrame::new(function_id, &[], ret_ty, Some(&[]), &instrs);
+        let mut fraction = Fraction::one();
+        let task_id = TaskId::from_usize(42);
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let task_state = TaskState::new().with_block_repeat_limit(2).with_repeat_limit_hits(Arc::clone(&hits));
+        let queue = Worker::new_lifo();
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::new(&ctx);
+
+        let result = run_loop(
+            7,
+            task_id,
+            &mut fraction,
+            Timeout::unlimited(),
+            None,
+            &queue,
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExecError::RepeatLimitReached { ref function, pc: 0, count: 3, limit: 2 }) if function == "repeat_test"
+        ));
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function, "repeat_test");
+        assert_eq!(hits[0].ir_pc, 0);
+        assert_eq!(hits[0].arch_pc, None);
+        assert_eq!(hits[0].repeat_count, 3);
+        assert_eq!(hits[0].limit, 2);
+        assert_eq!(hits[0].task_id, Some(42));
+        assert_eq!(hits[0].worker_id, Some(7));
+    }
+
+    #[test]
+    fn default_repeat_limit_records_no_hits() {
+        let mut symtab = Symtab::new();
+        let function_id = symtab.intern("zrepeat_test");
+        let shared_state = empty_shared_state(symtab);
+        let ret_ty = &Ty::Unit;
+        let instrs = [Instr::Goto(0)];
+        let mut frame = LocalFrame::new(function_id, &[], ret_ty, Some(&[]), &instrs);
+        let mut fraction = Fraction::one();
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::new(&ctx);
+
+        let result = run_loop(
+            0,
+            TaskId::from_usize(1),
+            &mut fraction,
+            Timeout { start_time: Instant::now(), duration: Some(Duration::from_millis(1)) },
+            None,
+            &queue,
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+
+        assert!(matches!(result, Err(ExecError::Timeout)));
+        assert!(task_state.repeat_limit_hits.is_none());
+    }
 }

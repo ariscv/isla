@@ -84,6 +84,12 @@ pub enum ExecError {
     /// Execution stopped because this function is in the stop_functions set
     Stopped(String),
     PCLimitReached(u64),
+    RepeatLimitReached {
+        function: String,
+        pc: usize,
+        count: usize,
+        limit: usize,
+    },
     InconsistentRegisterReset,
     BadInterrupt(&'static str),
 }
@@ -129,6 +135,9 @@ impl fmt::Display for ExecError {
             Z3Unknown => write!(f, "SMT solver returned unknown"),
             Stopped(func) => write!(f, "Execution stopped at {}", func),
             PCLimitReached(pc_value) => write!(f, "Executed instruction at {} more than specified limit", pc_value),
+            RepeatLimitReached { function, pc, count, limit } => {
+                write!(f, "Executed IR location {}:{} {} times, exceeding repeat limit {}", function, pc, count, limit)
+            }
             InconsistentRegisterReset => write!(f, "Inconsistent register reset constraints"),
             BadInterrupt(msg) => write!(f, "Bad task interrupt: {}", msg),
         }
