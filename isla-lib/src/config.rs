@@ -44,7 +44,6 @@ use toml::Value;
 use crate::bitvector::BV;
 use crate::ir::{IRTypeInfo, Loc, Name, Reset, Symtab, URVal, Val};
 use crate::ir_lexer::new_ir_lexer;
-use crate::target::apply_pmp_rules_to_config;
 use crate::primop_util::symbolic_from_typedefs;
 use crate::smt::smtlib::Exp;
 use crate::smt_parser;
@@ -1087,11 +1086,6 @@ impl<B: BV> ISAConfig<B> {
 
         let mut default_registers = get_default_registers(&config, symtab, type_info)?;
         let pmp = get_pmp_config(&config)?;
-        if let Some(pmp_config) = &pmp {
-            if !pmp_config.symbolic {
-                apply_pmp_rules_to_config(pmp_config, symtab, type_info, &mut default_registers)?;
-            }
-        }
 
         Ok(ISAConfig {
             pc: get_program_counter(&config, symtab)?,

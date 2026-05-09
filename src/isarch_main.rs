@@ -43,6 +43,7 @@ use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings};
 use isla_lib::log;
 mod opts;
 use isla::isarch;
+use isla::isarch::target::{RISCV, RV64};
 use opts::CommonOpts;
 
 #[cfg(feature = "debug_clause_args")]
@@ -217,11 +218,19 @@ fn isla_main() -> i32 {
         print_usage(&opts);
     }
 
-    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     let assertion_mode = AssertionMode::Optimistic;
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");
+
+    if let Some(pmp_config) = &isa_config.pmp {
+        if !pmp_config.symbolic {
+            RV64.apply_pmp_rules_to_config(
+                pmp_config, &symtab, &type_info, &mut isa_config.default_registers,
+            ).unwrap();
+        }
+    }
 
     let iarch = initialize_architecture(&mut arch, symtab, type_info, &isa_config, assertion_mode, use_model_reg_init);
     let iarch_config = InitArchWithConfig::from_initialized(&iarch, &isa_config);
@@ -278,7 +287,7 @@ fn isla_main() -> i32 {
 
     #[cfg(feature = "debug_exec")]
     {
-        let initial_memory = isla_lib::memory_builder::MemoryBuilder::from_config(&isa_config)
+        let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&isa_config)
             .and_then(|builder| builder.build())
             .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
             .ok();

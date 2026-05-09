@@ -1,6 +1,8 @@
 pub mod args;
 pub mod args_yaml;
 pub mod exec;
+pub mod memory_builder;
+pub mod target;
 
 use crate::isarch::args::{ArgStruct, InstructionMap};
 use isla_lib::bitvector::BV;
@@ -12,7 +14,7 @@ use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{checkpoint, Config, Context, Model};
 use isla_lib::smt::{Checkpoint, Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
-use isla_lib::{dlog, zencode};
+use isla_lib::{dlog, log, zencode};
 use isla_lib::{ir::*, smt};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -51,8 +53,8 @@ pub fn get_assembly_name<B: BV>(
             Err((error, backtrace)) => match &error {
                 ExecError::MatchFailure(_) => {}
                 _ => {
-                    eprintln!("执行错误: {:?}", error);
-                    eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                    log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
+                    log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
                 }
             },
         },
@@ -92,8 +94,8 @@ fn get_assembly_encdec_forwards<B: BV>(
             Err((error, backtrace)) => match &error {
                 ExecError::MatchFailure(_) => {}
                 _ => {
-                    eprintln!("执行错误: {:?}", error);
-                    eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                    log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
+                    log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
                 }
             },
         },
@@ -534,8 +536,8 @@ pub fn get_assembly_names_all<B: BV>(
                 Err((error, backtrace)) => match &error {
                     ExecError::MatchFailure(_) => {}
                     _ => {
-                        eprintln!("执行错误: {:?}", error);
-                        eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                        log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
+                        log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
                     }
                 },
             },
@@ -638,22 +640,25 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
                         collected.lock().unwrap().push((assembly_str, cp));
                     }
                     _ => {
-                        eprintln!(
-                            "执行异常终止: {}",
-                            match run {
-                                Run::Dead => "Run::Dead",
-                                Run::Exit => "Run::Exit",
-                                Run::Suspended => "Run::Suspended",
-                                _ => "Unkown type",
-                            }
+                        log!(
+                            log::PATH_RESULT,
+                            &format!(
+                                "执行异常终止: {}",
+                                match run {
+                                    Run::Dead => "Run::Dead",
+                                    Run::Exit => "Run::Exit",
+                                    Run::Suspended => "Run::Suspended",
+                                    _ => "Unkown type",
+                                }
+                            )
                         );
                     }
                 },
                 Err((error, backtrace)) => match &error {
                     ExecError::MatchFailure(_) => {}
                     _ => {
-                        eprintln!("执行错误: {:?}", error);
-                        eprintln!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab));
+                        log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
+                        log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
                     }
                 },
             },
@@ -709,9 +714,9 @@ pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
         }
     }
 
-    eprintln!("警告: 以下 {} 个指令没有汇编名称映射:", clause_has_no_inst_name.len());
+    log!(log::ARCH_INFO, &format!("警告: 以下 {} 个指令没有汇编名称映射:", clause_has_no_inst_name.len()));
     clause_has_no_inst_name.iter().for_each(|name| {
-        eprintln!("  - {}", name);
+        log!(log::ARCH_INFO, &format!("  - {}", name));
     });
     InstructionMap::from_vec_with_shared_state(&arg_structs_merged, &shared_state)
 }
@@ -846,15 +851,14 @@ pub fn test_instruction_list_main<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) {
-    println!("test_instruction_list_main");
+    log!(log::SYM_EXEC, "test_instruction_list_main");
 
     let assembly_names = get_assembly_names_all("zRTYPE", shared_state, regs, lets);
-    // let assembly_names = get_assembly_names_all("zSTORE", shared_state, regs, lets);
 
     /* assembly_names.iter().for_each(|name| {
         println!("{}", name);
     }); */
-    println!("{:?}", assembly_names);
+    log!(log::PATH_RESULT, &format!("{:?}", assembly_names));
 
     ()
 }
