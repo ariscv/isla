@@ -30,7 +30,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::executor::frame::{Backtrace, Frame};
@@ -40,6 +40,32 @@ use crate::smt::{smtlib, Checkpoint, Event};
 use crate::zencode;
 
 static TASK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static FORK_TREE_NODE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ForkTreeNode {
+    pub id: u32,
+    pub parent: Option<u32>,
+    pub branch_conditions_at_fork: usize,
+}
+
+impl ForkTreeNode {
+    pub fn fresh_root(branch_conditions_at_fork: usize) -> Self {
+        ForkTreeNode {
+            id: FORK_TREE_NODE_COUNTER.fetch_add(1, Ordering::SeqCst),
+            parent: None,
+            branch_conditions_at_fork,
+        }
+    }
+
+    pub fn fresh_child(parent: u32, branch_conditions_at_fork: usize) -> Self {
+        ForkTreeNode {
+            id: FORK_TREE_NODE_COUNTER.fetch_add(1, Ordering::SeqCst),
+            parent: Some(parent),
+            branch_conditions_at_fork,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TaskId {
@@ -156,6 +182,16 @@ pub struct TaskState<B> {
     // Exit if we ever announce an instruction with all bits set to zero
     pub(super) zero_announce_exit: bool,
     pub(super) interrupts: Vec<TaskInterrupt<B>>,
+}
+
+pub trait StateSerialize {
+    type Error;
+
+    fn serialize_state(&self) -> Result<Vec<u8>, Self::Error>;
+
+    fn deserialize_state(data: &[u8]) -> Result<Self, Self::Error>
+    where
+        Self: Sized;
 }
 
 impl<B> TaskState<B> {

@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::bitvector::BV;
 use crate::error::ExecError;
-use crate::executor::task::{Task, TaskId, TaskState};
+use crate::executor::task::{ForkTreeNode, Task, TaskId, TaskState};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
@@ -121,6 +121,7 @@ pub struct Frame<'ir, B> {
     pub(super) pc_counts: Arc<HashMap<B, usize>>,
     pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
     pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
+    pub(super) fork_tree_node: Option<ForkTreeNode>,
 }
 
 pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
@@ -141,6 +142,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc_counts: (*frame.pc_counts).clone(),
         taken_interrupts: (*frame.taken_interrupts).clone(),
         branch_conditions: frame.branch_conditions.clone(),
+        fork_tree_node: frame.fork_tree_node.clone(),
     }
 }
 
@@ -164,6 +166,7 @@ pub struct LocalFrame<'ir, B> {
     pub(super) pc_counts: HashMap<B, usize>,
     pub(super) taken_interrupts: Vec<(TaskId, u8)>,
     pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
+    pub(super) fork_tree_node: Option<ForkTreeNode>,
 }
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
@@ -184,6 +187,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         pc_counts: Arc::new(frame.pc_counts.clone()),
         taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
         branch_conditions: frame.branch_conditions.clone(),
+        fork_tree_node: frame.fork_tree_node.clone(),
     }
 }
 
@@ -316,6 +320,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc_counts: HashMap::new(),
             taken_interrupts: Vec::new(),
             branch_conditions: Vec::new(),
+            fork_tree_node: None,
         }
     }
 
@@ -334,6 +339,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();
+        new_frame.fork_tree_node = self.fork_tree_node.clone();
         new_frame
     }
 

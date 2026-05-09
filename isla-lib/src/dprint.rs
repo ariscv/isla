@@ -464,8 +464,6 @@ impl<B: BV> Val<B> {
 
     pub fn from_str(s: &str, shared_state: &SharedState<B>) -> Result<Self, String> {
         let s = s.trim();
-        let chars: Vec<char> = s.chars().collect();
-
         // Symbolic: Sym(name)
         if s.starts_with("Sym(") && s.ends_with(')') {
             let inner = &s[4..s.len() - 1];
@@ -792,6 +790,8 @@ pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>,
         Copy(loc, exp, info) => write!(f, "Copy {:?} = {:?} ` {:?}", loc, exp, info),
         Monomorphize(id, ty, info) => write!(f, "mono {} : {:?} ` {:?}", s!(*id), ty, info),
         Call(loc, ext, id, args, info) => write!(f, "Call {:?} = {}<{:?}>({:?}) ` {:?}", loc, s!(*id), ext, args, info),
+        OpenMerge => write!(f, "open-merge"),
+        CloseMerge => write!(f, "close-merge"),
         Exit(cause, info) => write!(f, "exit {:?} ` {:?}", cause, info),
         Arbitrary => write!(f, "arbitrary"),
         End => write!(f, "end"),

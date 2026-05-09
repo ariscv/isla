@@ -62,7 +62,7 @@ mod task;
 use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
-pub use task::{ExecutionLimits, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+pub use task::{ExecutionLimits, ForkTreeNode, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1147,6 +1147,10 @@ fn run_loop<'ir, 'task, B: BV>(
                     }
                 }
 
+                if frame.fork_tree_node.is_none() {
+                    frame.fork_tree_node = Some(ForkTreeNode::fresh_root(frame.branch_conditions.len()));
+                }
+
                 let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
                 match *value.as_ref() {
                     Val::Symbolic(v) => {
@@ -1223,13 +1227,21 @@ fn run_loop<'ir, 'task, B: BV>(
                             });
 
                             let point = checkpoint(solver);
+                            let parent_fork_tree_node = frame.fork_tree_node.clone().unwrap();
 
                             // 为 fork 路径创建条件列表
                             let mut fork_conditions = frame.branch_conditions.clone();
                             fork_conditions.push(test_false.clone());
 
-                            let frozen =
-                                Frame { pc: frame.pc + 1, branch_conditions: fork_conditions, ..freeze_frame(frame) };
+                            let frozen = Frame {
+                                pc: frame.pc + 1,
+                                branch_conditions: fork_conditions,
+                                fork_tree_node: Some(ForkTreeNode::fresh_child(
+                                    parent_fork_tree_node.id,
+                                    frame.branch_conditions.len(),
+                                )),
+                                ..freeze_frame(frame)
+                            };
                             frame.forks += 1;
                             task_fraction.halve();
                             queue.push(Task {
@@ -1475,6 +1487,10 @@ fn run_loop<'ir, 'task, B: BV>(
                 }
             }
 
+            Instr::OpenMerge | Instr::CloseMerge => {
+                frame.pc += 1;
+            }
+
             Instr::End => match frame.vars().get(&RETURN) {
                 None => panic!("Return variable missing at end of function"),
                 Some(value) => {
@@ -1608,10 +1624,17 @@ fn run_loop<'ir, 'task, B: BV>(
                     // give it a larger part of the fraction (otherwise the denominator becomes
                     // small very fast).
                     let child_frac = task_fraction.min_split(6);
+                    if frame.fork_tree_node.is_none() {
+                        frame.fork_tree_node = Some(ForkTreeNode::fresh_root(frame.branch_conditions.len()));
+                    }
+                    let parent_fork_tree_node = frame.fork_tree_node.clone().unwrap();
                     queue.push(Task {
                         id: task_id,
                         fraction: child_frac,
-                        frame: freeze_frame(frame),
+                        frame: Frame {
+                            fork_tree_node: Some(ForkTreeNode::fresh_child(parent_fork_tree_node.id, frame.branch_conditions.len())),
+                            ..freeze_frame(frame)
+                        },
                         checkpoint: point,
                         fork_cond: Some((
                             Assert(Neq(Box::new(Var(v)), Box::new(result_exp.clone()))),

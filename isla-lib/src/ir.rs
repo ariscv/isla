@@ -692,6 +692,8 @@ pub enum Instr<A, B> {
     Copy(Loc<A>, Exp<A>, SourceLoc),
     Monomorphize(A, Ty<A>, SourceLoc),
     Call(Loc<A>, bool, A, Vec<Exp<A>>, SourceLoc),
+    OpenMerge,
+    CloseMerge,
     PrimopUnary(Loc<A>, Unary<B>, Exp<A>, SourceLoc),
     PrimopBinary(Loc<A>, Binary<B>, Exp<A>, Exp<A>, SourceLoc),
     PrimopVariadic(Loc<A>, Variadic<B>, Vec<Exp<A>>, SourceLoc),
@@ -712,6 +714,8 @@ impl<A: fmt::Debug, B: fmt::Debug> fmt::Debug for Instr<A, B> {
             Copy(loc, exp, info) => write!(f, "{:?} = {:?} ` {:?}", loc, exp, info),
             Monomorphize(id, ty, info) => write!(f, "mono {:?} : {:?} ` {:?}", id, ty, info),
             Call(loc, ext, id, args, info) => write!(f, "{:?} = {:?}<{:?}>({:?}) ` {:?}", loc, id, ext, args, info),
+            OpenMerge => write!(f, "open-merge"),
+            CloseMerge => write!(f, "close-merge"),
             Exit(cause, info) => write!(f, "exit {:?} ` {:?}", cause, info),
             Arbitrary => write!(f, "arbitrary"),
             End => write!(f, "end"),
@@ -734,6 +738,7 @@ pub fn append_instrs<A, B>(lhs: &mut Vec<Instr<A, B>>, rhs: &mut Vec<Instr<A, B>
         match instr {
             Instr::Goto(label) => *label += lhs.len(),
             Instr::Jump(_, label, _) => *label += lhs.len(),
+            Instr::OpenMerge | Instr::CloseMerge => (),
             _ => (),
         }
     }
