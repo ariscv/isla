@@ -37,12 +37,14 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Arc;
 use toml::Value;
 
 use crate::bitvector::BV;
 use crate::ir::{IRTypeInfo, Loc, Name, Reset, Symtab, URVal, Val};
 use crate::ir_lexer::new_ir_lexer;
+use crate::target::apply_pmp_rules_to_config;
 use crate::primop_util::symbolic_from_typedefs;
 use crate::smt::smtlib::Exp;
 use crate::smt_parser;
@@ -54,6 +56,19 @@ fn allowed_keys(config: &Value, root: &str, allowed_keys: &[&str]) -> Result<(),
     let Value::Table(tbl) = config else { return Err(format!("{} should be a toml key-value table", root)) };
 
     'outer: for key in tbl.keys() {
+        for allowed_key in allowed_keys {
+            if key == allowed_key {
+                continue 'outer;
+            }
+        }
+        return Err(format!("Key {} is not allowed in {}", key, root));
+    }
+
+    Ok(())
+}
+
+fn allowed_table_keys(config: &toml::value::Table, root: &str, allowed_keys: &[&str]) -> Result<(), String> {
+    'outer: for key in config.keys() {
         for allowed_key in allowed_keys {
             if key == allowed_key {
                 continue 'outer;
@@ -103,6 +118,129 @@ impl Tool {
     }
 }
 
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRegionType {
+    Concrete,
+    Symbolic,
+}
+
+impl FromStr for MemoryRegionType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "concrete" => Ok(MemoryRegionType::Concrete),
+            "symbolic" => Ok(MemoryRegionType::Symbolic),
+            _ => Err(format!("Unknown memory region type {}", s)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryRegionConfig {
+    pub name: String,
+    pub base: u64,
+    pub size: u64,
+    pub region_type: MemoryRegionType,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTableMode {
+    SV39,
+    SV48,
+}
+
+impl FromStr for PageTableMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "sv39" => Ok(PageTableMode::SV39),
+            "sv48" => Ok(PageTableMode::SV48),
+            _ => Err(format!("Unknown page table mode {}", s)),
+        }
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTablePreset {
+    Identity,
+    Offset,
+    ProtectedLinear,
+    SymbolicMapping,
+}
+
+impl FromStr for PageTablePreset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "identity" => Ok(PageTablePreset::Identity),
+            "offset" => Ok(PageTablePreset::Offset),
+            "protected" => Ok(PageTablePreset::ProtectedLinear),
+            "symbolic" => Ok(PageTablePreset::SymbolicMapping),
+            _ => Err(format!("Unknown page table preset {}", s)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtectedRange {
+    pub base: u64,
+    pub size: u64,
+    pub flags: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageTableConfig {
+    pub mode: PageTableMode,
+    pub preset: PageTablePreset,
+    pub base: u64,
+    pub page_size: u64,
+    pub offset: Option<i64>,
+    pub protected_ranges: Option<Vec<ProtectedRange>>,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmpMode {
+    Tor,
+    Na4,
+    Napot,
+}
+
+impl FromStr for PmpMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tor" => Ok(PmpMode::Tor),
+            "na4" => Ok(PmpMode::Na4),
+            "napot" => Ok(PmpMode::Napot),
+            _ => Err(format!("Unknown PMP mode {}", s)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PmpRule {
+    pub index: u32,
+    pub mode: PmpMode,
+    pub base: u64,
+    pub size: Option<u64>,
+    pub permissions: String,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PmpConfig {
+    pub rules: Vec<PmpRule>,
+    pub symbolic: bool,
+}
+
 fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
     match config.get(tool) {
         Some(Value::String(tool)) => {
@@ -111,6 +249,264 @@ fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
             Ok(Tool { executable: find_tool_path(program)?, options: words.map(|w| w.to_string()).collect() })
         }
         _ => Err(format!("Toolchain option {} must be specified", tool)),
+    }
+}
+
+fn parse_u64_value(value: &Value, context: &str) -> Result<u64, String> {
+    match value {
+        Value::Integer(i) => u64::try_from(*i).map_err(|e| format!("failed to parse integer in {}: {}", context, e)),
+        Value::String(s) => {
+            if s.len() >= 2 && &s[0..2] == "0x" { u64::from_str_radix(&s[2..], 16) } else { u64::from_str_radix(s, 10) }
+                .map_err(|e| format!("Could not parse {} as a 64-bit unsigned integer in {}: {}", s, context, e))
+        }
+        _ => Err(format!("{} should be an integer or string", context)),
+    }
+}
+
+fn parse_i64_value(s: &str) -> Result<i64, String> {
+    if s.len() >= 2 && &s[0..2] == "0x" { i64::from_str_radix(&s[2..], 16) } else { s.parse::<i64>() }
+        .map_err(|e| format!("Could not parse '{}' as i64: {}", s, e))
+}
+
+fn parse_aligned_u64_value(value: &Value, context: &str) -> Result<u64, String> {
+    let parsed = parse_u64_value(value, context)?;
+    if parsed % 4096 != 0 {
+        Err(format!("{} must be page-aligned", context))
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn get_memory_regions(config: &Value) -> Result<Option<Vec<MemoryRegionConfig>>, String> {
+    let Some(memory_regions) = config.get("memory_regions") else { return Ok(None) };
+    let Some(memory_regions) = memory_regions.as_array() else {
+        return Err("memory_regions should be an array of tables".to_string());
+    };
+
+    let regions = memory_regions
+        .iter()
+        .map(|region| {
+            let Some(region) = region.as_table() else {
+                return Err("memory_regions should be an array of tables".to_string());
+            };
+
+            let name = region
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "memory_regions.name should be a string".to_string())?
+                .to_string();
+            let base = region
+                .get("base")
+                .ok_or_else(|| format!("No memory_regions.base found for region {}", name))
+                .and_then(|value| parse_aligned_u64_value(value, &format!("memory_regions.{}.base", name)))?;
+            let size = region
+                .get("size")
+                .ok_or_else(|| format!("No memory_regions.size found for region {}", name))
+                .and_then(|value| parse_aligned_u64_value(value, &format!("memory_regions.{}.size", name)))?;
+            if size == 0 {
+                return Err(format!("memory_regions.{}.size must be greater than 0", name));
+            }
+            let region_type = region
+                .get("region_type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "memory_regions.region_type should be a string".to_string())?
+                .parse::<MemoryRegionType>()?;
+
+            Ok(MemoryRegionConfig { name, base, size, region_type })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(regions))
+}
+
+fn get_page_table_config(config: &Value) -> Result<Option<PageTableConfig>, String> {
+    let Some(page_table_config) = config.get("page_table_config") else { return Ok(None) };
+    let Some(page_table_config) = page_table_config.as_table() else {
+        return Err("page_table_config should be a table".to_string());
+    };
+
+    let mode = page_table_config
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "page_table_config.mode should be a string".to_string())?
+        .parse::<PageTableMode>()?;
+    let preset = page_table_config
+        .get("preset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "page_table_config.preset should be a string".to_string())?
+        .parse::<PageTablePreset>()?;
+    let base = page_table_config
+        .get("base")
+        .ok_or_else(|| "No page_table_config.base found in config".to_string())
+        .and_then(|value| parse_aligned_u64_value(value, "page_table_config.base"))?;
+    let page_size = page_table_config
+        .get("page_size")
+        .ok_or_else(|| "No page_table_config.page_size found in config".to_string())
+        .and_then(|value| parse_aligned_u64_value(value, "page_table_config.page_size"))?;
+    if page_size != 4096 {
+        return Err(format!("page_table_config.page_size must be 4096, got {}", page_size));
+    }
+    let offset = match page_table_config.get("offset") {
+        Some(Value::Integer(i)) => Some(*i),
+        Some(Value::String(s)) => Some(parse_i64_value(s)?),
+        Some(_) => return Err("page_table_config.offset should be an integer or string".to_string()),
+        None => None,
+    };
+    let protected_ranges = match page_table_config.get("protected_ranges") {
+        None => None,
+        Some(value) => {
+            let Some(ranges) = value.as_array() else {
+                return Err("page_table_config.protected_ranges should be an array of tables".to_string());
+            };
+            Some(
+                ranges
+                    .iter()
+                    .map(|range| {
+                        let Some(range) = range.as_table() else {
+                            return Err("page_table_config.protected_ranges should be an array of tables".to_string());
+                        };
+                        let base = range
+                            .get("base")
+                            .ok_or_else(|| "No page_table_config.protected_ranges.base found in config".to_string())
+                            .and_then(|value| {
+                                parse_aligned_u64_value(value, "page_table_config.protected_ranges.base")
+                            })?;
+                        let size = range
+                            .get("size")
+                            .ok_or_else(|| "No page_table_config.protected_ranges.size found in config".to_string())
+                            .and_then(|value| {
+                                parse_aligned_u64_value(value, "page_table_config.protected_ranges.size")
+                            })?;
+                        if size == 0 {
+                            return Err("page_table_config.protected_ranges.size must be greater than 0".to_string());
+                        }
+                        let flags = range
+                            .get("flags")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "page_table_config.protected_ranges.flags should be a string".to_string())?
+                            .to_string();
+                        Ok(ProtectedRange { base, size, flags })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+    };
+
+    Ok(Some(PageTableConfig { mode, preset, base, page_size, offset, protected_ranges }))
+}
+
+// The current RISC-V IR snapshots expose PMP register families as `zpmpcfg_n` and `zpmpaddr_n`
+// in the IR, with concrete architectural names `pmpcfg0`..`pmpcfg15` and `pmpaddr0`..`pmpaddr63`.
+// Use the concrete names when looking up symbols, and note the family form for the generated IR.
+fn get_pmp_config(config: &Value) -> Result<Option<PmpConfig>, String> {
+    let Some(pmp_config) = config.get("pmp") else { return Ok(None) };
+    let Some(pmp_config) = pmp_config.as_table() else {
+        return Err("pmp should be a table".to_string());
+    };
+
+    allowed_table_keys(pmp_config, "[pmp]", &["symbolic", "rules"])?;
+
+    let symbolic = match pmp_config.get("symbolic") {
+        Some(Value::Boolean(b)) => *b,
+        Some(_) => return Err("pmp.symbolic should be a boolean".to_string()),
+        None => false,
+    };
+
+    let rules = match pmp_config.get("rules") {
+        None => Vec::new(),
+        Some(value) => {
+            let Some(rules) = value.as_array() else {
+                return Err("pmp.rules should be an array of tables".to_string());
+            };
+
+            rules
+                .iter()
+                .map(|rule| {
+                    let Some(rule) = rule.as_table() else {
+                        return Err("pmp.rules should be an array of tables".to_string());
+                    };
+
+                    allowed_table_keys(
+                        rule,
+                        "[[pmp.rules]]",
+                        &["index", "mode", "base", "size", "permissions", "locked"],
+                    )?;
+
+                    let index = rule
+                        .get("index")
+                        .and_then(Value::as_integer)
+                        .ok_or_else(|| "pmp.rules.index should be an integer".to_string())
+                        .and_then(|i| {
+                            u32::try_from(i).map_err(|e| format!("failed to parse integer in pmp.rules.index: {}", e))
+                        })?;
+                    if index >= 64 {
+                        return Err(format!("pmp.rules.index must be < 64, got {}", index));
+                    }
+                    let mode = rule
+                        .get("mode")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "pmp.rules.mode should be a string".to_string())?
+                        .parse::<PmpMode>()?;
+                    let base = rule
+                        .get("base")
+                        .ok_or_else(|| format!("No pmp.rules.base found for index {}", index))
+                        .and_then(|value| parse_u64_value(value, &format!("pmp.rules[{}].base", index)))?;
+                    let size = match rule.get("size") {
+                        Some(value) => Some(parse_u64_value(value, &format!("pmp.rules[{}].size", index))?),
+                        None => None,
+                    };
+                    if matches!(mode, PmpMode::Napot) && size.is_none() {
+                        return Err(format!("pmp.rules[{}].size is required for napot mode", index));
+                    }
+                    if matches!(mode, PmpMode::Napot) {
+                        if let Some(size) = size {
+                            if size < 8 {
+                                return Err(format!("pmp.rules[{}].size must be >= 8 for NAPOT, got {}", index, size));
+                            }
+                            if !size.is_power_of_two() {
+                                return Err(format!(
+                                    "pmp.rules[{}].size must be a power of 2 for NAPOT, got {}",
+                                    index, size
+                                ));
+                            }
+                            if base % size != 0 {
+                                return Err(format!(
+                                    "pmp.rules[{}].base 0x{:x} must be aligned to size 0x{:x}",
+                                    index, base, size
+                                ));
+                            }
+                        }
+                    }
+                    let permissions = rule
+                        .get("permissions")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "pmp.rules.permissions should be a string".to_string())?
+                        .to_string();
+                    if permissions.contains('w') && !permissions.contains('r') {
+                        return Err(format!(
+                            "pmp.rules[{}].permissions 'w' requires 'r' (W=1,R=0 is reserved in RISC-V)",
+                            index
+                        ));
+                    }
+                    let locked = match rule.get("locked") {
+                        Some(Value::Boolean(b)) => *b,
+                        Some(_) => return Err("pmp.rules.locked should be a boolean".to_string()),
+                        None => false,
+                    };
+
+                    Ok(PmpRule { index, mode, base, size, permissions, locked })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+
+    Ok(Some(PmpConfig { rules, symbolic }))
+}
+
+fn get_clint_enabled(config: &Value) -> Result<Option<bool>, String> {
+    match config.get("clint_enabled") {
+        Some(value) => value.as_bool().map(Some).ok_or_else(|| "clint_enabled should be a boolean".to_string()),
+        None => Ok(None),
     }
 }
 
@@ -657,6 +1053,14 @@ pub struct ISAConfig<B> {
     pub default_sizeof: u32,
     /// Exit if sail_instr_announce is called with a zero bitvector
     pub zero_announce_exit: bool,
+    /// Optional memory regions for symbolic/concrete setup
+    pub memory_regions: Option<Vec<MemoryRegionConfig>>,
+    /// Optional page table configuration
+    pub page_table_config: Option<PageTableConfig>,
+    /// Optional PMP configuration
+    pub pmp: Option<PmpConfig>,
+    /// Optional CLINT enable flag
+    pub clint_enabled: Option<bool>,
 }
 
 impl<B: BV> ISAConfig<B> {
@@ -681,6 +1085,14 @@ impl<B: BV> ISAConfig<B> {
 
         let toolchain = get_toolchain(&config, toolchain_name)?;
 
+        let mut default_registers = get_default_registers(&config, symtab, type_info)?;
+        let pmp = get_pmp_config(&config)?;
+        if let Some(pmp_config) = &pmp {
+            if !pmp_config.symbolic {
+                apply_pmp_rules_to_config(pmp_config, symtab, type_info, &mut default_registers)?;
+            }
+        }
+
         Ok(ISAConfig {
             pc: get_program_counter(&config, symtab)?,
             register_event_sets: get_register_event_sets(&config, symtab)?,
@@ -700,7 +1112,7 @@ impl<B: BV> ISAConfig<B> {
             symbolic_addr_base: get_table_value(&config, "symbolic_addrs", "base")?,
             symbolic_addr_top: get_table_value(&config, "symbolic_addrs", "top")?,
             symbolic_addr_stride: get_table_value(&config, "symbolic_addrs", "stride")?,
-            default_registers: get_default_registers(&config, symtab, type_info)?,
+            default_registers,
             reset_registers: get_reset_registers(&config, symtab, type_info)?,
             reset_constraints: get_reset_constraints(&config)?,
             const_primops: get_const_primops(&config, symtab, type_info)?,
@@ -715,6 +1127,10 @@ impl<B: BV> ISAConfig<B> {
             in_program_order: get_in_program_order(&config, symtab)?,
             default_sizeof: get_default_sizeof(&config)?,
             zero_announce_exit: get_zero_announce_exit(&config)?,
+            memory_regions: get_memory_regions(&config)?,
+            page_table_config: get_page_table_config(&config)?,
+            pmp,
+            clint_enabled: get_clint_enabled(&config)?,
         })
     }
 

@@ -542,6 +542,7 @@ pub fn get_assembly_names_all<B: BV>(
                 },
             },
             checkpoint.clone(),
+            None,
         );
 
         /*let res = { result.lock().unwrap().as_ref().cloned() };
@@ -658,6 +659,7 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
                 },
             },
             checkpoint.clone(),
+            None,
         );
 
         /*let res = { result.lock().unwrap().as_ref().cloned() };

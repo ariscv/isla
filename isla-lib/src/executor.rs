@@ -2132,6 +2132,7 @@ pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
     collected: &R,
     collector: &Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
+    initial_memory: Option<crate::memory::Memory<B>>,
 ) {
     // 获取函数信息
     let function_id = shared_state.symtab.lookup(function_name);
@@ -2141,6 +2142,10 @@ pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
     let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
     initial_frame.add_regs(regs);
     initial_frame.add_lets(lets);
+
+    if let Some(memory) = initial_memory {
+        initial_frame.set_memory(memory);
+    }
 
     // 创建任务，使用传入的checkpoint
     let task_state = TaskState::new();
