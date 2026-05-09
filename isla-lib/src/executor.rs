@@ -34,7 +34,8 @@
 use crossbeam::deque::{Injector, Steal, Stealer, Worker};
 use crossbeam::queue::SegQueue;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -65,6 +66,22 @@ use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 pub use task::{ExecutionLimits, ForkTreeNode, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
+
+trait TaskQueuePush<T> {
+    fn push_task(&self, task: T);
+}
+
+impl<T> TaskQueuePush<T> for Worker<T> {
+    fn push_task(&self, task: T) {
+        self.push(task);
+    }
+}
+
+impl<T> TaskQueuePush<T> for RefCell<VecDeque<T>> {
+    fn push_task(&self, task: T) {
+        self.borrow_mut().push_back(task);
+    }
+}
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -800,13 +817,13 @@ pub fn reset_registers<'ir, B: BV>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run<'ir, 'task, B: BV>(
+fn run<'ir, 'task, B: BV, Q: TaskQueuePush<Task<'ir, 'task, B>>>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
     timeout: Timeout,
     stop_conditions: Option<&'task StopConditions>,
-    queue: &Worker<Task<'ir, 'task, B>>,
+    queue: &Q,
     frame: &Frame<'ir, B>,
     task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
@@ -1232,13 +1249,13 @@ pub enum Run<B> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop<'ir, 'task, B: BV>(
+fn run_loop<'ir, 'task, B: BV, Q: TaskQueuePush<Task<'ir, 'task, B>>>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
     timeout: Timeout,
     stop_conditions: Option<&'task StopConditions>,
-    queue: &Worker<Task<'ir, 'task, B>>,
+    queue: &Q,
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
@@ -1441,7 +1458,7 @@ fn run_loop<'ir, 'task, B: BV>(
                             };
                             frame.forks += 1;
                             task_fraction.halve();
-                            queue.push(Task {
+                            queue.push_task(Task {
                                 id: task_id,
                                 fraction: task_fraction.clone(),
                                 frame: frozen,
@@ -1830,7 +1847,7 @@ fn run_loop<'ir, 'task, B: BV>(
                     } else {
                         None
                     };
-                    queue.push(Task {
+                    queue.push_task(Task {
                         id: task_id,
                         fraction: child_frac,
                         frame: Frame {
@@ -1902,6 +1919,29 @@ pub type Collector<'ir, B, R> = dyn 'ir
     + Sync
     + Fn(usize, TaskId, Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>, &SharedState<'ir, B>, Solver<B>, &R);
 
+fn drain_matching<'ir, 'task, B>(
+    queue: &RefCell<VecDeque<Task<'ir, 'task, B>>>,
+    merge_key: (u32, Name, usize),
+) -> Vec<Task<'ir, 'task, B>> {
+    let mut q = queue.borrow_mut();
+    let mut siblings = Vec::new();
+    let mut i = 0;
+    while i < q.len() {
+        let matches = {
+            let task = &q[i];
+            task.frame.fork_tree_node.as_ref().and_then(|n| n.parent) == Some(merge_key.0)
+                && task.frame.function_name == merge_key.1
+                && task.frame.pc == merge_key.2
+        };
+        if matches {
+            siblings.push(q.remove(i).unwrap());
+        } else {
+            i += 1;
+        }
+    }
+    siblings
+}
+
 /// Start symbolically executing a Task using just the current thread, collecting the results using
 /// the given collector.
 pub fn start_single<'ir, B: BV, R>(
@@ -1910,17 +1950,49 @@ pub fn start_single<'ir, B: BV, R>(
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) {
-    let queue = Worker::new_lifo();
-    queue.push(task);
-    while let Some(mut task) = queue.pop() {
+    let queue: RefCell<VecDeque<Task<'ir, '_, B>>> = RefCell::new(VecDeque::new());
+    queue.borrow_mut().push_back(task);
+    while let Some(mut task) = queue.borrow_mut().pop_back() {
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
-        if let Some((def, event)) = task.fork_cond {
+        if let Some((def, event)) = task.fork_cond.take() {
             solver.add_event(event);
             solver.add(def)
         };
+
+        let path_merging = task.state.execution_limits.as_ref().map(|l| l.path_merging).unwrap_or(false);
+        if path_merging {
+            if let Some(ref fork_node) = task.frame.fork_tree_node {
+                if let Some(parent_id) = fork_node.parent {
+                    let merge_key = (parent_id, task.frame.function_name, task.frame.pc);
+                    let siblings = drain_matching(&queue, merge_key);
+                    if !siblings.is_empty() {
+                        let mut primary_frame = unfreeze_frame(&task.frame);
+                        let mut sibling_solvers = Vec::new();
+                        let mut sibling_frames = Vec::new();
+                        for sib in siblings {
+                            let mut sib_solver = Solver::from_checkpoint(&ctx, sib.checkpoint);
+                            if let Some((def, event)) = sib.fork_cond {
+                                sib_solver.add_event(event);
+                                sib_solver.add(def);
+                            }
+                            sibling_solvers.push(sib_solver);
+                            sibling_frames.push(unfreeze_frame(&sib.frame));
+                        }
+                        match merge_frames(&mut primary_frame, sibling_frames, &mut solver, shared_state) {
+                            Ok(_) => {
+                                merge_traces(parent_id, &mut solver, sibling_solvers, SourceLoc::unknown());
+                            }
+                            Err(_) => {}
+                        }
+                        task.frame = freeze_frame(&primary_frame);
+                    }
+                }
+            }
+        }
+
         let result = run(
             0,
             task.id,
