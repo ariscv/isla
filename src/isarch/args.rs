@@ -1,11 +1,7 @@
-use crate::bitvector::BV;
-use crate::dlog;
-use crate::ir::*;
-use crate::isarch::{get_symbolic_arg_all, ir_assembly_names_to_InstructionMap};
-use crate::register::RegisterBindings;
-use crate::smt::Checkpoint;
-use crate::zencode;
-use serde::{Deserialize, Serialize};
+use isla_lib::bitvector::BV;
+use isla_lib::ir::*;
+use isla_lib::register::RegisterBindings;
+use isla_lib::smt::Checkpoint;
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -125,6 +121,9 @@ impl<'ir, B: BV> InstructionMap<'ir, B> {
         InstructionMap::new(merged_table, self.shared_state)
     }
 }
+
+#[cfg(feature = "debug_clause_args")]
+use crate::isarch::{get_symbolic_arg_all, ir_assembly_names_to_InstructionMap};
 
 #[cfg(feature = "debug_clause_args")]
 pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
