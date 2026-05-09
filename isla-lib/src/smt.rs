@@ -278,6 +278,8 @@ pub enum Event<B> {
     Smt(Def, DefAttrs, SourceLoc),
     /// Fork ID, assertion, branch number, source location
     Fork(u32, Sym, u32, SourceLoc),
+    /// Fork group ID, number of merged paths, source location
+    Merge(u32, usize, SourceLoc),
     /// Used to delimit function calls and returns in the trace
     Function {
         name: Name,
@@ -431,6 +433,10 @@ impl<B: BV> Event<B> {
     }
     pub fn is_fork(&self) -> bool {
         matches!(self, Event::Fork(_, _, _, _))
+    }
+
+    pub fn is_merge(&self) -> bool {
+        matches!(self, Event::Merge(_, _, _))
     }
 
     pub fn is_memory_read_or_write(&self) -> bool {

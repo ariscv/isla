@@ -57,6 +57,7 @@ where
     match event {
         Smt(def, _, _) => renumber_def(def, f),
         Fork(_, v, _, _) => *v = Sym { id: f(v.id) },
+        Merge(_, _, _) => (),
         Abstract { name: _, primitive: _, args, return_value } => {
             for arg in args.iter_mut() {
                 renumber_val(arg, f)
@@ -430,6 +431,7 @@ fn calculate_more_uses<B, E: Borrow<Event<B>>>(events: &[E], uses: &mut HashMap<
             Fork(_, sym, _, _) => {
                 uses.insert(*sym, uses.get(sym).unwrap_or(&0) + 1);
             }
+            Merge(_, _, _) => (),
             Cycle => (),
             Instr(val) => uses_in_value(uses, val),
             MarkReg { .. } => (),
@@ -510,6 +512,7 @@ fn calculate_required_uses<B, E: Borrow<Event<B>>>(events: &[E]) -> HashMap<Sym,
             Fork(_, sym, _, _) => {
                 uses.insert(*sym, uses.get(sym).unwrap_or(&0) + 1);
             }
+            Merge(_, _, _) => (),
             Cycle => (),
             Instr(val) => uses_in_value(&mut uses, val),
             MarkReg { .. } => (),
@@ -1102,10 +1105,17 @@ fn break_into_forks<B: BV, E: Borrow<Event<B>>>(events: &[E]) -> Vec<(Option<u32
     let mut current: Option<u32> = None;
 
     for (j, event) in events.iter().enumerate() {
-        if let Event::Fork(_fork_no, _, branch_no, info) = event.borrow() {
-            result.push((current, *info, &events[i..j]));
-            i = j + 1;
-            current = Some(*branch_no)
+        match event.borrow() {
+            Event::Fork(_fork_no, _, branch_no, info) => {
+                result.push((current, *info, &events[i..j]));
+                i = j + 1;
+                current = Some(*branch_no)
+            }
+            Event::Merge(_, _, info) => {
+                result.push((current, *info, &events[i..j]));
+                i = j + 1;
+            }
+            _ => continue,
         }
     }
     result.push((current, SourceLoc::unknown(), &events[i..]));
@@ -1630,6 +1640,10 @@ pub fn write_events_in_context<B: BV>(
         (match event {
             Fork(n, _, _, loc) => {
                 write!(buf, "\n{}  (branch {} \"{}\")", indent, n, loc.location_string(symtab.files()))
+            }
+
+            Merge(group_id, path_count, loc) => {
+                write!(buf, "\n{}  (merge {} {} \"{}\")", indent, group_id, path_count, loc.location_string(symtab.files()))
             }
 
             Function { name, call } => {
