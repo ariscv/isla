@@ -3,6 +3,7 @@ use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
 use isla_lib::executor::{backtrace_string, Run};
+use isla_lib::executor::{ExecutionLimits, LimitBehavior, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::UVal;
 use isla_lib::ir::*;
@@ -284,11 +285,18 @@ pub fn run_symbolic_execute<B: BV>(
 
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
+    let limits = ExecutionLimits::default()
+        .with_max_forks_per_branch(2)
+        .with_max_total_forks(8)
+        .with_max_backjumps_per_loop(10)
+        .with_max_path_depth(10000)
+        .with_limit_behavior(LimitBehavior::Concretize);
+    let task_state = TaskState::new().with_execution_limits(limits);
 
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
 
-    isla_lib::executor::execute_ir_function_with_checkpoint(
+    isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
         "zexecute",
         &fun_args,
         shared_state,
@@ -521,6 +529,7 @@ pub fn run_symbolic_execute<B: BV>(
             }
         },
         cp,
+        task_state,
     );
 
     // 提取字符串结果
