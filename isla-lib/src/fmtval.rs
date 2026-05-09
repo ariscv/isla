@@ -125,7 +125,8 @@ impl BitVal {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum FmtVal {
+#[non_exhaustive]
+pub enum FmtVal {
     Bits(BitVal),
     Enum(EnumMember),
 }

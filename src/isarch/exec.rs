@@ -1,26 +1,24 @@
-use crate::bitvector::BV;
-use crate::dprint::{self, colors};
-use crate::error::{ExecError, IslaError};
-use crate::executor::{backtrace_string, LocalFrame, Run};
-use crate::fmtval::FmtVal;
-use crate::ir::UVal;
-use crate::isarch::{self, get_assembly_name};
-use crate::primop_util::symbolic;
-use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context, Event, Model, ModelVal};
-use crate::smt::{Solver, Sym};
-use crate::source_loc::SourceLoc;
-use crate::target::{RISCV, RV64, Target};
-use crate::zencode;
-use crate::{dlog, log};
-use crate::{ir::*, smt};
+use isla_lib::bitvector::BV;
+use isla_lib::error::ExecError;
+use isla_lib::error::IslaError;
+use isla_lib::executor::{backtrace_string, Run};
+use isla_lib::fmtval::FmtVal;
+use isla_lib::ir::UVal;
+use super::{get_assembly_name, get_assembly_encdec};
+use isla_lib::primop_util::symbolic;
+use isla_lib::register::RegisterBindings;
+use isla_lib::smt::{Config, Context, Model};
+use isla_lib::smt::{Solver, Sym};
+use isla_lib::source_loc::SourceLoc;
+use isla_lib::zencode;
+use isla_lib::{dlog, log};
+use isla_lib::{ir::*, smt};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-#[macro_export]
 macro_rules! hashmap {
     // 空 map
     () => {
@@ -44,8 +42,78 @@ macro_rules! hashmap {
     }};
 }
 
+pub trait Target
+where
+    Self: Sync,
+{
+    fn arch_name(&self) -> &'static str;
+    fn arch_pretty_name(&self) -> &'static str;
+    fn xlen(&self) -> &'static str;
+    fn isa_state_list(&self) -> Vec<String>;
+}
+
+pub trait RISCV: Target {
+    fn xlen_bits(&self) -> &'static str;
+    fn xlen_name(&self) -> &'static str;
+}
+
+impl<T: RISCV> Target for T {
+    fn arch_name(&self) -> &'static str {
+        "riscv"
+    }
+
+    fn arch_pretty_name(&self) -> &'static str {
+        self.xlen_name()
+    }
+
+    fn xlen(&self) -> &'static str {
+        self.xlen_bits()
+    }
+
+    fn isa_state_list(&self) -> Vec<String> {
+        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
+        regs.extend((0..32).map(|r| format!("f{}", r)));
+        regs.push("PC".to_string());
+        regs.push("cur_privilege".to_string());
+        regs.extend(["mstatus".to_string()]);
+        regs
+    }
+}
+
+pub enum RISCVTarget {
+    RV32,
+    RV64,
+}
+
+impl RISCVTarget {
+    pub fn from_xlen(xlen: u32) -> Self {
+        match xlen {
+            32 => RISCVTarget::RV32,
+            64 => RISCVTarget::RV64,
+            _ => panic!("from_xlen(xlen={xlen})的值不是64或者32的其中一个，你是不是IR文件选错了或者配置给错了?"),
+        }
+    }
+}
+
+impl RISCV for RISCVTarget {
+    fn xlen_bits(&self) -> &'static str {
+        match self {
+            RISCVTarget::RV32 => "32",
+            RISCVTarget::RV64 => "64",
+        }
+    }
+
+    fn xlen_name(&self) -> &'static str {
+        match self {
+            RISCVTarget::RV32 => "rv32d",
+            RISCVTarget::RV64 => "rv64d",
+        }
+    }
+}
+
+#[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
-struct AssemGen_Json_Item {
+struct AssemGenJsonItem {
     arch: BTreeMap<String, String>,
     #[serde(rename = "test-ins")]
     test_ins: String,
@@ -55,7 +123,7 @@ struct AssemGen_Json_Item {
     isa_state: BTreeMap<String, String>,
     ret_val: String,
 }
-impl AssemGen_Json_Item {
+impl AssemGenJsonItem {
     pub fn new<T: Target>(
         target: &T,
         test_ins: String,
@@ -68,10 +136,11 @@ impl AssemGen_Json_Item {
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGen_Json_Item { arch, test_ins, test_ins_encdec, isa_state, ret_val }
+        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val }
     }
 }
 trait ToJSON: Serialize {
+    #[allow(dead_code)]
     fn to_json_str(&self) -> String {
         serde_json::to_string_pretty(self).unwrap()
     }
@@ -90,19 +159,21 @@ trait ToJSON: Serialize {
         fs::write(path, json).unwrap();
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
-struct AssemGen_Json {
-    gen: Vec<AssemGen_Json_Item>,
+struct AssemGenJson {
+    gen: Vec<AssemGenJsonItem>,
 }
-impl ToJSON for AssemGen_Json {}
-impl ToJSON for AssemGen_Json_Item {}
-impl AssemGen_Json {
-    fn new(gen: Vec<AssemGen_Json_Item>) -> Self {
-        AssemGen_Json { gen }
+impl ToJSON for AssemGenJson {}
+impl ToJSON for AssemGenJsonItem {}
+impl AssemGenJson {
+    fn new(gen: Vec<AssemGenJsonItem>) -> Self {
+        AssemGenJson { gen }
     }
 }
 
-fn symbolic_args_from_TYPEs<B: BV>(
+#[allow(non_snake_case)]
+fn symbolic_args_from_types<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
@@ -130,7 +201,7 @@ fn symbolic_args_from_TYPEs<B: BV>(
     };
 
     //hook: zSTORE
-    if (instruction_name == "zSTORE") {
+    if instruction_name == "zSTORE" {
         eprintln!("hook(zSTORE):ctor_ty={:#?}", ctor_ty);
     }
 
@@ -175,12 +246,12 @@ pub fn run_symbolic_execute<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-    initial_memory: Option<crate::memory::Memory<B>>,
+    initial_memory: Option<isla_lib::memory::Memory<B>>,
     pmp_symbolic: bool,
 ) -> Result<Option<String>, ExecError> {
-    use crate::smt::checkpoint;
+    use isla_lib::smt::checkpoint;
 
-    let target = RV64;
+    let target = RISCVTarget::RV64;
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
     let ctx = Context::new(cfg);
@@ -188,7 +259,7 @@ pub fn run_symbolic_execute<B: BV>(
     let mut symbolic_regs = regs.clone();
 
     if pmp_symbolic {
-        crate::target::apply_symbolic_pmp_to_registers(
+        isla_lib::target::apply_symbolic_pmp_to_registers(
             &shared_state.symtab,
             &mut symbolic_regs,
             shared_state,
@@ -196,12 +267,12 @@ pub fn run_symbolic_execute<B: BV>(
         )?;
     }
 
-    // 使用 symbolic_args_from_TYPEs 生成符号化参数
+    // 使用 symbolic_args_from_types 生成符号化参数
     let ctor_name = shared_state.symtab.lookup(instruction_name);
 
     let fun_args = vec![Val::<B>::Ctor(
         ctor_name,
-        Box::new(symbolic_args_from_TYPEs(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
+        Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
     )];
     println!("fun_args:{:?}", fun_args);
     println!("{:?}", target.isa_state_list());
@@ -214,9 +285,9 @@ pub fn run_symbolic_execute<B: BV>(
     let cp = checkpoint(&mut solver);
 
     // 使用checkpoint执行函数，支持错误传播
-    let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
+    let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
 
-    crate::executor::execute_ir_function_with_checkpoint(
+    isla_lib::executor::execute_ir_function_with_checkpoint(
         "zexecute",
         &fun_args,
         shared_state,
@@ -248,7 +319,7 @@ pub fn run_symbolic_execute<B: BV>(
                                         // arg_val 就是指令的参数值
                                         Some(UVal::Init(arg_val)) => {
                                             println!("{:#?}", arg_val);
-                                            isarch::get_assembly_name(arg_val.clone(), &shared_state, regs, lets)
+                                            get_assembly_name(arg_val.clone(), &shared_state, regs, lets)
                                         }
                                         _ => panic!(""),
                                     }
@@ -264,7 +335,7 @@ pub fn run_symbolic_execute<B: BV>(
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
-                        if solver.check_sat(SourceLoc::unknown()) == crate::smt::SmtResult::Sat {
+                        if solver.check_sat(SourceLoc::unknown()) == isla_lib::smt::SmtResult::Sat {
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
@@ -275,14 +346,14 @@ pub fn run_symbolic_execute<B: BV>(
                                 match model.get_val(&fun_args[0]) {
                                     Ok(arg_val) => {
                                         let asm_opt =
-                                            isarch::get_assembly_name(arg_val.clone(), shared_state, regs, lets);
+                                            get_assembly_name(arg_val.clone(), shared_state, regs, lets);
                                         println!("当前汇编：{:?}", asm_opt);
                                         match asm_opt {
-                                            Some(asm) => test_ins = asm.clone(),
+                                            Some(asm) => test_ins = asm,
                                             None => return,
                                         }
                                         let asm_encdec_opt =
-                                            isarch::get_assembly_encdec(arg_val.clone(), shared_state, regs, lets);
+                                            get_assembly_encdec(arg_val.clone(), shared_state, regs, lets);
                                         let asm_encdec_opt = asm_encdec_opt.map(|val| {
                                             FmtVal::from_val(&val, &mut model).unwrap().to_str(shared_state)
                                         });
@@ -326,7 +397,7 @@ pub fn run_symbolic_execute<B: BV>(
                                             .unwrap_or_else(|_| val.to_str(shared_state));
                                         let fv = model.get_fmtval(val);
                                         match fv {
-                                            Err(ExecError) => continue,
+                                            Err(exec_error) => continue,
                                             Ok(fmt_val) => {
                                                 // println!("  {} = {}", reg_name_decoded, formatted);
                                                 if fmt_val.is_arbitrary() {
@@ -350,10 +421,10 @@ pub fn run_symbolic_execute<B: BV>(
                                     if !let_name_str.starts_with("__") && let_name_str != "NULL" {
                                         match let_val {
                                             UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits64(bv))) => {
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits64(bv))) => {
                                                     println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
                                                 }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits(bv))) => {
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits(bv))) => {
                                                     let hex_str: String = bv
                                                         .chunks(4)
                                                         .rev()
@@ -369,10 +440,10 @@ pub fn run_symbolic_execute<B: BV>(
                                                         .collect();
                                                     println!("  let {} = 0b{}", let_name_str, hex_str);
                                                 }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bool(b))) => {
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bool(b))) => {
                                                     println!("  let {} = {}", let_name_str, b);
                                                 }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Enum(
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(
                                                     member,
                                                 ))) => {
                                                     let name = member.to_name(shared_state);
@@ -415,7 +486,7 @@ pub fn run_symbolic_execute<B: BV>(
                             }
                             solver.dump_solver("solver.dump");
                         }
-                        let single_instruction_json = AssemGen_Json_Item::new(
+                        let single_instruction_json = AssemGenJsonItem::new(
                             &target,
                             test_ins,
                             test_ins_encdec,
@@ -454,7 +525,7 @@ pub fn run_symbolic_execute<B: BV>(
 
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        let xlen_name = RV64::xlen_name();
+        let xlen_name = RISCVTarget::RV64.xlen_name();
         result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name, instruction_name)));
         Ok(None)
     } else {
@@ -468,11 +539,9 @@ pub fn test_exec_main<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-    initial_memory: Option<crate::memory::Memory<B>>,
+    initial_memory: Option<isla_lib::memory::Memory<B>>,
     pmp_symbolic: bool,
 ) {
-    use std::{process::exit, vec};
-
     println!("test_exec_main");
     /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
         Ok(_) => {}
@@ -849,7 +918,7 @@ pub fn test_exec_main<B: BV>(
     ];
     // instruction_table.extend( todo_instruction_table.to_vec());
 
-    /*     let ext_i_instruction_table = [
+    let ext_i_instruction_table = [
         "zADDIW",
         "zBTYPE",
         "zEBREAK",
@@ -871,7 +940,7 @@ pub fn test_exec_main<B: BV>(
         "zUTYPE",
         "zWFI",
     ];
-    instruction_table.extend(ext_i_instruction_table.to_vec()); */
+    instruction_table.extend(ext_i_instruction_table.to_vec());
 
     let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
         .into_iter()
