@@ -1207,6 +1207,16 @@ fn merge_frames<'ir, B: BV>(
     Ok(merged_condition)
 }
 
+fn merge_traces<B: BV>(
+    fork_group_id: u32,
+    solver_primary: &mut Solver<B>,
+    solvers_siblings: Vec<Solver<B>>,
+    info: SourceLoc,
+) {
+    let path_count = 1 + solvers_siblings.len();
+    solver_primary.add_event(Event::Merge(fork_group_id, path_count, info));
+}
+
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
