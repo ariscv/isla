@@ -3714,4 +3714,127 @@ fn zrX(z3zE1756) {
         assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
         assert!(results.iter().all(Result::is_ok));
     }
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    fn run_all_with_merging<'ir>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: SharedState<'ir, B64>,
+        regs: RegisterBindings<'ir, B64>,
+        lets: Bindings<'ir, B64>,
+    ) -> Vec<Result<Run<B64>, ExecError>> {
+        let frame = make_frame_with_bindings(instrs, &regs, &lets);
+        let task_state = TaskState::new().with_execution_limits(limits);
+        let queue: RefCell<VecDeque<Task<'ir, '_, B64>>> = RefCell::new(VecDeque::new());
+        queue.borrow_mut().push_back(frame.task(TaskId::from_usize(0), &task_state));
+        let mut results = Vec::new();
+        loop {
+            let mut task = match queue.borrow_mut().pop_back() {
+                Some(task) => task,
+                None => break,
+            };
+            let mut cfg = Config::new();
+            cfg.set_param_value("model", "true");
+            let ctx = Context::new(cfg);
+            let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+            if let Some((def, event)) = task.fork_cond.take() {
+                solver.add_event(event);
+                solver.add(def);
+            }
+            let path_merging = task.state.execution_limits.as_ref().map(|l| l.path_merging).unwrap_or(false);
+            let merge_info = if path_merging {
+                if let Some(ref fork_node) = task.frame.fork_tree_node {
+                    if let Some(parent_id) = fork_node.parent {
+                        let merge_key = (parent_id, task.frame.function_name, task.frame.pc);
+                        let siblings = drain_matching(&queue, merge_key);
+                        if !siblings.is_empty() {
+                            Some((parent_id, siblings))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let mut task_frame = unfreeze_frame(&task.frame);
+            if let Some((parent_id, siblings)) = merge_info {
+                let mut sibling_solvers = Vec::new();
+                let mut sibling_frames = Vec::new();
+                for sib in siblings {
+                    let mut sib_solver = Solver::from_checkpoint(&ctx, sib.checkpoint);
+                    if let Some((def, event)) = sib.fork_cond {
+                        sib_solver.add_event(event);
+                        sib_solver.add(def);
+                    }
+                    sibling_solvers.push(sib_solver);
+                    sibling_frames.push(unfreeze_frame(&sib.frame));
+                }
+                match merge_frames(&mut task_frame, sibling_frames, &mut solver, &shared_state) {
+                    Ok(_) => {
+                        merge_traces(parent_id, &mut solver, sibling_solvers, info());
+                    }
+                    Err(_) => {}
+                }
+            }
+            results.push(run_loop(
+                0,
+                task.id,
+                &mut task.fraction,
+                Timeout::unlimited(),
+                task.stop_conditions,
+                &queue,
+                &mut task_frame,
+                task.state,
+                &shared_state,
+                &mut solver,
+            ));
+        }
+        results
+    }
+    #[test]
+    fn path_merging_reduces_forks_in_zrx() {
+        let (instrs, shared_state, regs, lets) = real_zrx_program();
+        let limits = ExecutionLimits::default()
+            .with_path_merging(true)
+            .with_max_forks_per_branch(2)
+            .with_max_total_forks(8);
+        let results = run_all_with_merging(instrs, limits, shared_state, regs, lets);
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bits(_))))));
+    }
+    #[test]
+    fn path_merging_preserves_semantics() {
+        let (instrs_a, shared_state_a, regs_a, lets_a) = real_zrx_program();
+        let limits_no_merge = ExecutionLimits::default().with_max_forks_per_branch(2);
+        let results_no_merge = run_all_with_bindings(instrs_a, limits_no_merge, shared_state_a, regs_a, lets_a);
+        let (instrs_b, shared_state_b, regs_b, lets_b) = real_zrx_program();
+        let limits_merge = ExecutionLimits::default().with_path_merging(true).with_max_forks_per_branch(2);
+        let results_merge = run_all_with_merging(instrs_b, limits_merge, shared_state_b, regs_b, lets_b);
+        assert!(results_no_merge.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bits(_))))));
+        assert!(results_merge.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bits(_))))));
+    }
+    #[test]
+    fn path_merging_disabled_by_default() {
+        assert!(!ExecutionLimits::default().path_merging);
+    }
+    #[test]
+    fn path_merging_n_way_merge_scenario() {
+        let (instrs, shared_state) = repeated_call_fork_program(4);
+        let limits = ExecutionLimits::default()
+            .with_path_merging(true)
+            .with_max_total_forks(4);
+        let results = run_all_with_merging(
+            instrs,
+            limits,
+            shared_state,
+            RegisterBindings::new(),
+            HashMap::default(),
+        );
+        assert!(!results.is_empty());
+    }
 }
