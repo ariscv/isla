@@ -5,111 +5,20 @@ use isla_lib::executor::{backtrace_string, Run};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::UVal;
 use super::{get_assembly_name, get_assembly_encdec};
+use super::target::{Target, RISCV, RV32, RV64};
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
-use isla_lib::{dlog, log};
-use isla_lib::{ir::*, smt};
+use isla_lib::{log};
+use isla_lib::ir::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-
-macro_rules! hashmap {
-    // 空 map
-    () => {
-        ::std::collections::HashMap::new()
-    };
-
-    // 单个键值对，无尾随逗号
-    ($key:tt: $value:expr) => {{
-        let mut _map = ::std::collections::HashMap::new();
-        _map.insert($key, $value);
-        _map
-    }};
-
-    // 多个键值对，支持尾随逗号
-    ($($key:tt: $value:expr),+ $(,)?) => {{
-        let mut _map = ::std::collections::HashMap::new();
-        $(
-            _map.insert($key, $value);
-        )+
-        _map
-    }};
-}
-
-pub trait Target
-where
-    Self: Sync,
-{
-    fn arch_name(&self) -> &'static str;
-    fn arch_pretty_name(&self) -> &'static str;
-    fn xlen(&self) -> &'static str;
-    fn isa_state_list(&self) -> Vec<String>;
-}
-
-pub trait RISCV: Target {
-    fn xlen_bits(&self) -> &'static str;
-    fn xlen_name(&self) -> &'static str;
-}
-
-impl<T: RISCV> Target for T {
-    fn arch_name(&self) -> &'static str {
-        "riscv"
-    }
-
-    fn arch_pretty_name(&self) -> &'static str {
-        self.xlen_name()
-    }
-
-    fn xlen(&self) -> &'static str {
-        self.xlen_bits()
-    }
-
-    fn isa_state_list(&self) -> Vec<String> {
-        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
-        regs.extend((0..32).map(|r| format!("f{}", r)));
-        regs.push("PC".to_string());
-        regs.push("cur_privilege".to_string());
-        regs.extend(["mstatus".to_string()]);
-        regs
-    }
-}
-
-pub enum RISCVTarget {
-    RV32,
-    RV64,
-}
-
-impl RISCVTarget {
-    pub fn from_xlen(xlen: u32) -> Self {
-        match xlen {
-            32 => RISCVTarget::RV32,
-            64 => RISCVTarget::RV64,
-            _ => panic!("from_xlen(xlen={xlen})的值不是64或者32的其中一个，你是不是IR文件选错了或者配置给错了?"),
-        }
-    }
-}
-
-impl RISCV for RISCVTarget {
-    fn xlen_bits(&self) -> &'static str {
-        match self {
-            RISCVTarget::RV32 => "32",
-            RISCVTarget::RV64 => "64",
-        }
-    }
-
-    fn xlen_name(&self) -> &'static str {
-        match self {
-            RISCVTarget::RV32 => "rv32d",
-            RISCVTarget::RV64 => "rv64d",
-        }
-    }
-}
 
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
@@ -200,46 +109,7 @@ fn symbolic_args_from_types<B: BV>(
         ));
     };
 
-    //hook: zSTORE
-    if instruction_name == "zSTORE" {
-        eprintln!("hook(zSTORE):ctor_ty={:#?}", ctor_ty);
-    }
-
-    let mut ret_val = symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())?;
-
-    //hook: zSTORE
-
-    let hook_overwrite_map = hashmap! {
-        "zSTORE":hashmap!{
-            "tuple#%bv12_%bv5_%bv5_%i643":"I64(4)"
-        },
-        "zLOAD":hashmap!{
-            "tuple#%bv12_%bv5_%bv5_%bool_%i644":"I64(4)"
-        }
-    };
-    // 当在hook_overwrite_map表中发现了要hook的名字，并获取要覆写的参数字段，比如zSTORE.keys()
-    if let Some(zTYPE_name_map) = hook_overwrite_map.get(instruction_name) {
-        for (&target_arg_type, &target_arg_value) in zTYPE_name_map {
-            //hook: 检查类型名 ztuplez3z5bv12_z5bv5_z5bv5_z5i643
-            let target_arg_ztype = zencode::encode(target_arg_type);
-            match &mut ret_val {
-                Val::Struct(name) => {
-                    name.iter_mut().for_each(|(n, v)| {
-                        let field_name = shared_state.symtab.to_str(*n);
-
-                        if field_name == target_arg_ztype {
-                            *v = Val::from_str(target_arg_value, shared_state).unwrap();
-                            eprintln!("hook(field_name={target_arg_ztype}): value={:#?}", v);
-                        }
-                    });
-                }
-                _ => panic!("未预期类型的ret_val: {:?}", ret_val),
-            }
-            eprintln!("hook:ret_val={:#?}", ret_val);
-        }
-    }
-
-    Ok(ret_val)
+    symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())
 }
 pub fn run_symbolic_execute<B: BV>(
     instruction_name: &str,
@@ -249,9 +119,29 @@ pub fn run_symbolic_execute<B: BV>(
     initial_memory: Option<isla_lib::memory::Memory<B>>,
     pmp_symbolic: bool,
 ) -> Result<Option<String>, ExecError> {
+    let xlen_name = shared_state.symtab.lookup("zxlen");
+    let xlen = match lets.get(&xlen_name) {
+        Some(UVal::Init(Val::I64(n))) => *n as u32,
+        Some(UVal::Init(Val::I128(n))) => *n as u32,
+        _ => 64,
+    };
+    match xlen {
+        32 => run_symbolic_execute_with_target(&RV32, instruction_name, shared_state, regs, lets, initial_memory, pmp_symbolic),
+        _  => run_symbolic_execute_with_target(&RV64, instruction_name, shared_state, regs, lets, initial_memory, pmp_symbolic),
+    }
+}
+
+fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
+    target: &T,
+    instruction_name: &str,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+    initial_memory: Option<isla_lib::memory::Memory<B>>,
+    pmp_symbolic: bool,
+) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
-    let target = RISCVTarget::RV64;
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
     let ctx = Context::new(cfg);
@@ -259,11 +149,8 @@ pub fn run_symbolic_execute<B: BV>(
     let mut symbolic_regs = regs.clone();
 
     if pmp_symbolic {
-        isla_lib::target::apply_symbolic_pmp_to_registers(
-            &shared_state.symtab,
-            &mut symbolic_regs,
-            shared_state,
-            &mut solver,
+        target.apply_symbolic_pmp_to_registers(
+            &shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver,
         )?;
     }
 
@@ -274,8 +161,8 @@ pub fn run_symbolic_execute<B: BV>(
         ctor_name,
         Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
     )];
-    println!("fun_args:{:?}", fun_args);
-    println!("{:?}", target.isa_state_list());
+    log!(log::SYM_EXEC, &format!("fun_args:{:?}", fun_args));
+    log!(log::ARCH_INFO, &format!("{:?}", target.isa_state_list()));
 
     // 生成参数（暂时使用默认值，测试checkpoint机制）
 
@@ -298,14 +185,17 @@ pub fn run_symbolic_execute<B: BV>(
             match exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(Val::Poison) => {
-                        eprintln!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_",instruction_name)
+                        log!(log::SYM_EXEC, &format!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_", instruction_name))
                     }
                     Run::Finished(ret_val) => {
-                        println!(
-                            "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
-                            thread,
-                            frame.forks,
-                            ret_val.to_str(shared_state)
+                        log!(
+                            log::PATH_RESULT,
+                            &format!(
+                                "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
+                                thread,
+                                frame.forks,
+                                ret_val.to_str(shared_state)
+                            )
                         );
                         /* let assembly = {
                             // 获取 zexecute 函数的参数信息
@@ -339,7 +229,7 @@ pub fn run_symbolic_execute<B: BV>(
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
-                                println!("2. === ISA State (Thread {}) ===", thread);
+                                log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
                                 let test = Sym::from_u32(6);
                                 // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
@@ -347,7 +237,7 @@ pub fn run_symbolic_execute<B: BV>(
                                     Ok(arg_val) => {
                                         let asm_opt =
                                             get_assembly_name(arg_val.clone(), shared_state, regs, lets);
-                                        println!("当前汇编：{:?}", asm_opt);
+                                        log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
                                         match asm_opt {
                                             Some(asm) => test_ins = asm,
                                             None => return,
@@ -357,14 +247,14 @@ pub fn run_symbolic_execute<B: BV>(
                                         let asm_encdec_opt = asm_encdec_opt.map(|val| {
                                             FmtVal::from_val(&val, &mut model).unwrap().to_str(shared_state)
                                         });
-                                        println!("当前汇编encdec：{:?}", asm_encdec_opt);
+                                        log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
                                         match asm_encdec_opt {
                                             Some(encdec) => test_ins_encdec = encdec,
                                             None => return,
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("警告: {}没有汇编 {:?}", instruction_name, e);
+                                        log!(log::PATH_RESULT, &format!("警告: {}没有汇编 {:?}", instruction_name, e));
                                         //*collected.lock().unwrap() = Err(e);
                                         return;
                                     }
@@ -413,7 +303,10 @@ pub fn run_symbolic_execute<B: BV>(
                                     }
                                 }
 
-                                println!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap());
+                                log!(
+                                    log::PATH_RESULT,
+                                    &format!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap())
+                                );
                                 // 遍历lets中的特殊变量（如current_privilege等）
                                 /* for (let_name, let_val) in frame.lets().iter() {
                                     let let_name_str = shared_state.symtab.to_str(*let_name);
@@ -482,12 +375,12 @@ pub fn run_symbolic_execute<B: BV>(
                                         _ => println!(" [event] {:?}", event),
                                     }
                                 } */
-                                println!("3. ==============================\n");
+                                log!(log::PATH_RESULT, "3. ==============================");
                             }
                             solver.dump_solver("solver.dump");
                         }
                         let single_instruction_json = AssemGenJsonItem::new(
-                            &target,
+                            target,
                             test_ins,
                             test_ins_encdec,
                             isa_state,
@@ -496,10 +389,19 @@ pub fn run_symbolic_execute<B: BV>(
                         let mut instruction_json = collected.lock().unwrap();
                         instruction_json.gen.push(single_instruction_json);
                     }
-                    Run::Exit => println!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks),
-                    Run::Dead => println!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks),
+                    Run::Exit => log!(
+                        log::PATH_RESULT,
+                        &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks)
+                    ),
+                    Run::Dead => log!(
+                        log::PATH_RESULT,
+                        &format!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks)
+                    ),
 
-                    Run::Suspended => println!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks),
+                    Run::Suspended => log!(
+                        log::PATH_RESULT,
+                        &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks)
+                    ),
                 },
                 Err((error, backtrace)) => {
                     match &error {
@@ -507,13 +409,19 @@ pub fn run_symbolic_execute<B: BV>(
                             // 静默处理
                         }
                         _ => {
-                            eprintln!(
-                                "执行错误: {}({:?})[{}]",
-                                error,
-                                error,
-                                error.source_loc().location_string(shared_state.symtab.files())
+                            log!(
+                                log::SYM_EXEC,
+                                &format!(
+                                    "执行错误: {}({:?})[{}]",
+                                    error,
+                                    error,
+                                    error.source_loc().location_string(shared_state.symtab.files())
+                                )
                             );
-                            eprintln!("调用栈: {}", backtrace_string(&backtrace, &shared_state.symtab));
+                            log!(
+                                log::SYM_EXEC,
+                                &format!("调用栈: {}", backtrace_string(&backtrace, &shared_state.symtab))
+                            );
                         }
                     }
                 }
@@ -525,11 +433,11 @@ pub fn run_symbolic_execute<B: BV>(
 
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        let xlen_name = RISCVTarget::RV64.xlen_name();
-        result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name, instruction_name)));
+        let xlen_name_str = target.arch_pretty_name();
+        result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
         Ok(None)
     } else {
-        eprintln!("警告: {}无法获取 result 收集器", instruction_name);
+        log!(log::SYM_EXEC, &format!("警告: {}无法获取 result 收集器", instruction_name));
         Ok(None)
     }
 }
@@ -542,7 +450,7 @@ pub fn test_exec_main<B: BV>(
     initial_memory: Option<isla_lib::memory::Memory<B>>,
     pmp_symbolic: bool,
 ) {
-    println!("test_exec_main");
+    log!(log::SYM_EXEC, "test_exec_main");
     /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
         Ok(_) => {}
         Err(e) => {
@@ -1014,7 +922,7 @@ pub fn test_exec_main<B: BV>(
         match run_symbolic_execute(ins_name, &shared_state, regs, lets, initial_memory.clone(), pmp_symbolic) {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("test_exec_main: {}运行错误 {}", ins_name, e)
+                log!(log::SYM_EXEC, &format!("test_exec_main: {}运行错误 {}", ins_name, e))
             }
         };
     }

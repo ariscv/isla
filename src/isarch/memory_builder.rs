@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::bitvector::BV;
-use crate::config::{ISAConfig, MemoryRegionType, PageTableConfig, PageTableMode, PageTablePreset, ProtectedRange};
-use crate::memory::{Memory, Region};
-use crate::target::{ppn_from_pa, RiscvPte, RV64};
+use isla_lib::bitvector::BV;
+use isla_lib::config::{ISAConfig, MemoryRegionType, PageTableConfig, PageTableMode, PageTablePreset, ProtectedRange};
+use isla_lib::memory::{Memory, Region};
+use super::target::{RiscvPte, RISCV, RV64};
 
 enum PendingRegion {
     Concrete { base: u64, size: u64 },
@@ -39,6 +39,7 @@ impl<B: BV> MemoryBuilder<B> {
                 builder = match region.region_type {
                     MemoryRegionType::Concrete => builder.add_concrete_region(region.base, region.size),
                     MemoryRegionType::Symbolic => builder.add_symbolic_region(region.base, region.size),
+                    _ => return Err("unsupported memory region type".to_string()),
                 };
             }
         }
@@ -208,6 +209,7 @@ impl<B: BV> MemoryBuilder<B> {
                 PageTablePreset::Offset => Self::populate_offset_mapping(config, &mut memory)?,
                 PageTablePreset::ProtectedLinear => Self::populate_protected_mapping(config, &mut memory)?,
                 PageTablePreset::SymbolicMapping => Self::populate_symbolic_mapping(config, &mut memory)?,
+                _ => return Err("unsupported page table preset".to_string()),
             }
         }
 
@@ -221,6 +223,7 @@ impl<B: BV> MemoryBuilder<B> {
                 .map(|region| memory.add_region(region)),
             PageTableMode::SV48 => Self::populate_sv48_tables(config, |vpn1| Ok(Self::default_leaf_pte(vpn1 << 21)))
                 .map(|region| memory.add_region(region)),
+            _ => Err("unsupported page table mode".to_string()),
         }
     }
 
@@ -244,6 +247,7 @@ impl<B: BV> MemoryBuilder<B> {
                 Ok(Self::default_leaf_pte(pa))
             })
             .map(|region| memory.add_region(region)),
+            _ => Err("unsupported page table mode".to_string()),
         }
     }
 
@@ -253,24 +257,28 @@ impl<B: BV> MemoryBuilder<B> {
             PageTableMode::SV39 => Self::populate_sv39_tables(config, |vpn1| {
                 let va = vpn1 << 21;
                 let flags = Self::flags_for_va(config, va)?;
-                Ok(RiscvPte::new(ppn_from_pa(va), flags))
+                Ok(RiscvPte::new(RV64.ppn_from_pa(va), flags))
             })
             .map(|region| memory.add_region(region)),
             PageTableMode::SV48 => Self::populate_sv48_tables(config, |vpn1| {
                 let va = vpn1 << 21;
                 let flags = Self::flags_for_va(config, va)?;
-                Ok(RiscvPte::new(ppn_from_pa(va), flags))
+                Ok(RiscvPte::new(RV64.ppn_from_pa(va), flags))
             })
             .map(|region| memory.add_region(region)),
+            _ => Err("unsupported page table mode".to_string()),
         }
     }
 
-    // TODO(s symbolic): currently identical to identity mapping. True symbolic PTEs need a Solver
-    // at build time, which MemoryBuilder doesn't have. Revisit when executor supports post-build
-    // PTE symbolization.
     fn populate_symbolic_mapping(config: &PageTableConfig, memory: &mut Memory<B>) -> Result<(), String> {
-        eprintln!("Warning: page table preset 'symbolic' currently behaves as 'identity' — symbolic PTEs not yet implemented");
-        Self::populate_identity_mapping(config, memory)
+        Self::validate_page_table_config(config)?;
+        let pt_size = match config.mode {
+            PageTableMode::SV39 => Self::sv39_table_size(),
+            PageTableMode::SV48 => Self::sv48_table_size(),
+            _ => return Err("unsupported page table mode".to_string()),
+        };
+        memory.add_symbolic_region(config.base..config.base + pt_size);
+        Ok(())
     }
 
     /// SV39 two-level page table: L2(root) -> L1(megapage leaves, 2MiB each).
@@ -288,7 +296,7 @@ impl<B: BV> MemoryBuilder<B> {
         let mut pte_bytes = HashMap::new();
 
         // L2 (root) table: entry[0] = non-leaf pointer to L1, rest invalid (zero)
-        let l2_pte = RiscvPte::new(ppn_from_pa(l1_base), RV64::PTE_V);
+        let l2_pte = RiscvPte::new(RV64.ppn_from_pa(l1_base), RV64::PTE_V);
         for (i, &byte) in l2_pte.to_bytes().iter().enumerate() {
             pte_bytes.insert(config.base + i as u64, byte);
         }
@@ -326,13 +334,13 @@ impl<B: BV> MemoryBuilder<B> {
         let mut pte_bytes = HashMap::new();
 
         // L3 (root) table: entry[0] = non-leaf pointer to L2, rest invalid (zero)
-        let l3_pte = RiscvPte::new(ppn_from_pa(l2_base), RV64::PTE_V);
+        let l3_pte = RiscvPte::new(RV64.ppn_from_pa(l2_base), RV64::PTE_V);
         for (i, &byte) in l3_pte.to_bytes().iter().enumerate() {
             pte_bytes.insert(config.base + i as u64, byte);
         }
 
         // L2 table: entry[0] = non-leaf pointer to L1, rest invalid (zero)
-        let l2_pte = RiscvPte::new(ppn_from_pa(l1_base), RV64::PTE_V);
+        let l2_pte = RiscvPte::new(RV64.ppn_from_pa(l1_base), RV64::PTE_V);
         for (i, &byte) in l2_pte.to_bytes().iter().enumerate() {
             pte_bytes.insert(l2_base + i as u64, byte);
         }
@@ -386,7 +394,7 @@ impl<B: BV> MemoryBuilder<B> {
     }
 
     fn default_leaf_pte(pa: u64) -> RiscvPte {
-        RiscvPte::new(ppn_from_pa(pa), Self::default_leaf_flags())
+        RiscvPte::new(RV64.ppn_from_pa(pa), Self::default_leaf_flags())
     }
 
     fn default_leaf_flags() -> u64 {
@@ -399,6 +407,7 @@ impl<B: BV> MemoryBuilder<B> {
         }
         match config.mode {
             PageTableMode::SV39 | PageTableMode::SV48 => {}
+            _ => return Err("unsupported page table mode".to_string()),
         }
         Ok(())
     }
@@ -407,6 +416,7 @@ impl<B: BV> MemoryBuilder<B> {
         match config.mode {
             PageTableMode::SV39 => Self::sv39_table_size(),
             PageTableMode::SV48 => Self::sv48_table_size(),
+            _ => 0,
         }
     }
 
@@ -420,5 +430,202 @@ impl<B: BV> MemoryBuilder<B> {
 
     fn l1_megapage_size() -> u64 {
         1 << 21
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isla_lib::bitvector::b64::B64;
+    use isla_lib::config::{PageTableConfig, PageTableMode, PageTablePreset, ProtectedRange};
+    use isla_lib::memory::Region;
+
+    fn has_concrete_region(memory: &Memory<B64>, base: u64, size: u64) -> bool {
+        memory
+            .regions()
+            .iter()
+            .any(|region| matches!(region, Region::Concrete(range, _) if range.start == base && range.end == base + size))
+    }
+
+    fn has_symbolic_region(memory: &Memory<B64>, base: u64, size: u64) -> bool {
+        memory
+            .regions()
+            .iter()
+            .any(|region| matches!(region, Region::Symbolic(range) if range.start == base && range.end == base + size))
+    }
+
+    #[test]
+    fn new_builder_defaults() {
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new();
+        let memory = builder.build().unwrap();
+
+        assert_eq!(memory.regions().len(), 1);
+        assert!(has_concrete_region(&memory, 0x2000000, 0xc0000));
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
+            .add_concrete_region(0x8000_0000, 0x1000)
+            .add_symbolic_region(0x9000_0000, 0x2000)
+            .set_clint_enabled(false);
+        let memory = builder.build().unwrap();
+
+        assert_eq!(memory.regions().len(), 2);
+        assert!(has_concrete_region(&memory, 0x8000_0000, 0x1000));
+        assert!(has_symbolic_region(&memory, 0x9000_0000, 0x2000));
+    }
+
+    #[test]
+    fn identity_mapping_creates_config() {
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
+            .with_identity_mapping(0x1_0000)
+            .unwrap()
+            .set_clint_enabled(false);
+        let memory = builder.build().unwrap();
+
+        assert_eq!(memory.regions().len(), 1);
+        assert!(has_concrete_region(&memory, 0x1_0000, 2 * RV64::PAGE_TABLE_SIZE));
+    }
+
+    #[test]
+    fn offset_mapping_config() {
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
+            .with_offset_mapping(0x1_0000, 0x1000_0000)
+            .unwrap()
+            .set_clint_enabled(false);
+        let memory = builder.build().unwrap();
+
+        assert_eq!(memory.regions().len(), 1);
+        assert!(has_concrete_region(&memory, 0x1_0000, 2 * RV64::PAGE_TABLE_SIZE));
+    }
+
+    #[test]
+    fn symbolic_mapping_config() {
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
+            .with_symbolic_mapping(0x1_0000)
+            .unwrap()
+            .set_clint_enabled(false);
+        let memory = builder.build().unwrap();
+
+        assert_eq!(memory.regions().len(), 1);
+        assert!(has_symbolic_region(&memory, 0x1_0000, 2 * RV64::PAGE_TABLE_SIZE));
+    }
+
+    #[test]
+    fn overlapping_regions_rejected() {
+        let result = MemoryBuilder::<B64>::new()
+            .add_concrete_region(0x1000, 0x2000)
+            .add_concrete_region(0x2000, 0x1000)
+            .set_clint_enabled(false)
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn adjacent_regions_allowed() {
+        let memory = MemoryBuilder::<B64>::new()
+            .add_concrete_region(0x1000, 0x1000)
+            .add_concrete_region(0x2000, 0x1000)
+            .set_clint_enabled(false)
+            .build()
+            .unwrap();
+
+        assert!(has_concrete_region(&memory, 0x1000, 0x1000));
+        assert!(has_concrete_region(&memory, 0x2000, 0x1000));
+    }
+
+    #[test]
+    fn protected_mapping_with_ranges() {
+        let protected = vec![ProtectedRange {
+            base: 0x8000_0000,
+            size: 0x1000,
+            flags: "rwx".to_string(),
+        }];
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
+            .with_protected_mapping(0x1_0000, protected.clone())
+            .unwrap()
+            .set_clint_enabled(false);
+        let memory = builder.build().unwrap();
+
+        assert_eq!(protected.len(), 1);
+        assert!(has_concrete_region(&memory, 0x1_0000, 2 * RV64::PAGE_TABLE_SIZE));
+    }
+
+    #[test]
+    fn clint_disabled() {
+        let memory = MemoryBuilder::<B64>::new()
+            .set_clint_enabled(false)
+            .build()
+            .unwrap();
+
+        assert!(memory.regions().is_empty());
+    }
+
+    #[test]
+    fn clint_custom_params() {
+        let memory = MemoryBuilder::<B64>::new()
+            .clint_with_params(true, 0x3000_0000, 0x10000)
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.regions().len(), 1);
+        assert!(has_concrete_region(&memory, 0x3000_0000, 0x10000));
+    }
+
+    #[test]
+    fn pte_flags_in_page_table() {
+        let pte = RiscvPte::new(
+            RV64.ppn_from_pa(0x8000_0000),
+            RV64::PTE_V | RV64::PTE_R | RV64::PTE_W | RV64::PTE_X | RV64::PTE_A | RV64::PTE_D | RV64::PTE_U,
+        );
+
+        assert!(pte.is_valid());
+        assert!(pte.has_read());
+        assert!(pte.has_write());
+        assert!(pte.has_execute());
+    }
+
+    #[test]
+    fn sv39_table_size_is_two_pages() {
+        let config = PageTableConfig {
+            mode: PageTableMode::SV39,
+            preset: PageTablePreset::Identity,
+            base: 0x1_0000,
+            page_size: 4096,
+            offset: None,
+            protected_ranges: None,
+        };
+
+        assert_eq!(MemoryBuilder::<B64>::page_table_size(&config), 2 * RV64::PAGE_TABLE_SIZE);
+        assert_eq!(2 * RV64::PAGE_TABLE_SIZE, 8192);
+    }
+
+    #[test]
+    fn sv48_table_size_is_three_pages() {
+        let config = PageTableConfig {
+            mode: PageTableMode::SV48,
+            preset: PageTablePreset::Identity,
+            base: 0x1_0000,
+            page_size: 4096,
+            offset: None,
+            protected_ranges: None,
+        };
+
+        assert_eq!(MemoryBuilder::<B64>::page_table_size(&config), 3 * RV64::PAGE_TABLE_SIZE);
+        assert_eq!(3 * RV64::PAGE_TABLE_SIZE, 12288);
+    }
+
+    #[test]
+    fn build_identity_mapping_includes_page_table() {
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
+            .with_identity_mapping(0x1_0000)
+            .unwrap()
+            .set_clint_enabled(false);
+        let memory = builder.build().unwrap();
+
+        assert!(has_concrete_region(&memory, 0x1_0000, 2 * RV64::PAGE_TABLE_SIZE));
+        assert_eq!(memory.region_name_at(0x1_0000), "concrete");
     }
 }

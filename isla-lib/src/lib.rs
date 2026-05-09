@@ -54,17 +54,14 @@ pub mod ir;
 pub mod ir_lexer;
 pub mod lexer;
 pub mod memory;
-pub mod memory_builder;
 pub mod primop;
 pub mod primop_util;
 mod probe;
 
-pub use memory_builder::MemoryBuilder;
 pub mod register;
 pub mod simplify;
 pub mod smt;
 pub mod source_loc;
-pub mod target;
 pub mod trace;
 pub mod zencode;
 

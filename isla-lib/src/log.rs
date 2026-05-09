@@ -58,6 +58,12 @@ pub const LITMUS: u32 = 8u32;
 pub const PROBE: u32 = 16u32;
 pub const CACHE: u32 = 32u32;
 pub const GRAPH: u32 = 64u32;
+/// 符号执行引擎层 — 参数生成、solver 状态、执行流程控制等
+pub const SYM_EXEC: u32 = 128u32;
+/// 执行路径结果层 — 每条路径的寄存器/汇编/model 求解结果
+pub const PATH_RESULT: u32 = 256u32;
+/// 架构信息层 — xlen 检测、ISA 状态列表、Target 配置
+pub const ARCH_INFO: u32 = 512u32;
 
 pub fn set_flags(flags: u32) {
     FLAGS.store(flags, SeqCst);
