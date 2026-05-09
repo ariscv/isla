@@ -65,7 +65,10 @@ mod task;
 use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
-pub use task::{ExecutionLimits, ForkTreeNode, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
+pub use task::{
+    ExecutionLimits, ForkTreeNode, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState,
+    WriteSet,
+};
 
 trait TaskQueuePush<T> {
     fn push_task(&self, task: T);
@@ -1082,7 +1085,8 @@ fn merge_path_condition<B: BV>(
             return Err(ExecError::IncompatibleMerge);
         }
         let suffix = &frame.branch_conditions[fork_depth..];
-        let condition = suffix.iter().cloned().reduce(|lhs, rhs| And(Box::new(lhs), Box::new(rhs))).unwrap_or(Bool(true));
+        let condition =
+            suffix.iter().cloned().reduce(|lhs, rhs| And(Box::new(lhs), Box::new(rhs))).unwrap_or(Bool(true));
         condition_symbols.push(solver.define_const(condition, SourceLoc::unknown()));
     }
 
@@ -1209,7 +1213,8 @@ fn merge_frames<'ir, B: BV>(
     let max_forks = frame_refs.iter().map(|frame| frame.forks).max().unwrap_or(primary.forks);
     let max_step_count = frame_refs.iter().map(|frame| frame.step_count).max().unwrap_or(primary.step_count);
     drop(frame_refs);
-    let merge_conditions = if condition_symbols.is_empty() { &[] } else { &condition_symbols[..condition_symbols.len() - 1] };
+    let merge_conditions =
+        if condition_symbols.is_empty() { &[] } else { &condition_symbols[..condition_symbols.len() - 1] };
 
     merge_modified_vars(primary, &sibling_refs, merge_conditions, &union_write_set.modified_vars, solver)?;
     merge_modified_regs(primary, &sibling_refs, merge_conditions, &union_write_set.modified_regs, solver)?;
@@ -1282,9 +1287,9 @@ fn run_loop<'ir, 'task, B: BV, Q: TaskQueuePush<Task<'ir, 'task, B>>>(
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
-            if let Some(write_set) = frame.write_set.as_mut() {
-                write_set.modified_vars.insert(*v);
-            }
+                if let Some(write_set) = frame.write_set.as_mut() {
+                    write_set.modified_vars.insert(*v);
+                }
                 frame.vars_mut().insert(*v, UVal::Uninit(ty));
                 frame.pc += 1;
             }
@@ -1842,16 +1847,20 @@ fn run_loop<'ir, 'task, B: BV, Q: TaskQueuePush<Task<'ir, 'task, B>>>(
                         frame.fork_tree_node = Some(ForkTreeNode::fresh_root(frame.branch_conditions.len()));
                     }
                     let parent_fork_tree_node = frame.fork_tree_node.clone().unwrap();
-                    let child_write_set = if task_state.execution_limits.as_ref().map(|limits| limits.path_merging).unwrap_or(false) {
-                        Some(WriteSet::default())
-                    } else {
-                        None
-                    };
+                    let child_write_set =
+                        if task_state.execution_limits.as_ref().map(|limits| limits.path_merging).unwrap_or(false) {
+                            Some(WriteSet::default())
+                        } else {
+                            None
+                        };
                     queue.push_task(Task {
                         id: task_id,
                         fraction: child_frac,
                         frame: Frame {
-                            fork_tree_node: Some(ForkTreeNode::fresh_child(parent_fork_tree_node.id, frame.branch_conditions.len())),
+                            fork_tree_node: Some(ForkTreeNode::fresh_child(
+                                parent_fork_tree_node.id,
+                                frame.branch_conditions.len(),
+                            )),
                             write_set: child_write_set,
                             ..freeze_frame(frame)
                         },
@@ -1952,7 +1961,11 @@ pub fn start_single<'ir, B: BV, R>(
 ) {
     let queue: RefCell<VecDeque<Task<'ir, '_, B>>> = RefCell::new(VecDeque::new());
     queue.borrow_mut().push_back(task);
-    while let Some(mut task) = queue.borrow_mut().pop_back() {
+    loop {
+        let mut task = match queue.borrow_mut().pop_back() {
+            Some(t) => t,
+            None => break,
+        };
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3426,22 +3439,9 @@ fn zrX(z3zE1756) {
         let parent = ForkTreeNode::fresh_root(1);
         let left = solver.declare_const(smtlib::Ty::Bool, info());
         let right = solver.declare_const(smtlib::Ty::Bool, info());
-        let mut primary = make_merge_frame(
-            &mut solver,
-            function_name,
-            var,
-            Val::I64(1),
-            smtlib::Exp::Var(left),
-            &parent,
-        );
-        let sibling = make_merge_frame(
-            &mut solver,
-            function_name,
-            var,
-            Val::I64(2),
-            smtlib::Exp::Var(right),
-            &parent,
-        );
+        let mut primary =
+            make_merge_frame(&mut solver, function_name, var, Val::I64(1), smtlib::Exp::Var(left), &parent);
+        let sibling = make_merge_frame(&mut solver, function_name, var, Val::I64(2), smtlib::Exp::Var(right), &parent);
 
         let merged_condition = merge_frames(&mut primary, vec![sibling], &mut solver, &shared_state).unwrap();
 
@@ -3462,32 +3462,15 @@ fn zrX(z3zE1756) {
         let first = solver.declare_const(smtlib::Ty::Bool, info());
         let second = solver.declare_const(smtlib::Ty::Bool, info());
         let third = solver.declare_const(smtlib::Ty::Bool, info());
-        let mut primary = make_merge_frame(
-            &mut solver,
-            function_name,
-            var,
-            Val::I64(1),
-            smtlib::Exp::Var(first),
-            &parent,
-        );
-        let sibling_a = make_merge_frame(
-            &mut solver,
-            function_name,
-            var,
-            Val::I64(2),
-            smtlib::Exp::Var(second),
-            &parent,
-        );
-        let sibling_b = make_merge_frame(
-            &mut solver,
-            function_name,
-            var,
-            Val::I64(3),
-            smtlib::Exp::Var(third),
-            &parent,
-        );
+        let mut primary =
+            make_merge_frame(&mut solver, function_name, var, Val::I64(1), smtlib::Exp::Var(first), &parent);
+        let sibling_a =
+            make_merge_frame(&mut solver, function_name, var, Val::I64(2), smtlib::Exp::Var(second), &parent);
+        let sibling_b =
+            make_merge_frame(&mut solver, function_name, var, Val::I64(3), smtlib::Exp::Var(third), &parent);
 
-        let merged_condition = merge_frames(&mut primary, vec![sibling_a, sibling_b], &mut solver, &shared_state).unwrap();
+        let merged_condition =
+            merge_frames(&mut primary, vec![sibling_a, sibling_b], &mut solver, &shared_state).unwrap();
 
         assert!(matches!(primary.local_state.vars.get(&var), Some(UVal::Init(Val::Symbolic(_)))));
         assert_eq!(primary.branch_conditions, vec![smtlib::Exp::Bool(true), smtlib::Exp::Var(merged_condition)]);
@@ -3503,22 +3486,9 @@ fn zrX(z3zE1756) {
         let parent = ForkTreeNode::fresh_root(1);
         let left = solver.declare_const(smtlib::Ty::Bool, info());
         let right = solver.declare_const(smtlib::Ty::Bool, info());
-        let mut primary = make_merge_frame(
-            &mut solver,
-            test_name(60),
-            var,
-            Val::I64(1),
-            smtlib::Exp::Var(left),
-            &parent,
-        );
-        let sibling = make_merge_frame(
-            &mut solver,
-            test_name(62),
-            var,
-            Val::I64(2),
-            smtlib::Exp::Var(right),
-            &parent,
-        );
+        let mut primary =
+            make_merge_frame(&mut solver, test_name(60), var, Val::I64(1), smtlib::Exp::Var(left), &parent);
+        let sibling = make_merge_frame(&mut solver, test_name(62), var, Val::I64(2), smtlib::Exp::Var(right), &parent);
 
         match merge_frames(&mut primary, vec![sibling], &mut solver, &shared_state) {
             Err(ExecError::IncompatibleMerge) => (),
@@ -3799,10 +3769,8 @@ fn zrX(z3zE1756) {
     #[test]
     fn path_merging_reduces_forks_in_zrx() {
         let (instrs, shared_state, regs, lets) = real_zrx_program();
-        let limits = ExecutionLimits::default()
-            .with_path_merging(true)
-            .with_max_forks_per_branch(2)
-            .with_max_total_forks(8);
+        let limits =
+            ExecutionLimits::default().with_path_merging(true).with_max_forks_per_branch(2).with_max_total_forks(8);
         let results = run_all_with_merging(instrs, limits, shared_state, regs, lets);
         assert!(!results.is_empty());
         assert!(results.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bits(_))))));
@@ -3825,16 +3793,8 @@ fn zrX(z3zE1756) {
     #[test]
     fn path_merging_n_way_merge_scenario() {
         let (instrs, shared_state) = repeated_call_fork_program(4);
-        let limits = ExecutionLimits::default()
-            .with_path_merging(true)
-            .with_max_total_forks(4);
-        let results = run_all_with_merging(
-            instrs,
-            limits,
-            shared_state,
-            RegisterBindings::new(),
-            HashMap::default(),
-        );
+        let limits = ExecutionLimits::default().with_path_merging(true).with_max_total_forks(4);
+        let results = run_all_with_merging(instrs, limits, shared_state, RegisterBindings::new(), HashMap::default());
         assert!(!results.is_empty());
     }
 }
