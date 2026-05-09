@@ -2257,6 +2257,9 @@ fn write_mem<B: BV>(
     frame: &mut LocalFrame<B>,
     _: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(write_set) = frame.write_set_mut() {
+        write_set.memory_modified = true;
+    }
     frame.memory_mut().write(args[0].clone(), args[2].clone(), args[4].clone(), solver, None, WriteOpts::default())
 }
 
@@ -2266,6 +2269,9 @@ fn write_mem_exclusive<B: BV>(
     frame: &mut LocalFrame<B>,
     _: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(write_set) = frame.write_set_mut() {
+        write_set.memory_modified = true;
+    }
     frame.memory_mut().write(args[0].clone(), args[2].clone(), args[4].clone(), solver, None, WriteOpts::exclusive())
 }
 
@@ -2275,6 +2281,9 @@ fn write_memt<B: BV>(
     frame: &mut LocalFrame<B>,
     _: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(write_set) = frame.write_set_mut() {
+        write_set.memory_modified = true;
+    }
     frame.memory_mut().write(
         args[0].clone(),
         args[1].clone(),
@@ -2291,6 +2300,9 @@ fn write_tag<B: BV>(
     frame: &mut LocalFrame<B>,
     _: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(write_set) = frame.write_set_mut() {
+        write_set.memory_modified = true;
+    }
     frame.memory_mut().write_tag(args[0].clone(), args[1].clone(), args[2].clone(), solver)
 }
 

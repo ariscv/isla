@@ -62,7 +62,7 @@ mod task;
 use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
-pub use task::{ExecutionLimits, ForkTreeNode, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+pub use task::{ExecutionLimits, ForkTreeNode, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -272,6 +272,7 @@ fn write_register_from_vector<'ir, B: BV>(
     value: Val<B>,
     regs_vector: Val<B>,
     local_state: &mut LocalState<'ir, B>,
+    mut write_set: Option<&mut WriteSet>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
@@ -324,6 +325,9 @@ fn write_register_from_vector<'ir, B: BV>(
     match index {
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
+            if let Some(write_set) = write_set.as_mut() {
+                write_set.modified_regs.insert(regs[i]);
+            }
             local_state.regs.assign(regs[i], value.clone(), shared_state);
             solver.add_event(Event::WriteReg(regs[i], Vec::new(), value))
         }
@@ -335,6 +339,9 @@ fn write_register_from_vector<'ir, B: BV>(
                     solver.define_const(Eq(Box::new(Var(i)), Box::new(Bits64(B64::new(j as u64, rib)))), info)
                 });
                 let current_value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone();
+                if let Some(write_set) = write_set.as_mut() {
+                    write_set.modified_regs.insert(*reg);
+                }
                 local_state.regs.assign(
                     *reg,
                     solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
@@ -960,7 +967,8 @@ fn run_special_primop<'ir, B: BV>(
         let n = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
         let value = eval_exp(&args[1], &mut frame.local_state, shared_state, solver, info)?.into_owned();
         let regs = eval_exp(&args[2], &mut frame.local_state, shared_state, solver, info)?.into_owned();
-        write_register_from_vector(n, value, regs, &mut frame.local_state, shared_state, solver, info)?;
+        let write_set = frame.write_set.as_mut();
+        write_register_from_vector(n, value, regs, &mut frame.local_state, write_set, shared_state, solver, info)?;
         assign(tid, loc, Val::Unit, &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
     } else if f == INSTR_ANNOUNCE {
@@ -1074,12 +1082,18 @@ fn run_loop<'ir, 'task, B: BV>(
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
+            if let Some(write_set) = frame.write_set.as_mut() {
+                write_set.modified_vars.insert(*v);
+            }
                 frame.vars_mut().insert(*v, UVal::Uninit(ty));
                 frame.pc += 1;
             }
 
             Instr::Init(var, _, exp, info) => {
                 let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                if let Some(write_set) = frame.write_set.as_mut() {
+                    write_set.modified_vars.insert(*var);
+                }
                 frame.vars_mut().insert(*var, UVal::Init(value));
                 frame.pc += 1;
             }
@@ -1628,11 +1642,17 @@ fn run_loop<'ir, 'task, B: BV>(
                         frame.fork_tree_node = Some(ForkTreeNode::fresh_root(frame.branch_conditions.len()));
                     }
                     let parent_fork_tree_node = frame.fork_tree_node.clone().unwrap();
+                    let child_write_set = if task_state.execution_limits.as_ref().map(|limits| limits.path_merging).unwrap_or(false) {
+                        Some(WriteSet::default())
+                    } else {
+                        None
+                    };
                     queue.push(Task {
                         id: task_id,
                         fraction: child_frac,
                         frame: Frame {
                             fork_tree_node: Some(ForkTreeNode::fresh_child(parent_fork_tree_node.id, frame.branch_conditions.len())),
+                            write_set: child_write_set,
                             ..freeze_frame(frame)
                         },
                         checkpoint: point,

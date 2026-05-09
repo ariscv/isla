@@ -29,7 +29,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -47,6 +47,13 @@ pub struct ForkTreeNode {
     pub id: u32,
     pub parent: Option<u32>,
     pub branch_conditions_at_fork: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WriteSet {
+    pub modified_vars: HashSet<Name>,
+    pub modified_regs: HashSet<Name>,
+    pub memory_modified: bool,
 }
 
 impl ForkTreeNode {

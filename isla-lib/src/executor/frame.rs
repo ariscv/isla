@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::bitvector::BV;
 use crate::error::ExecError;
-use crate::executor::task::{ForkTreeNode, Task, TaskId, TaskState};
+use crate::executor::task::{ForkTreeNode, Task, TaskId, TaskState, WriteSet};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
@@ -113,6 +113,7 @@ pub struct Frame<'ir, B> {
     pub(super) loop_counts: Arc<HashMap<usize, u32>>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
     pub(super) memory: Arc<Memory<B>>,
+    pub(super) write_set: Option<WriteSet>,
     pub(super) instrs: &'ir [Instr<Name, B>],
     pub(super) stack_vars: Arc<Vec<Bindings<'ir, B>>>,
     pub(super) stack_call: Stack<'ir, B>,
@@ -134,6 +135,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         loop_counts: (*frame.loop_counts).clone(),
         local_state: (*frame.local_state).clone(),
         memory: (*frame.memory).clone(),
+        write_set: frame.write_set.clone(),
         instrs: frame.instrs,
         stack_vars: (*frame.stack_vars).clone(),
         stack_call: frame.stack_call.clone(),
@@ -158,6 +160,7 @@ pub struct LocalFrame<'ir, B> {
     pub(super) loop_counts: HashMap<usize, u32>,
     pub(super) local_state: LocalState<'ir, B>,
     pub(super) memory: Memory<B>,
+    pub(super) write_set: Option<WriteSet>,
     pub(super) instrs: &'ir [Instr<Name, B>],
     pub(super) stack_vars: Vec<Bindings<'ir, B>>,
     pub(super) stack_call: Stack<'ir, B>,
@@ -179,6 +182,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         loop_counts: Arc::new(frame.loop_counts.clone()),
         local_state: Arc::new(frame.local_state.clone()),
         memory: Arc::new(frame.memory.clone()),
+        write_set: frame.write_set.clone(),
         instrs: frame.instrs,
         stack_vars: Arc::new(frame.stack_vars.clone()),
         stack_call: frame.stack_call.clone(),
@@ -265,6 +269,14 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         &mut self.memory
     }
 
+    pub fn write_set_mut(&mut self) -> Option<&mut WriteSet> {
+        self.write_set.as_mut()
+    }
+
+    pub fn write_set(&self) -> Option<&WriteSet> {
+        self.write_set.as_ref()
+    }
+
     pub fn set_memory(&mut self, memory: Memory<B>) -> &mut Self {
         self.memory = memory;
         self
@@ -312,6 +324,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             loop_counts: HashMap::default(),
             local_state: LocalState { vars, regs, lets, probes },
             memory: Memory::new(),
+            write_set: None,
             instrs,
             stack_vars: Vec::new(),
             stack_call: None,
@@ -339,6 +352,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();
+        new_frame.write_set = self.write_set.clone();
         new_frame.fork_tree_node = self.fork_tree_node.clone();
         new_frame
     }
