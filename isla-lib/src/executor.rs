@@ -49,7 +49,9 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
 use crate::primop;
-use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_value, symbolic};
+use crate::primop_util::{
+    build_ite, i128_from_bits, ite_phi, merge_register_bindings_nary, merge_val_nary, smt_value, symbolic,
+};
 use crate::probe;
 use crate::smt::smtlib::Def;
 use crate::smt::*;
@@ -1032,6 +1034,177 @@ fn concretize_branch_condition<B: BV>(v: Sym, solver: &mut Solver<B>, info: Sour
     } else {
         Ok(false)
     }
+}
+
+fn compatible_stack_calls<B: BV>(frames: &[&LocalFrame<B>]) -> bool {
+    let Some(first) = frames.first() else {
+        return true;
+    };
+    frames.iter().skip(1).all(|frame| {
+        first.function_name == frame.function_name
+            && first.stack_vars.len() == frame.stack_vars.len()
+            && first.backtrace.len() == frame.backtrace.len()
+            && first
+                .backtrace
+                .iter()
+                .zip(frame.backtrace.iter())
+                .all(|((first_name, _), (frame_name, _))| first_name == frame_name)
+    })
+}
+
+fn merge_path_condition<B: BV>(
+    frames: &[&LocalFrame<B>],
+    fork_depth: usize,
+    solver: &mut Solver<B>,
+) -> Result<(Vec<Sym>, Sym), ExecError> {
+    use smtlib::Exp::*;
+
+    let mut condition_symbols = Vec::with_capacity(frames.len());
+    for frame in frames {
+        if frame.branch_conditions.len() < fork_depth {
+            return Err(ExecError::IncompatibleMerge);
+        }
+        let suffix = &frame.branch_conditions[fork_depth..];
+        let condition = suffix.iter().cloned().reduce(|lhs, rhs| And(Box::new(lhs), Box::new(rhs))).unwrap_or(Bool(true));
+        condition_symbols.push(solver.define_const(condition, SourceLoc::unknown()));
+    }
+
+    let merged_exp = condition_symbols
+        .iter()
+        .copied()
+        .map(Var)
+        .reduce(|lhs, rhs| Or(Box::new(lhs), Box::new(rhs)))
+        .unwrap_or(Bool(true));
+    let merged_condition = solver.define_const(merged_exp.clone(), SourceLoc::unknown());
+    solver.add(Def::Assert(Var(merged_condition)));
+
+    Ok((condition_symbols, merged_condition))
+}
+
+fn merge_write_sets<B: BV>(frames: &[&LocalFrame<B>]) -> WriteSet {
+    let mut union_write_set = WriteSet::default();
+    for frame in frames {
+        if let Some(write_set) = frame.write_set.as_ref() {
+            union_write_set.modified_vars.extend(write_set.modified_vars.iter().copied());
+            union_write_set.modified_regs.extend(write_set.modified_regs.iter().copied());
+            union_write_set.memory_modified |= write_set.memory_modified;
+        }
+    }
+    union_write_set
+}
+
+fn merge_modified_vars<'ir, B: BV>(
+    primary: &mut LocalFrame<'ir, B>,
+    siblings: &[&LocalFrame<'ir, B>],
+    condition_symbols: &[Sym],
+    modified_vars: &HashSet<Name>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
+    for var in modified_vars {
+        let mut values = Vec::with_capacity(siblings.len() + 1);
+        match primary.local_state.vars.get(var) {
+            Some(UVal::Init(value)) => values.push(value),
+            Some(UVal::Uninit(_)) => return Err(ExecError::IncompatibleMerge),
+            None => return Err(ExecError::IncompatibleMerge),
+        }
+        for sibling in siblings {
+            match sibling.local_state.vars.get(var) {
+                Some(UVal::Init(value)) => values.push(value),
+                Some(UVal::Uninit(_)) => return Err(ExecError::IncompatibleMerge),
+                None => return Err(ExecError::IncompatibleMerge),
+            }
+        }
+        let merged_value = merge_val_nary(condition_symbols, &values, solver, SourceLoc::unknown())?;
+        primary.local_state.vars.insert(*var, UVal::Init(merged_value));
+    }
+    Ok(())
+}
+
+fn merge_modified_regs<'ir, B: BV>(
+    primary: &mut LocalFrame<'ir, B>,
+    siblings: &[&LocalFrame<'ir, B>],
+    condition_symbols: &[Sym],
+    modified_regs: &HashSet<Name>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
+    if modified_regs.is_empty() {
+        return Ok(());
+    }
+
+    let mut primary_regs = RegisterBindings::new();
+    for reg in modified_regs {
+        match primary.local_state.regs.get_last_if_initialized(*reg) {
+            Some(value) => primary_regs.insert(*reg, false, UVal::Init(value.clone())),
+            None => return Err(ExecError::IncompatibleMerge),
+        }
+    }
+
+    let mut sibling_regs = Vec::with_capacity(siblings.len());
+    for sibling in siblings {
+        let mut regs = RegisterBindings::new();
+        for reg in modified_regs {
+            match sibling.local_state.regs.get_last_if_initialized(*reg) {
+                Some(value) => regs.insert(*reg, false, UVal::Init(value.clone())),
+                None => return Err(ExecError::IncompatibleMerge),
+            }
+        }
+        sibling_regs.push(regs);
+    }
+
+    let mut reg_refs = Vec::with_capacity(sibling_regs.len() + 1);
+    reg_refs.push(&primary_regs);
+    reg_refs.extend(sibling_regs.iter());
+    let merged_regs = merge_register_bindings_nary(condition_symbols, &reg_refs, solver, SourceLoc::unknown())?;
+    for (reg, value) in &merged_regs {
+        match value.read_last_if_initialized() {
+            Some(value) => primary.local_state.regs.insert(*reg, false, UVal::Init(value.clone())),
+            None => return Err(ExecError::IncompatibleMerge),
+        }
+    }
+
+    Ok(())
+}
+
+fn merge_frames<'ir, B: BV>(
+    primary: &mut LocalFrame<'ir, B>,
+    siblings: Vec<LocalFrame<'ir, B>>,
+    solver: &mut Solver<B>,
+    shared_state: &SharedState<'ir, B>,
+) -> Result<Sym, ExecError> {
+    shared_state.symtab.files();
+    let fork_node = primary.fork_tree_node.as_ref().ok_or(ExecError::IncompatibleMerge)?.clone();
+    let fork_depth = fork_node.branch_conditions_at_fork;
+    let sibling_refs: Vec<&LocalFrame<B>> = siblings.iter().collect();
+    let mut frame_refs = Vec::with_capacity(sibling_refs.len() + 1);
+    frame_refs.push(&*primary);
+    frame_refs.extend(sibling_refs.iter().copied());
+
+    if !compatible_stack_calls(&frame_refs) {
+        return Err(ExecError::IncompatibleMerge);
+    }
+
+    let union_write_set = merge_write_sets(&frame_refs);
+    if union_write_set.memory_modified {
+        return Err(ExecError::IncompatibleMerge);
+    }
+
+    let (condition_symbols, merged_condition) = merge_path_condition(&frame_refs, fork_depth, solver)?;
+    let max_forks = frame_refs.iter().map(|frame| frame.forks).max().unwrap_or(primary.forks);
+    let max_step_count = frame_refs.iter().map(|frame| frame.step_count).max().unwrap_or(primary.step_count);
+    drop(frame_refs);
+    let merge_conditions = if condition_symbols.is_empty() { &[] } else { &condition_symbols[..condition_symbols.len() - 1] };
+
+    merge_modified_vars(primary, &sibling_refs, merge_conditions, &union_write_set.modified_vars, solver)?;
+    merge_modified_regs(primary, &sibling_refs, merge_conditions, &union_write_set.modified_regs, solver)?;
+
+    primary.fork_tree_node = fork_node.parent.map(|parent| ForkTreeNode::fresh_child(parent, fork_depth));
+    primary.branch_conditions.truncate(fork_depth);
+    primary.branch_conditions.push(smtlib::Exp::Var(merged_condition));
+    primary.forks = max_forks;
+    primary.step_count = max_step_count;
+    primary.write_set = Some(WriteSet::default());
+
+    Ok(merged_condition)
 }
 
 pub enum Run<B> {
@@ -3116,6 +3289,28 @@ fn zrX(z3zE1756) {
         LocalFrame::new(test_name(25), &[], ret_ty, None, instrs)
     }
 
+    fn make_merge_frame<'ir>(
+        solver: &mut Solver<B64>,
+        function_name: Name,
+        var: Name,
+        value: Val<B64>,
+        suffix: smtlib::Exp<Sym>,
+        parent_node: &ForkTreeNode,
+    ) -> LocalFrame<'ir, B64> {
+        let mut frame = make_frame(Vec::new());
+        frame.function_name = function_name;
+        frame.branch_conditions.push(smtlib::Exp::Bool(true));
+        frame.branch_conditions.push(suffix);
+        frame.fork_tree_node = Some(ForkTreeNode::fresh_child(parent_node.id, parent_node.branch_conditions_at_fork));
+        frame.write_set = Some(WriteSet::default());
+        frame.write_set.as_mut().unwrap().modified_vars.insert(var);
+        frame.local_state.vars.insert(var, UVal::Init(value));
+        frame.forks = 1;
+        frame.step_count = 1;
+        solver.assert(smtlib::Exp::Bool(true));
+        frame
+    }
+
     fn run_with_limits(instrs: Vec<Instr<Name, B64>>, limits: ExecutionLimits) -> Result<Run<B64>, ExecError> {
         let shared_state = empty_shared_state();
         let mut frame = make_frame(instrs);
@@ -3137,6 +3332,116 @@ fn zrX(z3zE1756) {
             &shared_state,
             &mut solver,
         )
+    }
+
+    #[test]
+    fn merge_frames_two_way_merges_written_variable() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let shared_state = empty_shared_state();
+        let function_name = test_name(40);
+        let var = test_name(41);
+        let parent = ForkTreeNode::fresh_root(1);
+        let left = solver.declare_const(smtlib::Ty::Bool, info());
+        let right = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut primary = make_merge_frame(
+            &mut solver,
+            function_name,
+            var,
+            Val::I64(1),
+            smtlib::Exp::Var(left),
+            &parent,
+        );
+        let sibling = make_merge_frame(
+            &mut solver,
+            function_name,
+            var,
+            Val::I64(2),
+            smtlib::Exp::Var(right),
+            &parent,
+        );
+
+        let merged_condition = merge_frames(&mut primary, vec![sibling], &mut solver, &shared_state).unwrap();
+
+        assert!(matches!(primary.local_state.vars.get(&var), Some(UVal::Init(Val::Symbolic(_)))));
+        assert_eq!(primary.branch_conditions, vec![smtlib::Exp::Bool(true), smtlib::Exp::Var(merged_condition)]);
+        assert_eq!(primary.fork_tree_node.as_ref().unwrap().parent, Some(parent.id));
+        assert_eq!(primary.write_set.as_ref().unwrap().modified_vars.len(), 0);
+    }
+
+    #[test]
+    fn merge_frames_three_way_merges_written_variable() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let shared_state = empty_shared_state();
+        let function_name = test_name(50);
+        let var = test_name(51);
+        let parent = ForkTreeNode::fresh_root(1);
+        let first = solver.declare_const(smtlib::Ty::Bool, info());
+        let second = solver.declare_const(smtlib::Ty::Bool, info());
+        let third = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut primary = make_merge_frame(
+            &mut solver,
+            function_name,
+            var,
+            Val::I64(1),
+            smtlib::Exp::Var(first),
+            &parent,
+        );
+        let sibling_a = make_merge_frame(
+            &mut solver,
+            function_name,
+            var,
+            Val::I64(2),
+            smtlib::Exp::Var(second),
+            &parent,
+        );
+        let sibling_b = make_merge_frame(
+            &mut solver,
+            function_name,
+            var,
+            Val::I64(3),
+            smtlib::Exp::Var(third),
+            &parent,
+        );
+
+        let merged_condition = merge_frames(&mut primary, vec![sibling_a, sibling_b], &mut solver, &shared_state).unwrap();
+
+        assert!(matches!(primary.local_state.vars.get(&var), Some(UVal::Init(Val::Symbolic(_)))));
+        assert_eq!(primary.branch_conditions, vec![smtlib::Exp::Bool(true), smtlib::Exp::Var(merged_condition)]);
+        assert_eq!(primary.fork_tree_node.as_ref().unwrap().parent, Some(parent.id));
+    }
+
+    #[test]
+    fn merge_frames_incompatible_stack_returns_error() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let shared_state = empty_shared_state();
+        let var = test_name(61);
+        let parent = ForkTreeNode::fresh_root(1);
+        let left = solver.declare_const(smtlib::Ty::Bool, info());
+        let right = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut primary = make_merge_frame(
+            &mut solver,
+            test_name(60),
+            var,
+            Val::I64(1),
+            smtlib::Exp::Var(left),
+            &parent,
+        );
+        let sibling = make_merge_frame(
+            &mut solver,
+            test_name(62),
+            var,
+            Val::I64(2),
+            smtlib::Exp::Var(right),
+            &parent,
+        );
+
+        match merge_frames(&mut primary, vec![sibling], &mut solver, &shared_state) {
+            Err(ExecError::IncompatibleMerge) => (),
+            _ => panic!("期望栈不兼容合并错误"),
+        }
     }
 
     fn run_all_with_shared_state<'ir>(
