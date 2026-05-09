@@ -10,6 +10,7 @@ use crate::register::RegisterBindings;
 use crate::smt::{checkpoint, Config, Context, Event, Model, ModelVal};
 use crate::smt::{Solver, Sym};
 use crate::source_loc::SourceLoc;
+use crate::target::{RISCV, RV64, Target};
 use crate::zencode;
 use crate::{dlog, log};
 use crate::{ir::*, smt};
@@ -41,78 +42,6 @@ macro_rules! hashmap {
         )+
         _map
     }};
-}
-
-pub trait Target
-where
-    Self: Sync,
-{
-    fn arch_name(&self) -> &'static str;
-    fn arch_pretty_name(&self) -> &'static str;
-    fn xlen(&self) -> &'static str;
-    fn isa_state_list(&self) -> Vec<String>;
-}
-
-// Marker trait 表示这是 RISC-V 架构
-pub trait RISCV: Target {
-    fn xlen_bits(&self) -> &'static str;
-    fn xlen_name(&self) -> &'static str;
-}
-
-// 为所有 RISCV 类型提供默认实现
-impl<T: RISCV> Target for T {
-    fn arch_name(&self) -> &'static str {
-        "riscv"
-    }
-
-    fn arch_pretty_name(&self) -> &'static str {
-        self.xlen_name()
-    }
-
-    fn xlen(&self) -> &'static str {
-        self.xlen_bits()
-    }
-
-    fn isa_state_list(&self) -> Vec<String> {
-        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
-        regs.extend((0..32).map(|r| format!("f{}", r)));
-        regs.push("PC".to_string());
-        regs.push("cur_privilege".to_string());
-        regs.extend(["mstatus".to_string()]);
-        regs
-    }
-}
-
-/// 根据 xlen 值动态选择 RISC-V target
-pub enum RISCVTarget {
-    RV32,
-    RV64,
-}
-
-impl RISCVTarget {
-    pub fn from_xlen(xlen: u32) -> Self {
-        match xlen {
-            32 => RISCVTarget::RV32,
-            64 => RISCVTarget::RV64,
-            _ => panic!("from_xlen(xlen={xlen})的值不是64或者32的其中一个，你是不是IR文件选错了或者配置给错了?"),
-        }
-    }
-}
-
-impl RISCV for RISCVTarget {
-    fn xlen_bits(&self) -> &'static str {
-        match self {
-            RISCVTarget::RV32 => "32",
-            RISCVTarget::RV64 => "64",
-        }
-    }
-
-    fn xlen_name(&self) -> &'static str {
-        match self {
-            RISCVTarget::RV32 => "rv32d",
-            RISCVTarget::RV64 => "rv64d",
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -246,31 +175,33 @@ pub fn run_symbolic_execute<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
+    initial_memory: Option<crate::memory::Memory<B>>,
+    pmp_symbolic: bool,
 ) -> Result<Option<String>, ExecError> {
     use crate::smt::checkpoint;
 
-    // 从 lets 绑定中读取 zxlen 值
-    let xlen = shared_state
-        .symtab
-        .get("zxlen")
-        .and_then(|name| lets.get(&name))
-        .and_then(|uval| match uval {
-            UVal::Init(Val::I64(n)) => Some(*n as u32),
-            _ => None,
-        })
-        .unwrap();
-    let target = RISCVTarget::from_xlen(xlen);
+    let target = RV64;
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
     let ctx = Context::new(cfg);
     let mut solver = Solver::new(&ctx);
+    let mut symbolic_regs = regs.clone();
+
+    if pmp_symbolic {
+        crate::target::apply_symbolic_pmp_to_registers(
+            &shared_state.symtab,
+            &mut symbolic_regs,
+            shared_state,
+            &mut solver,
+        )?;
+    }
 
     // 使用 symbolic_args_from_TYPEs 生成符号化参数
     let ctor_name = shared_state.symtab.lookup(instruction_name);
 
     let fun_args = vec![Val::<B>::Ctor(
         ctor_name,
-        Box::new(symbolic_args_from_TYPEs(instruction_name, shared_state, regs, lets, &mut solver)?),
+        Box::new(symbolic_args_from_TYPEs(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
     )];
     println!("fun_args:{:?}", fun_args);
     println!("{:?}", target.isa_state_list());
@@ -289,7 +220,7 @@ pub fn run_symbolic_execute<B: BV>(
         "zexecute",
         &fun_args,
         shared_state,
-        regs,
+        &symbolic_regs,
         lets,
         &result,
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
@@ -518,11 +449,12 @@ pub fn run_symbolic_execute<B: BV>(
             }
         },
         cp,
+        initial_memory,
     );
 
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        let xlen_name = target.xlen_name();
+        let xlen_name = RV64::xlen_name();
         result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name, instruction_name)));
         Ok(None)
     } else {
@@ -532,7 +464,13 @@ pub fn run_symbolic_execute<B: BV>(
 }
 
 #[cfg(feature = "debug_exec")]
-pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
+pub fn test_exec_main<B: BV>(
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+    initial_memory: Option<crate::memory::Memory<B>>,
+    pmp_symbolic: bool,
+) {
     use std::{process::exit, vec};
 
     println!("test_exec_main");
@@ -1000,14 +938,11 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
 
     // instruction_table.extend(vec!["zLOAD"]);
 
-	let excute_through_instruction_table = [
-        "zSTORE",
-        "zLOAD",
-    ];
+    let excute_through_instruction_table = ["zSTORE", "zLOAD"];
     // instruction_table.extend( excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
-        match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
+        match run_symbolic_execute(ins_name, &shared_state, regs, lets, initial_memory.clone(), pmp_symbolic) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("test_exec_main: {}运行错误 {}", ins_name, e)

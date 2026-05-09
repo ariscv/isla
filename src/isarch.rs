@@ -289,7 +289,14 @@ fn isla_main() -> i32 {
     test_clause_args_yaml_main(shared_state, regs, lets);
 
     #[cfg(feature = "debug_exec")]
-    isla_lib::isarch_exec::test_exec_main(shared_state, regs, lets);
+    {
+        let initial_memory = isla_lib::memory_builder::MemoryBuilder::from_config(&isa_config)
+            .and_then(|builder| builder.build())
+            .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
+            .ok();
+        let pmp_symbolic = isa_config.pmp.as_ref().map(|pmp| pmp.symbolic).unwrap_or(false);
+        isla_lib::isarch_exec::test_exec_main(shared_state, regs, lets, initial_memory, pmp_symbolic);
+    }
 
     match subcommand {
         "list-instructions" => {

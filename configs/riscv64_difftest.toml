@@ -116,3 +116,53 @@ get_config_rvfi = "false"
 plat_enable_htif = "false"
 get_config_use_abi_names = "false"
 
+# === Memory Symbolization Configuration (optional) ===
+# Uncomment and configure to enable memory symbolization for RISC-V
+#
+# CLINT toggle — set to false to disable the CLINT memory region
+# clint_enabled = true
+#
+# Memory regions — define concrete (code/data) and symbolic regions
+# [[memory_regions]]
+# name = "code"
+# base = "0x80000000"
+# size = "0x100000"
+# region_type = "concrete"
+#
+# [[memory_regions]]
+# name = "symbolic_ram"
+# base = "0x80100000"
+# size = "0x1000000"
+# region_type = "symbolic"
+#
+# Page table configuration — pre-populate page tables
+# [page_table_config]
+# mode = "sv39"         # "sv39" or "sv48"
+# preset = "identity"   # "identity", "offset", "protected", "symbolic"
+# base = "0x300000"     # page table physical base address
+# page_size = 4096
+# offset = "0x10000000" # only for "offset" preset
+#
+# Optional: add protected ranges when using the "protected" preset
+# protected_ranges = [
+# #   { base = "0x80000000", size = "0x1000", flags = "rx" },
+# ]
+#
+# PMP (Physical Memory Protection) configuration
+# [pmp]
+# symbolic = false
+#
+# [[pmp.rules]]
+# index = 0
+# mode = "tor"
+# base = "0x80000000"
+# permissions = "rw"
+# locked = false
+#
+# [[pmp.rules]]
+# index = 1
+# mode = "napot"
+# base = "0x80200000"
+# size = "0x200000"
+# permissions = "rwx"
+# locked = true
