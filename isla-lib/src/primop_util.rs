@@ -32,12 +32,13 @@
 //! primitive operations, including converting IR values into SMT
 //! equivalents.
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use crate::bitvector::b64::B64;
 use crate::bitvector::BV;
 use crate::error::ExecError;
-use crate::ir::{BitsSegment, Name, SharedState, Ty, Typedefs, Val};
+use crate::ir::{Bindings, BitsSegment, Name, SharedState, Ty, Typedefs, UVal, Val};
+use crate::register::RegisterBindings;
 use crate::smt::smtlib::{self, bits64, Exp};
 use crate::smt::{Solver, Sym};
 use crate::source_loc::SourceLoc;
@@ -295,6 +296,228 @@ pub fn build_ite<B: BV>(
     }
 }
 
+pub fn merge_val<B: BV>(
+    cond: Sym,
+    val_a: &Val<B>,
+    val_b: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    match (val_a, val_b) {
+        (Val::Bool(_), Val::Bool(_))
+        | (Val::I64(_), Val::I64(_))
+        | (Val::I128(_), Val::I128(_))
+        | (Val::Bits(_), Val::Bits(_))
+        | (Val::Enum(_), Val::Enum(_)) => {
+            if val_a == val_b {
+                Ok(val_a.clone())
+            } else {
+                build_ite(cond, val_a, val_b, solver, info)
+            }
+        }
+
+        (Val::Unit, Val::Unit) => Ok(Val::Unit),
+        (Val::Poison, Val::Poison) => Ok(Val::Poison),
+
+        (Val::Struct(a_fields), Val::Struct(b_fields)) => {
+            if a_fields.len() != b_fields.len() {
+                return Err(ExecError::Type("merge_val struct field mismatch".to_string(), info));
+            }
+            let fields: Result<_, _> = a_fields
+                .iter()
+                .map(|(field, a_val)| match b_fields.get(field) {
+                    Some(b_val) => Ok((*field, merge_val(cond, a_val, b_val, solver, info)?)),
+                    None => Err(ExecError::Type(format!("merge_val missing struct field {:?}", field), info)),
+                })
+                .collect();
+            Ok(Val::Struct(fields?))
+        }
+
+        (Val::Ctor(a_id, a_val), Val::Ctor(b_id, b_val)) if a_id == b_id => {
+            Ok(Val::Ctor(*a_id, Box::new(merge_val(cond, a_val, b_val, solver, info)?)))
+        }
+
+        (Val::Ctor(_, _), Val::Ctor(_, _))
+        | (Val::Ctor(_, _), Val::SymbolicCtor(_, _))
+        | (Val::SymbolicCtor(_, _), Val::Ctor(_, _))
+        | (Val::SymbolicCtor(_, _), Val::SymbolicCtor(_, _)) => build_ite(cond, val_a, val_b, solver, info),
+
+        (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
+
+        (Val::MixedBits(_), Val::MixedBits(_))
+        | (Val::String(_), Val::String(_))
+        | (Val::Ref(_), Val::Ref(_))
+        | (Val::Vector(_), Val::Vector(_))
+        | (Val::List(_), Val::List(_)) => {
+            if val_a == val_b {
+                Ok(val_a.clone())
+            } else {
+                Ok(Val::Poison)
+            }
+        }
+
+        _ => {
+            if val_a == val_b {
+                Ok(val_a.clone())
+            } else {
+                Ok(Val::Poison)
+            }
+        }
+    }
+}
+
+pub fn merge_val_nary<B: BV>(
+    conditions: &[Sym],
+    values: &[&Val<B>],
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if values.is_empty() {
+        return Err(ExecError::Type("merge_val_nary requires at least one value".to_string(), info));
+    }
+    if conditions.len() + 1 != values.len() {
+        return Err(ExecError::Type("merge_val_nary condition/value length mismatch".to_string(), info));
+    }
+    if values.iter().all(|value| *value == values[0]) {
+        return Ok(values[0].clone());
+    }
+
+    if let Some(fields) = merge_struct_fields_nary(conditions, values, solver, info)? {
+        return Ok(Val::Struct(fields));
+    }
+
+    let mut merged = values[values.len() - 1].clone();
+    for index in (0..conditions.len()).rev() {
+        merged = merge_val(conditions[index], values[index], &merged, solver, info)?;
+    }
+    Ok(merged)
+}
+
+fn merge_struct_fields_nary<B: BV>(
+    conditions: &[Sym],
+    values: &[&Val<B>],
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<HashMap<Name, Val<B>, ahash::RandomState>>, ExecError> {
+    let mut structs = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            Val::Struct(fields) => structs.push(fields),
+            _ => return Ok(None),
+        }
+    }
+
+    let first_fields = structs[0];
+    if structs.iter().any(|fields| fields.len() != first_fields.len()) {
+        return Err(ExecError::Type("merge_val_nary struct field mismatch".to_string(), info));
+    }
+
+    let fields: Result<_, _> = first_fields
+        .iter()
+        .map(|(field, first_val)| {
+            let mut field_values = Vec::with_capacity(structs.len());
+            field_values.push(first_val);
+            for fields in structs.iter().skip(1) {
+                match fields.get(field) {
+                    Some(value) => field_values.push(value),
+                    None => return Err(ExecError::Type(format!("merge_val_nary missing struct field {:?}", field), info)),
+                }
+            }
+            Ok((*field, merge_val_nary(conditions, &field_values, solver, info)?))
+        })
+        .collect();
+    Ok(Some(fields?))
+}
+
+pub fn merge_bindings_nary<'ir, B: BV>(
+    conditions: &[Sym],
+    bindings: &[&Bindings<'ir, B>],
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Bindings<'ir, B>, ExecError> {
+    if bindings.is_empty() {
+        return Ok(HashMap::default());
+    }
+
+    let keys = binding_keys(bindings);
+    let mut merged = HashMap::default();
+    for key in keys {
+        let mut values = Vec::with_capacity(bindings.len());
+        let mut all_uninit = true;
+        let mut uninit = None;
+
+        for binding in bindings {
+            match binding.get(&key) {
+                Some(UVal::Init(value)) => {
+                    all_uninit = false;
+                    values.push(value);
+                }
+                Some(UVal::Uninit(ty)) => uninit = Some(*ty),
+                None => return Err(ExecError::Type(format!("merge_bindings_nary missing binding {:?}", key), info)),
+            }
+        }
+
+        if all_uninit {
+            if let Some(ty) = uninit {
+                merged.insert(key, UVal::Uninit(ty));
+            }
+        } else if values.len() == bindings.len() {
+            merged.insert(key, UVal::Init(merge_val_nary(conditions, &values, solver, info)?));
+        } else {
+            return Err(ExecError::Type(format!("merge_bindings_nary mixed init state {:?}", key), info));
+        }
+    }
+
+    Ok(merged)
+}
+
+fn binding_keys<B: BV>(bindings: &[&Bindings<'_, B>]) -> HashSet<Name> {
+    let mut keys = HashSet::new();
+    for binding in bindings {
+        keys.extend(binding.keys().copied());
+    }
+    keys
+}
+
+pub fn merge_register_bindings_nary<'ir, B: BV>(
+    conditions: &[Sym],
+    reg_bindings: &[&RegisterBindings<'ir, B>],
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<RegisterBindings<'ir, B>, ExecError> {
+    if reg_bindings.is_empty() {
+        return Ok(RegisterBindings::new());
+    }
+
+    let keys = register_binding_keys(reg_bindings);
+    let mut merged = RegisterBindings::new();
+    for key in keys {
+        let mut values = Vec::with_capacity(reg_bindings.len());
+        for regs in reg_bindings {
+            match regs.get_last_if_initialized(key) {
+                Some(value) => values.push(value),
+                None => {
+                    return Err(ExecError::Type(
+                        format!("merge_register_bindings_nary missing initialized register {:?}", key),
+                        info,
+                    ))
+                }
+            }
+        }
+        merged.insert(key, false, UVal::Init(merge_val_nary(conditions, &values, solver, info)?));
+    }
+
+    Ok(merged)
+}
+
+fn register_binding_keys<B: BV>(reg_bindings: &[&RegisterBindings<'_, B>]) -> HashSet<Name> {
+    let mut keys = HashSet::new();
+    for regs in reg_bindings {
+        keys.extend(regs.iter().map(|(key, _)| *key));
+    }
+    keys
+}
+
 pub fn ite<B: BV>(
     boolean: &Val<B>,
     lhs: &Val<B>,
@@ -427,4 +650,44 @@ pub fn symbolic<B: BV>(
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     symbolic_from_typedefs(ty, shared_state.typedefs(), solver, info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::{Config, Context};
+
+    fn solver() -> Solver<'static, B64> {
+        let ctx = Box::leak(Box::new(Context::new(Config::new())));
+        Solver::<B64>::new(ctx)
+    }
+
+    #[test]
+    fn merge_val_nary_three_concrete_values() {
+        let mut solver = solver();
+        let conditions = [
+            solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown()),
+            solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown()),
+        ];
+        let a = Val::I64(1);
+        let b = Val::I64(2);
+        let c = Val::I64(3);
+
+        let merged = merge_val_nary(&conditions, &[&a, &b, &c], &mut solver, SourceLoc::unknown()).unwrap();
+
+        assert!(matches!(merged, Val::Symbolic(_)));
+    }
+
+    #[test]
+    fn merge_val_nary_symbolic_and_concrete_values() {
+        let mut solver = solver();
+        let conditions = [solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown())];
+        let symbolic = Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(64), SourceLoc::unknown()));
+        let concrete = Val::I64(42);
+
+        let merged = merge_val_nary(&conditions, &[&symbolic, &concrete], &mut solver, SourceLoc::unknown()).unwrap();
+
+        assert!(matches!(merged, Val::Symbolic(_)));
+    }
 }
