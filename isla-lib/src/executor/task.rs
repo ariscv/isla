@@ -111,6 +111,7 @@ pub struct ExecutionLimits {
     pub max_total_forks: Option<u32>,
     pub max_backjumps_per_loop: Option<u32>,
     pub max_path_depth: Option<u64>,
+    pub path_merging: bool,
     pub on_limit_reached: LimitBehavior,
 }
 
@@ -121,6 +122,7 @@ impl Default for ExecutionLimits {
             max_total_forks: None,
             max_backjumps_per_loop: None,
             max_path_depth: None,
+            path_merging: false,
             on_limit_reached: LimitBehavior::Truncate,
         }
     }
@@ -141,6 +143,11 @@ impl ExecutionLimits {
 
     pub fn with_max_path_depth(self, max_path_depth: u64) -> Self {
         ExecutionLimits { max_path_depth: Some(max_path_depth), ..self }
+    }
+
+    pub fn with_path_merging(mut self, enabled: bool) -> Self {
+        self.path_merging = enabled;
+        self
     }
 
     pub fn with_limit_behavior(self, on_limit_reached: LimitBehavior) -> Self {
@@ -357,6 +364,7 @@ mod tests {
         assert!(limits.max_total_forks.is_none());
         assert!(limits.max_backjumps_per_loop.is_none());
         assert!(limits.max_path_depth.is_none());
+        assert!(!limits.path_merging);
         assert!(matches!(limits.on_limit_reached, LimitBehavior::Truncate));
     }
 
