@@ -35,28 +35,20 @@
 //! - `solve-state <instruction>`: Solve for concrete ISA state values
 
 use sha2::{Digest, Sha256};
-use std::any::type_name;
-use std::collections::HashMap;
 use std::process::exit;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::vec;
 
 use isla_lib::bitvector::b129::B129;
-use isla_lib::bitvector::BV;
-use isla_lib::executor::{backtrace_string, start_single, LocalFrame, Run, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
-use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings, FPTy, Name, SharedState, Ty, Val};
+use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings};
 use isla_lib::log;
-use isla_lib::register::RegisterBindings;
 mod opts;
-use isla_lib::isarch;
+use isla::isarch;
 use opts::CommonOpts;
 
 #[cfg(feature = "debug_clause_args")]
-use isla_lib::isarch_args_yaml::test_clause_args_main;
+use isla::isarch::args::test_clause_args_main;
 #[cfg(feature = "debug_clause_args_yaml")]
-use isla_lib::isarch_args_yaml::test_clause_args_yaml_main;
+use isla::isarch::args_yaml::test_clause_args_yaml_main;
 
 fn main() {
     let code = isla_main();
@@ -84,7 +76,7 @@ fn print_usage(opts: &getopts::Options) -> ! {
     iarch_config: isla_lib::init::InitArchWithConfig<B>,
     source_path: Option<std::path::PathBuf>,
 ) -> i32 {
-    use isla_lib::isarch;
+    use isarch;
 
     log!(log::VERBOSE, &format!("Building instruction dictionary..."));
 
@@ -116,6 +108,7 @@ fn print_usage(opts: &getopts::Options) -> ! {
     }
 } */
 
+#[allow(dead_code)]
 fn cmd_tree<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
     shared_state: &&isla_lib::ir::SharedState<B>,
@@ -124,11 +117,6 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
     iarch_config: isla_lib::init::InitArchWithConfig<B>,
     source_path: Option<std::path::PathBuf>,
 ) -> i32 {
-    use isla_lib::isarch;
-    use std::fs::create_dir_all;
-    use std::io::Write;
-    use std::process::Command;
-
     let instruction = &matches.free[1];
     let graphviz = matches.opt_present("graphviz");
 
@@ -196,6 +184,7 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
     0
 }
 
+#[allow(dead_code)]
 fn cmd_solve_state<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
     iarch: &isla_lib::init::Initialized<B>,
@@ -203,8 +192,6 @@ fn cmd_solve_state<B: isla_lib::bitvector::BV>(
     isa_config: isla_lib::config::ISAConfig<B>,
     source_path: Option<std::path::PathBuf>,
 ) -> i32 {
-    use isla_lib::isarch;
-
     let instruction = &matches.free[1];
     let init_isa_with_config = matches.opt_present("init-isa-with-config");
 
@@ -254,6 +241,7 @@ fn isla_main() -> i32 {
     //
     let instruction_list = &shared_state.type_info;
     let instruction_id = shared_state.symtab.lookup("zinstruction");
+    #[allow(non_snake_case)]
     let MRET_id = shared_state.symtab.lookup("zMRET");
     // println!("ins_id={:?},MRET_id={:?}",instruction_id,MRET_id);
     // let instructions_union=shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap();
@@ -295,7 +283,7 @@ fn isla_main() -> i32 {
             .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
             .ok();
         let pmp_symbolic = isa_config.pmp.as_ref().map(|pmp| pmp.symbolic).unwrap_or(false);
-        isla_lib::isarch_exec::test_exec_main(shared_state, regs, lets, initial_memory, pmp_symbolic);
+        isarch::exec::test_exec_main(shared_state, regs, lets, initial_memory, pmp_symbolic);
     }
 
     match subcommand {

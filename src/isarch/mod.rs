@@ -1,23 +1,21 @@
-use crate::bitvector::BV;
-use crate::config::ISAConfig;
-use crate::dprint::colors;
-use crate::error::ExecError;
-use crate::executor::{
-    backtrace_string, execute_ir_function, start_single, Collector, LocalFrame, Run, TaskId, TaskState,
-};
-use crate::ir::UVal;
-use crate::isarch_args::{ArgStruct, InstructionMap};
-use crate::log;
-use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context, EnumMember, Model};
-use crate::smt::{Checkpoint, Event, Solver, Sym};
-use crate::source_loc::SourceLoc;
-use crate::{d2, dlog, zencode};
-use crate::{ir::*, smt};
-use sha2::digest::generic_array::functional::FunctionalSequence;
+pub mod args;
+pub mod args_yaml;
+pub mod exec;
+
+use crate::isarch::args::{ArgStruct, InstructionMap};
+use isla_lib::bitvector::BV;
+use isla_lib::dprint::colors;
+use isla_lib::error::ExecError;
+use isla_lib::executor::{backtrace_string, execute_ir_function, LocalFrame, Run};
+use isla_lib::ir::UVal;
+use isla_lib::register::RegisterBindings;
+use isla_lib::smt::{checkpoint, Config, Context, Model};
+use isla_lib::smt::{Checkpoint, Solver, Sym};
+use isla_lib::source_loc::SourceLoc;
+use isla_lib::{dlog, zencode};
+use isla_lib::{ir::*, smt};
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /**
  * instruction list gen
@@ -128,7 +126,7 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
         Ty::Enum(enum_name) => {
             // 获取枚举的第一个成员作为默认值
             if let Some(_members) = shared_state.type_info.enums.get(enum_name) {
-                Val::Enum(crate::smt::EnumId::from_name(*enum_name).first_member())
+                Val::Enum(isla_lib::smt::EnumId::from_name(*enum_name).first_member())
             } else {
                 Val::Poison
             }
@@ -189,7 +187,7 @@ fn print_frame_args<B: BV>(
     let mut found = false;
 
     // 首先调用 check_sat 来确保 solver 有可用的模型
-    if solver.check_sat(SourceLoc::unknown()) != crate::smt::SmtResult::Sat {
+    if solver.check_sat(SourceLoc::unknown()) != isla_lib::smt::SmtResult::Sat {
         dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
         return;
     }
@@ -217,10 +215,10 @@ fn print_frame_args<B: BV>(
                     for sym in &syms {
                         match model.get_var(*sym) {
                             Ok(model_val) => match model_val {
-                                crate::smt::ModelVal::Exp(exp) => {
+                                isla_lib::smt::ModelVal::Exp(exp) => {
                                     dlog!("    |||Sym({:?}) = {:?}", sym, exp);
                                 }
-                                crate::smt::ModelVal::Arbitrary(ty) => {
+                                isla_lib::smt::ModelVal::Arbitrary(ty) => {
                                     dlog!("    Sym({:?}) = Arbitrary ({:?})", sym, ty);
                                 }
                             },
@@ -297,8 +295,8 @@ pub fn enumerate_possible_values<'ir, B: BV>(
                     let ctx = Context::new(cfg);
                     let mut solver = Solver::new(&ctx);
                     // 使用默认方式创建枚举值
-                    let enum_id = crate::smt::EnumId::from_name(*enum_name);
-                    let enum_member = crate::smt::EnumMember { enum_id, member: i };
+                    let enum_id = isla_lib::smt::EnumId::from_name(*enum_name);
+                    let enum_member = isla_lib::smt::EnumMember { enum_id, member: i };
                     let member_val = Val::Enum(enum_member);
                     // 获取成员名称
                     let member_name = members.iter().nth(i).copied().unwrap_or(*enum_name);
@@ -331,12 +329,12 @@ pub fn enumerate_possible_values<'ir, B: BV>(
                         if let Ty::Enum(enum_name) = field_ty {
                             if let Some(members) = shared_state.type_info.enums.get(enum_name) {
                                 let num_members = members.len();
-                                let enum_id = crate::smt::EnumId::from_name(*enum_name);
+                                let enum_id = isla_lib::smt::EnumId::from_name(*enum_name);
 
                                 let mut new_combinations = Vec::new();
                                 for mut combo in combinations.drain(..) {
                                     for i in 0..num_members {
-                                        let enum_member = crate::smt::EnumMember { enum_id, member: i };
+                                        let enum_member = isla_lib::smt::EnumMember { enum_id, member: i };
                                         let member_val = Val::Enum(enum_member);
                                         combo.insert(*field_name, member_val);
                                         new_combinations.push(combo.clone());
@@ -432,7 +430,7 @@ pub fn generate_symbolic_value<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    use crate::primop_util::symbolic;
+    use isla_lib::primop_util::symbolic;
 
     symbolic(ty, shared_state, solver, info)
 }
@@ -512,7 +510,7 @@ pub fn get_assembly_names_all<B: BV>(
         let collected: Vec<_> = Vec::new();
         let collected: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(collected));
 
-        crate::executor::execute_ir_function_with_checkpoint(
+        isla_lib::executor::execute_ir_function_with_checkpoint(
             "zassembly_forwards",
             &[instr_value],
             shared_state,
@@ -555,6 +553,7 @@ pub fn get_assembly_names_all<B: BV>(
     assembly_names
 }
 
+#[allow(non_snake_case)]
 pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
     instruction_name: &str,
     shared_state: &'ir SharedState<'ir, B>,
@@ -591,7 +590,7 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
         // 闭包只收集 (assembly_str, checkpoint)，不包含 shared_state 引用
         let collected: Arc<Mutex<Vec<(String, Checkpoint<B>)>>> = Arc::new(Mutex::new(Vec::new()));
 
-        crate::executor::execute_ir_function_with_checkpoint(
+        isla_lib::executor::execute_ir_function_with_checkpoint(
             "zassembly_forwards",
             &[instr_value],
             &shared_state,
@@ -612,7 +611,7 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
                             _ => panic!("return value error: {:#?}", &ret_val),
                         };
 
-                        /* if solver.check_sat(SourceLoc::unknown()) != crate::smt::SmtResult::Sat {
+                        /* if solver.check_sat(SourceLoc::unknown()) != isla_lib::smt::SmtResult::Sat {
                             dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
                             return;
                         }
@@ -676,6 +675,7 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
 
     arg_structs
 }
+#[allow(non_snake_case)]
 pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
     instruction_name: &str,
     shared_state: &'ir SharedState<'ir, B>,
@@ -683,7 +683,7 @@ pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
     lets: &Bindings<B>,
     arg_structs: Vec<(String, ArgStruct<'ir, B>)>,
 ) -> InstructionMap<'ir, B> {
-    let arg_structs_splited = arg_structs
+    let arg_structs_splited: Vec<(Option<&str>, &ArgStruct<'ir, B>)> = arg_structs
         .iter()
         .map(|(assembly_str, arg_struct)| (assembly_str.split_whitespace().next(), arg_struct))
         .collect::<Vec<_>>();
@@ -691,8 +691,7 @@ pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
     let mut arg_structs_merged: Vec<(String, Vec<ArgStruct<'ir, B>>)> = Vec::new();
     let mut clause_has_no_inst_name: HashSet<String> = HashSet::new();
 
-    for inst_name_and_arg_struct in arg_structs_splited {
-        let (inst_name_option, arg_struct) = inst_name_and_arg_struct;
+    for (inst_name_option, arg_struct) in arg_structs_splited {
         //在arg_structs_merged的key中，如果inst_name_option在里面没找到，说明是个新的，整个inst_name_and_arg_struct加进arg_structs_merged；
         //如果找到了，说明表里面有，就把arg_struct加到inst_name_option那一条里面去
 
@@ -717,6 +716,7 @@ pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
     InstructionMap::from_vec_with_shared_state(&arg_structs_merged, &shared_state)
 }
 ///给yaml用的
+#[allow(non_snake_case)]
 pub fn ir_assembly_names_to_InstructionMap<'ir, B: BV>(
     instruction_name: &str,
     shared_state: &'ir SharedState<'ir, B>,
