@@ -1,22 +1,16 @@
-use crate::bitvector::BV;
-use crate::dlog;
-use crate::ir::*;
-use crate::isarch::{
-    generate_default_value, get_default_arg_all, get_symbolic_arg_all, ir_assembly_names_to_InstructionMap,
-};
-use crate::isarch_args;
-use crate::isarch_args::ArgStruct;
-use crate::register::RegisterBindings;
-use crate::smt::smtlib::Exp;
-use crate::smt::{checkpoint, Config, Context, EnumMember, Model};
-use crate::smt::{Checkpoint, Event, Solver, Sym};
-use crate::source_loc::SourceLoc;
-use crate::zencode;
-use core::slice;
+use crate::isarch::args;
+use crate::isarch::args::ArgStruct;
+use crate::isarch::ir_assembly_names_to_InstructionMap;
+use isla_lib::bitvector::BV;
+use isla_lib::ir::*;
+use isla_lib::register::RegisterBindings;
+use isla_lib::smt::smtlib::Exp;
+use isla_lib::smt::{Checkpoint, Solver, Sym};
+use isla_lib::smt::{Config, Context, Model};
+use isla_lib::source_loc::SourceLoc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::panic::panic_any;
 
 pub trait MergeMaps<K, V> {
     fn merge_values(self) -> HashMap<K, HashSet<V>>;
@@ -61,51 +55,46 @@ where
     YAML
 */
 
-impl Sym {
-    pub fn sym_solve_str<B: BV>(&self, point: &Checkpoint<B>, shared_state: &SharedState<B>) -> String {
-        let mut cfg = Config::new();
-        cfg.set_param_value("model", "true");
-        let ctx = Context::new(cfg);
-        let mut solver = Solver::from_checkpoint(&ctx, point.clone());
+pub fn sym_solve_str<B: BV>(sym: &Sym, point: &Checkpoint<B>, shared_state: &SharedState<B>) -> String {
+    let mut cfg = Config::new();
+    cfg.set_param_value("model", "true");
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::from_checkpoint(&ctx, point.clone());
 
-        if solver.check_sat(SourceLoc::unknown()) != crate::smt::SmtResult::Sat {
-            panic!(
-                "  符号求解失败: UNSAT 或 UNKNOWN (不过不用担心，大概是z3子进程由于Ctrl+C或者其他原因被杀掉了导致的)"
-            );
-            // return;
-        }
-        let mut model = Model::new(&solver);
+    if solver.check_sat(SourceLoc::unknown()) != isla_lib::smt::SmtResult::Sat {
+        panic!("  符号求解失败: UNSAT 或 UNKNOWN (不过不用担心，大概是z3子进程由于Ctrl+C或者其他原因被杀掉了导致的)");
+        // return;
+    }
+    let mut model = Model::new(&solver);
 
-        let sym = &self.clone();
-        match model.get_var(*sym) {
-            Ok(model_val) => match model_val {
-                crate::smt::ModelVal::Exp(exp) => {
-                    // let val = execute::eval_exp(exp, local_state, shared_state, solver, info)?.into_owned();
-                    match &exp {
-                        Exp::Var(v) => format!("{}", v.sym_solve_str(&point, &shared_state)),
-                        Exp::Bits(vec) => format!("{:?}", &exp),
-                        Exp::Bits64(b64) => format!("{:?}", b64),
-                        Exp::Enum(enum_member) => format!("{:?}", &exp),
-                        Exp::Bool(b) => format!("{:?}", &exp),
-                        _ => panic!("不知道怎么处理的符号表达式Exp:{:?}", &exp),
-                    }
+    let sym = &sym.clone();
+    match model.get_var(*sym) {
+        Ok(model_val) => match model_val {
+            isla_lib::smt::ModelVal::Exp(exp) => {
+                // let val = execute::eval_exp(exp, local_state, shared_state, solver, info)?.into_owned();
+                match &exp {
+                    Exp::Var(v) => format!("{}", sym_solve_str(v, point, shared_state)),
+                    Exp::Bits(vec) => format!("{:?}", &exp),
+                    Exp::Bits64(b64) => format!("{:?}", b64),
+                    Exp::Enum(enum_member) => format!("{:?}", &exp),
+                    Exp::Bool(b) => format!("{:?}", &exp),
+                    _ => panic!("不知道怎么处理的符号表达式Exp:{:?}", &exp),
                 }
-                crate::smt::ModelVal::Arbitrary(ty) => {
-                    panic!("    不知道怎么处理的符号变量Sym({:?}) = Arbitrary ({:?})", sym, ty);
-                }
-            },
-            Err(e) => {
-                panic!("    Sym({:?}) = Error: {:?}", sym, e);
             }
+            isla_lib::smt::ModelVal::Arbitrary(ty) => {
+                panic!("    不知道怎么处理的符号变量Sym({:?}) = Arbitrary ({:?})", sym, ty);
+            }
+        },
+        Err(e) => {
+            panic!("    Sym({:?}) = Error: {:?}", sym, e);
         }
     }
 }
-impl<B: BV> Val<B> {
-    pub fn sym_solve_str(&self, point: &Checkpoint<B>, shared_state: &SharedState<B>) -> String {
-        match self {
-            Val::Symbolic(sym) => sym.sym_solve_str(&point, &shared_state),
-            _ => panic!("sym_solve:在符号化变量的求值中出现了非符号化的变量"),
-        }
+
+pub fn val_sym_solve_str<B: BV>(val: &Val<B>, point: &Checkpoint<B>, shared_state: &SharedState<B>) -> String {
+    match val {
+        Val::Symbolic(sym) => sym_solve_str(sym, point, shared_state),
+        _ => panic!("sym_solve:在符号化变量的求值中出现了非符号化的变量"),
     }
 }
 
@@ -133,14 +122,15 @@ impl YAMLAllInstructions {
 }
 // Trait 为 Vec<ArgStruct> 提供 YAML 序列化功能
 trait ToYAMLSerializer<'ir, B: BV> {
+    #[allow(non_snake_case)]
     fn to_YAMLSerializerBuilder(&self) -> YAMLInstArgs;
 }
 
-impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<isarch_args::ArgStruct<'ir, B>> {
+impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<args::ArgStruct<'ir, B>> {
     fn to_YAMLSerializerBuilder(&self) -> YAMLInstArgs {
         let arg_struct_vec = self.clone();
         let mut yaml_map_vec: Vec<HashMap<String, String>> = Vec::new();
-        let mut clause_name_mut: Option<String> =
+        let clause_name_mut: Option<String> =
             arg_struct_vec.iter().next().and_then(|arg_struct| arg_struct.clause_name.clone());
 
         //把表里面的Val转成字符串
@@ -162,7 +152,7 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<isarch_args::ArgStruct<'ir, B>
                             (
                                 k.to_str(&shared_state),
                                 match &v {
-                                    Val::Symbolic(sym) => v.sym_solve_str(&point, &shared_state),
+                                    Val::Symbolic(sym) => val_sym_solve_str(v, &point, &shared_state),
                                     _ => panic!("TODO:还要加其他类型的实现：{:#?}", v),
                                 },
                             )
@@ -171,7 +161,7 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<isarch_args::ArgStruct<'ir, B>
                     //println!("[Struct]:{:#?}", yaml_map)
                     yaml_map_vec.push(yaml_map);
                 }
-                _ => (panic!("这是什么类型？{:?}", arg_value)),
+                _ => panic!("这是什么类型？{:?}", arg_value),
             }
         }
 
@@ -212,7 +202,7 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<isarch_args::ArgStruct<'ir, B>
 
 /// 将 InstructionMap 转换为 YAML 格式并写入文件
 pub fn write_instruction_map_to_yaml<'ir, B: BV>(
-    instruction_map: &isarch_args::InstructionMap<'ir, B>,
+    instruction_map: &args::InstructionMap<'ir, B>,
     output_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let all_instructions = YAMLAllInstructions::new(

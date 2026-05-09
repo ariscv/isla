@@ -78,7 +78,7 @@ doc = false
 
 [[bin]]
 name = "isarch"
-path = "src/isarch.rs"
+path = "src/isarch_main.rs"
 doc = false
 
 [dependencies]
@@ -87,6 +87,7 @@ getopts = "0.2.21"
 toml = "0.5.5"
 pretty = "0.11.3"
 serde = "1.0.104"
+serde_json = "1.0.48"
 bincode = "1.2.1"
 sha2 = "0.8.1"
 rand = "0.7.3"
@@ -101,10 +102,10 @@ isla-elf = { path = "isla-elf", version = "0.2.0" }
 
 [features]
 smtperf = ["isla-lib/smtperf"]
-debug_instruction=["isla-lib/debug_instruction"]
-debug_clause_args=["isla-lib/debug_clause_args"]
-debug_clause_args_yaml=["isla-lib/debug_clause_args_yaml"]
-debug_exec=["isla-lib/debug_exec"]
+debug_instruction = []
+debug_clause_args = []
+debug_clause_args_yaml = []
+debug_exec = []
 default = ["debug_exec"]
 
 [profile.dev]

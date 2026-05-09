@@ -1,20 +1,19 @@
-use crate::bitvector::BV;
-use crate::dprint::{self, colors};
-use crate::error::{ExecError, IslaError};
-use crate::executor::{backtrace_string, LocalFrame, Run};
-use crate::fmtval::FmtVal;
-use crate::ir::UVal;
-use crate::isarch::{self, get_assembly_name};
-use crate::primop_util::symbolic;
-use crate::register::RegisterBindings;
-use crate::smt::{checkpoint, Config, Context, Event, Model, ModelVal};
-use crate::smt::{Solver, Sym};
-use crate::source_loc::SourceLoc;
-use crate::zencode;
-use crate::{dlog, log};
-use crate::{ir::*, smt};
+use crate::isarch::{self as isarch};
+use isla_lib::bitvector::BV;
+use isla_lib::error::ExecError;
+use isla_lib::error::IslaError;
+use isla_lib::executor::{backtrace_string, Run};
+use isla_lib::fmtval::FmtVal;
+use isla_lib::ir::UVal;
+use isla_lib::ir::*;
+use isla_lib::primop_util::symbolic;
+use isla_lib::register::RegisterBindings;
+use isla_lib::smt::{Config, Context, Model};
+use isla_lib::smt::{Solver, Sym};
+use isla_lib::source_loc::SourceLoc;
+use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -115,6 +114,7 @@ impl RISCV for RISCVTarget {
     }
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
 struct AssemGen_Json_Item {
     arch: BTreeMap<String, String>,
@@ -143,6 +143,7 @@ impl AssemGen_Json_Item {
     }
 }
 trait ToJSON: Serialize {
+    #[allow(dead_code)]
     fn to_json_str(&self) -> String {
         serde_json::to_string_pretty(self).unwrap()
     }
@@ -161,6 +162,7 @@ trait ToJSON: Serialize {
         fs::write(path, json).unwrap();
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
 struct AssemGen_Json {
     gen: Vec<AssemGen_Json_Item>,
@@ -173,6 +175,7 @@ impl AssemGen_Json {
     }
 }
 
+#[allow(non_snake_case)]
 fn symbolic_args_from_TYPEs<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
@@ -201,7 +204,7 @@ fn symbolic_args_from_TYPEs<B: BV>(
     };
 
     //hook: zSTORE
-    if (instruction_name == "zSTORE") {
+    if instruction_name == "zSTORE" {
         eprintln!("hook(zSTORE):ctor_ty={:#?}", ctor_ty);
     }
 
@@ -247,7 +250,7 @@ pub fn run_symbolic_execute<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Result<Option<String>, ExecError> {
-    use crate::smt::checkpoint;
+    use isla_lib::smt::checkpoint;
 
     // 从 lets 绑定中读取 zxlen 值
     let xlen = shared_state
@@ -285,7 +288,7 @@ pub fn run_symbolic_execute<B: BV>(
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
 
-    crate::executor::execute_ir_function_with_checkpoint(
+    isla_lib::executor::execute_ir_function_with_checkpoint(
         "zexecute",
         &fun_args,
         shared_state,
@@ -333,7 +336,7 @@ pub fn run_symbolic_execute<B: BV>(
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
-                        if solver.check_sat(SourceLoc::unknown()) == crate::smt::SmtResult::Sat {
+                        if solver.check_sat(SourceLoc::unknown()) == isla_lib::smt::SmtResult::Sat {
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
@@ -347,7 +350,7 @@ pub fn run_symbolic_execute<B: BV>(
                                             isarch::get_assembly_name(arg_val.clone(), shared_state, regs, lets);
                                         println!("当前汇编：{:?}", asm_opt);
                                         match asm_opt {
-                                            Some(asm) => test_ins = asm.clone(),
+                                            Some(asm) => test_ins = asm,
                                             None => return,
                                         }
                                         let asm_encdec_opt =
@@ -395,7 +398,7 @@ pub fn run_symbolic_execute<B: BV>(
                                             .unwrap_or_else(|_| val.to_str(shared_state));
                                         let fv = model.get_fmtval(val);
                                         match fv {
-                                            Err(ExecError) => continue,
+                                            Err(exec_error) => continue,
                                             Ok(fmt_val) => {
                                                 // println!("  {} = {}", reg_name_decoded, formatted);
                                                 if fmt_val.is_arbitrary() {
@@ -419,10 +422,10 @@ pub fn run_symbolic_execute<B: BV>(
                                     if !let_name_str.starts_with("__") && let_name_str != "NULL" {
                                         match let_val {
                                             UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits64(bv))) => {
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits64(bv))) => {
                                                     println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
                                                 }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bits(bv))) => {
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits(bv))) => {
                                                     let hex_str: String = bv
                                                         .chunks(4)
                                                         .rev()
@@ -438,10 +441,10 @@ pub fn run_symbolic_execute<B: BV>(
                                                         .collect();
                                                     println!("  let {} = 0b{}", let_name_str, hex_str);
                                                 }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Bool(b))) => {
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bool(b))) => {
                                                     println!("  let {} = {}", let_name_str, b);
                                                 }
-                                                Ok(crate::smt::ModelVal::Exp(crate::smt::smtlib::Exp::Enum(
+                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(
                                                     member,
                                                 ))) => {
                                                     let name = member.to_name(shared_state);
@@ -533,8 +536,6 @@ pub fn run_symbolic_execute<B: BV>(
 
 #[cfg(feature = "debug_exec")]
 pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindings<B>, lets: &Bindings<B>) {
-    use std::{process::exit, vec};
-
     println!("test_exec_main");
     /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
         Ok(_) => {}
@@ -911,7 +912,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     ];
     // instruction_table.extend( todo_instruction_table.to_vec());
 
-    /*     let ext_i_instruction_table = [
+    let ext_i_instruction_table = [
         "zADDIW",
         "zBTYPE",
         "zEBREAK",
@@ -933,7 +934,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         "zUTYPE",
         "zWFI",
     ];
-    instruction_table.extend(ext_i_instruction_table.to_vec()); */
+    instruction_table.extend(ext_i_instruction_table.to_vec());
 
     let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
         .into_iter()
@@ -1000,10 +1001,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
 
     // instruction_table.extend(vec!["zLOAD"]);
 
-	let excute_through_instruction_table = [
-        "zSTORE",
-        "zLOAD",
-    ];
+    let excute_through_instruction_table = ["zSTORE", "zLOAD"];
     // instruction_table.extend( excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {

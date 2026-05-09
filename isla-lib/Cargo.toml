@@ -16,10 +16,6 @@ execution engine as a library.
 
 [features]
 smtperf = []
-debug_instruction=[]
-debug_clause_args=[]
-debug_clause_args_yaml=[]
-debug_exec=[]
 
 [build-dependencies]
 lalrpop = { version = "0.20.2", features = ["lexer"] }
