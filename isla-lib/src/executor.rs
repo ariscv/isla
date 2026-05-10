@@ -1006,24 +1006,25 @@ fn run_special_primop<'ir, B: BV>(
 }
 
 fn concretize_branch_condition<B: BV>(v: Sym, solver: &mut Solver<B>, info: SourceLoc) -> Result<bool, ExecError> {
+    use smtlib::Def::*;
     use smtlib::Exp::*;
 
     // is_sat() 在 Unknown 时返回 Err(ExecError::Z3Unknown)，会通过 ? 正确传播
     let can_be_true = solver.check_sat_with(&Var(v), info).is_sat()?;
-    if can_be_true {
-        let seed =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1);
-        crate::smt::global_set_param_value("random_seed", &seed.to_string());
-
+    let concrete_val = if can_be_true {
         let mut model = Model::new(solver);
         match model.get_var(v) {
-            Ok(ModelVal::Exp(Bool(b))) => Ok(b),
-            Ok(ModelVal::Arbitrary(_)) => Ok(true),
-            _ => Ok(true),
+            Ok(ModelVal::Exp(Bool(b))) => b,
+            Ok(ModelVal::Arbitrary(_)) => true,
+            _ => true,
         }
     } else {
-        Ok(false)
-    }
+        false
+    };
+
+    solver.add(Assert(Eq(Box::new(Bool(concrete_val)), Box::new(Var(v)))));
+
+    Ok(concrete_val)
 }
 
 pub enum Run<B> {
@@ -1119,16 +1120,13 @@ fn run_loop<'ir, 'task, B: BV>(
                         let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
                         match *value.as_ref() {
                             Val::Symbolic(v) => {
-                                use smtlib::Def::*;
                                 use smtlib::Exp::*;
 
                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                 if concrete_bool {
-                                    solver.add(Assert(Var(v)));
                                     frame.branch_conditions.push(Var(v));
                                     frame.pc = *target;
                                 } else {
-                                    solver.add(Assert(Not(Box::new(Var(v)))));
                                     frame.branch_conditions.push(Not(Box::new(Var(v))));
                                     frame.pc += 1;
                                 }
@@ -1174,11 +1172,9 @@ fn run_loop<'ir, 'task, B: BV>(
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
-                                                    solver.add(Assert(test_true.clone()));
                                                     frame.branch_conditions.push(test_true);
                                                     frame.pc = *target;
                                                 } else {
-                                                    solver.add(Assert(test_false.clone()));
                                                     frame.branch_conditions.push(test_false);
                                                     frame.pc += 1;
                                                 }
@@ -1202,11 +1198,40 @@ fn run_loop<'ir, 'task, B: BV>(
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
-                                                    solver.add(Assert(test_true.clone()));
                                                     frame.branch_conditions.push(test_true);
                                                     frame.pc = *target;
                                                 } else {
-                                                    solver.add(Assert(test_false.clone()));
+                                                    frame.branch_conditions.push(test_false);
+                                                    frame.pc += 1;
+                                                }
+                                                continue 'main_loop;
+                                            }
+                                        }
+                                    }
+                                }
+                                // 自适应百分比 fork 限制（与 KLEE MaxStaticForkPct 一致）
+                                if let Some(max_pct) = limits.max_fork_pct_per_branch {
+                                    let branch_count = if limits.max_forks_per_branch.is_none() {
+                                        task_state.limits_state.increment_branch_fork(frame.function_name, frame.pc)
+                                    } else {
+                                        task_state.limits_state.get_branch_fork_count(frame.function_name, frame.pc)
+                                    };
+                                    let total = task_state.limits_state.total_forks();
+                                    let delay = limits.max_fork_pct_check_delay.unwrap_or(0);
+                                    if total > delay && (branch_count as f64) > (total as f64) * max_pct {
+                                        match limits.on_limit_reached {
+                                            LimitBehavior::Truncate => {
+                                                return Err(ExecError::BranchLimitReached(
+                                                    frame.function_name,
+                                                    frame.pc,
+                                                ))
+                                            }
+                                            LimitBehavior::Concretize => {
+                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                if concrete_bool {
+                                                    frame.branch_conditions.push(test_true);
+                                                    frame.pc = *target;
+                                                } else {
                                                     frame.branch_conditions.push(test_false);
                                                     frame.pc += 1;
                                                 }
