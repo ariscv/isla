@@ -959,7 +959,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         "zUTYPE",
         "zWFI",
     ];
-    instruction_table.extend(ext_i_instruction_table.to_vec());
+    // instruction_table.extend(ext_i_instruction_table.to_vec());
 
     let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
         .into_iter()
@@ -1027,7 +1027,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     // instruction_table.extend(vec!["zLOAD"]);
 
     let excute_through_instruction_table = ["zSTORE", "zLOAD"];
-    // instruction_table.extend( excute_through_instruction_table.to_vec());
+    instruction_table.extend(excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
         match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
