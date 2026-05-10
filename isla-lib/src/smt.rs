@@ -1883,6 +1883,7 @@ impl SmtResult {
 }
 
 static QFAUFBV_STR: &[u8] = b"qfaufbv\0";
+static SEED_STR: &[u8] = b"seed\0";
 static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -1903,19 +1904,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
             Z3_tactic_dec_ref(ctx.z3_ctx, qfaufbv_tactic);
 
-            // 创建 solver 参数对象，用来设置 random_seed，并手动管理它的引用计数。
+            // Z3 >= 4.13.0 将 random_seed 改名为 seed
             let z3_params = Z3_mk_params(ctx.z3_ctx);
             Z3_params_inc_ref(ctx.z3_ctx, z3_params);
 
-            // 把参数名 "random_seed" 转成 Z3 可识别的 symbol。
-            let random_seed =
-                Z3_mk_string_symbol(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(RANDOM_SEED_STR).as_ptr());
-
-            // 为当前 solver 设置一个随机 seed。
-            Z3_params_set_uint(ctx.z3_ctx, z3_params, random_seed, fresh_random_seed());
+            let seed_param_name = if major > 4 || (major == 4 && minor >= 13) {
+                CStr::from_bytes_with_nul_unchecked(SEED_STR).as_ptr()
+            } else {
+                CStr::from_bytes_with_nul_unchecked(RANDOM_SEED_STR).as_ptr()
+            };
+            let seed_symbol = Z3_mk_string_symbol(ctx.z3_ctx, seed_param_name);
+            Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, fresh_random_seed());
             Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
 
-            // 参数已经交给 solver 使用，这里释放本地这份 params 引用。
             Z3_params_dec_ref(ctx.z3_ctx, z3_params);
 
             Solver {
