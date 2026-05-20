@@ -43,7 +43,7 @@ use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings};
 use isla_lib::log;
 mod opts;
 use isla::isarch;
-use isla::isarch::target::{RISCV, RV64};
+use isla::isarch::target::{RISCV, RV32, RV64};
 use opts::CommonOpts;
 
 #[cfg(feature = "debug_clause_args")]
@@ -224,11 +224,13 @@ fn isla_main() -> i32 {
     let assertion_mode = AssertionMode::Optimistic;
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");
 
+    let pmp_symbolic = isa_config.pmp.as_ref().map(|pmp| pmp.symbolic).unwrap_or(false);
+
     if let Some(pmp_config) = &isa_config.pmp {
         if !pmp_config.symbolic {
-            RV64.apply_pmp_rules_to_config(
-                pmp_config, &symtab, &type_info, &mut isa_config.default_registers,
-            ).unwrap();
+            RV64::default()
+                .apply_pmp_rules_to_config(pmp_config, &symtab, &type_info, &mut isa_config.default_registers)
+                .unwrap();
         }
     }
 
@@ -287,12 +289,30 @@ fn isla_main() -> i32 {
 
     #[cfg(feature = "debug_exec")]
     {
-        let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&isa_config)
-            .and_then(|builder| builder.build())
-            .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
-            .ok();
-        let pmp_symbolic = isa_config.pmp.as_ref().map(|pmp| pmp.symbolic).unwrap_or(false);
-        isarch::exec::test_exec_main(shared_state, regs, lets, initial_memory, pmp_symbolic);
+        let xlen_name = shared_state.symtab.lookup("zxlen");
+        let xlen = match lets.get(&xlen_name) {
+            Some(isla_lib::ir::UVal::Init(isla_lib::ir::Val::I64(n))) => *n as u32,
+            Some(isla_lib::ir::UVal::Init(isla_lib::ir::Val::I128(n))) => *n as u32,
+            _ => panic!("unexpected xlen in lets: {:?}", lets.get(&xlen_name)),
+        };
+        match xlen {
+            32 => {
+                let target = RV32 { pmp_symbolic };
+                let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
+                    .and_then(|builder| builder.build())
+                    .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
+                    .ok();
+                isarch::exec::test_exec_main(shared_state, regs, lets, initial_memory, &target);
+            }
+            _ => {
+                let target = RV64 { pmp_symbolic };
+                let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
+                    .and_then(|builder| builder.build())
+                    .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
+                    .ok();
+                isarch::exec::test_exec_main(shared_state, regs, lets, initial_memory, &target);
+            }
+        }
     }
 
     match subcommand {
