@@ -23,6 +23,7 @@ pub trait MergeMaps<K, V> {
 ///
 /// ```
 /// use std::collections::{HashMap, HashSet};
+/// use isla::isarch::args_yaml::MergeMaps;
 ///
 /// let maps = vec![
 ///     [("a".to_string(), 1), ("b".to_string(), 2)].into_iter().collect(),

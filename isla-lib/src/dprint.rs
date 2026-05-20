@@ -487,6 +487,20 @@ impl<B: BV> Val<B> {
             return Ok(Val::I128(n));
         }
 
+        // I64: 字面量格式 "42i64" (to_str 的输出格式)
+        if s.ends_with("i64") {
+            let num_str = &s[..s.len() - 3];
+            let n = num_str.parse::<i64>().map_err(|_| format!("无法解析的Val格式: {}", s))?;
+            return Ok(Val::I64(n));
+        }
+
+        // I128: 字面量格式 "42i128" (to_str 的输出格式)
+        if s.ends_with("i128") {
+            let num_str = &s[..s.len() - 4];
+            let n = num_str.parse::<i128>().map_err(|_| format!("无法解析的Val格式: {}", s))?;
+            return Ok(Val::I128(n));
+        }
+
         // Bool: 支持两种格式 "true"/"false" 和 "Bool(true)"/"Bool(false)"
         if s == "true" {
             return Ok(Val::Bool(true));

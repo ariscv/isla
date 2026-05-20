@@ -62,7 +62,7 @@ mod task;
 use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
-pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+pub use task::{ExecutionLimits, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1005,40 +1005,26 @@ fn run_special_primop<'ir, B: BV>(
     Ok(SpecialResult::Continue)
 }
 
-fn is_zero_test_exp(exp: &Exp<Name>) -> bool {
-    match exp {
-        Exp::Bits(bits) => bits.lower_u64() == 0,
-        Exp::I64(n) => *n == 0,
-        Exp::I128(n) => *n == 0,
-        _ => false,
-    }
-}
+fn concretize_branch_condition<B: BV>(v: Sym, solver: &mut Solver<B>, info: SourceLoc) -> Result<bool, ExecError> {
+    use smtlib::Def::*;
+    use smtlib::Exp::*;
 
-fn x0_branch_side(exp: &Exp<Name>) -> Option<bool> {
-    match exp {
-        Exp::Call(Op::Eq, exps) if exps.len() == 2 => {
-            if is_zero_test_exp(&exps[0]) || is_zero_test_exp(&exps[1]) {
-                Some(true)
-            } else {
-                None
-            }
+    // is_sat() 在 Unknown 时返回 Err(ExecError::Z3Unknown)，会通过 ? 正确传播
+    let can_be_true = solver.check_sat_with(&Var(v), info).is_sat()?;
+    let concrete_val = if can_be_true {
+        let mut model = Model::new(solver);
+        match model.get_var(v) {
+            Ok(ModelVal::Exp(Bool(b))) => b,
+            Ok(ModelVal::Arbitrary(_)) => true,
+            _ => true,
         }
-        Exp::Call(Op::Neq, exps) if exps.len() == 2 => {
-            if is_zero_test_exp(&exps[0]) || is_zero_test_exp(&exps[1]) {
-                Some(false)
-            } else {
-                None
-            }
-        }
-        Exp::Call(Op::Not, exps) if exps.len() == 1 => x0_branch_side(&exps[0]).map(|is_true_branch| !is_true_branch),
-        _ => None,
-    }
-}
+    } else {
+        false
+    };
 
-fn in_x_function_stack<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) -> bool {
-    let workaround_list = ["X", "rX", "wX"];
-    let is_x = |name: Name| zencode::decode(shared_state.symtab.to_str(name)) == "X";
-    is_x(frame.function_name) || frame.backtrace.iter().any(|(name, _)| is_x(*name))
+    solver.add(Assert(Eq(Box::new(Bool(concrete_val)), Box::new(Var(v)))));
+
+    Ok(concrete_val)
 }
 
 pub enum Run<B> {
@@ -1100,6 +1086,65 @@ fn run_loop<'ir, 'task, B: BV>(
             }
 
             Instr::Jump(exp, target, info) => {
+                frame.step_count += 1;
+                if let Some(ref limits) = task_state.execution_limits {
+                    let mut limit_reached = false;
+
+                    if let Some(max_depth) = limits.max_path_depth {
+                        if frame.step_count as u64 > max_depth {
+                            match limits.on_limit_reached {
+                                LimitBehavior::Truncate => return Err(ExecError::DepthLimitReached),
+                                LimitBehavior::Concretize => limit_reached = true,
+                            }
+                        }
+                    }
+
+                    if !limit_reached {
+                        if let Some(max_backjumps) = limits.max_backjumps_per_loop {
+                            if *target <= frame.pc {
+                                let count = frame.loop_counts.entry(*target).or_insert(0);
+                                *count += 1;
+                                if *count > max_backjumps {
+                                    match limits.on_limit_reached {
+                                        LimitBehavior::Truncate => {
+                                            return Err(ExecError::LoopLimitReached(frame.function_name, *target))
+                                        }
+                                        LimitBehavior::Concretize => limit_reached = true,
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if limit_reached {
+                        let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
+                        match *value.as_ref() {
+                            Val::Symbolic(v) => {
+                                use smtlib::Exp::*;
+
+                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                if concrete_bool {
+                                    frame.branch_conditions.push(Var(v));
+                                    frame.pc = *target;
+                                } else {
+                                    frame.branch_conditions.push(Not(Box::new(Var(v))));
+                                    frame.pc += 1;
+                                }
+                                continue 'main_loop;
+                            }
+                            Val::Bool(jump) => {
+                                if jump {
+                                    frame.pc = *target
+                                } else {
+                                    frame.pc += 1
+                                }
+                                continue 'main_loop;
+                            }
+                            _ => return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info)),
+                        }
+                    }
+                }
+
                 let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
                 match *value.as_ref() {
                     Val::Symbolic(v) => {
@@ -1113,26 +1158,89 @@ fn run_loop<'ir, 'task, B: BV>(
                         let can_be_false = solver.check_sat_with(&test_false, *info).is_sat()?;
 
                         if can_be_true && can_be_false {
-                            /* if in_x_function_stack(frame, shared_state) {
-                                //先检查条件表达式是不是显式的 == 0 / != 0 / not(...) 这类形式
-                                if let Some(x0_is_true_branch) = x0_branch_side(exp) {
-                                    /*
-                                    如果命中：
-                                        x == 0 这种，直接丢掉 true 分支，只保留 false
-                                        x != 0 这种，直接丢掉 false 分支，只保留 true
-                                     */
-                                    if x0_is_true_branch {
-                                        solver.add(Assert(test_false.clone()));
-                                        frame.branch_conditions.push(test_false);
-                                        frame.pc += 1;
-                                    } else {
-                                        solver.add(Assert(test_true.clone()));
-                                        frame.branch_conditions.push(test_true);
-                                        frame.pc = *target;
+                            if let Some(ref limits) = task_state.execution_limits {
+                                // 全局 fork 总数限制（跨所有分支点累计，捕获串行 if-else 链）
+                                if let Some(max_total) = limits.max_total_forks {
+                                    if frame.forks >= max_total {
+                                        match limits.on_limit_reached {
+                                            LimitBehavior::Truncate => {
+                                                return Err(ExecError::BranchLimitReached(
+                                                    frame.function_name,
+                                                    frame.pc,
+                                                ))
+                                            }
+                                            LimitBehavior::Concretize => {
+                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                if concrete_bool {
+                                                    frame.branch_conditions.push(test_true);
+                                                    frame.pc = *target;
+                                                } else {
+                                                    frame.branch_conditions.push(test_false);
+                                                    frame.pc += 1;
+                                                }
+                                                continue 'main_loop;
+                                            }
+                                        }
                                     }
-                                    continue 'main_loop;
                                 }
-                            } */
+                                // 单分支点 fork 限制（防止循环中同一点爆炸）
+                                if let Some(max_forks) = limits.max_forks_per_branch {
+                                    let fork_count =
+                                        task_state.limits_state.increment_branch_fork(frame.function_name, frame.pc);
+                                    if fork_count > max_forks {
+                                        match limits.on_limit_reached {
+                                            LimitBehavior::Truncate => {
+                                                return Err(ExecError::BranchLimitReached(
+                                                    frame.function_name,
+                                                    frame.pc,
+                                                ))
+                                            }
+                                            LimitBehavior::Concretize => {
+                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                if concrete_bool {
+                                                    frame.branch_conditions.push(test_true);
+                                                    frame.pc = *target;
+                                                } else {
+                                                    frame.branch_conditions.push(test_false);
+                                                    frame.pc += 1;
+                                                }
+                                                continue 'main_loop;
+                                            }
+                                        }
+                                    }
+                                }
+                                // 自适应百分比 fork 限制（与 KLEE MaxStaticForkPct 一致）
+                                if let Some(max_pct) = limits.max_fork_pct_per_branch {
+                                    let branch_count = if limits.max_forks_per_branch.is_none() {
+                                        task_state.limits_state.increment_branch_fork(frame.function_name, frame.pc)
+                                    } else {
+                                        task_state.limits_state.get_branch_fork_count(frame.function_name, frame.pc)
+                                    };
+                                    let total = task_state.limits_state.total_forks();
+                                    let delay = limits.max_fork_pct_check_delay.unwrap_or(0);
+                                    if total > delay && (branch_count as f64) > (total as f64) * max_pct {
+                                        match limits.on_limit_reached {
+                                            LimitBehavior::Truncate => {
+                                                return Err(ExecError::BranchLimitReached(
+                                                    frame.function_name,
+                                                    frame.pc,
+                                                ))
+                                            }
+                                            LimitBehavior::Concretize => {
+                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                if concrete_bool {
+                                                    frame.branch_conditions.push(test_true);
+                                                    frame.pc = *target;
+                                                } else {
+                                                    frame.branch_conditions.push(test_false);
+                                                    frame.pc += 1;
+                                                }
+                                                continue 'main_loop;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             if_logging!(log::FORK, {
                                 log_from!(tid, log::FORK, info.location_string(shared_state.symtab.files()));
@@ -1192,7 +1300,27 @@ fn run_loop<'ir, 'task, B: BV>(
                 }
             }
 
-            Instr::Goto(target) => frame.pc = *target,
+            // Goto 是无条件跳转，没有分支条件可供具体化，因此即使配置了 Concretize 也只能 Truncate
+            Instr::Goto(target) => {
+                frame.step_count += 1;
+                if let Some(ref limits) = task_state.execution_limits {
+                    if let Some(max_depth) = limits.max_path_depth {
+                        if frame.step_count as u64 > max_depth {
+                            return Err(ExecError::DepthLimitReached);
+                        }
+                    }
+                    if let Some(max_backjumps) = limits.max_backjumps_per_loop {
+                        if *target <= frame.pc {
+                            let count = frame.loop_counts.entry(*target).or_insert(0);
+                            *count += 1;
+                            if *count > max_backjumps {
+                                return Err(ExecError::LoopLimitReached(frame.function_name, *target));
+                            }
+                        }
+                    }
+                }
+                frame.pc = *target
+            }
 
             Instr::Copy(loc, exp, info) => {
                 let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
@@ -1231,7 +1359,17 @@ fn run_loop<'ir, 'task, B: BV>(
                 frame.pc += 1;
             }
 
+            // Call 的深度限制同 Goto，无条件控制流只能 Truncate
             Instr::Call(loc, _, f, args, info) => {
+                frame.step_count += 1;
+                if let Some(ref limits) = task_state.execution_limits {
+                    if let Some(max_depth) = limits.max_path_depth {
+                        if frame.step_count as u64 > max_depth {
+                            return Err(ExecError::DepthLimitReached);
+                        }
+                    }
+                }
+
                 match shared_state.functions.get(f) {
                     None => {
                         match run_special_primop(
@@ -2154,6 +2292,66 @@ pub fn execute_ir_function_with_checkpoint<'ir, B: BV, R>(
 
     start_single(task, &shared_state, collected, collector);
 }
+
+pub fn execute_ir_function_with_checkpoint_and_limits<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    checkpoint: Checkpoint<B>,
+    initial_memory: Option<crate::memory::Memory<B>>,
+    task_state: TaskState<B>,
+) {
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+
+    if let Some(memory) = initial_memory {
+        initial_frame.set_memory(memory);
+    }
+
+    // 创建任务，使用传入的checkpoint和task_state
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+
+    start_single(task, &shared_state, collected, collector);
+}
+
+pub fn execute_ir_function_with_limits<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    task_state: TaskState<B>,
+) {
+    // 获取函数信息
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    // 创建初始帧
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+
+    // 创建任务，使用传入的task_state
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task(task_id, &task_state);
+
+    // 执行任务
+    start_single(task, shared_state, collected, collector);
+}
+
 pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
@@ -2181,4 +2379,948 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
     start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ISAConfig, Tool};
+    use std::path::PathBuf;
+
+    const REAL_RV64D_ZRX_IR: &str = r#"
+val zz5i64zDzKz5i = "%i64->%i" : (%i64) ->  %i
+
+val zeq_int = "eq_int" : (%i, %i) ->  %bool
+
+val zsail_zzeros = "zeros" : (%i) ->  %bv
+
+val zsail_ones : (%i) ->  %bv
+
+val zzzeros : (%i) ->  %bv
+
+fn zzzeros(zn) {
+  return = zsail_zzeros(zn) `14 93:21-93:34;
+  end;
+}
+
+let (zzzero_reg: %bv64) {
+  zz40 : %bv64 `34 13:25-13:32;
+  zz41 : %i `34 13:25-13:32;
+  zz41 = zz5i64zDzKz5i(64) `34 13:25-13:32;
+  zz42 : %bv `34 13:25-13:32;
+  zz42 = zzzeros(zz41) `34 13:25-13:32;
+  zz40 = zz42 `34 13:25-13:32;
+  zzzero_reg = zz40 `34 13:4-13:12;
+}
+
+val zregval_from_reg : (%bv64) ->  %bv64
+
+fn zregval_from_reg(zr) {
+  return = zr `34 20:52-20:53;
+  end;
+}
+
+register zx1 : %bv64
+
+register zx2 : %bv64
+
+register zx3 : %bv64
+
+register zx4 : %bv64
+
+register zx5 : %bv64
+
+register zx6 : %bv64
+
+register zx7 : %bv64
+
+register zx8 : %bv64
+
+register zx9 : %bv64
+
+register zx10 : %bv64
+
+register zx11 : %bv64
+
+register zx12 : %bv64
+
+register zx13 : %bv64
+
+register zx14 : %bv64
+
+register zx15 : %bv64
+
+register zx16 : %bv64
+
+register zx17 : %bv64
+
+register zx18 : %bv64
+
+register zx19 : %bv64
+
+register zx20 : %bv64
+
+register zx21 : %bv64
+
+register zx22 : %bv64
+
+register zx23 : %bv64
+
+register zx24 : %bv64
+
+register zx25 : %bv64
+
+register zx26 : %bv64
+
+register zx27 : %bv64
+
+register zx28 : %bv64
+
+register zx29 : %bv64
+
+register zx30 : %bv64
+
+register zx31 : %bv64
+
+val zrX : (%i64) ->  %bv64
+
+fn zrX(z3zE1756) {
+  zz40 : %i64 `35 151:19-151:20;
+  zz40 = z3zE1756 `35 151:19-151:20;
+  zz41 : %bv64 `35 152:2-187:20;
+  zz42 : %bv64 `35 153:4-186:5;
+  zz43 : %i64 `35 154:6-154:7;
+  zz43 = zz40 `35 154:6-154:7;
+  zz44 : %i `2931;
+  zz44 = zz5i64zDzKz5i(0) `2932;
+  zz45 : %bool `35 153:4-186:5;
+  zz46 : %i `2933;
+  zz46 = zz5i64zDzKz5i(zz43) `2934;
+  zz45 = zeq_int(zz46, zz44) `2935;
+  jump @not(zz45) goto 14 `35 153:4-186:5;
+  goto 15;
+  goto 17;
+  zz42 = zzzero_reg `35 154:11-154:19;
+  goto 408;
+  zz47 : %i64 `35 155:6-155:7;
+  zz47 = zz40 `35 155:6-155:7;
+  zz48 : %i `2936;
+  zz48 = zz5i64zDzKz5i(1) `2937;
+  zz49 : %bool `35 153:4-186:5;
+  zz410 : %i `2938;
+  zz410 = zz5i64zDzKz5i(zz47) `2939;
+  zz49 = zeq_int(zz410, zz48) `2940;
+  jump @not(zz49) goto 27 `35 153:4-186:5;
+  goto 28;
+  goto 30;
+  zz42 = zx1 `35 155:11-155:13;
+  goto 408;
+  zz411 : %i64 `35 156:6-156:7;
+  zz411 = zz40 `35 156:6-156:7;
+  zz412 : %i `2941;
+  zz412 = zz5i64zDzKz5i(2) `2942;
+  zz413 : %bool `35 153:4-186:5;
+  zz414 : %i `2943;
+  zz414 = zz5i64zDzKz5i(zz411) `2944;
+  zz413 = zeq_int(zz414, zz412) `2945;
+  jump @not(zz413) goto 40 `35 153:4-186:5;
+  goto 41;
+  goto 43;
+  zz42 = zx2 `35 156:11-156:13;
+  goto 408;
+  zz415 : %i64 `35 157:6-157:7;
+  zz415 = zz40 `35 157:6-157:7;
+  zz416 : %i `2946;
+  zz416 = zz5i64zDzKz5i(3) `2947;
+  zz417 : %bool `35 153:4-186:5;
+  zz418 : %i `2948;
+  zz418 = zz5i64zDzKz5i(zz415) `2949;
+  zz417 = zeq_int(zz418, zz416) `2950;
+  jump @not(zz417) goto 53 `35 153:4-186:5;
+  goto 54;
+  goto 56;
+  zz42 = zx3 `35 157:11-157:13;
+  goto 408;
+  zz419 : %i64 `35 158:6-158:7;
+  zz419 = zz40 `35 158:6-158:7;
+  zz420 : %i `2951;
+  zz420 = zz5i64zDzKz5i(4) `2952;
+  zz421 : %bool `35 153:4-186:5;
+  zz422 : %i `2953;
+  zz422 = zz5i64zDzKz5i(zz419) `2954;
+  zz421 = zeq_int(zz422, zz420) `2955;
+  jump @not(zz421) goto 66 `35 153:4-186:5;
+  goto 67;
+  goto 69;
+  zz42 = zx4 `35 158:11-158:13;
+  goto 408;
+  zz423 : %i64 `35 159:6-159:7;
+  zz423 = zz40 `35 159:6-159:7;
+  zz424 : %i `2956;
+  zz424 = zz5i64zDzKz5i(5) `2957;
+  zz425 : %bool `35 153:4-186:5;
+  zz426 : %i `2958;
+  zz426 = zz5i64zDzKz5i(zz423) `2959;
+  zz425 = zeq_int(zz426, zz424) `2960;
+  jump @not(zz425) goto 79 `35 153:4-186:5;
+  goto 80;
+  goto 82;
+  zz42 = zx5 `35 159:11-159:13;
+  goto 408;
+  zz427 : %i64 `35 160:6-160:7;
+  zz427 = zz40 `35 160:6-160:7;
+  zz428 : %i `2961;
+  zz428 = zz5i64zDzKz5i(6) `2962;
+  zz429 : %bool `35 153:4-186:5;
+  zz430 : %i `2963;
+  zz430 = zz5i64zDzKz5i(zz427) `2964;
+  zz429 = zeq_int(zz430, zz428) `2965;
+  jump @not(zz429) goto 92 `35 153:4-186:5;
+  goto 93;
+  goto 95;
+  zz42 = zx6 `35 160:11-160:13;
+  goto 408;
+  zz431 : %i64 `35 161:6-161:7;
+  zz431 = zz40 `35 161:6-161:7;
+  zz432 : %i `2966;
+  zz432 = zz5i64zDzKz5i(7) `2967;
+  zz433 : %bool `35 153:4-186:5;
+  zz434 : %i `2968;
+  zz434 = zz5i64zDzKz5i(zz431) `2969;
+  zz433 = zeq_int(zz434, zz432) `2970;
+  jump @not(zz433) goto 105 `35 153:4-186:5;
+  goto 106;
+  goto 108;
+  zz42 = zx7 `35 161:11-161:13;
+  goto 408;
+  zz435 : %i64 `35 162:6-162:7;
+  zz435 = zz40 `35 162:6-162:7;
+  zz436 : %i `2971;
+  zz436 = zz5i64zDzKz5i(8) `2972;
+  zz437 : %bool `35 153:4-186:5;
+  zz438 : %i `2973;
+  zz438 = zz5i64zDzKz5i(zz435) `2974;
+  zz437 = zeq_int(zz438, zz436) `2975;
+  jump @not(zz437) goto 118 `35 153:4-186:5;
+  goto 119;
+  goto 121;
+  zz42 = zx8 `35 162:11-162:13;
+  goto 408;
+  zz439 : %i64 `35 163:6-163:7;
+  zz439 = zz40 `35 163:6-163:7;
+  zz440 : %i `2976;
+  zz440 = zz5i64zDzKz5i(9) `2977;
+  zz441 : %bool `35 153:4-186:5;
+  zz442 : %i `2978;
+  zz442 = zz5i64zDzKz5i(zz439) `2979;
+  zz441 = zeq_int(zz442, zz440) `2980;
+  jump @not(zz441) goto 131 `35 153:4-186:5;
+  goto 132;
+  goto 134;
+  zz42 = zx9 `35 163:11-163:13;
+  goto 408;
+  zz443 : %i64 `35 164:6-164:8;
+  zz443 = zz40 `35 164:6-164:8;
+  zz444 : %i `2981;
+  zz444 = zz5i64zDzKz5i(10) `2982;
+  zz445 : %bool `35 153:4-186:5;
+  zz446 : %i `2983;
+  zz446 = zz5i64zDzKz5i(zz443) `2984;
+  zz445 = zeq_int(zz446, zz444) `2985;
+  jump @not(zz445) goto 144 `35 153:4-186:5;
+  goto 145;
+  goto 147;
+  zz42 = zx10 `35 164:12-164:15;
+  goto 408;
+  zz447 : %i64 `35 165:6-165:8;
+  zz447 = zz40 `35 165:6-165:8;
+  zz448 : %i `2986;
+  zz448 = zz5i64zDzKz5i(11) `2987;
+  zz449 : %bool `35 153:4-186:5;
+  zz450 : %i `2988;
+  zz450 = zz5i64zDzKz5i(zz447) `2989;
+  zz449 = zeq_int(zz450, zz448) `2990;
+  jump @not(zz449) goto 157 `35 153:4-186:5;
+  goto 158;
+  goto 160;
+  zz42 = zx11 `35 165:12-165:15;
+  goto 408;
+  zz451 : %i64 `35 166:6-166:8;
+  zz451 = zz40 `35 166:6-166:8;
+  zz452 : %i `2991;
+  zz452 = zz5i64zDzKz5i(12) `2992;
+  zz453 : %bool `35 153:4-186:5;
+  zz454 : %i `2993;
+  zz454 = zz5i64zDzKz5i(zz451) `2994;
+  zz453 = zeq_int(zz454, zz452) `2995;
+  jump @not(zz453) goto 170 `35 153:4-186:5;
+  goto 171;
+  goto 173;
+  zz42 = zx12 `35 166:12-166:15;
+  goto 408;
+  zz455 : %i64 `35 167:6-167:8;
+  zz455 = zz40 `35 167:6-167:8;
+  zz456 : %i `2996;
+  zz456 = zz5i64zDzKz5i(13) `2997;
+  zz457 : %bool `35 153:4-186:5;
+  zz458 : %i `2998;
+  zz458 = zz5i64zDzKz5i(zz455) `2999;
+  zz457 = zeq_int(zz458, zz456) `3000;
+  jump @not(zz457) goto 183 `35 153:4-186:5;
+  goto 184;
+  goto 186;
+  zz42 = zx13 `35 167:12-167:15;
+  goto 408;
+  zz459 : %i64 `35 168:6-168:8;
+  zz459 = zz40 `35 168:6-168:8;
+  zz460 : %i `3001;
+  zz460 = zz5i64zDzKz5i(14) `3002;
+  zz461 : %bool `35 153:4-186:5;
+  zz462 : %i `3003;
+  zz462 = zz5i64zDzKz5i(zz459) `3004;
+  zz461 = zeq_int(zz462, zz460) `3005;
+  jump @not(zz461) goto 196 `35 153:4-186:5;
+  goto 197;
+  goto 199;
+  zz42 = zx14 `35 168:12-168:15;
+  goto 408;
+  zz463 : %i64 `35 169:6-169:8;
+  zz463 = zz40 `35 169:6-169:8;
+  zz464 : %i `3006;
+  zz464 = zz5i64zDzKz5i(15) `3007;
+  zz465 : %bool `35 153:4-186:5;
+  zz466 : %i `3008;
+  zz466 = zz5i64zDzKz5i(zz463) `3009;
+  zz465 = zeq_int(zz466, zz464) `3010;
+  jump @not(zz465) goto 209 `35 153:4-186:5;
+  goto 210;
+  goto 212;
+  zz42 = zx15 `35 169:12-169:15;
+  goto 408;
+  zz467 : %i64 `35 170:6-170:8;
+  zz467 = zz40 `35 170:6-170:8;
+  zz468 : %i `3011;
+  zz468 = zz5i64zDzKz5i(16) `3012;
+  zz469 : %bool `35 153:4-186:5;
+  zz470 : %i `3013;
+  zz470 = zz5i64zDzKz5i(zz467) `3014;
+  zz469 = zeq_int(zz470, zz468) `3015;
+  jump @not(zz469) goto 222 `35 153:4-186:5;
+  goto 223;
+  goto 225;
+  zz42 = zx16 `35 170:12-170:15;
+  goto 408;
+  zz471 : %i64 `35 171:6-171:8;
+  zz471 = zz40 `35 171:6-171:8;
+  zz472 : %i `3016;
+  zz472 = zz5i64zDzKz5i(17) `3017;
+  zz473 : %bool `35 153:4-186:5;
+  zz474 : %i `3018;
+  zz474 = zz5i64zDzKz5i(zz471) `3019;
+  zz473 = zeq_int(zz474, zz472) `3020;
+  jump @not(zz473) goto 235 `35 153:4-186:5;
+  goto 236;
+  goto 238;
+  zz42 = zx17 `35 171:12-171:15;
+  goto 408;
+  zz475 : %i64 `35 172:6-172:8;
+  zz475 = zz40 `35 172:6-172:8;
+  zz476 : %i `3021;
+  zz476 = zz5i64zDzKz5i(18) `3022;
+  zz477 : %bool `35 153:4-186:5;
+  zz478 : %i `3023;
+  zz478 = zz5i64zDzKz5i(zz475) `3024;
+  zz477 = zeq_int(zz478, zz476) `3025;
+  jump @not(zz477) goto 248 `35 153:4-186:5;
+  goto 249;
+  goto 251;
+  zz42 = zx18 `35 172:12-172:15;
+  goto 408;
+  zz479 : %i64 `35 173:6-173:8;
+  zz479 = zz40 `35 173:6-173:8;
+  zz480 : %i `3026;
+  zz480 = zz5i64zDzKz5i(19) `3027;
+  zz481 : %bool `35 153:4-186:5;
+  zz482 : %i `3028;
+  zz482 = zz5i64zDzKz5i(zz479) `3029;
+  zz481 = zeq_int(zz482, zz480) `3030;
+  jump @not(zz481) goto 261 `35 153:4-186:5;
+  goto 262;
+  goto 264;
+  zz42 = zx19 `35 173:12-173:15;
+  goto 408;
+  zz483 : %i64 `35 174:6-174:8;
+  zz483 = zz40 `35 174:6-174:8;
+  zz484 : %i `3031;
+  zz484 = zz5i64zDzKz5i(20) `3032;
+  zz485 : %bool `35 153:4-186:5;
+  zz486 : %i `3033;
+  zz486 = zz5i64zDzKz5i(zz483) `3034;
+  zz485 = zeq_int(zz486, zz484) `3035;
+  jump @not(zz485) goto 274 `35 153:4-186:5;
+  goto 275;
+  goto 277;
+  zz42 = zx20 `35 174:12-174:15;
+  goto 408;
+  zz487 : %i64 `35 175:6-175:8;
+  zz487 = zz40 `35 175:6-175:8;
+  zz488 : %i `3036;
+  zz488 = zz5i64zDzKz5i(21) `3037;
+  zz489 : %bool `35 153:4-186:5;
+  zz490 : %i `3038;
+  zz490 = zz5i64zDzKz5i(zz487) `3039;
+  zz489 = zeq_int(zz490, zz488) `3040;
+  jump @not(zz489) goto 287 `35 153:4-186:5;
+  goto 288;
+  goto 290;
+  zz42 = zx21 `35 175:12-175:15;
+  goto 408;
+  zz491 : %i64 `35 176:6-176:8;
+  zz491 = zz40 `35 176:6-176:8;
+  zz492 : %i `3041;
+  zz492 = zz5i64zDzKz5i(22) `3042;
+  zz493 : %bool `35 153:4-186:5;
+  zz494 : %i `3043;
+  zz494 = zz5i64zDzKz5i(zz491) `3044;
+  zz493 = zeq_int(zz494, zz492) `3045;
+  jump @not(zz493) goto 300 `35 153:4-186:5;
+  goto 301;
+  goto 303;
+  zz42 = zx22 `35 176:12-176:15;
+  goto 408;
+  zz495 : %i64 `35 177:6-177:8;
+  zz495 = zz40 `35 177:6-177:8;
+  zz496 : %i `3046;
+  zz496 = zz5i64zDzKz5i(23) `3047;
+  zz497 : %bool `35 153:4-186:5;
+  zz498 : %i `3048;
+  zz498 = zz5i64zDzKz5i(zz495) `3049;
+  zz497 = zeq_int(zz498, zz496) `3050;
+  jump @not(zz497) goto 313 `35 153:4-186:5;
+  goto 314;
+  goto 316;
+  zz42 = zx23 `35 177:12-177:15;
+  goto 408;
+  zz499 : %i64 `35 178:6-178:8;
+  zz499 = zz40 `35 178:6-178:8;
+  zz4100 : %i `3051;
+  zz4100 = zz5i64zDzKz5i(24) `3052;
+  zz4101 : %bool `35 153:4-186:5;
+  zz4102 : %i `3053;
+  zz4102 = zz5i64zDzKz5i(zz499) `3054;
+  zz4101 = zeq_int(zz4102, zz4100) `3055;
+  jump @not(zz4101) goto 326 `35 153:4-186:5;
+  goto 327;
+  goto 329;
+  zz42 = zx24 `35 178:12-178:15;
+  goto 408;
+  zz4103 : %i64 `35 179:6-179:8;
+  zz4103 = zz40 `35 179:6-179:8;
+  zz4104 : %i `3056;
+  zz4104 = zz5i64zDzKz5i(25) `3057;
+  zz4105 : %bool `35 153:4-186:5;
+  zz4106 : %i `3058;
+  zz4106 = zz5i64zDzKz5i(zz4103) `3059;
+  zz4105 = zeq_int(zz4106, zz4104) `3060;
+  jump @not(zz4105) goto 339 `35 153:4-186:5;
+  goto 340;
+  goto 342;
+  zz42 = zx25 `35 179:12-179:15;
+  goto 408;
+  zz4107 : %i64 `35 180:6-180:8;
+  zz4107 = zz40 `35 180:6-180:8;
+  zz4108 : %i `3061;
+  zz4108 = zz5i64zDzKz5i(26) `3062;
+  zz4109 : %bool `35 153:4-186:5;
+  zz4110 : %i `3063;
+  zz4110 = zz5i64zDzKz5i(zz4107) `3064;
+  zz4109 = zeq_int(zz4110, zz4108) `3065;
+  jump @not(zz4109) goto 352 `35 153:4-186:5;
+  goto 353;
+  goto 355;
+  zz42 = zx26 `35 180:12-180:15;
+  goto 408;
+  zz4111 : %i64 `35 181:6-181:8;
+  zz4111 = zz40 `35 181:6-181:8;
+  zz4112 : %i `3066;
+  zz4112 = zz5i64zDzKz5i(27) `3067;
+  zz4113 : %bool `35 153:4-186:5;
+  zz4114 : %i `3068;
+  zz4114 = zz5i64zDzKz5i(zz4111) `3069;
+  zz4113 = zeq_int(zz4114, zz4112) `3070;
+  jump @not(zz4113) goto 365 `35 153:4-186:5;
+  goto 366;
+  goto 368;
+  zz42 = zx27 `35 181:12-181:15;
+  goto 408;
+  zz4115 : %i64 `35 182:6-182:8;
+  zz4115 = zz40 `35 182:6-182:8;
+  zz4116 : %i `3071;
+  zz4116 = zz5i64zDzKz5i(28) `3072;
+  zz4117 : %bool `35 153:4-186:5;
+  zz4118 : %i `3073;
+  zz4118 = zz5i64zDzKz5i(zz4115) `3074;
+  zz4117 = zeq_int(zz4118, zz4116) `3075;
+  jump @not(zz4117) goto 378 `35 153:4-186:5;
+  goto 379;
+  goto 381;
+  zz42 = zx28 `35 182:12-182:15;
+  goto 408;
+  zz4119 : %i64 `35 183:6-183:8;
+  zz4119 = zz40 `35 183:6-183:8;
+  zz4120 : %i `3076;
+  zz4120 = zz5i64zDzKz5i(29) `3077;
+  zz4121 : %bool `35 153:4-186:5;
+  zz4122 : %i `3078;
+  zz4122 = zz5i64zDzKz5i(zz4119) `3079;
+  zz4121 = zeq_int(zz4122, zz4120) `3080;
+  jump @not(zz4121) goto 391 `35 153:4-186:5;
+  goto 392;
+  goto 394;
+  zz42 = zx29 `35 183:12-183:15;
+  goto 408;
+  zz4123 : %i64 `35 184:6-184:8;
+  zz4123 = zz40 `35 184:6-184:8;
+  zz4124 : %i `3081;
+  zz4124 = zz5i64zDzKz5i(30) `3082;
+  zz4125 : %bool `35 153:4-186:5;
+  zz4126 : %i `3083;
+  zz4126 = zz5i64zDzKz5i(zz4123) `3084;
+  zz4125 = zeq_int(zz4126, zz4124) `3085;
+  jump @not(zz4125) goto 404 `35 153:4-186:5;
+  goto 405;
+  goto 407;
+  zz42 = zx30 `35 184:12-184:15;
+  goto 408;
+  zz42 = zx31 `35 185:12-185:15;
+  zz41 = zz42 `35 153:4-186:5;
+  return = zregval_from_reg(zz41) `35 187:2-187:20;
+  end;
+}
+"#;
+
+    fn info() -> SourceLoc {
+        SourceLoc::unknown()
+    }
+
+    fn test_name(id: u32) -> Name {
+        Name::from_u32(id)
+    }
+
+    fn shared_state_from_defs<'ir>(defs: Vec<crate::ir::Def<Name, B64>>) -> SharedState<'ir, B64> {
+        let symtab = Symtab::new();
+        let defs: &'ir [crate::ir::Def<Name, B64>] = Box::leak(defs.into_boxed_slice());
+        let type_info = IRTypeInfo::new(defs);
+        SharedState::new(
+            symtab,
+            defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn parse_ir_string(ir: &'static str) -> (Symtab<'static>, Vec<crate::ir::Def<Name, B64>>) {
+        let mut symtab = Symtab::new();
+        let defs = crate::ir_parser::IrParser::new()
+            .parse(&mut symtab, crate::ir_lexer::new_ir_lexer(ir))
+            .expect("IR parse failed");
+        (symtab, defs)
+    }
+
+    fn empty_tool() -> Tool {
+        Tool { executable: PathBuf::new(), options: Vec::new() }
+    }
+
+    fn empty_isa_config() -> ISAConfig<B64> {
+        ISAConfig {
+            pc: Name::from_u32(u32::MAX),
+            register_event_sets: HashMap::new(),
+            assembler: empty_tool(),
+            objdump: empty_tool(),
+            nm: empty_tool(),
+            linker: empty_tool(),
+            page_table_base: 0,
+            page_size: 0,
+            s2_page_table_base: 0,
+            s2_page_size: 0,
+            default_page_table_setup: String::new(),
+            thread_base: 0,
+            thread_top: 0,
+            thread_stride: 0,
+            symbolic_addr_base: 0,
+            symbolic_addr_top: 0,
+            symbolic_addr_stride: 0,
+            default_registers: HashMap::new(),
+            reset_registers: Vec::new(),
+            reset_constraints: Vec::new(),
+            const_primops: HashMap::new(),
+            function_assumptions: Vec::new(),
+            register_renames: HashMap::new(),
+            ignored_registers: HashSet::new(),
+            relaxed_registers: HashSet::new(),
+            probes: HashSet::new(),
+            probe_functions: HashSet::new(),
+            trace_functions: HashSet::new(),
+            translation_function: None,
+            in_program_order: HashSet::new(),
+            default_sizeof: 0,
+            zero_announce_exit: false,
+            memory_regions: None,
+            page_table_config: None,
+            pmp: None,
+            clint_enabled: None,
+        }
+    }
+
+    fn shared_state_and_bindings_from_ir(
+        ir: &'static str,
+    ) -> (SharedState<'static, B64>, RegisterBindings<'static, B64>, Bindings<'static, B64>) {
+        let (symtab, mut defs) = parse_ir_string(ir);
+        crate::ir::insert_primops(&mut defs, crate::ir::AssertionMode::Optimistic, &empty_isa_config());
+        let defs: &'static [crate::ir::Def<Name, B64>] = Box::leak(defs.into_boxed_slice());
+        let type_info = IRTypeInfo::new(defs);
+        let shared_state = SharedState::new(
+            symtab,
+            defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut regs = RegisterBindings::new();
+        let mut lets = HashMap::default();
+        for def in defs {
+            match def {
+                crate::ir::Def::Register(id, ty, _) => regs.insert(*id, false, UVal::Uninit(ty)),
+                crate::ir::Def::Let(bindings, setup) => {
+                    let vars: Vec<_> = bindings.iter().map(|(id, ty)| (*id, ty)).collect();
+                    let mut frame = LocalFrame::new(TOP_LEVEL_LET, &vars, &Ty::Unit, None, setup);
+                    frame.add_regs(&regs).add_lets(&lets);
+                    let task_state = TaskState::new();
+                    let queue = Worker::new_lifo();
+                    let mut task_fraction = Fraction::one();
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::new(&ctx);
+                    run_loop(
+                        0,
+                        TaskId::fresh(),
+                        &mut task_fraction,
+                        Timeout::unlimited(),
+                        None,
+                        &queue,
+                        &mut frame,
+                        &task_state,
+                        &shared_state,
+                        &mut solver,
+                    )
+                    .expect("IR let 初始化失败");
+                    for (id, _) in bindings.iter() {
+                        let value = frame.vars().get(id).expect("let 绑定缺少返回值").clone();
+                        lets.insert(*id, value);
+                    }
+                }
+                _ => (),
+            }
+        }
+        (shared_state, regs, lets)
+    }
+
+    fn real_zrx_program(
+    ) -> (Vec<Instr<Name, B64>>, SharedState<'static, B64>, RegisterBindings<'static, B64>, Bindings<'static, B64>)
+    {
+        let (mut shared_state, regs, lets) = shared_state_and_bindings_from_ir(REAL_RV64D_ZRX_IR);
+        let arg = shared_state.symtab.intern("zz_arg");
+        let result = shared_state.symtab.intern("zz_result");
+        let zrx = shared_state.symtab.lookup("zrX");
+        let instrs = vec![
+            Instr::Init(arg, Ty::I64, Exp::Undefined(Ty::I64), info()),
+            Instr::Decl(result, Ty::Bits(64), info()),
+            Instr::Call(Loc::Id(result), false, zrx, vec![Exp::Id(arg)], info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ];
+        (instrs, shared_state, regs, lets)
+    }
+
+    fn make_frame_with_bindings<'ir>(
+        instrs: Vec<Instr<Name, B64>>,
+        regs: &RegisterBindings<'ir, B64>,
+        lets: &Bindings<'ir, B64>,
+    ) -> LocalFrame<'ir, B64> {
+        let instrs: &'ir [Instr<Name, B64>] = Box::leak(instrs.into_boxed_slice());
+        let ret_ty: &'ir Ty<Name> = Box::leak(Box::new(Ty::Unit));
+        let mut frame = LocalFrame::new(test_name(25), &[], ret_ty, None, instrs);
+        frame.add_regs(regs).add_lets(lets);
+        frame
+    }
+
+    fn run_all_with_bindings<'ir>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: SharedState<'ir, B64>,
+        regs: RegisterBindings<'ir, B64>,
+        lets: Bindings<'ir, B64>,
+    ) -> Vec<Result<Run<B64>, ExecError>> {
+        let frame = make_frame_with_bindings(instrs, &regs, &lets);
+        let task_state = TaskState::new().with_execution_limits(limits);
+        let queue = Worker::new_lifo();
+        queue.push(frame.task(TaskId::from_usize(0), &task_state));
+        let mut results = Vec::new();
+
+        while let Some(mut task) = queue.pop() {
+            let mut cfg = Config::new();
+            cfg.set_param_value("model", "true");
+            let ctx = Context::new(cfg);
+            let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+            if let Some((def, event)) = task.fork_cond {
+                solver.add_event(event);
+                solver.add(def);
+            }
+            let mut task_frame = unfreeze_frame(&task.frame);
+            results.push(run_loop(
+                0,
+                task.id,
+                &mut task.fraction,
+                Timeout::unlimited(),
+                task.stop_conditions,
+                &queue,
+                &mut task_frame,
+                task.state,
+                &shared_state,
+                &mut solver,
+            ));
+        }
+
+        results
+    }
+
+    fn empty_shared_state<'ir>() -> SharedState<'ir, B64> {
+        shared_state_from_defs(Vec::new())
+    }
+
+    fn make_frame<'ir>(instrs: Vec<Instr<Name, B64>>) -> LocalFrame<'ir, B64> {
+        let instrs: &'ir [Instr<Name, B64>] = Box::leak(instrs.into_boxed_slice());
+        let ret_ty: &'ir Ty<Name> = Box::leak(Box::new(Ty::Unit));
+        LocalFrame::new(test_name(25), &[], ret_ty, None, instrs)
+    }
+
+    fn run_with_limits(instrs: Vec<Instr<Name, B64>>, limits: ExecutionLimits) -> Result<Run<B64>, ExecError> {
+        let shared_state = empty_shared_state();
+        let mut frame = make_frame(instrs);
+        let task_state = TaskState::new().with_execution_limits(limits);
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+
+        run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            Timeout::unlimited(),
+            None,
+            &queue,
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        )
+    }
+
+    fn run_all_with_shared_state<'ir>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: SharedState<'ir, B64>,
+    ) -> Vec<Result<Run<B64>, ExecError>> {
+        let frame = make_frame(instrs);
+        let task_state = TaskState::new().with_execution_limits(limits);
+        let queue = Worker::new_lifo();
+        queue.push(frame.task(TaskId::from_usize(0), &task_state));
+        let mut results = Vec::new();
+
+        while let Some(mut task) = queue.pop() {
+            let mut cfg = Config::new();
+            cfg.set_param_value("model", "true");
+            let ctx = Context::new(cfg);
+            let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+            if let Some((def, event)) = task.fork_cond {
+                solver.add_event(event);
+                solver.add(def);
+            }
+            let mut task_frame = unfreeze_frame(&task.frame);
+            results.push(run_loop(
+                0,
+                task.id,
+                &mut task.fraction,
+                Timeout::unlimited(),
+                task.stop_conditions,
+                &queue,
+                &mut task_frame,
+                task.state,
+                &shared_state,
+                &mut solver,
+            ));
+        }
+
+        results
+    }
+
+    fn repeated_call_fork_program(call_count: usize) -> (Vec<Instr<Name, B64>>, SharedState<'static, B64>) {
+        let callee = test_name(26);
+        let var = test_name(100);
+        let callee_instrs: &'static [Instr<Name, B64>] = Box::leak(
+            vec![Instr::Decl(var, Ty::Bool, info()), Instr::Jump(Exp::Id(var), 2, info()), Instr::End]
+                .into_boxed_slice(),
+        );
+        let defs = vec![
+            crate::ir::Def::Val(callee, Vec::new(), Ty::Unit),
+            crate::ir::Def::Fn(callee, Vec::new(), callee_instrs.to_vec()),
+        ];
+        let mut instrs = Vec::new();
+        for offset in 0..call_count {
+            let result = test_name(101 + offset as u32);
+            instrs.push(Instr::Decl(result, Ty::Unit, info()));
+            instrs.push(Instr::Call(Loc::Id(result), false, callee, Vec::new(), info()));
+        }
+        instrs.push(Instr::End);
+        (instrs, shared_state_from_defs(defs))
+    }
+
+    #[test]
+    fn branch_limit_truncate_reports_error_after_max_forks() {
+        let limits = ExecutionLimits::default().with_max_forks_per_branch(2);
+        let (instrs, shared_state) = repeated_call_fork_program(5);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        let branch_limit = results.into_iter().find_map(|result| match result {
+            Err(ExecError::BranchLimitReached(function, pc)) => Some((function, pc)),
+            _ => None,
+        });
+        match branch_limit {
+            Some((function, pc)) => {
+                assert_eq!(function, test_name(26));
+                assert_eq!(pc, 1);
+            }
+            None => panic!("期望分支限制错误"),
+        }
+    }
+
+    #[test]
+    fn branch_limit_concretize_finishes_without_error() {
+        let limits =
+            ExecutionLimits::default().with_max_forks_per_branch(2).with_limit_behavior(LimitBehavior::Concretize);
+        let (instrs, shared_state) = repeated_call_fork_program(5);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Unit)))));
+        assert!(results.iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn depth_limit_reports_error_after_max_steps() {
+        let limits = ExecutionLimits::default().with_max_path_depth(2);
+        let result = run_with_limits(vec![Instr::Goto(1), Instr::Goto(2), Instr::Goto(3), Instr::End], limits);
+
+        match result {
+            Err(ExecError::DepthLimitReached) => (),
+            _ => panic!("期望深度限制错误"),
+        }
+    }
+
+    #[test]
+    fn loop_limit_reports_error_after_max_backjumps() {
+        let limits = ExecutionLimits::default().with_max_backjumps_per_loop(2);
+        let result = run_with_limits(vec![Instr::Goto(0)], limits);
+
+        match result {
+            Err(ExecError::LoopLimitReached(function, pc)) => {
+                assert_eq!(function, test_name(25));
+                assert_eq!(pc, 0);
+            }
+            _ => panic!("期望循环限制错误"),
+        }
+    }
+
+    #[test]
+    fn total_fork_limit_truncates_serial_if_else_chain() {
+        let (instrs, shared_state) = repeated_call_fork_program(5);
+        let limits = ExecutionLimits::default().with_max_forks_per_branch(100).with_max_total_forks(2);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        let branch_limit = results.into_iter().find_map(|result| match result {
+            Err(ExecError::BranchLimitReached(function, pc)) => Some((function, pc)),
+            _ => None,
+        });
+        match branch_limit {
+            Some((function, pc)) => {
+                assert_eq!(function, test_name(26));
+                assert_eq!(pc, 1);
+            }
+            None => panic!("期望全局 fork 限制错误"),
+        }
+    }
+
+    #[test]
+    fn total_fork_limit_concretize_finishes_serial_if_else_chain() {
+        let (instrs, shared_state) = repeated_call_fork_program(5);
+        let limits = ExecutionLimits::default()
+            .with_max_forks_per_branch(100)
+            .with_max_total_forks(2)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Unit)))));
+        assert!(results.iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn real_ir_total_forks_limits_register_read_chain() {
+        let (instrs, shared_state, regs, lets) = real_zrx_program();
+        let zrx = shared_state.symtab.lookup("zrX");
+        let limits = ExecutionLimits::default().with_max_forks_per_branch(100).with_max_total_forks(5);
+        let results = run_all_with_bindings(instrs, limits, shared_state, regs, lets);
+
+        let branch_limit = results.into_iter().find_map(|result| match result {
+            Err(ExecError::BranchLimitReached(function, pc)) => Some((function, pc)),
+            _ => None,
+        });
+        match branch_limit {
+            Some((function, pc)) => {
+                assert_eq!(function, zrx);
+                assert_eq!(pc, 77);
+            }
+            None => panic!("期望真实 zrX 触发全局 fork 限制"),
+        }
+    }
+
+    #[test]
+    fn real_ir_per_branch_cannot_detect_serial_chain() {
+        let (instrs, shared_state, regs, lets) = real_zrx_program();
+        let limits = ExecutionLimits::default().with_max_forks_per_branch(2);
+        let results = run_all_with_bindings(instrs, limits, shared_state, regs, lets);
+
+        assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
+        assert!(results.iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn real_ir_concretize_continues_register_read() {
+        let (instrs, shared_state, regs, lets) = real_zrx_program();
+        let limits = ExecutionLimits::default()
+            .with_max_forks_per_branch(100)
+            .with_max_total_forks(5)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let results = run_all_with_bindings(instrs, limits, shared_state, regs, lets);
+
+        assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
+        assert!(results.iter().all(Result::is_ok));
+    }
 }
