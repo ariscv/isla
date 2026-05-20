@@ -23,6 +23,7 @@ pub trait RISCV: Target {
     const XLEN: u32;
 
     fn xlen_name(&self) -> &'static str;
+    fn pmp_symbolic(&self) -> bool;
 
     fn ppn_from_pa(&self, pa: u64) -> u64 {
         pa >> 12
@@ -30,6 +31,57 @@ pub trait RISCV: Target {
 
     fn pa_from_ppn(&self, ppn: u64) -> u64 {
         ppn << 12
+    }
+
+    // Page table constants
+    const PAGE_SIZE: u64 = 4096;
+    const PAGE_SHIFT: u64 = 12;
+    const PTE_SIZE: u64 = 8;
+    const PTES_PER_LEVEL: u64 = 512;
+    const PAGE_TABLE_SIZE: u64 = Self::PTES_PER_LEVEL * Self::PTE_SIZE;
+    const PTE_V: u64 = 1;
+    const PTE_R: u64 = 2;
+    const PTE_W: u64 = 4;
+    const PTE_X: u64 = 8;
+    const PTE_U: u64 = 16;
+    const PTE_A: u64 = 64;
+    const PTE_D: u64 = 128;
+
+    fn page_size(&self) -> u64 {
+        Self::PAGE_SIZE
+    }
+    fn page_shift(&self) -> u64 {
+        Self::PAGE_SHIFT
+    }
+    fn pte_size(&self) -> u64 {
+        Self::PTE_SIZE
+    }
+    fn ptes_per_level(&self) -> u64 {
+        Self::PTES_PER_LEVEL
+    }
+    fn page_table_size(&self) -> u64 {
+        Self::PAGE_TABLE_SIZE
+    }
+    fn pte_v(&self) -> u64 {
+        Self::PTE_V
+    }
+    fn pte_r(&self) -> u64 {
+        Self::PTE_R
+    }
+    fn pte_w(&self) -> u64 {
+        Self::PTE_W
+    }
+    fn pte_x(&self) -> u64 {
+        Self::PTE_X
+    }
+    fn pte_u(&self) -> u64 {
+        Self::PTE_U
+    }
+    fn pte_a(&self) -> u64 {
+        Self::PTE_A
+    }
+    fn pte_d(&self) -> u64 {
+        Self::PTE_D
     }
 
     fn apply_pmp_rules_to_config<B: BV>(
@@ -47,7 +99,12 @@ pub trait RISCV: Target {
                 PmpMode::Napot => encode_napot(rule.base, rule.size.expect("NAPOT PMP rules require size")),
                 _ => rule.base >> 2,
             };
-            insert_register(symtab, default_registers, &format!("pmpaddr{}", rule.index), Val::I64(pmpaddr_value as i64))?;
+            insert_register(
+                symtab,
+                default_registers,
+                &format!("pmpaddr{}", rule.index),
+                Val::I64(pmpaddr_value as i64),
+            )?;
 
             let cfg_register = (rule.index / 8) * 2;
             let byte_offset = rule.index % 8;
@@ -134,7 +191,15 @@ impl<T: RISCV> Target for T {
     }
 }
 
-pub struct RV32;
+pub struct RV32 {
+    pub pmp_symbolic: bool,
+}
+
+impl Default for RV32 {
+    fn default() -> Self {
+        RV32 { pmp_symbolic: false }
+    }
+}
 
 impl RISCV for RV32 {
     const XLEN: u32 = 32;
@@ -142,15 +207,31 @@ impl RISCV for RV32 {
     fn xlen_name(&self) -> &'static str {
         "rv32"
     }
+
+    fn pmp_symbolic(&self) -> bool {
+        self.pmp_symbolic
+    }
 }
 
-pub struct RV64;
+pub struct RV64 {
+    pub pmp_symbolic: bool,
+}
+
+impl Default for RV64 {
+    fn default() -> Self {
+        RV64 { pmp_symbolic: false }
+    }
+}
 
 impl RISCV for RV64 {
     const XLEN: u32 = 64;
 
     fn xlen_name(&self) -> &'static str {
         "rv64"
+    }
+
+    fn pmp_symbolic(&self) -> bool {
+        self.pmp_symbolic
     }
 }
 
@@ -345,12 +426,12 @@ mod tests {
 
     #[test]
     fn sv39_vpn_indices_zero() {
-        assert_eq!(RV64.sv39_vpn_indices(0), [0, 0, 0]);
+        assert_eq!(RV64::default().sv39_vpn_indices(0), [0, 0, 0]);
     }
 
     #[test]
     fn sv39_vpn_indices_known() {
-        let indices = RV64.sv39_vpn_indices(0x0400_0000);
+        let indices = RV64::default().sv39_vpn_indices(0x0400_0000);
         assert_eq!(indices[0], 0);
         assert_eq!(indices[1], 32);
         assert_eq!(indices[2], 0);
@@ -359,44 +440,46 @@ mod tests {
     #[test]
     fn sv39_vpn_indices_max() {
         let va = (0x1FFu64 << 12) | (0x1FF << 21) | (0x1FF << 30);
-        let indices = RV64.sv39_vpn_indices(va);
+        let indices = RV64::default().sv39_vpn_indices(va);
         assert_eq!(indices, [511, 511, 511]);
     }
 
     #[test]
     fn sv48_vpn_indices_zero() {
-        assert_eq!(RV64.sv48_vpn_indices(0), [0, 0, 0, 0]);
+        assert_eq!(RV64::default().sv48_vpn_indices(0), [0, 0, 0, 0]);
     }
 
     #[test]
     fn sv48_vpn_indices_four_levels() {
         let va = (0x1u64 << 12) | (0x2u64 << 21) | (0x3u64 << 30) | (0x4u64 << 39);
-        let indices = RV64.sv48_vpn_indices(va);
+        let indices = RV64::default().sv48_vpn_indices(va);
         assert_eq!(indices, [1, 2, 3, 4]);
     }
 
     #[test]
     fn ppn_pa_roundtrip() {
         let pa = 0x8000_1000u64;
-        let ppn = RV64.ppn_from_pa(pa);
+        let rv64 = RV64::default();
+        let ppn = rv64.ppn_from_pa(pa);
         assert_eq!(ppn, 0x8000_1);
-        assert_eq!(RV64.pa_from_ppn(ppn), pa);
+        assert_eq!(rv64.pa_from_ppn(ppn), pa);
     }
 
     #[test]
     fn ppn_from_pa_strips_offset() {
-        assert_eq!(RV64.ppn_from_pa(0x8000_1234), 0x8000_1);
+        assert_eq!(RV64::default().ppn_from_pa(0x8000_1234), 0x8000_1);
     }
 
     #[test]
     fn pa_from_ppn_aligned() {
-        let pa = RV64.pa_from_ppn(0x1234);
+        let rv64 = RV64::default();
+        let pa = rv64.pa_from_ppn(0x1234);
         assert_eq!(pa % RV64::PAGE_SIZE, 0);
     }
 
     #[test]
     fn rv64_target_trait() {
-        let target = RV64;
+        let target = RV64::default();
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "64");
         assert_eq!(target.xlen_name(), "rv64");
@@ -407,7 +490,7 @@ mod tests {
 
     #[test]
     fn rv32_target_trait() {
-        let target = RV32;
+        let target = RV32::default();
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "32");
         assert_eq!(target.xlen_name(), "rv32");

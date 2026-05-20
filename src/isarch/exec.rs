@@ -1,19 +1,18 @@
+use super::target::{Target, RISCV};
+use super::{get_assembly_encdec, get_assembly_name};
 use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
 use isla_lib::executor::{backtrace_string, Run};
 use isla_lib::fmtval::FmtVal;
-use isla_lib::ir::UVal;
-use super::{get_assembly_name, get_assembly_encdec};
-use super::target::{Target, RISCV, RV32, RV64};
+use isla_lib::ir::*;
+use isla_lib::log;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
-use isla_lib::{log};
-use isla_lib::ir::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -111,26 +110,6 @@ fn symbolic_args_from_types<B: BV>(
 
     symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())
 }
-pub fn run_symbolic_execute<B: BV>(
-    instruction_name: &str,
-    shared_state: &SharedState<B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
-    initial_memory: Option<isla_lib::memory::Memory<B>>,
-    pmp_symbolic: bool,
-) -> Result<Option<String>, ExecError> {
-    let xlen_name = shared_state.symtab.lookup("zxlen");
-    let xlen = match lets.get(&xlen_name) {
-        Some(UVal::Init(Val::I64(n))) => *n as u32,
-        Some(UVal::Init(Val::I128(n))) => *n as u32,
-        _ => 64,
-    };
-    match xlen {
-        32 => run_symbolic_execute_with_target(&RV32, instruction_name, shared_state, regs, lets, initial_memory, pmp_symbolic),
-        _  => run_symbolic_execute_with_target(&RV64, instruction_name, shared_state, regs, lets, initial_memory, pmp_symbolic),
-    }
-}
-
 fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     target: &T,
     instruction_name: &str,
@@ -138,7 +117,6 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
-    pmp_symbolic: bool,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -148,10 +126,8 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     let mut solver = Solver::new(&ctx);
     let mut symbolic_regs = regs.clone();
 
-    if pmp_symbolic {
-        target.apply_symbolic_pmp_to_registers(
-            &shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver,
-        )?;
+    if target.pmp_symbolic() {
+        target.apply_symbolic_pmp_to_registers(&shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver)?;
     }
 
     // 使用 symbolic_args_from_types 生成符号化参数
@@ -235,8 +211,7 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                 match model.get_val(&fun_args[0]) {
                                     Ok(arg_val) => {
-                                        let asm_opt =
-                                            get_assembly_name(arg_val.clone(), shared_state, regs, lets);
+                                        let asm_opt = get_assembly_name(arg_val.clone(), shared_state, regs, lets);
                                         log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
                                         match asm_opt {
                                             Some(asm) => test_ins = asm,
@@ -389,14 +364,12 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                         let mut instruction_json = collected.lock().unwrap();
                         instruction_json.gen.push(single_instruction_json);
                     }
-                    Run::Exit => log!(
-                        log::PATH_RESULT,
-                        &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks)
-                    ),
-                    Run::Dead => log!(
-                        log::PATH_RESULT,
-                        &format!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks)
-                    ),
+                    Run::Exit => {
+                        log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks))
+                    }
+                    Run::Dead => {
+                        log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks))
+                    }
 
                     Run::Suspended => log!(
                         log::PATH_RESULT,
@@ -443,12 +416,12 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
 }
 
 #[cfg(feature = "debug_exec")]
-pub fn test_exec_main<B: BV>(
+pub fn test_exec_main<B: BV, T: RISCV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
-    pmp_symbolic: bool,
+    target: &T,
 ) {
     log!(log::SYM_EXEC, "test_exec_main");
     /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
@@ -919,7 +892,7 @@ pub fn test_exec_main<B: BV>(
     // instruction_table.extend( excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
-        match run_symbolic_execute(ins_name, &shared_state, regs, lets, initial_memory.clone(), pmp_symbolic) {
+        match run_symbolic_execute_with_target(target, ins_name, shared_state, regs, lets, initial_memory.clone()) {
             Ok(_) => {}
             Err(e) => {
                 log!(log::SYM_EXEC, &format!("test_exec_main: {}运行错误 {}", ins_name, e))
