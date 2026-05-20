@@ -4,6 +4,7 @@ use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
 use isla_lib::executor::{backtrace_string, Run};
+use isla_lib::executor::{ExecutionLimits, LimitBehavior, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
 use isla_lib::log;
@@ -147,10 +148,33 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
 
+    // 执行限制配置（三道防线，OR 关系，任一触发即执行 on_limit_reached）：
+    //
+    // 1) max_total_forks=8       — 硬上限：全局 fork 总数，防止状态爆炸
+    // 2) max_forks_per_branch=2  — 硬上限：单个分支点最多 fork 2 次
+    // 3) max_fork_pct_per_branch=0.1 — 自适应：单个分支点的 fork 数不得超过全局的 10%
+    //    与 KLEE 的 MaxStaticForkPct 一致，自动抑制占比过高的"热点"分支。
+    //    max_fork_pct_check_delay=100：前 100 次 fork 跳过百分比检查（热身期），
+    //    避免初始阶段 total_forks 过小导致任何分支点占比都接近 100% 而误杀。
+    //
+    // 其他限制：
+    // - max_backjumps_per_loop=10 — 循环回边次数上限，超过即视为无限循环
+    // - max_path_depth=10000     — IR 指令步数上限，防止单条路径过长
+    // - on_limit_reached=Concretize — 触发限制时具体化符号条件继续执行，而非截断路径
+    let limits = ExecutionLimits::default()
+        .with_max_forks_per_branch(2)
+        .with_max_total_forks(8)
+        .with_max_backjumps_per_loop(10)
+        .with_max_path_depth(10000)
+        .with_max_fork_pct_per_branch(0.1)
+        .with_max_fork_pct_check_delay(100)
+        .with_limit_behavior(LimitBehavior::Concretize);
+    let task_state = TaskState::new().with_execution_limits(limits);
+
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
 
-    isla_lib::executor::execute_ir_function_with_checkpoint(
+    isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
         "zexecute",
         &fun_args,
         shared_state,
@@ -402,6 +426,7 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
         },
         cp,
         initial_memory,
+        task_state,
     );
 
     // 提取字符串结果
@@ -821,7 +846,7 @@ pub fn test_exec_main<B: BV, T: RISCV>(
         "zUTYPE",
         "zWFI",
     ];
-    instruction_table.extend(ext_i_instruction_table.to_vec());
+    // instruction_table.extend(ext_i_instruction_table.to_vec());
 
     let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
         .into_iter()
@@ -889,7 +914,7 @@ pub fn test_exec_main<B: BV, T: RISCV>(
     // instruction_table.extend(vec!["zLOAD"]);
 
     let excute_through_instruction_table = ["zSTORE", "zLOAD"];
-    // instruction_table.extend( excute_through_instruction_table.to_vec());
+    instruction_table.extend(excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
         match run_symbolic_execute_with_target(target, ins_name, shared_state, regs, lets, initial_memory.clone()) {

@@ -109,6 +109,8 @@ pub struct Frame<'ir, B> {
     pub(super) pc: usize,
     pub(super) forks: u32,
     pub(super) backjumps: u32,
+    pub(super) step_count: u32,
+    pub(super) loop_counts: Arc<HashMap<usize, u32>>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
     pub(super) memory: Arc<Memory<B>>,
     pub(super) instrs: &'ir [Instr<Name, B>],
@@ -127,6 +129,8 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc: frame.pc,
         forks: frame.forks,
         backjumps: frame.backjumps,
+        step_count: frame.step_count,
+        loop_counts: (*frame.loop_counts).clone(),
         local_state: (*frame.local_state).clone(),
         memory: (*frame.memory).clone(),
         instrs: frame.instrs,
@@ -148,6 +152,8 @@ pub struct LocalFrame<'ir, B> {
     pub(super) pc: usize,
     pub forks: u32,
     pub(super) backjumps: u32,
+    pub(super) step_count: u32,
+    pub(super) loop_counts: HashMap<usize, u32>,
     pub(super) local_state: LocalState<'ir, B>,
     pub(super) memory: Memory<B>,
     pub(super) instrs: &'ir [Instr<Name, B>],
@@ -166,6 +172,8 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         pc: frame.pc,
         forks: frame.forks,
         backjumps: frame.backjumps,
+        step_count: frame.step_count,
+        loop_counts: Arc::new(frame.loop_counts.clone()),
         local_state: Arc::new(frame.local_state.clone()),
         memory: Arc::new(frame.memory.clone()),
         instrs: frame.instrs,
@@ -296,6 +304,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc: 0,
             forks: 0,
             backjumps: 0,
+            step_count: 0,
+            loop_counts: HashMap::default(),
             local_state: LocalState { vars, regs, lets, probes },
             memory: Memory::new(),
             instrs,
@@ -319,6 +329,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
         new_frame.forks = self.forks;
+        new_frame.step_count = self.step_count;
+        new_frame.loop_counts = self.loop_counts.clone();
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();

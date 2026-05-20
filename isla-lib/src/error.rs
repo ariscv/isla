@@ -30,6 +30,7 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::ir::Name;
 use crate::source_loc::SourceLoc;
 
 pub trait IslaError {
@@ -84,6 +85,9 @@ pub enum ExecError {
     /// Execution stopped because this function is in the stop_functions set
     Stopped(String),
     PCLimitReached(u64),
+    BranchLimitReached(Name, usize),
+    LoopLimitReached(Name, usize),
+    DepthLimitReached,
     InconsistentRegisterReset,
     BadInterrupt(&'static str),
 }
@@ -98,6 +102,7 @@ impl IslaError for ExecError {
             | SymbolicLength(_, info)
             | VariableNotFound(_, info)
             | MatchFailure(info) => *info,
+            BranchLimitReached(_, _) | LoopLimitReached(_, _) | DepthLimitReached => SourceLoc::unknown(),
             _ => SourceLoc::unknown(),
         }
     }
@@ -129,6 +134,13 @@ impl fmt::Display for ExecError {
             Z3Unknown => write!(f, "SMT solver returned unknown"),
             Stopped(func) => write!(f, "Execution stopped at {}", func),
             PCLimitReached(pc_value) => write!(f, "Executed instruction at {} more than specified limit", pc_value),
+            BranchLimitReached(func, pc_value) => {
+                write!(f, "Executed branch in {} at {} more than specified limit", func, pc_value)
+            }
+            LoopLimitReached(func, pc_value) => {
+                write!(f, "Executed loop in {} at {} more than specified limit", func, pc_value)
+            }
+            DepthLimitReached => write!(f, "Execution depth limit reached"),
             InconsistentRegisterReset => write!(f, "Inconsistent register reset constraints"),
             BadInterrupt(msg) => write!(f, "Bad task interrupt: {}", msg),
         }
