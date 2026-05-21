@@ -182,6 +182,7 @@ pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architectu
 
     if !matches.opt_present("arch") {
         eprintln!("Required option 'arch' missing");
+        exit(1);
     }
 
     // if !matches.opt_present("config") {

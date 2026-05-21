@@ -29,27 +29,70 @@
 
 //! CLI tool for exploring RISC-V instruction execution through symbolic execution.
 //!
-//! This tool provides three main commands:
+//! This tool provides commands:
 //! - `list-instructions`: List all available instructions in the architecture
 //! - `tree <instruction>`: Show the execution path tree for an instruction
-//! - `solve-state <instruction>`: Solve for concrete ISA state values
+//! - `solve-state [--clause|--extension|--instruction-name|--all]`: Solve for concrete ISA state values
 
 use sha2::{Digest, Sha256};
 use std::process::exit;
 
 use isla_lib::bitvector::b129::B129;
+use isla_lib::bitvector::BV;
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
-use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings};
+use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings, SharedState};
 use isla_lib::log;
 mod opts;
 use isla::isarch;
 use isla::isarch::target::{RISCV, RV32, RV64};
 use opts::CommonOpts;
 
-#[cfg(feature = "debug_clause_args")]
 use isla::isarch::args::test_clause_args_main;
-#[cfg(feature = "debug_clause_args_yaml")]
 use isla::isarch::args_yaml::test_clause_args_yaml_main;
+
+/// isarch 支持的子命令
+#[derive(Debug, PartialEq)]
+enum Subcommand {
+    /// 列出所有可用指令
+    ListInstructions,
+    /// 显示指令执行路径树
+    Tree { instruction: String },
+    /// 求解具体 ISA 状态值，支持通过 clause/扩展/指令名筛选
+    SolveState { clauses: Vec<String>, extensions: Vec<String>, instruction_names: Vec<String>, run_all: bool },
+    /// 调试指令汇编名称列举（替代 debug_instruction feature）
+    DebugInstruction { clause: Option<String> },
+    /// 调试 clause 参数提取（替代 debug_clause_args feature）
+    DebugClauseArgs { clause: Option<String> },
+    /// 导出 clause 参数为 YAML（替代 debug_clause_args_yaml feature）
+    DebugClauseArgsYaml,
+}
+
+/// 从命令行参数解析子命令
+fn parse_subcommand(matches: &getopts::Matches) -> Result<Subcommand, String> {
+    if matches.free.is_empty() {
+        return Err("未指定子命令".to_string());
+    }
+    match matches.free[0].as_str() {
+        "list-instructions" => Ok(Subcommand::ListInstructions),
+        "tree" => {
+            if matches.free.len() < 2 {
+                return Err("'tree' 命令需要指定指令参数".to_string());
+            }
+            Ok(Subcommand::Tree { instruction: matches.free[1].clone() })
+        }
+        "solve-state" => {
+            let clauses = matches.opt_strs("clause");
+            let extensions = matches.opt_strs("extension");
+            let instruction_names = matches.opt_strs("instruction-name");
+            let run_all = matches.opt_present("all");
+            Ok(Subcommand::SolveState { clauses, extensions, instruction_names, run_all })
+        }
+        "debug-instruction" => Ok(Subcommand::DebugInstruction { clause: matches.free.get(1).cloned() }),
+        "debug-clause-args" => Ok(Subcommand::DebugClauseArgs { clause: matches.free.get(1).cloned() }),
+        "debug-clause-args-yaml" => Ok(Subcommand::DebugClauseArgsYaml),
+        other => Err(format!("未知命令 '{}'", other)),
+    }
+}
 
 fn main() {
     let code = isla_main();
@@ -60,9 +103,19 @@ fn main() {
 fn print_usage(opts: &getopts::Options) -> ! {
     let brief = "Usage: isarch [options] <command> [args]\n\
                  Commands:\n\
-                   list-instructions    List all available instructions\n\
-                   tree <instruction>    Show execution path tree\n\
-                   solve-state <instruction>  Solve for concrete ISA state values\n\
+                   list-instructions                    List all available instructions\n\
+                   tree <instruction>                   Show execution path tree\n\
+                   solve-state [--clause|--extension|--instruction-name|--all]\n\
+                                                        Solve for concrete ISA state values\n\
+                   debug-instruction [<clause>]         Debug instruction assembly name listing\n\
+                   debug-clause-args [<clause>]         Debug clause argument extraction\n\
+                   debug-clause-args-yaml               Export clause args to YAML files\n\
+                 \n\
+                 solve-state filters:\n\
+                   --clause <name>                      Specify clause(s) to execute (repeatable)\n\
+                   --extension <ext>                    Specify extension (i, m, c, etc.) (repeatable)\n\
+                   --instruction-name <name>            Specify assembly instruction name (repeatable)\n\
+                   --all                                Execute all clauses\n\
                  \n\
                  Options:\n";
     eprint!("{}", opts.usage(brief));
@@ -205,11 +258,24 @@ fn cmd_solve_state<B: isla_lib::bitvector::BV>(
     0
 }
 
+fn detect_xlen<B: BV>(shared_state: &SharedState<B>, lets: &Bindings<B>) -> u32 {
+    let xlen_name = shared_state.symtab.lookup("zxlen");
+    match lets.get(&xlen_name) {
+        Some(isla_lib::ir::UVal::Init(isla_lib::ir::Val::I64(n))) => *n as u32,
+        Some(isla_lib::ir::UVal::Init(isla_lib::ir::Val::I128(n))) => *n as u32,
+        _ => panic!("unexpected xlen in lets: {:?}", lets.get(&xlen_name)),
+    }
+}
+
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
     opts.optopt("", "timeout", "超时时间（秒）", "<n>");
+    opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
+    opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
+    opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
+    opts.optflag("", "all", "执行所有clause");
 
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
@@ -218,7 +284,15 @@ fn isla_main() -> i32 {
         print_usage(&opts);
     }
 
-    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
+    let subcommand = match parse_subcommand(&matches) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            print_usage(&opts);
+        }
+    };
+
+    let CommonOpts { num_threads: _, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     let assertion_mode = AssertionMode::Optimistic;
@@ -242,134 +316,245 @@ fn isla_main() -> i32 {
 
     set_global_shared_state(*shared_state);
 
-    let subcommand = matches.free[0].as_str();
-
-    // 测试 get_assembly_name
-    /* if let Some(assembly_name) = get_assembly_name::<B129>("zMRET", shared_state, regs) {
-        println!("MRET 的汇编名称: {}", assembly_name);
-    } */
-
-    //
-    let instruction_list = &shared_state.type_info;
-    let instruction_id = shared_state.symtab.lookup("zinstruction");
-    #[allow(non_snake_case)]
-    let MRET_id = shared_state.symtab.lookup("zMRET");
-    // println!("ins_id={:?},MRET_id={:?}",instruction_id,MRET_id);
-    // let instructions_union=shared_state.type_info.unions.get(  &shared_state.symtab.lookup("zinstruction")  ).unwrap();
-    //let instruction_union_ctors=&shared_state.type_info.union_ctors;
-    /* println!("{:?}",instructions_union.iter()
-        .map(
-            |(n,ty)| {
-                (shared_state.symtab.to_str(*n), match ty {
-
-                    isla_lib::ir::Ty::Enum(  ty_name) => isla_lib::ir::Ty::Enum(  shared_state.symtab.to_str(*ty_name)),
-                    isla_lib::ir::Ty::Struct(ty_name) => isla_lib::ir::Ty::Struct(shared_state.symtab.to_str(*ty_name)),
-                    isla_lib::ir::Ty::Union( ty_name) => isla_lib::ir::Ty::Union( shared_state.symtab.to_str(*ty_name)),
-                    _ => isla_lib::ir::Ty::RoundingMode
-                })
-            }
-        ).collect::<HashMap<_,_>>()
-    ); */
-    //println!("{:?}",instruction_union_ctors.iter().map(|e|{shared_state.symtab.to_str(*e)}).collect::<Vec<_>>() );
-
-    //======
-
-    // let instruction_list = isarch::get_instruction_list(shared_state, regs, lets);
-
-    // println!("是否存在mret：{:?}",instruction_list.contains(&String::from_str("mret").unwrap()));
-
-    #[cfg(feature = "debug_instruction")]
-    isarch::test_instruction_list_main(shared_state, regs, lets);
-
-    #[cfg(feature = "debug_clause_args")]
-    test_clause_args_main(shared_state, regs, lets);
-
-    #[cfg(feature = "debug_clause_args_yaml")]
-    test_clause_args_yaml_main(shared_state, regs, lets);
-
-    #[cfg(feature = "debug_exec")]
-    {
-        let xlen_name = shared_state.symtab.lookup("zxlen");
-        let xlen = match lets.get(&xlen_name) {
-            Some(isla_lib::ir::UVal::Init(isla_lib::ir::Val::I64(n))) => *n as u32,
-            Some(isla_lib::ir::UVal::Init(isla_lib::ir::Val::I128(n))) => *n as u32,
-            _ => panic!("unexpected xlen in lets: {:?}", lets.get(&xlen_name)),
-        };
-        match xlen {
-            32 => {
-                let target = RV32 { pmp_symbolic };
-                let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
-                    .and_then(|builder| builder.build())
-                    .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
-                    .ok();
-                isarch::exec::test_exec_main(shared_state, regs, lets, initial_memory, &target);
-            }
-            _ => {
-                let target = RV64 { pmp_symbolic };
-                let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
-                    .and_then(|builder| builder.build())
-                    .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
-                    .ok();
-                isarch::exec::test_exec_main(shared_state, regs, lets, initial_memory, &target);
-            }
-        }
-    }
-
     match subcommand {
-        "list-instructions" => {
-            println!("");
-            // println!("一共有{}条指令",instruction_list.len());
+        Subcommand::ListInstructions => {
+            let instructions = isarch::list_instructions(*shared_state, regs, lets);
+            let total_inst: usize = instructions.iter().map(|(_, names)| names.len()).sum();
+            let total_clause = instructions.len();
+            println!("共 {} 个 clause，{} 条指令：", total_clause, total_inst);
             println!();
-
-            // 将 HashMap 转换为 Vec 并按汇编名称排序
-            /* let mut instructions: Vec<_> = instruction_list.iter().collect();
-            instructions.sort_by(|a, b| a.0.cmp(b.0));
-
-            for (assembly, (_n, _ty, inst_str, _params, _constraints)) in instructions {
-                println!("{} <- {}", assembly, inst_str);
-            } */
-            /* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
-                println!("指令: {}", assembly);
-
-                // 将符号化参数和约束放在同一行显示
-                if !params.is_empty() && !constraints.is_empty() {
-                    for (param, (_var, ty)) in params.iter().zip(constraints.iter()) {
-                        println!("  {} : {}", param, ty);
-                    }
-                } else if !params.is_empty() {
-                    for param in params {
-                        println!("  {}", param);
-                    }
+            for (clause, names) in &instructions {
+                if names.is_empty() {
+                    println!("  [{}] (无汇编名称)", clause);
+                } else {
+                    println!("  [{}] {}", clause, names.join(", "));
                 }
-
-                println!();
-            } */
-
+            }
             0
         }
-        "tree" => {
-            if matches.free.len() < 2 {
-                eprintln!("Error: 'tree' command requires an instruction argument");
-                println!("\nUsage: isarch [options] tree <instruction>");
-                println!("\nExample: isarch -A ./rv32d.ir -C configs/riscv32.toml tree mret");
-                1
+        Subcommand::Tree { .. } => cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path),
+        Subcommand::SolveState { clauses, extensions, instruction_names, run_all } => {
+            let xlen = detect_xlen(*shared_state, lets);
+            let success = match xlen {
+                32 => {
+                    let target = RV32 { pmp_symbolic };
+                    let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
+                        .and_then(|builder| builder.build())
+                        .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
+                        .ok();
+                    isarch::exec::solve_state_main(
+                        shared_state,
+                        regs,
+                        lets,
+                        initial_memory,
+                        &target,
+                        &clauses,
+                        &extensions,
+                        &instruction_names,
+                        run_all,
+                    )
+                }
+                _ => {
+                    let target = RV64 { pmp_symbolic };
+                    let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
+                        .and_then(|builder| builder.build())
+                        .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
+                        .ok();
+                    isarch::exec::solve_state_main(
+                        shared_state,
+                        regs,
+                        lets,
+                        initial_memory,
+                        &target,
+                        &clauses,
+                        &extensions,
+                        &instruction_names,
+                        run_all,
+                    )
+                }
+            };
+            if success {
+                0
             } else {
-                cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path)
+                1
             }
         }
-        /* "solve-state" => {
-            if matches.free.len() < 2 {
-                eprintln!("Error: 'solve-state' command requires an instruction argument");
-                println!("\nUsage: isarch [options] solve-state <instruction>");
-                println!("\nExample: isarch -A ./rv32d.ir -C configs/riscv32.toml solve-state mret");
-                1
-            } else {
-                cmd_solve_state(matches, &iarch, arch, isa_config, source_path)
-            }
-        } */
-        _ => {
-            eprintln!("Error: Unknown command '{}'", subcommand);
-            print_usage(&opts);
+        Subcommand::DebugInstruction { clause } => {
+            let clause_name = clause.as_deref().unwrap_or("zRTYPE");
+            isarch::test_instruction_list_main(shared_state, regs, lets, clause_name);
+            0
         }
+        Subcommand::DebugClauseArgs { clause: _ } => {
+            test_clause_args_main(shared_state, regs, lets);
+            0
+        }
+        Subcommand::DebugClauseArgsYaml => {
+            test_clause_args_yaml_main(shared_state, regs, lets);
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_matches(args: &[&str]) -> getopts::Matches {
+        let mut opts = getopts::Options::new();
+        opts.optflag("g", "graphviz", "");
+        opts.optopt("A", "arch", "", "");
+        opts.optopt("C", "config", "", "");
+        opts.optmulti("", "clause", "", "<name>");
+        opts.optmulti("", "extension", "", "<ext>");
+        opts.optmulti("", "instruction-name", "", "<name>");
+        opts.optflag("", "all", "");
+        opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn test_no_subcommand() {
+        let matches = make_matches(&[]);
+        let result = parse_subcommand(&matches);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("未指定子命令"));
+    }
+
+    #[test]
+    fn test_unknown_command() {
+        let matches = make_matches(&["foobar"]);
+        let result = parse_subcommand(&matches);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("foobar"));
+    }
+
+    #[test]
+    fn test_list_instructions() {
+        let matches = make_matches(&["list-instructions"]);
+        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::ListInstructions);
+    }
+
+    #[test]
+    fn test_tree_with_instruction() {
+        let matches = make_matches(&["tree", "mret"]);
+        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::Tree { instruction: "mret".to_string() });
+    }
+
+    #[test]
+    fn test_tree_missing_instruction() {
+        let matches = make_matches(&["tree"]);
+        let result = parse_subcommand(&matches);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("tree"));
+    }
+
+    #[test]
+    fn test_solve_state_no_filter() {
+        let matches = make_matches(&["solve-state"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::SolveState { clauses: vec![], extensions: vec![], instruction_names: vec![], run_all: false }
+        );
+    }
+
+    #[test]
+    fn test_solve_state_with_clause() {
+        let matches = make_matches(&["solve-state", "--clause", "zADD"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::SolveState {
+                clauses: vec!["zADD".to_string()],
+                extensions: vec![],
+                instruction_names: vec![],
+                run_all: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_solve_state_with_extension() {
+        let matches = make_matches(&["solve-state", "--extension", "i"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::SolveState {
+                clauses: vec![],
+                extensions: vec!["i".to_string()],
+                instruction_names: vec![],
+                run_all: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_solve_state_with_instruction_name() {
+        let matches = make_matches(&["solve-state", "--instruction-name", "add"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::SolveState {
+                clauses: vec![],
+                extensions: vec![],
+                instruction_names: vec!["add".to_string()],
+                run_all: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_solve_state_with_all() {
+        let matches = make_matches(&["solve-state", "--all"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::SolveState { clauses: vec![], extensions: vec![], instruction_names: vec![], run_all: true }
+        );
+    }
+
+    #[test]
+    fn test_solve_state_with_multiple_filters() {
+        let matches =
+            make_matches(&["solve-state", "--clause", "zSTORE", "--extension", "i", "--instruction-name", "add"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::SolveState {
+                clauses: vec!["zSTORE".to_string()],
+                extensions: vec!["i".to_string()],
+                instruction_names: vec!["add".to_string()],
+                run_all: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_debug_instruction_no_clause() {
+        let matches = make_matches(&["debug-instruction"]);
+        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::DebugInstruction { clause: None });
+    }
+
+    #[test]
+    fn test_debug_instruction_with_clause() {
+        let matches = make_matches(&["debug-instruction", "zRTYPE"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::DebugInstruction { clause: Some("zRTYPE".to_string()) }
+        );
+    }
+
+    #[test]
+    fn test_debug_clause_args_no_clause() {
+        let matches = make_matches(&["debug-clause-args"]);
+        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::DebugClauseArgs { clause: None });
+    }
+
+    #[test]
+    fn test_debug_clause_args_with_clause() {
+        let matches = make_matches(&["debug-clause-args", "zSTORE"]);
+        assert_eq!(
+            parse_subcommand(&matches).unwrap(),
+            Subcommand::DebugClauseArgs { clause: Some("zSTORE".to_string()) }
+        );
+    }
+
+    #[test]
+    fn test_debug_clause_args_yaml() {
+        let matches = make_matches(&["debug-clause-args-yaml"]);
+        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::DebugClauseArgsYaml);
     }
 }

@@ -13,6 +13,10 @@ OptionParser.new do |opts|
   opts.on("-c", "--config [PATH]", String, "Set config for RISC-V concurrency tests") do |c|
     $options[:config] = File.expand_path c
   end
+
+  opts.on("-m", "--mode [MODE]", String, "Set isarch test mode: all (default) or quick") do |m|
+    $options[:mode] = m
+  end
 end.parse!
 
 class String
@@ -155,4 +159,36 @@ def run_tests()
   # step_print("LD_LIBRARY_PATH=..:$LD_LIBRARY_PATH #{isla_axiomatic} -A #{arch} -C #{$options[:config]} -m #{riscv_cat} -t #{axiomatic}/tests --refs #{axiomatic}/refs")
 end
 
+def run_isarch_tests
+  isarch_bin = File.expand_path(File.join($TEST_DIR, "../target/release/isarch"))
+  if !File.file?(isarch_bin) then
+    puts "Skipping isarch tests (binary not found)".yellow
+    return
+  end
+
+  repo_root = File.expand_path(File.join($TEST_DIR, ".."))
+  config = $options[:config] || File.expand_path(File.join(repo_root, "configs/riscv64.toml"))
+
+  puts "Running isarch tests:".blue
+
+  env = {
+    "ISARCH_BIN"  => isarch_bin,
+    "IR_FILE"     => File.expand_path(File.join(repo_root, "rv64d.ir")),
+    "CONFIG_FILE" => config,
+  }
+
+  test_script = File.expand_path(File.join($TEST_DIR, "isarch/test_isarch.sh"))
+
+  mode = $options[:mode] || "all"
+  stdout, stderr, status = Open3.capture3(env, "bash #{test_script} #{mode}")
+  puts stdout
+  if status.exitstatus != 0 then
+    puts "isarch tests #{"Failed".red}"
+    puts "stderr: #{stderr}" if !stderr.empty?
+    exit 1
+  end
+  puts "isarch tests #{"ok".green}"
+end
+
 run_tests
+run_isarch_tests

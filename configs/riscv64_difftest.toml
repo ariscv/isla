@@ -59,7 +59,7 @@ relaxed = [
 ]
 
 [registers.defaults]
-"__isla_vector_gpr" = false
+"__isla_vector_gpr" = true
 satp = "0x0000000000000000"
 misa = "{ bits = 0x800000000034112f }"
 mstatus = "{ bits = 0x0000000000000000 }"
