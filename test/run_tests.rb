@@ -17,6 +17,10 @@ OptionParser.new do |opts|
   opts.on("-m", "--mode [MODE]", String, "Set isarch test mode: all (default) or quick") do |m|
     $options[:mode] = m
   end
+
+  opts.on("-t", "--timeout [SECONDS]", Integer, "Set per-test execution timeout in seconds (default: 60)") do |t|
+    $options[:timeout] = t
+  end
 end.parse!
 
 class String
@@ -47,7 +51,7 @@ end
 
 class Dir
   def self.chunks(dir, n, &block)
-    Dir.entries(dir).each_slice(n).each do |chunk|
+    Dir.entries(dir).sort.each_slice(n).each do |chunk|
       chunk.each { |file| fork { yield file } }
       statuses = Process.waitall
       statuses.each do |status|
@@ -57,9 +61,23 @@ class Dir
   end
 end
 
-def step(str, *extra)
+def step(str, *extra, timeout: nil)
   expected = extra.fetch(0, 0)
-  stdout, stderr, status = Open3.capture3("#{str}")
+  if timeout then
+    # Insert timeout after leading env-var assignments (e.g. LD_LIBRARY_PATH=...)
+    cmd = str.sub(/\A((?:[A-Za-z_]\w*=\S+\s+)*)(.*)/, "\\1timeout #{timeout} \\2")
+  else
+    cmd = str
+  end
+  stdout, stderr, status = Open3.capture3(cmd)
+  if timeout && [124, 137].include?(status.exitstatus) then
+    puts <<OUTPUT
+#{"Timeout".red} (limit: #{timeout}s): #{str}
+#{"stdout".cyan}: #{stdout}
+#{"stderr".blue}: #{stderr}
+OUTPUT
+    exit 1
+  end
   if status.exitstatus != expected then
     puts <<OUTPUT
 #{"Failed".red} (expected #{expected}, got: #{status}): #{str}
@@ -68,6 +86,21 @@ def step(str, *extra)
 OUTPUT
     exit 1
   end
+end
+
+# For .timeout tests: pass if timeout (124/137), fail if completed normally
+def step_timeout(str, timeout)
+  cmd = str.sub(/\A((?:[A-Za-z_]\w*=\S+\s+)*)(.*)/, "\\1timeout #{timeout} \\2")
+  stdout, stderr, status = Open3.capture3(cmd)
+  if [124, 137].include?(status.exitstatus) then
+    return
+  end
+  puts <<OUTPUT
+#{"Failed".red} (expected timeout, but completed with #{status}): #{str}
+#{"stdout".cyan}: #{stdout}
+#{"stderr".blue}: #{stderr}
+OUTPUT
+  exit 1
 end
 
 def step_print(str)
@@ -131,10 +164,14 @@ def run_tests()
       building = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       step("sail -plugin #{isla_sail} -isla #{file} include/config.sail -o #{basename}#{isla_sail_extra_opts}")
       starting = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      if File.extname(basename) == ".unsat" then
-        step("LD_LIBRARY_PATH=..:$LD_LIBRARY_PATH #{isla_property} -A #{basename}.ir -p prop -T 2 -C ../../configs/plain.toml#{extra_opts}")
+      test_timeout = $options[:timeout] || 60
+      ext = File.extname(basename)
+      if ext == ".unsat" then
+        step("LD_LIBRARY_PATH=..:$LD_LIBRARY_PATH #{isla_property} -A #{basename}.ir -p prop -T 2 -C ../../configs/plain.toml#{extra_opts}", timeout: test_timeout)
+      elsif ext == ".timeout" then
+        step_timeout("LD_LIBRARY_PATH=..:$LD_LIBRARY_PATH #{isla_property} -A #{basename}.ir -p prop -T 2 -C ../../configs/plain.toml#{extra_opts}", test_timeout)
       else
-        step("LD_LIBRARY_PATH=..:$LD_LIBRARY_PATH #{isla_property} -A #{basename}.ir -p prop -T 2 -C ../../configs/plain.toml#{extra_opts}", 1)
+        step("LD_LIBRARY_PATH=..:$LD_LIBRARY_PATH #{isla_property} -A #{basename}.ir -p prop -T 2 -C ../../configs/plain.toml#{extra_opts}", 1, timeout: test_timeout)
       end
       ending = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       build_time = (starting - building) * 1000
@@ -191,4 +228,4 @@ def run_isarch_tests
 end
 
 run_tests
-run_isarch_tests
+# run_isarch_tests

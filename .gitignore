@@ -24,6 +24,7 @@ libz3.so
 callgrind.*
 z3_problems
 .merlin
+sail_smt_cache
 
 output/
 .*/
