@@ -23,7 +23,8 @@ web:
 	$(MAKE) -C web all
 
 test:
-	test/run_tests.rb --config configs/riscv64.toml
+# 	test/run_tests.rb --config configs/riscv64.toml --mode quick
+	test/run_tests.rb --config configs/riscv64_difftest.toml
 	$(MAKE) -C isla-lib test
 	$(MAKE) -C isla-cat test
 	$(MAKE) -C isla-elf test

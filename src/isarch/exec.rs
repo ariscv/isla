@@ -1,5 +1,6 @@
+use super::clause::get_extension_clauses;
 use super::target::{Target, RISCV};
-use super::{get_assembly_encdec, get_assembly_name};
+use super::{get_all_clause_names, get_assembly_encdec, get_assembly_name, list_instructions};
 use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
@@ -15,7 +16,7 @@ use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,83 @@ impl AssemGenJson {
     fn new(gen: Vec<AssemGenJsonItem>) -> Self {
         AssemGenJson { gen }
     }
+}
+
+/// solve-state 子命令的主入口函数
+/// 支持通过 clause 名、扩展名、汇编指令名或 --all 来筛选需要符号执行的 clause
+pub fn solve_state_main<B, T>(
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+    initial_memory: Option<isla_lib::memory::Memory<B>>,
+    target: &T,
+    clauses: &[String],
+    extensions: &[String],
+    instruction_names: &[String],
+    run_all: bool,
+) -> bool
+where
+    B: BV,
+    T: RISCV,
+{
+    let mut clause_set: HashSet<String> = HashSet::new();
+    let mut success = true;
+
+    // 添加显式指定的 clause
+    clause_set.extend(clauses.iter().cloned());
+
+    // 添加扩展对应的 clause
+    for ext in extensions {
+        let ext_clauses = get_extension_clauses(ext);
+        if ext_clauses.is_empty() {
+            log!(log::SYM_EXEC, &format!("警告: 未知扩展 '{}'", ext));
+            success = false;
+        }
+        clause_set.extend(ext_clauses);
+    }
+
+    // 根据汇编指令名查找对应的 clause
+    if !instruction_names.is_empty() {
+        let instruction_map = list_instructions(shared_state, regs, lets);
+        for inst_name in instruction_names {
+            let mut found = false;
+            for (clause_display_name, names) in &instruction_map {
+                if names.iter().any(|n| n == inst_name) {
+                    clause_set.insert(zencode::encode(clause_display_name));
+                    found = true;
+                }
+            }
+            if !found {
+                log!(log::SYM_EXEC, &format!("警告: 未找到指令 '{}' 对应的 clause", inst_name));
+                success = false;
+            }
+        }
+    }
+
+    // --all 模式：执行所有 clause
+    if run_all {
+        clause_set.extend(get_all_clause_names(shared_state));
+    }
+
+    if clause_set.is_empty() {
+        eprintln!("错误: 未指定任何要符号执行的 clause");
+        eprintln!("请使用 --clause, --extension, --instruction-name 或 --all 指定");
+        return false;
+    }
+
+    log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", clause_set.len()));
+
+    for clause in clause_set {
+        match run_symbolic_execute_with_target(target, &clause, shared_state, regs, lets, initial_memory.clone()) {
+            Ok(_) => {}
+            Err(e) => {
+                log!(log::SYM_EXEC, &format!("solve_state: {}运行错误 {}", clause, e));
+                success = false;
+            }
+        }
+    }
+
+    success
 }
 
 #[allow(non_snake_case)]
@@ -437,491 +515,5 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     } else {
         log!(log::SYM_EXEC, &format!("警告: {}无法获取 result 收集器", instruction_name));
         Ok(None)
-    }
-}
-
-#[cfg(feature = "debug_exec")]
-pub fn test_exec_main<B: BV, T: RISCV>(
-    shared_state: &SharedState<B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
-    initial_memory: Option<isla_lib::memory::Memory<B>>,
-    target: &T,
-) {
-    log!(log::SYM_EXEC, "test_exec_main");
-    /* match run_symbolic_execute("zLOAD", &shared_state, regs, lets) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("test_exec_main: 运行错误 {}", e)
-        }
-    }; */
-    // exit(0);
-
-    let mut instruction_table: Vec<&str> = Vec::new();
-    //能全部执行结束的
-    let excute_through_instruction_table = [
-        "zADDIW",
-        "zAES32DSI",
-        "zAES32DSMI",
-        "zAES32ESI",
-        "zAES32ESMI",
-        "zAES64DS",
-        "zAES64DSM",
-        "zAES64ES",
-        "zAES64ESM",
-        "zAES64IM",
-        "zAES64KS1I",
-        "zAES64KS2",
-        "zAMO",
-        "zBITYPE",
-        "zBREV8",
-        "zBTYPE",
-    ];
-    // instruction_table.extend( excute_through_instruction_table.to_vec());
-
-    //运行过程有问题的
-    let failed_instruction_table = [
-        /*
-        zCLMUL的问题在于carryless_mul函数，这个函数用循环做了个无进位乘法。
-
-        */
-        "zCLMUL",
-    ];
-    // instruction_table.extend(failed_instruction_table.to_vec());
-
-    //待测试的
-    let todo_instruction_table = [
-        "zCLMULH",
-        "zCLMULR",
-        "zCLZ",
-        "zCLZW",
-        "zCPOP",
-        "zCPOPW",
-        "zCSRImm",
-        "zCSRReg",
-        "zCTZ",
-        "zCTZW",
-        "zC_ADD",
-        "zC_ADDI",
-        "zC_ADDI16SP",
-        "zC_ADDI4SPN",
-        "zC_ADDIW",
-        "zC_ADDW",
-        "zC_AND",
-        "zC_ANDI",
-        "zC_BEQZ",
-        "zC_BNEZ",
-        "zC_EBREAK",
-        "zC_FLD",
-        "zC_FLDSP",
-        "zC_FLW",
-        "zC_FLWSP",
-        "zC_FSD",
-        "zC_FSDSP",
-        "zC_FSW",
-        "zC_FSWSP",
-        "zC_ILLEGAL",
-        "zC_J",
-        "zC_JAL",
-        "zC_JALR",
-        "zC_JR",
-        "zC_LBU",
-        "zC_LD",
-        "zC_LDSP",
-        "zC_LH",
-        "zC_LHU",
-        "zC_LI",
-        "zC_LUI",
-        "zC_LW",
-        "zC_LWSP",
-        "zC_MUL",
-        "zC_MV",
-        "zC_NOP",
-        "zC_NOT",
-        "zC_NTL",
-        "zC_OR",
-        "zC_SB",
-        "zC_SD",
-        "zC_SDSP",
-        "zC_SEXT_B",
-        "zC_SEXT_H",
-        "zC_SH",
-        "zC_SLLI",
-        "zC_SRAI",
-        "zC_SRLI",
-        "zC_SUB",
-        "zC_SUBW",
-        "zC_SW",
-        "zC_SWSP",
-        "zC_XOR",
-        "zC_ZEXT_B",
-        "zC_ZEXT_H",
-        "zC_ZEXT_W",
-        "zDIV",
-        "zDIVW",
-        "zEBREAK",
-        "zECALL",
-        "zFCVTMOD_W_D",
-        "zFCVT_BF16_S",
-        "zFCVT_S_BF16",
-        "zFENCE",
-        "zFENCEI",
-        "zFENCE_TSO",
-        "zFLEQ_D",
-        "zFLEQ_H",
-        "zFLEQ_S",
-        "zFLI_D",
-        "zFLI_H",
-        "zFLI_S",
-        "zFLTQ_D",
-        "zFLTQ_H",
-        "zFLTQ_S",
-        "zFMAXM_D",
-        "zFMAXM_H",
-        "zFMAXM_S",
-        "zFMINM_D",
-        "zFMINM_H",
-        "zFMINM_S",
-        "zFMVH_X_D",
-        "zFMVP_D_X",
-        "zFROUNDNX_D",
-        "zFROUNDNX_H",
-        "zFROUNDNX_S",
-        "zFROUND_D",
-        "zFROUND_H",
-        "zFROUND_S",
-        "zFVFMATYPE",
-        "zFVFMTYPE",
-        "zFVFTYPE",
-        "zFVVMATYPE",
-        "zFVVMTYPE",
-        "zFVVTYPE",
-        "zFWFTYPE",
-        "zFWVFMATYPE",
-        "zFWVFTYPE",
-        "zFWVTYPE",
-        "zFWVVMATYPE",
-        "zFWVVTYPE",
-        "zF_BIN_F_TYPE_D",
-        "zF_BIN_F_TYPE_H",
-        "zF_BIN_RM_TYPE_D",
-        "zF_BIN_RM_TYPE_H",
-        "zF_BIN_RM_TYPE_S",
-        "zF_BIN_TYPE_F_S",
-        "zF_BIN_TYPE_X_S",
-        "zF_BIN_X_TYPE_D",
-        "zF_BIN_X_TYPE_H",
-        "zF_MADD_TYPE_D",
-        "zF_MADD_TYPE_H",
-        "zF_MADD_TYPE_S",
-        "zF_UN_F_TYPE_D",
-        "zF_UN_F_TYPE_H",
-        "zF_UN_RM_FF_TYPE_D",
-        "zF_UN_RM_FF_TYPE_H",
-        "zF_UN_RM_FF_TYPE_S",
-        "zF_UN_RM_FX_TYPE_D",
-        "zF_UN_RM_FX_TYPE_H",
-        "zF_UN_RM_FX_TYPE_S",
-        "zF_UN_RM_XF_TYPE_D",
-        "zF_UN_RM_XF_TYPE_H",
-        "zF_UN_RM_XF_TYPE_S",
-        "zF_UN_TYPE_F_S",
-        "zF_UN_TYPE_X_S",
-        "zF_UN_X_TYPE_D",
-        "zF_UN_X_TYPE_H",
-        "zILLEGAL",
-        "zITYPE",
-        "zJAL",
-        "zJALR",
-        "zLOAD",
-        "zLOADRES",
-        "zLOAD_FP",
-        "zLPAD",
-        "zMASKTYPEI",
-        "zMASKTYPEV",
-        "zMASKTYPEX",
-        "zMMTYPE",
-        "zMOVETYPEI",
-        "zMOVETYPEV",
-        "zMOVETYPEX",
-        "zMRET",
-        "zMUL",
-        "zMULW",
-        "zMVVCOMPRESS",
-        "zMVVMATYPE",
-        "zMVVTYPE",
-        "zMVXMATYPE",
-        "zMVXTYPE",
-        "zNISTYPE",
-        "zNITYPE",
-        "zNTL",
-        "zNVSTYPE",
-        "zNVTYPE",
-        "zNXSTYPE",
-        "zNXTYPE",
-        "zORCB",
-        "zPAUSE",
-        "zREM",
-        "zREMW",
-        "zREV8",
-        "zRFVVTYPE",
-        "zRFWVVTYPE",
-        "zRIVVTYPE",
-        "zRMVVTYPE",
-        "zRORI",
-        "zRORIW",
-        "zRTYPE",
-        "zRTYPEW",
-        "zSFENCE_INVAL_IR",
-        "zSFENCE_VMA",
-        "zSFENCE_W_INVAL",
-        "zSHA256SIG0",
-        "zSHA256SIG1",
-        "zSHA256SUM0",
-        "zSHA256SUM1",
-        "zSHA512SIG0",
-        "zSHA512SIG0H",
-        "zSHA512SIG0L",
-        "zSHA512SIG1",
-        "zSHA512SIG1H",
-        "zSHA512SIG1L",
-        "zSHA512SUM0",
-        "zSHA512SUM0R",
-        "zSHA512SUM1",
-        "zSHA512SUM1R",
-        "zSHIFTIOP",
-        "zSHIFTIWOP",
-        "zSINVAL_VMA",
-        "zSLLIUW",
-        "zSM3P0",
-        "zSM3P1",
-        "zSM4ED",
-        "zSM4KS",
-        "zSRET",
-        "zSTORE",
-        "zSTORECON",
-        "zSTORE_FP",
-        "zUNZIP",
-        "zUTYPE",
-        "zVABS_V",
-        "zVAESDF",
-        "zVAESDM",
-        "zVAESEF",
-        "zVAESEM",
-        "zVAESKF1_VI",
-        "zVAESKF2_VI",
-        "zVAESZ_VS",
-        "zVANDN_VV",
-        "zVANDN_VX",
-        "zVBREV8_V",
-        "zVBREV_V",
-        "zVCLMULH_VV",
-        "zVCLMULH_VX",
-        "zVCLMUL_VV",
-        "zVCLMUL_VX",
-        "zVCLZ_V",
-        "zVCPOP_M",
-        "zVCPOP_V",
-        "zVCTZ_V",
-        "zVEXTTYPE",
-        "zVFIRST_M",
-        "zVFMERGE",
-        "zVFMV",
-        "zVFMVFS",
-        "zVFMVSF",
-        "zVFNCVTBF16_F_F_W",
-        "zVFNUNARY0",
-        "zVFUNARY0",
-        "zVFUNARY1",
-        "zVFWCVTBF16_F_F_V",
-        "zVFWMACCBF16_VF",
-        "zVFWMACCBF16_VV",
-        "zVFWUNARY0",
-        "zVGHSH_VV",
-        "zVGMUL_VV",
-        "zVICMPTYPE",
-        "zVID_V",
-        "zVIMCTYPE",
-        "zVIMSTYPE",
-        "zVIMTYPE",
-        "zVIOTA_M",
-        "zVISG",
-        "zVITYPE",
-        "zVLRETYPE",
-        "zVLSEGFFTYPE",
-        "zVLSEGTYPE",
-        "zVLSSEGTYPE",
-        "zVLXSEGTYPE",
-        "zVMSBF_M",
-        "zVMSIF_M",
-        "zVMSOF_M",
-        "zVMTYPE",
-        "zVMVRTYPE",
-        "zVMVSX",
-        "zVMVXS",
-        "zVREV8_V",
-        "zVROL_VV",
-        "zVROL_VX",
-        "zVROR_VI",
-        "zVROR_VV",
-        "zVROR_VX",
-        "zVSETIVLI",
-        "zVSETVL",
-        "zVSETVLI",
-        "zVSHA2MS_VV",
-        "zVSM3C_VI",
-        "zVSM3ME_VV",
-        "zVSM4K_VI",
-        "zVSRETYPE",
-        "zVSSEGTYPE",
-        "zVSSSEGTYPE",
-        "zVSXSEGTYPE",
-        "zVVCMPTYPE",
-        "zVVMCTYPE",
-        "zVVMSTYPE",
-        "zVVMTYPE",
-        "zVVTYPE",
-        "zVWSLL_VI",
-        "zVWSLL_VV",
-        "zVWSLL_VX",
-        "zVXCMPTYPE",
-        "zVXMCTYPE",
-        "zVXMSTYPE",
-        "zVXMTYPE",
-        "zVXSG",
-        "zVXTYPE",
-        "zWFI",
-        "zWMVVTYPE",
-        "zWMVXTYPE",
-        "zWRS",
-        "zWVTYPE",
-        "zWVVTYPE",
-        "zWVXTYPE",
-        "zWXTYPE",
-        "zXPERM4",
-        "zXPERM8",
-        "zZBA_RTYPE",
-        "zZBA_RTYPEUW",
-        "zZBB_EXTOP",
-        "zZBB_RTYPE",
-        "zZBB_RTYPEW",
-        "zZBKB_PACKW",
-        "zZBKB_RTYPE",
-        "zZBS_IOP",
-        "zZBS_RTYPE",
-        "zZCMOP",
-        "zZICBOM",
-        "zZICBOP",
-        "zZICBOZ",
-        "zZICOND_RTYPE",
-        "zZIMOP_MOP_R",
-        "zZIMOP_MOP_RR",
-        "zZIP",
-        "zZVABDTYPE",
-        "zZVKSHA2TYPE",
-        "zZVKSM4RTYPE",
-        "zZVWABDATYPE",
-    ];
-    // instruction_table.extend( todo_instruction_table.to_vec());
-
-    let ext_i_instruction_table = [
-        "zADDIW",
-        "zBTYPE",
-        "zEBREAK",
-        "zECALL",
-        "zFENCE",
-        "zFENCE_TSO",
-        "zITYPE",
-        "zJAL",
-        "zJALR",
-        // "zLOAD",
-        "zMRET",
-        "zRTYPE",
-        "zRTYPEW",
-        "zSFENCE_VMA",
-        "zSHIFTIOP",
-        "zSHIFTIWOP",
-        "zSRET",
-        // "zSTORE",
-        "zUTYPE",
-        "zWFI",
-    ];
-    // instruction_table.extend(ext_i_instruction_table.to_vec());
-
-    let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
-        .into_iter()
-        .map(|name| zencode::encode(name))
-        .collect::<Vec<String>>();
-    // instruction_table.extend(ext_m_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
-
-    /*     let ext_a_instruction_table =
-        ["AMO", "LOADRES", "STORECON"].into_iter().map(|name| zencode::encode(name)).collect::<Vec<String>>();
-    instruction_table.extend(ext_a_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>()); */
-
-    let ext_c_instruction_table = [
-        "C_NOP",
-        "C_ADDI4SPN",
-        "C_LW",
-        "C_LD",
-        "C_SW",
-        "C_SD",
-        "C_ADDI",
-        "C_JAL",
-        "C_ADDIW",
-        "C_LI",
-        "C_ADDI16SP",
-        "C_LUI",
-        "C_SRLI",
-        "C_SRAI",
-        "C_ANDI",
-        "C_SUB",
-        "C_XOR",
-        "C_OR",
-        "C_AND",
-        "C_SUBW",
-        "C_ADDW",
-        "C_J",
-        "C_BEQZ",
-        "C_BNEZ",
-        "C_SLLI",
-        "C_LWSP",
-        "C_LDSP",
-        "C_SWSP",
-        "C_SDSP",
-        "C_JR",
-        "C_JALR",
-        "C_MV",
-        "C_EBREAK",
-        "C_ADD",
-        "C_LBU",
-        "C_LHU",
-        "C_LH",
-        "C_SB",
-        "C_SH",
-        "C_ZEXT_B",
-        "C_SEXT_B",
-        "C_ZEXT_H",
-        "C_SEXT_H",
-        "C_ZEXT_W",
-        "C_NOT",
-        "C_MUL",
-    ]
-    .into_iter()
-    .map(|name| zencode::encode(name))
-    .collect::<Vec<String>>();
-    // instruction_table.extend(ext_c_instruction_table.iter().map(|name| name.as_str()).collect::<Vec<&str>>());
-
-    // instruction_table.extend(vec!["zLOAD"]);
-
-    let excute_through_instruction_table = ["zSTORE", "zLOAD"];
-    instruction_table.extend(excute_through_instruction_table.to_vec());
-
-    for ins_name in instruction_table {
-        match run_symbolic_execute_with_target(target, ins_name, shared_state, regs, lets, initial_memory.clone()) {
-            Ok(_) => {}
-            Err(e) => {
-                log!(log::SYM_EXEC, &format!("test_exec_main: {}运行错误 {}", ins_name, e))
-            }
-        };
     }
 }

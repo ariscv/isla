@@ -83,7 +83,7 @@ pub fn sym_solve_str<B: BV>(sym: &Sym, point: &Checkpoint<B>, shared_state: &Sha
                 }
             }
             isla_lib::smt::ModelVal::Arbitrary(ty) => {
-                panic!("    不知道怎么处理的符号变量Sym({:?}) = Arbitrary ({:?})", sym, ty);
+                format!("Arbitrary({:?})", ty)
             }
         },
         Err(e) => {
@@ -220,7 +220,6 @@ pub fn write_instruction_map_to_yaml<'ir, B: BV>(
     Ok(())
 }
 
-#[cfg(feature = "debug_clause_args_yaml")]
 pub fn test_clause_args_yaml_main<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,

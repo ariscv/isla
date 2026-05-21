@@ -28,3 +28,4 @@ z3_problems
 output/
 .*/
 .sisyphus/
+__pycache__/
