@@ -1123,6 +1123,7 @@ fn run_loop<'ir, 'task, B: BV>(
                                 use smtlib::Exp::*;
 
                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                solver.set_node_cfg_info("concretize");
                                 if concrete_bool {
                                     frame.branch_conditions.push(Var(v));
                                     frame.pc = *target;
@@ -1171,6 +1172,7 @@ fn run_loop<'ir, 'task, B: BV>(
                                             }
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                solver.set_node_cfg_info("concretize");
                                                 if concrete_bool {
                                                     frame.branch_conditions.push(test_true);
                                                     frame.pc = *target;
@@ -1197,6 +1199,7 @@ fn run_loop<'ir, 'task, B: BV>(
                                             }
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                solver.set_node_cfg_info("concretize");
                                                 if concrete_bool {
                                                     frame.branch_conditions.push(test_true);
                                                     frame.pc = *target;
@@ -1228,6 +1231,7 @@ fn run_loop<'ir, 'task, B: BV>(
                                             }
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                solver.set_node_cfg_info("concretize");
                                                 if concrete_bool {
                                                     frame.branch_conditions.push(test_true);
                                                     frame.pc = *target;
@@ -1247,7 +1251,8 @@ fn run_loop<'ir, 'task, B: BV>(
                                 probe::taint_info(log::FORK, v, Some(shared_state), solver)
                             });
 
-                            let point = checkpoint(solver);
+                            let fork_id = frame.forks;
+                            let point = solver.fork_trace_checkpoint(fork_id, v, *info);
 
                             // 为 fork 路径创建条件列表
                             let mut fork_conditions = frame.branch_conditions.clone();
@@ -1262,14 +1267,14 @@ fn run_loop<'ir, 'task, B: BV>(
                                 fraction: task_fraction.clone(),
                                 frame: frozen,
                                 checkpoint: point,
-                                fork_cond: Some((Assert(test_false), Event::Fork(frame.forks - 1, v, 1, *info))),
+                                fork_cond: Some((Assert(test_false), Event::Fork(fork_id, v, 1, *info))),
                                 state: task_state,
                                 stop_conditions,
                             });
 
                             // Track which asserts are assocated with each fork in the trace, so we
                             // can turn a set of traces into a tree later
-                            solver.add_event(Event::Fork(frame.forks - 1, v, 0, *info));
+                            solver.add_event(Event::Fork(fork_id, v, 0, *info));
 
                             solver.add(Assert(test_true.clone()));
 
@@ -1468,6 +1473,47 @@ fn run_loop<'ir, 'task, B: BV>(
                             }
                         }
 
+                        if let Some(ref config) = task_state.concrete_function_config {
+                            let mut call_stack: Vec<Name> = frame.backtrace.iter().map(|(name, _)| *name).collect();
+                            call_stack.push(frame.function_name);
+                            call_stack.push(*f);
+                            if let Some(spec) = config.find_matching(&call_stack, shared_state) {
+                                for (param_name, expected_value) in &spec.param_values {
+                                    let encoded = zencode::encode(param_name);
+                                    for (i, (param_sym, _)) in params.iter().enumerate() {
+                                        let param_str = shared_state.symtab.to_str(*param_sym);
+                                        if param_str == encoded || param_str == param_name.as_str() {
+                                            if let Some(arg_val) = args.get(i) {
+                                                if let Val::Symbolic(v) = arg_val {
+                                                    let concrete_exp = match expected_value {
+                                                        Some(val_str) => {
+                                                            let expected = Val::from_str(val_str, shared_state)
+                                                                .map_err(ExecError::Unreachable)?;
+                                                            smt_value(&expected, *info)?
+                                                        }
+                                                        None => {
+                                                            if solver.check_sat(*info).is_sat()? {
+                                                                let mut model = Model::new(solver);
+                                                                let concrete = model.get_val(arg_val)?;
+                                                                smt_value(&concrete, *info)?
+                                                            } else {
+                                                                return Ok(Run::Dead);
+                                                            }
+                                                        }
+                                                    };
+                                                    solver.add(Def::Assert(smtlib::Exp::Eq(
+                                                        Box::new(smtlib::Exp::Var(*v)),
+                                                        Box::new(concrete_exp),
+                                                    )));
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         let caller_pc = frame.pc;
                         let caller_instrs = frame.instrs;
                         let caller_stack_call = frame.stack_call.clone();
@@ -1552,7 +1598,8 @@ fn run_loop<'ir, 'task, B: BV>(
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
 
-                    let point = checkpoint(solver);
+                    let fork_id = frame.forks;
+                    let point = solver.fork_trace_checkpoint(fork_id, v, *info);
 
                     match ty {
                         Ty::Bits(len) => {
@@ -1640,13 +1687,13 @@ fn run_loop<'ir, 'task, B: BV>(
                         checkpoint: point,
                         fork_cond: Some((
                             Assert(Neq(Box::new(Var(v)), Box::new(result_exp.clone()))),
-                            Event::Fork(frame.forks - 1, v, 1, *info),
+                            Event::Fork(fork_id, v, 1, *info),
                         )),
                         state: task_state,
                         stop_conditions,
                     });
 
-                    solver.add_event(Event::Fork(frame.forks - 1, v, 0, *info));
+                    solver.add_event(Event::Fork(fork_id, v, 0, *info));
 
                     solver.assert_eq(Var(v), result_exp);
 
@@ -1699,7 +1746,14 @@ fn run_loop<'ir, 'task, B: BV>(
 /// collecting the results into a type R.
 pub type Collector<'ir, B, R> = dyn 'ir
     + Sync
-    + Fn(usize, TaskId, Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>, &SharedState<'ir, B>, Solver<B>, &R);
+    + Fn(
+        usize,
+        TaskId,
+        Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+        &SharedState<'ir, B>,
+        &mut Solver<B>,
+        &R,
+    );
 
 /// Start symbolically executing a Task using just the current thread, collecting the results using
 /// the given collector.
@@ -1711,11 +1765,12 @@ pub fn start_single<'ir, B: BV, R>(
 ) {
     let queue = Worker::new_lifo();
     queue.push(task);
+    let mut cfg = Config::new();
+    cfg.set_param_value("model", "true");
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::new(&ctx);
     while let Some(mut task) = queue.pop() {
-        let mut cfg = Config::new();
-        cfg.set_param_value("model", "true");
-        let ctx = Context::new(cfg);
-        let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+        solver.enter_checkpoint_incremental(task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
             solver.add_event(event);
             solver.add(def)
@@ -1732,7 +1787,7 @@ pub fn start_single<'ir, B: BV, R>(
             shared_state,
             &mut solver,
         );
-        collector(0, task.id, result, shared_state, solver, collected)
+        collector(0, task.id, result, shared_state, &mut solver, collected)
     }
 }
 
@@ -1756,10 +1811,9 @@ fn do_work<'ir, 'task, B: BV, R>(
     shared_state: &SharedState<'ir, B>,
     collected: &R,
     collector: &Collector<'ir, B, R>,
+    solver: &mut Solver<B>,
 ) -> Fraction {
-    let cfg = Config::new();
-    let ctx = Context::new(cfg);
-    let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+    solver.enter_checkpoint_incremental(task.checkpoint);
     if let Some((def, event)) = task.fork_cond {
         solver.add_event(event);
         solver.add(def)
@@ -1774,7 +1828,7 @@ fn do_work<'ir, 'task, B: BV, R>(
         &task.frame,
         task.state,
         shared_state,
-        &mut solver,
+        solver,
     );
     collector(tid, task.id, result, shared_state, solver, collected);
     task.fraction
@@ -1831,6 +1885,10 @@ pub fn start_multi<'ir, B: BV, R>(
 
             scope.spawn(move || {
                 let q = Worker::new_lifo();
+                let mut cfg = Config::new();
+                cfg.set_param_value("model", "true");
+                let ctx = Context::new(cfg);
+                let mut solver = Solver::new(&ctx);
                 {
                     let mut stealers = stealers.write().unwrap();
                     stealers.push(q.stealer());
@@ -1838,7 +1896,8 @@ pub fn start_multi<'ir, B: BV, R>(
                 loop {
                     while let Some(task) = find_task(&q, &global, &stealers) {
                         let task_id = task.id;
-                        let frac = do_work(tid, timeout, &q, task, shared_state, collected.as_ref(), collector);
+                        let frac =
+                            do_work(tid, timeout, &q, task, shared_state, collected.as_ref(), collector, &mut solver);
                         thread_tx.send(Progress::Finished { tid, task_id, frac }).unwrap();
                     }
                     thread_tx.send(Progress::Idle { tid }).unwrap();
@@ -1939,6 +1998,10 @@ where
 
             scope.spawn(move || {
                 let q = Worker::new_lifo();
+                let mut cfg = Config::new();
+                cfg.set_param_value("model", "true");
+                let ctx = Context::new(cfg);
+                let mut solver = Solver::new(&ctx);
                 {
                     let mut stealers = stealers.write().unwrap();
                     stealers.push(q.stealer());
@@ -1948,7 +2011,7 @@ where
                         let task_id = task.id;
                         let collected = collected_lock.read().unwrap();
                         let task_results = collected.get(&task_id).unwrap();
-                        let frac = do_work(tid, timeout, &q, task, shared_state, task_results, collector);
+                        let frac = do_work(tid, timeout, &q, task, shared_state, task_results, collector, &mut solver);
                         thread_tx.send(Progress::Finished { tid, task_id, frac }).unwrap();
                     }
                     thread_tx.send(Progress::Idle { tid }).unwrap();
@@ -2025,7 +2088,7 @@ pub fn all_unsat_collector<'ir, B: BV>(
     _: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
     shared_state: &SharedState<'ir, B>,
-    mut solver: Solver<B>,
+    solver: &mut Solver<B>,
     collected: &AtomicBool,
 ) {
     match result {
@@ -2123,15 +2186,15 @@ pub fn trace_collector<'ir, B: BV>(
     task_id: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
     shared_state: &SharedState<'ir, B>,
-    mut solver: Solver<B>,
+    solver: &mut Solver<B>,
     collected: &TraceQueue<B>,
 ) {
     solver.report_performance(shared_state.symtab.get_directory(), shared_state.symtab.files());
 
     match result {
         Ok((Run::Finished(_) | Run::Exit, _)) => {
-            let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, events.drain(..).cloned().collect())))
+            let events = solver.trace().to_vec();
+            collected.push(Ok((task_id, events)))
         }
         Ok((Run::Suspended, _)) => collected.push(Err(TraceError::UnexpectedSuspension)),
         Ok((Run::Dead, _)) => (),
@@ -2159,13 +2222,13 @@ pub fn trace_value_collector<'ir, B: BV>(
     task_id: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
     shared_state: &SharedState<'ir, B>,
-    mut solver: Solver<B>,
+    solver: &mut Solver<B>,
     collected: &TraceValueQueue<B>,
 ) {
     match result {
         Ok((Run::Finished(value), _)) => {
-            let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, value, events.drain(..).cloned().collect())))
+            let events = solver.trace().to_vec();
+            collected.push(Ok((task_id, value, events)))
         }
         Ok((Run::Exit | Run::Suspended, _)) => (),
         Ok((Run::Dead, _)) => (),
@@ -2189,13 +2252,13 @@ pub fn trace_result_collector<'ir, B: BV>(
     task_id: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
     shared_state: &SharedState<'ir, B>,
-    solver: Solver<B>,
+    solver: &mut Solver<B>,
     collected: &TraceResultQueue<B>,
 ) {
     match result {
         Ok((Run::Finished(Val::Bool(result)), _)) => {
-            let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, result, events.drain(..).cloned().collect())))
+            let events = solver.trace().to_vec();
+            collected.push(Ok((task_id, result, events)))
         }
         Ok((Run::Exit, _)) => (),
         Ok((Run::Suspended, _)) => collected.push(Err(TraceError::UnexpectedSuspension)),
@@ -2212,14 +2275,14 @@ pub fn footprint_collector<'ir, B: BV>(
     task_id: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
     shared_state: &SharedState<'ir, B>,
-    solver: Solver<B>,
+    solver: &mut Solver<B>,
     collected: &TraceQueue<B>,
 ) {
     match result {
         // Footprint function returns true on traces we need to consider as part of the footprint
         Ok((Run::Finished(Val::Bool(true)), _)) => {
-            let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, events.drain(..).cloned().collect())))
+            let events = solver.trace().to_vec();
+            collected.push(Ok((task_id, events)))
         }
         // If it is dead, returns false or exits, we ignore that trace
         Ok((Run::Finished(Val::Bool(false)) | Run::Exit | Run::Dead, _)) => (),
@@ -3308,5 +3371,190 @@ fn zrX(z3zE1756) {
 
         assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
         assert!(results.iter().all(Result::is_ok));
+    }
+
+    // ── 百分比 fork 限制测试 ──
+
+    #[test]
+    fn fork_pct_limit_truncates_hot_branch() {
+        let (instrs, shared_state) = repeated_call_fork_program(5);
+        let limits = ExecutionLimits::default().with_max_fork_pct_per_branch(0.5).with_max_fork_pct_check_delay(2);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        let has_branch_limit = results.iter().any(|r| matches!(r, Err(ExecError::BranchLimitReached(_, _))));
+        assert!(has_branch_limit, "期望百分比限制触发 BranchLimitReached");
+    }
+
+    #[test]
+    fn fork_pct_warmup_does_not_trigger_early() {
+        let (instrs, shared_state) = repeated_call_fork_program(3);
+        let limits = ExecutionLimits::default().with_max_fork_pct_per_branch(0.5).with_max_fork_pct_check_delay(100);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        assert!(results.iter().all(Result::is_ok), "热身期内不应触发限制");
+    }
+
+    #[test]
+    fn fork_pct_limit_concretize_finishes() {
+        let (instrs, shared_state) = repeated_call_fork_program(5);
+        let limits = ExecutionLimits::default()
+            .with_max_fork_pct_per_branch(0.5)
+            .with_max_fork_pct_check_delay(2)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        assert!(results.iter().all(Result::is_ok), "Concretize 模式下所有路径应正常完成");
+    }
+
+    // ── Goto + Concretize 降级测试 ──
+
+    #[test]
+    fn goto_depth_limit_truncates_even_with_concretize() {
+        let limits = ExecutionLimits::default().with_max_path_depth(2).with_limit_behavior(LimitBehavior::Concretize);
+        let result = run_with_limits(vec![Instr::Goto(1), Instr::Goto(2), Instr::Goto(3), Instr::End], limits);
+
+        assert!(
+            matches!(result, Err(ExecError::DepthLimitReached)),
+            "Goto 无分支条件，即使配了 Concretize 也应 Truncate"
+        );
+    }
+
+    #[test]
+    fn goto_loop_limit_truncates_even_with_concretize() {
+        let limits =
+            ExecutionLimits::default().with_max_backjumps_per_loop(2).with_limit_behavior(LimitBehavior::Concretize);
+        let result = run_with_limits(vec![Instr::Goto(0)], limits);
+
+        assert!(
+            matches!(result, Err(ExecError::LoopLimitReached(_, _))),
+            "Goto 无分支条件，即使配了 Concretize 也应 Truncate"
+        );
+    }
+
+    // ── Frame 继承语义测试 ──
+
+    #[test]
+    fn fork_inherits_step_count_from_parent() {
+        let var = test_name(100);
+        // pc=0: Goto(1)       step_count=1
+        // pc=1: Goto(2)       step_count=2
+        // pc=2: Decl(var)
+        // pc=3: Jump(var, 5)  step_count=3 → fork
+        // pc=4: Goto(5)       子路径落地，inherited step_count=3, → 4
+        // pc=5: Goto(6)       父路径落地，step_count=4 → 4
+        // pc=6: End
+        let instrs = vec![
+            Instr::Goto(1),
+            Instr::Goto(2),
+            Instr::Decl(var, Ty::Bool, info()),
+            Instr::Jump(Exp::Id(var), 5, info()),
+            Instr::Goto(5),
+            Instr::Goto(6),
+            Instr::End,
+        ];
+        let limits = ExecutionLimits::default().with_max_path_depth(3);
+        let shared_state = empty_shared_state();
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        // fork 后 step_count=3 被继承，下一条 Goto 使 step_count=4 > 3
+        // 如果继承失效（子帧 step_count 从 0 开始），子路径在 End 前只会到 step_count=1，不会触发限制
+        assert!(
+            results.iter().all(|r| matches!(r, Err(ExecError::DepthLimitReached))),
+            "fork 后所有路径都应因继承的 step_count 触发深度限制"
+        );
+    }
+
+    // ── isarch 完整配置端到端测试 ──
+
+    #[test]
+    fn isarch_full_config_runs_real_ir_without_error() {
+        let limits = ExecutionLimits::default()
+            .with_max_forks_per_branch(2)
+            .with_max_total_forks(8)
+            .with_max_backjumps_per_loop(10)
+            .with_max_path_depth(10000)
+            .with_max_fork_pct_per_branch(0.1)
+            .with_max_fork_pct_check_delay(100)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let (instrs, shared_state, regs, lets) = real_zrx_program();
+        let results = run_all_with_bindings(instrs, limits, shared_state, regs, lets);
+
+        assert!(results.iter().all(Result::is_ok), "完整 isarch 配置 + Concretize 模式下所有路径应正常完成");
+    }
+
+    // ── 限制优先级测试 ──
+
+    #[test]
+    fn depth_limit_takes_priority_over_branch_limit() {
+        let var = test_name(100);
+        let instrs = vec![Instr::Decl(var, Ty::Bool, info()), Instr::Jump(Exp::Id(var), 0, info()), Instr::End];
+        let limits = ExecutionLimits::default().with_max_path_depth(0).with_max_total_forks(0);
+        let result = run_with_limits(instrs, limits);
+
+        assert!(
+            matches!(result, Err(ExecError::DepthLimitReached)),
+            "路径深度检查在预评估层，应在 fork 层的分支限制之前触发"
+        );
+    }
+
+    // ── Smoke test: loop_counts Frame 继承语义 ──
+
+    #[test]
+    fn fork_inherits_loop_counts_from_parent() {
+        let var = test_name(100);
+        // pc=0: Goto(0)       loop_counts[0]=1, step_count=1
+        // pc=0: Goto(0)       loop_counts[0]=2, step_count=2  (max_backjumps=2, 超限)
+        //
+        // 但用符号分支 + 更小的阈值来验证继承：
+        // pc=0: Decl(var)
+        // pc=1: Goto(0)       loop_counts[0]=1, step_count=1 (回边)
+        // pc=0: Decl(var)     (回到 pc=0)
+        // pc=1: Jump(var, 0)  loop_counts[0]=2, step_count=2, 符号分支 → fork
+        //   子路径(回跳到 pc=0): 继承 loop_counts[0]=2，下一条 Goto(0) 使 loop_counts[0]=3
+        //   如果继承失效，子路径 loop_counts 为空，不会触发限制
+        let instrs = vec![
+            Instr::Decl(var, Ty::Bool, info()),   // pc=0
+            Instr::Goto(0),                       // pc=1: 回边到 0, loop_counts[0]+=1
+            Instr::Decl(var, Ty::Bool, info()),   // pc=0 (再次)
+            Instr::Jump(Exp::Id(var), 0, info()), // pc=1: 回边到 0, loop_counts[0]+=1 (=2), 然后符号 fork
+            Instr::End,                           // pc=2 (fallthrough)
+        ];
+        // max_backjumps=2: loop_counts[0]=2 时刚好超限(>2 不成立, count=2 不大于 2)
+        // 但 fork 后子路径继承 loop_counts[0]=2，执行 Goto(0) 时 loop_counts[0]=3 > 2 → 触发
+        let limits = ExecutionLimits::default().with_max_backjumps_per_loop(2).with_max_path_depth(100); // 足够大，不干扰
+        let shared_state = empty_shared_state();
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        // 如果继承失效，fork 后的子路径 loop_counts 为空，Goto(0) 只让 count=1 不超限
+        // 如果继承正确，fork 后子路径 loop_counts[0]=2，Goto(0) 让 count=3 > 2 触发 LoopLimitReached
+        let has_loop_limit = results.iter().any(|r| matches!(r, Err(ExecError::LoopLimitReached(_, _))));
+        assert!(has_loop_limit, "fork 后应继承 loop_counts 并触发循环限制");
+    }
+
+    // ── Smoke test: 回边限制优先于 fork 层限制 ──
+
+    #[test]
+    fn loop_backjump_limit_takes_priority_over_per_branch_fork_limit() {
+        let var = test_name(100);
+        // pc=0: Decl(var)
+        // pc=1: Jump(var, 0, info)  回边到 0，同时会触发符号 fork
+        //   每次回到 pc=0，都会再次执行 Jump(var, 0)
+        //   回边在预评估层检查，fork 在 fork 层检查
+        //   设置 max_backjumps=1（严格）和 max_forks_per_branch=100（宽松）
+        //   应该先触发回边限制而非 fork 限制
+        let instrs = vec![Instr::Decl(var, Ty::Bool, info()), Instr::Jump(Exp::Id(var), 0, info()), Instr::End];
+        let limits = ExecutionLimits::default()
+            .with_max_backjumps_per_loop(1)
+            .with_max_forks_per_branch(100)
+            .with_max_total_forks(100);
+        let shared_state = empty_shared_state();
+        let results = run_all_with_shared_state(instrs, limits, shared_state);
+
+        // 回边限制在预评估层（评估分支条件之前）就触发了
+        // 所以应该看到 LoopLimitReached 而不是 BranchLimitReached
+        let has_loop_limit = results.iter().any(|r| matches!(r, Err(ExecError::LoopLimitReached(_, _))));
+        let has_branch_limit = results.iter().any(|r| matches!(r, Err(ExecError::BranchLimitReached(_, _))));
+        assert!(has_loop_limit, "应触发回边限制");
+        assert!(!has_branch_limit, "回边限制在 fork 层之前触发，不应产生 BranchLimitReached");
     }
 }

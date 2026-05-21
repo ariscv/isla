@@ -1,5 +1,7 @@
 use crate::isarch::{self as isarch};
 use isla_lib::bitvector::BV;
+use isla_lib::cfg_output::{output_cfg_dot, output_cfg_json, CfgOutputConfig};
+use isla_lib::concrete_function::ConcreteFunctionConfig;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
 use isla_lib::executor::{backtrace_string, Run};
@@ -9,6 +11,7 @@ use isla_lib::ir::UVal;
 use isla_lib::ir::*;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
+use isla_lib::smt::Event;
 use isla_lib::smt::{Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
@@ -250,6 +253,8 @@ pub fn run_symbolic_execute<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
+    cfg_output_config: Option<&CfgOutputConfig>,
+    concrete_function_config: Option<&ConcreteFunctionConfig>,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -307,7 +312,10 @@ pub fn run_symbolic_execute<B: BV>(
         .with_max_fork_pct_per_branch(0.1)
         .with_max_fork_pct_check_delay(100)
         .with_limit_behavior(LimitBehavior::Concretize);
-    let task_state = TaskState::new().with_execution_limits(limits);
+    let mut task_state = TaskState::new().with_execution_limits(limits);
+    if let Some(config) = concrete_function_config {
+        task_state = task_state.with_concrete_function_config(config.clone());
+    }
 
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGen_Json>> = Arc::new(Mutex::new(AssemGen_Json::new(Vec::new())));
@@ -491,22 +499,10 @@ pub fn run_symbolic_execute<B: BV>(
                                     }
                                 } */
 
-                                // events
-                                /* let mut events_vec = solver.trace().to_vec();
-                                let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
-                                for event in events {
-                                    match event {
-                                        Event::Fork(fork_id, sym, branch_number, _) => {
-                                            println!(
-                                                " [event] Fork({}, {:?}, {}, _ )",
-                                                fork_id,
-                                                model.get_var(sym).unwrap(),
-                                                branch_number
-                                            )
-                                        }
-                                        _ => println!(" [event] {:?}", event),
-                                    }
-                                } */
+                                if let Some(config) = concrete_function_config {
+                                    println!("post-hoc concrete-function 报告（参数断言已在调用前执行）:");
+                                    report_concrete_functions(config, shared_state, &solver, &mut model, &frame);
+                                }
                                 println!("3. ==============================\n");
                             }
                             solver.dump_solver("solver.dump");
@@ -522,7 +518,10 @@ pub fn run_symbolic_execute<B: BV>(
                         instruction_json.gen.push(single_instruction_json);
                     }
                     Run::Exit => println!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks),
-                    Run::Dead => println!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks),
+                    Run::Dead => {
+                        solver.set_node_cfg_info("dead");
+                        println!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks)
+                    }
 
                     Run::Suspended => println!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks),
                 },
@@ -548,6 +547,21 @@ pub fn run_symbolic_execute<B: BV>(
         task_state,
     );
 
+    if let Some(cfg_config) = cfg_output_config {
+        let tree = solver.tree();
+        match cfg_config.format {
+            isla_lib::cfg_output::CfgOutputFormat::Dot => {
+                if let Err(e) = output_cfg_dot(&tree, cfg_config) {
+                    eprintln!("警告: {} CFG DOT 输出失败: {}", instruction_name, e);
+                }
+            }
+            isla_lib::cfg_output::CfgOutputFormat::Json => {
+                if let Err(e) = output_cfg_json(&tree, cfg_config) {
+                    eprintln!("警告: {} CFG JSON 输出失败: {}", instruction_name, e);
+                }
+            }
+        }
+    }
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
         let xlen_name = target.xlen_name();
@@ -556,6 +570,101 @@ pub fn run_symbolic_execute<B: BV>(
     } else {
         eprintln!("警告: {}无法获取 result 收集器", instruction_name);
         Ok(None)
+    }
+}
+
+fn report_concrete_functions<B: BV>(
+    config: &ConcreteFunctionConfig,
+    shared_state: &SharedState<B>,
+    solver: &Solver<B>,
+    model: &mut Model<B>,
+    frame: &isla_lib::executor::LocalFrame<'_, B>,
+) {
+    let mut call_stack = Vec::new();
+    for event in solver.trace().to_vec() {
+        if let Event::Function { name, call } = event {
+            if call {
+                call_stack.push(name);
+                if let Some(spec) = config.find_matching(&call_stack, shared_state) {
+                    print_concrete_function_match(spec, &call_stack, shared_state, model, frame);
+                }
+            } else {
+                call_stack.pop();
+            }
+        }
+    }
+
+    let mut final_stack: Vec<Name> = frame.backtrace().iter().map(|(name, _)| *name).collect();
+    final_stack.push(frame.function_name());
+    if let Some(spec) = config.find_matching(&final_stack, shared_state) {
+        print_concrete_function_match(spec, &final_stack, shared_state, model, frame);
+    }
+}
+
+fn print_concrete_function_match<B: BV>(
+    spec: &isla_lib::concrete_function::ConcreteFunctionSpec,
+    call_stack: &[Name],
+    shared_state: &SharedState<B>,
+    model: &mut Model<B>,
+    frame: &isla_lib::executor::LocalFrame<'_, B>,
+) {
+    let stack = call_stack
+        .iter()
+        .map(|name| zencode::decode(shared_state.symtab.to_str(*name)))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    println!("concrete-function 匹配: {}", stack);
+
+    for (param_name, expected_value) in &spec.param_values {
+        let encoded = zencode::encode(param_name);
+        let Some(param) = shared_state.symtab.get(&encoded).or_else(|| shared_state.symtab.get(param_name)) else {
+            println!("  {} = <未找到参数>", param_name);
+            continue;
+        };
+        let Some(UVal::Init(value)) = frame.vars().get(&param) else {
+            println!("  {} = <当前 frame 中未初始化或不存在>", param_name);
+            continue;
+        };
+
+        let concrete = model
+            .get_fmtval(value)
+            .map(|fmt_val| fmt_val.to_str(shared_state))
+            .or_else(|_| model.get_val(value).map(|value| value.to_str(shared_state)))
+            .unwrap_or_else(|error| format!("<concrete 化失败: {}>", error));
+
+        match expected_value {
+            Some(expected) => println!("  {} = {} (期望 {})", param_name, concrete, expected),
+            None => println!("  {} = {}", param_name, concrete),
+        }
+    }
+}
+
+/// 遍历 zinstruction union 中的所有指令并执行符号执行
+pub fn run_all_instructions<B: BV>(
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+    cfg_output_config: Option<&CfgOutputConfig>,
+    concrete_function_config: Option<&ConcreteFunctionConfig>,
+) {
+    let instruction_id = shared_state.symtab.lookup("zinstruction");
+    let Some(union_members) = shared_state.type_info.unions.get(&instruction_id) else {
+        eprintln!("错误: 在 symtab 中没找到符号 'zinstruction'");
+        return;
+    };
+
+    let mut instruction_names: Vec<&str> =
+        union_members.iter().map(|(name, _)| shared_state.symtab.to_str(*name)).collect();
+    instruction_names.sort();
+
+    println!("共 {} 条指令", instruction_names.len());
+
+    for name in &instruction_names {
+        println!("执行: {}", zencode::decode(name));
+        match run_symbolic_execute(name, shared_state, regs, lets, cfg_output_config, concrete_function_config) {
+            Ok(_) => {}
+            Err(e) => eprintln!("  错误: {}", e),
+        }
     }
 }
 
@@ -959,7 +1068,7 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
         "zUTYPE",
         "zWFI",
     ];
-    // instruction_table.extend(ext_i_instruction_table.to_vec());
+    instruction_table.extend(ext_i_instruction_table.to_vec());
 
     let ext_m_instruction_table = ["MUL", "DIV", "REM", "MULW", "DIVW", "REMW"]
         .into_iter()
@@ -1027,10 +1136,10 @@ pub fn test_exec_main<B: BV>(shared_state: &SharedState<B>, regs: &RegisterBindi
     // instruction_table.extend(vec!["zLOAD"]);
 
     let excute_through_instruction_table = ["zSTORE", "zLOAD"];
-    instruction_table.extend(excute_through_instruction_table.to_vec());
+    // instruction_table.extend(excute_through_instruction_table.to_vec());
 
     for ins_name in instruction_table {
-        match run_symbolic_execute(ins_name, &shared_state, regs, lets) {
+        match run_symbolic_execute(ins_name, &shared_state, regs, lets, None, None) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("test_exec_main: {}运行错误 {}", ins_name, e)

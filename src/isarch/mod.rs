@@ -182,7 +182,7 @@ fn print_frame_args<B: BV>(
     function_name: &str,
     frame: &LocalFrame<B>,
     shared_state: &SharedState<B>,
-    mut solver: Solver<B>,
+    solver: &mut Solver<B>,
 ) {
     let mut found = false;
 

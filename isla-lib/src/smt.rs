@@ -48,6 +48,9 @@ use petgraph::{
     Directed,
 };
 
+#[cfg(not(feature = "smtperf"))]
+use petgraph::graph::NodeIndex;
+
 use z3_sys::*;
 
 #[cfg(feature = "smtperf")]
@@ -66,6 +69,7 @@ use std::sync::Arc;
 
 use crate::bitvector::BV;
 use crate::error::ExecError;
+use crate::execution_tree::{ExecutionTree, NodeData};
 use crate::ir::{IRTypeInfo, Loc, Name, Symtab, Val};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
@@ -184,20 +188,29 @@ use smtlib::*;
 
 /// Snapshot of interaction with underlying solver that can be
 /// efficiently cloned and shared between threads.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Checkpoint<B> {
-    num: usize,
-    next_var: u32,
-    trace: Arc<Option<Trace<B>>>,
+    pub num: usize,
+    pub tree: Arc<ExecutionTree<B>>,
+    pub node: NodeIndex,
+    pub next_var: u32,
 }
 
-impl<B> Checkpoint<B> {
+impl<B: BV> Checkpoint<B> {
     pub fn new() -> Self {
-        Checkpoint { num: 0, next_var: 0, trace: Arc::new(None) }
+        let tree = Arc::new(ExecutionTree::new());
+        let (node, _) = tree.root();
+        Checkpoint { num: 0, tree, node, next_var: 0 }
     }
 
-    pub fn trace(&self) -> &Option<Trace<B>> {
-        &self.trace
+    pub fn trace(&self) -> Option<Trace<B>> {
+        Some(Trace::from_tree_node(Arc::clone(&self.tree), self.node))
+    }
+}
+
+impl<B: BV> Default for Checkpoint<B> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -504,45 +517,74 @@ pub type EvPath<B> = Vec<Event<B>>;
 
 /// Abstractly represents a sequence of events in such a way that
 /// checkpoints can be created and shared.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Trace<B> {
-    checkpoints: usize,
-    head: Vec<Event<B>>,
-    tail: Arc<Option<Trace<B>>>,
+    tree: Arc<ExecutionTree<B>>,
+    current_node: NodeIndex,
+    current_data: Arc<NodeData<B>>,
 }
 
 impl<B: BV> Trace<B> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Trace { checkpoints: 0, head: Vec::new(), tail: Arc::new(None) }
+        let tree = Arc::new(ExecutionTree::new());
+        let (current_node, current_data) = tree.root();
+        Trace { tree, current_node, current_data }
     }
 
-    pub fn checkpoint(&mut self, next_var: u32) -> Checkpoint<B> {
-        let mut head = Vec::new();
-        mem::swap(&mut self.head, &mut head);
-        let tail = Arc::new(Some(Trace { checkpoints: self.checkpoints, head, tail: self.tail.clone() }));
-        self.checkpoints += 1;
-        self.tail = tail.clone();
-        Checkpoint { num: self.checkpoints, trace: tail, next_var }
+    fn from_tree_node(tree: Arc<ExecutionTree<B>>, current_node: NodeIndex) -> Self {
+        let current_data = tree.node_data(current_node);
+        Trace { tree, current_node, current_data }
     }
 
-    pub fn to_vec<'a>(&'a self) -> Vec<&'a Event<B>> {
-        let mut vec: Vec<&'a Event<B>> = Vec::new();
+    pub fn into_tree(self) -> Arc<ExecutionTree<B>> {
+        Arc::clone(&self.tree)
+    }
 
-        let mut current_head = &self.head;
-        let mut current_tail = self.tail.as_ref();
+    pub fn set_node_cfg_info(&self, info: &str) {
+        self.current_data.set_cfg_info(info);
+    }
+
+    pub fn push_event(&self, event: Event<B>) {
+        self.current_data.events.lock().unwrap().push(event)
+    }
+
+    #[cfg(test)]
+    fn fork(&self) -> (Trace<B>, Trace<B>) {
+        let ((left_node, left_data), (right_node, right_data)) =
+            self.tree.fork(self.current_node, 0, Sym::from_u32(0), SourceLoc::unknown());
+        (
+            Trace { tree: Arc::clone(&self.tree), current_node: left_node, current_data: left_data },
+            Trace { tree: Arc::clone(&self.tree), current_node: right_node, current_data: right_data },
+        )
+    }
+
+    pub fn checkpoint(&self, next_var: u32) -> Checkpoint<B> {
+        Checkpoint { num: 0, tree: Arc::clone(&self.tree), node: self.current_node, next_var }
+    }
+
+    fn fork_checkpoint(&mut self, next_var: u32, fork_id: u32, condition: Sym, source_loc: SourceLoc) -> Checkpoint<B> {
+        let ((true_node, true_data), (false_node, _false_data)) =
+            self.tree.fork(self.current_node, fork_id, condition, source_loc);
+        self.current_node = true_node;
+        self.current_data = true_data;
+        Checkpoint { num: 0, tree: Arc::clone(&self.tree), node: false_node, next_var }
+    }
+
+    pub fn to_vec(&self) -> Vec<Event<B>> {
+        let mut segments: Vec<Vec<Event<B>>> = Vec::new();
+        let mut current_node = Some(self.current_node);
         loop {
-            for def in current_head.iter().rev() {
-                vec.push(def)
-            }
-            match current_tail {
-                Some(trace) => {
-                    current_head = &trace.head;
-                    current_tail = trace.tail.as_ref();
+            match current_node {
+                Some(node) => {
+                    let data = self.tree.node_data(node);
+                    segments.push(data.events.lock().unwrap().clone());
+                    current_node = self.tree.parent(node);
                 }
-                None => return vec,
+                None => break,
             }
         }
+        segments.into_iter().rev().flatten().collect()
     }
 }
 
@@ -1512,6 +1554,9 @@ pub struct Solver<'ctx, B> {
     z3_solver: Z3_solver,
     ctx: &'ctx Context,
     performance_info: PerformanceInfo,
+    z3_scope_depth: u32,
+    node_scope_depth: HashMap<NodeIndex, u32>,
+    current_solver_node: NodeIndex,
 }
 
 impl<B> Drop for Solver<'_, B> {
@@ -1919,18 +1964,44 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
             Z3_params_dec_ref(ctx.z3_ctx, z3_params);
 
+            let trace = Trace::new();
+            let root = trace.current_node;
+            let mut node_scope_depth = HashMap::new();
+            node_scope_depth.insert(root, 0);
+
             Solver {
                 ctx,
                 z3_solver,
                 next_var: 0,
                 def_attrs: DefAttrs::default(),
                 cycles: 0,
-                trace: Trace::new(),
+                trace,
                 decls: HashMap::new(),
                 func_decls: HashMap::new(),
                 enums: Enums::new(ctx),
                 performance_info: PerformanceInfo::new(),
+                z3_scope_depth: 0,
+                node_scope_depth,
+                current_solver_node: root,
             }
+        }
+    }
+
+    fn push_scope(&mut self) {
+        unsafe {
+            Z3_solver_push(self.ctx.z3_ctx, self.z3_solver);
+        }
+        self.z3_scope_depth += 1;
+    }
+
+    fn pop_to_scope(&mut self, target: u32) {
+        assert!(target <= self.z3_scope_depth);
+        let n = self.z3_scope_depth - target;
+        if n > 0 {
+            unsafe {
+                Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, n);
+            }
+            self.z3_scope_depth = target;
         }
     }
 
@@ -2207,12 +2278,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn add(&mut self, def: Def) {
         self.add_internal(&def, SourceLoc::unknown());
-        self.trace.head.push(Event::Smt(def, self.def_attrs, SourceLoc::unknown()))
+        self.trace.push_event(Event::Smt(def, self.def_attrs, SourceLoc::unknown()))
     }
 
     pub fn add_with_location(&mut self, def: Def, info: SourceLoc) {
         self.add_internal(&def, info);
-        self.trace.head.push(Event::Smt(def, self.def_attrs, info))
+        self.trace.push_event(Event::Smt(def, self.def_attrs, info))
     }
 
     pub fn declare_const(&mut self, ty: Ty, info: SourceLoc) -> Sym {
@@ -2258,7 +2329,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn add_event(&mut self, event: Event<B>) {
         self.add_event_internal(&event);
-        self.trace.head.push(event)
+        self.trace.push_event(event)
     }
 
     pub fn trace_call(&mut self, name: Name) {
@@ -2337,37 +2408,56 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     //     log!(log::VERBOSE, format!("Spent {:?} resetting {} {}", self.reset_duration, removed as f32 / total as f32, removedv as f32 / totalv as f32));
     // }
 
-    fn replay(&mut self, num: usize, trace: Arc<Option<Trace<B>>>) {
-        // Some extra work would be required to replay on top of
-        // another trace, so until we need to do that we'll check it's
-        // empty:
-        assert!(self.trace.checkpoints == 0 && self.trace.head.is_empty());
-        let mut checkpoints: Vec<&[Event<B>]> = Vec::with_capacity(num);
-        let mut next = &*trace;
-        loop {
-            match next {
-                None => break,
-                Some(tr) => {
-                    checkpoints.push(&tr.head);
-                    next = &*tr.tail
-                }
-            }
+    fn replay(&mut self, trace: &Trace<B>) {
+        for event in trace.to_vec() {
+            self.add_event_internal(&event)
         }
-        assert!(checkpoints.len() == num);
-        for events in checkpoints.iter().rev() {
-            for event in *events {
-                self.add_event_internal(event)
-            }
-        }
-        self.trace.checkpoints = num;
-        self.trace.tail = trace
     }
 
-    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace }: Checkpoint<B>) -> Self {
+    fn replay_node_events(&mut self, node: NodeIndex) {
+        let tree = &self.trace.tree;
+        let nodes = tree.read_nodes();
+        if let Some(data) = nodes.get(&node) {
+            let events = data.events.lock().unwrap().clone();
+            drop(nodes);
+            for event in events {
+                self.add_event_internal(&event);
+            }
+        }
+    }
+
+    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num: _, tree, node, next_var }: Checkpoint<B>) -> Self {
         let mut solver = Solver::new(ctx);
-        solver.replay(num, trace);
+        solver.trace = Trace::from_tree_node(tree, node);
+        let trace = solver.trace.clone();
+        solver.replay(&trace);
         solver.next_var = next_var;
+        solver.current_solver_node = node;
+        solver.node_scope_depth.insert(node, solver.z3_scope_depth);
         solver
+    }
+
+    pub fn enter_checkpoint_incremental(&mut self, checkpoint: Checkpoint<B>) {
+        let Checkpoint { tree, node, next_var, .. } = checkpoint;
+
+        if !Arc::ptr_eq(&self.trace.tree, &tree) {
+            *self = Solver::from_checkpoint(self.ctx, Checkpoint { num: 0, tree, node, next_var });
+            return;
+        }
+
+        let lca = self.trace.tree.lca(self.current_solver_node, node);
+        let lca_depth = *self.node_scope_depth.get(&lca).expect("missing LCA scope depth");
+        self.pop_to_scope(lca_depth);
+        self.current_solver_node = lca;
+
+        for child in self.trace.tree.path_from_ancestor(lca, node) {
+            self.push_scope();
+            self.node_scope_depth.insert(child, self.z3_scope_depth);
+            self.current_solver_node = child;
+            self.replay_node_events(child);
+        }
+
+        self.trace = Trace::from_tree_node(tree, node);
     }
 
     pub fn check_sat_with(&mut self, exp: &Exp<Sym>, _info: SourceLoc) -> SmtResult {
@@ -2391,6 +2481,30 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn trace(&self) -> &Trace<B> {
         &self.trace
+    }
+
+    pub fn tree(&self) -> Arc<ExecutionTree<B>> {
+        Arc::clone(&self.trace.tree)
+    }
+
+    pub fn into_tree(self) -> Arc<ExecutionTree<B>> {
+        self.tree()
+    }
+
+    pub fn set_node_cfg_info(&self, info: &str) {
+        self.trace.set_node_cfg_info(info);
+    }
+
+    pub fn fork_trace_checkpoint(&mut self, fork_id: u32, condition: Sym, source_loc: SourceLoc) -> Checkpoint<B> {
+        let parent = self.trace.current_node;
+        let parent_depth = *self.node_scope_depth.get(&parent).unwrap_or(&self.z3_scope_depth);
+        let checkpoint = self.trace.fork_checkpoint(self.next_var, fork_id, condition, source_loc);
+
+        self.push_scope();
+        self.node_scope_depth.insert(self.trace.current_node, parent_depth + 1);
+        self.current_solver_node = self.trace.current_node;
+
+        checkpoint
     }
 
     pub fn check_sat(&mut self, _info: SourceLoc) -> SmtResult {
@@ -2486,6 +2600,30 @@ mod tests {
 
     fn var(id: u32) -> Exp<Sym> {
         Var(Sym::from_u32(id))
+    }
+
+    #[test]
+    fn trace_tree_to_vec_preserves_path_order() {
+        let trace = Trace::<B64>::new();
+        trace.push_event(Event::Cycle);
+        trace.push_event(Event::Instr(Val::Bool(true)));
+
+        let (left, right) = trace.fork();
+        left.push_event(Event::Function { name: Name::from_u32(1), call: true });
+        left.push_event(Event::Cycle);
+        right.push_event(Event::Function { name: Name::from_u32(2), call: true });
+
+        let left_events = left.to_vec();
+        assert!(matches!(left_events[0], Event::Cycle));
+        assert!(matches!(left_events[1], Event::Instr(Val::Bool(true))));
+        assert!(matches!(left_events[2], Event::Function { name, call: true } if name == Name::from_u32(1)));
+        assert!(matches!(left_events[3], Event::Cycle));
+
+        let right_events = right.to_vec();
+        assert!(matches!(right_events[0], Event::Cycle));
+        assert!(matches!(right_events[1], Event::Instr(Val::Bool(true))));
+        assert!(matches!(right_events[2], Event::Function { name, call: true } if name == Name::from_u32(2)));
+        assert_eq!(right_events.len(), 3);
     }
 
     #[test]

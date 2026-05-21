@@ -27,3 +27,5 @@ z3_problems
 
 output/
 .sisyphus/
+.serena/
+.omx/

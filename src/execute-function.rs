@@ -174,7 +174,8 @@ fn isla_main() -> i32 {
     let tree = matches.opt_present("tree");
     let error_traces = matches.opt_present("error-traces");
     let models = matches.opt_present("model");
-    let collecting = Arc::new((SegQueue::new(), tree | traces | error_traces, models));
+    let collecting: Arc<(AllTraceValueQueue<B129>, bool, bool)> =
+        Arc::new((SegQueue::new(), tree | traces | error_traces, models));
     let now = Instant::now();
     executor::start_multi(num_threads, timeout, vec![task], &shared_state, collecting.clone(), &model_collector);
 
@@ -304,10 +305,10 @@ fn model_collector<'ir, B: BV>(
     task_id: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
     shared_state: &SharedState<'ir, B>,
-    mut solver: Solver<B>,
+    solver: &mut Solver<B>,
     (collected, trace, models): &(AllTraceValueQueue<B>, bool, bool),
 ) {
-    let events: Vec<Event<B>> = if *trace { solver.trace().to_vec().drain(..).cloned().collect() } else { vec![] };
+    let events: Vec<Event<B>> = if *trace { solver.trace().to_vec() } else { vec![] };
     match result {
         Ok((Run::Finished(val), _)) => {
             if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {

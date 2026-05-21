@@ -38,6 +38,8 @@ use sha2::{Digest, Sha256};
 use std::process::exit;
 
 use isla_lib::bitvector::b129::B129;
+use isla_lib::cfg_output::{CfgOutputConfig, CfgOutputFormat};
+use isla_lib::concrete_function::{ConcreteFunctionConfig, ConcreteFunctionSpec};
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
 use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings};
 use isla_lib::log;
@@ -209,6 +211,10 @@ fn isla_main() -> i32 {
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
     opts.optopt("", "timeout", "超时时间（秒）", "<n>");
+    opts.optopt("", "cfg-output", "CFG 输出文件路径", "<path>");
+    opts.optopt("", "cfg-format", "CFG 输出格式 (dot 或 json)", "<dot|json>");
+    opts.optflag("", "expand-fork-condition", "在 CFG 输出中展开 fork 条件表达式");
+    opts.optmulti("", "concrete-function", "指定 concrete function（可多次使用）", "<spec>");
 
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
@@ -276,38 +282,59 @@ fn isla_main() -> i32 {
     #[cfg(feature = "debug_clause_args_yaml")]
     test_clause_args_yaml_main(shared_state, regs, lets);
 
-    #[cfg(feature = "debug_exec")]
-    isarch::exec::test_exec_main(shared_state, regs, lets);
+    // #[cfg(feature = "debug_exec")]
+    // isarch::exec::test_exec_main(shared_state, regs, lets);
+
+    // 解析 CFG 输出配置
+    let cfg_output_config: Option<CfgOutputConfig> = if let Some(output_path) = matches.opt_str("cfg-output") {
+        let format = match matches.opt_str("cfg-format").as_deref() {
+            Some("dot") | None => CfgOutputFormat::Dot,
+            Some("json") => CfgOutputFormat::Json,
+            Some(other) => {
+                eprintln!("错误: 未知的 CFG 格式 '{}'，支持 'dot' 或 'json'", other);
+                return 1;
+            }
+        };
+        Some(CfgOutputConfig {
+            format,
+            output_path: Some(std::path::PathBuf::from(output_path)),
+            expand_fork_condition: matches.opt_present("expand-fork-condition"),
+        })
+    } else {
+        None
+    };
+
+    // 解析 Concrete Function 配置
+    let concrete_function_config: Option<ConcreteFunctionConfig> = {
+        let mut specs: Vec<ConcreteFunctionSpec> = Vec::new();
+        for spec_str in matches.opt_strs("concrete-function") {
+            match spec_str.parse::<ConcreteFunctionSpec>() {
+                Ok(spec) => specs.push(spec),
+                Err(e) => {
+                    eprintln!("错误: 解析 concrete-function 规格失败 '{}': {}", spec_str, e);
+                    return 1;
+                }
+            }
+        }
+        if specs.is_empty() {
+            None
+        } else {
+            Some(ConcreteFunctionConfig { specs })
+        }
+    };
 
     match subcommand {
         "list-instructions" => {
             println!("");
-            // println!("一共有{}条指令",instruction_list.len());
             println!();
 
-            // 将 HashMap 转换为 Vec 并按汇编名称排序
-            /* let mut instructions: Vec<_> = instruction_list.iter().collect();
-            instructions.sort_by(|a, b| a.0.cmp(b.0));
-
-            for (assembly, (_n, _ty, inst_str, _params, _constraints)) in instructions {
-                println!("{} <- {}", assembly, inst_str);
-            } */
-            /* for (assembly, (_n, _ty, _inst_str, params, constraints)) in instructions {
-                println!("指令: {}", assembly);
-
-                // 将符号化参数和约束放在同一行显示
-                if !params.is_empty() && !constraints.is_empty() {
-                    for (param, (_var, ty)) in params.iter().zip(constraints.iter()) {
-                        println!("  {} : {}", param, ty);
-                    }
-                } else if !params.is_empty() {
-                    for param in params {
-                        println!("  {}", param);
-                    }
-                }
-
-                println!();
-            } */
+            isarch::exec::run_all_instructions::<B129>(
+                shared_state,
+                regs,
+                lets,
+                cfg_output_config.as_ref(),
+                concrete_function_config.as_ref(),
+            );
 
             0
         }

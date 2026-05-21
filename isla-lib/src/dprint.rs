@@ -997,7 +997,7 @@ mod tests {
         }
 
         // 非空结构体
-        let val = Val::from_str("{field1: 1i64, field2: 2i64}", &shared_state).unwrap();
+        let val = Val::from_str("{field1: I64(1), field2: I64(2)}", &shared_state).unwrap();
         assert!(matches!(val, Val::Struct(_)));
         if let Val::Struct(m) = val {
             assert_eq!(m.len(), 2);

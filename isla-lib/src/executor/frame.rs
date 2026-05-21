@@ -206,6 +206,14 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         &self.local_state.vars
     }
 
+    pub fn function_name(&self) -> Name {
+        self.function_name
+    }
+
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
+
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
         &mut self.local_state.regs
     }

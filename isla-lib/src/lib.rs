@@ -43,9 +43,12 @@ lalrpop_mod!(#[allow(clippy::all)] pub smt_parser);
 
 pub mod bitvector;
 pub mod cache;
+pub mod cfg_output;
+pub mod concrete_function;
 pub mod config;
 pub mod dprint;
 pub mod error;
+pub mod execution_tree;
 pub mod executor;
 pub mod fmtval;
 pub mod fraction;

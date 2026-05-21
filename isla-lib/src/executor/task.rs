@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::concrete_function::ConcreteFunctionConfig;
 use crate::executor::frame::{Backtrace, Frame};
 use crate::fraction::Fraction;
 use crate::ir::{Loc, Name, Reset, SharedState};
@@ -171,16 +172,12 @@ impl ExecutionLimitsState {
 
 pub struct TaskState<B> {
     pub(super) reset_registers: HashMap<Loc<Name>, Reset<B>>,
-    // We might want to avoid loops in the assembly by requiring that
-    // any unique program counter (pc) is only visited a fixed number
-    // of times. Note that this is the architectural PC, not the isla
-    // IR program counter in the frame.
     pub(super) pc_limit: Option<(Name, usize)>,
     pub(super) execution_limits: Option<ExecutionLimits>,
     pub(super) limits_state: Arc<ExecutionLimitsState>,
-    // Exit if we ever announce an instruction with all bits set to zero
     pub(super) zero_announce_exit: bool,
     pub(super) interrupts: Vec<TaskInterrupt<B>>,
+    pub concrete_function_config: Option<ConcreteFunctionConfig>,
 }
 
 impl<B> TaskState<B> {
@@ -192,6 +189,7 @@ impl<B> TaskState<B> {
             limits_state: Arc::new(ExecutionLimitsState::new()),
             zero_announce_exit: true,
             interrupts: Vec::new(),
+            concrete_function_config: None,
         }
     }
 
@@ -209,6 +207,10 @@ impl<B> TaskState<B> {
 
     pub fn with_zero_announce_exit(self, b: bool) -> Self {
         TaskState { zero_announce_exit: b, ..self }
+    }
+
+    pub fn with_concrete_function_config(self, config: ConcreteFunctionConfig) -> Self {
+        TaskState { concrete_function_config: Some(config), ..self }
     }
 
     pub fn add_interrupt(&mut self, interrupt: TaskInterrupt<B>) -> &mut Self {
