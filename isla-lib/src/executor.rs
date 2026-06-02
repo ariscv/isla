@@ -966,6 +966,8 @@ fn run_special_primop<'ir, B: BV>(
     } else if f == INSTR_ANNOUNCE {
         assert!(args.len() == 1);
         let opcode = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
+        #[cfg(feature = "tracetool")]
+        shared_state.itrace.record_at_loc(&opcode, shared_state, &info);
         if let Some((arch_pc, limit)) = task_state.pc_limit {
             if let Some(reg) = frame.local_state.regs.get(arch_pc, shared_state, solver, info)? {
                 match reg {

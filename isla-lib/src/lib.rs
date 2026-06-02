@@ -63,6 +63,7 @@ pub mod simplify;
 pub mod smt;
 pub mod source_loc;
 pub mod trace;
+pub mod tracetool;
 pub mod zencode;
 
 pub const ISLA_VERSION: &str = env!("ISLA_VERSION");
