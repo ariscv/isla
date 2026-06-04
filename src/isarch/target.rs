@@ -47,7 +47,12 @@ pub trait RISCV: Target {
                 PmpMode::Napot => encode_napot(rule.base, rule.size.expect("NAPOT PMP rules require size")),
                 _ => rule.base >> 2,
             };
-            insert_register(symtab, default_registers, &format!("pmpaddr{}", rule.index), Val::I64(pmpaddr_value as i64))?;
+            insert_register(
+                symtab,
+                default_registers,
+                &format!("pmpaddr{}", rule.index),
+                Val::I64(pmpaddr_value as i64),
+            )?;
 
             let cfg_register = (rule.index / 8) * 2;
             let byte_offset = rule.index % 8;

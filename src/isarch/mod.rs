@@ -537,7 +537,10 @@ pub fn get_assembly_names_all<B: BV>(
                     ExecError::MatchFailure(_) => {}
                     _ => {
                         log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
-                        log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
+                        log!(
+                            log::SYM_EXEC,
+                            &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab))
+                        );
                     }
                 },
             },
@@ -658,7 +661,10 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
                     ExecError::MatchFailure(_) => {}
                     _ => {
                         log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
-                        log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
+                        log!(
+                            log::SYM_EXEC,
+                            &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab))
+                        );
                     }
                 },
             },
