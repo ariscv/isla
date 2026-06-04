@@ -194,7 +194,10 @@ pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architectu
         | (if debug_opts.contains('m') { log::MEMORY } else { 0u32 })
         | (if debug_opts.contains('l') { log::LITMUS } else { 0u32 })
         | (if debug_opts.contains('g') { log::GRAPH } else { 0u32 })
-        | (if debug_opts.contains('p') { log::PROBE } else { 0u32 });
+        | (if debug_opts.contains('p') { log::PROBE } else { 0u32 })
+        | (if debug_opts.contains('s') { log::SYM_EXEC } else { 0u32 })
+        | (if debug_opts.contains('r') { log::PATH_RESULT } else { 0u32 })
+        | (if debug_opts.contains('a') { log::ARCH_INFO } else { 0u32 });
     log::set_flags(logging_flags);
 
     let arch = {

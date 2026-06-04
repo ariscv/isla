@@ -226,9 +226,7 @@ fn isla_main() -> i32 {
 
     if let Some(pmp_config) = &isa_config.pmp {
         if !pmp_config.symbolic {
-            RV64.apply_pmp_rules_to_config(
-                pmp_config, &symtab, &type_info, &mut isa_config.default_registers,
-            ).unwrap();
+            RV64.apply_pmp_rules_to_config(pmp_config, &symtab, &type_info, &mut isa_config.default_registers).unwrap();
         }
     }
 

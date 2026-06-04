@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use super::target::{RiscvPte, RISCV, RV64};
 use isla_lib::bitvector::BV;
 use isla_lib::config::{ISAConfig, MemoryRegionType, PageTableConfig, PageTableMode, PageTablePreset, ProtectedRange};
 use isla_lib::memory::{Memory, Region};
-use super::target::{RiscvPte, RISCV, RV64};
 
 enum PendingRegion {
     Concrete { base: u64, size: u64 },
@@ -231,10 +231,7 @@ impl<B: BV> MemoryBuilder<B> {
         Self::validate_page_table_config(config)?;
         let offset = config.offset.ok_or_else(|| "offset mapping requires offset field".to_string())?;
         if offset % (1 << 21) != 0 {
-            return Err(format!(
-                "offset 0x{:x} must be 2MiB aligned for megapage mapping",
-                offset
-            ));
+            return Err(format!("offset 0x{:x} must be 2MiB aligned for megapage mapping", offset));
         }
         match config.mode {
             PageTableMode::SV39 => Self::populate_sv39_tables(config, |vpn1| {
@@ -310,10 +307,7 @@ impl<B: BV> MemoryBuilder<B> {
             }
         }
 
-        Ok(Region::Concrete(
-            config.base..config.base + Self::sv39_table_size(),
-            pte_bytes,
-        ))
+        Ok(Region::Concrete(config.base..config.base + Self::sv39_table_size(), pte_bytes))
     }
 
     /// SV48 three-level page table: L3(root) -> L2 -> L1(megapage leaves, 2MiB each).
@@ -327,9 +321,8 @@ impl<B: BV> MemoryBuilder<B> {
             .base
             .checked_add(RV64::PAGE_TABLE_SIZE)
             .ok_or_else(|| "SV48 L2 table address overflows".to_string())?;
-        let l1_base = l2_base
-            .checked_add(RV64::PAGE_TABLE_SIZE)
-            .ok_or_else(|| "SV48 L1 table address overflows".to_string())?;
+        let l1_base =
+            l2_base.checked_add(RV64::PAGE_TABLE_SIZE).ok_or_else(|| "SV48 L1 table address overflows".to_string())?;
 
         let mut pte_bytes = HashMap::new();
 
@@ -354,10 +347,7 @@ impl<B: BV> MemoryBuilder<B> {
             }
         }
 
-        Ok(Region::Concrete(
-            config.base..config.base + Self::sv48_table_size(),
-            pte_bytes,
-        ))
+        Ok(Region::Concrete(config.base..config.base + Self::sv48_table_size(), pte_bytes))
     }
 
     fn flags_for_va(config: &PageTableConfig, va: u64) -> Result<u64, String> {
@@ -441,10 +431,9 @@ mod tests {
     use isla_lib::memory::Region;
 
     fn has_concrete_region(memory: &Memory<B64>, base: u64, size: u64) -> bool {
-        memory
-            .regions()
-            .iter()
-            .any(|region| matches!(region, Region::Concrete(range, _) if range.start == base && range.end == base + size))
+        memory.regions().iter().any(
+            |region| matches!(region, Region::Concrete(range, _) if range.start == base && range.end == base + size),
+        )
     }
 
     fn has_symbolic_region(memory: &Memory<B64>, base: u64, size: u64) -> bool {
@@ -478,10 +467,8 @@ mod tests {
 
     #[test]
     fn identity_mapping_creates_config() {
-        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
-            .with_identity_mapping(0x1_0000)
-            .unwrap()
-            .set_clint_enabled(false);
+        let builder: MemoryBuilder<B64> =
+            MemoryBuilder::new().with_identity_mapping(0x1_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
         assert_eq!(memory.regions().len(), 1);
@@ -490,10 +477,8 @@ mod tests {
 
     #[test]
     fn offset_mapping_config() {
-        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
-            .with_offset_mapping(0x1_0000, 0x1000_0000)
-            .unwrap()
-            .set_clint_enabled(false);
+        let builder: MemoryBuilder<B64> =
+            MemoryBuilder::new().with_offset_mapping(0x1_0000, 0x1000_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
         assert_eq!(memory.regions().len(), 1);
@@ -502,10 +487,8 @@ mod tests {
 
     #[test]
     fn symbolic_mapping_config() {
-        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
-            .with_symbolic_mapping(0x1_0000)
-            .unwrap()
-            .set_clint_enabled(false);
+        let builder: MemoryBuilder<B64> =
+            MemoryBuilder::new().with_symbolic_mapping(0x1_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
         assert_eq!(memory.regions().len(), 1);
@@ -538,15 +521,9 @@ mod tests {
 
     #[test]
     fn protected_mapping_with_ranges() {
-        let protected = vec![ProtectedRange {
-            base: 0x8000_0000,
-            size: 0x1000,
-            flags: "rwx".to_string(),
-        }];
-        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
-            .with_protected_mapping(0x1_0000, protected.clone())
-            .unwrap()
-            .set_clint_enabled(false);
+        let protected = vec![ProtectedRange { base: 0x8000_0000, size: 0x1000, flags: "rwx".to_string() }];
+        let builder: MemoryBuilder<B64> =
+            MemoryBuilder::new().with_protected_mapping(0x1_0000, protected.clone()).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
         assert_eq!(protected.len(), 1);
@@ -555,20 +532,14 @@ mod tests {
 
     #[test]
     fn clint_disabled() {
-        let memory = MemoryBuilder::<B64>::new()
-            .set_clint_enabled(false)
-            .build()
-            .unwrap();
+        let memory = MemoryBuilder::<B64>::new().set_clint_enabled(false).build().unwrap();
 
         assert!(memory.regions().is_empty());
     }
 
     #[test]
     fn clint_custom_params() {
-        let memory = MemoryBuilder::<B64>::new()
-            .clint_with_params(true, 0x3000_0000, 0x10000)
-            .build()
-            .unwrap();
+        let memory = MemoryBuilder::<B64>::new().clint_with_params(true, 0x3000_0000, 0x10000).build().unwrap();
 
         assert_eq!(memory.regions().len(), 1);
         assert!(has_concrete_region(&memory, 0x3000_0000, 0x10000));
@@ -619,10 +590,8 @@ mod tests {
 
     #[test]
     fn build_identity_mapping_includes_page_table() {
-        let builder: MemoryBuilder<B64> = MemoryBuilder::new()
-            .with_identity_mapping(0x1_0000)
-            .unwrap()
-            .set_clint_enabled(false);
+        let builder: MemoryBuilder<B64> =
+            MemoryBuilder::new().with_identity_mapping(0x1_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
         assert!(has_concrete_region(&memory, 0x1_0000, 2 * RV64::PAGE_TABLE_SIZE));
