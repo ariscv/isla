@@ -866,6 +866,7 @@ mod tests {
             probes: HashSet::new(),
             probe_functions: HashSet::new(),
             trace_functions: HashSet::new(),
+            itrace: crate::tracetool::itrace::ItraceHandler::default(),
             reset_registers: Vec::new(),
             reset_constraints: Vec::new(),
             function_assumptions: Vec::new(),

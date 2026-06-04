@@ -104,7 +104,7 @@ isla-elf = { path = "isla-elf", version = "0.2.0" }
 itrace = ["tracetool", "isla-lib/itrace"]
 tracetool = ["isla-lib/tracetool"]
 smtperf = ["isla-lib/smtperf"]
-default = []
+default = ["tracetool"]
 
 [profile.dev]
 opt-level = 0
