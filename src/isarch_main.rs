@@ -276,9 +276,11 @@ fn isla_main() -> i32 {
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
     opts.optflag("", "all", "执行所有clause");
+    opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
 
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
+    let itrace_path = matches.opt_str("itrace").map(std::path::PathBuf::from);
 
     if matches.free.is_empty() {
         print_usage(&opts);
@@ -352,6 +354,7 @@ fn isla_main() -> i32 {
                         &extensions,
                         &instruction_names,
                         run_all,
+                        itrace_path.clone(),
                     )
                 }
                 _ => {
@@ -370,6 +373,7 @@ fn isla_main() -> i32 {
                         &extensions,
                         &instruction_names,
                         run_all,
+                        itrace_path.clone(),
                     )
                 }
             };

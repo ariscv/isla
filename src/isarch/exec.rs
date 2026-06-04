@@ -18,7 +18,7 @@ use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[allow(non_camel_case_types)]
@@ -94,6 +94,7 @@ pub fn solve_state_main<B, T>(
     extensions: &[String],
     instruction_names: &[String],
     run_all: bool,
+    itrace_path: Option<PathBuf>,
 ) -> bool
 where
     B: BV,
@@ -144,6 +145,8 @@ where
         return false;
     }
 
+    shared_state.itrace.set_path(itrace_path);
+
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", clause_set.len()));
 
     for clause in clause_set {
@@ -155,6 +158,8 @@ where
             }
         }
     }
+
+    let _ = shared_state.itrace.dump();
 
     success
 }

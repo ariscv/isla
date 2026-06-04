@@ -1073,6 +1073,15 @@ fn run_loop<'ir, 'task, B: BV>(
             last_z3_reset = Instant::now()
         };
 
+        #[cfg(feature = "tracetool")]
+        shared_state.itrace.record_with_sharedstate(
+            shared_state,
+            &frame.backtrace,
+            frame.pc as u64,
+            &frame.instrs[frame.pc],
+            None,
+        );
+
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
                 frame.vars_mut().insert(*v, UVal::Uninit(ty));

@@ -1,0 +1,6 @@
+[zhex_bits_str 0]: zz40 : %bv `14 248:2-248:53;
+[zhex_bits_str 1]: zz41 : %i `14 248:11-248:52;
+[zhex_bits_str 2]: zz42 : %i64 `14 248:23-248:48;
+[zhex_bits_str 3]: zz43 : %i64 `14 248:24-248:42;
+[zhex_bits_str 4]: zz44 : %i `14 248:29-248:41;
+...

@@ -57,6 +57,7 @@ use crate::memory::Memory;
 use crate::primop::{self, Binary, Primops, Unary, Variadic};
 use crate::smt::{smtlib, Accessor, EnumMember, Solver, Sym};
 use crate::source_loc::SourceLoc;
+use crate::tracetool::itrace::ItraceHandler;
 use crate::zencode;
 
 pub mod linearize;
@@ -1109,6 +1110,8 @@ pub struct SharedState<'ir, B> {
     /// `trace_functions` defines a set of functions which we include
     /// in the traces as function call and return events
     pub trace_functions: HashSet<Name>,
+    /// 指令执行轨迹输出 handler。
+    pub itrace: ItraceHandler,
     /// `reset_registers` are reset values for each register
     /// derived from the ISA config
     pub reset_registers: Vec<(Loc<Name>, Reset<B>)>,
@@ -1224,6 +1227,7 @@ impl<'ir, B: BV> SharedState<'ir, B> {
             probes,
             probe_functions,
             trace_functions,
+            itrace: ItraceHandler::default(),
             reset_registers,
             reset_constraints,
             function_assumptions,
