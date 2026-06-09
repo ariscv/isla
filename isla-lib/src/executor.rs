@@ -802,7 +802,7 @@ fn run<'ir, 'task, B: BV>(
     task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
-) -> Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)> {
+) -> Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)> {
     let mut frame = unfreeze_frame(frame);
     match run_loop(
         tid,
@@ -819,7 +819,7 @@ fn run<'ir, 'task, B: BV>(
         Ok(run) => Ok((run, frame)),
         Err(err) => {
             frame.backtrace.push((frame.function_name, frame.pc));
-            Err((err, frame.backtrace))
+            Err((err, frame))
         }
     }
 }
@@ -1027,6 +1027,35 @@ fn concretize_branch_condition<B: BV>(v: Sym, solver: &mut Solver<B>, info: Sour
     Ok(concrete_val)
 }
 
+macro_rules! itrace_push_branch_condition {
+    ($frame:expr, $condition:expr) => {{
+        #[cfg(feature = "tracetool")]
+        {
+            $frame.itrace_path.push_branch_condition($condition);
+        }
+        #[cfg(not(feature = "tracetool"))]
+        {
+            let _ = (&$frame, &$condition);
+        }
+    }};
+}
+
+macro_rules! itrace_fork_frame_with_branch_condition {
+    ($frame:expr, $pc:expr, $condition:expr) => {{
+        #[cfg(feature = "tracetool")]
+        {
+            let mut itrace_path = $frame.itrace_path.clone();
+            itrace_path.push_branch_condition($condition);
+            Frame { pc: $pc, itrace_path: Arc::new(itrace_path), ..freeze_frame($frame) }
+        }
+        #[cfg(not(feature = "tracetool"))]
+        {
+            let _ = &$condition;
+            Frame { pc: $pc, ..freeze_frame($frame) }
+        }
+    }};
+}
+
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
@@ -1074,13 +1103,7 @@ fn run_loop<'ir, 'task, B: BV>(
         };
 
         #[cfg(feature = "tracetool")]
-        shared_state.itrace.record_with_sharedstate(
-            shared_state,
-            &frame.backtrace,
-            frame.pc as u64,
-            &frame.instrs[frame.pc],
-            None,
-        );
+        frame.itrace_path.record(frame.function_name, frame.backtrace.clone(), frame.pc as u64);
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
@@ -1133,10 +1156,10 @@ fn run_loop<'ir, 'task, B: BV>(
 
                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                 if concrete_bool {
-                                    frame.branch_conditions.push(Var(v));
+                                    itrace_push_branch_condition!(frame, Var(v));
                                     frame.pc = *target;
                                 } else {
-                                    frame.branch_conditions.push(Not(Box::new(Var(v))));
+                                    itrace_push_branch_condition!(frame, Not(Box::new(Var(v))));
                                     frame.pc += 1;
                                 }
                                 continue 'main_loop;
@@ -1181,10 +1204,10 @@ fn run_loop<'ir, 'task, B: BV>(
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
-                                                    frame.branch_conditions.push(test_true);
+                                                    itrace_push_branch_condition!(frame, test_true);
                                                     frame.pc = *target;
                                                 } else {
-                                                    frame.branch_conditions.push(test_false);
+                                                    itrace_push_branch_condition!(frame, test_false);
                                                     frame.pc += 1;
                                                 }
                                                 continue 'main_loop;
@@ -1207,10 +1230,10 @@ fn run_loop<'ir, 'task, B: BV>(
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
-                                                    frame.branch_conditions.push(test_true);
+                                                    itrace_push_branch_condition!(frame, test_true);
                                                     frame.pc = *target;
                                                 } else {
-                                                    frame.branch_conditions.push(test_false);
+                                                    itrace_push_branch_condition!(frame, test_false);
                                                     frame.pc += 1;
                                                 }
                                                 continue 'main_loop;
@@ -1238,10 +1261,10 @@ fn run_loop<'ir, 'task, B: BV>(
                                             LimitBehavior::Concretize => {
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
-                                                    frame.branch_conditions.push(test_true);
+                                                    itrace_push_branch_condition!(frame, test_true);
                                                     frame.pc = *target;
                                                 } else {
-                                                    frame.branch_conditions.push(test_false);
+                                                    itrace_push_branch_condition!(frame, test_false);
                                                     frame.pc += 1;
                                                 }
                                                 continue 'main_loop;
@@ -1258,12 +1281,8 @@ fn run_loop<'ir, 'task, B: BV>(
 
                             let point = checkpoint(solver);
 
-                            // 为 fork 路径创建条件列表
-                            let mut fork_conditions = frame.branch_conditions.clone();
-                            fork_conditions.push(test_false.clone());
-
                             let frozen =
-                                Frame { pc: frame.pc + 1, branch_conditions: fork_conditions, ..freeze_frame(frame) };
+                                itrace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
                             frame.forks += 1;
                             task_fraction.halve();
                             queue.push(Task {
@@ -1282,8 +1301,7 @@ fn run_loop<'ir, 'task, B: BV>(
 
                             solver.add(Assert(test_true.clone()));
 
-                            // 当前路径的条件
-                            frame.branch_conditions.push(test_true);
+                            itrace_push_branch_condition!(frame, test_true);
 
                             frame.pc = *target
                         } else if can_be_true {
@@ -1708,7 +1726,34 @@ fn run_loop<'ir, 'task, B: BV>(
 /// collecting the results into a type R.
 pub type Collector<'ir, B, R> = dyn 'ir
     + Sync
-    + Fn(usize, TaskId, Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>, &SharedState<'ir, B>, Solver<B>, &R);
+    + Fn(
+        usize,
+        TaskId,
+        Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
+        &SharedState<'ir, B>,
+        Solver<B>,
+        &R,
+    );
+
+pub fn submit_itrace_for_local_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) {
+    #[cfg(feature = "tracetool")]
+    {
+        let text = frame.itrace_path.render_text(&shared_state.itrace, &shared_state.symtab);
+        shared_state.itrace.submit_path(text);
+    }
+    #[cfg(not(feature = "tracetool"))]
+    let _ = (frame, shared_state);
+}
+
+pub fn submit_itrace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {
+    #[cfg(feature = "tracetool")]
+    {
+        let text = frame.itrace_path.render_text(&shared_state.itrace, &shared_state.symtab);
+        shared_state.itrace.submit_path(text);
+    }
+    #[cfg(not(feature = "tracetool"))]
+    let _ = (frame, shared_state);
+}
 
 /// Start symbolically executing a Task using just the current thread, collecting the results using
 /// the given collector.
@@ -2032,40 +2077,47 @@ where
 pub fn all_unsat_collector<'ir, B: BV>(
     tid: usize,
     _: TaskId,
-    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     mut solver: Solver<B>,
     collected: &AtomicBool,
 ) {
     match result {
-        Ok((Run::Finished(value), _)) => match value {
-            Val::Symbolic(v) => {
-                use smtlib::Def::*;
-                use smtlib::Exp::*;
-                solver.add(Assert(Not(Box::new(Var(v)))));
-                if solver.check_sat(SourceLoc::unknown()) != SmtResult::Unsat {
-                    log_from!(tid, log::VERBOSE, "Got sat");
-                    collected.store(false, Ordering::Release)
-                } else {
-                    log_from!(tid, log::VERBOSE, "Got unsat")
+        Ok((Run::Finished(value), frame)) => {
+            match value {
+                Val::Symbolic(v) => {
+                    use smtlib::Def::*;
+                    use smtlib::Exp::*;
+                    solver.add(Assert(Not(Box::new(Var(v)))));
+                    if solver.check_sat(SourceLoc::unknown()) != SmtResult::Unsat {
+                        log_from!(tid, log::VERBOSE, "Got sat");
+                        collected.store(false, Ordering::Release)
+                    } else {
+                        log_from!(tid, log::VERBOSE, "Got unsat")
+                    }
                 }
+                Val::Bool(true) => log_from!(tid, log::VERBOSE, "Got true"),
+                Val::Bool(false) => {
+                    log_from!(tid, log::VERBOSE, "Got false");
+                    collected.store(false, Ordering::Release)
+                }
+                _ => log_from!(tid, log::VERBOSE, &format!("Got value {:?}", value)),
             }
-            Val::Bool(true) => log_from!(tid, log::VERBOSE, "Got true"),
-            Val::Bool(false) => {
-                log_from!(tid, log::VERBOSE, "Got false");
-                collected.store(false, Ordering::Release)
-            }
-            _ => log_from!(tid, log::VERBOSE, &format!("Got value {:?}", value)),
-        },
-        Ok((Run::Dead, _)) => (),
-        Ok((Run::Exit | Run::Suspended, _)) => log_from!(tid, log::VERBOSE, "Unexpected return".to_string()),
-        Err((err, backtrace)) => {
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
+        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Exit | Run::Suspended, frame)) => {
+            log_from!(tid, log::VERBOSE, "Unexpected return".to_string());
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
+        Err((err, frame)) => {
             if_logging!(log::VERBOSE, {
                 log_from!(tid, log::VERBOSE, &format!("Got error, {:?}", err));
-                for (f, pc) in backtrace.iter().rev() {
+                for (f, pc) in frame.backtrace.iter().rev() {
                     log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
                 }
             });
+            submit_itrace_for_local_frame(&frame, shared_state);
             collected.store(false, Ordering::Release)
         }
     }
@@ -2130,7 +2182,7 @@ pub type TraceValueQueue<B> = SegQueue<Result<(TaskId, Val<B>, Vec<Event<B>>), T
 pub fn trace_collector<'ir, B: BV>(
     tid: usize,
     task_id: TaskId,
-    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     mut solver: Solver<B>,
     collected: &TraceQueue<B>,
@@ -2138,27 +2190,32 @@ pub fn trace_collector<'ir, B: BV>(
     solver.report_performance(shared_state.symtab.get_directory(), shared_state.symtab.files());
 
     match result {
-        Ok((Run::Finished(_) | Run::Exit, _)) => {
+        Ok((Run::Finished(_) | Run::Exit, frame)) => {
             let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, events.drain(..).cloned().collect())))
+            collected.push(Ok((task_id, events.drain(..).cloned().collect())));
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Suspended, _)) => collected.push(Err(TraceError::UnexpectedSuspension)),
-        Ok((Run::Dead, _)) => (),
-        Err((err, backtrace)) => {
+        Ok((Run::Suspended, frame)) => {
+            collected.push(Err(TraceError::UnexpectedSuspension));
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
+        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Err((err, frame)) => {
             log_from!(tid, log::VERBOSE, format!("Error {:?}", err));
-            for (f, pc) in backtrace.iter().rev() {
+            for (f, pc) in frame.backtrace.iter().rev() {
                 log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
             }
             if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {
                 let model = Model::new(&solver);
                 collected.push(Err(TraceError::exec_model(
                     err,
-                    backtrace_string(&backtrace, &shared_state.symtab),
+                    backtrace_string(&frame.backtrace, &shared_state.symtab),
                     model,
                 )))
             } else {
-                collected.push(Err(TraceError::exec(err, backtrace_string(&backtrace, &shared_state.symtab))))
+                collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))))
             }
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -2166,29 +2223,31 @@ pub fn trace_collector<'ir, B: BV>(
 pub fn trace_value_collector<'ir, B: BV>(
     _: usize,
     task_id: TaskId,
-    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     mut solver: Solver<B>,
     collected: &TraceValueQueue<B>,
 ) {
     match result {
-        Ok((Run::Finished(value), _)) => {
+        Ok((Run::Finished(value), frame)) => {
             let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, value, events.drain(..).cloned().collect())))
+            collected.push(Ok((task_id, value, events.drain(..).cloned().collect())));
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Exit | Run::Suspended, _)) => (),
-        Ok((Run::Dead, _)) => (),
-        Err((err, backtrace)) => {
+        Ok((Run::Exit | Run::Suspended, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Err((err, frame)) => {
             if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {
                 let model = Model::new(&solver);
                 collected.push(Err(TraceError::exec_model(
                     err,
-                    backtrace_string(&backtrace, &shared_state.symtab),
+                    backtrace_string(&frame.backtrace, &shared_state.symtab),
                     model,
                 )))
             } else {
-                collected.push(Err(TraceError::exec(err, backtrace_string(&backtrace, &shared_state.symtab))))
+                collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))))
             }
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -2196,22 +2255,30 @@ pub fn trace_value_collector<'ir, B: BV>(
 pub fn trace_result_collector<'ir, B: BV>(
     _: usize,
     task_id: TaskId,
-    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     solver: Solver<B>,
     collected: &TraceResultQueue<B>,
 ) {
     match result {
-        Ok((Run::Finished(Val::Bool(result)), _)) => {
+        Ok((Run::Finished(Val::Bool(result)), frame)) => {
             let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, result, events.drain(..).cloned().collect())))
+            collected.push(Ok((task_id, result, events.drain(..).cloned().collect())));
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Exit, _)) => (),
-        Ok((Run::Suspended, _)) => collected.push(Err(TraceError::UnexpectedSuspension)),
-        Ok((Run::Finished(val), _)) => collected.push(Err(TraceError::unexpected_value(val))),
-        Ok((Run::Dead, _)) => (),
-        Err((err, backtrace)) => {
-            collected.push(Err(TraceError::exec(err, backtrace_string(&backtrace, &shared_state.symtab))))
+        Ok((Run::Exit, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Suspended, frame)) => {
+            collected.push(Err(TraceError::UnexpectedSuspension));
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
+        Ok((Run::Finished(val), frame)) => {
+            collected.push(Err(TraceError::unexpected_value(val)));
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
+        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Err((err, frame)) => {
+            collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))));
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -2219,26 +2286,36 @@ pub fn trace_result_collector<'ir, B: BV>(
 pub fn footprint_collector<'ir, B: BV>(
     _: usize,
     task_id: TaskId,
-    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     solver: Solver<B>,
     collected: &TraceQueue<B>,
 ) {
     match result {
         // Footprint function returns true on traces we need to consider as part of the footprint
-        Ok((Run::Finished(Val::Bool(true)), _)) => {
+        Ok((Run::Finished(Val::Bool(true)), frame)) => {
             let mut events = solver.trace().to_vec();
-            collected.push(Ok((task_id, events.drain(..).cloned().collect())))
+            collected.push(Ok((task_id, events.drain(..).cloned().collect())));
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
         // If it is dead, returns false or exits, we ignore that trace
-        Ok((Run::Finished(Val::Bool(false)) | Run::Exit | Run::Dead, _)) => (),
+        Ok((Run::Finished(Val::Bool(false)) | Run::Exit | Run::Dead, frame)) => {
+            submit_itrace_for_local_frame(&frame, shared_state)
+        }
         // Any other value is an error!
-        Ok((Run::Finished(value), _)) => collected.push(Err(TraceError::unexpected_value(value))),
+        Ok((Run::Finished(value), frame)) => {
+            collected.push(Err(TraceError::unexpected_value(value)));
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
 
-        Ok((Run::Suspended, _)) => collected.push(Err(TraceError::UnexpectedSuspension)),
+        Ok((Run::Suspended, frame)) => {
+            collected.push(Err(TraceError::UnexpectedSuspension));
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
 
-        Err((err, backtrace)) => {
-            collected.push(Err(TraceError::exec(err, backtrace_string(&backtrace, &shared_state.symtab))))
+        Err((err, frame)) => {
+            collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))));
+            submit_itrace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -2984,6 +3061,168 @@ fn zrX(z3zE1756) {
             pmp: None,
             clint_enabled: None,
         }
+    }
+
+    #[cfg(feature = "tracetool")]
+    fn itrace_fixture_shared_state() -> SharedState<'static, B64> {
+        const IR_FIXTURE: &str = include_str!("../tests/fixtures/ir_cache_assumption.ir");
+        let (symtab, defs) = parse_ir_string(IR_FIXTURE);
+        let defs: &'static [crate::ir::Def<Name, B64>] = Box::leak(defs.into_boxed_slice());
+        let type_info = IRTypeInfo::new(defs);
+        let shared_state = SharedState::new(
+            symtab,
+            defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let ir_path = PathBuf::from(manifest_dir).join("tests/fixtures/ir_cache_assumption.ir");
+        shared_state.itrace.configure("itrace test title", ir_path, None, &shared_state.symtab);
+        shared_state
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_branch_condition_macros_record_current_and_forked_paths() {
+        let shared_state = itrace_fixture_shared_state();
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_branch_condition_macro_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        shared_state.itrace.set_path(Some(output_path.clone()));
+
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let function = shared_state.symtab.lookup("zcache_ok");
+        let mut frame = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
+        frame.itrace_path.record(function, Vec::new(), 0);
+
+        itrace_push_branch_condition!(&mut frame, smtlib::Exp::<Sym>::Bool(true));
+        let forked = itrace_fork_frame_with_branch_condition!(&frame, 7, smtlib::Exp::<Sym>::Bool(false));
+
+        assert_eq!(forked.pc, 7);
+
+        submit_itrace_for_local_frame(&frame, &shared_state);
+        submit_itrace_for_frame(&forked, &shared_state);
+        shared_state.itrace.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read macro itrace output");
+        assert_eq!(content.matches("branch_0: true").count(), 2);
+        assert!(content.contains("branch_1: false"));
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_submit_for_local_frame_writes_rendered_path_text() {
+        let shared_state = itrace_fixture_shared_state();
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_submit_executor_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        shared_state.itrace.set_path(Some(output_path.clone()));
+
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let mut frame = LocalFrame::new(shared_state.symtab.lookup("zcache_ok"), &[], &Ty::Unit, None, &instrs);
+        frame.itrace_path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
+
+        submit_itrace_for_local_frame(&frame, &shared_state);
+        shared_state.itrace.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read itrace submit output");
+        assert!(content.contains("itrace test title"));
+        assert!(content.contains("return = z1"));
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_submit_for_frame_preserves_frozen_path_and_branch_conditions() {
+        let shared_state = itrace_fixture_shared_state();
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_integration_executor_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        shared_state.itrace.set_path(Some(output_path.clone()));
+
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let zcache_ok = shared_state.symtab.lookup("zcache_ok");
+        let zpc_lookup = shared_state.symtab.lookup("zpc_lookup");
+
+        let mut first_frame = LocalFrame::new(zcache_ok, &[], &Ty::Unit, None, &instrs);
+        first_frame.itrace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(true));
+        first_frame.itrace_path.record(zcache_ok, Vec::new(), 0);
+        first_frame.itrace_path.record(zcache_ok, Vec::new(), 3);
+
+        let mut error_like_frame = LocalFrame::new(zpc_lookup, &[], &Ty::Unit, None, &instrs);
+        error_like_frame.itrace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(false));
+        error_like_frame.itrace_path.record(zpc_lookup, Vec::new(), 1);
+        error_like_frame.itrace_path.record(zpc_lookup, Vec::new(), 5);
+        let frozen_error_like_frame = freeze_frame(&error_like_frame);
+
+        submit_itrace_for_local_frame(&first_frame, &shared_state);
+        submit_itrace_for_frame(&frozen_error_like_frame, &shared_state);
+        shared_state.itrace.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read itrace integration output");
+
+        assert_eq!(content.matches("itrace test title").count(), 2);
+        assert!(content.contains("branch_0: true"));
+        assert!(content.contains("branch_0: false"));
+        assert!(!content.contains("branch_conditions"));
+        assert!(!content.contains("Bool"));
+        assert!(content.contains("z0 : %i"));
+        assert!(content.contains("return = z1"));
+        assert!(content.contains("p1 : %i"));
+        assert!(content.contains("end"));
+        assert!(!content.contains("`1"));
+        assert!(!content.contains("`4"));
+        assert!(!content.contains("`11"));
+
+        let first_title = content.find("itrace test title").expect("first path title missing");
+        let second_title = content[first_title + 1..]
+            .find("itrace test title")
+            .map(|offset| first_title + 1 + offset)
+            .expect("second path title missing");
+        assert!(content[first_title..second_title].contains("z0 : %i"));
+        assert!(content[first_title..second_title].contains("return = z1"));
+        assert!(content[second_title..].contains("p1 : %i"));
+        assert!(content[second_title..].contains("end"));
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_integration_run_loop_collector_writes_executed_path() {
+        let shared_state = itrace_fixture_shared_state();
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_run_loop_collector_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        shared_state.itrace.set_path(Some(output_path.clone()));
+
+        let function = shared_state.symtab.lookup("zcache_ok");
+        let (args, ret_ty, instrs) = shared_state.functions.get(&function).expect("fixture function exists");
+        let initial_frame = LocalFrame::new(function, args, ret_ty, None, instrs);
+        let task_state = TaskState::new();
+        let task = initial_frame.task(TaskId::fresh(), &task_state);
+        let collected = AtomicBool::new(true);
+
+        start_single(task, &shared_state, &collected, &all_unsat_collector);
+        shared_state.itrace.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read run_loop itrace output");
+        assert!(content.contains("itrace test title"));
+        assert!(content.contains("z0 : %i"));
+        assert!(content.contains("z1 : %i"));
+        assert!(content.contains("z1 = z0(zu)"));
+        assert!(!content.contains('`'));
+        assert!(!content.contains("branch_conditions"));
+
+        let _ = std::fs::remove_file(&output_path);
     }
 
     fn shared_state_and_bindings_from_ir(

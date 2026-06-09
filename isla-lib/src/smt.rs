@@ -1886,15 +1886,28 @@ static QFAUFBV_STR: &[u8] = b"qfaufbv\0";
 static SEED_STR: &[u8] = b"seed\0";
 static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
 
+// 不同 Z3 solver 暴露的随机种子参数名不同，按实际参数表选择。
+unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> &'static [u8] {
+    let param_descrs = Z3_solver_get_param_descrs(ctx, solver);
+    Z3_param_descrs_inc_ref(ctx, param_descrs);
+    let mut seed_param_name = RANDOM_SEED_STR;
+    for i in 0..Z3_param_descrs_size(ctx, param_descrs) {
+        let symbol = Z3_param_descrs_get_name(ctx, param_descrs, i);
+        if Z3_get_symbol_kind(ctx, symbol) == SymbolKind::String {
+            let name = CStr::from_ptr(Z3_get_symbol_string(ctx, symbol)).to_bytes();
+            if name == &SEED_STR[..SEED_STR.len() - 1] {
+                seed_param_name = SEED_STR;
+                break;
+            }
+        }
+    }
+    Z3_param_descrs_dec_ref(ctx, param_descrs);
+    seed_param_name
+}
+
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub fn new(ctx: &'ctx Context) -> Self {
         unsafe {
-            let mut major: c_uint = 0;
-            let mut minor: c_uint = 0;
-            let mut build: c_uint = 0;
-            let mut revision: c_uint = 0;
-            Z3_get_version(&mut major, &mut minor, &mut build, &mut revision);
-
             // The QF_AUFBV solver has good performance on our problems, but we need to initialise it
             // using a tactic rather than the logic name to ensure that the enumerations are supported,
             // otherwise Z3 may crash.
@@ -1904,16 +1917,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
             Z3_tactic_dec_ref(ctx.z3_ctx, qfaufbv_tactic);
 
-            // Z3 >= 4.13.0 将 random_seed 改名为 seed
             let z3_params = Z3_mk_params(ctx.z3_ctx);
             Z3_params_inc_ref(ctx.z3_ctx, z3_params);
 
-            let seed_param_name = if major > 4 || (major == 4 && minor >= 13) {
-                CStr::from_bytes_with_nul_unchecked(SEED_STR).as_ptr()
-            } else {
-                CStr::from_bytes_with_nul_unchecked(RANDOM_SEED_STR).as_ptr()
-            };
-            let seed_symbol = Z3_mk_string_symbol(ctx.z3_ctx, seed_param_name);
+            let seed_symbol = Z3_mk_string_symbol(
+                ctx.z3_ctx,
+                CStr::from_bytes_with_nul_unchecked(z3_seed_param_name(ctx.z3_ctx, z3_solver)).as_ptr(),
+            );
             Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, fresh_random_seed());
             Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
 

@@ -281,6 +281,7 @@ fn isla_main() -> i32 {
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
     let itrace_path = matches.opt_str("itrace").map(std::path::PathBuf::from);
+    let arch_path = matches.opt_str("arch").map(std::path::PathBuf::from);
 
     if matches.free.is_empty() {
         print_usage(&opts);
@@ -355,6 +356,7 @@ fn isla_main() -> i32 {
                         &instruction_names,
                         run_all,
                         itrace_path.clone(),
+                        arch_path.clone(),
                     )
                 }
                 _ => {
@@ -374,6 +376,7 @@ fn isla_main() -> i32 {
                         &instruction_names,
                         run_all,
                         itrace_path.clone(),
+                        arch_path.clone(),
                     )
                 }
             };

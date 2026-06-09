@@ -41,7 +41,7 @@ use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
 use isla_lib::executor;
-use isla_lib::executor::{reset_registers, Backtrace, LocalFrame, Run, StopAction, StopConditions, TaskId, TaskState};
+use isla_lib::executor::{reset_registers, LocalFrame, Run, StopAction, StopConditions, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, Initialized};
 use isla_lib::ir::*;
 use isla_lib::ir_lexer::new_ir_lexer;
@@ -302,7 +302,7 @@ type AllTraceValueQueue<B> = SegQueue<Result<(TaskId, Val<B>, Vec<Event<B>>), (S
 fn model_collector<'ir, B: BV>(
     tid: usize,
     task_id: TaskId,
-    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, Backtrace)>,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     mut solver: Solver<B>,
     (collected, trace, models): &(AllTraceValueQueue<B>, bool, bool),
@@ -325,9 +325,9 @@ fn model_collector<'ir, B: BV>(
         Ok((Run::Exit, _)) => collected.push(Err(("Exit".to_string(), events))),
         Ok((Run::Suspended { .. }, _)) => collected.push(Err(("Suspended".to_string(), events))),
         Ok((Run::Dead, _)) => (),
-        Err((err, backtrace)) => {
+        Err((err, frame)) => {
             log_from!(tid, log::VERBOSE, format!("Error {:?}", err));
-            for (f, pc) in backtrace.iter().rev() {
+            for (f, pc) in frame.backtrace().iter().rev() {
                 log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
             }
             if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {

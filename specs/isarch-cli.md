@@ -19,7 +19,7 @@ isarch [全局选项] <子命令> [子命令参数]
 | `-T/--threads <n>` | 工作线程数 |
 | `-R/--register <name>=<value>` | 寄存器初始化 |
 | `-I/--initial <name>=<value>` | 初始状态寄存器 |
-| `-D/--debug <flags>` | 调试标志（f, m, l, g, p） |
+| `-D/--debug <flags>` | 调试标志。`f`=FORK，`m`=MEMORY，`l`=LITMUS，`g`=GRAPH，`p`=PROBE，`c`=CACHE，`s`=SYM_EXEC，`r`=PATH_RESULT，`a`=ARCH_INFO |
 | `--no-model-reg-init` | 跳过寄存器初始化 |
 | `--verbose` | 详细输出 |
 | `--init-isa-with-config` | 使用配置默认值初始化 ISA |

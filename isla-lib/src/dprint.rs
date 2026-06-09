@@ -832,8 +832,6 @@ pub fn print_instr<B>(pc: usize, instr: &Instr<Name, B>, symtab: &Symtab, functi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::IRTypeInfo;
-    use std::collections::{BTreeMap, HashMap, HashSet};
 
     /// 创建一个用于测试的最小 SharedState
     ///
@@ -851,26 +849,7 @@ mod tests {
         symtab.intern("TestStruct");
         symtab.intern("Member1");
 
-        SharedState {
-            functions: HashMap::default(),
-            externs: HashMap::default(),
-            symtab,
-            type_info: IRTypeInfo {
-                structs: HashMap::default(),
-                enums: HashMap::default(),
-                enum_members: HashMap::default(),
-                unions: HashMap::default(),
-                union_ctors: HashSet::default(),
-            },
-            registers: HashMap::default(),
-            probes: HashSet::new(),
-            probe_functions: HashSet::new(),
-            trace_functions: HashSet::new(),
-            itrace: crate::tracetool::itrace::ItraceHandler::default(),
-            reset_registers: Vec::new(),
-            reset_constraints: Vec::new(),
-            function_assumptions: Vec::new(),
-        }
+        SharedState::empty(symtab)
     }
 
     /// 示例：解析 I64 值

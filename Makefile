@@ -2,8 +2,9 @@
 
 run:
 	cargo fmt && cp log log.1 \
-		&& bash -c "RUST_BACKTRACE=1 cargo run --bin isarch --release \
-		-- -A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --probe-all --trace-all list-instructions  >log 2> >(tee -a log >&2) "
+		&&cargo build --release --bin isarch \
+		&& bash -c "RUST_BACKTRACE=1 ./target/release/isarch \
+		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/itrace.txt solve-state --clause=zRTYPE >log 2> >(tee -a log >&2) "
 
 all: isla
 
