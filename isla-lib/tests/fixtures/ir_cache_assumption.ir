@@ -1,0 +1,18 @@
+val zcache_ok : (%unit) -> %i
+fn zcache_ok(zu) {
+  z0 : %i `1;
+  z1 : %i `2;
+  z1 = z0(zu) `3;
+  return = z1 `4;
+  end;
+}
+
+val zpc_lookup : (%unit) -> %i
+fn zpc_lookup(pu) {
+  p0 : %i `10;
+  p1 : %i `11;
+  p2 : %i `12;
+  p1 = p2(pu) `13;
+  return = p1 `14;
+  end;
+}

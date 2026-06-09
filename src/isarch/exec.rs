@@ -82,6 +82,16 @@ impl AssemGenJson {
     }
 }
 
+/// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
+/// 规则：`output/itrace.txt` + clause `zadd` → `output/itrace_zadd.txt`
+#[cfg(feature = "tracetool")]
+fn clause_itrace_output_path(base_path: &Path, clause: &str) -> PathBuf {
+    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("itrace");
+    let extension = base_path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
+    let new_name = format!("{}_{}.{}", stem, clause, extension);
+    base_path.with_file_name(new_name)
+}
+
 /// solve-state 子命令的主入口函数
 /// 支持通过 clause 名、扩展名、汇编指令名或 --all 来筛选需要符号执行的 clause
 pub fn solve_state_main<B, T>(
@@ -95,6 +105,7 @@ pub fn solve_state_main<B, T>(
     instruction_names: &[String],
     run_all: bool,
     itrace_path: Option<PathBuf>,
+    ir_file_path: Option<PathBuf>,
 ) -> bool
 where
     B: BV,
@@ -139,27 +150,49 @@ where
         clause_set.extend(get_all_clause_names(shared_state));
     }
 
+    #[cfg(not(feature = "tracetool"))]
+    let _ = (&itrace_path, &ir_file_path);
+
+    #[cfg(feature = "tracetool")]
+    if itrace_path.is_some() && ir_file_path.is_none() {
+        panic!("itrace: 使用 --itrace 时必须同时指定 --arch/-A 提供 IR 文件路径");
+    }
+
     if clause_set.is_empty() {
         eprintln!("错误: 未指定任何要符号执行的 clause");
         eprintln!("请使用 --clause, --extension, --instruction-name 或 --all 指定");
         return false;
     }
 
-    shared_state.itrace.set_path(itrace_path);
-
-    log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", clause_set.len()));
+    let num_clauses = clause_set.len();
+    log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
 
     for clause in clause_set {
+        #[cfg(feature = "tracetool")]
+        if let Some(base_path) = &itrace_path {
+            // 多个 clause 同时执行时，为每个 clause 生成独立 itrace 输出文件，避免互相覆盖。
+            let output_path =
+                if num_clauses > 1 { clause_itrace_output_path(base_path, &clause) } else { base_path.clone() };
+            if let Some(ir) = ir_file_path.as_ref() {
+                // 每次执行前用当前 clause、IR 文件和输出路径配置 itrace 追踪器。
+                shared_state.itrace.configure(clause.as_str(), ir.clone(), Some(output_path), &shared_state.symtab);
+            }
+        }
+
         match run_symbolic_execute_with_target(target, &clause, shared_state, regs, lets, initial_memory.clone()) {
             Ok(_) => {}
             Err(e) => {
+                eprintln!("错误: clause '{}' 符号执行失败: {}", clause, e);
                 log!(log::SYM_EXEC, &format!("solve_state: {}运行错误 {}", clause, e));
                 success = false;
             }
         }
-    }
 
-    let _ = shared_state.itrace.dump();
+        #[cfg(feature = "tracetool")]
+        if itrace_path.is_some() {
+            shared_state.itrace.dump();
+        }
+    }
 
     success
 }
@@ -265,6 +298,11 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
         lets,
         &result,
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
+            match &exec_result {
+                Ok((_, frame)) => isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state),
+                Err((_, frame)) => isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state),
+            }
+
             match exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(Val::Poison) => {
@@ -459,7 +497,6 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                                 } */
                                 log!(log::PATH_RESULT, "3. ==============================");
                             }
-                            solver.dump_solver("solver.dump");
                         }
                         let single_instruction_json = AssemGenJsonItem::new(
                             target,
@@ -483,7 +520,7 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                         &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks)
                     ),
                 },
-                Err((error, backtrace)) => {
+                Err((error, frame)) => {
                     match &error {
                         ExecError::MatchFailure(_) => {
                             // 静默处理
@@ -500,7 +537,7 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                             );
                             log!(
                                 log::SYM_EXEC,
-                                &format!("调用栈: {}", backtrace_string(&backtrace, &shared_state.symtab))
+                                &format!("调用栈: {}", backtrace_string(frame.backtrace(), &shared_state.symtab))
                             );
                         }
                     }
@@ -520,5 +557,31 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     } else {
         log!(log::SYM_EXEC, &format!("警告: {}无法获取 result 收集器", instruction_name));
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clause_itrace_output_path_appends_clause_suffix() {
+        let base = PathBuf::from("output/itrace.txt");
+        let result = clause_itrace_output_path(&base, "zadd");
+        assert_eq!(result, PathBuf::from("output/itrace_zadd.txt"));
+    }
+
+    #[test]
+    fn clause_itrace_output_path_preserves_directory() {
+        let base = PathBuf::from("/tmp/deep/dir/trace.log");
+        let result = clause_itrace_output_path(&base, "zlw");
+        assert_eq!(result, PathBuf::from("/tmp/deep/dir/trace_zlw.log"));
+    }
+
+    #[test]
+    fn clause_itrace_output_path_handles_no_extension() {
+        let base = PathBuf::from("output/itrace");
+        let result = clause_itrace_output_path(&base, "zsub");
+        assert_eq!(result, PathBuf::from("output/itrace_zsub.txt"));
     }
 }

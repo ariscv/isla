@@ -43,6 +43,8 @@ use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
 use crate::smt::{Checkpoint, Solver, Sym};
+#[cfg(feature = "tracetool")]
+use crate::tracetool::itrace::ItracePerPath;
 
 #[derive(Clone)]
 pub struct LocalDebugProbes {
@@ -120,7 +122,21 @@ pub struct Frame<'ir, B> {
     pub(super) function_assumptions: Arc<HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>>,
     pub(super) pc_counts: Arc<HashMap<B, usize>>,
     pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
-    pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
+    /*
+     * ATTENTION git-block:
+     * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
+     * 该字段来自 origin/dev-isarch-pathmerge；字段本身由 dea623a
+     * `feat(executor): add ForkTreeNode + StateSerialize trait + IR merge annotation stub` 引入。
+     * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
+     * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
+     * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
+     * 分支条件是 itrace/path 级别的观测元数据，必须保存在 itrace_path 内部。
+     * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
+     * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
+     */
+    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
+    #[cfg(feature = "tracetool")]
+    pub(super) itrace_path: Arc<ItracePerPath>,
 }
 
 pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
@@ -140,7 +156,8 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         function_assumptions: (*frame.function_assumptions).clone(),
         pc_counts: (*frame.pc_counts).clone(),
         taken_interrupts: (*frame.taken_interrupts).clone(),
-        branch_conditions: frame.branch_conditions.clone(),
+        #[cfg(feature = "tracetool")]
+        itrace_path: (*frame.itrace_path).clone(),
     }
 }
 
@@ -163,7 +180,21 @@ pub struct LocalFrame<'ir, B> {
     pub(super) function_assumptions: HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>,
     pub(super) pc_counts: HashMap<B, usize>,
     pub(super) taken_interrupts: Vec<(TaskId, u8)>,
-    pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
+    /*
+     * ATTENTION git-block:
+     * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
+     * 该字段来自 origin/dev-isarch-pathmerge；字段本身由 dea623a
+     * `feat(executor): add ForkTreeNode + StateSerialize trait + IR merge annotation stub` 引入。
+     * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
+     * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
+     * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
+     * 分支条件属于当前 itrace path 的输出上下文，不属于 executor 的可执行状态。
+     * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
+     * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
+     */
+    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
+    #[cfg(feature = "tracetool")]
+    pub(super) itrace_path: ItracePerPath,
 }
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
@@ -183,7 +214,8 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         function_assumptions: Arc::new(frame.function_assumptions.clone()),
         pc_counts: Arc::new(frame.pc_counts.clone()),
         taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
-        branch_conditions: frame.branch_conditions.clone(),
+        #[cfg(feature = "tracetool")]
+        itrace_path: Arc::new(frame.itrace_path.clone()),
     }
 }
 
@@ -204,6 +236,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn vars(&self) -> &Bindings<'ir, B> {
         &self.local_state.vars
+    }
+
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
     }
 
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
@@ -315,7 +351,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             function_assumptions: HashMap::new(),
             pc_counts: HashMap::new(),
             taken_interrupts: Vec::new(),
-            branch_conditions: Vec::new(),
+            #[cfg(feature = "tracetool")]
+            itrace_path: ItracePerPath::default(),
         }
     }
 
@@ -334,6 +371,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();
+        #[cfg(feature = "tracetool")]
+        {
+            new_frame.itrace_path = self.itrace_path.clone();
+        }
         new_frame
     }
 
@@ -369,6 +410,12 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 }
 
+impl<'ir, B: BV> Frame<'ir, B> {
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
+}
+
 pub(super) fn push_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
     let mut vars = HashMap::default();
     mem::swap(&mut vars, frame.vars_mut());
@@ -378,5 +425,75 @@ pub(super) fn push_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
 pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
     if let Some(mut vars) = frame.stack_vars.pop() {
         mem::swap(&mut vars, frame.vars_mut())
+    }
+}
+
+#[cfg(all(test, feature = "tracetool"))]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+
+    #[test]
+    fn itrace_fork_paths_grow_independently() {
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let instrs_ref: &[Instr<Name, B64>] = &instrs;
+
+        let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, instrs_ref);
+
+        local.itrace_path.record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
+        local.itrace_path.record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
+        assert_eq!(local.itrace_path.records().len(), 2);
+
+        let frozen = freeze_frame(&local);
+        assert_eq!(frozen.itrace_path.records().len(), 2);
+
+        let mut fork_a = unfreeze_frame(&frozen);
+        let mut fork_b = unfreeze_frame(&frozen);
+
+        fork_a.itrace_path.record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
+        fork_b.itrace_path.record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
+        fork_b.itrace_path.record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
+
+        assert_eq!(fork_a.itrace_path.records().len(), 3);
+        assert_eq!(fork_b.itrace_path.records().len(), 4);
+        assert_eq!(local.itrace_path.records().len(), 2);
+
+        assert_eq!(fork_a.itrace_path.records()[2].function_name, Name::from_u32(3));
+        assert_eq!(fork_a.itrace_path.records()[2].pc, 30);
+        assert_eq!(fork_a.itrace_path.records()[2].backtrace, vec![(Name::from_u32(30), 3)]);
+        assert!(fork_a.itrace_path.records()[2].summary.is_none());
+
+        assert_eq!(fork_b.itrace_path.records()[2].function_name, Name::from_u32(4));
+        assert_eq!(fork_b.itrace_path.records()[2].pc, 40);
+        assert_eq!(fork_b.itrace_path.records()[2].backtrace, vec![(Name::from_u32(40), 4)]);
+        assert!(fork_b.itrace_path.records()[2].summary.is_none());
+
+        assert_eq!(fork_b.itrace_path.records()[3].function_name, Name::from_u32(5));
+        assert_eq!(fork_b.itrace_path.records()[3].pc, 50);
+        assert_eq!(fork_b.itrace_path.records()[3].backtrace, vec![(Name::from_u32(50), 5)]);
+        assert!(fork_b.itrace_path.records()[3].summary.is_none());
+    }
+
+    #[test]
+    fn freeze_unfreeze_independent_path_state() {
+        itrace_fork_paths_grow_independently();
+    }
+
+    #[test]
+    fn new_frame_has_default_itrace_path() {
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+        assert!(local.itrace_path.records().is_empty());
+    }
+
+    #[test]
+    fn new_call_carries_itrace_path() {
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+        local.itrace_path.record(Name::from_u32(1), vec![], 10);
+
+        let callee = local.new_call(Name::from_u32(99), &[], &Ty::Unit, None, &instrs);
+        assert_eq!(callee.itrace_path.records().len(), 1);
+        assert_eq!(callee.itrace_path.records()[0].pc, 10);
     }
 }

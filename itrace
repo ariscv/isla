@@ -1,6 +1,25 @@
-[zhex_bits_str 0]: zz40 : %bv `14 248:2-248:53;
-[zhex_bits_str 1]: zz41 : %i `14 248:11-248:52;
-[zhex_bits_str 2]: zz42 : %i64 `14 248:23-248:48;
-[zhex_bits_str 3]: zz43 : %i64 `14 248:24-248:42;
-[zhex_bits_str 4]: zz44 : %i `14 248:29-248:41;
+<zRTYPE> path(zRTYPE_branch_xxx_xxx):
+[zhex_bits_str 0]: zz40 : %bv;
+[zhex_bits_str 1]: zz41 : %i;
+[zhex_bits_str 2]: zz42 : %i64;
+[zhex_bits_str 3]: zz43 : %i64;
+[zhex_bits_str 4]: zz44 : %i;
+...
+
+====
+<zRTYPE> path(zRTYPE_branch_xxx_xxx):
+[zhex_bits_str 0]: zz40 : %bv;
+[zhex_bits_str 1]: zz41 : %i;
+[zhex_bits_str 2]: zz42 : %i64;
+[zhex_bits_str 3]: zz43 : %i64;
+[zhex_bits_str 4]: zz44 : %i;
+...
+
+====
+<zMRET> path(zMRET_branch_xxx_xxx):
+[zhex_bits_str 0]: zz40 : %bv;
+[zhex_bits_str 1]: zz41 : %i;
+[zhex_bits_str 2]: zz42 : %i64;
+[zhex_bits_str 3]: zz43 : %i64;
+[zhex_bits_str 4]: zz44 : %i;
 ...
