@@ -100,7 +100,7 @@ fn initialize_letbinding<'ir, B: BV>(
                     }
                 }
             }
-            Err(err) => log!(log::VERBOSE, &format!("Failed to evaluate letbinding: {:?}", err)),
+            Err((err, _)) => log!(log::VERBOSE, &format!("Failed to evaluate letbinding: {:?}", err)),
         },
     );
 }
@@ -158,7 +158,7 @@ fn initialize_register<'ir, B: BV>(
                             regs.insert(*id, relaxed_registers.contains(id), UVal::Init(v.clone()))
                         }
                     }
-                    Err(err) => log!(log::VERBOSE, &format!("Failed to evaluate register initialiser: {:?}", err)),
+                    Err((err, _)) => log!(log::VERBOSE, &format!("Failed to evaluate register initialiser: {:?}", err)),
                 },
             );
         }

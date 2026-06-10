@@ -51,19 +51,60 @@ pub fn color(tid: usize) -> &'static str {
     }
 }
 
-pub const VERBOSE: u32 = 1u32;
-pub const MEMORY: u32 = 2u32;
-pub const FORK: u32 = 4u32;
-pub const LITMUS: u32 = 8u32;
-pub const PROBE: u32 = 16u32;
-pub const CACHE: u32 = 32u32;
-pub const GRAPH: u32 = 64u32;
-/// 符号执行引擎层 — 参数生成、solver 状态、执行流程控制等
-pub const SYM_EXEC: u32 = 128u32;
-/// 执行路径结果层 — 每条路径的寄存器/汇编/model 求解结果
-pub const PATH_RESULT: u32 = 256u32;
-/// 架构信息层 — xlen 检测、ISA 状态列表、Target 配置
-pub const ARCH_INFO: u32 = 512u32;
+macro_rules! define_log_flags {
+    ($( $(#[$meta:meta])* $name:ident = ($value:expr, $debug_flag:expr, $label:expr); )+) => {
+        $(
+            $(#[$meta])*
+            pub const $name: u32 = $value;
+        )+
+
+        pub fn flags_from_debug_opts(debug_opts: &str) -> u32 {
+            let mut flags = 0u32;
+
+            $(
+                if let Some(debug_flag) = $debug_flag {
+                    if debug_opts.contains(debug_flag) {
+                        flags |= $name;
+                    }
+                }
+            )+
+
+            flags
+        }
+
+        pub fn flag_label(flags: u32) -> String {
+            let mut labels = Vec::new();
+
+            $(
+                if flags & $name > 0 {
+                    labels.push($label);
+                }
+            )+
+
+            if labels.is_empty() {
+                format!("0x{:x}", flags)
+            } else {
+                labels.join("|")
+            }
+        }
+    };
+}
+
+define_log_flags! {
+    VERBOSE = (1u32, None::<char>, "VERBOSE");
+    MEMORY = (2u32, Some('m'), "MEMORY");
+    FORK = (4u32, Some('f'), "FORK");
+    LITMUS = (8u32, Some('l'), "LITMUS");
+    PROBE = (16u32, Some('p'), "PROBE");
+    CACHE = (32u32, Some('c'), "CACHE");
+    GRAPH = (64u32, Some('g'), "GRAPH");
+    /// 符号执行引擎层 — 参数生成、solver 状态、执行流程控制等
+    SYM_EXEC = (128u32, Some('s'), "SYM_EXEC");
+    /// 执行路径结果层 — 每条路径的寄存器/汇编/model 求解结果
+    PATH_RESULT = (256u32, Some('r'), "PATH_RESULT");
+    /// 架构信息层 — xlen 检测、ISA 状态列表、Target 配置
+    ARCH_INFO = (512u32, Some('a'), "ARCH_INFO");
+}
 
 pub fn set_flags(flags: u32) {
     FLAGS.store(flags, SeqCst);
@@ -71,20 +112,22 @@ pub fn set_flags(flags: u32) {
 
 #[macro_export]
 macro_rules! log {
-    ($flags: expr, $msg: expr) => {
-        if log::FLAGS.load(std::sync::atomic::Ordering::Relaxed) & $flags > 0u32 {
-            eprintln!("[log]: {}", $msg)
+    ($flags: expr, $msg: expr) => {{
+        let flags = $flags;
+        if log::FLAGS.load(std::sync::atomic::Ordering::Relaxed) & flags > 0u32 {
+            eprintln!("[{}]: {}", log::flag_label(flags), $msg)
         }
-    };
+    }};
 }
 
 #[macro_export]
 macro_rules! log_from {
-    ($tid: expr, $flags: expr, $msg: expr) => {
-        if log::FLAGS.load(std::sync::atomic::Ordering::Relaxed) & $flags > 0u32 {
-            eprintln!("[{}{:<3}\x1b[0m]: {}", log::color($tid), $tid, $msg)
+    ($tid: expr, $flags: expr, $msg: expr) => {{
+        let flags = $flags;
+        if log::FLAGS.load(std::sync::atomic::Ordering::Relaxed) & flags > 0u32 {
+            eprintln!("[{}{:<3}\x1b[0m][{}]: {}", log::color($tid), $tid, log::flag_label(flags), $msg)
         }
-    };
+    }};
 }
 
 #[macro_export]
