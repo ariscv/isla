@@ -1,5 +1,6 @@
 pub mod args;
 pub mod args_yaml;
+pub mod clause;
 pub mod exec;
 pub mod memory_builder;
 pub mod target;
@@ -50,11 +51,14 @@ pub fn get_assembly_name<B: BV>(
                     *collected.lock().unwrap() = Some(ret_val);
                 }
             }
-            Err((error, backtrace)) => match &error {
+            Err((error, frame)) => match &error {
                 ExecError::MatchFailure(_) => {}
                 _ => {
                     log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
-                    log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
+                    log!(
+                        log::SYM_EXEC,
+                        &format!("调用栈: {:?}", backtrace_string(frame.backtrace(), &shared_state.symtab))
+                    );
                 }
             },
         },
@@ -91,11 +95,14 @@ fn get_assembly_encdec_forwards<B: BV>(
                     *collected.lock().unwrap() = Some(ret_val);
                 }
             }
-            Err((error, backtrace)) => match &error {
+            Err((error, frame)) => match &error {
                 ExecError::MatchFailure(_) => {}
                 _ => {
                     log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
-                    log!(log::SYM_EXEC, &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab)));
+                    log!(
+                        log::SYM_EXEC,
+                        &format!("调用栈: {:?}", backtrace_string(frame.backtrace(), &shared_state.symtab))
+                    );
                 }
             },
         },
@@ -533,13 +540,13 @@ pub fn get_assembly_names_all<B: BV>(
                         *result.lock().unwrap() = Some(ret_val);
                     }
                 }
-                Err((error, backtrace)) => match &error {
+                Err((error, frame)) => match &error {
                     ExecError::MatchFailure(_) => {}
                     _ => {
                         log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
                         log!(
                             log::SYM_EXEC,
-                            &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab))
+                            &format!("调用栈: {:?}", backtrace_string(frame.backtrace(), &shared_state.symtab))
                         );
                     }
                 },
@@ -657,13 +664,13 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
                         );
                     }
                 },
-                Err((error, backtrace)) => match &error {
+                Err((error, frame)) => match &error {
                     ExecError::MatchFailure(_) => {}
                     _ => {
                         log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
                         log!(
                             log::SYM_EXEC,
-                            &format!("调用栈: {:?}", backtrace_string(&backtrace, &shared_state.symtab))
+                            &format!("调用栈: {:?}", backtrace_string(frame.backtrace(), &shared_state.symtab))
                         );
                     }
                 },
@@ -851,15 +858,15 @@ pub fn ir_assembly_names_to_InstructionMap<'ir, B: BV>(
 }
  */
 
-#[cfg(feature = "debug_instruction")]
 pub fn test_instruction_list_main<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
+    clause: &str,
 ) {
     log!(log::SYM_EXEC, "test_instruction_list_main");
 
-    let assembly_names = get_assembly_names_all("zRTYPE", shared_state, regs, lets);
+    let assembly_names = get_assembly_names_all(clause, shared_state, regs, lets);
 
     /* assembly_names.iter().for_each(|name| {
         println!("{}", name);
@@ -867,4 +874,115 @@ pub fn test_instruction_list_main<B: BV>(
     log!(log::PATH_RESULT, &format!("{:?}", assembly_names));
 
     ()
+}
+
+/// 枚举类型中所有枚举字段的具体值组合，非枚举字段使用具体默认值
+/// 不创建 solver/symbolic 值，仅使用具体值
+fn enumerate_concrete_values<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Vec<Val<B>> {
+    match ty {
+        Ty::Unit => vec![Val::Unit],
+        Ty::Enum(enum_name) => {
+            let Some(members) = shared_state.type_info.enums.get(enum_name) else {
+                return vec![Val::Poison];
+            };
+            let enum_id = isla_lib::smt::EnumId::from_name(*enum_name);
+            (0..members.len()).map(|i| Val::Enum(isla_lib::smt::EnumMember { enum_id, member: i })).collect()
+        }
+        Ty::Struct(struct_name) => {
+            let Some(struct_def) = shared_state.type_info.structs.get(struct_name) else {
+                return vec![generate_default_value(ty, shared_state)];
+            };
+            // 找出所有枚举字段
+            let enum_fields: Vec<(&Name, &Ty<Name>)> =
+                struct_def.iter().filter(|(_, ty)| matches!(ty, Ty::Enum(_))).collect();
+            if enum_fields.is_empty() {
+                return vec![generate_default_value(ty, shared_state)];
+            }
+            // 枚举所有枚举组合
+            let mut combos: Vec<ahash::HashMap<Name, Val<B>>> = vec![ahash::HashMap::default()];
+            for (field_name, _field_ty) in &enum_fields {
+                if let Ty::Enum(enum_name) = _field_ty {
+                    let Some(members) = shared_state.type_info.enums.get(enum_name) else {
+                        continue;
+                    };
+                    let enum_id = isla_lib::smt::EnumId::from_name(*enum_name);
+                    let mut new_combos = Vec::new();
+                    for mut combo in combos.drain(..) {
+                        for i in 0..members.len() {
+                            combo.insert(**field_name, Val::Enum(isla_lib::smt::EnumMember { enum_id, member: i }));
+                            new_combos.push(combo.clone());
+                        }
+                    }
+                    combos = new_combos;
+                }
+            }
+            // 对非枚举字段填充默认值
+            combos
+                .into_iter()
+                .map(|mut combo| {
+                    for (field_name, field_ty) in struct_def {
+                        if !combo.contains_key(field_name) {
+                            combo.insert(*field_name, generate_default_value(field_ty, shared_state));
+                        }
+                    }
+                    Val::Struct(combo)
+                })
+                .collect()
+        }
+        _ => vec![generate_default_value(ty, shared_state)],
+    }
+}
+
+/// 从 zinstruction union 中提取所有 clause，对每个 clause 解析汇编指令名
+/// 枚举枚举类型参数的所有组合，使用具体默认值快速获取指令名
+pub fn list_instructions<B: BV>(
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Vec<(String, Vec<String>)> {
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
+    let Some(union_members) = instruction_union else {
+        panic!("list_instructions: 在symtab中没找到符号'zinstruction'");
+    };
+
+    let mut clause_names: Vec<String> =
+        union_members.iter().map(|(n, _)| shared_state.symtab.to_str(*n).to_string()).collect();
+    clause_names.sort();
+
+    let mut result = Vec::new();
+    for clause in &clause_names {
+        let display_name = zencode::decode(clause).to_string();
+        let ctor_name = shared_state.symtab.lookup(clause);
+
+        let Some((_, ctor_ty)) = union_members.iter().find(|(n, _)| *n == ctor_name) else {
+            result.push((display_name, vec![]));
+            continue;
+        };
+
+        let arg_combos = enumerate_concrete_values(ctor_ty, shared_state);
+
+        let mut inst_names: HashSet<String> = HashSet::new();
+        for arg_value in &arg_combos {
+            let instr_value = Val::Ctor(ctor_name, Box::new(arg_value.clone()));
+            if let Some(asm_str) = get_assembly_name(instr_value, shared_state, regs, lets) {
+                if let Some(mnemonic) = asm_str.split_whitespace().next() {
+                    inst_names.insert(mnemonic.to_string());
+                }
+            }
+        }
+
+        let mut names: Vec<String> = inst_names.into_iter().collect();
+        names.sort();
+        result.push((display_name, names));
+    }
+    result
+}
+
+/// 获取所有 clause 名称（编码后的原始名称，从 zinstruction union 中提取）
+pub fn get_all_clause_names<B: BV>(shared_state: &SharedState<B>) -> Vec<String> {
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
+    let Some(union_members) = instruction_union else {
+        return vec![];
+    };
+    union_members.iter().map(|(n, _)| shared_state.symtab.to_str(*n).to_string()).collect()
 }

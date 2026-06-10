@@ -101,12 +101,10 @@ isla-lib = { path = "isla-lib", version = "0.2.0" }
 isla-elf = { path = "isla-elf", version = "0.2.0" }
 
 [features]
+itrace = ["tracetool", "isla-lib/itrace"]
+tracetool = ["isla-lib/tracetool"]
 smtperf = ["isla-lib/smtperf"]
-debug_instruction = []
-debug_clause_args = []
-debug_clause_args_yaml = []
-debug_exec = []
-default = ["debug_exec"]
+default = ["tracetool"]
 
 [profile.dev]
 opt-level = 0

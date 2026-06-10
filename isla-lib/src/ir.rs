@@ -57,6 +57,8 @@ use crate::memory::Memory;
 use crate::primop::{self, Binary, Primops, Unary, Variadic};
 use crate::smt::{smtlib, Accessor, EnumMember, Solver, Sym};
 use crate::source_loc::SourceLoc;
+#[cfg(feature = "tracetool")]
+use crate::tracetool::itrace::ItraceHandler;
 use crate::zencode;
 
 pub mod linearize;
@@ -1109,6 +1111,9 @@ pub struct SharedState<'ir, B> {
     /// `trace_functions` defines a set of functions which we include
     /// in the traces as function call and return events
     pub trace_functions: HashSet<Name>,
+    #[cfg(feature = "tracetool")]
+    /// 指令执行轨迹输出 handler。
+    pub itrace: ItraceHandler,
     /// `reset_registers` are reset values for each register
     /// derived from the ISA config
     pub reset_registers: Vec<(Loc<Name>, Reset<B>)>,
@@ -1172,6 +1177,30 @@ impl IRTypeInfo {
 }
 
 impl<'ir, B: BV> SharedState<'ir, B> {
+    pub fn empty(symtab: Symtab<'ir>) -> Self {
+        SharedState {
+            functions: HashMap::default(),
+            externs: HashMap::default(),
+            symtab,
+            type_info: IRTypeInfo {
+                structs: HashMap::default(),
+                enums: HashMap::default(),
+                enum_members: HashMap::default(),
+                unions: HashMap::default(),
+                union_ctors: HashSet::default(),
+            },
+            registers: HashMap::default(),
+            probes: HashSet::new(),
+            probe_functions: HashSet::new(),
+            trace_functions: HashSet::new(),
+            #[cfg(feature = "tracetool")]
+            itrace: ItraceHandler::default(),
+            reset_registers: Vec::new(),
+            reset_constraints: Vec::new(),
+            function_assumptions: Vec::new(),
+        }
+    }
+
     pub fn new(
         symtab: Symtab<'ir>,
         defs: &'ir [Def<Name, B>],
@@ -1224,6 +1253,8 @@ impl<'ir, B: BV> SharedState<'ir, B> {
             probes,
             probe_functions,
             trace_functions,
+            #[cfg(feature = "tracetool")]
+            itrace: ItraceHandler::default(),
             reset_registers,
             reset_constraints,
             function_assumptions,

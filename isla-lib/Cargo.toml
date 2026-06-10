@@ -15,7 +15,9 @@ execution engine as a library.
 """
 
 [features]
+itrace = ["tracetool"]
 smtperf = []
+tracetool = []
 
 [build-dependencies]
 lalrpop = { version = "0.20.2", features = ["lexer"] }

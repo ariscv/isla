@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use isla_lib::bitvector::b64::B64;
 use isla_lib::executor;
-use isla_lib::executor::{LocalFrame, TaskId, TaskState};
+use isla_lib::executor::{ExecutionLimits, LocalFrame, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, Initialized};
 use isla_lib::ir::*;
 use isla_lib::zencode;
@@ -70,7 +70,12 @@ fn isla_main() -> i32 {
 
     let function_id = shared_state.symtab.lookup(&property);
     let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
-    let task_state = TaskState::new();
+    let task_state = TaskState::new().with_execution_limits(
+        ExecutionLimits::default()
+            .with_max_backjumps_per_loop(1000)
+            .with_max_path_depth(1_000_000)
+            .with_max_forks_per_branch(1024),
+    );
     let task = LocalFrame::new(function_id, args, ret_ty, None, instrs)
         .add_lets(&lets)
         .add_regs(&regs)
