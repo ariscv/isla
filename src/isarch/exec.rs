@@ -1,4 +1,4 @@
-use super::clause::get_extension_clauses;
+use super::clause::{get_extension_clauses, normalize_clause_name};
 use super::target::{Target, RISCV};
 use super::{get_all_clause_names, get_assembly_encdec, get_assembly_name, list_instructions};
 use isla_lib::bitvector::BV;
@@ -115,7 +115,7 @@ where
     let mut success = true;
 
     // 添加显式指定的 clause
-    clause_set.extend(clauses.iter().cloned());
+    clause_set.extend(clauses.iter().map(|clause| normalize_clause_name(clause)));
 
     // 添加扩展对应的 clause
     for ext in extensions {
