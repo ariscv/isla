@@ -47,9 +47,6 @@ use isla::isarch;
 use isla::isarch::target::{RISCV, RV32, RV64};
 use opts::CommonOpts;
 
-use isla::isarch::args::test_clause_args_main;
-use isla::isarch::args_yaml::test_clause_args_yaml_main;
-
 /// isarch 支持的子命令
 #[derive(Debug, PartialEq)]
 enum Subcommand {
@@ -59,12 +56,6 @@ enum Subcommand {
     Tree { instruction: String },
     /// 求解具体 ISA 状态值，支持通过 clause/扩展/指令名筛选
     SolveState { clauses: Vec<String>, extensions: Vec<String>, instruction_names: Vec<String>, run_all: bool },
-    /// 调试指令汇编名称列举（替代 debug_instruction feature）
-    DebugInstruction { clause: Option<String> },
-    /// 调试 clause 参数提取（替代 debug_clause_args feature）
-    DebugClauseArgs { clause: Option<String> },
-    /// 导出 clause 参数为 YAML（替代 debug_clause_args_yaml feature）
-    DebugClauseArgsYaml,
 }
 
 /// 从命令行参数解析子命令
@@ -87,9 +78,6 @@ fn parse_subcommand(matches: &getopts::Matches) -> Result<Subcommand, String> {
             let run_all = matches.opt_present("all");
             Ok(Subcommand::SolveState { clauses, extensions, instruction_names, run_all })
         }
-        "debug-instruction" => Ok(Subcommand::DebugInstruction { clause: matches.free.get(1).cloned() }),
-        "debug-clause-args" => Ok(Subcommand::DebugClauseArgs { clause: matches.free.get(1).cloned() }),
-        "debug-clause-args-yaml" => Ok(Subcommand::DebugClauseArgsYaml),
         other => Err(format!("未知命令 '{}'", other)),
     }
 }
@@ -107,9 +95,6 @@ fn print_usage(opts: &getopts::Options) -> ! {
                    tree <instruction>                   Show execution path tree\n\
                    solve-state [--clause|--extension|--instruction-name|--all]\n\
                                                         Solve for concrete ISA state values\n\
-                   debug-instruction [<clause>]         Debug instruction assembly name listing\n\
-                   debug-clause-args [<clause>]         Debug clause argument extraction\n\
-                   debug-clause-args-yaml               Export clause args to YAML files\n\
                  \n\
                  solve-state filters:\n\
                    --clause <name>                      Specify clause(s) to execute (repeatable)\n\
@@ -386,19 +371,6 @@ fn isla_main() -> i32 {
                 1
             }
         }
-        Subcommand::DebugInstruction { clause } => {
-            let clause_name = clause.as_deref().unwrap_or("zRTYPE");
-            isarch::test_instruction_list_main(shared_state, regs, lets, clause_name);
-            0
-        }
-        Subcommand::DebugClauseArgs { clause: _ } => {
-            test_clause_args_main(shared_state, regs, lets);
-            0
-        }
-        Subcommand::DebugClauseArgsYaml => {
-            test_clause_args_yaml_main(shared_state, regs, lets);
-            0
-        }
     }
 }
 
@@ -530,38 +502,26 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_instruction_no_clause() {
+    fn test_debug_instruction_removed() {
         let matches = make_matches(&["debug-instruction"]);
-        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::DebugInstruction { clause: None });
+        let result = parse_subcommand(&matches);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("debug-instruction"));
     }
 
     #[test]
-    fn test_debug_instruction_with_clause() {
-        let matches = make_matches(&["debug-instruction", "zRTYPE"]);
-        assert_eq!(
-            parse_subcommand(&matches).unwrap(),
-            Subcommand::DebugInstruction { clause: Some("zRTYPE".to_string()) }
-        );
-    }
-
-    #[test]
-    fn test_debug_clause_args_no_clause() {
+    fn test_debug_clause_args_removed() {
         let matches = make_matches(&["debug-clause-args"]);
-        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::DebugClauseArgs { clause: None });
+        let result = parse_subcommand(&matches);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("debug-clause-args"));
     }
 
     #[test]
-    fn test_debug_clause_args_with_clause() {
-        let matches = make_matches(&["debug-clause-args", "zSTORE"]);
-        assert_eq!(
-            parse_subcommand(&matches).unwrap(),
-            Subcommand::DebugClauseArgs { clause: Some("zSTORE".to_string()) }
-        );
-    }
-
-    #[test]
-    fn test_debug_clause_args_yaml() {
+    fn test_debug_clause_args_yaml_removed() {
         let matches = make_matches(&["debug-clause-args-yaml"]);
-        assert_eq!(parse_subcommand(&matches).unwrap(), Subcommand::DebugClauseArgsYaml);
+        let result = parse_subcommand(&matches);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("debug-clause-args-yaml"));
     }
 }
