@@ -1,6 +1,8 @@
 pub mod args;
 pub mod args_yaml;
 pub mod clause;
+pub mod context_execution;
+pub mod context_state;
 pub mod exec;
 pub mod memory_builder;
 pub mod target;
@@ -878,7 +880,8 @@ pub fn test_instruction_list_main<B: BV>(
 
 /// 枚举类型中所有枚举字段的具体值组合，非枚举字段使用具体默认值
 /// 不创建 solver/symbolic 值，仅使用具体值
-fn enumerate_concrete_values<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Vec<Val<B>> {
+pub(crate) fn enumerate_concrete_values<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B>) -> Vec<Val<B>> {
+    // 该函数用于把 clause 参数类型展开成可汇编的具体候选。
     match ty {
         Ty::Unit => vec![Val::Unit],
         Ty::Enum(enum_name) => {

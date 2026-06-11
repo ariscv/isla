@@ -30,3 +30,5 @@ output/
 .*/
 .sisyphus/
 __pycache__/
+
+logs_todo/

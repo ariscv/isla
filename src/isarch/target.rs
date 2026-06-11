@@ -1,13 +1,20 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use isla_lib::bitvector::BV;
 use isla_lib::config::{PmpConfig, PmpMode};
 use isla_lib::error::ExecError;
-use isla_lib::ir::{IRTypeInfo, Name, SharedState, Symtab, Val};
+use isla_lib::executor::LocalFrame;
+use isla_lib::ir::{IRTypeInfo, Name, SharedState, Symtab, Ty, Val};
 use isla_lib::register::RegisterBindings;
-use isla_lib::smt::{smtlib, Solver};
+use isla_lib::smt::smtlib::{bits64, Exp};
+use isla_lib::smt::{smtlib, Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
+
+use super::context_state::GVAccessor;
+
+pub type TranslationTableInfo = (Range<u64>, u64, u64);
 
 pub trait Target
 where
@@ -17,6 +24,193 @@ where
     fn arch_pretty_name(&self) -> &'static str;
     fn xlen(&self) -> &'static str;
     fn isa_state_list(&self) -> Vec<String>;
+
+    /// 返回 Sail 模型初始化寄存器使用的函数名。
+    fn init_function(&self) -> String {
+        // RISC-V IR 中初始化函数名会通过 zencode 编码后查找。
+        "initialize_registers".to_string()
+    }
+
+    /// 返回 testgen 执行单条指令时使用的默认起始 PC。
+    fn default_init_pc(&self) -> u64 {
+        // 该地址同时作为符号代码区的起点。
+        0x8010_0000
+    }
+
+    /// 返回目标架构地址位宽。
+    fn addr_size(&self) -> u32 {
+        // 默认直接复用 xlen；解析失败时保守退回 64 位。
+        self.xlen().parse().unwrap_or(64)
+    }
+
+    /// 返回需要符号化并纳入上下文观察的寄存器列表。
+    fn regs(&self) -> Vec<(String, Vec<GVAccessor<String>>)> {
+        // 当前只支持 bitvector 形态的通用寄存器、浮点寄存器和 PC。
+        self.isa_state_list()
+            .into_iter()
+            .filter(|reg| {
+                reg == "PC"
+                    || reg.strip_prefix('x').map(|suffix| suffix.chars().all(|c| c.is_ascii_digit())).unwrap_or(false)
+                    || reg.strip_prefix('f').map(|suffix| suffix.chars().all(|c| c.is_ascii_digit())).unwrap_or(false)
+            })
+            .map(|reg| (reg, vec![]))
+            .collect()
+    }
+
+    /// 返回即使 trace 未提及也必须输出的关键寄存器。
+    fn essential_regs(&self) -> Vec<(String, Vec<GVAccessor<String>>)> {
+        // RISC-V 当前没有额外强制输出的系统寄存器。
+        vec![]
+    }
+
+    /// 为特殊寄存器提供自定义初始化逻辑。
+    fn special_reg_init<'ctx, 'ir, B: BV>(
+        &self,
+        _reg: &str,
+        _acc: &Vec<GVAccessor<String>>,
+        _ty: &Ty<Name>,
+        _shared_state: &SharedState<'ir, B>,
+        _frame: &mut LocalFrame<'ir, B>,
+        _ctx: &'ctx isla_lib::smt::Context,
+        _solver: &mut Solver<'ctx, B>,
+    ) -> Option<(Sym, Val<B>)> {
+        // 默认没有特殊寄存器，调用方会走通用符号化路径。
+        None
+    }
+
+    /// 为特殊寄存器提供自定义 post-state 编码逻辑。
+    fn special_reg_encode<'ctx, 'ir, B: BV>(
+        &self,
+        _reg: &str,
+        _acc: &Vec<GVAccessor<String>>,
+        _ty: &Ty<Name>,
+        _shared_state: &SharedState<'ir, B>,
+        _frame: &mut LocalFrame<'ir, B>,
+        _ctx: &'ctx isla_lib::smt::Context,
+        _solver: &mut Solver<'ctx, B>,
+    ) -> Option<Val<B>> {
+        // 默认直接读取寄存器当前值，不做额外编码。
+        None
+    }
+
+    /// 在寄存器符号化后执行目标架构额外初始化。
+    fn init<'ir, B: BV>(
+        &self,
+        _shared_state: &SharedState<'ir, B>,
+        _frame: &mut LocalFrame<'ir, B>,
+        _solver: &mut Solver<B>,
+        _init_pc: u64,
+        _regs: &HashMap<(String, Vec<GVAccessor<String>>), Sym>,
+    ) {
+        // RISC-V 当前没有额外初始化约束。
+    }
+
+    /// 单条指令执行完成后执行目标架构额外处理。
+    fn post_instruction<'ir, B: BV>(
+        &self,
+        _shared_state: &SharedState<'ir, B>,
+        _frame: &mut LocalFrame<'ir, B>,
+        _solver: &mut Solver<B>,
+    ) {
+        // RISC-V 当前不需要额外 post-instruction 处理。
+    }
+
+    /// 返回用于特殊翻译表建模的信息。
+    fn translation_table_info(&self) -> Option<TranslationTableInfo> {
+        // RISC-V 当前不使用 testgen 的独立 translation table 建模。
+        None
+    }
+
+    /// 返回 PC 对齐粒度的 2 的幂。
+    fn pc_alignment_pow() -> u32 {
+        // RISC-V 启用压缩指令时按 2 字节对齐。
+        1
+    }
+
+    /// 返回 IR 中 PC 寄存器的编码名和 accessor。
+    fn pc_reg(&self) -> (String, Vec<GVAccessor<String>>) {
+        // 当前调用方直接查 symtab，因此这里返回 zencode 后的 zPC。
+        ("zPC".to_string(), vec![])
+    }
+
+    /// 返回通用整数寄存器数量。
+    fn number_gprs() -> u32 {
+        // RISC-V 有 32 个 x 寄存器。
+        32
+    }
+
+    /// 判断 IR 寄存器名是否为 RISC-V GPR，并返回编号。
+    fn is_gpr(name: &str) -> Option<u32> {
+        // IR 名称已经是 zencode 形式，例如 zx0。
+        name.strip_prefix("zx").and_then(|reg| reg.parse().ok())
+    }
+
+    /// 返回需要作为异常边界停止的 Sail 函数名。
+    fn exception_stop_functions() -> Vec<String> {
+        // 保留通用 trap/exception handler 名称，避免异常路径继续扩展。
+        vec!["trap_handler".to_string(), "exception_handler".to_string()]
+    }
+
+    /// 对执行结束后的 frame/solver 做目标架构后处理。
+    fn postprocess<'ir, B: BV>(
+        &self,
+        _shared_state: &SharedState<'ir, B>,
+        _frame: &LocalFrame<'ir, B>,
+        _solver: &mut Solver<B>,
+    ) -> Result<(), String> {
+        // 默认认为执行结束状态已经可用于上下文提取。
+        Ok(())
+    }
+
+    /// 返回 capability 地址清 tag 时使用的地址掩码。
+    fn capability_address_mask() -> u64 {
+        // RISC-V 无 capability tag 对齐需求。
+        0
+    }
+
+    /// 返回执行单条指令时调用的 Sail step 函数名。
+    fn run_instruction_function() -> String {
+        // RISC-V Sail 模型从 hart 运行函数进入取指执行流程。
+        "run_hart_active".to_string()
+    }
+
+    /// 返回 RISC-V step 函数所需的默认参数。
+    fn run_instruction_args<B: BV>() -> Vec<Val<B>> {
+        // run_hart_active 的 hart id 固定为 0。
+        vec![Val::I128(0)]
+    }
+
+    /// 返回 harness 收尾用的最终指令 opcode。
+    fn final_instruction<B: BV>(&self, _exit_register: u32) -> B {
+        // ebreak 作为默认终止指令。
+        B::from_u32(0x0010_0073)
+    }
+}
+
+/// 构造翻译表范围内内存读取的 SMT 等式约束。
+pub fn translation_table_exp(
+    tt_info: &TranslationTableInfo,
+    read_exp: smtlib::Exp<Sym>,
+    addr_exp: smtlib::Exp<Sym>,
+    bytes: u32,
+) -> smtlib::Exp<Sym> {
+    // 只为给定地址范围和 entry 生成一个小型 ITE 约束。
+    let (addresses, tt_base, entry) = tt_info;
+    let bits = 8 * bytes;
+    let mask: u64 = 0xffff_ffff_ffff_ffff >> (64 - bits);
+    let address_prop = Exp::And(
+        Box::new(Exp::Bvule(Box::new(bits64(addresses.start, 64)), Box::new(addr_exp.clone()))),
+        Box::new(Exp::Bvult(Box::new(addr_exp.clone()), Box::new(bits64(addresses.end, 64)))),
+    );
+    let mut value_exp = bits64(0, bits);
+    for byte in (0..8).rev() {
+        value_exp = Exp::Ite(
+            Box::new(Exp::Eq(Box::new(addr_exp.clone()), Box::new(bits64(*tt_base + byte, 64)))),
+            Box::new(bits64((*entry >> (byte * 8)) & mask, bits)),
+            Box::new(value_exp),
+        );
+    }
+    Exp::And(Box::new(address_prop), Box::new(Exp::Eq(Box::new(read_exp), Box::new(value_exp))))
 }
 
 pub trait RISCV: Target {

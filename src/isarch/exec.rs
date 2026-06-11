@@ -1,17 +1,24 @@
 use super::clause::get_extension_clauses;
+use super::context_execution::{init_model, run_model_instruction, setup_init_regs, setup_opcode};
+use super::context_state::{interrogate_model, GVAccessor, GroundVal, PrePostStates};
 use super::target::{Target, RISCV};
-use super::{get_all_clause_names, get_assembly_encdec, get_assembly_name, list_instructions};
+use super::{
+    enumerate_concrete_values, get_all_clause_names, get_assembly_encdec, get_assembly_name, list_instructions,
+};
+use isla_axiomatic::litmus::assemble_instruction;
 use isla_lib::bitvector::BV;
+use isla_lib::config::ISAConfig;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
-use isla_lib::executor::{backtrace_string, Run};
+use isla_lib::executor::{backtrace_string, Frame, Run, StopAction, StopConditions};
 use isla_lib::executor::{ExecutionLimits, LimitBehavior, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
 use isla_lib::log;
+use isla_lib::memory::{Address, Memory};
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
-use isla_lib::smt::{Config, Context, Model};
+use isla_lib::smt::{Checkpoint, Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
@@ -32,6 +39,8 @@ struct AssemGenJsonItem {
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
     ret_val: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ExecutionContextJson>,
 }
 impl AssemGenJsonItem {
     pub fn new<T: Target>(
@@ -41,13 +50,63 @@ impl AssemGenJsonItem {
         isa_state: BTreeMap<String, String>,
         ret_val: String,
     ) -> Self {
+        Self::with_context(target, test_ins, test_ins_encdec, isa_state, ret_val, None)
+    }
+
+    pub fn with_context<T: Target>(
+        target: &T,
+        test_ins: String,
+        test_ins_encdec: String,
+        isa_state: BTreeMap<String, String>,
+        ret_val: String,
+        context: Option<ExecutionContextJson>,
+    ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val }
+        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, context }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct MemoryBytesJson {
+    start: u64,
+    end: u64,
+    bytes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MemoryTagsJson {
+    start: u64,
+    end: u64,
+    tags: Vec<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TagWriteJson {
+    address: u64,
+    tag: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExecutionContextJson {
+    code: Vec<MemoryBytesJson>,
+    #[serde(rename = "pre-memory")]
+    pre_memory: Vec<MemoryBytesJson>,
+    #[serde(rename = "pre-tag-memory")]
+    pre_tag_memory: Vec<MemoryTagsJson>,
+    #[serde(rename = "pre-registers")]
+    pre_registers: BTreeMap<String, String>,
+    #[serde(rename = "post-memory")]
+    post_memory: Vec<MemoryBytesJson>,
+    #[serde(rename = "post-tag-memory")]
+    post_tag_memory: Vec<TagWriteJson>,
+    #[serde(rename = "post-registers")]
+    post_registers: BTreeMap<String, String>,
+    #[serde(rename = "instruction-locations")]
+    instruction_locations: BTreeMap<String, String>,
 }
 trait ToJSON: Serialize {
     #[allow(dead_code)]
@@ -77,9 +136,172 @@ struct AssemGenJson {
 impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
+    /// 创建 solve-state 输出 JSON 的顶层结构。
     fn new(gen: Vec<AssemGenJsonItem>) -> Self {
+        // 这里只包装 gen 列表，具体字段由 AssemGenJsonItem 承载。
         AssemGenJson { gen }
     }
+}
+
+/// 把寄存器名和 accessor 路径拼成 JSON 中使用的键。
+fn regacc_key(reg: &str, acc: &[GVAccessor<&str>]) -> String {
+    // 先解码寄存器名，再追加字段或元素下标。
+    let mut parts = vec![zencode::decode(reg)];
+    parts.extend(acc.iter().map(|acc| match acc {
+        GVAccessor::Field(field) => zencode::decode(field),
+        GVAccessor::Element(index) => index.to_string(),
+    }));
+    parts.join(".")
+}
+
+/// 把内部字节内存区间转换为 JSON 结构。
+fn memory_bytes_json(ranges: Vec<(std::ops::Range<Address>, Vec<u8>)>) -> Vec<MemoryBytesJson> {
+    // 字节使用十六进制字符串，便于外部模块直接消费。
+    ranges
+        .into_iter()
+        .map(|(range, bytes)| MemoryBytesJson {
+            start: range.start,
+            end: range.end,
+            bytes: bytes.into_iter().map(|byte| format!("0x{:02x}", byte)).collect(),
+        })
+        .collect()
+}
+
+/// 把内部 tag 内存区间转换为 JSON 结构。
+fn memory_tags_json(ranges: Vec<(std::ops::Range<Address>, Vec<bool>)>) -> Vec<MemoryTagsJson> {
+    // tag 本身就是 bool，保持原样输出。
+    ranges.into_iter().map(|(range, tags)| MemoryTagsJson { start: range.start, end: range.end, tags }).collect()
+}
+
+/// 把内部寄存器具体值转换为 JSON 键值表。
+fn registers_json<B: BV>(
+    registers: std::collections::HashMap<(&str, Vec<GVAccessor<&str>>), GroundVal<B>>,
+) -> BTreeMap<String, String> {
+    // 使用 BTreeMap 保证输出稳定排序。
+    registers.into_iter().map(|((reg, acc), value)| (regacc_key(reg, &acc), value.to_string())).collect()
+}
+
+/// 把 testgen 风格的 pre/post 状态转换为当前 JSON 的 context 字段。
+fn context_json<B: BV>(states: PrePostStates<B>) -> ExecutionContextJson {
+    // 这里仅做结构转换，不再参与求解。
+    ExecutionContextJson {
+        code: memory_bytes_json(states.code),
+        pre_memory: memory_bytes_json(states.pre_memory),
+        pre_tag_memory: memory_tags_json(states.pre_tag_memory),
+        pre_registers: registers_json(states.pre_registers),
+        post_memory: memory_bytes_json(states.post_memory),
+        post_tag_memory: states
+            .post_tag_memory
+            .into_iter()
+            .map(|(address, tag)| TagWriteJson { address, tag })
+            .collect(),
+        post_registers: registers_json(states.post_registers),
+        instruction_locations: states
+            .instruction_locations
+            .into_iter()
+            .map(|(address, description)| (format!("0x{:x}", address), description))
+            .collect(),
+    }
+}
+
+/// 规范化 Sail 输出的 RISC-V 汇编字符串，使其能被外部 assembler 接受。
+fn normalize_riscv_assembly_for_assembler(instruction: &str) -> String {
+    // GNU assembler 不接受 fence 0,0 形式，等价改写成 fence。
+    let trimmed = instruction.trim();
+    if trimmed == "fence 0, 0" || trimmed == "fence 0,0" {
+        "fence".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 把汇编字符串或十六进制 opcode 字符串转换为 Isla bitvector opcode。
+fn instruction_opcode_from_asm<B: BV>(instruction: &str, isa_config: &ISAConfig<B>) -> Result<B, ExecError> {
+    // 0x 前缀直接解析；其他字符串交给 RISC-V assembler。
+    if let Some(hex) = instruction.strip_prefix("0x") {
+        B::from_str(&format!("0x{}", hex.split_whitespace().next().unwrap_or(hex)))
+            .ok_or_else(|| ExecError::Type(format!("无法解析指令 opcode: {}", instruction), SourceLoc::unknown()))
+    } else {
+        let normalized_instruction = normalize_riscv_assembly_for_assembler(instruction);
+        let mut bytes = assemble_instruction(&normalized_instruction, isa_config)
+            .map_err(|msg| ExecError::Type(format!("无法汇编指令 '{}': {}", instruction, msg), SourceLoc::unknown()))?;
+        bytes.reverse();
+        Ok(B::from_bytes(&bytes))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// 对单条具体汇编指令执行“放入内存、跑模型、提取上下文”的完整流程。
+fn solve_assembly_context<'ir, B, T>(
+    target: &'ir T,
+    shared_state: &'ir SharedState<'ir, B>,
+    initial_frame: &Frame<'ir, B>,
+    initial_checkpoint: Checkpoint<B>,
+    register_map: &std::collections::HashMap<(String, Vec<GVAccessor<String>>), Sym>,
+    register_types: &std::collections::HashMap<Name, Ty<Name>>,
+    isa_config: &ISAConfig<B>,
+    symbolic_regions: &[std::ops::Range<Address>],
+    symbolic_code_regions: &[std::ops::Range<Address>],
+    instruction: &str,
+    num_threads: usize,
+) -> Result<Vec<AssemGenJsonItem>, ExecError>
+where
+    B: BV,
+    T: RISCV,
+{
+    // 先把汇编转 opcode，再把 opcode 约束到当前 PC 的指令内存读取上。
+    let opcode = instruction_opcode_from_asm(instruction, isa_config)?;
+    let (opcode_pc, opcode_var, opcode_checkpoint, opcode_ok) =
+        setup_opcode(target, shared_state, initial_frame, opcode, None, initial_checkpoint);
+    if !opcode_ok {
+        return Err(ExecError::Z3Error(format!("指令 '{}' 放入内存后约束不可满足", instruction)));
+    }
+
+    let stop_conditions = StopConditions::new();
+    let exception_stop_conditions =
+        StopConditions::parse(T::exception_stop_functions(), shared_state, StopAction::Kill);
+    let all_stop_conditions = stop_conditions.union(&exception_stop_conditions);
+    let continuations = run_model_instruction(
+        target,
+        &T::run_instruction_function(),
+        num_threads,
+        shared_state,
+        initial_frame,
+        opcode_checkpoint,
+        opcode_var,
+        &all_stop_conditions,
+        false,
+        &None,
+    );
+
+    if continuations.is_empty() {
+        return Err(ExecError::Unreachable(format!("指令 '{}' 没有可行执行路径", instruction)));
+    }
+
+    let (frame, checkpoint) = continuations.into_iter().next().unwrap();
+    let states = interrogate_model(
+        target,
+        isa_config,
+        checkpoint,
+        shared_state,
+        initial_frame,
+        &frame,
+        register_types,
+        symbolic_regions,
+        symbolic_code_regions,
+        true,
+        register_map,
+        &[(opcode_pc.clone(), instruction.to_string())],
+    )?;
+
+    Ok(vec![AssemGenJsonItem::with_context(
+        target,
+        instruction.to_string(),
+        instruction.to_string(),
+        BTreeMap::new(),
+        "unit".to_string(),
+        Some(context_json(states)),
+    )])
 }
 
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
@@ -92,13 +314,16 @@ fn clause_itrace_output_path(base_path: &Path, clause: &str) -> PathBuf {
     base_path.with_file_name(new_name)
 }
 
-/// solve-state 子命令的主入口函数
-/// 支持通过 clause 名、扩展名、汇编指令名或 --all 来筛选需要符号执行的 clause
+/// solve-state 子命令的主入口函数，枚举目标 clause 并输出带 context 的 JSON。
+/// 支持通过 clause 名、扩展名、汇编指令名或 --all 来筛选需要符号执行的 clause。
 pub fn solve_state_main<B, T>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
+    isa_config: &ISAConfig<B>,
+    register_types: &std::collections::HashMap<Name, Ty<Name>>,
+    num_threads: usize,
     target: &T,
     clauses: &[String],
     extensions: &[String],
@@ -111,6 +336,7 @@ where
     B: BV,
     T: RISCV,
 {
+    // 先汇总用户指定的筛选条件，得到最终要处理的 clause 集合。
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
 
@@ -167,6 +393,35 @@ where
     let num_clauses = clause_set.len();
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
 
+    // 当前 testgen 路径自行构造符号内存，因此丢弃旧入口传入的初始内存。
+    drop(initial_memory);
+
+    // 数据内存和代码内存分开建模，代码区从目标默认 PC 开始。
+    let symbolic_regions = vec![0x8031_0000..0x8041_0000];
+    let symbolic_code_regions = vec![target.default_init_pc()..target.default_init_pc() + 0x10000];
+    let mut memory = Memory::new();
+    for region in &symbolic_regions {
+        memory.add_symbolic_region(region.clone());
+    }
+    for region in &symbolic_code_regions {
+        memory.add_symbolic_code_region(region.clone());
+    }
+
+    // 初始化 Sail 模型，并把需要观察的寄存器符号化。
+    let mut init_lets = lets.clone();
+    init_lets.insert(ELF_ENTRY, UVal::Init(Val::I128(target.default_init_pc() as i128)));
+    let (initial_frame, initial_checkpoint) =
+        init_model(shared_state, init_lets, regs.clone(), &memory, &target.init_function());
+    let (initial_frame, initial_checkpoint, register_map) = setup_init_regs(
+        shared_state,
+        initial_frame,
+        initial_checkpoint,
+        register_types,
+        target.default_init_pc(),
+        target,
+        &[],
+    );
+
     for clause in clause_set {
         #[cfg(feature = "tracetool")]
         if let Some(base_path) = &itrace_path {
@@ -179,14 +434,37 @@ where
             }
         }
 
-        match run_symbolic_execute_with_target(target, &clause, shared_state, regs, lets, initial_memory.clone()) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("错误: clause '{}' 符号执行失败: {}", clause, e);
-                log!(log::SYM_EXEC, &format!("solve_state: {}运行错误 {}", clause, e));
-                success = false;
+        let instructions = full_assembly_candidates_for_clause(&clause, shared_state, regs, lets);
+        if instructions.is_empty() {
+            eprintln!("错误: clause '{}' 没有可汇编的候选指令", clause);
+            success = false;
+            continue;
+        }
+
+        let mut gen = Vec::new();
+        for instruction in instructions {
+            match solve_assembly_context(
+                target,
+                shared_state,
+                &initial_frame,
+                initial_checkpoint.clone(),
+                &register_map,
+                register_types,
+                isa_config,
+                &symbolic_regions,
+                &symbolic_code_regions,
+                &instruction,
+                num_threads,
+            ) {
+                Ok(mut items) => gen.append(&mut items),
+                Err(e) => {
+                    eprintln!("错误: clause '{}' 指令 '{}' 上下文提取失败: {}", clause, instruction, e);
+                    log!(log::SYM_EXEC, &format!("solve_state: {} {} 上下文提取错误 {}", clause, instruction, e));
+                    success = false;
+                }
             }
         }
+        AssemGenJson::new(gen).to_json(Some(format!("output/{}_{}.json", target.arch_pretty_name(), clause)));
 
         #[cfg(feature = "tracetool")]
         if itrace_path.is_some() {
@@ -195,6 +473,35 @@ where
     }
 
     success
+}
+
+/// 枚举某个 clause 能生成的完整汇编候选字符串。
+fn full_assembly_candidates_for_clause<B: BV>(
+    clause: &str,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Vec<String> {
+    // 先在 zinstruction union 中找到 clause 的构造器类型。
+    let instruction_union = shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction"));
+    let Some(union_members) = instruction_union else {
+        return vec![];
+    };
+    let ctor_name = shared_state.symtab.lookup(clause);
+    let Some((_, ctor_ty)) = union_members.iter().find(|(name, _)| *name == ctor_name) else {
+        return vec![];
+    };
+
+    let mut instructions = HashSet::new();
+    for arg_value in enumerate_concrete_values(ctor_ty, shared_state) {
+        let instr_value = Val::Ctor(ctor_name, Box::new(arg_value));
+        if let Some(asm) = get_assembly_name(instr_value, shared_state, regs, lets) {
+            instructions.insert(asm);
+        }
+    }
+    let mut instructions: Vec<_> = instructions.into_iter().collect();
+    instructions.sort();
+    instructions
 }
 
 #[allow(non_snake_case)]
@@ -583,5 +890,16 @@ mod tests {
         let base = PathBuf::from("output/itrace");
         let result = clause_itrace_output_path(&base, "zsub");
         assert_eq!(result, PathBuf::from("output/itrace_zsub.txt"));
+    }
+
+    #[test]
+    fn normalize_riscv_assembly_accepts_numeric_fence_zero_masks() {
+        assert_eq!(normalize_riscv_assembly_for_assembler("fence 0, 0"), "fence");
+        assert_eq!(normalize_riscv_assembly_for_assembler("fence 0,0"), "fence");
+    }
+
+    #[test]
+    fn normalize_riscv_assembly_preserves_other_instructions() {
+        assert_eq!(normalize_riscv_assembly_for_assembler(" add x1, x2, x3 "), "add x1, x2, x3");
     }
 }

@@ -295,7 +295,7 @@ fn isla_main() -> i32 {
         }
     };
 
-    let CommonOpts { num_threads: _, mut arch, symtab, type_info, mut isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     let assertion_mode = AssertionMode::Optimistic;
@@ -310,6 +310,14 @@ fn isla_main() -> i32 {
                 .unwrap();
         }
     }
+
+    let register_types: std::collections::HashMap<isla_lib::ir::Name, isla_lib::ir::Ty<isla_lib::ir::Name>> = arch
+        .iter()
+        .filter_map(|def| match def {
+            isla_lib::ir::Def::Register(reg, ty, _) => Some((*reg, ty.clone())),
+            _ => None,
+        })
+        .collect();
 
     let iarch = initialize_architecture(&mut arch, symtab, type_info, &isa_config, assertion_mode, use_model_reg_init);
     let iarch_config = InitArchWithConfig::from_initialized(&iarch, &isa_config);
@@ -350,6 +358,9 @@ fn isla_main() -> i32 {
                         regs,
                         lets,
                         initial_memory,
+                        &isa_config,
+                        &register_types,
+                        num_threads,
                         &target,
                         &clauses,
                         &extensions,
@@ -370,6 +381,9 @@ fn isla_main() -> i32 {
                         regs,
                         lets,
                         initial_memory,
+                        &isa_config,
+                        &register_types,
+                        num_threads,
                         &target,
                         &clauses,
                         &extensions,
