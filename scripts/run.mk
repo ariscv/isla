@@ -52,10 +52,16 @@ ZIMOP_MOP_RR ZIP ZVABDTYPE ZVKSHA2TYPE ZVKSM4RTYPE ZVWABDATYPE
 build-isarch:
 	cargo build --release --bin isarch
 solve-%: build-isarch
-	cargo fmt && cp log log.1 \
-		&&cargo build --release --bin isarch \
-		&& bash -c "RUST_BACKTRACE=1 ./target/release/isarch \
-		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/itrace.txt solve-state --clause=$* > $*.log 2> >(tee -a log >&2) "
+	@mkdir -p output/log output/trace outputs
+	@RUST_BACKTRACE=1 timeout 120 ./target/release/isarch \
+		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace.txt solve-state --clause=$* \
+		> output/log/$*.log 2>&1; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then \
+		echo "$* timeout" >> output/status.timeout.log; \
+	else \
+		echo "$* intime" >> output/status.intime.log; \
+	fi
 
 SOLVE_TARGETS=$(addprefix solve-,$(ALL))
 
