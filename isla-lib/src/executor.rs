@@ -1738,8 +1738,7 @@ pub type Collector<'ir, B, R> = dyn 'ir
 pub fn submit_itrace_for_local_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) {
     #[cfg(feature = "tracetool")]
     {
-        let text = frame.itrace_path.render_text(&shared_state.itrace, &shared_state.symtab);
-        shared_state.itrace.submit_path(text);
+        shared_state.itrace.submit_path(&frame.itrace_path, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
     let _ = (frame, shared_state);
@@ -1748,8 +1747,7 @@ pub fn submit_itrace_for_local_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>, sha
 pub fn submit_itrace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {
     #[cfg(feature = "tracetool")]
     {
-        let text = frame.itrace_path.render_text(&shared_state.itrace, &shared_state.symtab);
-        shared_state.itrace.submit_path(text);
+        shared_state.itrace.submit_path(&frame.itrace_path, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
     let _ = (frame, shared_state);

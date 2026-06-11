@@ -44,257 +44,95 @@ impl ItracePerPath {
     }
 }
 
-fn clear_output_file(output_path: &Option<PathBuf>) {
-    let Some(path) = output_path else {
-        return;
+// 识别 `fn name(...) {` 形式的函数头，返回 z-encoded 函数名。
+fn try_parse_fn_header(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("fn ")?;
+    let paren_pos = rest.find('(')?;
+    let name = rest[..paren_pos].trim();
+    Some(name.to_string())
+}
+
+// 用花括号深度判断当前函数体是否结束；IR fixture 中函数体按 `{}` 包围。
+fn count_braces(line: &str) -> i32 {
+    line.chars().fold(0, |acc, ch| match ch {
+        '{' => acc + 1,
+        '}' => acc - 1,
+        _ => acc,
+    })
+}
+
+// 只接受 Isla IR 末尾 source location 的两种形态：纯数字 id，或 `file line:col-line:col`。
+fn is_source_loc(segment: &str) -> bool {
+    if segment.chars().all(|c| c.is_ascii_digit()) {
+        return !segment.is_empty();
+    }
+
+    let mut parts = segment.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    let file = parts.remove(0);
+    if !file.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    let range = parts.remove(0);
+
+    let mut range_parts = range.splitn(2, ':');
+    let Some(line1) = range_parts.next() else {
+        return false;
     };
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .unwrap_or_else(|error| panic!("itrace: 无法创建输出目录 {}: {}", parent.display(), error));
-        }
+    let Some(start_colon_pos) = range_parts.next() else {
+        return false;
+    };
+
+    if !line1.chars().all(|c| c.is_ascii_digit()) {
+        return false;
     }
-    File::create(path).unwrap_or_else(|error| panic!("itrace: 无法创建/清空输出文件 {}: {}", path.display(), error));
+
+    let mut end_parts = start_colon_pos.splitn(2, '-');
+    let Some(char1) = end_parts.next() else {
+        return false;
+    };
+    let Some(line2_colon_char2) = end_parts.next() else {
+        return false;
+    };
+    if end_parts.next().is_some() {
+        return false;
+    }
+
+    if !char1.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    let mut line2_parts = line2_colon_char2.split(':');
+    let Some(line2) = line2_parts.next() else {
+        return false;
+    };
+    let Some(char2) = line2_parts.next() else {
+        return false;
+    };
+    if line2_parts.next().is_some() {
+        return false;
+    }
+
+    line2.chars().all(|c| c.is_ascii_digit()) && char2.chars().all(|c| c.is_ascii_digit())
 }
 
-// ============ ItraceHandler ============
-// 一个 ItraceHandler 对应一次完整的符号执行入口、一个 itrace 输出文件和一个大标题。
-// 在多 clause / --all 场景下，每个 clause 应拥有独立的 handler 生命周期，
-// 以保证各 clause 的 itrace 输出互不干扰（独立文件、独立标题）。
-// 管理输出路径、完成队列和后台写线程，保持执行侧提交逻辑尽量轻量。
+pub fn strip_source_loc(ir_line: &str) -> String {
+    let trimmed = ir_line.trim_end();
 
-pub struct ItraceHandler {
-    title: Mutex<String>,
-    ir_cache: Mutex<IrFileCache>,
-    output_path: Mutex<Option<PathBuf>>,
-    completed_queue: Arc<SegQueue<String>>,
-    shutdown: Arc<AtomicBool>,
-    write_thread: Mutex<Option<JoinHandle<()>>>,
-}
+    if let Some(start) = trimmed.rfind('`') {
+        let suffix = &trimmed[start + 1..];
+        let suffix = suffix.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
 
-impl Default for ItraceHandler {
-    fn default() -> Self {
-        Self {
-            title: Mutex::new(String::new()),
-            ir_cache: Mutex::new(IrFileCache::default()),
-            output_path: Mutex::new(None),
-            completed_queue: Arc::new(SegQueue::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            write_thread: Mutex::new(None),
-        }
-    }
-}
-
-impl Drop for ItraceHandler {
-    fn drop(&mut self) {
-        self.dump();
-    }
-}
-
-impl ItraceHandler {
-    /// Full initialization: read .ir file to build cache, set output path, spawn write thread
-    pub fn init(title: &str, ir_file_path: PathBuf, output_path: Option<PathBuf>, symtab: &Symtab) -> Self {
-        let ir_cache = IrFileCache::from_file(&ir_file_path, symtab);
-        let handler = Self {
-            title: Mutex::new(title.to_string()),
-            ir_cache: Mutex::new(ir_cache),
-            output_path: Mutex::new(output_path.clone()),
-            completed_queue: Arc::new(SegQueue::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            write_thread: Mutex::new(None),
-        };
-        if output_path.is_some() {
-            clear_output_file(&output_path);
-            handler.start_write_thread();
-        }
-        handler
-    }
-
-    pub fn configure(&self, title: &str, ir_file_path: PathBuf, output_path: Option<PathBuf>, symtab: &Symtab) {
-        self.stop_write_thread();
-
-        if let Ok(mut title_lock) = self.title.lock() {
-            *title_lock = title.to_string();
-        }
-
-        let ir_cache = IrFileCache::from_file(&ir_file_path, symtab);
-        if let Ok(mut cache_lock) = self.ir_cache.lock() {
-            *cache_lock = ir_cache;
-        }
-
-        clear_output_file(&output_path);
-        self.set_path(output_path);
-    }
-
-    fn start_write_thread(&self) {
-        let output_path = self.output_path.lock().expect("itrace mutex poisoned").clone();
-        let path = match output_path {
-            Some(p) => p,
-            None => return,
-        };
-
-        let mut thread_handle = self.write_thread.lock().expect("itrace mutex poisoned");
-        if thread_handle.is_some() {
-            return;
-        }
-
-        self.shutdown.store(false, Ordering::Release);
-
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .unwrap_or_else(|error| panic!("itrace: 无法创建输出目录 {}: {}", parent.display(), error));
-            }
-        }
-
-        let queue = Arc::clone(&self.completed_queue);
-        let shutdown = Arc::clone(&self.shutdown);
-        let path_for_error = path.clone();
-
-        let handle = thread::Builder::new()
-            .name("itrace-writer".into())
-            .spawn(move || {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .unwrap_or_else(|error| panic!("itrace: 无法打开输出文件 {}: {}", path.display(), error));
-
-                loop {
-                    match queue.pop() {
-                        Some(text) => {
-                            writeln!(file, "{}", text).unwrap_or_else(|write_error| {
-                                panic!("itrace: 写入输出文件 {} 失败: {}", path.display(), write_error)
-                            });
-                        }
-                        None => {
-                            if shutdown.load(Ordering::Acquire) {
-                                break;
-                            }
-                            thread::yield_now();
-                        }
-                    }
-                }
-
-                // Drain remaining items after shutdown signal
-                while let Some(text) = queue.pop() {
-                    writeln!(file, "{}", text).unwrap_or_else(|write_error| {
-                        panic!("itrace: 写入输出文件 {} 失败: {}", path.display(), write_error)
-                    });
-                }
-                file.flush().unwrap_or_else(|flush_error| {
-                    panic!("itrace: 刷新输出文件 {} 失败: {}", path.display(), flush_error)
-                });
-            })
-            .unwrap_or_else(|spawn_error| {
-                panic!("itrace: 无法启动写入线程 (输出路径 {}): {}", path_for_error.display(), spawn_error)
-            });
-
-        *thread_handle = Some(handle);
-    }
-
-    fn stop_write_thread(&self) {
-        self.shutdown.store(true, Ordering::Release);
-        if let Ok(mut thread_handle) = self.write_thread.lock() {
-            if let Some(handle) = thread_handle.take() {
-                match handle.join() {
-                    Ok(()) => {}
-                    Err(panic_payload) => {
-                        let message = panic_payload
-                            .downcast_ref::<String>()
-                            .map(String::as_str)
-                            .or_else(|| panic_payload.downcast_ref::<&str>().copied())
-                            .unwrap_or("未知写入线程 panic");
-                        panic!("itrace: 写入线程异常退出: {}", message);
-                    }
-                }
-            }
+        if is_source_loc(suffix) {
+            return format!("{};", trimmed[..start].trim_end());
         }
     }
 
-    /// Set output path — compatible with &self call sites (interior mutability via Mutex)
-    pub fn set_path(&self, output_path: Option<PathBuf>) {
-        let current_path = self.output_path.lock().expect("itrace mutex poisoned").clone();
-        if current_path != output_path {
-            self.stop_write_thread();
-        }
-
-        *self.output_path.lock().expect("itrace mutex poisoned") = output_path.clone();
-        let needs_spawn = {
-            let thread_handle = self.write_thread.lock().expect("itrace mutex poisoned");
-            thread_handle.is_none() && output_path.is_some()
-        };
-        if needs_spawn {
-            self.start_write_thread();
-        }
-    }
-
-    /// Push preprocessed text into the SegQueue for the write thread
-    pub fn submit_path(&self, text: String) {
-        self.completed_queue.push(text);
-    }
-
-    pub(crate) fn title(&self) -> String {
-        self.title.lock().map(|title| title.clone()).unwrap_or_default()
-    }
-
-    /// Signal shutdown and join the write thread (flushes remaining data)
-    pub fn dump(&self) {
-        self.stop_write_thread();
-    }
-}
-
-/*
- * Post-processing and presentation
- *
- * 后处理路径负责 IR cache 查找、source location 清洗和标题格式化，优先保证输出整洁可读。
- */
-
-impl ItracePerPath {
-    fn render_title(&self, title: &str, symtab: &Symtab) -> String {
-        if self.branch_conditions.is_empty() {
-            format!("<{}> path({}):", title, title)
-        } else {
-            let branches = self
-                .branch_conditions
-                .iter()
-                .map(|condition| condition.to_itrace_string(symtab))
-                .collect::<Vec<_>>()
-                .join("_");
-            format!("<{}> path({}_branch_{}):", title, title, branches)
-        }
-    }
-
-    pub fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> String {
-        let mut lines = Vec::new();
-        lines.push(self.render_title(&handler.title(), symtab));
-
-        for record in self.records() {
-            let ir_line = handler.lookup_ir_line(record.function_name, record.pc, symtab).unwrap_or_else(|| {
-                let fallback = format!("{}:{} not found", symtab.to_str(record.function_name), record.pc);
-                eprintln!(
-                    "warning: {}, downgrade to fallback itrace text; this path can still be written, but the original IR line is unavailable",
-                    fallback
-                );
-                fallback
-            });
-            lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, ir_line));
-        }
-
-        lines.push(String::new());
-        lines.push("====".to_string());
-        lines.join("\n")
-    }
-}
-
-impl ItraceHandler {
-    pub(crate) fn lookup_ir_line(&self, function_name: Name, pc: u64, symtab: &Symtab) -> Option<String> {
-        let _ = symtab;
-        let Ok(cache) = self.ir_cache.lock() else {
-            return None;
-        };
-        cache.lookup_line(function_name, pc)
-    }
+    ir_line.to_string()
 }
 
 /*
@@ -310,21 +148,21 @@ impl ItraceHandler {
  *    source location，把每个函数体保存成 `Vec<String>`。
  * 3. 函数名通过 `Symtab::get` 转成 `Name`，所以缓存键和执行器记录的
  *    `ItracePerInstr::function_name` 保持一致。
- * 4. 渲染时 `ItracePerPath::render_text` 只调用 `ItraceHandler::lookup_ir_line`；
- *    handler 再持锁委托给 `IrFileCache::lookup_line(function_name, pc)`。
+ * 4. 执行器只调用 `ItraceHandler::submit_path` 提交完成的 path；handler 内部渲染时再
+ *    持锁委托给 `IrFileCache::lookup_line(function_name, pc)`。
  *
  * 例子：
  * - `.ir` 文件中存在 `fn zcache_ok(...) { z0 : %i `1; ... return = z1 `4; }`。
  * - 构建 cache 后，`zcache_ok` 会经 `Symtab::get("zcache_ok")` 转成 `Name`，
  *   函数体非空行会按顺序缓存为 `[ "z0 : %i;", ..., "return = z1;" ]`。
  * - 执行器记录到 `ItracePerInstr { function_name: zcache_ok_name, pc: 3, ... }`
- *   时，渲染阶段会调用 `lookup_ir_line(zcache_ok_name, 3, symtab)`。
+ *   时，handler 内部渲染阶段会调用 `lookup_ir_line(zcache_ok_name, 3, symtab)`。
  * - `lookup_line` 把 `pc = 3` 当作数组下标，返回第 4 条缓存行，例如
  *   `"return = z1;"`；如果下标越界，则返回 `None`，上层输出 `zcache_ok:3 not found`。
  *
  * 使用约定：
  * - 外部代码不要直接访问缓存结构，也不要依赖 `HashMap<Name, Vec<String>>`
- *   这个存储形态；需要查 IR 行时走 `ItraceHandler::lookup_ir_line`。
+ *   这个存储形态；只提交 `ItracePerPath`，由 handler 内部查 IR 行并输出。
  * - `pc` 被当作函数体行向量下标使用，因此 `.ir` 缓存规则必须和
  *   `SharedState` 中同一函数的指令顺序一致。
  * - 构建失败、函数缺失、pc 越界或锁中毒都会返回 `None`，调用方负责降级输出。
@@ -391,97 +229,6 @@ impl IrFileCache {
         let pc_index = usize::try_from(pc).ok()?;
         self.functions.get(&function_name)?.get(pc_index).map(|line| strip_source_loc(line))
     }
-}
-
-// 识别 `fn name(...) {` 形式的函数头，返回 z-encoded 函数名。
-fn try_parse_fn_header(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("fn ")?;
-    let paren_pos = rest.find('(')?;
-    let name = rest[..paren_pos].trim();
-    Some(name.to_string())
-}
-
-// 用花括号深度判断当前函数体是否结束；IR fixture 中函数体按 `{}` 包围。
-fn count_braces(line: &str) -> i32 {
-    line.chars().fold(0, |acc, ch| match ch {
-        '{' => acc + 1,
-        '}' => acc - 1,
-        _ => acc,
-    })
-}
-
-pub fn strip_source_loc(ir_line: &str) -> String {
-    let trimmed = ir_line.trim_end();
-
-    if let Some(start) = trimmed.rfind('`') {
-        let suffix = &trimmed[start + 1..];
-        let suffix = suffix.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
-
-        if is_source_loc(suffix) {
-            return format!("{};", trimmed[..start].trim_end());
-        }
-    }
-
-    ir_line.to_string()
-}
-
-// 只接受 Isla IR 末尾 source location 的两种形态：纯数字 id，或 `file line:col-line:col`。
-fn is_source_loc(segment: &str) -> bool {
-    if segment.chars().all(|c| c.is_ascii_digit()) {
-        return !segment.is_empty();
-    }
-
-    let mut parts = segment.split_whitespace().collect::<Vec<_>>();
-    if parts.len() != 2 {
-        return false;
-    }
-
-    let file = parts.remove(0);
-    if !file.chars().all(|c| c.is_ascii_digit()) {
-        return false;
-    }
-
-    let range = parts.remove(0);
-
-    let mut range_parts = range.splitn(2, ':');
-    let Some(line1) = range_parts.next() else {
-        return false;
-    };
-    let Some(start_colon_pos) = range_parts.next() else {
-        return false;
-    };
-
-    if !line1.chars().all(|c| c.is_ascii_digit()) {
-        return false;
-    }
-
-    let mut end_parts = start_colon_pos.splitn(2, '-');
-    let Some(char1) = end_parts.next() else {
-        return false;
-    };
-    let Some(line2_colon_char2) = end_parts.next() else {
-        return false;
-    };
-    if end_parts.next().is_some() {
-        return false;
-    }
-
-    if !char1.chars().all(|c| c.is_ascii_digit()) {
-        return false;
-    }
-
-    let mut line2_parts = line2_colon_char2.split(':');
-    let Some(line2) = line2_parts.next() else {
-        return false;
-    };
-    let Some(char2) = line2_parts.next() else {
-        return false;
-    };
-    if line2_parts.next().is_some() {
-        return false;
-    }
-
-    line2.chars().all(|c| c.is_ascii_digit()) && char2.chars().all(|c| c.is_ascii_digit())
 }
 
 impl smtlib::Exp<Sym> {
@@ -626,6 +373,311 @@ impl smtlib::Exp<Sym> {
                 index.to_itrace_string(symtab),
                 value.to_itrace_string(symtab)
             ),
+        }
+    }
+}
+
+fn clear_output_file(output_path: &Option<PathBuf>) {
+    let Some(path) = output_path else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|error| panic!("itrace: 无法创建输出目录 {}: {}", parent.display(), error));
+        }
+    }
+    File::create(path).unwrap_or_else(|error| panic!("itrace: 无法创建/清空输出文件 {}: {}", path.display(), error));
+}
+
+// ============ ItraceWriter ============
+// Writer 独立管理输出路径、完成队列和后台写线程。ItraceHandler 只需要把
+// 已完成的 itrace path 交给 writer，不再暴露 String 队列和线程细节。
+
+struct ItraceWriter {
+    output_path: Mutex<Option<PathBuf>>,
+    completed_queue: Arc<SegQueue<String>>,
+    shutdown: Arc<AtomicBool>,
+    write_thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Default for ItraceWriter {
+    fn default() -> Self {
+        Self {
+            output_path: Mutex::new(None),
+            completed_queue: Arc::new(SegQueue::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            write_thread: Mutex::new(None),
+        }
+    }
+}
+
+impl ItraceWriter {
+    fn start_write_thread(&self) {
+        let output_path = self.output_path.lock().expect("itrace mutex poisoned").clone();
+        let path = match output_path {
+            Some(p) => p,
+            None => return,
+        };
+
+        let mut thread_handle = self.write_thread.lock().expect("itrace mutex poisoned");
+        if thread_handle.is_some() {
+            return;
+        }
+
+        self.shutdown.store(false, Ordering::Release);
+
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|error| panic!("itrace: 无法创建输出目录 {}: {}", parent.display(), error));
+            }
+        }
+
+        let queue = Arc::clone(&self.completed_queue);
+        let shutdown = Arc::clone(&self.shutdown);
+        let path_for_error = path.clone();
+
+        let handle = thread::Builder::new()
+            .name("itrace-writer".into())
+            .spawn(move || {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .unwrap_or_else(|error| panic!("itrace: 无法打开输出文件 {}: {}", path.display(), error));
+
+                loop {
+                    match queue.pop() {
+                        Some(text) => {
+                            writeln!(file, "{}", text).unwrap_or_else(|write_error| {
+                                panic!("itrace: 写入输出文件 {} 失败: {}", path.display(), write_error)
+                            });
+                        }
+                        None => {
+                            if shutdown.load(Ordering::Acquire) {
+                                break;
+                            }
+                            thread::yield_now();
+                        }
+                    }
+                }
+
+                // Drain remaining items after shutdown signal
+                while let Some(text) = queue.pop() {
+                    writeln!(file, "{}", text).unwrap_or_else(|write_error| {
+                        panic!("itrace: 写入输出文件 {} 失败: {}", path.display(), write_error)
+                    });
+                }
+                file.flush().unwrap_or_else(|flush_error| {
+                    panic!("itrace: 刷新输出文件 {} 失败: {}", path.display(), flush_error)
+                });
+            })
+            .unwrap_or_else(|spawn_error| {
+                panic!("itrace: 无法启动写入线程 (输出路径 {}): {}", path_for_error.display(), spawn_error)
+            });
+
+        *thread_handle = Some(handle);
+    }
+
+    fn stop_write_thread(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Ok(mut thread_handle) = self.write_thread.lock() {
+            if let Some(handle) = thread_handle.take() {
+                match handle.join() {
+                    Ok(()) => {}
+                    Err(panic_payload) => {
+                        let message = panic_payload
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                            .unwrap_or("未知写入线程 panic");
+                        panic!("itrace: 写入线程异常退出: {}", message);
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_path(&self, output_path: Option<PathBuf>) {
+        let current_path = self.output_path.lock().expect("itrace mutex poisoned").clone();
+        if current_path != output_path {
+            self.stop_write_thread();
+        }
+
+        *self.output_path.lock().expect("itrace mutex poisoned") = output_path.clone();
+        let needs_spawn = {
+            let thread_handle = self.write_thread.lock().expect("itrace mutex poisoned");
+            thread_handle.is_none() && output_path.is_some()
+        };
+        if needs_spawn {
+            self.start_write_thread();
+        }
+    }
+
+    fn configure_path(&self, output_path: Option<PathBuf>) {
+        self.stop_write_thread();
+        clear_output_file(&output_path);
+        self.set_path(output_path);
+    }
+
+    fn with_output_path(output_path: Option<PathBuf>) -> Self {
+        let writer = Self::default();
+        writer.configure_path(output_path);
+        writer
+    }
+
+    fn submit_text(&self, text: String) {
+        self.completed_queue.push(text);
+    }
+
+    fn dump(&self) {
+        self.stop_write_thread();
+    }
+
+    #[cfg(test)]
+    fn has_write_thread(&self) -> bool {
+        self.write_thread.lock().expect("itrace mutex poisoned").is_some()
+    }
+
+    fn output_path(&self) -> Option<PathBuf> {
+        self.output_path.lock().expect("itrace mutex poisoned").clone()
+    }
+}
+
+impl Drop for ItraceWriter {
+    fn drop(&mut self) {
+        self.dump();
+    }
+}
+
+// ============ ItraceHandler ============
+// 一个 ItraceHandler 对应一次完整的符号执行入口、一个 itrace 输出文件和一个大标题。
+// 在多 clause / --all 场景下，每个 clause 应拥有独立的 handler 生命周期，
+// 以保证各 clause 的 itrace 输出互不干扰（独立文件、独立标题）。
+// Handler 管理 itrace 的语义上下文，Writer 管理写入生命周期。
+
+pub struct ItraceHandler {
+    title: Mutex<String>,
+    ir_cache: Mutex<IrFileCache>,
+    writer: ItraceWriter,
+}
+
+impl Default for ItraceHandler {
+    fn default() -> Self {
+        Self {
+            title: Mutex::new(String::new()),
+            ir_cache: Mutex::new(IrFileCache::default()),
+            writer: ItraceWriter::default(),
+        }
+    }
+}
+
+impl ItraceHandler {
+    /// Full initialization: read .ir file to build cache, set output path, spawn write thread
+    pub fn init(title: &str, ir_file_path: PathBuf, output_path: Option<PathBuf>, symtab: &Symtab) -> Self {
+        let ir_cache = IrFileCache::from_file(&ir_file_path, symtab);
+        Self {
+            title: Mutex::new(title.to_string()),
+            ir_cache: Mutex::new(ir_cache),
+            writer: ItraceWriter::with_output_path(output_path),
+        }
+    }
+
+    pub fn configure(&self, title: &str, ir_file_path: PathBuf, output_path: Option<PathBuf>, symtab: &Symtab) {
+        self.writer.dump();
+
+        if let Ok(mut title_lock) = self.title.lock() {
+            *title_lock = title.to_string();
+        }
+
+        let ir_cache = IrFileCache::from_file(&ir_file_path, symtab);
+        if let Ok(mut cache_lock) = self.ir_cache.lock() {
+            *cache_lock = ir_cache;
+        }
+
+        self.writer.configure_path(output_path);
+    }
+
+    /// Set output path — compatible with &self call sites (interior mutability via Mutex)
+    pub fn set_path(&self, output_path: Option<PathBuf>) {
+        self.writer.set_path(output_path);
+    }
+
+    fn title(&self) -> String {
+        self.title.lock().map(|title| title.clone()).unwrap_or_default()
+    }
+
+    fn lookup_ir_line(&self, function_name: Name, pc: u64, symtab: &Symtab) -> Option<String> {
+        let _ = symtab;
+        let Ok(cache) = self.ir_cache.lock() else {
+            return None;
+        };
+        cache.lookup_line(function_name, pc)
+    }
+
+    /// Signal shutdown and join the write thread (flushes remaining data)
+    pub fn dump(&self) {
+        self.writer.dump();
+    }
+}
+
+impl Drop for ItraceHandler {
+    fn drop(&mut self) {
+        self.dump();
+    }
+}
+
+/*
+ * Post-processing and presentation
+ *
+ * 后处理路径负责 IR cache 查找、source location 清洗和标题格式化，优先保证输出整洁可读。
+ */
+
+impl ItracePerPath {
+    fn render_title(&self, title: &str, symtab: &Symtab) -> String {
+        if self.branch_conditions.is_empty() {
+            format!("<{}> path({}):", title, title)
+        } else {
+            let branches = self
+                .branch_conditions
+                .iter()
+                .map(|condition| condition.to_itrace_string(symtab))
+                .collect::<Vec<_>>()
+                .join("_");
+            format!("<{}> path({}_branch_{}):", title, title, branches)
+        }
+    }
+
+    fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
+        handler.writer.output_path()?;
+
+        let mut lines = Vec::new();
+        lines.push(self.render_title(&handler.title(), symtab));
+
+        for record in self.records() {
+            let ir_line = handler.lookup_ir_line(record.function_name, record.pc, symtab).unwrap_or_else(|| {
+                let fallback = format!("{}:{} not found", symtab.to_str(record.function_name), record.pc);
+                eprintln!(
+                    "warning: {}, downgrade to fallback itrace text; this path can still be written, but the original IR line is unavailable",
+                    fallback
+                );
+                fallback
+            });
+            lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, ir_line));
+        }
+
+        lines.push(String::new());
+        lines.push("====".to_string());
+        Some(lines.join("\n"))
+    }
+}
+
+impl ItraceHandler {
+    /// Submit a finished itrace path; rendering and string queueing stay internal to itrace.
+    pub fn submit_path(&self, path: &ItracePerPath, symtab: &Symtab) {
+        if let Some(text) = path.render_text(self, symtab) {
+            self.writer.submit_text(text);
         }
     }
 }
@@ -845,7 +897,15 @@ fn zmissing() {
     #[test]
     fn itrace_per_path_render_text_uses_lookup_and_fallback() {
         let shared_state = parse_shared_state();
-        let handler = ItraceHandler::init("itrace test title", fixture_ir_path(), None, &shared_state.symtab);
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_render_fallback_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        let handler = ItraceHandler::init(
+            "itrace test title",
+            fixture_ir_path(),
+            Some(output_path.clone()),
+            &shared_state.symtab,
+        );
         let mut path = ItracePerPath::default();
         let known_fn = shared_state.symtab.lookup("zcache_ok");
 
@@ -853,7 +913,7 @@ fn zmissing() {
         path.record(known_fn, Vec::new(), 99);
         path.push_branch_condition(smtlib::Exp::<Sym>::Bool(false));
 
-        let text = path.render_text(&handler, &shared_state.symtab);
+        let text = path.render_text(&handler, &shared_state.symtab).expect("render itrace text");
 
         assert!(text.contains("<itrace test title> path(itrace test title_branch_false):"));
         assert!(!text.contains("branch_conditions"));
@@ -861,19 +921,25 @@ fn zmissing() {
         assert!(text.contains("[zcache_ok 0]: z0 : %i;"));
         assert!(text.contains("[zcache_ok 99]: zcache_ok:99 not found"));
         assert!(text.ends_with("\n\n===="));
+
+        drop(handler);
+        let _ = std::fs::remove_file(&output_path);
     }
 
     #[test]
     fn itrace_per_path_render_text_matches_reference_itrace_shape() {
         let shared_state = parse_shared_state();
-        let handler = ItraceHandler::init("zRTYPE", fixture_ir_path(), None, &shared_state.symtab);
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_render_shape_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        let handler = ItraceHandler::init("zRTYPE", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
         let mut path = ItracePerPath::default();
         let zcache_ok = shared_state.symtab.lookup("zcache_ok");
 
         path.record(zcache_ok, Vec::new(), 0);
         path.record(zcache_ok, Vec::new(), 1);
 
-        let text = path.render_text(&handler, &shared_state.symtab);
+        let text = path.render_text(&handler, &shared_state.symtab).expect("render itrace text");
         let expected = "\
 <zRTYPE> path(zRTYPE):
 [zcache_ok 0]: z0 : %i;
@@ -882,6 +948,9 @@ fn zmissing() {
 ====";
 
         assert_eq!(text, expected);
+
+        drop(handler);
+        let _ = std::fs::remove_file(&output_path);
     }
 
     #[test]
@@ -899,7 +968,32 @@ fn zmissing() {
         let mut path = ItracePerPath::default();
 
         path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
-        handler.submit_path(path.render_text(&handler, &shared_state.symtab));
+        handler.submit_path(&path, &shared_state.symtab);
+        handler.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read itrace submit output");
+        assert!(content.contains("<itrace test title> path(itrace test title):"));
+        assert!(content.contains("[zcache_ok 3]: return = z1;"));
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn itrace_handler_submits_itrace_path_without_exposing_rendered_text() {
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_submit_path_api_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        let shared_state = parse_shared_state();
+        let handler = ItraceHandler::init(
+            "itrace test title",
+            fixture_ir_path(),
+            Some(output_path.clone()),
+            &shared_state.symtab,
+        );
+        let mut path = ItracePerPath::default();
+
+        path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
+        handler.submit_path(&path, &shared_state.symtab);
         handler.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read itrace submit output");
@@ -934,8 +1028,8 @@ fn zmissing() {
         second_path.record(zpc_lookup, Vec::new(), 1);
         second_path.record(zpc_lookup, Vec::new(), 5);
 
-        handler.submit_path(first_path.render_text(&handler, &shared_state.symtab));
-        handler.submit_path(second_path.render_text(&handler, &shared_state.symtab));
+        handler.submit_path(&first_path, &shared_state.symtab);
+        handler.submit_path(&second_path, &shared_state.symtab);
         handler.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read itrace integration output");
@@ -1079,8 +1173,23 @@ fn zmissing() {
     #[test]
     fn itrace_handler_default_no_thread() {
         let handler = ItraceHandler::default();
-        assert!(handler.write_thread.lock().expect("mutex").is_none());
-        assert!(handler.output_path.lock().expect("mutex").is_none());
+        assert!(!handler.writer.has_write_thread());
+        assert!(handler.writer.output_path().is_none());
+    }
+
+    #[test]
+    fn itrace_handler_submit_path_without_output_path_does_not_render_or_queue() {
+        let shared_state = parse_shared_state();
+        let handler = ItraceHandler::default();
+        let mut path = ItracePerPath::default();
+
+        path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
+        handler.submit_path(&path, &shared_state.symtab);
+
+        assert!(
+            handler.writer.completed_queue.pop().is_none(),
+            "submit_path should skip rendering when no output path is configured"
+        );
     }
 
     #[test]
@@ -1092,9 +1201,9 @@ fn zmissing() {
         let shared_state = parse_shared_state();
         let handler = ItraceHandler::init("test", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
 
-        handler.submit_path("line1".to_string());
-        handler.submit_path("line2".to_string());
-        handler.submit_path("line3".to_string());
+        handler.writer.submit_text("line1".to_string());
+        handler.writer.submit_text("line2".to_string());
+        handler.writer.submit_text("line3".to_string());
 
         handler.dump();
 
@@ -1115,7 +1224,7 @@ fn zmissing() {
         let shared_state = parse_shared_state();
         let handler = ItraceHandler::init("test", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
 
-        handler.submit_path("data_before_drop".to_string());
+        handler.writer.submit_text("data_before_drop".to_string());
 
         // Drop should trigger dump internally — no panic, no hang
         drop(handler);
@@ -1133,12 +1242,12 @@ fn zmissing() {
         let _ = std::fs::remove_file(&output_path);
 
         let handler = ItraceHandler::default();
-        assert!(handler.write_thread.lock().expect("mutex").is_none());
+        assert!(!handler.writer.has_write_thread());
 
         handler.set_path(Some(output_path.clone()));
-        assert!(handler.write_thread.lock().expect("mutex").is_some(), "Thread should be spawned after set_path");
+        assert!(handler.writer.has_write_thread(), "Thread should be spawned after set_path");
 
-        handler.submit_path("via_set_path".to_string());
+        handler.writer.submit_text("via_set_path".to_string());
         handler.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read");
@@ -1157,12 +1266,12 @@ fn zmissing() {
 
         let handler = ItraceHandler::default();
         handler.set_path(Some(first_path.clone()));
-        handler.submit_path("first-path-line".to_string());
+        handler.writer.submit_text("first-path-line".to_string());
         handler.dump();
 
         handler.set_path(Some(second_path.clone()));
         std::thread::sleep(std::time::Duration::from_millis(20));
-        handler.submit_path("second-path-line".to_string());
+        handler.writer.submit_text("second-path-line".to_string());
         handler.dump();
 
         let first_content = std::fs::read_to_string(&first_path).expect("read first itrace output");
@@ -1190,7 +1299,7 @@ fn zmissing() {
 
         let handler = ItraceHandler::default();
         handler.configure("first title", ir_path.clone(), Some(first_path.clone()), &shared_state.symtab);
-        handler.submit_path("first configured line".to_string());
+        handler.writer.submit_text("first configured line".to_string());
         handler.dump();
 
         handler.configure("second title", ir_path, Some(second_path.clone()), &shared_state.symtab);
@@ -1199,7 +1308,7 @@ fn zmissing() {
         let ir_line = handler
             .lookup_ir_line(zcache_ok, 0, &shared_state.symtab)
             .expect("configured cache should resolve fixture line");
-        handler.submit_path(format!("{}\n{}", handler.title(), ir_line));
+        handler.writer.submit_text(format!("{}\n{}", handler.title(), ir_line));
         handler.dump();
 
         let first_content = std::fs::read_to_string(&first_path).expect("read first configured itrace output");
@@ -1356,7 +1465,7 @@ fn zmissing() {
             ItraceHandler::init("clause_A", fixture_ir_path(), Some(output_a.clone()), &shared_state.symtab);
         let mut path_a = ItracePerPath::default();
         path_a.record(zcache_ok, Vec::new(), 0);
-        handler_a.submit_path(path_a.render_text(&handler_a, &shared_state.symtab));
+        handler_a.submit_path(&path_a, &shared_state.symtab);
         handler_a.dump();
 
         // clause B: 独立 handler，title 为 "clause_B"
@@ -1364,7 +1473,7 @@ fn zmissing() {
             ItraceHandler::init("clause_B", fixture_ir_path(), Some(output_b.clone()), &shared_state.symtab);
         let mut path_b = ItracePerPath::default();
         path_b.record(zpc_lookup, Vec::new(), 1);
-        handler_b.submit_path(path_b.render_text(&handler_b, &shared_state.symtab));
+        handler_b.submit_path(&path_b, &shared_state.symtab);
         handler_b.dump();
 
         let content_a = std::fs::read_to_string(&output_a).expect("read clause A output");
@@ -1399,13 +1508,13 @@ fn zmissing() {
         handler.configure("first_clause", fixture_ir_path(), Some(first_path.clone()), &shared_state.symtab);
         let mut path1 = ItracePerPath::default();
         path1.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
-        handler.submit_path(path1.render_text(&handler, &shared_state.symtab));
+        handler.submit_path(&path1, &shared_state.symtab);
         handler.dump();
 
         handler.configure("second_clause", fixture_ir_path(), Some(second_path.clone()), &shared_state.symtab);
         let mut path2 = ItracePerPath::default();
         path2.record(shared_state.symtab.lookup("zpc_lookup"), Vec::new(), 1);
-        handler.submit_path(path2.render_text(&handler, &shared_state.symtab));
+        handler.submit_path(&path2, &shared_state.symtab);
         handler.dump();
 
         let first_content = std::fs::read_to_string(&first_path).expect("read first title output");
@@ -1433,7 +1542,7 @@ fn zmissing() {
             ItraceHandler::init("panic-test", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
 
         // 正常提交数据然后 dump，不应 panic
-        handler.submit_path("before-panic".to_string());
+        handler.writer.submit_text("before-panic".to_string());
         handler.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read output");
@@ -1454,7 +1563,7 @@ fn zmissing() {
 
         let mut path = ItracePerPath::default();
         path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
-        handler.submit_path(path.render_text(&handler, &shared_state.symtab));
+        handler.submit_path(&path, &shared_state.symtab);
         handler.dump();
 
         assert!(exact_path.exists(), "file should be created at the exact user-specified path, no suffix added");
