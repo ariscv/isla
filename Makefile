@@ -1,5 +1,5 @@
 .PHONY: all isla-sail isla-litmus isla web test fmt clean install uninstall update
-
+include scripts/run.mk
 run:
 	cargo fmt && cp log log.1 \
 		&&cargo build --release --bin isarch \

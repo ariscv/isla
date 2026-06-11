@@ -1,5 +1,16 @@
 use isla_lib::zencode;
 
+/// 归一化用户输入的 clause 名称：
+/// - 首字母是小写 z 时视为 Sail zname，保持不变
+/// - 否则视为源码中的原始名称，转换成 zencode 后的 zname
+pub fn normalize_clause_name(input: &str) -> String {
+    if input.starts_with('z') {
+        input.to_string()
+    } else {
+        zencode::encode(input)
+    }
+}
+
 /// 根据扩展名获取对应的 clause 列表
 /// 数据来源：sail-riscv 模型中各扩展目录下的 clause 定义
 pub fn get_extension_clauses(extension: &str) -> Vec<String> {
@@ -400,5 +411,30 @@ pub fn get_extension_clauses(extension: &str) -> Vec<String> {
         "zvabd" => ["VABS_V", "ZVABDTYPE", "ZVWABDATYPE"].into_iter().map(|n| zencode::encode(n)).collect(),
 
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_clause_name_keeps_existing_zname() {
+        assert_eq!(normalize_clause_name("zRTYPE"), "zRTYPE");
+    }
+
+    #[test]
+    fn normalize_clause_name_encodes_original_name() {
+        assert_eq!(normalize_clause_name("RTYPE"), "zRTYPE");
+    }
+
+    #[test]
+    fn normalize_clause_name_encodes_special_chars_in_original_name() {
+        assert_eq!(normalize_clause_name("C_ADDIW"), "zC_ADDIW");
+    }
+
+    #[test]
+    fn normalize_clause_name_encodes_original_name_starting_with_uppercase_z() {
+        assert_eq!(normalize_clause_name("ZVKSHA2TYPE"), "zZVKSHA2TYPE");
     }
 }
