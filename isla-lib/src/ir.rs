@@ -50,7 +50,7 @@ use std::io::{Error, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::bitvector::{b64::B64, BV};
+use crate::bitvector::{b64::B64, ParsedBits, BV};
 use crate::config::ISAConfig;
 use crate::error::ExecError;
 use crate::memory::Memory;
@@ -300,6 +300,30 @@ impl<B: BV> From<&BitsSegment<B>> for Val<B> {
 }
 
 impl<B: BV> Val<B> {
+    pub fn parse_bits_literal(bits: String) -> Self {
+        match B::from_str_long(&bits) {
+            Some(ParsedBits::Short(bv)) => Val::Bits(bv),
+            Some(ParsedBits::Long(bits)) => {
+                let mut segments = Vec::new();
+                let mut end = bits.len();
+                while end > 0 {
+                    let start = end.saturating_sub(B::MAX_WIDTH as usize);
+                    let mut chunk = String::with_capacity(end - start + 2);
+                    chunk.push_str("0b");
+                    for bit in bits[start..end].iter().rev() {
+                        chunk.push(if *bit { '1' } else { '0' });
+                    }
+                    segments.push(BitsSegment::Concrete(
+                        B::from_str(&chunk).unwrap_or_else(|| panic!("Unable to parse bitvector literal {}", chunk)),
+                    ));
+                    end = start;
+                }
+                Val::MixedBits(segments)
+            }
+            None => panic!("Unable to parse bitvector literal {}", bits),
+        }
+    }
+
     pub fn collect_symbolic_variables(&self, vars: &mut HashSet<Sym, ahash::RandomState>) {
         use Val::*;
         match self {
@@ -468,11 +492,22 @@ impl<B: BV> Val<B> {
             (Val::I128(_), Ty::I128) => Ok(()),
             (Val::Bool(_), Ty::Bool) => Ok(()),
             (Val::Bits(_), Ty::AnyBits) => Ok(()),
+            (Val::MixedBits(_), Ty::AnyBits) => Ok(()),
             (Val::Bits(bv), Ty::Bits(n)) => {
                 if bv.len() == *n {
                     Ok(())
                 } else {
                     Err(format!("value {} doesn't appear to match type {:?}", self.to_string(shared_state), ty))
+                }
+            }
+            (Val::MixedBits(segments), Ty::Bits(n)) => {
+                let len = segments.iter().try_fold(0u32, |len, segment| match segment {
+                    BitsSegment::Concrete(bv) => Ok(len + bv.len()),
+                    BitsSegment::Symbolic(_) => Err(()),
+                });
+                match len {
+                    Ok(len) if len == *n => Ok(()),
+                    _ => Err(format!("value {} doesn't appear to match type {:?}", self.to_string(shared_state), ty)),
                 }
             }
             (Val::String(_), Ty::String) => Ok(()),
