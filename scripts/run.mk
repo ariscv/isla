@@ -49,12 +49,32 @@ ZBB_EXTOP ZBB_RTYPE ZBB_RTYPEW ZBKB_PACKW ZBKB_RTYPE ZBS_IOP \
 ZBS_RTYPE ZCMOP ZICBOM ZICBOP ZICBOZ ZICOND_RTYPE ZIMOP_MOP_R \
 ZIMOP_MOP_RR ZIP ZVABDTYPE ZVKSHA2TYPE ZVKSM4RTYPE ZVWABDATYPE 
 
+# FD/浮点相关的 clause 先单独放在这里，默认 solve 不跑。
+FD_FLOAT=C_FLD C_FLDSP C_FLW C_FLWSP C_FSD C_FSDSP C_FSW C_FSWSP \
+FCVTMOD_W_D FCVT_BF16_S FCVT_S_BF16 FLEQ_D FLEQ_H FLEQ_S FLI_D \
+FLI_H FLI_S FLTQ_D FLTQ_H FLTQ_S FMAXM_D FMAXM_H FMAXM_S \
+FMINM_D FMINM_H FMINM_S FMVH_X_D FMVP_D_X FROUNDNX_D FROUNDNX_H \
+FROUNDNX_S FROUND_D FROUND_H FROUND_S FVFMATYPE FVFMTYPE FVFTYPE \
+FVVMATYPE FVVMTYPE FVVTYPE FWFTYPE FWVFMATYPE FWVFTYPE FWVTYPE \
+FWVVMATYPE FWVVTYPE F_BIN_F_TYPE_D F_BIN_F_TYPE_H F_BIN_RM_TYPE_D \
+F_BIN_RM_TYPE_H F_BIN_RM_TYPE_S F_BIN_TYPE_F_S F_BIN_TYPE_X_S \
+F_BIN_X_TYPE_D F_BIN_X_TYPE_H F_MADD_TYPE_D F_MADD_TYPE_H \
+F_MADD_TYPE_S F_UN_F_TYPE_D F_UN_F_TYPE_H F_UN_RM_FF_TYPE_D \
+F_UN_RM_FF_TYPE_H F_UN_RM_FF_TYPE_S F_UN_RM_FX_TYPE_D \
+F_UN_RM_FX_TYPE_H F_UN_RM_FX_TYPE_S F_UN_RM_XF_TYPE_D \
+F_UN_RM_XF_TYPE_H F_UN_RM_XF_TYPE_S F_UN_TYPE_F_S F_UN_TYPE_X_S \
+F_UN_X_TYPE_D F_UN_X_TYPE_H LOAD_FP RFVVTYPE RFWVVTYPE STORE_FP \
+VFMERGE VFMV VFMVFS VFMVSF VFNCVTBF16_F_F_W VFNUNARY0 VFUNARY0 \
+VFUNARY1 VFWCVTBF16_F_F_V VFWMACCBF16_VF VFWMACCBF16_VV VFWUNARY0
+
+ACTIVE_ALL=$(filter-out $(FD_FLOAT),$(ALL))
+
 build-isarch:
 	cargo build --release --bin isarch
 solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
 	@RUST_BACKTRACE=1 timeout 120 ./target/release/isarch \
-		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace.txt solve-state --clause=$* \
+		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace_$*.txt solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \
@@ -63,7 +83,9 @@ solve-%: build-isarch
 		echo "$* intime" >> output/status.intime.log; \
 	fi
 
-SOLVE_TARGETS=$(addprefix solve-,$(ALL))
+SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
+FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
 
-.PHONY: build-isarch solve
+.PHONY: build-isarch solve solve-fd-float
 solve: $(SOLVE_TARGETS)
+solve-fd-float: $(FD_FLOAT_SOLVE_TARGETS)

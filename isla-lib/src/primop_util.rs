@@ -199,6 +199,24 @@ pub fn smt_value<B: BV>(v: &Val<B>, info: SourceLoc) -> Result<Exp<Sym>, ExecErr
         Val::Bool(b) => Exp::Bool(*b),
         Val::Enum(e) => Exp::Enum(*e),
         Val::Symbolic(v) => Exp::Var(*v),
+        Val::MixedBits(segments) => {
+            let mut segments = segments.iter();
+            let Some(first) = segments.next() else {
+                return Err(ExecError::Type("smt_value empty MixedBits".to_string(), info));
+            };
+            let mut exp = match first {
+                BitsSegment::Concrete(bv) => smt_sbits(*bv),
+                BitsSegment::Symbolic(v) => Exp::Var(*v),
+            };
+            for segment in segments {
+                let rhs = match segment {
+                    BitsSegment::Concrete(bv) => smt_sbits(*bv),
+                    BitsSegment::Symbolic(v) => Exp::Var(*v),
+                };
+                exp = Exp::Concat(Box::new(exp), Box::new(rhs));
+            }
+            exp
+        }
         _ => return Err(ExecError::Type(format!("smt_value {:?}", &v), info)),
     })
 }

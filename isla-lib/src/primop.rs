@@ -239,6 +239,7 @@ fn pessimistic_assert<B: BV>(
 fn i64_to_i128<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match x {
         Val::I64(x) => Ok(Val::I128(i128::from(x))),
+        Val::Bits(x) if x.len() == 64 => Ok(Val::I128(x.signed())),
         Val::Symbolic(x) => solver.define_const(Exp::SignExtend(64, Box::new(Exp::Var(x))), info).into(),
         _ => Err(ExecError::Type(format!("%i64->%i {:?}", &x), info)),
     }
@@ -700,7 +701,7 @@ fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
                 solver.define_const(smt_zeros(len), info).into()
             }
         }
-        Val::Symbolic(sym) => Err(ExecError::SymbolicLength("zeros", info)),
+        Val::Symbolic(_) => Err(ExecError::SymbolicLength("zeros", info)),
         _ => Err(ExecError::Type(format!("zeros {:?}", &len), info)),
     }
 }
@@ -990,7 +991,6 @@ fn slice_internal<B: BV>(
             },
             _ => Err(ExecError::Type(format!("slice_internal {:?}", &bits), info)),
         },
-        Val::Symbolic(_) => Err(ExecError::SymbolicLength("slice_internal", info)),
         _ => Err(ExecError::Type(format!("slice_internal {:?}", &length), info)),
     }
 }
@@ -2589,7 +2589,6 @@ fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, 
 /// For two bitvectors a and b, computes the polynomial product in GF(2).
 /// This is used by the RISC-V CLMUL instruction.
 fn carryless_mul<B: BV>(a: Val<B>, b: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    panic!("arrive carryless_mul!!");
     match (replace_mixed_bits(a, solver, info)?, replace_mixed_bits(b, solver, info)?) {
         (Val::Bits(a), Val::Bits(b)) => {
             // Concrete case: compute carry-less multiplication directly
@@ -2895,6 +2894,86 @@ mod tests {
     use crate::smt::smtlib::Ty;
     use crate::smt::{Config, Context, SmtResult, Solver};
     use crate::source_loc::SourceLoc;
+
+    #[test]
+    fn zeros_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let len = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        solver.assert_eq(Exp::Var(len), smt_i128(8));
+
+        match zeros(Val::Symbolic(len), &mut solver, SourceLoc::unknown())? {
+            Val::Bits(bits) => assert_eq!(bits, B64::zeros(8)),
+            value => panic!("expected concrete zero bits, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn zeros_rejects_unconstrained_symbolic_length() {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let len = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+
+        let error = zeros(Val::Symbolic(len), &mut solver, SourceLoc::unknown()).expect_err("expected symbolic length");
+        assert!(matches!(error, ExecError::SymbolicLength("zeros", _)));
+    }
+
+    #[test]
+    fn subrange_accepts_proven_symbolic_bounds() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let high = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let low = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        solver.assert_eq(Exp::Var(high), smt_i128(7));
+        solver.assert_eq(Exp::Var(low), smt_i128(4));
+
+        match subrange_internal(
+            Val::Bits(B64::new(0b1011_0010, 8)),
+            Val::Symbolic(high),
+            Val::Symbolic(low),
+            &mut solver,
+            SourceLoc::unknown(),
+        )? {
+            Val::Bits(bits) => assert_eq!(bits, B64::new(0b1011, 4)),
+            value => panic!("expected concrete extracted bits, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn i64_to_i128_accepts_bits_as_signed_i64() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+
+        assert_eq!(i64_to_i128(Val::Bits(B64::new(u64::MAX, 64)), &mut solver, SourceLoc::unknown())?, Val::I128(-1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn slice_and_subrange_propagate_poison() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+
+        assert_eq!(
+            slice_internal(Val::Poison, Val::I128(0), Val::I128(8), &mut solver, SourceLoc::unknown())?,
+            Val::Poison
+        );
+        assert_eq!(
+            subrange_internal(Val::Poison, Val::I128(7), Val::I128(0), &mut solver, SourceLoc::unknown())?,
+            Val::Poison
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn mixed_bits() -> Result<(), ExecError> {

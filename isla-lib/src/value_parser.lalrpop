@@ -64,14 +64,8 @@ pub Val: Val<B> = {
             panic!("Cannot parse integer size {}", sz)
         }
     },
-    <hex:Hex> => {
-        Val::Bits(B::from_str(&hex)
-                      .unwrap_or_else(|| panic!("Unable to parse bitvector literal {}", hex)))
-    },
-    <bin:Bin> => {
-        Val::Bits(B::from_str(&bin)
-                      .unwrap_or_else(|| panic!("Unable to parse bitvector literal {}", bin)))
-    },
+    <hex:Hex> => Val::parse_bits_literal(hex),
+    <bin:Bin> => Val::parse_bits_literal(bin),
     <cap:"cap"> => {
         Val::Bits(B::from_str(cap)
                       .unwrap_or_else(|| panic!("Unable to parse bitvector literal {}", cap)))

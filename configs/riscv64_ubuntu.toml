@@ -75,3 +75,5 @@ Barrier_RISCV_w_r = "Fence.w.r"
 Barrier_RISCV_tso = "Fence.tso"
 Barrier_RISCV_i = "Fence.i"
 
+[const_primops]
+sys_enable_experimental_extensions = false
