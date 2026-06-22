@@ -608,8 +608,13 @@ struct Timeout {
 }
 
 impl Timeout {
+    #[allow(dead_code)]
     fn unlimited() -> Self {
         Timeout { start_time: Instant::now(), duration: None }
+    }
+
+    fn seconds(seconds: u64) -> Self {
+        Timeout { start_time: Instant::now(), duration: Some(Duration::from_secs(seconds)) }
     }
 
     fn timed_out(&self) -> bool {
@@ -1092,6 +1097,18 @@ fn run_loop<'ir, 'task, B: BV>(
         }
 
         if timeout.timed_out() {
+            #[cfg(feature = "tracetool")]
+            {
+                frame.itrace_path.record_summary(
+                    frame.function_name,
+                    frame.backtrace.clone(),
+                    frame.pc as u64,
+                    format!(
+                        "timeout: path exceeded {}ms",
+                        if let Some(duration) = timeout.duration { duration.as_millis() } else { 0 }
+                    ),
+                );
+            }
             return Err(ExecError::Timeout);
         }
 
@@ -1776,7 +1793,7 @@ pub fn start_single<'ir, B: BV, R>(
             0,
             task.id,
             &mut task.fraction,
-            Timeout::unlimited(),
+            Timeout::seconds(5),
             task.stop_conditions,
             &queue,
             &task.frame,
@@ -3448,6 +3465,17 @@ fn zrX(z3zE1756) {
         }
         instrs.push(Instr::End);
         (instrs, shared_state_from_defs(defs))
+    }
+
+    #[test]
+    fn path_timeout_reuses_existing_timeout_predicate() {
+        let duration = Duration::from_secs(2);
+        let expired =
+            Timeout { start_time: Instant::now() - duration - Duration::from_millis(1), duration: Some(duration) };
+        let active = Timeout::seconds(2);
+
+        assert!(expired.timed_out());
+        assert!(!active.timed_out());
     }
 
     #[test]

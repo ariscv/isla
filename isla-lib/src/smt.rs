@@ -1820,29 +1820,82 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                 // Model did not need to assign an interpretation to this variable
                 Ok(ModelVal::Arbitrary(Ty::BitVec(size)))
             } else if sort_kind == SortKind::Datatype {
-                let func_decl = Z3_get_app_decl(z3_ctx, Z3_to_app(z3_ctx, z3_ast));
-                Z3_inc_ref(z3_ctx, Z3_func_decl_to_ast(z3_ctx, func_decl));
+                // Match enum constructors using the recognizer (tester) of
+                // the MODEL VALUE'S OWN SORT — not from our registered enum.
+                // This avoids all pointer-identity issues: the recognizer and
+                // the value belong to the same sort object by construction.
+                // We then map the constructor index back to our enum_id via
+                // the deterministic Z3 sort symbol id.
+                let n_ctors = Z3_get_datatype_sort_num_constructors(z3_ctx, sort);
+                let mut ctor_idx: Option<usize> = None;
 
-                let mut result = Err(ExecError::NoModel);
-
-                // Scan all enumerations to find the enum_id (which is
-                // the size of the enum) and member number.
-                'outer: for (enum_id, enumeration) in self.solver.enums.enums.iter() {
-                    for (i, member) in enumeration.consts.iter().enumerate() {
-                        if Z3_is_eq_func_decl(z3_ctx, func_decl, *member) {
-                            result = Ok(ModelVal::Exp(Exp::Enum(EnumMember {
-                                enum_id: EnumId { id: *enum_id },
-                                member: i,
-                            })));
-                            break 'outer;
+                for i in 0..n_ctors as usize {
+                    let recognizer = Z3_get_datatype_sort_recognizer(z3_ctx, sort, i as c_uint);
+                    let tester_app = Z3_mk_app(z3_ctx, recognizer, 1, &z3_ast);
+                    Z3_inc_ref(z3_ctx, tester_app);
+                    let mut eval_result: Z3_ast = ptr::null_mut();
+                    let evaluated = Z3_model_eval(z3_ctx, self.z3_model, tester_app, true, &mut eval_result);
+                    Z3_dec_ref(z3_ctx, tester_app);
+                    if evaluated {
+                        Z3_inc_ref(z3_ctx, eval_result);
+                        let is_match = Z3_get_bool_value(z3_ctx, eval_result) == Z3_L_TRUE;
+                        Z3_dec_ref(z3_ctx, eval_result);
+                        if is_match {
+                            ctor_idx = Some(i as usize);
+                            break;
                         }
                     }
                 }
 
-                Z3_dec_ref(z3_ctx, Z3_func_decl_to_ast(z3_ctx, func_decl));
+                let result = match ctor_idx {
+                    Some(idx) => {
+                        // Map constructor index back to our EnumId via the
+                        // deterministic Z3 sort symbol id.
+                        let sort_name = Z3_get_sort_name(z3_ctx, sort);
+                        if Z3_get_symbol_kind(z3_ctx, sort_name) != SymbolKind::Int {
+                            let sort_str =
+                                CStr::from_ptr(Z3_sort_to_string(z3_ctx, sort)).to_string_lossy().into_owned();
+                            Err(ExecError::Type(
+                                format!("get_ast: datatype sort has non-int symbol {}", sort_str),
+                                SourceLoc::unknown(),
+                            ))
+                        } else {
+                            let sort_id = Z3_get_symbol_int(z3_ctx, sort_name);
+                            if sort_id < 0 {
+                                Err(ExecError::Type(
+                                    format!("get_ast: negative enum sort id {}", sort_id),
+                                    SourceLoc::unknown(),
+                                ))
+                            } else {
+                                let eid = Name::from_u32(sort_id as u32);
+                                match self.solver.enums.enums.get(&eid) {
+                                    Some(e) if idx < e.consts.len() => Ok(ModelVal::Exp(Exp::Enum(EnumMember {
+                                        enum_id: EnumId { id: eid },
+                                        member: idx,
+                                    }))),
+                                    Some(_) => Err(ExecError::Type(
+                                        format!("get_ast: constructor {} out of range for enum {}", idx, eid),
+                                        SourceLoc::unknown(),
+                                    )),
+                                    None => Err(ExecError::Type(
+                                        format!("get_ast: no registered enum for sort id {}", sort_id),
+                                        SourceLoc::unknown(),
+                                    )),
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        let sort_str = CStr::from_ptr(Z3_sort_to_string(z3_ctx, sort)).to_string_lossy().into_owned();
+                        Err(ExecError::Type(
+                            format!("get_ast: no recognizer matched for sort={}", sort_str),
+                            SourceLoc::unknown(),
+                        ))
+                    }
+                };
                 result
             } else {
-                Err(ExecError::Type("get_ast".to_string(), SourceLoc::unknown()))
+                Err(ExecError::Type("get_ast: unsupported sort kind".to_string(), SourceLoc::unknown()))
             };
 
             Z3_dec_ref(z3_ctx, Z3_sort_to_ast(z3_ctx, sort));
@@ -2155,7 +2208,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
             Def::DefineEnum(name, size) => {
                 if !self.enums.enums.contains_key(name) {
-                    let z3_name = self.fresh();
+                    // Keep enum sort names deterministic across checkpoint replay.
+                    // Member constructor names do not need to be stable: get_ast
+                    // matches constructors through recognizers from the model
+                    // value's own sort.
+                    let z3_name = Sym::from_u32(name.as_u32());
                     let members: Vec<Sym> = (0..*size).map(|_| self.fresh()).collect();
                     self.enums.add_enum(*name, z3_name, &members)
                 }
@@ -2564,6 +2621,77 @@ mod tests {
             Sat => (),
             _ => panic!("Round-trip failed, trace {:?}", solver.trace()),
         }
+    }
+
+    #[test]
+    fn get_single_member_enum_const_after_checkpoint_replay() {
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let e = solver.get_enum(Name::from_u32(11), 1);
+        let v = solver.declare_const(Ty::Enum(e), SourceLoc::unknown());
+        solver.assert_eq(Var(v), Enum(e.first_member()));
+
+        let checkpoint = checkpoint(&mut solver);
+        let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
+
+        let mut model = Model::new(&replayed);
+        assert_eq!(model.get_var(v).unwrap().unwrap_exp(), Enum(e.first_member()));
+    }
+
+    #[test]
+    fn get_multi_member_enum_const_after_checkpoint_replay() {
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let e = solver.get_enum(Name::from_u32(12), 4);
+        let v = solver.declare_const(Ty::Enum(e), SourceLoc::unknown());
+        let member = EnumMember { enum_id: e, member: 2 };
+        solver.assert_eq(Var(v), Enum(member));
+
+        let checkpoint = checkpoint(&mut solver);
+        let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
+
+        let mut model = Model::new(&replayed);
+        assert_eq!(model.get_var(v).unwrap().unwrap_exp(), Enum(member));
+    }
+
+    #[test]
+    fn get_struct_with_enum_field_after_checkpoint_replay() {
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+
+        let enum_id = solver.get_enum(Name::from_u32(13), 3);
+        let enum_sym = solver.declare_const(Ty::Enum(enum_id), SourceLoc::unknown());
+        let bits_sym = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
+        let enum_member = EnumMember { enum_id, member: 2 };
+        solver.assert_eq(Var(enum_sym), Enum(enum_member));
+        solver.assert_eq(Var(bits_sym), bv!("10101010"));
+
+        let enum_field = Name::from_u32(100);
+        let bits_field = Name::from_u32(101);
+        let mut fields = ahash::HashMap::with_capacity_and_hasher(2, ahash::RandomState::new());
+        fields.insert(enum_field, Val::Symbolic(enum_sym));
+        fields.insert(bits_field, Val::Symbolic(bits_sym));
+        let value = Val::Struct(fields);
+
+        let checkpoint = checkpoint(&mut solver);
+        let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
+
+        let mut model = Model::new(&replayed);
+        let resolved = model.get_val(&value).unwrap();
+
+        let mut expected_fields = ahash::HashMap::with_capacity_and_hasher(2, ahash::RandomState::new());
+        expected_fields.insert(enum_field, Val::Enum(enum_member));
+        expected_fields.insert(bits_field, Val::Bits(B64::new(0b10101010, 8)));
+        assert_eq!(resolved, Val::Struct(expected_fields));
     }
 
     #[test]

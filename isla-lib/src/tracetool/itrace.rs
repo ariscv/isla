@@ -35,6 +35,10 @@ impl ItracePerPath {
         self.records.push(ItracePerInstr { function_name, backtrace, pc, summary: None });
     }
 
+    pub fn record_summary(&mut self, function_name: Name, backtrace: Backtrace, pc: u64, summary: impl Into<String>) {
+        self.records.push(ItracePerInstr { function_name, backtrace, pc, summary: Some(summary.into()) });
+    }
+
     pub fn records(&self) -> &[ItracePerInstr] {
         self.records.as_slice()
     }
@@ -656,6 +660,10 @@ impl ItracePerPath {
         lines.push(self.render_title(&handler.title(), symtab));
 
         for record in self.records() {
+            if let Some(summary) = &record.summary {
+                lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, summary));
+                continue;
+            }
             let ir_line = handler.lookup_ir_line(record.function_name, record.pc, symtab).unwrap_or_else(|| {
                 let fallback = format!("{}:{} not found", symtab.to_str(record.function_name), record.pc);
                 eprintln!(
@@ -737,6 +745,22 @@ mod tests {
         assert_eq!(records[0].backtrace, backtrace);
         assert_eq!(records[0].pc, 42);
         assert!(records[0].summary.is_none());
+    }
+
+    #[test]
+    fn itrace_per_path_record_summary_stores_timeout_context() {
+        let mut path = ItracePerPath::default();
+        let function_name = Name::from_u32(7);
+        let backtrace = vec![(Name::from_u32(1), 11), (Name::from_u32(2), 22)];
+
+        path.record_summary(function_name, backtrace.clone(), 42, "timeout: path exceeded 2000ms");
+
+        let records = path.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].function_name, function_name);
+        assert_eq!(records[0].backtrace, backtrace);
+        assert_eq!(records[0].pc, 42);
+        assert_eq!(records[0].summary.as_deref(), Some("timeout: path exceeded 2000ms"));
     }
 
     #[test]
@@ -974,6 +998,32 @@ fn zmissing() {
         let content = std::fs::read_to_string(&output_path).expect("read itrace submit output");
         assert!(content.contains("<itrace test title> path(itrace test title):"));
         assert!(content.contains("[zcache_ok 3]: return = z1;"));
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn itrace_handler_writes_summary_record_text() {
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("itrace_summary_record_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        let shared_state = parse_shared_state();
+        let handler = ItraceHandler::init(
+            "itrace test title",
+            fixture_ir_path(),
+            Some(output_path.clone()),
+            &shared_state.symtab,
+        );
+        let mut path = ItracePerPath::default();
+
+        path.record_summary(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3, "timeout: path exceeded 2000ms");
+        handler.submit_path(&path, &shared_state.symtab);
+        handler.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read itrace summary output");
+        assert!(content.contains("<itrace test title> path(itrace test title):"));
+        assert!(content.contains("[zcache_ok 3]: timeout: path exceeded 2000ms"));
+        assert!(!content.contains("[zcache_ok 3]: return = z1;"));
 
         let _ = std::fs::remove_file(&output_path);
     }

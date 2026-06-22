@@ -67,13 +67,21 @@ F_UN_X_TYPE_D F_UN_X_TYPE_H LOAD_FP RFVVTYPE RFWVVTYPE STORE_FP \
 VFMERGE VFMV VFMVFS VFMVSF VFNCVTBF16_F_F_W VFNUNARY0 VFUNARY0 \
 VFUNARY1 VFWCVTBF16_F_F_V VFWMACCBF16_VF VFWMACCBF16_VV VFWUNARY0
 
-ACTIVE_ALL=$(filter-out $(FD_FLOAT),$(ALL))
+# 内存符号化支持尚不完整，默认 solve 先跳过实际访存、缓存块、fence/TLB 类 clause。
+MEMORY=AMO LOAD LOADRES STORE STORECON \
+C_LBU C_LD C_LDSP C_LH C_LHU C_LW C_LWSP C_SB C_SD C_SDSP C_SH \
+C_SW C_SWSP C_FLD C_FLDSP C_FLW C_FLWSP C_FSD C_FSDSP C_FSW C_FSWSP \
+LOAD_FP STORE_FP VLRETYPE VLSEGFFTYPE VLSEGTYPE VLSSEGTYPE VLXSEGTYPE \
+VMTYPE VSRETYPE VSSEGTYPE VSSSEGTYPE VSXSEGTYPE ZICBOM ZICBOP ZICBOZ \
+FENCE FENCEI FENCE_TSO SFENCE_INVAL_IR SFENCE_VMA SFENCE_W_INVAL SINVAL_VMA
+
+ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
 
 build-isarch:
 	cargo build --release --bin isarch
 solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
-	@RUST_BACKTRACE=1 timeout 120 ./target/release/isarch \
+	@RUST_BACKTRACE=1 timeout 30 ./target/release/isarch \
 		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace_$*.txt solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
@@ -85,7 +93,9 @@ solve-%: build-isarch
 
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
+MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
 
-.PHONY: build-isarch solve solve-fd-float
+.PHONY: build-isarch solve solve-fd-float solve-memory
 solve: $(SOLVE_TARGETS)
 solve-fd-float: $(FD_FLOAT_SOLVE_TARGETS)
+solve-memory: $(MEMORY_SOLVE_TARGETS)

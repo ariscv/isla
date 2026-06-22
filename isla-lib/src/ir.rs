@@ -112,6 +112,9 @@ impl Name {
     pub fn from_u32(id: u32) -> Self {
         Name { id }
     }
+    pub fn as_u32(self) -> u32 {
+        self.id
+    }
 
     pub fn to_smt<V>(self) -> smtlib::Exp<V> {
         smtlib::Exp::Bits64(B64::from_u32(self.id))
