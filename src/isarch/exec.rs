@@ -274,13 +274,13 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     //    避免初始阶段 total_forks 过小导致任何分支点占比都接近 100% 而误杀。
     //
     // 其他限制：
-    // - max_backjumps_per_loop=10 — 循环回边次数上限，超过即视为无限循环
+    // - max_backjumps_per_loop=512 — 循环回边次数上限，超过即视为无限循环
     // - max_path_depth=10000     — IR 指令步数上限，防止单条路径过长
     // - on_limit_reached=Concretize — 触发限制时具体化符号条件继续执行，而非截断路径
     let limits = ExecutionLimits::default()
         .with_max_forks_per_branch(2)
         .with_max_total_forks(8)
-        .with_max_backjumps_per_loop(10)
+        .with_max_backjumps_per_loop(256)
         .with_max_path_depth(10000)
         .with_max_fork_pct_per_branch(0.1)
         .with_max_fork_pct_check_delay(100)
@@ -363,10 +363,22 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                                             None => return,
                                         }
                                         let asm_encdec_opt =
-                                            get_assembly_encdec(arg_val.clone(), shared_state, regs, lets);
-                                        let asm_encdec_opt = asm_encdec_opt.map(|val| {
-                                            FmtVal::from_val(&val, &mut model).unwrap().to_str(shared_state)
-                                        });
+                                            match get_assembly_encdec(arg_val.clone(), shared_state, regs, lets) {
+                                                Some(val) => match FmtVal::from_val(&val, &mut model) {
+                                                    Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
+                                                    Err(err) => {
+                                                        log!(
+                                                            log::PATH_RESULT,
+                                                            &format!(
+                                                                "警告: {}汇编编码不可格式化 {:?}",
+                                                                instruction_name, err
+                                                            )
+                                                        );
+                                                        None
+                                                    }
+                                                },
+                                                None => None,
+                                            };
                                         log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
                                         match asm_encdec_opt {
                                             Some(encdec) => test_ins_encdec = encdec,
@@ -374,7 +386,10 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                                         }
                                     }
                                     Err(e) => {
-                                        log!(log::PATH_RESULT, &format!("警告: {}没有汇编 {:?}", instruction_name, e));
+                                        log!(
+                                            log::PATH_RESULT,
+                                            &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
+                                        );
                                         //*collected.lock().unwrap() = Err(e);
                                         return;
                                     }
@@ -524,6 +539,9 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                     match &error {
                         ExecError::MatchFailure(_) => {
                             // 静默处理
+                        }
+                        ExecError::AssertionFailure(_, _) => {
+                            // assert 失败表示当前路径不满足模型前置条件，丢弃该路径。
                         }
                         _ => {
                             log!(
