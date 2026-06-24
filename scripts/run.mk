@@ -77,11 +77,25 @@ FENCE FENCEI FENCE_TSO SFENCE_INVAL_IR SFENCE_VMA SFENCE_W_INVAL SINVAL_VMA
 
 ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
 
+# 进度计数器：make solve 开始时重置为 0，每个 solve-% 启动时用 flock 原子自增取号，
+# 配合下面的 TOTAL 打印形如 [3/243] solve-REM 的进度（类似 ninja/cmake 的 [n/total]）。
+COUNTER=output/.solve_progress_counter
+TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
+TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
+TOTAL_MEMORY=$(words $(MEMORY))
+
 build-isarch:
 	cargo build --release --bin isarch
+
+# 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
+#
+# 进度打印说明：n=原子自增后的序号，TOTAL 由调用入口（solve/solve-fd-float/solve-memory）
+# 通过 make 变量 SOLVE_TOTAL 透传进来；首行打印 [n/TOTAL] solve-$*。
 solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
-	@RUST_BACKTRACE=1 timeout 30 ./target/release/isarch \
+	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
+	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
+	RUST_BACKTRACE=1 timeout 60 ./target/release/isarch \
 		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace_$*.txt solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
@@ -96,6 +110,23 @@ FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
 MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
 
 .PHONY: build-isarch solve solve-fd-float solve-memory
+# Ctrl-C 清理是【可选插件】：scripts/run_ctrl_c.mk 若存在，会给 solve-% 注入 Ctrl-C 清理逻辑
+# （pkill 掉后台 isarch）；缺失则不影响。-include 保证缺失不报错。
+-include scripts/run_ctrl_c.mk
+
+# solve-pre 作为所有 solve-XXX 的【真前置依赖】：make 的拓扑顺序保证它先跑完（重置进度
+# 计数器、建目录），其后才并行跑各 solve-%，避免计数器竞态，且不阻塞并行。
+$(SOLVE_TARGETS) $(FD_FLOAT_SOLVE_TARGETS) $(MEMORY_SOLVE_TARGETS): solve-pre
+solve-pre:
+	@mkdir -p output/log output/trace outputs && echo 0 > $(COUNTER)
+.PHONY: solve-pre
+
+# 三个入口各自把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
+# 然后【直接依赖】目标——单 make 进程并行跑（-j 正常生效、jobserver 不丢），无需递归 make。
+# （此前用“递归 make 注入 SOLVE_TOTAL”的写法会断 jobserver、降级串行，故弃用。）
+solve: SOLVE_TOTAL := $(TOTAL_ACTIVE_ALL)
 solve: $(SOLVE_TARGETS)
+solve-fd-float: SOLVE_TOTAL := $(TOTAL_FD_FLOAT)
 solve-fd-float: $(FD_FLOAT_SOLVE_TARGETS)
+solve-memory: SOLVE_TOTAL := $(TOTAL_MEMORY)
 solve-memory: $(MEMORY_SOLVE_TARGETS)
