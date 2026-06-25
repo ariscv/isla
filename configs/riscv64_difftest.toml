@@ -42,26 +42,6 @@ top = "0x80410000"
 stride = "0x10"
 
 [registers]
-relaxed = [
-	"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", 
-	"x9", "x10", "x11", "x12", "x13", "x14", "x15", 
-	"x16", "x17", "x18", "x19", "x20", "x21", "x22", 
-	"x23", "x24", "x25", "x26", "x27", "x28", "x29", 
-	"x30", "x31",
-	"f0",
-	"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", 
-	"f9", "f10", "f11", "f12", "f13", "f14", "f15", 
-	"f16", "f17", "f18", "f19", "f20", "f21", "f22", 
-	"f23", "f24", "f25", "f26", "f27", "f28", "f29", 
-	"f30", "f31", 
-	"vr0",
-	"vr1", "vr2", "vr3", "vr4", "vr5", "vr6", "vr7",
-	"vr8", "vr9", "vr10", "vr11", "vr12", "vr13", "vr14", "vr15",
-	"vr16", "vr17", "vr18", "vr19", "vr20", "vr21", "vr22", "vr23",
-	"vr24", "vr25", "vr26", "vr27", "vr28", "vr29", "vr30", "vr31",
-	"cur_privilege",
-	"mstatus"
-]
 
 [registers.defaults]
 "__isla_vector_gpr" = true
@@ -119,7 +99,7 @@ sys_enable_fdext = false
 sys_enable_zfinx = false
 sys_enable_rvc = true
 sys_enable_next = false
-sys_enable_vext = false
+sys_enable_vext = true
 sys_enable_writable_fiom = true
 sys_enable_writable_misa = true
 sys_enable_bext = false

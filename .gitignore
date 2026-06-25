@@ -26,7 +26,7 @@ z3_problems
 .merlin
 sail_smt_cache
 
-output/
+output*/
 .*/
 .sisyphus/
 __pycache__/

@@ -11,18 +11,17 @@ enum PendingRegion {
     Symbolic { base: u64, size: u64 },
 }
 
-pub struct MemoryBuilder<'a, B, T: RISCV> {
-    target: &'a T,
+pub struct MemoryBuilder<'a, B: BV> {
+    target: &'a dyn RISCV<B>,
     regions: Vec<PendingRegion>,
     page_table_config: Option<PageTableConfig>,
     clint_enabled: bool,
     clint_base: u64,
     clint_size: u64,
-    _phantom: std::marker::PhantomData<B>,
 }
 
-impl<'a, B: BV, T: RISCV> MemoryBuilder<'a, B, T> {
-    pub fn new(target: &'a T) -> Self {
+impl<'a, B: BV> MemoryBuilder<'a, B> {
+    pub fn new(target: &'a dyn RISCV<B>) -> Self {
         MemoryBuilder {
             target,
             regions: Vec::new(),
@@ -30,11 +29,10 @@ impl<'a, B: BV, T: RISCV> MemoryBuilder<'a, B, T> {
             clint_enabled: true,
             clint_base: 0x2000000,
             clint_size: 0xc0000,
-            _phantom: std::marker::PhantomData,
         }
     }
 
-    pub fn from_config(target: &'a T, config: &ISAConfig<B>) -> Result<Self, String> {
+    pub fn from_config(target: &'a dyn RISCV<B>, config: &ISAConfig<B>) -> Result<Self, String> {
         let mut builder = MemoryBuilder::new(target);
         if let Some(ref regions) = config.memory_regions {
             for region in regions {
@@ -461,8 +459,8 @@ mod tests {
 
     #[test]
     fn new_builder_defaults() {
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> = MemoryBuilder::new(&rv64);
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new(&rv64);
         let memory = builder.build().unwrap();
 
         assert_eq!(memory.regions().len(), 1);
@@ -471,8 +469,8 @@ mod tests {
 
     #[test]
     fn builder_chaining() {
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> = MemoryBuilder::new(&rv64)
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new(&rv64)
             .add_concrete_region(0x8000_0000, 0x1000)
             .add_symbolic_region(0x9000_0000, 0x2000)
             .set_clint_enabled(false);
@@ -485,8 +483,8 @@ mod tests {
 
     #[test]
     fn identity_mapping_creates_config() {
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> =
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> =
             MemoryBuilder::new(&rv64).with_identity_mapping(0x1_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
@@ -496,8 +494,8 @@ mod tests {
 
     #[test]
     fn offset_mapping_config() {
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> =
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> =
             MemoryBuilder::new(&rv64).with_offset_mapping(0x1_0000, 0x1000_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
@@ -507,8 +505,8 @@ mod tests {
 
     #[test]
     fn symbolic_mapping_config() {
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> =
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> =
             MemoryBuilder::new(&rv64).with_symbolic_mapping(0x1_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 
@@ -518,8 +516,8 @@ mod tests {
 
     #[test]
     fn overlapping_regions_rejected() {
-        let rv64 = RV64::default();
-        let result = MemoryBuilder::<B64, RV64>::new(&rv64)
+        let rv64: RV64<B64> = RV64::default();
+        let result = MemoryBuilder::<B64>::new(&rv64)
             .add_concrete_region(0x1000, 0x2000)
             .add_concrete_region(0x2000, 0x1000)
             .set_clint_enabled(false)
@@ -530,8 +528,8 @@ mod tests {
 
     #[test]
     fn adjacent_regions_allowed() {
-        let rv64 = RV64::default();
-        let memory = MemoryBuilder::<B64, RV64>::new(&rv64)
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64)
             .add_concrete_region(0x1000, 0x1000)
             .add_concrete_region(0x2000, 0x1000)
             .set_clint_enabled(false)
@@ -545,8 +543,8 @@ mod tests {
     #[test]
     fn protected_mapping_with_ranges() {
         let protected = vec![ProtectedRange { base: 0x8000_0000, size: 0x1000, flags: "rwx".to_string() }];
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> = MemoryBuilder::new(&rv64)
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> = MemoryBuilder::new(&rv64)
             .with_protected_mapping(0x1_0000, protected.clone())
             .unwrap()
             .set_clint_enabled(false);
@@ -558,17 +556,16 @@ mod tests {
 
     #[test]
     fn clint_disabled() {
-        let rv64 = RV64::default();
-        let memory = MemoryBuilder::<B64, RV64>::new(&rv64).set_clint_enabled(false).build().unwrap();
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64).set_clint_enabled(false).build().unwrap();
 
         assert!(memory.regions().is_empty());
     }
 
     #[test]
     fn clint_custom_params() {
-        let rv64 = RV64::default();
-        let memory =
-            MemoryBuilder::<B64, RV64>::new(&rv64).clint_with_params(true, 0x3000_0000, 0x10000).build().unwrap();
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64).clint_with_params(true, 0x3000_0000, 0x10000).build().unwrap();
 
         assert_eq!(memory.regions().len(), 1);
         assert!(has_concrete_region(&memory, 0x3000_0000, 0x10000));
@@ -576,7 +573,7 @@ mod tests {
 
     #[test]
     fn pte_flags_in_page_table() {
-        let rv64 = RV64::default();
+        let rv64: RV64<B64> = RV64::default();
         let pte = RiscvPte::new(
             rv64.ppn_from_pa(0x8000_0000),
             rv64.pte_v() | rv64.pte_r() | rv64.pte_w() | rv64.pte_x() | rv64.pte_a() | rv64.pte_d() | rv64.pte_u(),
@@ -590,7 +587,7 @@ mod tests {
 
     #[test]
     fn sv39_table_size_is_two_pages() {
-        let rv64 = RV64::default();
+        let rv64: RV64<B64> = RV64::default();
         let config = PageTableConfig {
             mode: PageTableMode::SV39,
             preset: PageTablePreset::Identity,
@@ -600,14 +597,14 @@ mod tests {
             protected_ranges: None,
         };
 
-        let builder = MemoryBuilder::<B64, RV64>::new(&rv64);
+        let builder = MemoryBuilder::<B64>::new(&rv64);
         assert_eq!(builder.page_table_size(&config), 2 * rv64.page_table_size());
         assert_eq!(2 * rv64.page_table_size(), 8192);
     }
 
     #[test]
     fn sv48_table_size_is_three_pages() {
-        let rv64 = RV64::default();
+        let rv64: RV64<B64> = RV64::default();
         let config = PageTableConfig {
             mode: PageTableMode::SV48,
             preset: PageTablePreset::Identity,
@@ -617,15 +614,15 @@ mod tests {
             protected_ranges: None,
         };
 
-        let builder = MemoryBuilder::<B64, RV64>::new(&rv64);
+        let builder = MemoryBuilder::<B64>::new(&rv64);
         assert_eq!(builder.page_table_size(&config), 3 * rv64.page_table_size());
         assert_eq!(3 * rv64.page_table_size(), 12288);
     }
 
     #[test]
     fn build_identity_mapping_includes_page_table() {
-        let rv64 = RV64::default();
-        let builder: MemoryBuilder<B64, RV64> =
+        let rv64: RV64<B64> = RV64::default();
+        let builder: MemoryBuilder<B64> =
             MemoryBuilder::new(&rv64).with_identity_mapping(0x1_0000).unwrap().set_clint_enabled(false);
         let memory = builder.build().unwrap();
 

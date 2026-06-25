@@ -34,8 +34,8 @@ struct AssemGenJsonItem {
     ret_val: String,
 }
 impl AssemGenJsonItem {
-    pub fn new<T: Target>(
-        target: &T,
+    pub fn new<B: BV>(
+        target: &dyn Target<B>,
         test_ins: String,
         test_ins_encdec: String,
         isa_state: BTreeMap<String, String>,
@@ -94,23 +94,19 @@ fn clause_itrace_output_path(base_path: &Path, clause: &str) -> PathBuf {
 
 /// solve-state 子命令的主入口函数
 /// 支持通过 clause 名、扩展名、汇编指令名或 --all 来筛选需要符号执行的 clause
-pub fn solve_state_main<B, T>(
-    shared_state: &SharedState<B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
+pub fn solve_state_main<'ir, B: BV>(
+    shared_state: &SharedState<'ir, B>,
+    regs: &'ir RegisterBindings<'ir, B>,
+    lets: &'ir Bindings<'ir, B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
-    target: &T,
+    target: &mut dyn RISCV<B>,
     clauses: &[String],
     extensions: &[String],
     instruction_names: &[String],
     run_all: bool,
     itrace_path: Option<PathBuf>,
     ir_file_path: Option<PathBuf>,
-) -> bool
-where
-    B: BV,
-    T: RISCV,
-{
+) -> bool {
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
 
@@ -227,15 +223,17 @@ fn symbolic_args_from_types<B: BV>(
 
     symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())
 }
-fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
-    target: &T,
+fn run_symbolic_execute_with_target<'ir, B: BV>(
+    target: &mut dyn RISCV<B>,
     instruction_name: &str,
-    shared_state: &SharedState<B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
+    shared_state: &SharedState<'ir, B>,
+    regs: &'ir RegisterBindings<'ir, B>,
+    lets: &'ir Bindings<'ir, B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
+
+    let state_regs = target.reg_list();
 
     let mut cfg = Config::new();
     cfg.set_param_value("model", "true");
@@ -243,9 +241,13 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
     let mut solver = Solver::new(&ctx);
     let mut symbolic_regs = regs.clone();
 
-    if target.pmp_symbolic() {
+    // pre-state 主动符号化：遍历 target 提供的寄存器、按类型符号化并覆盖，返回 PreStateCtx 供求解后取 pre-state。
+    target.setup_pre_state(&mut symbolic_regs, lets, shared_state, &mut solver)?;
+
+    //不要删掉这个注释！！！留着以后改pmp的时候用
+    /* if target.pmp_symbolic() {
         target.apply_symbolic_pmp_to_registers(&shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver)?;
-    }
+    } */
 
     // 使用 symbolic_args_from_types 生成符号化参数
     let ctor_name = shared_state.symtab.lookup(instruction_name);
@@ -255,7 +257,7 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
         Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
     )];
     log!(log::SYM_EXEC, &format!("fun_args:{:?}", fun_args));
-    log!(log::ARCH_INFO, &format!("{:?}", target.isa_state_list()));
+    log!(log::ARCH_INFO, &format!("{:?}", state_regs));
 
     // 生成参数（暂时使用默认值，测试checkpoint机制）
 
@@ -350,6 +352,9 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
+                                // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
+                                // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
+                                // model.set_complete_model(true);
                                 log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
                                 let test = Sym::from_u32(6);
                                 // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
@@ -395,48 +400,8 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
                                     }
                                 }
 
-                                // 遍历所有寄存器
-                                for (reg_name, reg) in frame.regs().iter() {
-                                    let reg_name_str: &str = shared_state.symtab.to_str(*reg_name);
-                                    let reg_name_decoded = zencode::decode(reg_name_str);
-                                    /* dlog!(
-                                        "{}:(read_init_value_if_initialized){:?},(read_old_if_initialized){:?},(read_last_if_initialized){:?}",
-                                        reg_name_str,
-                                        reg.read_init_value_if_initialized(),
-                                        reg.read_old_if_initialized(),
-                                        reg.read_last_if_initialized()
-                                    ); */
-
-                                    // print reg
-                                    let filter_list = ["pma_regions", "tlb"];
-                                    if filter_list.contains(&reg_name_decoded.as_str())
-                                        || reg_name_decoded.starts_with("__")
-                                        || reg_name_decoded.starts_with("htif_")
-                                    {
-                                        continue;
-                                    };
-                                    if let Some(val) = reg.read_init_value_if_initialized() {
-                                        let formatted = model
-                                            .get_fmtval(val)
-                                            .map(|fmt_val| fmt_val.to_str(shared_state))
-                                            .unwrap_or_else(|_| val.to_str(shared_state));
-                                        let fv = model.get_fmtval(val);
-                                        match fv {
-                                            Err(exec_error) => continue,
-                                            Ok(fmt_val) => {
-                                                // println!("  {} = {}", reg_name_decoded, formatted);
-                                                if fmt_val.is_arbitrary() {
-                                                    continue;
-                                                }
-
-                                                if target.isa_state_list().contains(&reg_name_decoded.to_string()) {
-                                                    let formatted = fmt_val.to_str(shared_state);
-                                                    isa_state.insert(reg_name_decoded.to_string(), formatted.clone());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
+                                isa_state.extend(target.solve_pre_state(&mut model, shared_state));
 
                                 log!(
                                     log::PATH_RESULT,
@@ -569,7 +534,7 @@ fn run_symbolic_execute_with_target<T: RISCV, B: BV>(
 
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        let xlen_name_str = target.arch_pretty_name();
+        let xlen_name_str = target.arch_pretty_name().to_string();
         result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
         Ok(None)
     } else {
