@@ -1,30 +1,158 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use isla_lib::bitvector::BV;
 use isla_lib::config::{PmpConfig, PmpMode};
 use isla_lib::error::ExecError;
-use isla_lib::ir::{IRTypeInfo, Name, SharedState, Symtab, Val};
+use isla_lib::fmtval::FmtVal;
+use isla_lib::ir::{Bindings, IRTypeInfo, Name, SharedState, Symtab, Ty, UVal, Val};
+use isla_lib::log;
+use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
+use isla_lib::smt::Model;
 use isla_lib::smt::{smtlib, Solver};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 
-pub trait Target
+#[derive(Debug, Clone)]
+pub struct PreStateCtx<B: BV> {
+    map: HashMap<Name, Val<B>>,
+}
+
+impl<B: BV> PreStateCtx<B> {
+    pub fn new() -> Self {
+        PreStateCtx { map: HashMap::new() }
+    }
+
+    pub fn get(&self, name: &Name) -> Option<&Val<B>> {
+        self.map.get(name)
+    }
+
+    pub fn get_from_str(&self, name_str: &str, symtab: &Symtab) -> Option<&Val<B>> {
+        let name_zstr = zencode::encode(name_str);
+        let name = symtab.get(&name_zstr)?;
+        self.map.get(&name)
+    }
+
+    pub fn insert(&mut self, name: Name, value: Val<B>) -> Option<Val<B>> {
+        self.map.insert(name, value)
+    }
+
+    pub fn insert_from_str(&mut self, name_str: &str, value: Val<B>, symtab: &Symtab) -> Option<Val<B>> {
+        let name_zstr = zencode::encode(name_str);
+        let name = symtab.get(&name_zstr)?;
+        self.map.insert(name, value)
+    }
+
+    pub fn iter(&self) -> std::collections::hash_map::Iter<Name, Val<B>> {
+        self.map.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+pub trait Target<B: BV>
 where
     Self: Sync,
 {
     fn arch_name(&self) -> &'static str;
-    fn arch_pretty_name(&self) -> &'static str;
+    fn xlen_name(&self) -> &'static str;
     fn xlen(&self) -> &'static str;
-    fn isa_state_list(&self) -> Vec<String>;
+
+    fn arch_pretty_name(&self) -> &'static str {
+        self.xlen_name()
+    }
+
+    fn reg_list(&self) -> Vec<String>;
+
+    fn setup_pre_state<'ir>(
+        &mut self,
+        regs: &mut RegisterBindings<'ir, B>,
+        lets: &Bindings<'ir, B>,
+        shared_state: &SharedState<'ir, B>,
+        solver: &mut Solver<B>,
+    ) -> Result<(), ExecError> {
+        let reg_names = self.reg_list();
+        let pre_state = self.pre_state_mut();
+        let symtab = &shared_state.symtab;
+        for reg_name_str in reg_names.into_iter().filter(|r| r != "x0" && r != "PC") {
+            let Some(name) = symtab.get(&zencode::encode(&reg_name_str)) else { continue };
+            let sym_val = match shared_state.registers.get(&name) {
+                Some(Ty::AnyBits) if is_vector_register_name(&reg_name_str) => {
+                    let vlen = vlen_from_lets(lets, symtab);
+                    Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(vlen), SourceLoc::unknown()))
+                }
+                Some(Ty::AnyBits) => {
+                    panic!("防御性编程：寄存器 {} 是 %bv，但不是已知可由 vlen 定宽的 vr* 寄存器", reg_name_str)
+                }
+                Some(ty) => symbolic(ty, shared_state, solver, SourceLoc::unknown()).unwrap_or_else(|err| {
+                    panic!("防御性编程：寄存器 {} 无法符号化，类型 {:?}: {:?}", reg_name_str, ty, err)
+                }),
+                None => Val::Poison,
+            };
+            let recorded = if matches!(sym_val, Val::Poison) {
+                panic!(
+                    "防御性编程：寄存器 {} 的类型 {:?} 无法表示为符号值",
+                    reg_name_str,
+                    shared_state.registers.get(&name)
+                );
+            } else {
+                regs.assign(name, sym_val.clone(), shared_state);
+                sym_val
+            };
+            if !matches!(recorded, Val::Poison) {
+                pre_state.insert(name, recorded);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn solve_pre_state<'state>(
+        &self,
+        model: &mut Model<'_, B>,
+        shared_state: &SharedState<'state, B>,
+    ) -> BTreeMap<String, String> {
+        let pre_state = self.pre_state();
+        let symtab = &shared_state.symtab;
+        let mut result = BTreeMap::new();
+        for (name, val) in pre_state.iter() {
+            let reg_name = zencode::decode(symtab.to_str(*name));
+            match FmtVal::from_val(val, model) {
+                Ok(fmt_val) => {
+                    result.insert(reg_name, fmt_val.to_str(shared_state));
+                }
+                Err(e) => {
+                    log!(log::PATH_RESULT, &format!("警告: pre-state 寄存器 {} 无法求解: {:?}", reg_name, e));
+                }
+            }
+        }
+        result
+    }
+
+    fn pre_state(&self) -> &PreStateCtx<B>;
+    fn pre_state_mut(&mut self) -> &mut PreStateCtx<B>;
 }
 
-pub trait RISCV: Target {
-    const XLEN: u32;
+fn is_vector_register_name(reg_name: &str) -> bool {
+    reg_name.strip_prefix("vr").is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
 
-    fn xlen_name(&self) -> &'static str;
+fn vlen_from_lets<B: BV>(lets: &Bindings<B>, symtab: &Symtab) -> u32 {
+    let vlen_name = symtab.get(&zencode::encode("vlen")).expect("防御性编程：IR 中缺少 let vlen");
+    let vlen = lets.get(&vlen_name).expect("防御性编程：let vlen 未初始化");
+    let value = match vlen {
+        UVal::Init(Val::I64(value)) => *value as i128,
+        UVal::Init(Val::I128(value)) => *value,
+        UVal::Init(value) => panic!("防御性编程：let vlen 不是整数值: {:?}", value),
+        UVal::Uninit(ty) => panic!("防御性编程：let vlen 仍未求值，类型 {:?}", ty),
+    };
+    u32::try_from(value).unwrap_or_else(|err| panic!("防御性编程：let vlen 不能作为 bitvector 宽度: {}", err))
+}
+
+pub trait RISCV<B: BV>: Target<B> {
     fn pmp_symbolic(&self) -> bool;
-
     fn ppn_from_pa(&self, pa: u64) -> u64 {
         pa >> 12
     }
@@ -33,58 +161,54 @@ pub trait RISCV: Target {
         ppn << 12
     }
 
-    // Page table constants
-    const PAGE_SIZE: u64 = 4096;
-    const PAGE_SHIFT: u64 = 12;
-    const PTE_SIZE: u64 = 8;
-    const PTES_PER_LEVEL: u64 = 512;
-    const PAGE_TABLE_SIZE: u64 = Self::PTES_PER_LEVEL * Self::PTE_SIZE;
-    const PTE_V: u64 = 1;
-    const PTE_R: u64 = 2;
-    const PTE_W: u64 = 4;
-    const PTE_X: u64 = 8;
-    const PTE_U: u64 = 16;
-    const PTE_A: u64 = 64;
-    const PTE_D: u64 = 128;
-
+    // Page table constants (hardcoded defaults; override per-impl if needed)
     fn page_size(&self) -> u64 {
-        Self::PAGE_SIZE
+        4096
     }
     fn page_shift(&self) -> u64 {
-        Self::PAGE_SHIFT
+        12
     }
     fn pte_size(&self) -> u64 {
-        Self::PTE_SIZE
+        8
     }
     fn ptes_per_level(&self) -> u64 {
-        Self::PTES_PER_LEVEL
+        512
     }
     fn page_table_size(&self) -> u64 {
-        Self::PAGE_TABLE_SIZE
+        self.ptes_per_level() * self.pte_size()
     }
     fn pte_v(&self) -> u64 {
-        Self::PTE_V
+        1
     }
     fn pte_r(&self) -> u64 {
-        Self::PTE_R
+        2
     }
     fn pte_w(&self) -> u64 {
-        Self::PTE_W
+        4
     }
     fn pte_x(&self) -> u64 {
-        Self::PTE_X
+        8
     }
     fn pte_u(&self) -> u64 {
-        Self::PTE_U
+        16
     }
     fn pte_a(&self) -> u64 {
-        Self::PTE_A
+        64
     }
     fn pte_d(&self) -> u64 {
-        Self::PTE_D
+        128
+    }
+    fn vpn_bits(&self) -> u64 {
+        9
+    }
+    fn sv39_levels(&self) -> u64 {
+        3
+    }
+    fn sv48_levels(&self) -> u64 {
+        4
     }
 
-    fn apply_pmp_rules_to_config<B: BV>(
+    fn apply_pmp_rules_to_config(
         &self,
         pmp_config: &PmpConfig,
         symtab: &Symtab,
@@ -130,7 +254,7 @@ pub trait RISCV: Target {
         Ok(())
     }
 
-    fn apply_symbolic_pmp_to_registers<'ir, B: BV>(
+    fn apply_symbolic_pmp_to_registers<'ir>(
         &self,
         symtab: &Symtab,
         default_registers: &mut RegisterBindings<'ir, B>,
@@ -163,106 +287,133 @@ pub trait RISCV: Target {
     }
 }
 
-impl<T: RISCV> Target for T {
+pub struct RV32<B: BV> {
+    pub pmp_symbolic: bool,
+    pub pre_state: PreStateCtx<B>,
+}
+
+impl<B: BV> Default for RV32<B> {
+    fn default() -> Self {
+        RV32 { pmp_symbolic: false, pre_state: PreStateCtx::new() }
+    }
+}
+
+impl<B: BV> Target<B> for RV32<B> {
     fn arch_name(&self) -> &'static str {
         "riscv"
     }
-
-    fn arch_pretty_name(&self) -> &'static str {
-        self.xlen_name()
-    }
-
-    fn xlen(&self) -> &'static str {
-        const { assert!(T::XLEN == 32 || T::XLEN == 64) };
-        match T::XLEN {
-            32 => "32",
-            64 => "64",
-            _ => "0",
-        }
-    }
-
-    fn isa_state_list(&self) -> Vec<String> {
-        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
-        regs.extend((0..32).map(|r| format!("f{}", r)));
-        regs.push("PC".to_string());
-        regs.push("cur_privilege".to_string());
-        regs.extend(["mstatus".to_string()]);
-        regs
-    }
-}
-
-pub struct RV32 {
-    pub pmp_symbolic: bool,
-}
-
-impl Default for RV32 {
-    fn default() -> Self {
-        RV32 { pmp_symbolic: false }
-    }
-}
-
-impl RISCV for RV32 {
-    const XLEN: u32 = 32;
-
     fn xlen_name(&self) -> &'static str {
         "rv32"
     }
+    fn xlen(&self) -> &'static str {
+        "32"
+    }
+    fn reg_list(&self) -> Vec<String> {
+        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
+        regs.extend((0..32).map(|r| format!("f{}", r)));
+        regs.extend((0..32).map(|r| format!("vr{}", r)));
+        regs.push("PC".to_string());
+        regs.push("cur_privilege".to_string());
+        regs.push("mstatus".to_string());
+        regs
+    }
+    fn pre_state(&self) -> &PreStateCtx<B> {
+        &self.pre_state
+    }
+    fn pre_state_mut(&mut self) -> &mut PreStateCtx<B> {
+        &mut self.pre_state
+    }
+}
 
+impl<B: BV> RISCV<B> for RV32<B> {
     fn pmp_symbolic(&self) -> bool {
         self.pmp_symbolic
     }
 }
 
-pub struct RV64 {
+pub struct RV64<B: BV> {
     pub pmp_symbolic: bool,
+    pub pre_state: PreStateCtx<B>,
 }
 
-impl Default for RV64 {
+impl<B: BV> Default for RV64<B> {
     fn default() -> Self {
-        RV64 { pmp_symbolic: false }
+        RV64 { pmp_symbolic: false, pre_state: PreStateCtx::new() }
     }
 }
 
-impl RISCV for RV64 {
-    const XLEN: u32 = 64;
-
+impl<B: BV> Target<B> for RV64<B> {
+    fn arch_name(&self) -> &'static str {
+        "riscv"
+    }
     fn xlen_name(&self) -> &'static str {
         "rv64"
     }
+    fn xlen(&self) -> &'static str {
+        "64"
+    }
+    fn reg_list(&self) -> Vec<String> {
+        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
+        regs.extend((0..32).map(|r| format!("f{}", r)));
+        regs.extend((0..32).map(|r| format!("vr{}", r)));
+        regs.push("PC".to_string());
+        regs.push("cur_privilege".to_string());
+        regs.push("mstatus".to_string());
+        regs
+    }
+    fn pre_state(&self) -> &PreStateCtx<B> {
+        &self.pre_state
+    }
+    fn pre_state_mut(&mut self) -> &mut PreStateCtx<B> {
+        &mut self.pre_state
+    }
+}
 
+impl<B: BV> RISCV<B> for RV64<B> {
     fn pmp_symbolic(&self) -> bool {
         self.pmp_symbolic
     }
 }
 
-impl RV64 {
-    pub const PAGE_SIZE: u64 = 4096;
-    pub const PAGE_SHIFT: u64 = 12;
-    pub const PTE_SIZE: u64 = 8;
-    pub const VPN_BITS: u64 = 9;
-    pub const PTES_PER_LEVEL: u64 = 512;
-    pub const PAGE_TABLE_SIZE: u64 = Self::PTES_PER_LEVEL * Self::PTE_SIZE;
-
-    pub const PTE_V: u64 = 1;
-    pub const PTE_R: u64 = 2;
-    pub const PTE_W: u64 = 4;
-    pub const PTE_X: u64 = 8;
-    pub const PTE_U: u64 = 16;
-    pub const PTE_A: u64 = 64;
-    pub const PTE_D: u64 = 128;
-
-    pub const SV39_LEVELS: u64 = 3;
-    pub const SV48_LEVELS: u64 = 4;
-
+impl<B: BV> RV64<B> {
     pub fn sv39_vpn_indices(&self, va: u64) -> [u64; 3] {
         [(va >> 12) & 0x1FF, (va >> 21) & 0x1FF, (va >> 30) & 0x1FF]
     }
 
     pub fn sv48_vpn_indices(&self, va: u64) -> [u64; 4] {
-        [(va >> 12) & 0x1FF, (va >> 21) & 0x1FF, (va >> 30) & 0x1FF, (va >> 39) & 0x1FF]
+        [(va >> 12) & 0x1FF, (va >> 21) & 0x1FF, (va >> 39) & 0x1FF, (va >> 39) & 0x1FF]
     }
 }
 
+pub struct ARM<B: BV> {
+    pub pre_state: PreStateCtx<B>,
+}
+
+impl<B: BV> Target<B> for ARM<B> {
+    fn arch_name(&self) -> &'static str {
+        "aarch64"
+    }
+    fn xlen_name(&self) -> &'static str {
+        "aarch64"
+    }
+    fn xlen(&self) -> &'static str {
+        "64"
+    }
+    fn arch_pretty_name(&self) -> &'static str {
+        "AArch64"
+    }
+    fn reg_list(&self) -> Vec<String> {
+        let mut regs: Vec<String> = (0..31).map(|r| format!("R{}", r)).collect();
+        regs.push("PC".to_string());
+        regs
+    }
+    fn pre_state(&self) -> &PreStateCtx<B> {
+        &self.pre_state
+    }
+    fn pre_state_mut(&mut self) -> &mut PreStateCtx<B> {
+        &mut self.pre_state
+    }
+}
 const PPN_MASK: u64 = 0xFFF_FFFF_FFF;
 
 #[derive(Debug)]
@@ -284,19 +435,19 @@ impl RiscvPte {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.bits & RV64::PTE_V != 0
+        self.bits & 1 != 0
     }
 
     pub fn has_read(&self) -> bool {
-        self.bits & RV64::PTE_R != 0
+        self.bits & 2 != 0
     }
 
     pub fn has_write(&self) -> bool {
-        self.bits & RV64::PTE_W != 0
+        self.bits & 4 != 0
     }
 
     pub fn has_execute(&self) -> bool {
-        self.bits & RV64::PTE_X != 0
+        self.bits & 8 != 0
     }
 
     pub fn to_bytes(&self) -> [u8; 8] {
@@ -362,7 +513,14 @@ fn insert_symbolic_register<'ir, B: BV>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use isla_lib::bitvector::b64::B64;
 
+    fn rv64() -> RV64<B64> {
+        RV64::default()
+    }
+    fn rv32() -> RV32<B64> {
+        RV32::default()
+    }
     #[test]
     fn pte_new_and_extract() {
         let pte = RiscvPte::new(0x1234, 0xF);
@@ -392,18 +550,19 @@ mod tests {
 
     #[test]
     fn pte_individual_flags() {
-        let pte_v = RiscvPte::new(0, RV64::PTE_V);
+        let r = rv64();
+        let pte_v = RiscvPte::new(0, r.pte_v());
         assert!(pte_v.is_valid());
         assert!(!pte_v.has_read());
 
-        let pte_r = RiscvPte::new(0, RV64::PTE_R);
+        let pte_r = RiscvPte::new(0, r.pte_r());
         assert!(!pte_r.is_valid());
         assert!(pte_r.has_read());
 
-        let pte_w = RiscvPte::new(0, RV64::PTE_W);
+        let pte_w = RiscvPte::new(0, r.pte_w());
         assert!(pte_w.has_write());
 
-        let pte_x = RiscvPte::new(0, RV64::PTE_X);
+        let pte_x = RiscvPte::new(0, r.pte_x());
         assert!(pte_x.has_execute());
     }
 
@@ -417,8 +576,9 @@ mod tests {
 
     #[test]
     fn pte_roundtrip() {
+        let r = rv64();
         let ppn = 0xABCD;
-        let flags = RV64::PTE_V | RV64::PTE_R | RV64::PTE_W | RV64::PTE_A | RV64::PTE_D;
+        let flags = r.pte_v() | r.pte_r() | r.pte_w() | r.pte_a() | r.pte_d();
         let pte = RiscvPte::new(ppn, flags);
         let reconstructed = RiscvPte::new(pte.ppn(), pte.flags());
         assert_eq!(pte.bits, reconstructed.bits);
@@ -426,12 +586,12 @@ mod tests {
 
     #[test]
     fn sv39_vpn_indices_zero() {
-        assert_eq!(RV64::default().sv39_vpn_indices(0), [0, 0, 0]);
+        assert_eq!(rv64().sv39_vpn_indices(0), [0, 0, 0]);
     }
 
     #[test]
     fn sv39_vpn_indices_known() {
-        let indices = RV64::default().sv39_vpn_indices(0x0400_0000);
+        let indices = rv64().sv39_vpn_indices(0x0400_0000);
         assert_eq!(indices[0], 0);
         assert_eq!(indices[1], 32);
         assert_eq!(indices[2], 0);
@@ -440,26 +600,26 @@ mod tests {
     #[test]
     fn sv39_vpn_indices_max() {
         let va = (0x1FFu64 << 12) | (0x1FF << 21) | (0x1FF << 30);
-        let indices = RV64::default().sv39_vpn_indices(va);
+        let indices = rv64().sv39_vpn_indices(va);
         assert_eq!(indices, [511, 511, 511]);
     }
 
     #[test]
     fn sv48_vpn_indices_zero() {
-        assert_eq!(RV64::default().sv48_vpn_indices(0), [0, 0, 0, 0]);
+        assert_eq!(rv64().sv48_vpn_indices(0), [0, 0, 0, 0]);
     }
 
     #[test]
     fn sv48_vpn_indices_four_levels() {
         let va = (0x1u64 << 12) | (0x2u64 << 21) | (0x3u64 << 30) | (0x4u64 << 39);
-        let indices = RV64::default().sv48_vpn_indices(va);
+        let indices = rv64().sv48_vpn_indices(va);
         assert_eq!(indices, [1, 2, 3, 4]);
     }
 
     #[test]
     fn ppn_pa_roundtrip() {
         let pa = 0x8000_1000u64;
-        let rv64 = RV64::default();
+        let rv64 = rv64();
         let ppn = rv64.ppn_from_pa(pa);
         assert_eq!(ppn, 0x8000_1);
         assert_eq!(rv64.pa_from_ppn(ppn), pa);
@@ -467,30 +627,39 @@ mod tests {
 
     #[test]
     fn ppn_from_pa_strips_offset() {
-        assert_eq!(RV64::default().ppn_from_pa(0x8000_1234), 0x8000_1);
+        assert_eq!(rv64().ppn_from_pa(0x8000_1234), 0x8000_1);
     }
 
     #[test]
     fn pa_from_ppn_aligned() {
-        let rv64 = RV64::default();
+        let rv64 = rv64();
         let pa = rv64.pa_from_ppn(0x1234);
-        assert_eq!(pa % RV64::PAGE_SIZE, 0);
+        assert_eq!(pa % rv64.page_size(), 0);
     }
 
     #[test]
     fn rv64_target_trait() {
-        let target = RV64::default();
+        let target = rv64();
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "64");
         assert_eq!(target.xlen_name(), "rv64");
-        let regs = target.isa_state_list();
+        // registers_of_interest 是 pre-state 与 post-state 的统一来源（全量并集）
+        let regs = target.reg_list();
         assert!(regs.contains(&"x0".to_string()));
         assert!(regs.contains(&"PC".to_string()));
+        assert!(regs.contains(&"vr0".to_string()));
+        assert!(regs.contains(&"mstatus".to_string()));
+        // pre-state 派生（setup_pre_state 内部）：排除 x0 和 PC（不做主动符号化）
+        let pre_state: Vec<String> = regs.into_iter().filter(|r| r != "x0" && r != "PC").collect();
+        assert!(!pre_state.contains(&"x0".to_string()));
+        assert!(!pre_state.contains(&"PC".to_string()));
+        assert!(pre_state.contains(&"vr0".to_string()));
+        assert!(pre_state.contains(&"mstatus".to_string()));
     }
 
     #[test]
     fn rv32_target_trait() {
-        let target = RV32::default();
+        let target = rv32();
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "32");
         assert_eq!(target.xlen_name(), "rv32");
@@ -498,14 +667,15 @@ mod tests {
 
     #[test]
     fn rv64_constants() {
-        assert_eq!(RV64::PAGE_SIZE, 4096);
-        assert_eq!(RV64::PAGE_SHIFT, 12);
-        assert_eq!(RV64::PTES_PER_LEVEL, 512);
-        assert_eq!(RV64::PAGE_TABLE_SIZE, 512 * 8);
-        assert_eq!(1u64 << RV64::PAGE_SHIFT, RV64::PAGE_SIZE);
-        assert_eq!(RV64::PTE_V, 1);
-        assert_eq!(RV64::PTE_R, 2);
-        assert_eq!(RV64::PTE_W, 4);
-        assert_eq!(RV64::PTE_X, 8);
+        let r = rv64();
+        assert_eq!(r.page_size(), 4096);
+        assert_eq!(r.page_shift(), 12);
+        assert_eq!(r.ptes_per_level(), 512);
+        assert_eq!(r.page_table_size(), 512 * 8);
+        assert_eq!(1u64 << r.page_shift(), r.page_size());
+        assert_eq!(r.pte_v(), 1);
+        assert_eq!(r.pte_r(), 2);
+        assert_eq!(r.pte_w(), 4);
+        assert_eq!(r.pte_x(), 8);
     }
 }

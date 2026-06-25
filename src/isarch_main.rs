@@ -325,7 +325,8 @@ fn isla_main() -> i32 {
             let xlen = detect_xlen(*shared_state, lets);
             let success = match xlen {
                 32 => {
-                    let target = RV32 { pmp_symbolic };
+                    let mut target = RV32::default();
+                    target.pmp_symbolic = pmp_symbolic;
                     let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                         .and_then(|builder| builder.build())
                         .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
@@ -335,7 +336,7 @@ fn isla_main() -> i32 {
                         regs,
                         lets,
                         initial_memory,
-                        &target,
+                        &mut target,
                         &clauses,
                         &extensions,
                         &instruction_names,
@@ -345,7 +346,8 @@ fn isla_main() -> i32 {
                     )
                 }
                 _ => {
-                    let target = RV64 { pmp_symbolic };
+                    let mut target = RV64::default();
+                    target.pmp_symbolic = pmp_symbolic;
                     let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                         .and_then(|builder| builder.build())
                         .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
@@ -355,7 +357,7 @@ fn isla_main() -> i32 {
                         regs,
                         lets,
                         initial_memory,
-                        &target,
+                        &mut target,
                         &clauses,
                         &extensions,
                         &instruction_names,

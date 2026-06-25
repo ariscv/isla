@@ -1793,7 +1793,7 @@ pub fn start_single<'ir, B: BV, R>(
             0,
             task.id,
             &mut task.fraction,
-            Timeout::seconds(5),
+            Timeout::seconds(10),
             task.stop_conditions,
             &queue,
             &task.frame,
