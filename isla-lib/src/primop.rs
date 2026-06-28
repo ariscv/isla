@@ -1384,6 +1384,23 @@ fn arith_shiftr<B: BV>(
                 info,
             )
             .into(),
+        (Val::Symbolic(x), Val::Bits(y)) => match solver.length(x) {
+            Some(length) => {
+                let shift = if length < y.len() {
+                    Exp::Extract(length - 1, 0, Box::new(smt_sbits(y)))
+                } else if length > y.len() {
+                    Exp::ZeroExtend(length - y.len(), Box::new(smt_sbits(y)))
+                } else {
+                    smt_sbits(y)
+                };
+                solver.define_const(Exp::Bvashr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+            }
+            None => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &x, &y), info)),
+        },
+        (Val::Bits(x), Val::Bits(y)) => {
+            let shift: u64 = y.try_into()?;
+            Ok(Val::Bits(x.arith_shiftr(i128::from(shift))))
+        }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.arith_shiftr(y))),
         (bits, shift) => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &bits, &shift), info)),
     }
@@ -2990,21 +3007,13 @@ fn pack_vreg_bits<B: BV>(elements: &[Val<B>], solver: &mut Solver<B>, info: Sour
     }
 }
 
-fn isla_pack_vreg_internal<B: BV>(
-    args: Vec<Val<B>>,
+fn pack_vreg_values<B: BV>(
+    sew: u32,
+    vlen: u32,
+    values: Vec<Val<B>>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    if args.len() != 3 {
-        return Err(ExecError::Type(format!("isla_pack_vreg expected 3 arguments, got {}", args.len()), info));
-    }
-
-    let sew = u32::try_from(expect_i128_arg(&args[0], "isla_pack_vreg SEW", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
-    let vlen = u32::try_from(expect_i128_arg(&args[1], "isla_pack_vreg VLEN", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
-    let values = expect_vector_arg(args[2].clone(), "isla_pack_vreg vector", info)?;
-
     if !matches!(sew, 8 | 16 | 32 | 64) || vlen == 0 || vlen % sew != 0 {
         return Err(ExecError::Type(format!("isla_pack_vreg invalid SEW/VLEN {}/{}", sew, vlen), info));
     }
@@ -3023,6 +3032,24 @@ fn isla_pack_vreg_internal<B: BV>(
     }
 
     Ok(Val::Vector(registers))
+}
+
+fn isla_pack_vreg_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 3 {
+        return Err(ExecError::Type(format!("isla_pack_vreg expected 3 arguments, got {}", args.len()), info));
+    }
+
+    let sew = u32::try_from(expect_i128_arg(&args[0], "isla_pack_vreg SEW", solver, info)?)
+        .map_err(|_| ExecError::Overflow)?;
+    let vlen = u32::try_from(expect_i128_arg(&args[1], "isla_pack_vreg VLEN", solver, info)?)
+        .map_err(|_| ExecError::Overflow)?;
+    let values = expect_vector_arg(args[2].clone(), "isla_pack_vreg vector", info)?;
+
+    pack_vreg_values(sew, vlen, values, solver, info)
 }
 
 fn isla_pack_vreg<B: BV>(
@@ -3304,6 +3331,7 @@ fn smt_clz<B: BV>(bv: Sym, len: u32, solver: &mut Solver<B>, info: SourceLoc) ->
     }
 }
 
+/// 在 SMT solver 中实现 count trailing zeros (ctz)，从低半部分开始递归检查。
 fn smt_ctz<B: BV>(bv: Sym, len: u32, solver: &mut Solver<B>, info: SourceLoc) -> Sym {
     if len == 1 {
         solver.define_const(
@@ -3321,16 +3349,16 @@ fn smt_ctz<B: BV>(bv: Sym, len: u32, solver: &mut Solver<B>, info: SourceLoc) ->
         let top = solver.define_const(Exp::Extract(len - 1, low_len, Box::new(Exp::Var(bv))), info);
         let low = solver.define_const(Exp::Extract(low_len - 1, 0, Box::new(Exp::Var(bv))), info);
 
-        let top_bits_are_zero = Exp::Eq(Box::new(Exp::Var(top)), Box::new(smt_zeros(top_len as i128)));
+        let low_bits_are_zero = Exp::Eq(Box::new(Exp::Var(low)), Box::new(smt_zeros(low_len as i128)));
 
-        let top_clz = smt_clz(top, top_len, solver, info);
-        let low_clz = smt_clz(low, low_len, solver, info);
+        let top_ctz = smt_ctz(top, top_len, solver, info);
+        let low_ctz = smt_ctz(low, low_len, solver, info);
 
         solver.define_const(
             Exp::Ite(
-                Box::new(top_bits_are_zero),
-                Box::new(Exp::Bvadd(Box::new(smt_i128(top_len as i128)), Box::new(Exp::Var(low_clz)))),
-                Box::new(Exp::Var(top_clz)),
+                Box::new(low_bits_are_zero),
+                Box::new(Exp::Bvadd(Box::new(smt_i128(low_len as i128)), Box::new(Exp::Var(top_ctz)))),
+                Box::new(Exp::Var(low_ctz)),
             ),
             info,
         )
@@ -3360,15 +3388,14 @@ fn count_trailing_zeros<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceL
             if let Some(len) = solver.length(bv) {
                 smt_ctz(bv, len, solver, info).into()
             } else {
-                Err(ExecError::Type("count_leading_zeros (solver could not determine length)".to_string(), info))
+                Err(ExecError::Type("count_trailing_zeros (solver could not determine length)".to_string(), info))
             }
         }
-        _ => Err(ExecError::Type(format!("count_leading_zeros {:?}", &bv), info)),
+        _ => Err(ExecError::Type(format!("count_trailing_zeros {:?}", &bv), info)),
     }
 }
 
-/// Generate SMT expression for carry-less multiplication.
-/// This avoids branching by using bitwise operations directly.
+/// 生成 carry-less multiplication 的 SMT 表达式，直接用位运算构造符号路径。
 fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, info: SourceLoc) -> Sym {
     let result_len = len * 2;
 
@@ -4539,6 +4566,27 @@ mod tests {
     }
 
     #[test]
+    fn count_trailing_zeros_symbolic_counts_from_low_bits() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let bits = solver.declare_const(Ty::BitVec(4), SourceLoc::unknown());
+
+        let result = count_trailing_zeros(Val::Symbolic(bits), &mut solver, SourceLoc::unknown())?;
+        let Val::Symbolic(result) = result else {
+            panic!("expected symbolic trailing-zero count, got {:?}", result);
+        };
+
+        solver.assert_eq(Exp::Var(bits), Exp::Bits64(B64::new(0b0010, 4)));
+        assert_eq!(
+            solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(result)), Box::new(smt_i128(1))), SourceLoc::unknown()),
+            SmtResult::Unsat
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn isla_clmul_variants_extract_expected_product_bits() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -4992,7 +5040,9 @@ mod tests {
 
         assert_eq!(
             isla_mux2_internal(
-                vec![Val::Bits(B64::BIT_ZERO), false_value.clone(), true_value.clone()],
+                Val::Bits(B64::BIT_ZERO),
+                false_value.clone(),
+                true_value.clone(),
                 &mut solver,
                 SourceLoc::unknown(),
             )?,
@@ -5000,7 +5050,9 @@ mod tests {
         );
         assert_eq!(
             isla_mux2_internal(
-                vec![Val::Bits(B64::BIT_ONE), Val::Bits(B64::new(0xaa, 8)), true_value],
+                Val::Bits(B64::BIT_ONE),
+                Val::Bits(B64::new(0xaa, 8)),
+                true_value,
                 &mut solver,
                 SourceLoc::unknown(),
             )?,
@@ -5009,7 +5061,9 @@ mod tests {
 
         let selector = solver.declare_const(Ty::BitVec(1), SourceLoc::unknown());
         match isla_mux2_internal(
-            vec![Val::Symbolic(selector), Val::Bits(B64::new(0xaa, 8)), Val::Bits(B64::new(0x55, 8))],
+            Val::Symbolic(selector),
+            Val::Bits(B64::new(0xaa, 8)),
+            Val::Bits(B64::new(0x55, 8)),
             &mut solver,
             SourceLoc::unknown(),
         )? {
