@@ -107,19 +107,6 @@ fn smt_u64_width<V>(value: u64, width: u32) -> Exp<V> {
     }
 }
 
-// 用当前路径约束尝试把布尔表达式具体化为 true/false。
-//
-// 这里处理的是“条件”本身，而不是证明某个符号值等于唯一常数：
-// one-of 约束下的 `num_elem <= vlen` 可能可证明为 true，
-// 但 `num_elem == 2` 仍会保留为 symbolic，避免错误具体化。
-//
-// 返回值：
-// - `Val::Bool(true)`：当前约束能证明 exp 恒真。
-// - `Val::Bool(false)`：当前约束能证明 exp 恒假。
-// - `Val::Symbolic(_)`：exp 仍可能真也可能假，或 solver 无法证明，保留为符号布尔值。
-//
-// 例：若已有 assert(num_elem == 1 | num_elem == 2 | num_elem == 4)，
-// `0 < num_elem` 会返回 true，而 `num_elem == 2` 仍返回 symbolic。
 fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match solver.check_sat_with(&Exp::Not(Box::new(exp.clone())), info) {
         SmtResult::Unsat => return Ok(Val::Bool(true)),
@@ -1384,6 +1371,23 @@ fn arith_shiftr<B: BV>(
                 info,
             )
             .into(),
+        (Val::Symbolic(x), Val::Bits(y)) => match solver.length(x) {
+            Some(length) => {
+                let shift = if length < y.len() {
+                    Exp::Extract(length - 1, 0, Box::new(smt_sbits(y)))
+                } else if length > y.len() {
+                    Exp::ZeroExtend(length - y.len(), Box::new(smt_sbits(y)))
+                } else {
+                    smt_sbits(y)
+                };
+                solver.define_const(Exp::Bvashr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+            }
+            None => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &x, &y), info)),
+        },
+        (Val::Bits(x), Val::Bits(y)) => {
+            let shift: u64 = y.try_into()?;
+            Ok(Val::Bits(x.arith_shiftr(i128::from(shift))))
+        }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.arith_shiftr(y))),
         (bits, shift) => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &bits, &shift), info)),
     }
@@ -2990,21 +2994,13 @@ fn pack_vreg_bits<B: BV>(elements: &[Val<B>], solver: &mut Solver<B>, info: Sour
     }
 }
 
-fn isla_pack_vreg_internal<B: BV>(
-    args: Vec<Val<B>>,
+fn pack_vreg_values<B: BV>(
+    sew: u32,
+    vlen: u32,
+    values: Vec<Val<B>>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    if args.len() != 3 {
-        return Err(ExecError::Type(format!("isla_pack_vreg expected 3 arguments, got {}", args.len()), info));
-    }
-
-    let sew = u32::try_from(expect_i128_arg(&args[0], "isla_pack_vreg SEW", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
-    let vlen = u32::try_from(expect_i128_arg(&args[1], "isla_pack_vreg VLEN", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
-    let values = expect_vector_arg(args[2].clone(), "isla_pack_vreg vector", info)?;
-
     if !matches!(sew, 8 | 16 | 32 | 64) || vlen == 0 || vlen % sew != 0 {
         return Err(ExecError::Type(format!("isla_pack_vreg invalid SEW/VLEN {}/{}", sew, vlen), info));
     }
@@ -3023,6 +3019,24 @@ fn isla_pack_vreg_internal<B: BV>(
     }
 
     Ok(Val::Vector(registers))
+}
+
+fn isla_pack_vreg_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 3 {
+        return Err(ExecError::Type(format!("isla_pack_vreg expected 3 arguments, got {}", args.len()), info));
+    }
+
+    let sew = u32::try_from(expect_i128_arg(&args[0], "isla_pack_vreg SEW", solver, info)?)
+        .map_err(|_| ExecError::Overflow)?;
+    let vlen = u32::try_from(expect_i128_arg(&args[1], "isla_pack_vreg VLEN", solver, info)?)
+        .map_err(|_| ExecError::Overflow)?;
+    let values = expect_vector_arg(args[2].clone(), "isla_pack_vreg vector", info)?;
+
+    pack_vreg_values(sew, vlen, values, solver, info)
 }
 
 fn isla_pack_vreg<B: BV>(
@@ -3321,16 +3335,16 @@ fn smt_ctz<B: BV>(bv: Sym, len: u32, solver: &mut Solver<B>, info: SourceLoc) ->
         let top = solver.define_const(Exp::Extract(len - 1, low_len, Box::new(Exp::Var(bv))), info);
         let low = solver.define_const(Exp::Extract(low_len - 1, 0, Box::new(Exp::Var(bv))), info);
 
-        let top_bits_are_zero = Exp::Eq(Box::new(Exp::Var(top)), Box::new(smt_zeros(top_len as i128)));
+        let low_bits_are_zero = Exp::Eq(Box::new(Exp::Var(low)), Box::new(smt_zeros(low_len as i128)));
 
-        let top_clz = smt_clz(top, top_len, solver, info);
-        let low_clz = smt_clz(low, low_len, solver, info);
+        let top_ctz = smt_ctz(top, top_len, solver, info);
+        let low_ctz = smt_ctz(low, low_len, solver, info);
 
         solver.define_const(
             Exp::Ite(
-                Box::new(top_bits_are_zero),
-                Box::new(Exp::Bvadd(Box::new(smt_i128(top_len as i128)), Box::new(Exp::Var(low_clz)))),
-                Box::new(Exp::Var(top_clz)),
+                Box::new(low_bits_are_zero),
+                Box::new(Exp::Bvadd(Box::new(smt_i128(low_len as i128)), Box::new(Exp::Var(top_ctz)))),
+                Box::new(Exp::Var(low_ctz)),
             ),
             info,
         )
@@ -3360,15 +3374,13 @@ fn count_trailing_zeros<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceL
             if let Some(len) = solver.length(bv) {
                 smt_ctz(bv, len, solver, info).into()
             } else {
-                Err(ExecError::Type("count_leading_zeros (solver could not determine length)".to_string(), info))
+                Err(ExecError::Type("count_trailing_zeros (solver could not determine length)".to_string(), info))
             }
         }
-        _ => Err(ExecError::Type(format!("count_leading_zeros {:?}", &bv), info)),
+        _ => Err(ExecError::Type(format!("count_trailing_zeros {:?}", &bv), info)),
     }
 }
 
-/// Generate SMT expression for carry-less multiplication.
-/// This avoids branching by using bitwise operations directly.
 fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, info: SourceLoc) -> Sym {
     let result_len = len * 2;
 
@@ -4443,6 +4455,7 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn isla_rev8_reverses_byte_order() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -4539,6 +4552,20 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
     fn isla_clmul_variants_extract_expected_product_bits() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -4597,6 +4624,13 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
     #[test]
     fn isla_carryless_mul_symbolic_paths_have_double_width() -> Result<(), ExecError> {
         let cfg = Config::new();
@@ -4983,6 +5017,8 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    #[test]
     fn isla_mux2_selects_bitvector_operand() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -4992,7 +5028,9 @@ mod tests {
 
         assert_eq!(
             isla_mux2_internal(
-                vec![Val::Bits(B64::BIT_ZERO), false_value.clone(), true_value.clone()],
+                Val::Bits(B64::BIT_ZERO),
+                false_value.clone(),
+                true_value.clone(),
                 &mut solver,
                 SourceLoc::unknown(),
             )?,
@@ -5000,7 +5038,9 @@ mod tests {
         );
         assert_eq!(
             isla_mux2_internal(
-                vec![Val::Bits(B64::BIT_ONE), Val::Bits(B64::new(0xaa, 8)), true_value],
+                Val::Bits(B64::BIT_ONE),
+                Val::Bits(B64::new(0xaa, 8)),
+                true_value,
                 &mut solver,
                 SourceLoc::unknown(),
             )?,
@@ -5009,7 +5049,9 @@ mod tests {
 
         let selector = solver.declare_const(Ty::BitVec(1), SourceLoc::unknown());
         match isla_mux2_internal(
-            vec![Val::Symbolic(selector), Val::Bits(B64::new(0xaa, 8)), Val::Bits(B64::new(0x55, 8))],
+            Val::Symbolic(selector),
+            Val::Bits(B64::new(0xaa, 8)),
+            Val::Bits(B64::new(0x55, 8)),
             &mut solver,
             SourceLoc::unknown(),
         )? {
