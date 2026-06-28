@@ -2654,6 +2654,137 @@ fn isla_init_mask<B: BV>(
     isla_init_mask_internal(args, solver, info)
 }
 
+// Read a vector mask register of fixed width `'n` (= VLEN) with a *symbolic* `num_elem`,
+// without ever producing a symbolic subrange (which would hit `subrange_internal`
+// `SymbolicLength`). Mirrors the Sail semantics of `read_vmask`/`read_vmask_carry`:
+//   bit i = vm==1 ? pad_val : (i < num_elem ? vreg[i] : pad_val)
+// where `pad_val = !is_carry` (ones for `read_vmask`, zeros for `read_vmask_carry`).
+// `num_elem` only ever appears as an SMT `Bvslt` comparison, never as a slice bound or
+// bitvector construction length, so no `subrange_internal` is triggered.
+fn isla_read_vmask_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 4 {
+        return Err(ExecError::Type(format!("isla_read_vmask expected 4 arguments, got {}", args.len()), info));
+    }
+
+    let num_elem = concrete_i128_arg(&args[0]);
+    let vm = expect_bits_arg(args[1].clone(), "isla_read_vmask vm", solver, info)?;
+    if length_bits(&vm, solver, info)? != 1 {
+        return Err(ExecError::Type("isla_read_vmask vm must be bits(1)".to_string(), info));
+    }
+    let is_carry = expect_bits_arg(args[2].clone(), "isla_read_vmask is_carry", solver, info)?;
+    if length_bits(&is_carry, solver, info)? != 1 {
+        return Err(ExecError::Type("isla_read_vmask is_carry must be bits(1)".to_string(), info));
+    }
+    let vreg = expect_bits_arg(args[3].clone(), "isla_read_vmask vreg", solver, info)?;
+    let len = length_bits(&vreg, solver, info)?;
+    if len == 0 {
+        return Ok(Val::Bits(B::zeros(0)));
+    }
+
+    // pad_val = !is_carry: ones for read_vmask, zeros for read_vmask_carry.
+    let pad_val = match &is_carry {
+        Val::Bits(b) => !concrete_bit(*b, 0)?,
+        _ => false, // symbolic is_carry falls back to read_vmask (ones) padding semantics via SMT below
+    };
+    let vm_on = match &vm {
+        Val::Bits(b) => concrete_bit(*b, 0)?,
+        _ => false,
+    };
+
+    // Fully concrete fast path.
+    if let (Some(num_elem), Val::Bits(vreg_bits), Val::Bits(_), Val::Bits(_)) = (num_elem, &vreg, &vm, &is_carry) {
+        let mut value = B::zeros(len);
+        for i in 0..len {
+            let bit = if vm_on {
+                pad_val
+            } else if (i as i128) < num_elem {
+                concrete_bit(*vreg_bits, i)?
+            } else {
+                pad_val
+            };
+            if bit {
+                value = value.set_slice(i, B::BIT_ONE);
+            }
+        }
+        return Ok(Val::Bits(value));
+    }
+
+    // Symbolic path: build an SMT expression of fixed width `len`.
+    let num_elem_exp = int_exp_128(&args[0], solver, "isla_read_vmask num_elem", info)?;
+    let pad_one = Exp::Bits64(B64::BIT_ONE);
+    let pad_zero = Exp::Bits64(B64::BIT_ZERO);
+    // pad bit = is_carry ? 0 : 1  (ones for read_vmask, zeros for carry)
+    let pad_bit = match &is_carry {
+        Val::Bits(b) => {
+            if concrete_bit(*b, 0)? {
+                pad_zero.clone()
+            } else {
+                pad_one.clone()
+            }
+        }
+        _ => pad_one.clone(),
+    };
+    // vm_on bit expression: when vm==1 the whole result is pad_val.
+    let vm_branch = match &vm {
+        Val::Bits(b) => {
+            if concrete_bit(*b, 0)? {
+                pad_bit.clone()
+            } else {
+                // not used per-bit but kept for clarity; fall through to per-bit build
+                pad_zero.clone()
+            }
+        }
+        _ => pad_zero.clone(),
+    };
+
+    let mut exp = None;
+    for i in (0..len).rev() {
+        let index = smt_i128(i128::from(i));
+        // bit_i = vm==1 ? pad : (i < num_elem ? vreg[i] : pad)
+        let in_range = Exp::Bvslt(Box::new(index.clone()), Box::new(num_elem_exp.clone()));
+        let vreg_bit = symbolic_bit(&vreg, i, info)?;
+        let body_bit = Exp::Ite(Box::new(in_range), Box::new(vreg_bit), Box::new(pad_bit.clone()));
+        let bit = match &vm {
+            Val::Bits(b) => {
+                if concrete_bit(*b, 0)? {
+                    pad_bit.clone()
+                } else {
+                    body_bit
+                }
+            }
+            Val::Symbolic(sym) => {
+                let vm_bit = Exp::Extract(0, 0, Box::new(Exp::Var(*sym)));
+                Exp::Ite(
+                    Box::new(Exp::Eq(Box::new(vm_bit), Box::new(Exp::Bits64(B64::BIT_ONE)))),
+                    Box::new(pad_bit.clone()),
+                    Box::new(body_bit),
+                )
+            }
+            _ => body_bit,
+        };
+        let _ = vm_branch; // (kept for readability; vm handling is per-bit above)
+        exp = Some(match exp {
+            Some(acc) => Exp::Concat(Box::new(acc), Box::new(bit)),
+            None => bit,
+        });
+    }
+
+    solver.define_const(exp.expect("non-empty read_vmask expression"), info).into()
+}
+
+fn isla_read_vmask<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    _: &mut LocalFrame<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    isla_read_vmask_internal(args, solver, info)
+}
+
 enum Condition {
     Concrete(bool),
     Symbolic(Exp<Sym>),
@@ -3979,6 +4110,7 @@ pub fn variadic_primops<B: BV>() -> HashMap<String, Variadic<B>> {
     primops.insert("mark_register_pair".to_string(), mark_register_pair as Variadic<B>);
     primops.insert("isla_read_vreg".to_string(), isla_read_vreg as Variadic<B>);
     primops.insert("isla_init_mask".to_string(), isla_init_mask as Variadic<B>);
+    primops.insert("isla_read_vmask".to_string(), isla_read_vmask as Variadic<B>);
     primops.insert("isla_vector_select".to_string(), isla_vector_select as Variadic<B>);
     primops.insert("isla_mux2".to_string(), isla_mux2 as Variadic<B>);
     primops.insert("isla_masktypei_result".to_string(), isla_masktypei_result as Variadic<B>);
@@ -4868,6 +5000,66 @@ mod tests {
             value => panic!("expected symbolic mask, got {:?}", value),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn isla_read_vmask_concrete_returns_low_bits_with_ones_padding() -> Result<(), ExecError> {
+        // read_vmask: vm=0, num_elem=3, vreg=0b1011 (4 bits). Expected: low 3 bits from vreg
+        // (011), high 1 bit padded with ones -> 0b1011 = 11. (bit i: i<3 ? vreg[i] : 1)
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let args = vec![
+            Val::I128(3),                   // num_elem
+            Val::Bits(B64::new(0, 1)),      // vm = 0 (use the else branch)
+            Val::Bits(B64::new(0, 1)),      // is_carry = 0 (pad high with ones)
+            Val::Bits(B64::new(0b1011, 4)), // vreg bits
+        ];
+        match isla_read_vmask_internal(args, &mut solver, SourceLoc::unknown())? {
+            Val::Bits(bits) => assert_eq!(bits, B64::new(0b1011, 4)),
+            value => panic!("expected concrete read_vmask result, got {:?}", value),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn isla_read_vmask_symbolic_num_elem_has_fixed_width() -> Result<(), ExecError> {
+        // symbolic num_elem must NOT trigger subrange_internal: result width fixed to vreg width.
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let num_elem = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let args = vec![
+            Val::Symbolic(num_elem),
+            Val::Bits(B64::new(0, 1)),      // vm = 0
+            Val::Bits(B64::new(0, 1)),      // is_carry = 0
+            Val::Bits(B64::new(0b1011, 4)), // vreg (4 bits)
+        ];
+        match isla_read_vmask_internal(args, &mut solver, SourceLoc::unknown())? {
+            Val::Symbolic(mask) => assert_eq!(solver.length(mask), Some(4)),
+            value => panic!("expected symbolic read_vmask result, got {:?}", value),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn isla_read_vmask_carry_pads_zeros() -> Result<(), ExecError> {
+        // read_vmask_carry: vm=0, is_carry=1, num_elem=2, vreg=0b0101 (4 bits).
+        // bit i: i<2 ? vreg[i] : 0 -> low 2 bits 01, high 2 bits 00 -> 0b0001 = 1
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let args = vec![
+            Val::I128(2),
+            Val::Bits(B64::new(0, 1)),      // vm = 0
+            Val::Bits(B64::new(1, 1)),      // is_carry = 1 (pad high with zeros)
+            Val::Bits(B64::new(0b0101, 4)), // vreg bits
+        ];
+        match isla_read_vmask_internal(args, &mut solver, SourceLoc::unknown())? {
+            Val::Bits(bits) => assert_eq!(bits, B64::new(0b0001, 4)),
+            value => panic!("expected concrete read_vmask carry result, got {:?}", value),
+        }
         Ok(())
     }
 
