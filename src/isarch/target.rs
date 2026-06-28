@@ -121,6 +121,14 @@ where
             let reg_name = zencode::decode(symtab.to_str(*name));
             match FmtVal::from_val(val, model) {
                 Ok(fmt_val) => {
+                    // 过滤未约束的符号变量（与历史提交 4639bd7 的 isa-state 打印过滤一致）：
+                    // is_arbitrary 为真表示该 pre-state 符号在最终 model 中没有被任何约束定值
+                    //（complete_model=false 下，z3 对从未出现在断言中的声明常量返回 Arbitrary）。
+                    // 这类寄存器对当前指令路径没有实际约束，跳过不输出，避免 isa-state 被全 0
+                    // 的 arbitrary 值淹没，只保留真正被符号执行约束过的 pre-state。
+                    if fmt_val.is_arbitrary() {
+                        continue;
+                    }
                     result.insert(reg_name, fmt_val.to_str(shared_state));
                 }
                 Err(e) => {
