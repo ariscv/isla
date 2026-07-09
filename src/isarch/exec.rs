@@ -266,7 +266,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
 
-    // 执行限制配置（三道防线，OR 关系，任一触发即执行 on_limit_reached）：
+    /*     // 执行限制配置（三道防线，OR 关系，任一触发即执行 on_limit_reached）：
     //
     // 1) max_total_forks=8       — 硬上限：全局 fork 总数，防止状态爆炸
     // 2) max_forks_per_branch=2  — 硬上限：单个分支点最多 fork 2 次
@@ -287,12 +287,13 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         .with_max_fork_pct_per_branch(0.1)
         .with_max_fork_pct_check_delay(100)
         .with_limit_behavior(LimitBehavior::Concretize);
-    let task_state = TaskState::new().with_execution_limits(limits);
+    let task_state = TaskState::new().with_execution_limits(limits); */
 
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
 
-    isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
+    //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
+    isla_lib::executor::execute_ir_function_with_checkpoint_multi_thread(
         "zexecute",
         &fun_args,
         shared_state,
@@ -528,8 +529,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
         },
         cp,
-        initial_memory,
-        task_state,
+        64,
     );
 
     // 提取字符串结果
