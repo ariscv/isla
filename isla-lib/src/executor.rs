@@ -2615,6 +2615,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     collector: &'ir Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
     num_threads: usize,
+    task_state: &TaskState<B>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -2628,10 +2629,9 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     initial_frame.add_regs(regs);
     initial_frame.add_lets(lets);
 
-    // 创建任务，使用传入的checkpoint
-    let task_state = TaskState::new();
+    // 使用调用方传入的 task_state（含 ExecutionLimits 配置），跨线程经 Arc<ExecutionLimitsState> 共享
     let task_id = TaskId::fresh();
-    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+    let task = initial_frame.task_with_checkpoint(task_id, task_state, checkpoint);
 
     start_multi(num_threads, None, vec![task], &shared_state, collected.clone(), collector);
 }
@@ -3442,7 +3442,7 @@ fn zrX(z3zE1756) {
                         &mut task_fraction,
                         Timeout::unlimited(),
                         None,
-                        &queue,
+                        &SingleForkSink { queue: &queue },
                         &mut frame,
                         &task_state,
                         &shared_state,
@@ -3518,7 +3518,7 @@ fn zrX(z3zE1756) {
                 &mut task.fraction,
                 Timeout::unlimited(),
                 task.stop_conditions,
-                &queue,
+                &SingleForkSink { queue: &queue },
                 &mut task_frame,
                 task.state,
                 &shared_state,
@@ -3554,7 +3554,7 @@ fn zrX(z3zE1756) {
             &mut task_fraction,
             Timeout::unlimited(),
             None,
-            &queue,
+            &SingleForkSink { queue: &queue },
             &mut frame,
             &task_state,
             &shared_state,
@@ -3589,7 +3589,7 @@ fn zrX(z3zE1756) {
                 &mut task.fraction,
                 Timeout::unlimited(),
                 task.stop_conditions,
-                &queue,
+                &SingleForkSink { queue: &queue },
                 &mut task_frame,
                 task.state,
                 &shared_state,
@@ -3760,6 +3760,74 @@ fn zrX(z3zE1756) {
 
         assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
         assert!(results.iter().all(Result::is_ok));
+    }
+
+    // 测试 A（red->green）：验证 execute_ir_function_with_checkpoint_multi_thread
+    // 透传调用方传入的 task_state（含 limits）。改动前该入口硬编码 TaskState::new()（无 limits），
+    // 故 max_path_depth 不会触发；改动后透传生效，第二条 goto 触发 DepthLimitReached。
+    #[test]
+    fn entry_function_respects_passed_task_state_limits() {
+        const STEPT_IR: &str = r#"
+val zsteptest : (%unit) -> %unit
+fn zsteptest(zu) {
+  goto 1;
+  goto 2;
+  end;
+}
+"#;
+        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(STEPT_IR);
+        let limits = ExecutionLimits::default().with_max_path_depth(1).with_limit_behavior(LimitBehavior::Concretize);
+        let task_state = TaskState::new().with_execution_limits(limits);
+        let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+
+        execute_ir_function_with_checkpoint_multi_thread(
+            "zsteptest",
+            &[Val::Unit],
+            &shared_state,
+            &regs,
+            &lets,
+            &collected,
+            &|_tid, _id, result, _ss, _solver, count| {
+                if matches!(result, Err((ExecError::DepthLimitReached, _))) {
+                    *count.lock().unwrap() += 1;
+                }
+            },
+            Checkpoint::new(),
+            4,
+            &task_state,
+        );
+
+        let depth_hits = *collected.lock().unwrap();
+        assert!(depth_hits >= 1, "期望入口透传 task_state 后触发 DepthLimitReached，实际 {} 次", depth_hits);
+    }
+
+    // 测试 B：多线程并发下全局 per-branch 计数器（Arc<Mutex>）跨线程共享截断。
+    // 复用 repeated_call_fork_program(8)（无限制 2^8=256 路径），配 max_forks_per_branch(2)+Truncate，
+    // 经 start_multi(4) 多线程执行，断言完成路径数被全局计数器截断（远小于 256）。
+    #[test]
+    fn multi_thread_global_branch_limit_bounds_concurrent_forks() {
+        let (instrs, shared_state) = repeated_call_fork_program(8);
+        let limits =
+            ExecutionLimits::default().with_max_forks_per_branch(2).with_limit_behavior(LimitBehavior::Truncate);
+        let task_state = TaskState::new().with_execution_limits(limits);
+        let frame = make_frame(instrs);
+        let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
+        let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+
+        start_multi(
+            4,
+            None,
+            vec![task],
+            &shared_state,
+            collected.clone(),
+            &|_tid, _id, _result, _ss, _solver, count| {
+                *count.lock().unwrap() += 1;
+            },
+        );
+
+        let total = *collected.lock().unwrap();
+        assert!(total >= 1, "至少应有一条路径完成，实际 {}", total);
+        assert!(total < 256, "全局 per-branch 计数器应跨线程截断，实际完成 {} 条", total);
     }
 }
 pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(

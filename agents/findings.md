@@ -156,3 +156,11 @@
 - 因此，如果一次运行里真的执行到了 `run_symbolic_execute("zSTORE", ...)`，按当前实现应当直接得到 `output/rv64d_zSTORE.json`；若运行后连 `output/` 目录都没有，优先说明该指令根本没有被送进 `run_symbolic_execute(...)`。
 - `test_exec_main(...)` 里虽然定义了多个候选指令表，包括含有 `zSTORE` 的 `todo_instruction_table` 和 `["zSTORE", "zLOAD"]` 的 `excute_through_instruction_table`，但这些 `instruction_table.extend(...)` 语句当前都被注释掉了。
 - 由于 `instruction_table` 初始化为空且未被填充，`for ins_name in instruction_table { ... }` 当前不会执行任何指令；这会导致 `make run` 虽然进入了 `test_exec_main(...)`，但不会产出 `zSTORE` 或 `zLOAD` 的 JSON 文件。
+
+## 多线程 limit 机制入口透传（2026-07-09）
+
+- **入口硬编码缺口**：`isla-lib/src/executor.rs` 的 `execute_ir_function_with_checkpoint_multi_thread`（原 ~:2608）原本在函数体内硬编码 `let task_state = TaskState::new();`（无 limits），导致 `exec.rs` 调用方配置的 `ExecutionLimits` 无法传入多线程执行路径。已改为增加 `task_state: &TaskState<B>` 参数，由 `exec.rs` 构造带 limits 的 `TaskState` 透传。
+- **机制本身在多线程下本就可用**，无需改造计数器：`Task.state: &'task TaskState<B>` 是共享引用（fork 时新 Task 携带同一引用，executor.rs fork 点 ~:1504 `state: task_state`），`TaskState.limits_state: Arc<ExecutionLimitsState>` 内含 `Arc<Mutex<HashMap>>` + `AtomicU32`（task.rs ~:143-144），天然 `Send + Sync`；`start_multi` 用 `thread::scope`，所有线程 join 后才返回，故参数 `task_state` 引用生命周期安全。
+- **`max_total_forks` 在多线程下退化为 per-path 深度限制**：其检查用 `frame.forks`（per-frame 计数，executor.rs ~:1412），非全局 `total_forks()`。真正的全局跨分支点计数是 `max_forks_per_branch`（用 `increment_branch_fork`，mutex 全局）。
+- **dev-multithread 合并遗留的测试破坏**：合并把 `run_loop` 的 fork_sink 参数从 `&Worker` 改为泛型 `S: ForkSink`（trait 仅 impl 于 `SingleForkSink`/`MultiForkSink`），但 `executor.rs` 测试模块里 4 个 helper（`shared_state_and_bindings_from_ir`/`run_all_with_bindings`/`run_with_limits`/`run_all_with_shared_state`）仍传 `&queue`，导致 `cargo test --lib` 不编译（`cargo check` 不编 test 未暴露）。已将 4 处改为 `&SingleForkSink { queue: &queue }`（与 `start_single` ~:1991 同法，行为等价：push 到同一 LIFO queue）。
+- **预存无关失败**：`primop::tests::replicate_bits_rejects_unconstrained_symbolic_count`（primop.rs:4214）失败，属 V 扩展 primop 行为/测试不匹配，与 limit 机制无关，不在本次改动范围。
