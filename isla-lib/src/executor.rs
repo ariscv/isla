@@ -2462,6 +2462,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     collected: &Arc<R>,
     collector: &Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
+    num_threads: usize,
 ) where
     R: Send + Sync,
 {
@@ -2479,7 +2480,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(num_threads, None, vec![task], &shared_state, collected.clone(), collector);
 }
 
 #[cfg(test)]
