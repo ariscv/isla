@@ -34,12 +34,13 @@
 use crossbeam::deque::{Injector, Steal, Stealer, Worker};
 use crossbeam::queue::SegQueue;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -796,13 +797,13 @@ pub fn reset_registers<'ir, B: BV>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run<'ir, 'task, B: BV>(
+fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
     timeout: Timeout,
     stop_conditions: Option<&'task StopConditions>,
-    queue: &Worker<Task<'ir, 'task, B>>,
+    fork_sink: &S,
     frame: &Frame<'ir, B>,
     task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
@@ -815,7 +816,7 @@ fn run<'ir, 'task, B: BV>(
         task_fraction,
         timeout,
         stop_conditions,
-        queue,
+        fork_sink,
         &mut frame,
         task_state,
         shared_state,
@@ -833,6 +834,204 @@ fn run<'ir, 'task, B: BV>(
 enum SpecialResult {
     Exit,
     Continue,
+}
+
+trait ForkSink<'ir, 'task, B: BV> {
+    fn submit(&self, task: Task<'ir, 'task, B>);
+}
+
+struct SingleForkSink<'a, 'ir, 'task, B: BV> {
+    queue: &'a Worker<Task<'ir, 'task, B>>,
+}
+
+impl<'a, 'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for SingleForkSink<'a, 'ir, 'task, B> {
+    fn submit(&self, task: Task<'ir, 'task, B>) {
+        self.queue.push(task);
+    }
+}
+
+struct MultiForkSink<'scope, 'env, 'ir, 'task, B: BV, R> {
+    runtime: Arc<MultiRuntime<'ir, 'task, B, R>>,
+    scope: &'scope thread::Scope<'scope, 'env>,
+}
+
+impl<'scope, 'env, 'ir, 'task, B: BV + Send + Sync, R: Send + Sync> ForkSink<'ir, 'task, B>
+    for MultiForkSink<'scope, 'env, 'ir, 'task, B, R>
+where
+    'ir: 'scope,
+    'task: 'scope,
+{
+    fn submit(&self, task: Task<'ir, 'task, B>) {
+        self.runtime.submit(self.scope, task);
+    }
+}
+
+struct MultiRuntime<'ir, 'task, B: BV, R> {
+    limit: usize,
+    timeout: Timeout,
+    active_threads: AtomicUsize,
+    pending_tasks: AtomicUsize,
+    next_tid: AtomicUsize,
+    refill_owner: AtomicBool,
+    queued_tasks: Mutex<VecDeque<Task<'ir, 'task, B>>>,
+    finished_mu: Mutex<()>,
+    finished_cv: Condvar,
+    shared_state: &'ir SharedState<'ir, B>,
+    collected: Arc<R>,
+    collector: &'ir Collector<'ir, B, R>,
+}
+
+impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B, R> {
+    fn submit<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>, task: Task<'ir, 'task, B>)
+    where
+        'ir: 'scope,
+        'task: 'scope,
+    {
+        self.pending_tasks.fetch_add(1, Ordering::AcqRel);
+        if self.try_reserve_thread() {
+            self.spawn_reserved_task(scope, task);
+        } else {
+            let mut queued = self.queued_tasks.lock().unwrap();
+            queued.push_back(task);
+        }
+    }
+
+    fn try_reserve_thread(&self) -> bool {
+        loop {
+            let active = self.active_threads.load(Ordering::Acquire);
+            if active >= self.limit {
+                return false;
+            }
+            if self.active_threads.compare_exchange(active, active + 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return true;
+            }
+        }
+    }
+
+    fn spawn_reserved_task<'scope, 'env>(
+        self: &Arc<Self>,
+        scope: &'scope thread::Scope<'scope, 'env>,
+        task: Task<'ir, 'task, B>,
+    ) where
+        'ir: 'scope,
+        'task: 'scope,
+    {
+        let tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
+        let runtime = Arc::clone(self);
+        scope.spawn(move || runtime.execute_task(scope, tid, task));
+    }
+
+    fn execute_task<'scope, 'env>(
+        self: Arc<Self>,
+        scope: &'scope thread::Scope<'scope, 'env>,
+        tid: usize,
+        mut task: Task<'ir, 'task, B>,
+    ) where
+        'ir: 'scope,
+        'task: 'scope,
+    {
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+        if let Some((def, event)) = task.fork_cond {
+            solver.add_event(event);
+            solver.add(def);
+        }
+        let fork_sink = MultiForkSink { runtime: Arc::clone(&self), scope };
+        let result = run(
+            tid,
+            task.id,
+            &mut task.fraction,
+            self.timeout,
+            task.stop_conditions,
+            &fork_sink,
+            &task.frame,
+            task.state,
+            self.shared_state,
+            &mut solver,
+        );
+        (self.collector)(tid, task.id, result, self.shared_state, solver, self.collected.as_ref());
+        self.on_task_finished(scope);
+    }
+
+    fn on_task_finished<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>)
+    where
+        'ir: 'scope,
+        'task: 'scope,
+    {
+        let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
+        self.active_threads.fetch_sub(1, Ordering::AcqRel);
+
+        if remaining == 0 {
+            let _finished = self.finished_mu.lock().unwrap();
+            self.finished_cv.notify_all();
+            return;
+        }
+
+        self.try_refill_threads(scope);
+    }
+
+    fn try_refill_threads<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>)
+    where
+        'ir: 'scope,
+        'task: 'scope,
+    {
+        if self.refill_owner.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return;
+        }
+
+        let mut to_spawn = Vec::new();
+        {
+            let mut queued = self.queued_tasks.lock().unwrap();
+            loop {
+                let queued_len = queued.len();
+                if queued_len == 0 {
+                    break;
+                }
+
+                let active = self.active_threads.load(Ordering::Acquire);
+                if active >= self.limit {
+                    break;
+                }
+
+                let available = self.limit - active;
+                let batch = queued_len.min(available);
+                if batch == 0 {
+                    break;
+                }
+
+                if self
+                    .active_threads
+                    .compare_exchange(active, active + batch, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    for _ in 0..batch {
+                        to_spawn.push(queued.pop_front().unwrap());
+                    }
+                    break;
+                }
+            }
+        }
+
+        self.refill_owner.store(false, Ordering::Release);
+
+        for task in to_spawn {
+            self.spawn_reserved_task(scope, task);
+        }
+
+        if self.pending_tasks.load(Ordering::Acquire) == 0 {
+            let _finished = self.finished_mu.lock().unwrap();
+            self.finished_cv.notify_all();
+        }
+    }
+
+    fn wait_until_finished(&self) {
+        let mut finished = self.finished_mu.lock().unwrap();
+        while self.pending_tasks.load(Ordering::Acquire) != 0 {
+            finished = self.finished_cv.wait(finished).unwrap();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1076,13 +1275,13 @@ pub enum Run<B> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop<'ir, 'task, B: BV>(
+fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
     timeout: Timeout,
     stop_conditions: Option<&'task StopConditions>,
-    queue: &Worker<Task<'ir, 'task, B>>,
+    fork_sink: &S,
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
@@ -1302,7 +1501,7 @@ fn run_loop<'ir, 'task, B: BV>(
                                 itrace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
                             frame.forks += 1;
                             task_fraction.halve();
-                            queue.push(Task {
+                            fork_sink.submit(Task {
                                 id: task_id,
                                 fraction: task_fraction.clone(),
                                 frame: frozen,
@@ -1677,7 +1876,7 @@ fn run_loop<'ir, 'task, B: BV>(
                     // give it a larger part of the fraction (otherwise the denominator becomes
                     // small very fast).
                     let child_frac = task_fraction.min_split(6);
-                    queue.push(Task {
+                    fork_sink.submit(Task {
                         id: task_id,
                         fraction: child_frac,
                         frame: freeze_frame(frame),
@@ -1789,13 +1988,14 @@ pub fn start_single<'ir, B: BV, R>(
             solver.add_event(event);
             solver.add(def)
         };
+        let fork_sink = SingleForkSink { queue: &queue };
         let result = run(
             0,
             task.id,
             &mut task.fraction,
             Timeout::seconds(10),
             task.stop_conditions,
-            &queue,
+            &fork_sink,
             &task.frame,
             task.state,
             shared_state,
@@ -1833,13 +2033,14 @@ fn do_work<'ir, 'task, B: BV, R>(
         solver.add_event(event);
         solver.add(def)
     };
+    let fork_sink = SingleForkSink { queue };
     let result = run(
         tid,
         task.id,
         &mut task.fraction,
         timeout,
         task.stop_conditions,
-        queue,
+        &fork_sink,
         &task.frame,
         task.state,
         shared_state,
@@ -1865,93 +2066,44 @@ pub fn start_multi<'ir, B: BV, R>(
     num_threads: usize,
     timeout: Option<u64>,
     tasks: Vec<Task<'ir, '_, B>>,
-    shared_state: &SharedState<'ir, B>,
+    shared_state: &'ir SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &Collector<'ir, B, R>,
+    collector: &'ir Collector<'ir, B, R>,
 ) where
+    B: Send + Sync,
     R: Send + Sync,
 {
-    let timeout = Timeout { start_time: Instant::now(), duration: timeout.map(Duration::from_secs) };
-
-    let (tx, rx): (Sender<Progress>, Receiver<Progress>) = mpsc::channel();
-    let global: Arc<Injector<Task<B>>> = Arc::new(Injector::<Task<B>>::new());
-    let stealers: Arc<RwLock<Vec<Stealer<Task<B>>>>> = Arc::new(RwLock::new(Vec::new()));
-
-    let mut progress: HashMap<TaskId, Fraction, ahash::RandomState> = HashMap::default();
-
-    for task in tasks {
-        global.push(task);
+    if num_threads == 0 {
+        for task in tasks {
+            start_single(task, shared_state, collected.as_ref(), collector);
+        }
+        return;
     }
 
+    let timeout = Timeout { start_time: Instant::now(), duration: timeout.map(Duration::from_secs) };
+
     thread::scope(|scope| {
-        let mut poke_txs = Vec::new();
+        let runtime = Arc::new(MultiRuntime {
+            limit: num_threads,
+            timeout,
+            active_threads: AtomicUsize::new(0),
+            pending_tasks: AtomicUsize::new(0),
+            next_tid: AtomicUsize::new(0),
+            refill_owner: AtomicBool::new(false),
+            queued_tasks: Mutex::new(VecDeque::new()),
+            finished_mu: Mutex::new(()),
+            finished_cv: Condvar::new(),
+            shared_state,
+            collected,
+            collector,
+        });
 
-        for tid in 0..num_threads {
-            // When a worker is idle, it reports that to the main orchestrating thread, which can
-            // then 'poke' it to wake it up via a channel, which will cause the worker to try to
-            // steal some work, or the main thread can kill the worker.
-            let (poke_tx, poke_rx): (Sender<Response>, Receiver<Response>) = mpsc::channel();
-            poke_txs.push(poke_tx.clone());
-
-            let thread_tx = tx.clone();
-            let global = global.clone();
-            let stealers = stealers.clone();
-            let collected = collected.clone();
-
-            scope.spawn(move || {
-                let q = Worker::new_lifo();
-                {
-                    let mut stealers = stealers.write().unwrap();
-                    stealers.push(q.stealer());
-                }
-                loop {
-                    while let Some(task) = find_task(&q, &global, &stealers) {
-                        let task_id = task.id;
-                        let frac = do_work(tid, timeout, &q, task, shared_state, collected.as_ref(), collector);
-                        thread_tx.send(Progress::Finished { tid, task_id, frac }).unwrap();
-                    }
-                    thread_tx.send(Progress::Idle { tid }).unwrap();
-                    match poke_rx.recv().unwrap() {
-                        Response::Poke => (),
-                        Response::Kill => break,
-                    }
-                }
-            });
+        for task in tasks {
+            runtime.submit(scope, task);
         }
 
-        let mut is_idle = vec![false; num_threads];
-        loop {
-            loop {
-                match rx.try_recv() {
-                    Ok(Progress::Finished { tid, task_id, frac }) => {
-                        let current_fraction = progress.entry(task_id).or_insert(Fraction::zero());
-                        *current_fraction += frac;
-                        is_idle[tid] = false
-                    }
-                    Ok(Progress::Idle { tid }) => is_idle[tid] = true,
-                    Err(_) => break,
-                }
-            }
-            // Try to wake up any idle threads
-            for (tid, idle) in is_idle.iter().enumerate() {
-                if *idle {
-                    poke_txs[tid].send(Response::Poke).unwrap()
-                }
-            }
-            let mut all_tasks_complete = true;
-            for (_, frac) in progress.iter() {
-                if !frac.is_one() {
-                    all_tasks_complete = false;
-                }
-            }
-            if all_tasks_complete {
-                for poke_tx in poke_txs.iter() {
-                    poke_tx.send(Response::Kill).unwrap()
-                }
-                break;
-            }
-            thread::sleep(Duration::from_millis(1))
-        }
+        runtime.try_refill_threads(scope);
+        runtime.wait_until_finished();
     })
 }
 
@@ -2456,14 +2608,15 @@ pub fn execute_ir_function_with_limits<'ir, B: BV, R>(
 pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     function_name: &str,
     args: &[Val<B>],
-    shared_state: &SharedState<'ir, B>,
+    shared_state: &'ir SharedState<'ir, B>,
     regs: &RegisterBindings<'ir, B>,
     lets: &Bindings<'ir, B>,
     collected: &Arc<R>,
-    collector: &Collector<'ir, B, R>,
+    collector: &'ir Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
     num_threads: usize,
 ) where
+    B: Send + Sync,
     R: Send + Sync,
 {
     // 获取函数信息
@@ -3608,4 +3761,57 @@ fn zrX(z3zE1756) {
         assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
         assert!(results.iter().all(Result::is_ok));
     }
+}
+pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    memory: super::memory::Memory<B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+    checkpoint: Checkpoint<B>,
+) {
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+    initial_frame.set_memory(memory);
+
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+
+    start_single(task, &shared_state, collected, collector);
+}
+pub fn execute_ir_function_with_checkpoint_and_memory_multi_thread<'ir, B: BV, R>(
+    function_name: &str,
+    args: &[Val<B>],
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+    memory: super::memory::Memory<B>,
+    collected: &Arc<R>,
+    collector: &'ir Collector<'ir, B, R>,
+    checkpoint: Checkpoint<B>,
+) where
+    B: Send + Sync,
+    R: Send + Sync,
+{
+    let function_id = shared_state.symtab.lookup(function_name);
+    let (func_args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
+
+    let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
+    initial_frame.add_regs(regs);
+    initial_frame.add_lets(lets);
+    initial_frame.set_memory(memory);
+
+    let task_state = TaskState::new();
+    let task_id = TaskId::fresh();
+    let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
+
+    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
 }
