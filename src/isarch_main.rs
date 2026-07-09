@@ -280,7 +280,7 @@ fn isla_main() -> i32 {
         }
     };
 
-    let CommonOpts { num_threads: _, mut arch, symtab, type_info, mut isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     let assertion_mode = AssertionMode::Optimistic;
@@ -343,6 +343,7 @@ fn isla_main() -> i32 {
                         run_all,
                         itrace_path.clone(),
                         arch_path.clone(),
+                        num_threads,
                     )
                 }
                 _ => {
@@ -364,6 +365,7 @@ fn isla_main() -> i32 {
                         run_all,
                         itrace_path.clone(),
                         arch_path.clone(),
+                        num_threads,
                     )
                 }
             };

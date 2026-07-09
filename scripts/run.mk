@@ -80,6 +80,8 @@ ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
 # 进度计数器：make solve 开始时重置为 0，每个 solve-% 启动时用 flock 原子自增取号，
 # 配合下面的 TOTAL 打印形如 [3/243] solve-REM 的进度（类似 ninja/cmake 的 [n/total]）。
 COUNTER=output/.solve_progress_counter
+# isarch 多线程执行的工作线程数（-T），默认 64；单测可 `make solve-X THREADS=110` 覆盖
+THREADS ?= 64
 TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
 TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
 TOTAL_MEMORY=$(words $(MEMORY))
@@ -96,7 +98,7 @@ solve-%: build-isarch
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
 	RUST_BACKTRACE=1 timeout 60 ./target/release/isarch \
-		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace_$*.txt solve-state --clause=$* \
+		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace_$*.txt -T $(THREADS) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \

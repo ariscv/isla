@@ -106,6 +106,7 @@ pub fn solve_state_main<'ir, B: BV>(
     run_all: bool,
     itrace_path: Option<PathBuf>,
     ir_file_path: Option<PathBuf>,
+    num_threads: usize,
 ) -> bool {
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
@@ -175,7 +176,15 @@ pub fn solve_state_main<'ir, B: BV>(
             }
         }
 
-        match run_symbolic_execute_with_target(target, &clause, shared_state, regs, lets, initial_memory.clone()) {
+        match run_symbolic_execute_with_target(
+            target,
+            &clause,
+            shared_state,
+            regs,
+            lets,
+            initial_memory.clone(),
+            num_threads,
+        ) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("错误: clause '{}' 符号执行失败: {}", clause, e);
@@ -230,6 +239,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     regs: &'ir RegisterBindings<'ir, B>,
     lets: &'ir Bindings<'ir, B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
+    num_threads: usize,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -266,19 +276,22 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
 
-    /*     // 执行限制配置（三道防线，OR 关系，任一触发即执行 on_limit_reached）：
+    // 使用checkpoint执行函数，支持错误传播
+    let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
+
+    // 执行限制配置（三道防线，OR 关系，任一触发即执行 on_limit_reached）：
     //
-    // 1) max_total_forks=8       — 硬上限：全局 fork 总数，防止状态爆炸
-    // 2) max_forks_per_branch=2  — 硬上限：单个分支点最多 fork 2 次
-    // 3) max_fork_pct_per_branch=0.1 — 自适应：单个分支点的 fork 数不得超过全局的 10%
+    // 1) max_total_forks=8       - 硬上限：单条路径 fork 总数（多线程下退化为 per-path 深度，防深层爆炸）
+    // 2) max_forks_per_branch=2  - 硬上限：单个分支点最多 fork 2 次（全局 Arc<Mutex> 计数器，跨线程共享）
+    // 3) max_fork_pct_per_branch=0.1 - 自适应：单个分支点的 fork 数不得超过全局的 10%
     //    与 KLEE 的 MaxStaticForkPct 一致，自动抑制占比过高的"热点"分支。
     //    max_fork_pct_check_delay=100：前 100 次 fork 跳过百分比检查（热身期），
     //    避免初始阶段 total_forks 过小导致任何分支点占比都接近 100% 而误杀。
     //
     // 其他限制：
-    // - max_backjumps_per_loop=512 — 循环回边次数上限，超过即视为无限循环
-    // - max_path_depth=10000     — IR 指令步数上限，防止单条路径过长
-    // - on_limit_reached=Concretize — 触发限制时具体化符号条件继续执行，而非截断路径
+    // - max_backjumps_per_loop=256 - 循环回边次数上限，超过即视为无限循环
+    // - max_path_depth=10000     - IR 指令步数上限，防止单条路径过长
+    // - on_limit_reached=Concretize - 触发限制时具体化符号条件继续执行，而非截断路径
     let limits = ExecutionLimits::default()
         .with_max_forks_per_branch(2)
         .with_max_total_forks(8)
@@ -287,10 +300,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         .with_max_fork_pct_per_branch(0.1)
         .with_max_fork_pct_check_delay(100)
         .with_limit_behavior(LimitBehavior::Concretize);
-    let task_state = TaskState::new().with_execution_limits(limits); */
-
-    // 使用checkpoint执行函数，支持错误传播
-    let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
+    let task_state = TaskState::new().with_execution_limits(limits);
 
     //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
     isla_lib::executor::execute_ir_function_with_checkpoint_multi_thread(
@@ -529,7 +539,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
         },
         cp,
-        64,
+        num_threads,
+        &task_state,
     );
 
     // 提取字符串结果
