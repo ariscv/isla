@@ -106,6 +106,7 @@ pub fn solve_state_main<'ir, B: BV>(
     run_all: bool,
     itrace_path: Option<PathBuf>,
     ir_file_path: Option<PathBuf>,
+    num_threads: usize,
 ) -> bool {
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
@@ -175,7 +176,15 @@ pub fn solve_state_main<'ir, B: BV>(
             }
         }
 
-        match run_symbolic_execute_with_target(target, &clause, shared_state, regs, lets, initial_memory.clone()) {
+        match run_symbolic_execute_with_target(
+            target,
+            &clause,
+            shared_state,
+            regs,
+            lets,
+            initial_memory.clone(),
+            num_threads,
+        ) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("错误: clause '{}' 符号执行失败: {}", clause, e);
@@ -230,6 +239,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     regs: &'ir RegisterBindings<'ir, B>,
     lets: &'ir Bindings<'ir, B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
+    num_threads: usize,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -529,7 +539,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
         },
         cp,
-        64,
+        num_threads,
         &task_state,
     );
 
