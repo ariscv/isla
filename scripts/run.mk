@@ -82,12 +82,17 @@ ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
 COUNTER=output/.solve_progress_counter
 # isarch 多线程执行的工作线程数（-T），默认 64；单测可 `make solve-X THREADS=110` 覆盖
 THREADS ?= 64
+# itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
+ITRACE ?= 0
+CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
+# isarch 内部符号执行 timeout；为空时不传 --timeout，支持纯数字秒数或 s/m/h 后缀。
+SOLVE_TIMEOUT ?=
 TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
 TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
-	cargo build --release --bin isarch
+	cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE)
 
 # 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
 #
@@ -97,8 +102,8 @@ solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
-	RUST_BACKTRACE=1 timeout 60 ./target/release/isarch \
-		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all --itrace=output/trace/itrace_$*.txt -T $(THREADS) solve-state --clause=$* \
+	RUST_BACKTRACE=1 timeout 6h ./target/release/isarch \
+		-A ./rv64d.ir -C ./configs/riscv64_difftest.toml --timeout 5h --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \

@@ -82,9 +82,13 @@ impl AssemGenJson {
     }
 }
 
+fn should_collect_unfinished_path<B: BV>(run: &Run<B>) -> bool {
+    !matches!(run, Run::Dead)
+}
+
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
 /// 规则：`output/itrace.txt` + clause `zadd` → `output/itrace_zadd.txt`
-#[cfg(feature = "tracetool")]
+#[cfg(feature = "itrace")]
 fn clause_itrace_output_path(base_path: &Path, clause: &str) -> PathBuf {
     let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("itrace");
     let extension = base_path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
@@ -107,6 +111,7 @@ pub fn solve_state_main<'ir, B: BV>(
     itrace_path: Option<PathBuf>,
     ir_file_path: Option<PathBuf>,
     num_threads: usize,
+    timeout: Option<u64>,
 ) -> bool {
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
@@ -147,10 +152,10 @@ pub fn solve_state_main<'ir, B: BV>(
         clause_set.extend(get_all_clause_names(shared_state));
     }
 
-    #[cfg(not(feature = "tracetool"))]
+    #[cfg(not(feature = "itrace"))]
     let _ = (&itrace_path, &ir_file_path);
 
-    #[cfg(feature = "tracetool")]
+    #[cfg(feature = "itrace")]
     if itrace_path.is_some() && ir_file_path.is_none() {
         panic!("itrace: 使用 --itrace 时必须同时指定 --arch/-A 提供 IR 文件路径");
     }
@@ -165,7 +170,7 @@ pub fn solve_state_main<'ir, B: BV>(
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
 
     for clause in clause_set {
-        #[cfg(feature = "tracetool")]
+        #[cfg(feature = "itrace")]
         if let Some(base_path) = &itrace_path {
             // 多个 clause 同时执行时，为每个 clause 生成独立 itrace 输出文件，避免互相覆盖。
             let output_path =
@@ -184,6 +189,7 @@ pub fn solve_state_main<'ir, B: BV>(
             lets,
             initial_memory.clone(),
             num_threads,
+            timeout,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -193,7 +199,7 @@ pub fn solve_state_main<'ir, B: BV>(
             }
         }
 
-        #[cfg(feature = "tracetool")]
+        #[cfg(feature = "itrace")]
         if itrace_path.is_some() {
             shared_state.itrace.dump();
         }
@@ -240,6 +246,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     lets: &'ir Bindings<'ir, B>,
     initial_memory: Option<isla_lib::memory::Memory<B>>,
     num_threads: usize,
+    timeout: Option<u64>,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -293,8 +300,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // - max_path_depth=10000     - IR 指令步数上限，防止单条路径过长
     // - on_limit_reached=Concretize - 触发限制时具体化符号条件继续执行，而非截断路径
     let limits = ExecutionLimits::default()
-        .with_max_forks_per_branch(2)
-        .with_max_total_forks(8)
+        //.with_max_forks_per_branch(2)
+        //.with_max_total_forks(8)
         .with_max_backjumps_per_loop(256)
         .with_max_path_depth(10000)
         .with_max_fork_pct_per_branch(0.1)
@@ -312,7 +319,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         &result,
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
             match &exec_result {
-                Ok((_, frame)) => isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state),
+                Ok((Run::Finished(_), frame)) => {
+                    isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state);
+                }
+                Ok((run, frame)) => {
+                    if should_collect_unfinished_path(run) {
+                        isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state);
+                    }
+                }
+                Err((ExecError::AssertionFailure(_, _), _)) => {}
                 Err((_, frame)) => isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state),
             }
 
@@ -322,15 +337,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         log!(log::SYM_EXEC, &format!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_", instruction_name))
                     }
                     Run::Finished(ret_val) => {
+                        let ret_val_str = ret_val.to_str(shared_state).to_string();
                         log!(
                             log::PATH_RESULT,
-                            &format!(
-                                "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
-                                thread,
-                                frame.forks,
-                                ret_val.to_str(shared_state)
-                            )
+                            &format!("1. tid:{} 执行好一条路径，fork={}，ret_val={}", thread, frame.forks, ret_val_str)
                         );
+                        // Illegal_Instruction is a valid Sail ExecutionResult; JSON keeps every finished ret_val.
                         /* let assembly = {
                             // 获取 zexecute 函数的参数信息
                             let execute_fn_id = shared_state.symtab.lookup("zexecute");
@@ -489,22 +501,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 log!(log::PATH_RESULT, "3. ==============================");
                             }
                         }
-                        let single_instruction_json = AssemGenJsonItem::new(
-                            target,
-                            test_ins,
-                            test_ins_encdec,
-                            isa_state,
-                            ret_val.to_str(shared_state).to_string(),
-                        );
+                        let single_instruction_json =
+                            AssemGenJsonItem::new(target, test_ins, test_ins_encdec, isa_state, ret_val_str);
                         let mut instruction_json = collected.lock().unwrap();
                         instruction_json.gen.push(single_instruction_json);
                     }
                     Run::Exit => {
                         log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks))
                     }
-                    Run::Dead => {
-                        log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Dead)，fork={}", thread, frame.forks))
-                    }
+                    Run::Dead => {}
 
                     Run::Suspended => log!(
                         log::PATH_RESULT,
@@ -540,6 +545,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         },
         cp,
         num_threads,
+        timeout,
         &task_state,
     );
 
@@ -557,6 +563,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use isla_lib::bitvector::b64::B64;
+
+    #[test]
+    fn unfinished_path_collection_skips_dead_paths() {
+        assert!(!should_collect_unfinished_path::<B64>(&Run::Dead));
+        assert!(should_collect_unfinished_path::<B64>(&Run::Exit));
+        assert!(should_collect_unfinished_path::<B64>(&Run::Suspended));
+    }
 
     #[test]
     fn clause_itrace_output_path_appends_clause_suffix() {

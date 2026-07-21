@@ -252,11 +252,39 @@ fn detect_xlen<B: BV>(shared_state: &SharedState<B>, lets: &Bindings<B>) -> u32 
     }
 }
 
+fn parse_timeout_seconds(value: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("--timeout 不能为空".to_string());
+    }
+
+    let (number, multiplier): (&str, u64) = match value.as_bytes().last().unwrap() {
+        b's' | b'S' => (&value[..value.len() - 1], 1),
+        b'm' | b'M' => (&value[..value.len() - 1], 60),
+        b'h' | b'H' => (&value[..value.len() - 1], 60 * 60),
+        b'0'..=b'9' => (value, 1),
+        unit => return Err(format!("--timeout 不支持单位 '{}': 使用纯数字秒数，或后缀 s/m/h", *unit as char)),
+    };
+
+    if number.is_empty() {
+        return Err("--timeout 缺少数值".to_string());
+    }
+    if !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("--timeout 数值必须是非负整数: {}", value));
+    }
+
+    let seconds = number.parse::<u64>().map_err(|error| format!("Failed to parse --timeout: {}", error))?;
+    seconds.checked_mul(multiplier).map(Some).ok_or_else(|| format!("--timeout 超出 u64 秒范围: {}", value))
+}
+
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
-    opts.optopt("", "timeout", "超时时间（秒）", "<n>");
+    opts.optopt("", "timeout", "超时时间，默认秒；支持 s/m/h 后缀", "<n[s|m|h]>");
     opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
@@ -267,6 +295,14 @@ fn isla_main() -> i32 {
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
     let itrace_path = matches.opt_str("itrace").map(std::path::PathBuf::from);
     let arch_path = matches.opt_str("arch").map(std::path::PathBuf::from);
+    let timeout_arg = matches.opt_str("timeout");
+    let timeout: Option<u64> = match parse_timeout_seconds(timeout_arg.as_deref()) {
+        Ok(timeout) => timeout,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
 
     if matches.free.is_empty() {
         print_usage(&opts);
@@ -344,6 +380,7 @@ fn isla_main() -> i32 {
                         itrace_path.clone(),
                         arch_path.clone(),
                         num_threads,
+                        timeout,
                     )
                 }
                 _ => {
@@ -366,6 +403,7 @@ fn isla_main() -> i32 {
                         itrace_path.clone(),
                         arch_path.clone(),
                         num_threads,
+                        timeout,
                     )
                 }
             };
@@ -392,6 +430,31 @@ mod tests {
         opts.optmulti("", "instruction-name", "", "<name>");
         opts.optflag("", "all", "");
         opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn parse_timeout_defaults_to_seconds() {
+        assert_eq!(parse_timeout_seconds(None).unwrap(), None);
+        assert_eq!(parse_timeout_seconds(Some("360")).unwrap(), Some(360));
+        assert_eq!(parse_timeout_seconds(Some("360s")).unwrap(), Some(360));
+        assert_eq!(parse_timeout_seconds(Some("360S")).unwrap(), Some(360));
+    }
+
+    #[test]
+    fn parse_timeout_accepts_minutes_and_hours() {
+        assert_eq!(parse_timeout_seconds(Some("6m")).unwrap(), Some(360));
+        assert_eq!(parse_timeout_seconds(Some("6M")).unwrap(), Some(360));
+        assert_eq!(parse_timeout_seconds(Some("1h")).unwrap(), Some(3600));
+        assert_eq!(parse_timeout_seconds(Some("1H")).unwrap(), Some(3600));
+    }
+
+    #[test]
+    fn parse_timeout_rejects_invalid_values() {
+        assert!(parse_timeout_seconds(Some("")).is_err());
+        assert!(parse_timeout_seconds(Some("m")).is_err());
+        assert!(parse_timeout_seconds(Some("1d")).is_err());
+        assert!(parse_timeout_seconds(Some("1.5h")).is_err());
+        assert!(parse_timeout_seconds(Some("18446744073709551615h")).is_err());
     }
 
     #[test]

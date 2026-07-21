@@ -614,12 +614,16 @@ impl Timeout {
         Timeout { start_time: Instant::now(), duration: None }
     }
 
-    fn seconds(seconds: u64) -> Self {
-        Timeout { start_time: Instant::now(), duration: Some(Duration::from_secs(seconds)) }
+    fn from_seconds(timeout: Option<u64>) -> Self {
+        Timeout { start_time: Instant::now(), duration: timeout.map(Duration::from_secs) }
     }
 
     fn timed_out(&self) -> bool {
         self.duration.is_some() && self.start_time.elapsed() > self.duration.unwrap()
+    }
+
+    fn duration_ms(&self) -> u128 {
+        self.duration.map_or(0, |duration| duration.as_millis())
     }
 }
 
@@ -1260,6 +1264,24 @@ macro_rules! itrace_fork_frame_with_branch_condition {
     }};
 }
 
+macro_rules! itrace_record_execution_limit {
+    ($frame:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
+        #[cfg(feature = "tracetool")]
+        {
+            $frame.itrace_path.record_summary(
+                $frame.function_name,
+                $frame.backtrace.clone(),
+                $frame.pc as u64,
+                format!(concat!("execution limit: ", $fmt), $($arg),*),
+            );
+        }
+        #[cfg(not(feature = "tracetool"))]
+        {
+            let _ = &$frame;
+        }
+    }};
+}
+
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
@@ -1302,10 +1324,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     frame.function_name,
                     frame.backtrace.clone(),
                     frame.pc as u64,
-                    format!(
-                        "timeout: path exceeded {}ms",
-                        if let Some(duration) = timeout.duration { duration.as_millis() } else { 0 }
-                    ),
+                    format!("timeout: path exceeded {}ms", timeout.duration_ms()),
                 );
             }
             return Err(ExecError::Timeout);
@@ -1341,8 +1360,24 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     if let Some(max_depth) = limits.max_path_depth {
                         if frame.step_count as u64 > max_depth {
                             match limits.on_limit_reached {
-                                LimitBehavior::Truncate => return Err(ExecError::DepthLimitReached),
-                                LimitBehavior::Concretize => limit_reached = true,
+                                LimitBehavior::Truncate => {
+                                    itrace_record_execution_limit!(
+                                        frame,
+                                        "max_path_depth exceeded: step_count={}, max_path_depth={}, action=truncate",
+                                        frame.step_count,
+                                        max_depth
+                                    );
+                                    return Err(ExecError::DepthLimitReached);
+                                }
+                                LimitBehavior::Concretize => {
+                                    itrace_record_execution_limit!(
+                                        frame,
+                                        "max_path_depth exceeded: step_count={}, max_path_depth={}, action=concretize_branch_condition",
+                                        frame.step_count,
+                                        max_depth
+                                    );
+                                    limit_reached = true;
+                                }
                             }
                         }
                     }
@@ -1352,12 +1387,29 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             if *target <= frame.pc {
                                 let count = frame.loop_counts.entry(*target).or_insert(0);
                                 *count += 1;
-                                if *count > max_backjumps {
+                                let backjumps = *count;
+                                if backjumps > max_backjumps {
                                     match limits.on_limit_reached {
                                         LimitBehavior::Truncate => {
-                                            return Err(ExecError::LoopLimitReached(frame.function_name, *target))
+                                            itrace_record_execution_limit!(
+                                                frame,
+                                                "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=truncate",
+                                                target,
+                                                backjumps,
+                                                max_backjumps
+                                            );
+                                            return Err(ExecError::LoopLimitReached(frame.function_name, *target));
                                         }
-                                        LimitBehavior::Concretize => limit_reached = true,
+                                        LimitBehavior::Concretize => {
+                                            itrace_record_execution_limit!(
+                                                frame,
+                                                "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=concretize_branch_condition",
+                                                target,
+                                                backjumps,
+                                                max_backjumps
+                                            );
+                                            limit_reached = true;
+                                        }
                                     }
                                 }
                             }
@@ -1412,12 +1464,24 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     if frame.forks >= max_total {
                                         match limits.on_limit_reached {
                                             LimitBehavior::Truncate => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_total_forks exceeded: forks={}, max_total_forks={}, action=truncate",
+                                                    frame.forks,
+                                                    max_total
+                                                );
                                                 return Err(ExecError::BranchLimitReached(
                                                     frame.function_name,
                                                     frame.pc,
-                                                ))
+                                                ));
                                             }
                                             LimitBehavior::Concretize => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_total_forks exceeded: forks={}, max_total_forks={}, action=concretize_branch_condition",
+                                                    frame.forks,
+                                                    max_total
+                                                );
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
                                                     itrace_push_branch_condition!(frame, test_true);
@@ -1438,12 +1502,24 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     if fork_count > max_forks {
                                         match limits.on_limit_reached {
                                             LimitBehavior::Truncate => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_forks_per_branch exceeded: branch_forks={}, max_forks_per_branch={}, action=truncate",
+                                                    fork_count,
+                                                    max_forks
+                                                );
                                                 return Err(ExecError::BranchLimitReached(
                                                     frame.function_name,
                                                     frame.pc,
-                                                ))
+                                                ));
                                             }
                                             LimitBehavior::Concretize => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_forks_per_branch exceeded: branch_forks={}, max_forks_per_branch={}, action=concretize_branch_condition",
+                                                    fork_count,
+                                                    max_forks
+                                                );
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
                                                     itrace_push_branch_condition!(frame, test_true);
@@ -1469,12 +1545,28 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     if total > delay && (branch_count as f64) > (total as f64) * max_pct {
                                         match limits.on_limit_reached {
                                             LimitBehavior::Truncate => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_fork_pct_per_branch exceeded: branch_forks={}, total_forks={}, max_fork_pct_per_branch={}, check_delay={}, action=truncate",
+                                                    branch_count,
+                                                    total,
+                                                    max_pct,
+                                                    delay
+                                                );
                                                 return Err(ExecError::BranchLimitReached(
                                                     frame.function_name,
                                                     frame.pc,
-                                                ))
+                                                ));
                                             }
                                             LimitBehavior::Concretize => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_fork_pct_per_branch exceeded: branch_forks={}, total_forks={}, max_fork_pct_per_branch={}, check_delay={}, action=concretize_branch_condition",
+                                                    branch_count,
+                                                    total,
+                                                    max_pct,
+                                                    delay
+                                                );
                                                 let concrete_bool = concretize_branch_condition(v, solver, *info)?;
                                                 if concrete_bool {
                                                     itrace_push_branch_condition!(frame, test_true);
@@ -1549,6 +1641,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 if let Some(ref limits) = task_state.execution_limits {
                     if let Some(max_depth) = limits.max_path_depth {
                         if frame.step_count as u64 > max_depth {
+                            itrace_record_execution_limit!(
+                                frame,
+                                "max_path_depth exceeded: step_count={}, max_path_depth={}, action=truncate, reason=unconditional_control_flow",
+                                frame.step_count,
+                                max_depth
+                            );
                             return Err(ExecError::DepthLimitReached);
                         }
                     }
@@ -1556,7 +1654,15 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         if *target <= frame.pc {
                             let count = frame.loop_counts.entry(*target).or_insert(0);
                             *count += 1;
-                            if *count > max_backjumps {
+                            let backjumps = *count;
+                            if backjumps > max_backjumps {
+                                itrace_record_execution_limit!(
+                                    frame,
+                                    "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=truncate, reason=unconditional_control_flow",
+                                    target,
+                                    backjumps,
+                                    max_backjumps
+                                );
                                 return Err(ExecError::LoopLimitReached(frame.function_name, *target));
                             }
                         }
@@ -1608,6 +1714,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 if let Some(ref limits) = task_state.execution_limits {
                     if let Some(max_depth) = limits.max_path_depth {
                         if frame.step_count as u64 > max_depth {
+                            itrace_record_execution_limit!(
+                                frame,
+                                "max_path_depth exceeded: step_count={}, max_path_depth={}, action=truncate, reason=call_depth_limit",
+                                frame.step_count,
+                                max_depth
+                            );
                             return Err(ExecError::DepthLimitReached);
                         }
                     }
@@ -1977,6 +2089,17 @@ pub fn start_single<'ir, B: BV, R>(
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) {
+    start_single_with_timeout(task, None, shared_state, collected, collector);
+}
+
+fn start_single_with_timeout<'ir, B: BV, R>(
+    task: Task<'ir, '_, B>,
+    timeout: Option<u64>,
+    shared_state: &SharedState<'ir, B>,
+    collected: &R,
+    collector: &Collector<'ir, B, R>,
+) {
+    let timeout = Timeout::from_seconds(timeout);
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
@@ -1993,7 +2116,7 @@ pub fn start_single<'ir, B: BV, R>(
             0,
             task.id,
             &mut task.fraction,
-            Timeout::seconds(10),
+            timeout,
             task.stop_conditions,
             &fork_sink,
             &task.frame,
@@ -2075,12 +2198,12 @@ pub fn start_multi<'ir, B: BV, R>(
 {
     if num_threads == 0 {
         for task in tasks {
-            start_single(task, shared_state, collected.as_ref(), collector);
+            start_single_with_timeout(task, timeout, shared_state, collected.as_ref(), collector);
         }
         return;
     }
 
-    let timeout = Timeout { start_time: Instant::now(), duration: timeout.map(Duration::from_secs) };
+    let timeout = Timeout::from_seconds(timeout);
 
     thread::scope(|scope| {
         let runtime = Arc::new(MultiRuntime {
@@ -2127,7 +2250,7 @@ pub fn start_multi_per_task<'ir, 'task, B: BV, R>(
 where
     R: Send + Sync + Collection,
 {
-    let timeout = Timeout { start_time: Instant::now(), duration: timeout.map(Duration::from_secs) };
+    let timeout = Timeout::from_seconds(timeout);
 
     let (tx, rx): (Sender<Progress>, Receiver<Progress>) = mpsc::channel();
     let global: Arc<Injector<Task<B>>> = Arc::new(Injector::<Task<B>>::new());
@@ -2615,6 +2738,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     collector: &'ir Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
     num_threads: usize,
+    timeout: Option<u64>,
     task_state: &TaskState<B>,
 ) where
     B: Send + Sync,
@@ -2633,7 +2757,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, task_state, checkpoint);
 
-    start_multi(num_threads, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(num_threads, timeout, vec![task], &shared_state, collected.clone(), collector);
 }
 
 #[cfg(test)]
@@ -3433,6 +3557,7 @@ fn zrX(z3zE1756) {
                     frame.add_regs(&regs).add_lets(&lets);
                     let task_state = TaskState::new();
                     let queue = Worker::new_lifo();
+                    let fork_sink = SingleForkSink { queue: &queue };
                     let mut task_fraction = Fraction::one();
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::new(&ctx);
@@ -3499,6 +3624,7 @@ fn zrX(z3zE1756) {
         let frame = make_frame_with_bindings(instrs, &regs, &lets);
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
+        let fork_sink = SingleForkSink { queue: &queue };
         queue.push(frame.task(TaskId::from_usize(0), &task_state));
         let mut results = Vec::new();
 
@@ -3544,6 +3670,7 @@ fn zrX(z3zE1756) {
         let mut frame = make_frame(instrs);
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
+        let fork_sink = SingleForkSink { queue: &queue };
         let mut task_fraction = Fraction::one();
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
@@ -3570,6 +3697,7 @@ fn zrX(z3zE1756) {
         let frame = make_frame(instrs);
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
+        let fork_sink = SingleForkSink { queue: &queue };
         queue.push(frame.task(TaskId::from_usize(0), &task_state));
         let mut results = Vec::new();
 
@@ -3626,7 +3754,7 @@ fn zrX(z3zE1756) {
         let duration = Duration::from_secs(2);
         let expired =
             Timeout { start_time: Instant::now() - duration - Duration::from_millis(1), duration: Some(duration) };
-        let active = Timeout::seconds(2);
+        let active = Timeout::from_seconds(Some(2));
 
         assert!(expired.timed_out());
         assert!(!active.timed_out());
@@ -3660,6 +3788,75 @@ fn zrX(z3zE1756) {
 
         assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Unit)))));
         assert!(results.iter().all(Result::is_ok));
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn execution_limit_concretize_records_itrace_summary() {
+        let shared_state = empty_shared_state();
+        let var = test_name(100);
+        let mut frame =
+            make_frame(vec![Instr::Decl(var, Ty::Bool, info()), Instr::Jump(Exp::Id(var), 2, info()), Instr::End]);
+        let task_state = TaskState::new().with_execution_limits(
+            ExecutionLimits::default().with_max_path_depth(0).with_limit_behavior(LimitBehavior::Concretize),
+        );
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            Timeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        assert!(frame.itrace_path.records().iter().any(|record| {
+            record.summary.as_deref().map_or(false, |summary| {
+                summary.contains("execution limit: max_path_depth exceeded")
+                    && summary.contains("action=concretize_branch_condition")
+            })
+        }));
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn execution_limit_truncate_records_itrace_summary() {
+        let shared_state = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::Goto(0)]);
+        let task_state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_max_path_depth(0));
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            Timeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+
+        assert!(matches!(result, Err(ExecError::DepthLimitReached)));
+        assert!(frame.itrace_path.records().iter().any(|record| {
+            record.summary.as_deref().map_or(false, |summary| {
+                summary.contains("execution limit: max_path_depth exceeded") && summary.contains("action=truncate")
+            })
+        }));
     }
 
     #[test]
@@ -3794,11 +3991,85 @@ fn zsteptest(zu) {
             },
             Checkpoint::new(),
             4,
+            None,
             &task_state,
         );
 
         let depth_hits = *collected.lock().unwrap();
         assert!(depth_hits >= 1, "期望入口透传 task_state 后触发 DepthLimitReached，实际 {} 次", depth_hits);
+    }
+
+    #[test]
+    fn entry_function_timeout_returns_through_collector() {
+        const STEPT_IR: &str = r#"
+val zsteptest : (%unit) -> %unit
+fn zsteptest(zu) {
+  goto 1;
+  goto 2;
+  end;
+}
+"#;
+        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(STEPT_IR);
+        let task_state = TaskState::new();
+        let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+
+        execute_ir_function_with_checkpoint_multi_thread(
+            "zsteptest",
+            &[Val::Unit],
+            &shared_state,
+            &regs,
+            &lets,
+            &collected,
+            &|_tid, _id, result, _ss, _solver, count| {
+                if matches!(result, Err((ExecError::Timeout, _))) {
+                    *count.lock().unwrap() += 1;
+                }
+            },
+            Checkpoint::new(),
+            4,
+            Some(0),
+            &task_state,
+        );
+
+        let timeout_hits = *collected.lock().unwrap();
+        assert_eq!(timeout_hits, 1, "timeout 后应通过 collector 返回一次，实际 {} 次", timeout_hits);
+    }
+
+    #[test]
+    fn start_single_timeout_none_is_unlimited() {
+        let shared_state = empty_shared_state();
+        let task_state = TaskState::new();
+        let timeout_hits = std::sync::Mutex::new(0);
+        let finished_hits = std::sync::Mutex::new(0);
+
+        let timeout_frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()), Instr::End]);
+        start_single_with_timeout(
+            timeout_frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new()),
+            Some(0),
+            &shared_state,
+            &timeout_hits,
+            &|_tid, _id, result, _ss, _solver, count| {
+                if matches!(result, Err((ExecError::Timeout, _))) {
+                    *count.lock().unwrap() += 1;
+                }
+            },
+        );
+
+        let unlimited_frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()), Instr::End]);
+        start_single_with_timeout(
+            unlimited_frame.task_with_checkpoint(TaskId::from_usize(1), &task_state, Checkpoint::new()),
+            None,
+            &shared_state,
+            &finished_hits,
+            &|_tid, _id, result, _ss, _solver, count| {
+                if matches!(result, Ok((Run::Finished(Val::Unit), _))) {
+                    *count.lock().unwrap() += 1;
+                }
+            },
+        );
+
+        assert_eq!(*timeout_hits.lock().unwrap(), 1);
+        assert_eq!(*finished_hits.lock().unwrap(), 1);
     }
 
     // 测试 B：多线程并发下全局 per-branch 计数器（Arc<Mutex>）跨线程共享截断。
@@ -3865,6 +4136,7 @@ pub fn execute_ir_function_with_checkpoint_and_memory_multi_thread<'ir, B: BV, R
     collected: &Arc<R>,
     collector: &'ir Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
+    timeout: Option<u64>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -3881,5 +4153,5 @@ pub fn execute_ir_function_with_checkpoint_and_memory_multi_thread<'ir, B: BV, R
     let task_id = TaskId::fresh();
     let task = initial_frame.task_with_checkpoint(task_id, &task_state, checkpoint);
 
-    start_multi(110, None, vec![task], &shared_state, collected.clone(), collector);
+    start_multi(110, timeout, vec![task], &shared_state, collected.clone(), collector);
 }

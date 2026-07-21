@@ -2,7 +2,7 @@
 
 ## V 扩展符号执行约束原则
 
-不要为了让 solve-state 快速通过而把运行上下文固定成单一代表值。`vl`、`vstart`、`vtype`、mask/tail policy、寄存器选择等都属于程序运行态，除非用户明确要求生成某个特定上下文，否则不能在 Isla 入口层覆盖成固定值。
+不要为了让 solve-state 快速通过而把cli flag或者运行上下文简单地设置成单一代表值。`vl`、`vstart`、`vtype`、mask/tail policy、寄存器选择等都属于程序运行态，除非用户明确要求生成某个特定上下文，否则不能在 Isla 入口层覆盖成固定值。
 
 可以固化真实 RISC-V 处理器不可变的编译/配置参数，例如 `vlen`、`elen`、`xlen`，以及由这些参数决定的静态上界。此类参数来自 Sail config 或目标配置，本来就不是每条 path 上变化的程序上下文。
 
