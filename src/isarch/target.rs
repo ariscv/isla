@@ -323,6 +323,7 @@ impl<B: BV> Target<B> for RV32<B> {
         regs.push("PC".to_string());
         regs.push("cur_privilege".to_string());
         regs.push("mstatus".to_string());
+        regs.push("vtype".to_string());
         regs
     }
     fn pre_state(&self) -> &PreStateCtx<B> {
@@ -367,6 +368,7 @@ impl<B: BV> Target<B> for RV64<B> {
         regs.push("PC".to_string());
         regs.push("cur_privilege".to_string());
         regs.push("mstatus".to_string());
+        regs.push("vtype".to_string());
         regs
     }
     fn pre_state(&self) -> &PreStateCtx<B> {
@@ -657,12 +659,14 @@ mod tests {
         assert!(regs.contains(&"PC".to_string()));
         assert!(regs.contains(&"vr0".to_string()));
         assert!(regs.contains(&"mstatus".to_string()));
+        assert!(regs.contains(&"vtype".to_string()));
         // pre-state 派生（setup_pre_state 内部）：排除 x0 和 PC（不做主动符号化）
         let pre_state: Vec<String> = regs.into_iter().filter(|r| r != "x0" && r != "PC").collect();
         assert!(!pre_state.contains(&"x0".to_string()));
         assert!(!pre_state.contains(&"PC".to_string()));
         assert!(pre_state.contains(&"vr0".to_string()));
         assert!(pre_state.contains(&"mstatus".to_string()));
+        assert!(pre_state.contains(&"vtype".to_string()));
     }
 
     #[test]
@@ -671,6 +675,7 @@ mod tests {
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "32");
         assert_eq!(target.xlen_name(), "rv32");
+        assert!(target.reg_list().contains(&"vtype".to_string()));
     }
 
     #[test]

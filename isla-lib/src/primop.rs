@@ -402,6 +402,24 @@ pub(crate) fn bit_to_bool<B: BV>(bit: Val<B>, solver: &mut Solver<B>, info: Sour
     }
 }
 
+pub(crate) fn bool_to_bit<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    match value {
+        Val::Bool(true) => Ok(Val::Bits(B::BIT_ONE)),
+        Val::Bool(false) => Ok(Val::Bits(B::BIT_ZERO)),
+        Val::Symbolic(value) => solver
+            .define_const(
+                Exp::Ite(
+                    Box::new(Exp::Var(value)),
+                    Box::new(Exp::Bits64(B64::BIT_ONE)),
+                    Box::new(Exp::Bits64(B64::BIT_ZERO)),
+                ),
+                info,
+            )
+            .into(),
+        _ => Err(ExecError::Type(format!("bool_to_bit {:?}", &value), info)),
+    }
+}
+
 pub(crate) fn op_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
     match bits {
@@ -808,7 +826,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(sym: Sym, solver: &mut Solver<B>, info
     // 那么 `sym != 1` 可由 sym=2 满足，`sym != 2` 也可由 sym=1 满足，
     // 两次查询都会返回 Sat，闭包返回 false，不会触发 find 短路，因此不会
     // 误选其中一个值，最终返回 None。
-    CANDIDATES.iter().copied().find(|candidate| {
+    CANDIDATES.iter().copied().chain((0..=512).filter(|candidate| !CANDIDATES.contains(candidate))).find(|candidate| {
         // 这个闭包是 `find` 的判定谓词：输入一个候选整数，输出它是否已经
         // 被当前路径约束证明为 sym 的唯一取值。整体流程是：
         // 1. 先把 candidate 编码成和 sym 相同位宽的 SMT bitvector 常量；
@@ -2570,6 +2588,42 @@ fn concrete_i128_arg<B: BV>(value: &Val<B>) -> Option<i128> {
     }
 }
 
+fn isla_select_int_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 3 {
+        return Err(ExecError::Type(format!("isla_select_int expected 3 arguments, got {}", args.len()), info));
+    }
+
+    let condition = args[0].clone();
+    let true_value = args[1].clone();
+    let false_value = args[2].clone();
+
+    match condition {
+        Val::Bool(true) => Ok(true_value),
+        Val::Bool(false) => Ok(false_value),
+        Val::Symbolic(condition) => {
+            let true_exp = int_exp_128(&true_value, solver, "isla_select_int true value", info)?;
+            let false_exp = int_exp_128(&false_value, solver, "isla_select_int false value", info)?;
+            solver
+                .define_const(Exp::Ite(Box::new(Exp::Var(condition)), Box::new(true_exp), Box::new(false_exp)), info)
+                .into()
+        }
+        value => Err(ExecError::Type(format!("isla_select_int condition {:?}", value), info)),
+    }
+}
+
+fn isla_select_int<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    _: &mut LocalFrame<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    isla_select_int_internal(args, solver, info)
+}
+
 fn concrete_bit<B: BV>(bits: B, bit: u32) -> Result<bool, ExecError> {
     bits.slice(bit, 1).map(|bit| bit == B::BIT_ONE).ok_or(ExecError::Overflow)
 }
@@ -2580,6 +2634,157 @@ fn symbolic_bit<B: BV>(bits: &Val<B>, bit: u32, info: SourceLoc) -> Result<Exp<S
         Val::Symbolic(sym) => Ok(Exp::Extract(bit, bit, Box::new(Exp::Var(*sym)))),
         value => Err(ExecError::Type(format!("isla_init_mask vm bit {:?}", value), info)),
     }
+}
+
+fn bool_bit_exp(cond: Exp<Sym>) -> Exp<Sym> {
+    Exp::Ite(Box::new(cond), Box::new(Exp::Bits64(B64::BIT_ONE)), Box::new(Exp::Bits64(B64::BIT_ZERO)))
+}
+
+fn bits_nonzero_exp<B: BV>(bits: &Val<B>, high: u32, low: u32, info: SourceLoc) -> Result<Exp<Sym>, ExecError> {
+    if high < low {
+        return Ok(Exp::Bool(false));
+    }
+    let width = high - low + 1;
+    let slice = if high == low {
+        symbolic_bit(bits, low, info)?
+    } else {
+        Exp::Extract(high, low, Box::new(smt_value(bits, info)?))
+    };
+    Ok(Exp::Neq(Box::new(slice), Box::new(smt_zeros(i128::from(width)))))
+}
+
+fn bits_eq_u64<B: BV>(
+    bits: &Val<B>,
+    expected: u64,
+    width: u32,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Exp<Sym>, ExecError> {
+    let actual_width = length_bits(bits, solver, info)?;
+    if actual_width != width {
+        return Err(ExecError::Type(format!("bits_eq_u64 width {} != {}", actual_width, width), info));
+    }
+    Ok(Exp::Eq(Box::new(smt_value(bits, info)?), Box::new(bits64(expected, width))))
+}
+
+fn fixed_rounding_incr_for_shift<B: BV>(
+    vec_elem: &Val<B>,
+    shift: u32,
+    rounding_mode: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Exp<Sym>, ExecError> {
+    if shift == 0 {
+        return Ok(Exp::Bits64(B64::BIT_ZERO));
+    }
+
+    let round_bit = symbolic_bit(vec_elem, shift - 1, info)?;
+    let sticky_before_round = if shift == 1 {
+        Exp::Bits64(B64::BIT_ZERO)
+    } else {
+        bool_bit_exp(bits_nonzero_exp(vec_elem, shift - 2, 0, info)?)
+    };
+    let sticky_through_round = bool_bit_exp(bits_nonzero_exp(vec_elem, shift - 1, 0, info)?);
+    let next_bit = symbolic_bit(vec_elem, shift, info)?;
+
+    let rnu = round_bit.clone();
+    let rne =
+        Exp::Bvand(Box::new(round_bit), Box::new(Exp::Bvor(Box::new(sticky_before_round), Box::new(next_bit.clone()))));
+    let rtz = Exp::Bits64(B64::BIT_ZERO);
+    let rod = Exp::Bvand(Box::new(Exp::Bvnot(Box::new(next_bit))), Box::new(sticky_through_round));
+
+    Ok(Exp::Ite(
+        Box::new(bits_eq_u64(rounding_mode, 0, 2, solver, info)?),
+        Box::new(rnu),
+        Box::new(Exp::Ite(
+            Box::new(bits_eq_u64(rounding_mode, 1, 2, solver, info)?),
+            Box::new(rne),
+            Box::new(Exp::Ite(Box::new(bits_eq_u64(rounding_mode, 2, 2, solver, info)?), Box::new(rtz), Box::new(rod))),
+        )),
+    ))
+}
+
+fn concrete_low_nonzero<B: BV>(bits: B, high: u32) -> Result<bool, ExecError> {
+    for bit in 0..=high {
+        if concrete_bit(bits, bit)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn fixed_rounding_incr_concrete<B: BV>(vec_elem: B, shift: i128, rounding_mode: B) -> Result<Val<B>, ExecError> {
+    if shift < 0 || shift >= i128::from(vec_elem.len()) {
+        return Err(ExecError::Overflow);
+    }
+    if shift == 0 {
+        return Ok(Val::Bits(B::BIT_ZERO));
+    }
+
+    let shift = u32::try_from(shift).map_err(|_| ExecError::Overflow)?;
+    let increment = match rounding_mode.unsigned() {
+        0 => concrete_bit(vec_elem, shift - 1)?,
+        1 => {
+            concrete_bit(vec_elem, shift - 1)?
+                && ((shift != 1 && concrete_low_nonzero(vec_elem, shift - 2)?) || concrete_bit(vec_elem, shift)?)
+        }
+        2 => false,
+        3 => !concrete_bit(vec_elem, shift)? && concrete_low_nonzero(vec_elem, shift - 1)?,
+        _ => return Err(ExecError::Overflow),
+    };
+
+    Ok(Val::Bits(if increment { B::BIT_ONE } else { B::BIT_ZERO }))
+}
+
+fn isla_fixed_rounding_incr_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 3 {
+        return Err(ExecError::Type(
+            format!("isla_fixed_rounding_incr expected 3 arguments, got {}", args.len()),
+            info,
+        ));
+    }
+
+    let vec_elem = expect_bits_arg(args[0].clone(), "isla_fixed_rounding_incr vec_elem", solver, info)?;
+    let shift_amount = concretize_proven_i128(args[1].clone(), solver, info);
+    let rounding_mode = expect_bits_arg(args[2].clone(), "isla_fixed_rounding_incr rounding_mode", solver, info)?;
+    let len = length_bits(&vec_elem, solver, info)?;
+    if len == 0 {
+        return Err(ExecError::Type("isla_fixed_rounding_incr empty vec_elem".to_string(), info));
+    }
+
+    if let (Val::Bits(vec_elem_bits), Some(shift), Val::Bits(rounding_mode_bits)) =
+        (&vec_elem, concrete_i128_arg(&shift_amount), &rounding_mode)
+    {
+        return fixed_rounding_incr_concrete(*vec_elem_bits, shift, *rounding_mode_bits);
+    }
+
+    let shift_exp = int_exp_128(&shift_amount, solver, "isla_fixed_rounding_incr shift_amount", info)?;
+    solver.add(Def::Assert(Exp::Bvsge(Box::new(shift_exp.clone()), Box::new(smt_i128(0)))));
+    solver.add(Def::Assert(Exp::Bvslt(Box::new(shift_exp.clone()), Box::new(smt_i128(i128::from(len))))));
+
+    let mut exp = Exp::Bits64(B64::BIT_ZERO);
+    for shift in (0..len).rev() {
+        exp = Exp::Ite(
+            Box::new(Exp::Eq(Box::new(shift_exp.clone()), Box::new(smt_i128(i128::from(shift))))),
+            Box::new(fixed_rounding_incr_for_shift(&vec_elem, shift, &rounding_mode, solver, info)?),
+            Box::new(exp),
+        );
+    }
+
+    solver.define_const(exp, info).into()
+}
+
+fn isla_fixed_rounding_incr<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    _: &mut LocalFrame<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    isla_fixed_rounding_incr_internal(args, solver, info)
 }
 
 fn isla_init_mask_internal<B: BV>(
@@ -2667,6 +2872,107 @@ fn isla_init_mask<B: BV>(
     isla_init_mask_internal(args, solver, info)
 }
 
+fn isla_mask_from_low_bits_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 4 && args.len() != 5 {
+        return Err(ExecError::Type(
+            format!("isla_mask_from_low_bits expected 4 or 5 arguments, got {}", args.len()),
+            info,
+        ));
+    }
+
+    let num_elem_concrete = concrete_i128_arg(&args[0]);
+    let num_elem = int_exp_128(&args[0], solver, "isla_mask_from_low_bits num_elem", info)?;
+    let vm = expect_bits_arg(args[1].clone(), "isla_mask_from_low_bits vm", solver, info)?;
+    let fill = expect_bits_arg(args[2].clone(), "isla_mask_from_low_bits fill", solver, info)?;
+    let source = expect_bits_arg(args[3].clone(), "isla_mask_from_low_bits source", solver, info)?;
+    let source_len = length_bits(&source, solver, info)?;
+    let len = if args.len() == 5 {
+        let width_template = expect_bits_arg(args[4].clone(), "isla_mask_from_low_bits width_template", solver, info)?;
+        length_bits(&width_template, solver, info)?
+    } else if let Some(num_elem) = num_elem_concrete {
+        if num_elem < 0 {
+            return Err(ExecError::Type(
+                format!("isla_mask_from_low_bits num_elem {} out of width {}", num_elem, source_len),
+                info,
+            ));
+        }
+        u32::try_from(num_elem).map_err(|_| ExecError::Overflow)?
+    } else {
+        source_len
+    };
+
+    if length_bits(&vm, solver, info)? != 1 {
+        return Err(ExecError::Type("isla_mask_from_low_bits vm must be one bit".to_string(), info));
+    }
+    if length_bits(&fill, solver, info)? != 1 {
+        return Err(ExecError::Type("isla_mask_from_low_bits fill must be one bit".to_string(), info));
+    }
+    if len == 0 {
+        return Ok(Val::Bits(B::zeros(0)));
+    }
+
+    if source_len < len {
+        return Err(ExecError::Type(
+            format!("isla_mask_from_low_bits source width {} < result width {}", source_len, len),
+            info,
+        ));
+    }
+
+    if let (Some(num_elem), Val::Bits(vm_bits), Val::Bits(fill_bits), Val::Bits(source_bits)) =
+        (num_elem_concrete, &vm, &fill, &source)
+    {
+        if num_elem < 0 || num_elem > i128::from(len) {
+            return Err(ExecError::Type(
+                format!("isla_mask_from_low_bits num_elem {} out of width {}", num_elem, len),
+                info,
+            ));
+        }
+        let fill_is_one = concrete_bit(*fill_bits, 0)?;
+        let vm_enabled = concrete_bit(*vm_bits, 0)?;
+        let mut bits = B::zeros(len);
+        for i in 0..len {
+            let use_fill = vm_enabled || i128::from(i) >= num_elem;
+            let bit_is_one = if use_fill { fill_is_one } else { concrete_bit(*source_bits, i)? };
+            if bit_is_one {
+                bits = bits.set_slice(i, B::BIT_ONE);
+            }
+        }
+        return Ok(Val::Bits(bits));
+    }
+
+    solver.add(Def::Assert(Exp::Bvsge(Box::new(num_elem.clone()), Box::new(smt_i128(0)))));
+    solver.add(Def::Assert(Exp::Bvsle(Box::new(num_elem.clone()), Box::new(smt_i128(i128::from(len))))));
+
+    let vm_enabled = Exp::Eq(Box::new(symbolic_bit(&vm, 0, info)?), Box::new(Exp::Bits64(B64::BIT_ONE)));
+    let fill_bit = symbolic_bit(&fill, 0, info)?;
+
+    let mut exp = None;
+    for i in (0..len).rev() {
+        let outside_low_bits = Exp::Bvsle(Box::new(num_elem.clone()), Box::new(smt_i128(i128::from(i))));
+        let use_fill = Exp::Or(Box::new(vm_enabled.clone()), Box::new(outside_low_bits));
+        let bit = Exp::Ite(Box::new(use_fill), Box::new(fill_bit.clone()), Box::new(symbolic_bit(&source, i, info)?));
+        exp = Some(match exp {
+            Some(acc) => Exp::Concat(Box::new(acc), Box::new(bit)),
+            None => bit,
+        });
+    }
+
+    solver.define_const(exp.expect("non-empty mask expression"), info).into()
+}
+
+fn isla_mask_from_low_bits<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    _: &mut LocalFrame<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    isla_mask_from_low_bits_internal(args, solver, info)
+}
+
 enum Condition {
     Concrete(bool),
     Symbolic(Exp<Sym>),
@@ -2720,6 +3026,151 @@ fn expect_vector_arg<B: BV>(value: Val<B>, name: &str, info: SourceLoc) -> Resul
         Val::Vector(values) => Ok(values),
         value => Err(ExecError::Type(format!("{} {:?}", name, value), info)),
     }
+}
+
+fn expect_concrete_len<B: BV>(
+    value: Val<B>,
+    name: &str,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<usize, ExecError> {
+    let value = concretize_proven_i128(value, solver, info);
+    panic_if_negative_concretized_nat(name, &value);
+    match value {
+        Val::I128(value) => usize::try_from(value).map_err(|_| ExecError::Overflow),
+        Val::I64(value) => usize::try_from(value).map_err(|_| ExecError::Overflow),
+        value => Err(ExecError::Type(format!("{} must be concrete, got {:?}", name, value), info)),
+    }
+}
+
+fn bitvec_value_count(width: u32) -> Option<usize> {
+    if width >= usize::BITS {
+        None
+    } else {
+        Some(1usize << width)
+    }
+}
+
+fn bitvec_index_in_range_exp<B: BV>(
+    index: &Val<B>,
+    valid_len: usize,
+    index_width: u32,
+    info: SourceLoc,
+) -> Result<Exp<Sym>, ExecError> {
+    if valid_len == 0 {
+        return Ok(Exp::Bool(false));
+    }
+    if let Some(value_count) = bitvec_value_count(index_width) {
+        if valid_len >= value_count {
+            return Ok(Exp::Bool(true));
+        }
+    }
+    let valid_len = u64::try_from(valid_len).map_err(|_| ExecError::Overflow)?;
+    Ok(Exp::Bvult(Box::new(smt_value(index, info)?), Box::new(smt_u64_width(valid_len, index_width))))
+}
+
+fn vector_array_access_or_default_exp<B: BV>(
+    valid_len: usize,
+    value_exps: &[Exp<Sym>],
+    index: &Val<B>,
+    element_width: u32,
+    default: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Exp<Sym>, ExecError> {
+    let index_width = length_bits(index, solver, info)?;
+    if index_width == 0 {
+        return Err(ExecError::Type("isla_vector_access_or_default index must be non-empty".to_string(), info));
+    }
+    if element_width == 0 {
+        return smt_value(default, info);
+    }
+
+    let store_len = bitvec_value_count(index_width).map(|value_count| min(valid_len, value_count)).unwrap_or(valid_len);
+    let array =
+        solver.declare_const(Ty::Array(Box::new(Ty::BitVec(index_width)), Box::new(Ty::BitVec(element_width))), info);
+    let mut array_exp = Exp::Var(array);
+    for (i, value_exp) in value_exps.iter().take(store_len).enumerate() {
+        let i = u64::try_from(i).map_err(|_| ExecError::Overflow)?;
+        array_exp =
+            Exp::Store(Box::new(array_exp), Box::new(smt_u64_width(i, index_width)), Box::new(value_exp.clone()));
+    }
+
+    let selected = Exp::Select(Box::new(array_exp), Box::new(smt_value(index, info)?));
+    Ok(Exp::Ite(
+        Box::new(bitvec_index_in_range_exp(index, valid_len, index_width, info)?),
+        Box::new(selected),
+        Box::new(smt_value(default, info)?),
+    ))
+}
+
+fn isla_vector_access_or_default_internal<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 4 {
+        return Err(ExecError::Type(
+            format!("isla_vector_access_or_default expected 4 arguments, got {}", args.len()),
+            info,
+        ));
+    }
+
+    let valid_len = expect_concrete_len(args[0].clone(), "isla_vector_access_or_default valid_len", solver, info)?;
+    let values = expect_vector_arg(args[1].clone(), "isla_vector_access_or_default vector", info)?;
+    let index = expect_bits_arg(args[2].clone(), "isla_vector_access_or_default index", solver, info)?;
+    let default = expect_bits_arg(args[3].clone(), "isla_vector_access_or_default default", solver, info)?;
+
+    if valid_len > values.len() {
+        return Err(ExecError::Type(
+            format!("isla_vector_access_or_default valid_len {} > vector length {}", valid_len, values.len()),
+            info,
+        ));
+    }
+
+    let default_len = length_bits(&default, solver, info)?;
+    let mut value_exps = Vec::with_capacity(valid_len);
+    for value in values.iter().take(valid_len) {
+        let value_bits = expect_bits_arg(value.clone(), "isla_vector_access_or_default element", solver, info)?;
+        let value_len = length_bits(&value_bits, solver, info)?;
+        if value_len != default_len {
+            return Err(ExecError::Type(
+                format!("isla_vector_access_or_default element width {} != default width {}", value_len, default_len),
+                info,
+            ));
+        }
+        value_exps.push(smt_value(&value_bits, info)?);
+    }
+
+    if let Val::Bits(bits) = index {
+        let index = bits.unsigned();
+        if index >= 0 {
+            if let Ok(index) = usize::try_from(index) {
+                if index < valid_len {
+                    return Ok(values[index].clone());
+                }
+            }
+        }
+        return Ok(default);
+    }
+
+    if valid_len == 0 || default_len == 0 {
+        return Ok(default);
+    }
+
+    let index_width = length_bits(&index, solver, info)?;
+    let exp = vector_array_access_or_default_exp(valid_len, &value_exps, &index, default_len, &default, solver, info)?;
+    debug_assert!(index_width > 0);
+    solver.define_const(exp, info).into()
+}
+
+fn isla_vector_access_or_default<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    _: &mut LocalFrame<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    isla_vector_access_or_default_internal(args, solver, info)
 }
 
 fn isla_vector_select_internal<B: BV>(
@@ -3831,6 +4282,7 @@ pub fn unary_primops<B: BV>() -> HashMap<String, Unary<B>> {
     primops.insert("%i->%i64".to_string(), i128_to_i64 as Unary<B>);
     primops.insert("%string->%i".to_string(), string_to_i128 as Unary<B>);
     primops.insert("bit_to_bool".to_string(), bit_to_bool as Unary<B>);
+    primops.insert("isla_bool_to_bit".to_string(), bool_to_bit as Unary<B>);
     primops.insert("assume".to_string(), assume as Unary<B>);
     primops.insert("not".to_string(), not_bool as Unary<B>);
     primops.insert("neg_int".to_string(), neg_int as Unary<B>);
@@ -3994,6 +4446,10 @@ pub fn variadic_primops<B: BV>() -> HashMap<String, Variadic<B>> {
     primops.insert("mark_register_pair".to_string(), mark_register_pair as Variadic<B>);
     primops.insert("isla_read_vreg".to_string(), isla_read_vreg as Variadic<B>);
     primops.insert("isla_init_mask".to_string(), isla_init_mask as Variadic<B>);
+    primops.insert("isla_select_int".to_string(), isla_select_int as Variadic<B>);
+    primops.insert("isla_fixed_rounding_incr".to_string(), isla_fixed_rounding_incr as Variadic<B>);
+    primops.insert("isla_mask_from_low_bits".to_string(), isla_mask_from_low_bits as Variadic<B>);
+    primops.insert("isla_vector_access_or_default".to_string(), isla_vector_access_or_default as Variadic<B>);
     primops.insert("isla_vector_select".to_string(), isla_vector_select as Variadic<B>);
     primops.insert("isla_mux2".to_string(), isla_mux2 as Variadic<B>);
     primops.insert("isla_masktypei_result".to_string(), isla_masktypei_result as Variadic<B>);
@@ -4444,6 +4900,22 @@ mod tests {
     }
 
     #[test]
+    fn extension_accepts_proven_symbolic_length_from_fallback_candidate() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B129>::new(&ctx);
+        let len = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        solver.assert_eq(Exp::Var(len), smt_i128(65));
+
+        match zero_extend(Val::Bits(B129::new(0x12, 8)), Val::Symbolic(len), &mut solver, SourceLoc::unknown())? {
+            Val::Bits(bits) => assert_eq!(bits, B129::new(0x12, 65)),
+            value => panic!("expected concrete zero_extend result, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     #[should_panic(expected = "nat invariant violated in extension")]
     fn extension_panics_on_negative_proven_symbolic_length() {
         let cfg = Config::new();
@@ -4886,6 +5358,204 @@ mod tests {
     }
 
     #[test]
+    fn bool_to_bit_builds_one_bit_result() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+
+        assert_eq!(bool_to_bit(Val::Bool(true), &mut solver, SourceLoc::unknown())?, Val::Bits(B64::BIT_ONE));
+        assert_eq!(bool_to_bit(Val::Bool(false), &mut solver, SourceLoc::unknown())?, Val::Bits(B64::BIT_ZERO));
+
+        let condition = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        match bool_to_bit(Val::Symbolic(condition), &mut solver, SourceLoc::unknown())? {
+            Val::Symbolic(result) => assert_eq!(solver.length(result), Some(1)),
+            value => panic!("expected symbolic bit result, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_fixed_rounding_incr_handles_concrete_modes() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let elem = Val::Bits(B64::new(0b10110, 5));
+
+        assert_eq!(
+            isla_fixed_rounding_incr_internal(
+                vec![elem.clone(), Val::I128(2), Val::Bits(B64::new(0b00, 2))],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::Bits(B64::BIT_ONE)
+        );
+        assert_eq!(
+            isla_fixed_rounding_incr_internal(
+                vec![elem.clone(), Val::I128(2), Val::Bits(B64::new(0b01, 2))],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::Bits(B64::BIT_ONE)
+        );
+        assert_eq!(
+            isla_fixed_rounding_incr_internal(
+                vec![elem.clone(), Val::I128(2), Val::Bits(B64::new(0b10, 2))],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::Bits(B64::BIT_ZERO)
+        );
+        assert_eq!(
+            isla_fixed_rounding_incr_internal(
+                vec![elem, Val::I128(2), Val::Bits(B64::new(0b11, 2))],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::Bits(B64::BIT_ZERO)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_fixed_rounding_incr_builds_symbolic_bit() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let shift = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let mode = solver.declare_const(Ty::BitVec(2), SourceLoc::unknown());
+
+        match isla_fixed_rounding_incr_internal(
+            vec![Val::Bits(B64::new(0b10110, 5)), Val::Symbolic(shift), Val::Symbolic(mode)],
+            &mut solver,
+            SourceLoc::unknown(),
+        )? {
+            Val::Symbolic(result) => assert_eq!(solver.length(result), Some(1)),
+            value => panic!("expected symbolic rounding increment, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_select_int_selects_concrete_and_symbolic_values() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+
+        assert_eq!(
+            isla_select_int_internal(
+                vec![Val::Bool(true), Val::I128(7), Val::I128(-3)],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::I128(7)
+        );
+        assert_eq!(
+            isla_select_int_internal(
+                vec![Val::Bool(false), Val::I128(7), Val::I128(-3)],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::I128(-3)
+        );
+
+        let condition = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        match isla_select_int_internal(
+            vec![Val::Symbolic(condition), Val::I128(7), Val::I128(-3)],
+            &mut solver,
+            SourceLoc::unknown(),
+        )? {
+            Val::Symbolic(result) => assert_eq!(solver.length(result), Some(128)),
+            value => panic!("expected symbolic integer select result, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_mask_from_low_bits_handles_concrete_fill_and_source() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+
+        let masked = isla_mask_from_low_bits_internal(
+            vec![
+                Val::I128(3),
+                Val::Bits(B64::BIT_ZERO),
+                Val::Bits(B64::BIT_ONE),
+                Val::Bits(B64::new(0b10101, 8)),
+                Val::Bits(B64::new(0, 5)),
+            ],
+            &mut solver,
+            SourceLoc::unknown(),
+        )?;
+        assert_eq!(masked, Val::Bits(B64::new(0b11101, 5)));
+
+        let unmasked = isla_mask_from_low_bits_internal(
+            vec![
+                Val::I128(3),
+                Val::Bits(B64::BIT_ONE),
+                Val::Bits(B64::BIT_ZERO),
+                Val::Bits(B64::new(0b10101, 8)),
+                Val::Bits(B64::new(0, 5)),
+            ],
+            &mut solver,
+            SourceLoc::unknown(),
+        )?;
+        assert_eq!(unmasked, Val::Bits(B64::new(0, 5)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_mask_from_low_bits_uses_source_width_for_symbolic_len_without_template() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let num_elem = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let vm = solver.declare_const(Ty::BitVec(1), SourceLoc::unknown());
+
+        match isla_mask_from_low_bits_internal(
+            vec![Val::Symbolic(num_elem), Val::Symbolic(vm), Val::Bits(B64::BIT_ONE), Val::Bits(B64::new(0b10101, 8))],
+            &mut solver,
+            SourceLoc::unknown(),
+        )? {
+            Val::Symbolic(mask) => assert_eq!(solver.length(mask), Some(8)),
+            value => panic!("expected symbolic mask, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_mask_from_low_bits_builds_symbolic_width_preserving_mask() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let num_elem = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let vm = solver.declare_const(Ty::BitVec(1), SourceLoc::unknown());
+
+        match isla_mask_from_low_bits_internal(
+            vec![
+                Val::Symbolic(num_elem),
+                Val::Symbolic(vm),
+                Val::Bits(B64::BIT_ONE),
+                Val::Bits(B64::new(0b10101, 8)),
+                Val::Bits(B64::new(0, 5)),
+            ],
+            &mut solver,
+            SourceLoc::unknown(),
+        )? {
+            Val::Symbolic(mask) => assert_eq!(solver.length(mask), Some(5)),
+            value => panic!("expected symbolic mask, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn isla_vector_select_uses_mask_bits() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -4903,6 +5573,92 @@ mod tests {
                 assert_eq!(values[2], Val::Bits(B64::new(0x22, 8)));
             }
             value => panic!("expected vector result, got {:?}", value),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_vector_access_or_default_handles_concrete_bounds() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let values =
+            Val::Vector(vec![Val::Bits(B64::new(0x10, 8)), Val::Bits(B64::new(0x11, 8)), Val::Bits(B64::new(0x12, 8))]);
+        let default = Val::Bits(B64::new(0, 8));
+
+        assert_eq!(
+            isla_vector_access_or_default_internal(
+                vec![Val::I128(3), values.clone(), Val::Bits(B64::new(1, 8)), default.clone()],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            Val::Bits(B64::new(0x11, 8))
+        );
+        assert_eq!(
+            isla_vector_access_or_default_internal(
+                vec![Val::I128(3), values, Val::Bits(B64::new(5, 8)), default.clone()],
+                &mut solver,
+                SourceLoc::unknown(),
+            )?,
+            default
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn isla_vector_access_or_default_builds_smt_array_select() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let index = solver.declare_const(Ty::BitVec(2), SourceLoc::unknown());
+        let values =
+            Val::Vector(vec![Val::Bits(B64::new(0x10, 8)), Val::Bits(B64::new(0x11, 8)), Val::Bits(B64::new(0x12, 8))]);
+        let default = Val::Bits(B64::new(0, 8));
+
+        let array_exp = vector_array_access_or_default_exp(
+            3,
+            &[bits64(0x10, 8), bits64(0x11, 8), bits64(0x12, 8)],
+            &Val::Symbolic(index),
+            8,
+            &default,
+            &mut solver,
+            SourceLoc::unknown(),
+        )?;
+        let array_exp_debug = format!("{:?}", array_exp);
+        assert!(array_exp_debug.contains("Select("));
+        assert!(array_exp_debug.contains("Store("));
+
+        match isla_vector_access_or_default_internal(
+            vec![Val::I128(3), values, Val::Symbolic(index), default],
+            &mut solver,
+            SourceLoc::unknown(),
+        )? {
+            Val::Symbolic(result) => {
+                assert_eq!(solver.length(result), Some(8));
+                assert_eq!(
+                    solver.check_sat_with(
+                        &Exp::And(
+                            Box::new(Exp::Eq(Box::new(Exp::Var(index)), Box::new(bits64(1, 2)))),
+                            Box::new(Exp::Neq(Box::new(Exp::Var(result)), Box::new(bits64(0x11, 8)))),
+                        ),
+                        SourceLoc::unknown(),
+                    ),
+                    SmtResult::Unsat
+                );
+                assert_eq!(
+                    solver.check_sat_with(
+                        &Exp::And(
+                            Box::new(Exp::Eq(Box::new(Exp::Var(index)), Box::new(bits64(3, 2)))),
+                            Box::new(Exp::Neq(Box::new(Exp::Var(result)), Box::new(bits64(0, 8)))),
+                        ),
+                        SourceLoc::unknown(),
+                    ),
+                    SmtResult::Unsat
+                );
+            }
+            value => panic!("expected symbolic vector access result, got {:?}", value),
         }
 
         Ok(())
