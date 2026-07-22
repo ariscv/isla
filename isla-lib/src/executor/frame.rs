@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::bitvector::BV;
 use crate::error::ExecError;
-use crate::executor::task::{Task, TaskId, TaskState};
+use crate::executor::task::{ControlFlowScope, Task, TaskId, TaskState};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
@@ -112,7 +112,7 @@ pub struct Frame<'ir, B> {
     pub(super) forks: u32,
     pub(super) backjumps: u32,
     pub(super) step_count: u32,
-    pub(super) loop_counts: Arc<HashMap<usize, u32>>,
+    pub(super) loop_counts: Arc<HashMap<ControlFlowScope, u32>>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
     pub(super) memory: Arc<Memory<B>>,
     pub(super) instrs: &'ir [Instr<Name, B>],
@@ -170,7 +170,7 @@ pub struct LocalFrame<'ir, B> {
     pub forks: u32,
     pub(super) backjumps: u32,
     pub(super) step_count: u32,
-    pub(super) loop_counts: HashMap<usize, u32>,
+    pub(super) loop_counts: HashMap<ControlFlowScope, u32>,
     pub(super) local_state: LocalState<'ir, B>,
     pub(super) memory: Memory<B>,
     pub(super) instrs: &'ir [Instr<Name, B>],

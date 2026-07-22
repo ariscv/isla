@@ -63,7 +63,11 @@ mod task;
 use crate::register::RegisterBindings;
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
-pub use task::{ExecutionLimits, LimitBehavior, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+use task::{BranchLimitReason, ControlFlowScope};
+pub use task::{
+    ExecutionLimitCounts, ExecutionLimitRegion, ExecutionLimits, ExecutionLimitsState, LimitBehavior, StopAction,
+    StopConditions, Task, TaskId, TaskInterrupt, TaskState,
+};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1213,26 +1217,121 @@ fn run_special_primop<'ir, B: BV>(
     Ok(SpecialResult::Continue)
 }
 
-fn concretize_branch_condition<B: BV>(v: Sym, solver: &mut Solver<B>, info: SourceLoc) -> Result<bool, ExecError> {
-    use smtlib::Def::*;
+/// 在不再创建子执行路径的前提下，把符号布尔分支 `v` 固定到一个可满足的具体方向。
+///
+/// 正常的符号执行会在条件的 `true`、`false` 两侧都可满足时 fork，两条路径分别携带
+/// `v` 和 `!v` 约束继续执行。执行限制选择 [`LimitBehavior::Concretize`] 后，系统不再
+/// fork，而是只保留其中一个方向，以控制路径数量或路径深度。这个函数是该流程的“机制层”：
+/// 它只负责验证方向是否可满足并提交最终约束，不负责决定采样策略，也不更新执行限制统计。
+///
+/// `preferred_value` 表示优先尝试的方向，而不是必须强制采用的结果：
+///
+/// - 先通过临时 assumption 查询偏好方向是否可满足；
+/// - 如果偏好方向不可满足，则查询相反方向；
+/// - 如果两个方向都不可满足，说明调用前的 solver 状态或分支不变量已经被破坏，直接触发断言；
+/// - 选定方向后，再把对应断言正式加入当前路径的 solver，使执行器中的控制流位置与 SMT
+///   路径条件保持一致。
+///
+/// 返回值是实际提交的分支条件值，可能与 `preferred_value` 不同。调用者据此选择跳转目标或
+/// fall-through 路径。
+fn concretize_branch_condition<B: BV>(
+    v: Sym,
+    preferred_value: bool,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
 
-    // is_sat() 在 Unknown 时返回 Err(ExecError::Z3Unknown)，会通过 ? 正确传播
-    let can_be_true = solver.check_sat_with(&Var(v), info).is_sat()?;
-    let concrete_val = if can_be_true {
-        let mut model = Model::new(solver);
-        match model.get_var(v) {
-            Ok(ModelVal::Exp(Bool(b))) => b,
-            Ok(ModelVal::Arbitrary(_)) => true,
-            _ => true,
-        }
+    // 把 Rust 层的方向偏好转换成 SMT 表达式。这里保留 preferred/alternate 两个表达式，
+    // 是为了明确区分“策略希望选择哪边”和“当前路径实际上允许选择哪边”。
+    let preferred = if preferred_value { Var(v) } else { Not(Box::new(Var(v))) };
+    let alternate = if preferred_value { Not(Box::new(Var(v))) } else { Var(v) };
+
+    // check_sat_with 只在当前 solver 状态上附加临时 assumption 做可满足性探测，不会把该方向
+    // 留在路径约束中。因此可以先低成本尝试偏好方向，仅在偏好方向不可满足时再查询另一侧。
+    let concrete_value = if solver.check_sat_with(&preferred, info).is_sat()? {
+        preferred_value
     } else {
-        false
+        // 一个仍可执行的符号布尔分支至少应有一侧可满足。两侧都不可满足不是普通的路径截断，
+        // 而是内部状态不一致，所以按照执行器的不变量要求立即失败，避免掩盖上游逻辑错误。
+        assert!(
+            solver.check_sat_with(&alternate, info).is_sat()?,
+            "symbolic branch has neither a satisfiable preferred side nor a satisfiable alternate side"
+        );
+        !preferred_value
     };
 
-    solver.add(Assert(Eq(Box::new(Bool(concrete_val)), Box::new(Var(v)))));
+    // 上面的 SAT 查询只是探测；这里才把最终方向提交到当前执行路径。若省略这一步，Rust
+    // 执行器虽然只沿一个 PC 方向继续，solver 却仍允许另一个方向，后续求解结果就会与实际
+    // 控制流不一致。
+    solver.add(smtlib::Def::Assert(if concrete_value { Var(v) } else { Not(Box::new(Var(v))) }));
 
-    Ok(concrete_val)
+    Ok(concrete_value)
+}
+
+/// 使用执行限制的可复现采样策略具体化一个普通符号分支。
+///
+/// 这是“策略层”包装函数，位于执行限制判定和 [`concretize_branch_condition`] 之间。当最大
+/// 路径深度、全局 fork 数、单分支 fork 数或单分支 fork 占比等限制触发且配置为
+/// [`LimitBehavior::Concretize`] 时，上层调用它，用一次确定性采样代替继续 fork。
+///
+/// 整体职责分为三步：
+///
+/// 1. 根据采样种子、控制流作用域和本次采样序号计算偏好方向；
+/// 2. 委托 [`concretize_branch_condition`] 验证可满足性并把实际方向加入 solver；
+/// 3. 将实际选择结果写入共享的 [`ExecutionLimitsState`]，使跨路径、跨工作线程汇总的具体化
+///    统计与 solver 中真正保留的路径一致。
+///
+/// `scope` 用函数、IR PC、调用上下文和源码位置区分逻辑分支点；`sample_ordinal` 是调用者为
+/// 该作用域预留的单调采样序号。`preferred_branch` 将这些信息与
+/// `limits.branch_sampling_seed` 组合，使相同输入可稳定复现，并让相邻两个采样序号偏好相反
+/// 方向，从采样策略层面避免长期偏向 `true` 或 `false`。采样结果仍然只是一种偏好：如果该
+/// 方向在当前路径下不可满足，机制层会选择另一侧，所以统计必须记录 `concrete_value`，不能
+/// 记录 `preferred`。
+fn concretize_branch_with_sampling<B: BV>(
+    v: Sym,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    limits: &ExecutionLimits,
+    limits_state: &ExecutionLimitsState,
+    scope: &ControlFlowScope,
+    sample_ordinal: u32,
+) -> Result<bool, ExecError> {
+    // 采样不读取 SMT model，也不随机生成变量取值；它只为这个布尔分支生成一个可复现的
+    // 优先方向，真正能否选择该方向仍由 solver 中已有的路径约束决定。
+    let preferred = limits_state.preferred_branch(scope, sample_ordinal, limits.branch_sampling_seed);
+
+    // 机制层返回实际加入 solver 的方向。对于调用前已确认两侧都可满足的普通 fork 限制，
+    // 它通常等于 preferred；对于尚未预查两侧的路径深度限制，它可能被修正为相反方向。
+    let concrete_value = concretize_branch_condition(v, preferred, solver, info)?;
+
+    // ExecutionLimitsState 通过内部 Mutex 被同一 TaskState 派生出的路径共享。这里记录实际
+    // 结果，使 concretized/true/false 计数与已经提交到 solver 的路径条件严格一致。
+    limits_state.record_concretized(scope, concrete_value);
+    Ok(concrete_value)
+}
+
+fn concretize_loop_branch_with_sampling<B: BV>(
+    v: Sym,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    limits: &ExecutionLimits,
+    limits_state: &ExecutionLimitsState,
+    scope: &ControlFlowScope,
+    sample_ordinal: u32,
+) -> Result<Option<bool>, ExecError> {
+    use smtlib::Exp::*;
+
+    let exit = Not(Box::new(Var(v)));
+    if !solver.check_sat_with(&exit, info).is_sat()? {
+        return Ok(None);
+    }
+
+    let preferred = limits_state.preferred_branch(scope, sample_ordinal, limits.branch_sampling_seed);
+    let concrete_value = if preferred && solver.check_sat_with(&Var(v), info).is_sat()? { true } else { false };
+    solver.add(smtlib::Def::Assert(if concrete_value { Var(v) } else { exit }));
+    limits_state.record_concretized(scope, concrete_value);
+    Ok(Some(concrete_value))
 }
 
 macro_rules! itrace_push_branch_condition {
@@ -1277,7 +1376,7 @@ macro_rules! itrace_record_execution_limit {
         }
         #[cfg(not(feature = "tracetool"))]
         {
-            let _ = &$frame;
+            let _ = (&$frame, $(&$arg),*);
         }
     }};
 }
@@ -1356,6 +1455,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 frame.step_count += 1;
                 if let Some(ref limits) = task_state.execution_limits {
                     let mut limit_reached = false;
+                    let mut loop_limit_reached = false;
 
                     if let Some(max_depth) = limits.max_path_depth {
                         if frame.step_count as u64 > max_depth {
@@ -1385,30 +1485,42 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     if !limit_reached {
                         if let Some(max_backjumps) = limits.max_backjumps_per_loop {
                             if *target <= frame.pc {
-                                let count = frame.loop_counts.entry(*target).or_insert(0);
-                                *count += 1;
-                                let backjumps = *count;
-                                if backjumps > max_backjumps {
-                                    match limits.on_limit_reached {
-                                        LimitBehavior::Truncate => {
-                                            itrace_record_execution_limit!(
-                                                frame,
-                                                "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=truncate",
-                                                target,
-                                                backjumps,
-                                                max_backjumps
-                                            );
-                                            return Err(ExecError::LoopLimitReached(frame.function_name, *target));
-                                        }
-                                        LimitBehavior::Concretize => {
-                                            itrace_record_execution_limit!(
-                                                frame,
-                                                "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=concretize_branch_condition",
-                                                target,
-                                                backjumps,
-                                                max_backjumps
-                                            );
-                                            limit_reached = true;
+                                let loop_scope = ControlFlowScope::new(
+                                    frame.function_name,
+                                    *target,
+                                    &frame.backtrace,
+                                    *info,
+                                    limits.call_context_depth,
+                                );
+                                if limits.applies_to(&loop_scope) {
+                                    let backjumps = {
+                                        let count = frame.loop_counts.entry(loop_scope).or_insert(0);
+                                        *count += 1;
+                                        *count
+                                    };
+                                    if backjumps > max_backjumps {
+                                        match limits.on_limit_reached {
+                                            LimitBehavior::Truncate => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=truncate",
+                                                    target,
+                                                    backjumps,
+                                                    max_backjumps
+                                                );
+                                                return Err(ExecError::LoopLimitReached(frame.function_name, *target));
+                                            }
+                                            LimitBehavior::Concretize => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=sample_branch_condition",
+                                                    target,
+                                                    backjumps,
+                                                    max_backjumps
+                                                );
+                                                limit_reached = true;
+                                                loop_limit_reached = true;
+                                            }
                                         }
                                     }
                                 }
@@ -1422,7 +1534,46 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             Val::Symbolic(v) => {
                                 use smtlib::Exp::*;
 
-                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                let scope = ControlFlowScope::new(
+                                    frame.function_name,
+                                    frame.pc,
+                                    &frame.backtrace,
+                                    *info,
+                                    limits.call_context_depth,
+                                );
+                                let sample_ordinal =
+                                    task_state.limits_state.begin_concretization_attempt(scope.clone());
+                                let concrete_bool = if loop_limit_reached {
+                                    match concretize_loop_branch_with_sampling(
+                                        v,
+                                        solver,
+                                        *info,
+                                        limits,
+                                        task_state.limits_state.as_ref(),
+                                        &scope,
+                                        sample_ordinal,
+                                    )? {
+                                        Some(value) => value,
+                                        None => {
+                                            itrace_record_execution_limit!(
+                                                frame,
+                                                "max_backjumps_per_loop exceeded: target_pc={}, action=truncate, reason=exit_direction_unsatisfiable",
+                                                target
+                                            );
+                                            return Err(ExecError::LoopLimitReached(frame.function_name, *target));
+                                        }
+                                    }
+                                } else {
+                                    concretize_branch_with_sampling(
+                                        v,
+                                        solver,
+                                        *info,
+                                        limits,
+                                        task_state.limits_state.as_ref(),
+                                        &scope,
+                                        sample_ordinal,
+                                    )?
+                                };
                                 if concrete_bool {
                                     itrace_push_branch_condition!(frame, Var(v));
                                     frame.pc = *target;
@@ -1433,6 +1584,9 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 continue 'main_loop;
                             }
                             Val::Bool(jump) => {
+                                if loop_limit_reached && jump {
+                                    return Err(ExecError::LoopLimitReached(frame.function_name, *target));
+                                }
                                 if jump {
                                     frame.pc = *target
                                 } else {
@@ -1459,115 +1613,84 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                         if can_be_true && can_be_false {
                             if let Some(ref limits) = task_state.execution_limits {
-                                // 全局 fork 总数限制（跨所有分支点累计，捕获串行 if-else 链）
-                                if let Some(max_total) = limits.max_total_forks {
-                                    if frame.forks >= max_total {
-                                        match limits.on_limit_reached {
-                                            LimitBehavior::Truncate => {
+                                let scope = ControlFlowScope::new(
+                                    frame.function_name,
+                                    frame.pc,
+                                    &frame.backtrace,
+                                    *info,
+                                    limits.call_context_depth,
+                                );
+                                if limits.applies_to(&scope) {
+                                    let attempt = task_state.limits_state.begin_branch_attempt(scope.clone(), limits);
+                                    if let Some(reason) = attempt.limit {
+                                        match reason {
+                                            BranchLimitReason::MaxTotalForks { actual, max } => {
                                                 itrace_record_execution_limit!(
                                                     frame,
-                                                    "max_total_forks exceeded: forks={}, max_total_forks={}, action=truncate",
-                                                    frame.forks,
-                                                    max_total
+                                                    "max_total_forks exceeded: actual_forks={}, max_total_forks={}, action={}",
+                                                    actual,
+                                                    max,
+                                                    if limits.on_limit_reached == LimitBehavior::Truncate {
+                                                        "truncate"
+                                                    } else {
+                                                        "sample_branch_condition"
+                                                    }
                                                 );
-                                                return Err(ExecError::BranchLimitReached(
-                                                    frame.function_name,
-                                                    frame.pc,
-                                                ));
                                             }
-                                            LimitBehavior::Concretize => {
+                                            BranchLimitReason::MaxForksPerBranch { actual, max } => {
                                                 itrace_record_execution_limit!(
                                                     frame,
-                                                    "max_total_forks exceeded: forks={}, max_total_forks={}, action=concretize_branch_condition",
-                                                    frame.forks,
-                                                    max_total
+                                                    "max_forks_per_branch exceeded: actual_branch_forks={}, max_forks_per_branch={}, action={}",
+                                                    actual,
+                                                    max,
+                                                    if limits.on_limit_reached == LimitBehavior::Truncate {
+                                                        "truncate"
+                                                    } else {
+                                                        "sample_branch_condition"
+                                                    }
                                                 );
-                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
-                                                if concrete_bool {
-                                                    itrace_push_branch_condition!(frame, test_true);
-                                                    frame.pc = *target;
-                                                } else {
-                                                    itrace_push_branch_condition!(frame, test_false);
-                                                    frame.pc += 1;
-                                                }
-                                                continue 'main_loop;
+                                            }
+                                            BranchLimitReason::MaxForkPctPerBranch {
+                                                branch_actual,
+                                                total_actual,
+                                                max_pct,
+                                                check_delay,
+                                            } => {
+                                                itrace_record_execution_limit!(
+                                                    frame,
+                                                    "max_fork_pct_per_branch exceeded: actual_branch_forks={}, actual_total_forks={}, max_fork_pct_per_branch={}, check_delay={}, action={}",
+                                                    branch_actual,
+                                                    total_actual,
+                                                    max_pct,
+                                                    check_delay,
+                                                    if limits.on_limit_reached == LimitBehavior::Truncate {
+                                                        "truncate"
+                                                    } else {
+                                                        "sample_branch_condition"
+                                                    }
+                                                );
                                             }
                                         }
-                                    }
-                                }
-                                // 单分支点 fork 限制（防止循环中同一点爆炸）
-                                if let Some(max_forks) = limits.max_forks_per_branch {
-                                    let fork_count =
-                                        task_state.limits_state.increment_branch_fork(frame.function_name, frame.pc);
-                                    if fork_count > max_forks {
+
                                         match limits.on_limit_reached {
                                             LimitBehavior::Truncate => {
-                                                itrace_record_execution_limit!(
-                                                    frame,
-                                                    "max_forks_per_branch exceeded: branch_forks={}, max_forks_per_branch={}, action=truncate",
-                                                    fork_count,
-                                                    max_forks
-                                                );
                                                 return Err(ExecError::BranchLimitReached(
                                                     frame.function_name,
                                                     frame.pc,
                                                 ));
                                             }
                                             LimitBehavior::Concretize => {
-                                                itrace_record_execution_limit!(
-                                                    frame,
-                                                    "max_forks_per_branch exceeded: branch_forks={}, max_forks_per_branch={}, action=concretize_branch_condition",
-                                                    fork_count,
-                                                    max_forks
-                                                );
-                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
-                                                if concrete_bool {
-                                                    itrace_push_branch_condition!(frame, test_true);
-                                                    frame.pc = *target;
-                                                } else {
-                                                    itrace_push_branch_condition!(frame, test_false);
-                                                    frame.pc += 1;
-                                                }
-                                                continue 'main_loop;
-                                            }
-                                        }
-                                    }
-                                }
-                                // 自适应百分比 fork 限制（与 KLEE MaxStaticForkPct 一致）
-                                if let Some(max_pct) = limits.max_fork_pct_per_branch {
-                                    let branch_count = if limits.max_forks_per_branch.is_none() {
-                                        task_state.limits_state.increment_branch_fork(frame.function_name, frame.pc)
-                                    } else {
-                                        task_state.limits_state.get_branch_fork_count(frame.function_name, frame.pc)
-                                    };
-                                    let total = task_state.limits_state.total_forks();
-                                    let delay = limits.max_fork_pct_check_delay.unwrap_or(0);
-                                    if total > delay && (branch_count as f64) > (total as f64) * max_pct {
-                                        match limits.on_limit_reached {
-                                            LimitBehavior::Truncate => {
-                                                itrace_record_execution_limit!(
-                                                    frame,
-                                                    "max_fork_pct_per_branch exceeded: branch_forks={}, total_forks={}, max_fork_pct_per_branch={}, check_delay={}, action=truncate",
-                                                    branch_count,
-                                                    total,
-                                                    max_pct,
-                                                    delay
-                                                );
-                                                return Err(ExecError::BranchLimitReached(
-                                                    frame.function_name,
-                                                    frame.pc,
-                                                ));
-                                            }
-                                            LimitBehavior::Concretize => {
-                                                itrace_record_execution_limit!(
-                                                    frame,
-                                                    "max_fork_pct_per_branch exceeded: branch_forks={}, total_forks={}, max_fork_pct_per_branch={}, check_delay={}, action=concretize_branch_condition",
-                                                    branch_count,
-                                                    total,
-                                                    max_pct,
-                                                    delay
-                                                );
-                                                let concrete_bool = concretize_branch_condition(v, solver, *info)?;
+                                                let concrete_bool = concretize_branch_with_sampling(
+                                                    v,
+                                                    solver,
+                                                    *info,
+                                                    limits,
+                                                    task_state.limits_state.as_ref(),
+                                                    &scope,
+                                                    attempt.sample_ordinal.expect(
+                                                        "concretize limit must reserve a branch sample ordinal",
+                                                    ),
+                                                )?;
                                                 if concrete_bool {
                                                     itrace_push_branch_condition!(frame, test_true);
                                                     frame.pc = *target;
@@ -1652,18 +1775,29 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     }
                     if let Some(max_backjumps) = limits.max_backjumps_per_loop {
                         if *target <= frame.pc {
-                            let count = frame.loop_counts.entry(*target).or_insert(0);
-                            *count += 1;
-                            let backjumps = *count;
-                            if backjumps > max_backjumps {
-                                itrace_record_execution_limit!(
-                                    frame,
-                                    "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=truncate, reason=unconditional_control_flow",
-                                    target,
-                                    backjumps,
-                                    max_backjumps
-                                );
-                                return Err(ExecError::LoopLimitReached(frame.function_name, *target));
+                            let loop_scope = ControlFlowScope::new(
+                                frame.function_name,
+                                *target,
+                                &frame.backtrace,
+                                SourceLoc::unknown(),
+                                limits.call_context_depth,
+                            );
+                            if limits.applies_to(&loop_scope) {
+                                let backjumps = {
+                                    let count = frame.loop_counts.entry(loop_scope).or_insert(0);
+                                    *count += 1;
+                                    *count
+                                };
+                                if backjumps > max_backjumps {
+                                    itrace_record_execution_limit!(
+                                        frame,
+                                        "max_backjumps_per_loop exceeded: target_pc={}, backjumps={}, max_backjumps_per_loop={}, action=truncate, reason=unconditional_control_flow",
+                                        target,
+                                        backjumps,
+                                        max_backjumps
+                                    );
+                                    return Err(ExecError::LoopLimitReached(frame.function_name, *target));
+                                }
                             }
                         }
                     }
@@ -3790,6 +3924,51 @@ fn zrX(z3zE1756) {
         assert!(results.iter().all(Result::is_ok));
     }
 
+    struct ForkAccountingSink<'a> {
+        limits_state: &'a ExecutionLimitsState,
+        actual_seen_during_submit: &'a std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl<'a, 'ir, 'task> ForkSink<'ir, 'task, B64> for ForkAccountingSink<'a> {
+        fn submit(&self, _task: Task<'ir, 'task, B64>) {
+            self.actual_seen_during_submit.lock().unwrap().push(self.limits_state.counts().actual);
+        }
+    }
+
+    #[test]
+    fn actual_fork_quota_is_reserved_before_child_submission() {
+        let shared_state = empty_shared_state();
+        let var = test_name(100);
+        let mut frame =
+            make_frame(vec![Instr::Decl(var, Ty::Bool, info()), Instr::Jump(Exp::Id(var), 2, info()), Instr::End]);
+        let task_state = TaskState::new().with_execution_limits(ExecutionLimits::default());
+        let actual_seen_during_submit = std::sync::Mutex::new(Vec::new());
+        let fork_sink = ForkAccountingSink {
+            limits_state: task_state.limits_state.as_ref(),
+            actual_seen_during_submit: &actual_seen_during_submit,
+        };
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            Timeout::unlimited(),
+            None,
+            &fork_sink,
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        assert_eq!(*actual_seen_during_submit.lock().unwrap(), vec![1]);
+        assert_eq!(task_state.limits_state.counts().actual, 1);
+    }
+
     #[cfg(feature = "tracetool")]
     #[test]
     fn execution_limit_concretize_records_itrace_summary() {
@@ -3881,6 +4060,33 @@ fn zrX(z3zE1756) {
                 assert_eq!(pc, 0);
             }
             _ => panic!("期望循环限制错误"),
+        }
+    }
+
+    #[test]
+    fn loop_sampling_truncates_when_exit_direction_becomes_unsatisfiable() {
+        let var = test_name(100);
+        let info = info();
+        let scope = ControlFlowScope::new(test_name(25), 1, &[], info, 2);
+        let sampling_state = ExecutionLimitsState::new();
+        let seed = (0..u64::MAX)
+            .find(|seed| sampling_state.preferred_branch(&scope, 0, *seed))
+            .expect("必须能找到首轮选择回边的 sampling seed");
+        let limits = ExecutionLimits::default()
+            .with_max_backjumps_per_loop(0)
+            .with_branch_sampling_seed(seed)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let result = run_with_limits(
+            vec![Instr::Decl(var, Ty::Bool, info), Instr::Jump(Exp::Id(var), 1, info), Instr::End],
+            limits,
+        );
+
+        match result {
+            Err(ExecError::LoopLimitReached(function, pc)) => {
+                assert_eq!(function, test_name(25));
+                assert_eq!(pc, 1);
+            }
+            _ => panic!("退出方向不可满足时必须截断符号回边"),
         }
     }
 
