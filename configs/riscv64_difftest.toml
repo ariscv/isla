@@ -8,6 +8,70 @@ default_sizeof = 4
 
 in_program_order = ["sail_barrier"]
 
+[execution_limits]
+max_forks_per_branch = 1
+
+# solve-state 默认在代码中仅对 V gather 的四个逐元素热点做局部抽样。
+# 本配置将每个热点的实际 fork 次数从代码默认 2 覆盖为 1；一次 fork 已覆盖条件两侧。
+#
+# Region 配置说明：
+# - region 使用半开区间 [start, end)，位置按 (line, column) 比较。
+# - 多个 [[execution_limits.regions]] 之间是 OR：IR 位置命中任意一个 region 即可。
+# - regions 会同时过滤 branch-local limit 和 loop limit；path fork/depth limit 不受 region 过滤。
+# - 一旦显式配置 regions，就会整体替换 solve-state 的代码默认 regions。
+# - file 必须与 IR files 表中的路径完全相同；文件不存在时只是不命中，不会报错或 panic。
+# - loop region 只能命中带 SourceLoc 的条件回边；无 SourceLoc 的 Goto 回边不会命中源码 region。
+#
+# 样例一：只对 VV_VRGATHER 的 mask 分支和 idx < VLMAX 分支应用 branch limit。
+# 使用时保留上面的 max_forks_per_branch，取消下面两个 region 的注释。
+# [[execution_limits.regions]]
+# file = "extensions/V/vext_arith_insts.sail"
+# start_line = 186
+# start_column = 6
+# end_line = 192
+# end_column = 7
+#
+# [[execution_limits.regions]]
+# file = "extensions/V/vext_arith_insts.sail"
+# start_line = 191
+# start_column = 20
+# end_line = 191
+# end_column = 65
+#
+# 样例二：只限制 vmem_read_addr 中 repeat-until 的条件回边。
+# 使用时删除或注释上面的 max_forks_per_branch，再取消下面内容的注释。
+# max_backjumps_per_loop = 16
+# on_limit_reached = "truncate"
+#
+# [[execution_limits.regions]]
+# file = "sys/vmem_utils.sail"
+# start_line = 146
+# start_column = 2
+# end_line = 171
+# end_column = 0
+#
+# 样例三：在同一组 region 内同时启用 branch 和 loop limit。
+# regions 是共享选择器，因此下面两个限制都会作用于所有已配置 region；目前不能为二者分别配置 region 集合。
+# 使用时应替换当前 [execution_limits] 中的同名字段，避免 TOML 重复 key。
+# max_forks_per_branch = 2
+# max_backjumps_per_loop = 32
+# call_context_depth = 2
+# on_limit_reached = "concretize"
+#
+# [[execution_limits.regions]]
+# file = "extensions/V/vext_arith_insts.sail"
+# start_line = 185
+# start_column = 20
+# end_line = 194
+# end_column = 0
+#
+# [[execution_limits.regions]]
+# file = "sys/vmem_utils.sail"
+# start_line = 146
+# start_column = 2
+# end_line = 171
+# end_column = 0
+
 [[toolchain]]
 name = "macos-riscv64"
 os = "macos"
