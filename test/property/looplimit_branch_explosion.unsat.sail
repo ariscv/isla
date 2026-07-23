@@ -7,7 +7,7 @@ overload operator == = {eq_anything}
 
 // 模式来源: sail-riscv 中 check_PTE_permission 的多层 match 嵌套
 // 第一层 match 分支后，第二层又有分支，总路径数指数增长
-// 验证 max_forks_per_branch + max_total_forks 联合限制
+// 验证 max_forks_per_branch + max_forks_per_path 联合限制
 // unsat: 两层枚举分类结果之和总是 >= 0
 
 enum E1 = A | B | C | D

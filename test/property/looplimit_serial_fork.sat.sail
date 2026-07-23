@@ -3,8 +3,8 @@ default Order dec
 $include <prelude.sail>
 
 // 模式来源: sail-riscv 中 pmpCheck 的串行 foreach + match
-// 每次循环迭代对枚举做 match，各迭代的分支累加产生全局 fork
-// 验证 max_total_forks 限制
+// 每次循环迭代对枚举做 match，每条路径会累加祖先 fork
+// 验证 max_forks_per_path 限制
 // sat: 存在 x 使得结果为 false（x 的低位不是全 1）
 
 function prop(x: bits(8)) -> bool = {
