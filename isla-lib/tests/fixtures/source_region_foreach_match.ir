@@ -1,0 +1,134 @@
+val zz5izDzKz5i64 = "%i->%i64" : (%i) ->  %i64
+
+val zz5i64zDzKz5i = "%i64->%i" : (%i64) ->  %i
+
+enum zread_kind {
+  zRead_plain,
+  zRead_ifetch
+}
+
+union zexception {
+  z__dummy_exnz3: %unit
+}
+
+
+
+val zinternal_pickzIEread_kindz5zK = "internal_pick" : (%list(%enum zread_kind)) ->  %enum zread_kind
+
+val zundefined_bitvector = "undefined_bitvector" : (%i) ->  %bv
+
+val zeq_int = "eq_int" : (%i, %i) ->  %bool
+
+val zgteq_int = "gteq" : (%i, %i) ->  %bool
+
+val zgt_int = "gt" : (%i, %i) ->  %bool
+
+val zeq_bits = "eq_bits" : (%bv, %bv) ->  %bool
+
+val zappend_64 = "append_64" : (%bv, %bv64) ->  %bv
+
+val zassume = "assume" : (%bool) ->  %unit
+
+val zprop : (%bv1, %i) ->  %bool
+
+fn zprop(zx, za) {
+  zz40 : %bool `0 9:2-9:15;
+  zz41 : %i `0 9:9-9:14;
+  zz41 = zz5i64zDzKz5i(0) `0 9:9-9:14;
+  zz40 = zgt_int(za, zz41) `0 9:9-9:14;
+  zz42 : %unit `0 9:2-9:15;
+  zz42 = zassume(zz40) `0 9:2-9:15;
+  zz43 : %bool `0 10:2-22:6;
+  zz43 = true `0 10:22-10:26;
+  zz44 : %i64 `0 11:2-21:3;
+  zz45 : %i `0 11:18-11:19;
+  zz45 = zz5i64zDzKz5i(0) `0 11:18-11:19;
+  zz44 = zz5izDzKz5i64(zz45) `0 11:18-11:19;
+  zz46 : %i64 `0 11:2-21:3;
+  zz46 = zz5izDzKz5i64(za) `0 11:23-11:24;
+  zz47 : %i64 `0 11:2-21:3;
+  zz48 : %i `0 11:11-11:24;
+  zz48 = zz5i64zDzKz5i(1) `0 11:11-11:24;
+  zz47 = zz5izDzKz5i64(zz48) `0 11:11-11:24;
+  zz49 : %i64 `0 11:2-21:3;
+  zz49 = zz44 `0 11:2-21:3;
+  zz410 : %unit `0 11:2-21:3;
+  jump @gt(zz49, zz46) goto 62 `0 11:2-21:3;
+  zz411 : %unit `0 12:4-19:5;
+  zz412 : %bv1 `0 13:6-13:13;
+  zz412 = zx `0 13:6-13:13;
+  zz413 : %bool `0 12:4-19:5;
+  zz414 : %bv `1;
+  zz414 = zz412 `2;
+  zz415 : %bv `3;
+  zz415 = 0b0 `4;
+  zz413 = zeq_bits(zz414, zz415) `5;
+  jump @not(zz413) goto 33 `0 12:4-19:5;
+  goto 34;
+  goto 41;
+  zz416 : %i `0 14:17-14:23;
+  zz416 = zz5i64zDzKz5i(0) `0 14:17-14:23;
+  zz417 : %i `0 14:17-14:23;
+  zz417 = zz5i64zDzKz5i(zz49) `0 14:17-14:23;
+  zz43 = zgteq_int(zz417, zz416) `0 14:17-14:23;
+  zz411 = () `0 14:8-14:23;
+  goto 47;
+  zz418 : %i `0 17:17-17:23;
+  zz418 = zz5i64zDzKz5i(0) `0 17:17-17:23;
+  zz419 : %i `0 17:17-17:23;
+  zz419 = zz5i64zDzKz5i(zz49) `0 17:17-17:23;
+  zz43 = zgteq_int(zz419, zz418) `0 17:17-17:23;
+  zz411 = () `0 17:8-17:23;
+  zz420 : %unit `0 12:4-19:5;
+  zz420 = zz411 `0 12:4-19:5;
+  zz421 : %bool `0 20:4-20:40;
+  zz422 : %i `0 20:7-20:13;
+  zz422 = zz5i64zDzKz5i(0) `0 20:7-20:13;
+  zz423 : %i `0 20:7-20:13;
+  zz423 = zz5i64zDzKz5i(zz49) `0 20:7-20:13;
+  zz421 = zeq_int(zz423, zz422) `0 20:7-20:13;
+  jump zz421 goto 58 `0 20:4-20:40;
+  zz410 = () `0 20:38-20:40;
+  goto 60;
+  return = zz43 `6;
+  goto 65;
+  zz49 = @iadd(zz49, zz47) `0 11:2-21:3;
+  goto 21;
+  zz424 : %unit `0 11:2-21:3;
+  zz424 = () `0 11:2-21:3;
+  return = true `0 22:2-22:6;
+  end;
+}
+
+register z_PC : %bv64
+
+val zundefined_read_kind : (%unit) ->  %enum zread_kind
+
+val zconsz3z5enumz0zzread_kind = "cons" : (%enum zread_kind, %list(%enum zread_kind)) ->  %list(%enum zread_kind)
+
+fn zundefined_read_kind(z3zE16) {
+  zz40 : %list(%enum zread_kind) `7;
+  zz40 = zconsz3z5enumz0zzread_kind(zRead_ifetch, zz40) `8;
+  zz40 = zconsz3z5enumz0zzread_kind(zRead_plain, zz40) `9;
+  return = zinternal_pickzIEread_kindz5zK(zz40) `10;
+  end;
+}
+
+register zdummy : %enum zread_kind
+
+val zinitializze_registers : (%unit) ->  %unit
+
+fn zinitializze_registers(z3zE18) {
+  zz40 : %i `11;
+  zz40 = zz5i64zDzKz5i(64) `12;
+  zz41 : %bv `13;
+  zz41 = zundefined_bitvector(zz40) `14;
+  z_PC = zz41 `15;
+  zz42 : %unit `16;
+  zz42 = () `17;
+  zdummy = zundefined_read_kind(()) `18;
+  return = () `19;
+  end;
+}
+
+files "source_region_foreach_match.unsat.sail"
