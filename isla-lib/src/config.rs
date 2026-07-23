@@ -47,7 +47,7 @@ use crate::ir_lexer::new_ir_lexer;
 use crate::primop_util::symbolic_from_typedefs;
 use crate::smt::smtlib::Exp;
 use crate::smt_parser;
-use crate::source_loc::SourceLoc;
+use crate::source_loc::{SourceLoc, SourceRegionSpec};
 use crate::value_parser::{LocParser, URValParser, ValParser};
 use crate::zencode;
 
@@ -986,6 +986,158 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExecutionLimitsConfig {
+    pub enabled: Option<bool>,
+    pub max_forks_per_branch: Option<u32>,
+    pub max_forks_per_path: Option<u32>,
+    pub max_backjumps_per_loop: Option<u32>,
+    pub max_path_depth: Option<u64>,
+    pub max_fork_pct_per_branch: Option<f64>,
+    pub max_fork_pct_check_delay: Option<u32>,
+    pub call_context_depth: Option<usize>,
+    pub branch_sampling_seed: Option<u64>,
+    pub on_limit_reached: Option<LimitBehaviorConfig>,
+    pub regions: Option<Vec<SourceRegionSpec>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitBehaviorConfig {
+    Truncate,
+    Concretize,
+}
+
+fn optional_bool(table: &toml::value::Table, key: &str, root: &str) -> Result<Option<bool>, String> {
+    table.get(key).map(|value| value.as_bool().ok_or_else(|| format!("{}.{} 必须是布尔值", root, key))).transpose()
+}
+
+fn optional_u32(table: &toml::value::Table, key: &str, root: &str) -> Result<Option<u32>, String> {
+    table
+        .get(key)
+        .map(|value| {
+            let value = value.as_integer().ok_or_else(|| format!("{}.{} 必须是非负整数", root, key))?;
+            u32::try_from(value).map_err(|_| format!("{}.{} 超出 u32 范围", root, key))
+        })
+        .transpose()
+}
+
+fn optional_u64(table: &toml::value::Table, key: &str, root: &str) -> Result<Option<u64>, String> {
+    table
+        .get(key)
+        .map(|value| {
+            let value = value.as_integer().ok_or_else(|| format!("{}.{} 必须是非负整数", root, key))?;
+            u64::try_from(value).map_err(|_| format!("{}.{} 超出 u64 范围", root, key))
+        })
+        .transpose()
+}
+
+fn required_u32(table: &toml::value::Table, key: &str, root: &str) -> Result<u32, String> {
+    optional_u32(table, key, root)?.ok_or_else(|| format!("{}.{} 是必填项", root, key))
+}
+
+fn required_u16(table: &toml::value::Table, key: &str, root: &str) -> Result<u16, String> {
+    let value = required_u32(table, key, root)?;
+    u16::try_from(value).map_err(|_| format!("{}.{} 超出 u16 范围", root, key))
+}
+
+fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsConfig>, String> {
+    let Some(value) = config.get("execution_limits") else { return Ok(None) };
+    let Some(table) = value.as_table() else { return Err("[execution_limits] 必须是 TOML table".to_string()) };
+    allowed_table_keys(
+        table,
+        "[execution_limits]",
+        &[
+            "enabled",
+            "max_forks_per_branch",
+            "max_forks_per_path",
+            "max_backjumps_per_loop",
+            "max_path_depth",
+            "max_fork_pct_per_branch",
+            "max_fork_pct_check_delay",
+            "call_context_depth",
+            "branch_sampling_seed",
+            "on_limit_reached",
+            "regions",
+        ],
+    )?;
+
+    let enabled = optional_bool(table, "enabled", "execution_limits")?;
+    if enabled == Some(false) && table.len() != 1 {
+        return Err("execution_limits.enabled=false 时不能再配置其他 execution limit 字段".to_string());
+    }
+
+    let max_fork_pct_per_branch = table
+        .get("max_fork_pct_per_branch")
+        .map(|value| {
+            let value = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|value| value as f64))
+                .ok_or_else(|| "execution_limits.max_fork_pct_per_branch 必须是 0.0..=1.0 的数值".to_string())?;
+            if value.is_finite() && (0.0..=1.0).contains(&value) {
+                Ok(value)
+            } else {
+                Err("execution_limits.max_fork_pct_per_branch 必须是 0.0..=1.0 的数值".to_string())
+            }
+        })
+        .transpose()?;
+
+    let on_limit_reached = table
+        .get("on_limit_reached")
+        .map(|value| match value.as_str() {
+            Some("concretize") => Ok(LimitBehaviorConfig::Concretize),
+            Some("truncate") => Ok(LimitBehaviorConfig::Truncate),
+            _ => Err("execution_limits.on_limit_reached 必须是 concretize 或 truncate".to_string()),
+        })
+        .transpose()?;
+
+    let regions = table
+        .get("regions")
+        .map(|value| {
+            let regions = value.as_array().ok_or_else(|| "execution_limits.regions 必须是数组".to_string())?;
+            if regions.is_empty() {
+                return Err("execution_limits.regions 不能为空；如需关闭执行限制请设置 enabled=false".to_string());
+            }
+            regions
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let root = format!("execution_limits.regions[{}]", index);
+                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
+                    allowed_table_keys(
+                        table,
+                        &root,
+                        &["file", "start_line", "start_column", "end_line", "end_column"],
+                    )?;
+                    let file = table
+                        .get("file")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| format!("{}.file 是必填字符串", root))?;
+                    Ok(SourceRegionSpec::new(
+                        file,
+                        (required_u32(table, "start_line", &root)?, required_u16(table, "start_column", &root)?),
+                        (required_u32(table, "end_line", &root)?, required_u16(table, "end_column", &root)?),
+                    ))
+                })
+                .collect()
+        })
+        .transpose()?;
+
+    Ok(Some(ExecutionLimitsConfig {
+        enabled,
+        max_forks_per_branch: optional_u32(table, "max_forks_per_branch", "execution_limits")?,
+        max_forks_per_path: optional_u32(table, "max_forks_per_path", "execution_limits")?,
+        max_backjumps_per_loop: optional_u32(table, "max_backjumps_per_loop", "execution_limits")?,
+        max_path_depth: optional_u64(table, "max_path_depth", "execution_limits")?,
+        max_fork_pct_per_branch,
+        max_fork_pct_check_delay: optional_u32(table, "max_fork_pct_check_delay", "execution_limits")?,
+        call_context_depth: optional_u64(table, "call_context_depth", "execution_limits")?
+            .map(|value| usize::try_from(value).expect("usize 无法表示 execution_limits.call_context_depth")),
+        branch_sampling_seed: optional_u64(table, "branch_sampling_seed", "execution_limits")?,
+        on_limit_reached,
+        regions,
+    }))
+}
+
 pub struct ISAConfig<B> {
     /// The identifier for the program counter register
     pub pc: Name,
@@ -1060,6 +1212,8 @@ pub struct ISAConfig<B> {
     pub pmp: Option<PmpConfig>,
     /// Optional CLINT enable flag
     pub clint_enabled: Option<bool>,
+    /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
+    pub execution_limits: Option<ExecutionLimitsConfig>,
 }
 
 impl<B: BV> ISAConfig<B> {
@@ -1125,6 +1279,7 @@ impl<B: BV> ISAConfig<B> {
             page_table_config: get_page_table_config(&config)?,
             pmp,
             clint_enabled: get_clint_enabled(&config)?,
+            execution_limits: get_execution_limits_config(&config)?,
         })
     }
 
@@ -1178,5 +1333,98 @@ impl<B: BV> ISAConfig<B> {
             Ok(config) => Ok(config),
             Err(msg) => Err(format!("{}: {}", path.as_ref().display(), msg)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_limits_config_parses_source_regions_and_overrides() {
+        let value = r#"
+            [execution_limits]
+            max_forks_per_branch = 7
+            max_forks_per_path = 11
+            max_path_depth = 1234
+            call_context_depth = 3
+            branch_sampling_seed = 99
+            on_limit_reached = "truncate"
+
+            [[execution_limits.regions]]
+            file = "extensions/V/vext_arith_insts.sail"
+            start_line = 186
+            start_column = 6
+            end_line = 192
+            end_column = 7
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let config = get_execution_limits_config(&value).unwrap().unwrap();
+
+        assert_eq!(config.max_forks_per_branch, Some(7));
+        assert_eq!(config.max_forks_per_path, Some(11));
+        assert_eq!(config.max_path_depth, Some(1234));
+        assert_eq!(config.call_context_depth, Some(3));
+        assert_eq!(config.branch_sampling_seed, Some(99));
+        assert_eq!(config.on_limit_reached, Some(LimitBehaviorConfig::Truncate));
+        assert_eq!(
+            config.regions.unwrap()[0],
+            SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7))
+        );
+    }
+
+    #[test]
+    fn execution_limits_config_parses_region_scoped_branch_and_loop_limits() {
+        let value = r#"
+            [execution_limits]
+            max_forks_per_branch = 2
+            max_backjumps_per_loop = 16
+            on_limit_reached = "concretize"
+
+            [[execution_limits.regions]]
+            file = "extensions/V/vext_arith_insts.sail"
+            start_line = 186
+            start_column = 6
+            end_line = 192
+            end_column = 7
+
+            [[execution_limits.regions]]
+            file = "sys/vmem_utils.sail"
+            start_line = 146
+            start_column = 2
+            end_line = 171
+            end_column = 0
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let config = get_execution_limits_config(&value).unwrap().unwrap();
+
+        assert_eq!(config.max_forks_per_branch, Some(2));
+        assert_eq!(config.max_backjumps_per_loop, Some(16));
+        assert_eq!(config.on_limit_reached, Some(LimitBehaviorConfig::Concretize));
+        assert_eq!(
+            config.regions,
+            Some(vec![
+                SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7)),
+                SourceRegionSpec::new("sys/vmem_utils.sail", (146, 2), (171, 0)),
+            ])
+        );
+    }
+
+    #[test]
+    fn execution_limits_config_rejects_empty_region_override() {
+        let value = "[execution_limits]\nregions = []".parse::<Value>().unwrap();
+        let error = get_execution_limits_config(&value).unwrap_err();
+
+        assert!(error.contains("regions 不能为空"));
+    }
+
+    #[test]
+    fn execution_limits_config_rejects_unknown_keys() {
+        let value = "[execution_limits]\nmax_global_forks = 8".parse::<Value>().unwrap();
+        let error = get_execution_limits_config(&value).unwrap_err();
+
+        assert!(error.contains("max_global_forks"));
     }
 }

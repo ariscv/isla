@@ -2,6 +2,7 @@ use super::clause::{get_extension_clauses, normalize_clause_name};
 use super::target::{Target, RISCV};
 use super::{get_all_clause_names, get_assembly_encdec, get_assembly_name, list_instructions};
 use isla_lib::bitvector::BV;
+use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
 use isla_lib::executor::{backtrace_string, Run};
@@ -13,7 +14,7 @@ use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
-use isla_lib::source_loc::SourceLoc;
+use isla_lib::source_loc::{SourceLoc, SourceRegionSpec};
 use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -86,23 +87,39 @@ fn should_collect_unfinished_path<B: BV>(run: &Run<B>) -> bool {
     !matches!(run, Run::Dead)
 }
 
-fn solve_execution_limits() -> ExecutionLimits {
+fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig>) -> ExecutionLimits {
+    const GATHER_SOURCE_FILE: &str = "extensions/V/vext_arith_insts.sail";
+
     // 执行限制配置：局部 branch/loop 预算负责压制路径规模；达到预算后按固定 seed
     // 可复现抽样一侧继续执行，而不是固定选择 true 或直接丢弃整条路径。
     //
     // - max_forks_per_branch=2：每个 (函数, IR PC, 最近两层调用点, SourceLoc) 最多实际 fork 2 次；
     //   后续访问成对均衡地抽样 true/false，避免循环热点吃光深层分支预算。
-    // - max_total_forks=4096：全 clause 的实际 child 总量上界，防止大量不同局部点同时膨胀；
-    //   它明显高于局部预算，不承担日常的首要裁剪职责。
-    // - max_backjumps_per_loop=256：符号回边超限后抽样退出；若退出不可满足则截断该路径。
-    // - max_path_depth=10000：无局部回边可识别时的最终路径长度界。
-    ExecutionLimits::default()
+    // - max_forks_per_path=None：不设置全局 path fork 上限，避免在 SourceLoc region 之外裁剪路径。
+    // - max_backjumps_per_loop=None：当前只限制下面四个 gather 条件分支，不提前退出有界 vector 循环。
+    // - max_path_depth=None：不使用全局路径深度限制，区域外控制流保持完整遍历。
+    // - regions：只选择两个 gather 指令的 mask 和 idx < VLMAX 逐元素热点；constructor、编码 guard、
+    //   合法性检查与主 match 保持完整展开，避免影响 VVTYPE 指令种类覆盖。
+    let default_region_specs = [
+        // VV_VRGATHER：逐元素 mask 分支。
+        SourceRegionSpec::new(GATHER_SOURCE_FILE, (186, 6), (192, 7)),
+        // VV_VRGATHER：逐元素 idx < VLMAX 分支。
+        SourceRegionSpec::new(GATHER_SOURCE_FILE, (191, 20), (191, 65)),
+        // VV_VRGATHEREI16：逐元素 mask 分支。
+        SourceRegionSpec::new(GATHER_SOURCE_FILE, (195, 6), (201, 7)),
+        // VV_VRGATHEREI16：逐元素 idx < VLMAX 分支。
+        SourceRegionSpec::new(GATHER_SOURCE_FILE, (200, 20), (200, 65)),
+    ];
+    let limits = ExecutionLimits::default()
         .with_max_forks_per_branch(2)
-        .with_max_total_forks(4096)
-        .with_max_backjumps_per_loop(256)
-        .with_max_path_depth(10000)
-        .with_call_context_depth(2)
         .with_limit_behavior(LimitBehavior::Concretize)
+        .with_region_specs(&default_region_specs, symtab);
+
+    // TOML 中出现的字段逐项覆盖代码默认策略；regions 出现时整体替换默认 SourceRegion 集合。
+    match config {
+        Some(config) => limits.with_config(config, symtab),
+        None => limits,
+    }
 }
 
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
@@ -131,6 +148,7 @@ pub fn solve_state_main<'ir, B: BV>(
     ir_file_path: Option<PathBuf>,
     num_threads: usize,
     timeout: Option<u64>,
+    execution_limits_config: Option<&ExecutionLimitsConfig>,
 ) -> bool {
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
@@ -187,6 +205,7 @@ pub fn solve_state_main<'ir, B: BV>(
 
     let num_clauses = clause_set.len();
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
+    let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
 
     for clause in clause_set {
         #[cfg(feature = "itrace")]
@@ -209,6 +228,7 @@ pub fn solve_state_main<'ir, B: BV>(
             initial_memory.clone(),
             num_threads,
             timeout,
+            &execution_limits,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -266,6 +286,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     initial_memory: Option<isla_lib::memory::Memory<B>>,
     num_threads: usize,
     timeout: Option<u64>,
+    execution_limits: &ExecutionLimits,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -305,8 +326,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
 
-    let limits = solve_execution_limits();
-    let task_state = TaskState::new().with_execution_limits(limits);
+    let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
 
     //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
     isla_lib::executor::execute_ir_function_with_checkpoint_multi_thread(
@@ -339,7 +359,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         let ret_val_str = ret_val.to_str(shared_state).to_string();
                         log!(
                             log::PATH_RESULT,
-                            &format!("1. tid:{} 执行好一条路径，fork={}，ret_val={}", thread, frame.forks, ret_val_str)
+                            &format!(
+                                "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
+                                thread,
+                                frame.forks(),
+                                ret_val_str
+                            )
                         );
                         // Illegal_Instruction is a valid Sail ExecutionResult; JSON keeps every finished ret_val.
                         /* let assembly = {
@@ -506,13 +531,13 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         instruction_json.gen.push(single_instruction_json);
                     }
                     Run::Exit => {
-                        log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks))
+                        log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks()))
                     }
                     Run::Dead => {}
 
                     Run::Suspended => log!(
                         log::PATH_RESULT,
-                        &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks)
+                        &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks())
                     ),
                 },
                 Err((error, frame)) => {
@@ -548,20 +573,6 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         &task_state,
     );
 
-    let limit_counts = task_state.execution_limit_counts();
-    log!(
-        log::SYM_EXEC,
-        &format!(
-            "execution sampling: attempted={}, actual_forks={}, sampled={}, concretized={}, true={}, false={}",
-            limit_counts.attempted,
-            limit_counts.actual,
-            limit_counts.sampled,
-            limit_counts.concretized,
-            limit_counts.concretized_true,
-            limit_counts.concretized_false
-        )
-    );
-
     // 提取字符串结果
     if let Ok(result_mutex) = Arc::try_unwrap(result) {
         let xlen_name_str = target.arch_pretty_name().to_string();
@@ -577,16 +588,96 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 mod tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
+    use isla_lib::config::LimitBehaviorConfig;
+    use isla_lib::source_loc::SourceRegion;
 
     #[test]
     fn solve_execution_limits_use_local_sampling_as_primary_path_bound() {
-        let limits = solve_execution_limits();
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["extensions/V/vext_arith_insts.sail"]);
+        let limits = solve_execution_limits(&symtab, None);
 
         assert_eq!(limits.max_forks_per_branch, Some(2));
-        assert_eq!(limits.max_total_forks, Some(4096));
-        assert_eq!(limits.max_backjumps_per_loop, Some(256));
-        assert_eq!(limits.call_context_depth, 2);
+        assert_eq!(limits.max_forks_per_path, None);
+        assert_eq!(limits.max_backjumps_per_loop, None);
+        assert_eq!(limits.max_path_depth, None);
+        assert_eq!(limits.call_context_depth, None);
         assert_eq!(limits.on_limit_reached, LimitBehavior::Concretize);
+        assert_eq!(limits.regions.as_ref().unwrap().len(), 4);
+
+        assert_eq!(
+            limits.regions,
+            Some(vec![
+                SourceRegion::from_source_loc(SourceLoc::new(0, 186, 6, 192, 7)),
+                SourceRegion::from_source_loc(SourceLoc::new(0, 191, 20, 191, 65)),
+                SourceRegion::from_source_loc(SourceLoc::new(0, 195, 6, 201, 7)),
+                SourceRegion::from_source_loc(SourceLoc::new(0, 200, 20, 200, 65)),
+            ])
+        );
+    }
+
+    #[test]
+    fn solve_execution_limits_applies_toml_override_after_defaults() {
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["extensions/V/vext_arith_insts.sail"]);
+        let config = ExecutionLimitsConfig {
+            max_forks_per_branch: Some(7),
+            max_forks_per_path: Some(11),
+            call_context_depth: Some(3),
+            on_limit_reached: Some(LimitBehaviorConfig::Truncate),
+            ..ExecutionLimitsConfig::default()
+        };
+
+        let limits = solve_execution_limits(&symtab, Some(&config));
+
+        assert_eq!(limits.max_forks_per_branch, Some(7));
+        assert_eq!(limits.max_forks_per_path, Some(11));
+        assert_eq!(limits.call_context_depth, Some(3));
+        assert_eq!(limits.on_limit_reached, LimitBehavior::Truncate);
+        assert_eq!(limits.regions.as_ref().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn solve_execution_limits_can_be_disabled_by_toml() {
+        let symtab = Symtab::new();
+        let config = ExecutionLimitsConfig { enabled: Some(false), ..ExecutionLimitsConfig::default() };
+
+        let limits = solve_execution_limits(&symtab, Some(&config));
+
+        assert_eq!(limits.max_forks_per_branch, None);
+        assert_eq!(limits.max_forks_per_path, None);
+        assert!(limits.regions.is_none());
+    }
+
+    #[test]
+    fn solve_execution_limits_missing_default_region_file_matches_nothing_without_panicking() {
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["core/types.sail"]);
+
+        let limits = solve_execution_limits(&symtab, None);
+
+        assert_eq!(limits.max_forks_per_branch, Some(2));
+        assert_eq!(limits.max_fork_pct_per_branch, None);
+        assert_eq!(limits.max_backjumps_per_loop, None);
+        assert_eq!(limits.regions, Some(Vec::new()));
+    }
+
+    #[test]
+    fn solve_execution_limits_missing_configured_region_keeps_path_limits_only() {
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["core/types.sail"]);
+        let config = ExecutionLimitsConfig {
+            max_forks_per_branch: Some(7),
+            max_forks_per_path: Some(11),
+            regions: Some(vec![SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7))]),
+            ..ExecutionLimitsConfig::default()
+        };
+
+        let limits = solve_execution_limits(&symtab, Some(&config));
+
+        assert_eq!(limits.max_forks_per_branch, Some(7));
+        assert_eq!(limits.max_forks_per_path, Some(11));
+        assert_eq!(limits.regions, Some(Vec::new()));
     }
 
     #[test]
@@ -596,6 +687,7 @@ mod tests {
         assert!(should_collect_unfinished_path::<B64>(&Run::Suspended));
     }
 
+    #[cfg(feature = "itrace")]
     #[test]
     fn clause_itrace_output_path_appends_clause_suffix() {
         let base = PathBuf::from("output/itrace.txt");
@@ -603,6 +695,7 @@ mod tests {
         assert_eq!(result, PathBuf::from("output/itrace_zadd.txt"));
     }
 
+    #[cfg(feature = "itrace")]
     #[test]
     fn clause_itrace_output_path_preserves_directory() {
         let base = PathBuf::from("/tmp/deep/dir/trace.log");
@@ -610,6 +703,7 @@ mod tests {
         assert_eq!(result, PathBuf::from("/tmp/deep/dir/trace_zlw.log"));
     }
 
+    #[cfg(feature = "itrace")]
     #[test]
     fn clause_itrace_output_path_handles_no_extension() {
         let base = PathBuf::from("output/itrace");

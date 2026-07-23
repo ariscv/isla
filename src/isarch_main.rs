@@ -381,6 +381,7 @@ fn isla_main() -> i32 {
                         arch_path.clone(),
                         num_threads,
                         timeout,
+                        isa_config.execution_limits.as_ref(),
                     )
                 }
                 _ => {
@@ -404,6 +405,7 @@ fn isla_main() -> i32 {
                         arch_path.clone(),
                         num_threads,
                         timeout,
+                        isa_config.execution_limits.as_ref(),
                     )
                 }
             };
