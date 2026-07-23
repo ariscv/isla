@@ -2,6 +2,7 @@
 
 require 'open3'
 require 'optparse'
+require 'shellwords'
 include Process
 
 $TEST_DIR = File.expand_path(File.dirname(__FILE__))
@@ -178,6 +179,14 @@ def run_tests()
       build_time = (starting - building) * 1000
       time = (ending - starting) * 1000
       puts "#{file}".ljust(40).concat("#{"ok".green} (#{build_time.to_i}ms/#{time.to_i}ms)#{extra_opts}\n")
+    end
+
+    if suffix.empty? then
+      generated_ir = Shellwords.escape(File.expand_path("source_region_foreach_match.unsat.ir"))
+      manifest = Shellwords.escape(File.expand_path("../../Cargo.toml"))
+      step(
+        "ISLA_SOURCE_REGION_TEST_IR=#{generated_ir} cargo test --manifest-path #{manifest} -p isla-lib source_region_generated_ir_matches_fixture --lib"
+      )
     end
   end
 
