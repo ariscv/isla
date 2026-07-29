@@ -59,6 +59,7 @@ use crate::zencode;
 
 mod execution_limits;
 mod frame;
+mod path_timing;
 mod task;
 
 use crate::register::RegisterBindings;
@@ -68,6 +69,7 @@ use execution_limits::{BranchSample, ExecutionLimitDecision, ExecutionLimitHandl
 pub use execution_limits::{ExecutionLimits, LimitBehavior};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
+use path_timing::PathTimeout;
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
@@ -607,31 +609,6 @@ fn assign<'ir, B: BV>(
     assign_with_accessor(loc, v, local_state, shared_state, solver, &mut Vec::new(), info)
 }
 
-#[derive(Copy, Clone, Debug)]
-struct Timeout {
-    start_time: Instant,
-    duration: Option<Duration>,
-}
-
-impl Timeout {
-    #[allow(dead_code)]
-    fn unlimited() -> Self {
-        Timeout { start_time: Instant::now(), duration: None }
-    }
-
-    fn from_seconds(timeout: Option<u64>) -> Self {
-        Timeout { start_time: Instant::now(), duration: timeout.map(Duration::from_secs) }
-    }
-
-    fn timed_out(&self) -> bool {
-        self.duration.is_some() && self.start_time.elapsed() > self.duration.unwrap()
-    }
-
-    fn duration_ms(&self) -> u128 {
-        self.duration.map_or(0, |duration| duration.as_millis())
-    }
-}
-
 fn smt_exp_to_value<B: BV>(exp: smtlib::Exp<Sym>, solver: &mut Solver<B>) -> Result<Val<B>, ExecError> {
     use smtlib::Exp;
     let v = match exp {
@@ -810,7 +787,7 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
-    timeout: Timeout,
+    timeout: PathTimeout,
     stop_conditions: Option<&'task StopConditions>,
     fork_sink: &S,
     frame: &Frame<'ir, B>,
@@ -819,7 +796,8 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     solver: &mut Solver<B>,
 ) -> Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)> {
     let mut frame = unfreeze_frame(frame);
-    match run_loop(
+    frame.path_timing.start_active();
+    let result = run_loop(
         tid,
         task_id,
         task_fraction,
@@ -830,7 +808,10 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
         task_state,
         shared_state,
         solver,
-    ) {
+    );
+    frame.path_timing.pause_active();
+
+    match result {
         Ok(run) => Ok((run, frame)),
         Err(err) => {
             frame.backtrace.push((frame.function_name, frame.pc));
@@ -877,7 +858,7 @@ where
 
 struct MultiRuntime<'ir, 'task, B: BV, R> {
     limit: usize,
-    timeout: Timeout,
+    timeout: PathTimeout,
     active_threads: AtomicUsize,
     pending_tasks: AtomicUsize,
     next_tid: AtomicUsize,
@@ -1416,7 +1397,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
-    timeout: Timeout,
+    timeout: PathTimeout,
     stop_conditions: Option<&'task StopConditions>,
     fork_sink: &S,
     frame: &mut LocalFrame<'ir, B>,
@@ -1428,21 +1409,17 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        // Completion is checked before the soft timeout. Therefore a path that
+        // finished its last IR instruction is reported as finished even if its
+        // budget was crossed during that instruction. A path timeout only means
+        // that execution is stopped at this safe point before the next IR
+        // instruction starts; ordinary Rust/IR execution is never preempted.
         if frame.pc >= frame.instrs.len() {
             // Currently this happens when evaluating letbindings.
             return Ok(Run::Finished(Val::Unit));
         }
 
-        if timeout.timed_out() {
-            #[cfg(feature = "tracetool")]
-            {
-                frame.itrace_path.record_summary(
-                    frame.function_name,
-                    frame.backtrace.clone(),
-                    frame.pc as u64,
-                    format!("timeout: path exceeded {}ms", timeout.duration_ms()),
-                );
-            }
+        if timeout.timed_out_with(|| frame.path_timing.snapshot()) {
             return Err(ExecError::Timeout);
         }
 
@@ -1788,25 +1765,31 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                         if let Some(assumptions) = frame.function_assumptions.get(f) {
                             for (required_args, result) in assumptions {
-                                if args.len() == required_args.len()
-                                    && required_args.iter().zip(args.iter()).all(|(req, arg)| {
-                                        primop::eq_anything(req.clone(), arg.clone(), solver, *info)
-                                            .map(|v| match v {
-                                                Val::Symbolic(var) => {
-                                                    solver.check_sat_with(
-                                                        &smtlib::Exp::Eq(
-                                                            Box::new(smtlib::Exp::Var(var)),
-                                                            Box::new(smtlib::Exp::Bool(false)),
-                                                        ),
-                                                        *info,
-                                                    ) == SmtResult::Unsat
-                                                }
-                                                Val::Bool(b) => b,
-                                                _ => panic!("TODO"),
-                                            })
-                                            .unwrap()
-                                    })
-                                {
+                                let mut all_args_match = args.len() == required_args.len();
+                                if all_args_match {
+                                    for (req, arg) in required_args.iter().zip(args.iter()) {
+                                        let equality = primop::eq_anything(req.clone(), arg.clone(), solver, *info)?;
+                                        all_args_match = match equality {
+                                            Val::Symbolic(var) => match solver.check_sat_with(
+                                                &smtlib::Exp::Eq(
+                                                    Box::new(smtlib::Exp::Var(var)),
+                                                    Box::new(smtlib::Exp::Bool(false)),
+                                                ),
+                                                *info,
+                                            ) {
+                                                SmtResult::Unsat => true,
+                                                SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+                                                SmtResult::Sat | SmtResult::Unknown => false,
+                                            },
+                                            Val::Bool(matches) => matches,
+                                            _ => panic!("TODO"),
+                                        };
+                                        if !all_args_match {
+                                            break;
+                                        }
+                                    }
+                                }
+                                if all_args_match {
                                     assign(
                                         tid,
                                         loc,
@@ -2087,18 +2070,43 @@ pub type Collector<'ir, B, R> = dyn 'ir
     );
 
 pub fn submit_itrace_for_local_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) {
+    submit_itrace_for_local_frame_with_diagnostics(frame, shared_state, Vec::new());
+}
+
+pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
+    frame: &LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    diagnostics: Vec<(crate::timeout::TimeoutDiagnostic, bool)>,
+) {
     #[cfg(feature = "tracetool")]
     {
-        shared_state.itrace.submit_path(&frame.itrace_path, &shared_state.symtab);
+        for (diagnostic, _) in &diagnostics {
+            let dump = diagnostic.dump();
+            if !dump.is_materialized() {
+                dump.configure_names(frame.smt_dump_names(shared_state));
+            }
+        }
+        let mut completed =
+            crate::tracetool::itrace::ItraceCompletedPath::without_diagnostics(frame.itrace_path.clone());
+        for (diagnostic, include_smt_dump) in diagnostics {
+            completed.push_diagnostic_with_dump(diagnostic, include_smt_dump);
+        }
+        completed.set_timing(frame.path_time_snapshot());
+        shared_state.itrace.submit_completed_path(&completed, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
-    let _ = (frame, shared_state);
+    let _ = (frame, shared_state, diagnostics);
 }
 
 pub fn submit_itrace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {
     #[cfg(feature = "tracetool")]
     {
-        shared_state.itrace.submit_path(&frame.itrace_path, &shared_state.symtab);
+        let completed = crate::tracetool::itrace::ItraceCompletedPath::with_timing(
+            (*frame.itrace_path).clone(),
+            Vec::new(),
+            frame.path_time_snapshot(),
+        );
+        shared_state.itrace.submit_completed_path(&completed, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
     let _ = (frame, shared_state);
@@ -2112,17 +2120,16 @@ pub fn start_single<'ir, B: BV, R>(
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) {
-    start_single_with_timeout(task, None, shared_state, collected, collector);
+    start_single_with_timeout(task, PathTimeout::from_seconds(None), shared_state, collected, collector);
 }
 
 fn start_single_with_timeout<'ir, B: BV, R>(
     task: Task<'ir, '_, B>,
-    timeout: Option<u64>,
+    timeout: PathTimeout,
     shared_state: &SharedState<'ir, B>,
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) {
-    let timeout = Timeout::from_seconds(timeout);
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
@@ -2147,7 +2154,7 @@ fn start_single_with_timeout<'ir, B: BV, R>(
             shared_state,
             &mut solver,
         );
-        collector(0, task.id, result, shared_state, solver, collected)
+        collector(0, task.id, result, shared_state, solver, collected);
     }
 }
 
@@ -2165,7 +2172,7 @@ fn find_task<T>(local: &Worker<T>, global: &Injector<T>, stealers: &RwLock<Vec<S
 
 fn do_work<'ir, 'task, B: BV, R>(
     tid: usize,
-    timeout: Timeout,
+    timeout: PathTimeout,
     queue: &Worker<Task<'ir, 'task, B>>,
     mut task: Task<'ir, 'task, B>,
     shared_state: &SharedState<'ir, B>,
@@ -2219,14 +2226,13 @@ pub fn start_multi<'ir, B: BV, R>(
     B: Send + Sync,
     R: Send + Sync,
 {
+    let timeout = PathTimeout::from_seconds(timeout);
     if num_threads == 0 {
         for task in tasks {
             start_single_with_timeout(task, timeout, shared_state, collected.as_ref(), collector);
         }
         return;
     }
-
-    let timeout = Timeout::from_seconds(timeout);
 
     thread::scope(|scope| {
         let runtime = Arc::new(MultiRuntime {
@@ -2276,8 +2282,7 @@ pub fn start_multi_per_task<'ir, 'task, B: BV, R>(
 where
     R: Send + Sync + Collection,
 {
-    let timeout = Timeout::from_seconds(timeout);
-
+    let timeout = PathTimeout::from_seconds(timeout);
     let (tx, rx): (Sender<Progress>, Receiver<Progress>) = mpsc::channel();
     let global: Arc<Injector<Task<B>>> = Arc::new(Injector::<Task<B>>::new());
     let stealers: Arc<RwLock<Vec<Stealer<Task<B>>>>> = Arc::new(RwLock::new(Vec::new()));
@@ -2405,11 +2410,17 @@ pub fn all_unsat_collector<'ir, B: BV>(
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
                     solver.add(Assert(Not(Box::new(Var(v)))));
-                    if solver.check_sat(SourceLoc::unknown()) != SmtResult::Unsat {
-                        log_from!(tid, log::VERBOSE, "Got sat");
-                        collected.store(false, Ordering::Release)
-                    } else {
-                        log_from!(tid, log::VERBOSE, "Got unsat")
+                    match solver.check_sat(SourceLoc::unknown()) {
+                        SmtResult::Unsat => log_from!(tid, log::VERBOSE, "Got unsat"),
+                        SmtResult::Error(error) => {
+                            let error = ExecError::Smt(error);
+                            log_from!(tid, log::VERBOSE, format!("Got {}", error));
+                            collected.store(false, Ordering::Release)
+                        }
+                        SmtResult::Sat | SmtResult::Unknown => {
+                            log_from!(tid, log::VERBOSE, "Got sat");
+                            collected.store(false, Ordering::Release)
+                        }
                     }
                 }
                 Val::Bool(true) => log_from!(tid, log::VERBOSE, "Got true"),
@@ -2521,15 +2532,17 @@ pub fn trace_collector<'ir, B: BV>(
             for (f, pc) in frame.backtrace.iter().rev() {
                 log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
             }
-            if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {
-                let model = Model::new(&solver);
-                collected.push(Err(TraceError::exec_model(
-                    err,
-                    backtrace_string(&frame.backtrace, &shared_state.symtab),
-                    model,
-                )))
-            } else {
-                collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))))
+            let backtrace = backtrace_string(&frame.backtrace, &shared_state.symtab);
+            match solver.check_sat(SourceLoc::unknown()) {
+                SmtResult::Sat => {
+                    let model = Model::new(&solver);
+                    collected.push(Err(TraceError::exec_model(err, backtrace, model)));
+                }
+                SmtResult::Error(error) => {
+                    let error = ExecError::Smt(error);
+                    collected.push(Err(TraceError::exec(error, backtrace)))
+                }
+                SmtResult::Unsat | SmtResult::Unknown => collected.push(Err(TraceError::exec(err, backtrace))),
             }
             submit_itrace_for_local_frame(&frame, shared_state);
         }
@@ -2553,15 +2566,17 @@ pub fn trace_value_collector<'ir, B: BV>(
         Ok((Run::Exit | Run::Suspended, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
-            if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {
-                let model = Model::new(&solver);
-                collected.push(Err(TraceError::exec_model(
-                    err,
-                    backtrace_string(&frame.backtrace, &shared_state.symtab),
-                    model,
-                )))
-            } else {
-                collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))))
+            let backtrace = backtrace_string(&frame.backtrace, &shared_state.symtab);
+            match solver.check_sat(SourceLoc::unknown()) {
+                SmtResult::Sat => {
+                    let model = Model::new(&solver);
+                    collected.push(Err(TraceError::exec_model(err, backtrace, model)));
+                }
+                SmtResult::Error(error) => {
+                    let error = ExecError::Smt(error);
+                    collected.push(Err(TraceError::exec(error, backtrace)))
+                }
+                SmtResult::Unsat | SmtResult::Unknown => collected.push(Err(TraceError::exec(err, backtrace))),
             }
             submit_itrace_for_local_frame(&frame, shared_state);
         }
@@ -3541,7 +3556,13 @@ fn zrX(z3zE1756) {
         let task = initial_frame.task(TaskId::fresh(), &task_state);
         let collected = AtomicBool::new(true);
 
-        start_single(task, &shared_state, &collected, &all_unsat_collector);
+        start_single_with_timeout(
+            task,
+            PathTimeout::from_seconds(None),
+            &shared_state,
+            &collected,
+            &all_unsat_collector,
+        );
         shared_state.itrace.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read run_loop itrace output");
@@ -3591,7 +3612,7 @@ fn zrX(z3zE1756) {
                         0,
                         TaskId::fresh(),
                         &mut task_fraction,
-                        Timeout::unlimited(),
+                        PathTimeout::unlimited(),
                         None,
                         &SingleForkSink { queue: &queue },
                         &mut frame,
@@ -3667,7 +3688,7 @@ fn zrX(z3zE1756) {
                 0,
                 task.id,
                 &mut task.fraction,
-                Timeout::unlimited(),
+                PathTimeout::unlimited(),
                 task.stop_conditions,
                 &SingleForkSink { queue: &queue },
                 &mut task_frame,
@@ -3703,7 +3724,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &SingleForkSink { queue: &queue },
             &mut frame,
@@ -3738,7 +3759,7 @@ fn zrX(z3zE1756) {
                 0,
                 task.id,
                 &mut task.fraction,
-                Timeout::unlimited(),
+                PathTimeout::unlimited(),
                 task.stop_conditions,
                 &SingleForkSink { queue: &queue },
                 &mut task_frame,
@@ -3773,14 +3794,19 @@ fn zrX(z3zE1756) {
     }
 
     #[test]
-    fn path_timeout_reuses_existing_timeout_predicate() {
-        let duration = Duration::from_secs(2);
-        let expired =
-            Timeout { start_time: Instant::now() - duration - Duration::from_millis(1), duration: Some(duration) };
-        let active = Timeout::from_seconds(Some(2));
+    fn path_timeout_is_evaluated_from_path_local_totals() {
+        let timeout = PathTimeout::from_seconds(Some(2));
+        let expired = crate::timeout::PathTimeSnapshot {
+            active_wall: Duration::from_secs(2),
+            ..crate::timeout::PathTimeSnapshot::default()
+        };
+        let active = crate::timeout::PathTimeSnapshot {
+            active_wall: Duration::from_secs(1),
+            ..crate::timeout::PathTimeSnapshot::default()
+        };
 
-        assert!(expired.timed_out());
-        assert!(!active.timed_out());
+        assert!(timeout.timed_out(expired));
+        assert!(!timeout.timed_out(active));
     }
 
     #[test]
@@ -3842,7 +3868,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &fork_sink,
             &mut frame,
@@ -3876,7 +3902,7 @@ fn zrX(z3zE1756) {
                 0,
                 TaskId::from_usize(0),
                 &mut task_fraction,
-                Timeout::unlimited(),
+                PathTimeout::unlimited(),
                 None,
                 &fork_sink,
                 &mut frame,
@@ -3912,7 +3938,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &fork_sink,
             &mut frame,
@@ -3949,7 +3975,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &fork_sink,
             &mut frame,
@@ -3983,7 +4009,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &fork_sink,
             &mut frame,
@@ -4067,7 +4093,7 @@ fn zrX(z3zE1756) {
                 0,
                 task.id,
                 &mut task.fraction,
-                Timeout::unlimited(),
+                PathTimeout::unlimited(),
                 task.stop_conditions,
                 &SingleForkSink { queue: &queue },
                 &mut task_frame,
@@ -4107,7 +4133,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &SingleForkSink { queue: &queue },
             &mut frame,
@@ -4140,7 +4166,7 @@ fn zrX(z3zE1756) {
             0,
             TaskId::from_usize(0),
             &mut task_fraction,
-            Timeout::unlimited(),
+            PathTimeout::unlimited(),
             None,
             &SingleForkSink { queue: &queue },
             &mut frame,
@@ -4390,7 +4416,7 @@ fn zsteptest(zu) {
         let timeout_frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()), Instr::End]);
         start_single_with_timeout(
             timeout_frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new()),
-            Some(0),
+            PathTimeout::from_seconds(Some(0)),
             &shared_state,
             &timeout_hits,
             &|_tid, _id, result, _ss, _solver, count| {
@@ -4403,7 +4429,7 @@ fn zsteptest(zu) {
         let unlimited_frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()), Instr::End]);
         start_single_with_timeout(
             unlimited_frame.task_with_checkpoint(TaskId::from_usize(1), &task_state, Checkpoint::new()),
-            None,
+            PathTimeout::from_seconds(None),
             &shared_state,
             &finished_hits,
             &|_tid, _id, result, _ss, _solver, count| {
@@ -4415,6 +4441,39 @@ fn zsteptest(zu) {
 
         assert_eq!(*timeout_hits.lock().unwrap(), 1);
         assert_eq!(*finished_hits.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn completed_path_wins_over_zero_timeout_at_the_completion_boundary() {
+        let shared_state = empty_shared_state();
+        let task_state = TaskState::new();
+        let completed = std::sync::Mutex::new(false);
+        let frame = make_frame(Vec::new());
+
+        start_single_with_timeout(
+            frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new()),
+            PathTimeout::from_seconds(Some(0)),
+            &shared_state,
+            &completed,
+            &|_tid, _id, result, _ss, _solver, completed| {
+                *completed.lock().unwrap() = matches!(result, Ok((Run::Finished(Val::Unit), _)));
+            },
+        );
+
+        assert!(*completed.lock().unwrap());
+    }
+
+    #[test]
+    fn single_fork_sink_submits_the_child_task() {
+        let state = TaskState::new();
+        let frame = make_frame(Vec::new());
+        let task = frame.task_with_checkpoint(TaskId::from_usize(0), &state, Checkpoint::new());
+        let queue = Worker::new_lifo();
+
+        SingleForkSink { queue: &queue }.submit(task);
+        let child = queue.pop().expect("forked task was not submitted");
+
+        assert_eq!(child.id, TaskId::from_usize(0));
     }
 
     fn worker_invariant_branch_prefix() -> (Vec<Instr<Name, B64>>, Name, Name) {

@@ -420,6 +420,7 @@ impl<B: BV> Memory<B> {
                     match solver.check_sat_with(&uniqueness_constraint, SourceLoc::unknown()) {
                         Unsat => Ok(Overlap::Unique(sat_address.lower_u64())),
                         Unknown => Err(ExecError::Z3Unknown),
+                        Error(error) => Err(ExecError::Smt(error)),
                         Sat => {
                             log!(log::MEMORY, &format!("Overlapping satisfiable address: {:x}", sat_address));
                             probe::taint_info(log::MEMORY, address, None, solver);
@@ -428,6 +429,7 @@ impl<B: BV> Memory<B> {
                     }
                 }
                 Unknown => Err(ExecError::Z3Unknown),
+                Error(error) => Err(ExecError::Smt(error)),
                 Unsat => Ok(Overlap::NoOverlap),
             }
         } else {

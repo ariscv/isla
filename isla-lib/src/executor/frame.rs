@@ -36,14 +36,16 @@ use std::mem;
 use std::sync::Arc;
 
 use crate::bitvector::BV;
-use crate::error::ExecError;
+use crate::error::{ExecError, SmtError};
 use crate::executor::execution_limits::ExecutionLimitPathState;
+use crate::executor::path_timing::{PathTimeTotals, PathTiming};
 use crate::executor::task::{Task, TaskId, TaskState};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
 use crate::smt::{Checkpoint, Solver, Sym};
+use crate::timeout::SmtDumpNames;
 #[cfg(feature = "tracetool")]
 use crate::tracetool::itrace::ItracePerPath;
 
@@ -108,6 +110,7 @@ pub fn backtrace_string<'ir>(backtrace: &[(Name, usize)], symtab: &Symtab<'ir>) 
 /// is being symbolically executed.
 #[derive(Clone)]
 pub struct Frame<'ir, B> {
+    pub(super) path_time_totals: PathTimeTotals,
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
@@ -139,6 +142,7 @@ pub struct Frame<'ir, B> {
 
 pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
     LocalFrame {
+        path_timing: PathTiming::from_snapshot(frame.path_time_totals),
         function_name: frame.function_name,
         pc: frame.pc,
         execution_limit_state: (*frame.execution_limit_state).clone(),
@@ -160,6 +164,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
 /// executing thread. It is turned into an immutable `Frame` when the
 /// control flow forks on a choice, which can be shared by threads.
 pub struct LocalFrame<'ir, B> {
+    pub(super) path_timing: PathTiming,
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) execution_limit_state: ExecutionLimitPathState,
@@ -191,6 +196,11 @@ pub struct LocalFrame<'ir, B> {
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
     Frame {
+        // A frozen frame is a scheduler-safe snapshot: it stores accumulated
+        // totals, never an absolute wall or thread-CPU clock. If this snapshot
+        // is taken at a fork while the parent remains active, both paths inherit
+        // exactly the timing prefix observed at this point and diverge afterwards.
+        path_time_totals: frame.path_timing.fork_snapshot(),
         function_name: frame.function_name,
         pc: frame.pc,
         execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
@@ -209,6 +219,10 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    pub fn path_time_snapshot(&self) -> crate::timeout::PathTimeSnapshot {
+        self.path_timing.snapshot()
+    }
+
     pub fn collect_symbolic_variables(&self, vars: &mut HashSet<Sym, ahash::RandomState>) {
         self.local_state.collect_symbolic_variables(vars);
 
@@ -217,6 +231,47 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 value.collect_symbolic_variables(vars)
             }
         }
+    }
+
+    fn add_value_dump_names(names: &mut SmtDumpNames, name: Name, value: &Val<B>) {
+        let mut symbols = HashSet::default();
+        value.collect_symbolic_variables(&mut symbols);
+        for symbol in symbols {
+            names.bind_symbol_to_ir_name(symbol.id, name.as_u32());
+        }
+    }
+
+    fn add_binding_dump_names(names: &mut SmtDumpNames, bindings: &Bindings<'ir, B>) {
+        for (name, value) in bindings {
+            if let UVal::Init(value) = value {
+                Self::add_value_dump_names(names, *name, value);
+            }
+        }
+    }
+
+    pub(crate) fn smt_dump_names(&self, shared_state: &SharedState<'ir, B>) -> SmtDumpNames {
+        let mut names = SmtDumpNames::from_shared_state(shared_state);
+        Self::add_binding_dump_names(&mut names, &self.local_state.vars);
+        Self::add_binding_dump_names(&mut names, &self.local_state.lets);
+        for bindings in &self.stack_vars {
+            Self::add_binding_dump_names(&mut names, bindings);
+        }
+        for (name, register) in self.local_state.regs.iter() {
+            let mut symbols = HashSet::default();
+            register.collect_symbolic_variables(&mut symbols);
+            for symbol in symbols {
+                names.bind_symbol_to_ir_name(symbol.id, name.as_u32());
+            }
+        }
+        names
+    }
+
+    pub fn configure_timeout_smt_dump(&self, error: &ExecError, shared_state: &SharedState<'ir, B>) {
+        let dump = match error {
+            ExecError::Smt(SmtError::Timeout(timeout)) => &timeout.dump,
+            _ => return,
+        };
+        dump.configure_names(self.smt_dump_names(shared_state));
     }
 
     pub fn vars_mut(&mut self) -> &mut Bindings<'ir, B> {
@@ -329,6 +384,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         let probes = LocalDebugProbes { probe_this_function };
 
         LocalFrame {
+            path_timing: PathTiming::default(),
             function_name: name,
             pc: 0,
             execution_limit_state: ExecutionLimitPathState::default(),
@@ -355,6 +411,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         instrs: &'ir [Instr<Name, B>],
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
+        new_frame.path_timing = self.path_timing.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
@@ -399,6 +456,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 }
 
 impl<'ir, B: BV> Frame<'ir, B> {
+    pub fn path_time_snapshot(&self) -> crate::timeout::PathTimeSnapshot {
+        self.path_time_totals
+    }
+
     pub fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
@@ -417,6 +478,47 @@ pub(super) fn push_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
 pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
     if let Some(mut vars) = frame.stack_vars.pop() {
         mem::swap(&mut vars, frame.vars_mut())
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn frozen_frames_store_only_settled_path_timing_totals() {
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+        let base = Instant::now();
+        local.path_timing.start_active_at(base, Duration::from_millis(10));
+        local.path_timing.pause_active_at(base + Duration::from_millis(25), Duration::from_millis(15));
+
+        let frozen = freeze_frame(&local);
+        assert_eq!(frozen.path_time_snapshot().active_wall, Duration::from_millis(25));
+        assert_eq!(frozen.path_time_snapshot().executor_cpu, Duration::from_millis(5));
+
+        let resumed = unfreeze_frame(&frozen);
+        assert!(!resumed.path_timing.is_active());
+        assert_eq!(resumed.path_time_snapshot(), frozen.path_time_snapshot());
+    }
+
+    #[test]
+    fn dump_names_recover_ir_binding_names_from_shared_state() {
+        let local_text = crate::zencode::encode("local_value");
+        let function_text = crate::zencode::encode("test_function");
+        let mut symtab = Symtab::new();
+        let local_name = symtab.intern(&local_text);
+        let function_name = symtab.intern(&function_text);
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let mut frame = LocalFrame::new(function_name, &[], &Ty::Unit, None, &instrs);
+
+        frame.vars_mut().insert(local_name, UVal::Init(Val::Symbolic(Sym::from_u32(17))));
+
+        let names = frame.smt_dump_names(&shared_state);
+        assert_eq!(names.symbol_name(17), "isla_local_value__s17");
     }
 }
 

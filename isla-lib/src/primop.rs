@@ -125,21 +125,24 @@ fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: S
         SmtResult::Unsat => return Ok(Val::Bool(true)),
         SmtResult::Sat => (),
         SmtResult::Unknown => return solver.define_const(exp, info).into(),
+        SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
 
     match solver.check_sat_with(&exp, info) {
         SmtResult::Unsat => Ok(Val::Bool(false)),
         SmtResult::Sat | SmtResult::Unknown => solver.define_const(exp, info).into(),
+        SmtResult::Error(error) => Err(ExecError::Smt(error)),
     }
 }
 
-fn concretize_proven_i128<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Val<B> {
+fn concretize_proven_i128<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match value {
         Val::Symbolic(sym) => match proven_symbolic_i128(sym, solver, info) {
-            Some(value) => Val::I128(value),
-            None => Val::Symbolic(sym),
+            Ok(Some(value)) => Ok(Val::I128(value)),
+            Ok(None) => Ok(Val::Symbolic(sym)),
+            Err(error) => Err(error),
         },
-        value => value,
+        value => Ok(value),
     }
 }
 
@@ -594,8 +597,8 @@ macro_rules! symbolic_compare {
 }
 
 fn max_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let x = concretize_proven_i128(x, solver, info);
-    let y = concretize_proven_i128(y, solver, info);
+    let x = concretize_proven_i128(x, solver, info)?;
+    let y = concretize_proven_i128(y, solver, info)?;
     match (x, y) {
         (Val::I128(x), Val::I128(y)) => Ok(Val::I128(i128::max(x, y))),
         (Val::I128(x), Val::Symbolic(y)) => symbolic_compare!(Exp::Bvsgt, smt_i128(x), Exp::Var(y), solver),
@@ -606,8 +609,8 @@ fn max_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
 }
 
 fn min_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let x = concretize_proven_i128(x, solver, info);
-    let y = concretize_proven_i128(y, solver, info);
+    let x = concretize_proven_i128(x, solver, info)?;
+    let y = concretize_proven_i128(y, solver, info)?;
     match (x, y) {
         (Val::I128(x), Val::I128(y)) => Ok(Val::I128(i128::min(x, y))),
         (Val::I128(x), Val::Symbolic(y)) => symbolic_compare!(Exp::Bvslt, smt_i128(x), Exp::Var(y), solver),
@@ -618,7 +621,7 @@ fn min_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
 }
 
 fn pow2<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let x = concretize_proven_i128(x, solver, info);
+    let x = concretize_proven_i128(x, solver, info)?;
     panic_if_negative_concretized_nat("pow2", &x);
     match x {
         Val::I128(x) => Ok(Val::I128(1 << x)),
@@ -635,8 +638,8 @@ fn pow_int<B: BV>(x: Val<B>, y: Val<B>, _solver: &mut Solver<B>, info: SourceLoc
 }
 
 fn sub_nat<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let x = concretize_proven_i128(x, solver, info);
-    let y = concretize_proven_i128(y, solver, info);
+    let x = concretize_proven_i128(x, solver, info)?;
+    let y = concretize_proven_i128(y, solver, info)?;
     match (x, y) {
         (Val::I128(x), Val::I128(y)) => Ok(Val::I128(i128::max(x - y, 0))),
         (Val::I128(x), Val::Symbolic(y)) => {
@@ -803,8 +806,12 @@ fn smt_i128_width<V>(value: i128, width: u32) -> Option<Exp<V>> {
     }
 }
 
-pub(crate) fn proven_symbolic_i128<B: BV>(sym: Sym, solver: &mut Solver<B>, info: SourceLoc) -> Option<i128> {
-    let width = solver.length(sym)?;
+pub(crate) fn proven_symbolic_i128<B: BV>(
+    sym: Sym,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<i128>, ExecError> {
+    let Some(width) = solver.length(sym) else { return Ok(None) };
     // 证明时只枚举这里列出的常见整数。把 0、1、2、4、8、16、32、64、
     // 128 等宽度/元素个数常用值放在前面，可以让 SEW、VLEN、num_elem 这类
     // 已经被 assert 成单一常量的符号值更快命中，减少不必要的 SAT 查询。
@@ -826,7 +833,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(sym: Sym, solver: &mut Solver<B>, info
     // 那么 `sym != 1` 可由 sym=2 满足，`sym != 2` 也可由 sym=1 满足，
     // 两次查询都会返回 Sat，闭包返回 false，不会触发 find 短路，因此不会
     // 误选其中一个值，最终返回 None。
-    CANDIDATES.iter().copied().chain((0..=512).filter(|candidate| !CANDIDATES.contains(candidate))).find(|candidate| {
+    for candidate in CANDIDATES.iter().copied().chain((0..=512).filter(|candidate| !CANDIDATES.contains(candidate))) {
         // 这个闭包是 `find` 的判定谓词：输入一个候选整数，输出它是否已经
         // 被当前路径约束证明为 sym 的唯一取值。整体流程是：
         // 1. 先把 candidate 编码成和 sym 相同位宽的 SMT bitvector 常量；
@@ -837,21 +844,23 @@ pub(crate) fn proven_symbolic_i128<B: BV>(sym: Sym, solver: &mut Solver<B>, info
         //    闭包返回 false，find 继续尝试下一个 candidate。
         // 候选值必须能用 sym 当前的 SMT 位宽表示；例如过窄位宽无法表示
         // 某些较大的正数时，直接跳过这个候选。
-        let candidate_exp = match smt_i128_width(*candidate, width) {
+        let candidate_exp = match smt_i128_width(candidate, width) {
             Some(exp) => exp,
-            None => return false,
+            None => continue,
         };
         // 只有 `sym != candidate` 在当前路径条件下不可满足，才表示 candidate
         // 是唯一可能值。Sat 表示还存在别的可能值，Unknown 也不能安全具体化。
         match solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(sym)), Box::new(candidate_exp)), info) {
-            SmtResult::Unsat => true,
-            SmtResult::Sat | SmtResult::Unknown => false,
+            SmtResult::Unsat => return Ok(Some(candidate)),
+            SmtResult::Sat | SmtResult::Unknown => (),
+            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
         }
-    })
+    }
+    Ok(None)
 }
 
 fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let len = concretize_proven_i128(len, solver, info);
+    let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("zeros", &len);
     match len {
         Val::I128(len) => {
@@ -867,7 +876,7 @@ fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
 }
 
 fn ones<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let len = concretize_proven_i128(len, solver, info);
+    let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("ones", &len);
     match len {
         Val::I128(len) => {
@@ -892,7 +901,7 @@ macro_rules! extension {
             solver: &mut Solver<B>,
             info: SourceLoc,
         ) -> Result<Val<B>, ExecError> {
-            let len = concretize_proven_i128(len, solver, info);
+            let len = concretize_proven_i128(len, solver, info)?;
             panic_if_negative_concretized_nat("extension", &len);
             let len = match len {
                 Val::I128(len) => len,
@@ -979,7 +988,7 @@ fn replicate_bits<B: BV>(
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
-    let times = concretize_proven_i128(times, solver, info);
+    let times = concretize_proven_i128(times, solver, info)?;
     panic_if_negative_concretized_nat("replicate_bits", &times);
 
     match (bits, times) {
@@ -994,6 +1003,7 @@ fn replicate_bits<B: BV>(
                 solver.define_const(replicate_exp(Exp::Var(bits), times), info).into()
             }
         }
+        (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("replicate_bits", info)),
         (bits, times) => Err(ExecError::Type(format!("replicate_bits {:?} {:?}", &bits, &times), info)),
     }
 }
@@ -1187,9 +1197,9 @@ pub fn subrange_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let high = concretize_proven_i128(high, solver, info);
+    let high = concretize_proven_i128(high, solver, info)?;
     panic_if_negative_concretized_nat("subrange_internal", &high);
-    let low = concretize_proven_i128(low, solver, info);
+    let low = concretize_proven_i128(low, solver, info)?;
     panic_if_negative_concretized_nat("subrange_internal", &low);
     match (bits, high, low) {
         (Val::Symbolic(bits), Val::I128(high), Val::I128(low)) => {
@@ -1215,7 +1225,7 @@ pub fn subrange_internal<B: BV>(
                 info,
             );
 
-            let width = concretize_proven_i128(Val::Symbolic(width), solver, info);
+            let width = concretize_proven_i128(Val::Symbolic(width), solver, info)?;
             panic_if_negative_concretized_nat("subrange_internal", &width);
 
             match width {
@@ -2017,7 +2027,7 @@ fn get_slice_int_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let length = concretize_proven_i128(length, solver, info);
+    let length = concretize_proven_i128(length, solver, info)?;
     panic_if_negative_concretized_nat("get_slice_int", &length);
     match length {
         Val::I128(length) => match n {
@@ -2420,7 +2430,7 @@ fn cons<B: BV>(x: Val<B>, xs: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Res
 }
 
 fn vector_init<B: BV>(len: Val<B>, init: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let len = concretize_proven_i128(len, solver, info);
+    let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("vector_init", &len);
     match len {
         Val::I128(n) => Ok(Val::Vector(vec![init; n as usize])),
@@ -2438,7 +2448,7 @@ fn expect_i128_arg<B: BV>(
     match value {
         Val::I128(value) => Ok(*value),
         Val::I64(value) => Ok(i128::from(*value)),
-        Val::Symbolic(sym) => proven_symbolic_i128(*sym, solver, info)
+        Val::Symbolic(sym) => proven_symbolic_i128(*sym, solver, info)?
             .ok_or_else(|| ExecError::Type(format!("{} {:?}", name, value), info)),
         _ => Err(ExecError::Type(format!("{} {:?}", name, value), info)),
     }
@@ -2451,7 +2461,7 @@ fn expect_usize_or_symbolic_bound<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<usize, ExecError> {
-    let value = concretize_proven_i128(value.clone(), solver, info);
+    let value = concretize_proven_i128(value.clone(), solver, info)?;
     panic_if_negative_concretized_nat(name, &value);
     match &value {
         Val::I128(value) => usize::try_from(*value).map_err(|_| ExecError::Overflow),
@@ -2749,7 +2759,7 @@ fn isla_fixed_rounding_incr_internal<B: BV>(
     }
 
     let vec_elem = expect_bits_arg(args[0].clone(), "isla_fixed_rounding_incr vec_elem", solver, info)?;
-    let shift_amount = concretize_proven_i128(args[1].clone(), solver, info);
+    let shift_amount = concretize_proven_i128(args[1].clone(), solver, info)?;
     let rounding_mode = expect_bits_arg(args[2].clone(), "isla_fixed_rounding_incr rounding_mode", solver, info)?;
     let len = length_bits(&vec_elem, solver, info)?;
     if len == 0 {
@@ -3034,7 +3044,7 @@ fn expect_concrete_len<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<usize, ExecError> {
-    let value = concretize_proven_i128(value, solver, info);
+    let value = concretize_proven_i128(value, solver, info)?;
     panic_if_negative_concretized_nat(name, &value);
     match value {
         Val::I128(value) => usize::try_from(value).map_err(|_| ExecError::Overflow),
@@ -4526,7 +4536,7 @@ mod tests {
 
         assert_eq!(lt_int(Val::I128(0), Val::Symbolic(len), &mut solver, SourceLoc::unknown())?, Val::Bool(true));
         assert_eq!(lt_int(Val::Symbolic(len), Val::I128(0), &mut solver, SourceLoc::unknown())?, Val::Bool(false));
-        assert_eq!(proven_symbolic_i128(len, &mut solver, SourceLoc::unknown()), None);
+        assert_eq!(proven_symbolic_i128(len, &mut solver, SourceLoc::unknown())?, None);
 
         match eq_int(Val::Symbolic(len), Val::I128(2), &mut solver, SourceLoc::unknown())? {
             Val::Symbolic(_) => Ok(()),

@@ -29,9 +29,11 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::ir::Name;
 use crate::source_loc::SourceLoc;
+use crate::timeout::SmtTimeout;
 
 pub trait IslaError {
     fn source_loc(&self) -> SourceLoc;
@@ -51,6 +53,43 @@ impl IslaError for VoidError {
         SourceLoc::unknown()
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum SmtError {
+    Timeout(Arc<SmtTimeout>),
+}
+
+impl SmtError {
+    pub fn source_loc(&self) -> SourceLoc {
+        match self {
+            SmtError::Timeout(timeout) => timeout.source_loc(),
+        }
+    }
+}
+
+impl PartialEq for SmtError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (SmtError::Timeout(lhs), SmtError::Timeout(rhs)) => Arc::ptr_eq(lhs, rhs),
+        }
+    }
+}
+
+impl Eq for SmtError {}
+
+impl fmt::Display for SmtError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SmtError::Timeout(timeout) => write!(
+                f,
+                "SMT timeout during {:?} at {:?} after {:?} (operation wall {:?})",
+                timeout.operation, timeout.source_loc, timeout.limit, timeout.operation_wall
+            ),
+        }
+    }
+}
+
+impl Error for SmtError {}
 
 #[derive(Debug)]
 pub enum ExecError {
@@ -79,6 +118,7 @@ pub enum ExecError {
     OutOfBounds(&'static str),
     MatchFailure(SourceLoc),
     Timeout,
+    Smt(SmtError),
     NoModel,
     Z3Error(String),
     Z3Unknown,
@@ -102,6 +142,7 @@ impl IslaError for ExecError {
             | SymbolicLength(_, info)
             | VariableNotFound(_, info)
             | MatchFailure(info) => *info,
+            Smt(error) => error.source_loc(),
             BranchLimitReached(_, _) | LoopLimitReached(_, _) | DepthLimitReached => SourceLoc::unknown(),
             _ => SourceLoc::unknown(),
         }
@@ -129,6 +170,7 @@ impl fmt::Display for ExecError {
             OutOfBounds(func) => write!(f, "Out of bounds error in {}", func),
             MatchFailure(_) => write!(f, "Pattern match failure"),
             Timeout => write!(f, "Timeout"),
+            Smt(error) => write!(f, "{}", error),
             NoModel => write!(f, "No SMT model found"),
             Z3Error(msg) => write!(f, "SMT solver error: {}", msg),
             Z3Unknown => write!(f, "SMT solver returned unknown"),

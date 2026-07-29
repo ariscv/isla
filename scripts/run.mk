@@ -87,14 +87,29 @@ IR_FILE ?= ./rv64d.ir
 # itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
 ITRACE ?= 0
 CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
-# isarch 内部符号执行 timeout；为空时不传 --timeout，支持纯数字秒数或 s/m/h 后缀。
-SOLVE_TIMEOUT ?=
+# Z3 timeout wrapper 的实现由构建 feature 选择。
+Z3_TIMEOUT_IMPL ?= thread_interrupt
+ifeq ($(Z3_TIMEOUT_IMPL),direct)
+CARGO_SMT_FEATURE =
+SMT_TIMEOUT ?=
+else ifeq ($(Z3_TIMEOUT_IMPL),thread_interrupt)
+CARGO_SMT_FEATURE = --features smt-thread-interrupt
+SMT_TIMEOUT ?= 10m
+else
+$(error Z3_TIMEOUT_IMPL 必须是 direct 或 thread_interrupt)
+endif
+# 外层命令、isarch 符号执行和单条 Z3 operation 的默认验收时间上限。
+OUTER_TIMEOUT ?= 40m
+SOLVE_TIMEOUT ?= 30m
+# timeout SMT 输出目的地与目录；目的地示例：file,itrace 或 file,stdout,itrace。
+TIMEOUT_SMT_OUTPUT ?=
+TIMEOUT_SMT_DIR ?=
 TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
 TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
-	cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE)
+	cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE) $(CARGO_SMT_FEATURE)
 
 # 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
 #
@@ -104,15 +119,18 @@ solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
-	RUST_BACKTRACE=1 timeout 6h ./target/release/isarch \
-		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml --timeout 5h --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) solve-state --clause=$* \
+	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
+		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \
 		echo "$* timeout" >> output/status.timeout.log; \
-	else \
+	elif [ $$status -eq 0 ]; then \
 		echo "$* intime" >> output/status.intime.log; \
-	fi
+	else \
+		echo "$* failed ($$status)" >> output/status.failed.log; \
+	fi; \
+	exit $$status
 
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))

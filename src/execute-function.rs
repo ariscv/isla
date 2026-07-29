@@ -282,18 +282,23 @@ fn bits_to_bv<B: BV>(bits: &[bool]) -> B {
     bv
 }
 
-fn concrete_value<B: BV>(model: &mut Model<B>, val: &Val<B>) -> Val<B> {
+fn concrete_value<B: BV>(model: &mut Model<B>, val: &Val<B>) -> Result<Val<B>, ExecError> {
     match val {
         Val::Symbolic(v) => match model.get_var(*v) {
-            Ok(ModelVal::Exp(Exp::Bits64(bv))) => Val::Bits(B::new(bv.lower_u64(), bv.len())),
-            Ok(ModelVal::Exp(Exp::Bits(bs))) => Val::Bits(bits_to_bv(&bs)),
-            _ => val.clone(),
+            Ok(ModelVal::Exp(Exp::Bits64(bv))) => Ok(Val::Bits(B::new(bv.lower_u64(), bv.len()))),
+            Ok(ModelVal::Exp(Exp::Bits(bs))) => Ok(Val::Bits(bits_to_bv(&bs))),
+            Err(error @ ExecError::Smt(_)) => Err(error),
+            _ => Ok(val.clone()),
         },
-        Val::Vector(vec) => Val::Vector(vec.iter().map(|v| concrete_value(model, v)).collect()),
-        Val::List(vec) => Val::List(vec.iter().map(|v| concrete_value(model, v)).collect()),
-        Val::Struct(map) => Val::Struct(map.iter().map(|(k, v)| (*k, concrete_value(model, v))).collect()),
-        Val::Ctor(n, v) => Val::Ctor(*n, Box::new(concrete_value(model, v))),
-        _ => val.clone(),
+        Val::Vector(vec) => {
+            Ok(Val::Vector(vec.iter().map(|v| concrete_value(model, v)).collect::<Result<Vec<_>, _>>()?))
+        }
+        Val::List(vec) => Ok(Val::List(vec.iter().map(|v| concrete_value(model, v)).collect::<Result<Vec<_>, _>>()?)),
+        Val::Struct(map) => Ok(Val::Struct(
+            map.iter().map(|(k, v)| concrete_value(model, v).map(|value| (*k, value))).collect::<Result<_, _>>()?,
+        )),
+        Val::Ctor(n, v) => Ok(Val::Ctor(*n, Box::new(concrete_value(model, v)?))),
+        _ => Ok(val.clone()),
     }
 }
 
@@ -309,19 +314,27 @@ fn model_collector<'ir, B: BV>(
 ) {
     let events: Vec<Event<B>> = if *trace { solver.trace().to_vec().drain(..).cloned().collect() } else { vec![] };
     match result {
-        Ok((Run::Finished(val), _)) => {
-            if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {
+        Ok((Run::Finished(val), _)) => match solver.check_sat(SourceLoc::unknown()) {
+            SmtResult::Sat => {
                 let val = if *models {
                     let mut model = Model::new(&solver);
-                    concrete_value(&mut model, &val)
+                    match concrete_value(&mut model, &val) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            collected.push(Err((error.to_string(), events)));
+                            return;
+                        }
+                    }
                 } else {
                     val
                 };
                 collected.push(Ok((task_id, val, events)))
-            } else {
+            }
+            SmtResult::Error(error) => collected.push(Err((ExecError::Smt(error).to_string(), events))),
+            SmtResult::Unsat | SmtResult::Unknown => {
                 collected.push(Err((format!("Got value {} but unsat?", val.to_string(shared_state)), events)))
             }
-        }
+        },
         Ok((Run::Exit, _)) => collected.push(Err(("Exit".to_string(), events))),
         Ok((Run::Suspended { .. }, _)) => collected.push(Err(("Suspended".to_string(), events))),
         Ok((Run::Dead, _)) => (),
@@ -330,11 +343,17 @@ fn model_collector<'ir, B: BV>(
             for (f, pc) in frame.backtrace().iter().rev() {
                 log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
             }
-            if solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat {
-                let model = Model::new(&solver);
-                collected.push(Err((format!("Error {:?}\n{:?}", err, model), events)))
-            } else {
-                collected.push(Err((format!("Error {:?}\nno model", err), events)))
+            match solver.check_sat(SourceLoc::unknown()) {
+                SmtResult::Sat => {
+                    let model = Model::new(&solver);
+                    collected.push(Err((format!("Error {:?}\n{:?}", err, model), events)))
+                }
+                SmtResult::Error(error) => {
+                    collected.push(Err((format!("Error {:?}\n{}", err, ExecError::Smt(error)), events)))
+                }
+                SmtResult::Unsat | SmtResult::Unknown => {
+                    collected.push(Err((format!("Error {:?}\nno model", err), events)))
+                }
             }
         }
     }

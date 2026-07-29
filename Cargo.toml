@@ -81,6 +81,14 @@ name = "isarch"
 path = "src/isarch_main.rs"
 doc = false
 
+[[test]]
+name = "smt_contract"
+path = "test/smt/contract.rs"
+
+[[test]]
+name = "smt_thread_interrupt"
+path = "test/smt/thread_interrupt.rs"
+
 [dependencies]
 crossbeam = "0.8.1"
 getopts = "0.2.21"
@@ -103,6 +111,7 @@ isla-elf = { path = "isla-elf", version = "0.2.0" }
 [features]
 itrace = ["isla-lib/itrace"]
 smtperf = ["isla-lib/smtperf"]
+smt-thread-interrupt = ["isla-lib/smt-thread-interrupt"]
 default = []
 
 [profile.dev]

@@ -970,6 +970,7 @@ pub fn eval_carefully_part<B: BV, E: BorrowMut<Event<B>>>(
                 match solver.check_sat_with(&Exp::Neq(Box::new(exp.clone()), Box::new(e.clone())), *info) {
                     Sat => panic!("Bad eval {:?} to {:?}", e, exp),
                     Unknown => panic!("Difficult to check eval (!) {:?} to {:?}", e, exp),
+                    SmtResult::Error(error) => panic!("{}", crate::error::ExecError::Smt(error)),
                     Unsat => (),
                 };
                 let ty = exp.infer(tcx, ftcx).unwrap();
@@ -982,6 +983,7 @@ pub fn eval_carefully_part<B: BV, E: BorrowMut<Event<B>>>(
                 match solver.check_sat_with(&Exp::Neq(Box::new(exp.clone()), Box::new(e.clone())), *info) {
                     Sat => panic!("Bad eval {:?} to {:?}", e, exp),
                     Unknown => panic!("Difficult to check eval (!) {:?} to {:?}", e, exp),
+                    SmtResult::Error(error) => panic!("{}", crate::error::ExecError::Smt(error)),
                     Unsat => (),
                 }
             }
