@@ -40,7 +40,7 @@ use isla_lib::ir::{Name, Val};
 use isla_lib::log;
 use isla_lib::memory::{Memory, Region};
 use isla_lib::primop::Primops;
-use isla_lib::smt::{checkpoint, smtlib, Checkpoint, Config, Context, Model, ModelVal, SmtResult::Sat, Solver, Sym};
+use isla_lib::smt::{checkpoint, smtlib, Checkpoint, Config, Context, Model, ModelVal, SmtResult, Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 
 use super::{table_address, Index, PageAttrs, PageTables, S1PageAttrs, S2PageAttrs, UpdateWalk, VirtualAddress};
@@ -1068,9 +1068,7 @@ fn eval_address_constraints<B: BV>(
         }
     }
 
-    if solver.check_sat(SourceLoc::unknown()) != Sat {
-        return Err(AddressError("No satisfiable set of addresses".to_string()));
-    }
+    address_constraints_require_sat(solver.check_sat(SourceLoc::unknown()))?;
 
     let mut model = Model::new(&solver);
     for (name, (sym, to_val)) in vars {
@@ -1091,6 +1089,16 @@ fn eval_address_constraints<B: BV>(
     }
 
     Ok(())
+}
+
+fn address_constraints_require_sat(result: SmtResult) -> Result<(), SetupError> {
+    match result {
+        SmtResult::Sat => Ok(()),
+        SmtResult::Unsat | SmtResult::Unknown => {
+            Err(SetupError::AddressError("No satisfiable set of addresses".to_string()))
+        }
+        SmtResult::Error(error) => Err(SetupError::Exec(ExecError::Smt(error))),
+    }
 }
 
 fn map_code<B: BV>(
@@ -1398,4 +1406,43 @@ pub fn armv8_page_tables<B: BV>(
         tables,
         maybe_mapped,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use isla_lib::error::{ExecError, SmtError};
+    use isla_lib::smt::SmtResult;
+    use isla_lib::source_loc::SourceLoc;
+    use isla_lib::timeout::{SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
+
+    use super::{address_constraints_require_sat, SetupError};
+
+    struct TestDump;
+
+    impl SmtDumpSource for TestDump {
+        fn materialize(&self) -> Result<String, String> {
+            Ok("(check-sat)\n".to_string())
+        }
+    }
+
+    #[test]
+    fn address_constraint_smt_error_keeps_the_structured_timeout() {
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: SourceLoc::unknown(),
+            operation: SmtOperation::CheckSat,
+            limit: Duration::from_millis(5),
+            operation_wall: Duration::from_millis(5),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(TestDump))),
+        });
+
+        let error = address_constraints_require_sat(SmtResult::Error(SmtError::Timeout(timeout.clone())))
+            .expect_err("SMT timeout must not be reported as an unsatisfiable address set");
+        let SetupError::Exec(ExecError::Smt(SmtError::Timeout(actual))) = error else {
+            panic!("SMT timeout lost its structured SetupError representation")
+        };
+        assert!(Arc::ptr_eq(&actual, &timeout));
+    }
 }

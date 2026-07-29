@@ -36,9 +36,11 @@
 //! end of processor cycles, etc (see the [Event] type). Points in
 //! these traces can be snapshotted and shared between threads via the
 //! [Checkpoint] type.
+//!
+//! Z3 timeout wrapper 集中在 `smt::z3_timeout`，本文件只保留调用点。
 
 use ahash;
-use libc::{c_int, c_uint};
+use libc::c_uint;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "smtperf")]
@@ -51,11 +53,12 @@ use petgraph::{
 use z3_sys::*;
 
 #[cfg(feature = "smtperf")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::error::Error;
+use std::error::Error as StdError;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io::Write;
@@ -65,9 +68,10 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::bitvector::BV;
-use crate::error::ExecError;
-use crate::ir::{IRTypeInfo, Loc, Name, Symtab, Val};
+use crate::error::{ExecError, SmtError};
+use crate::ir::{Loc, Name, Symtab, Val};
 use crate::source_loc::SourceLoc;
+use crate::timeout::SmtOperation;
 use crate::zencode;
 use crate::{bitvector::b64::B64, ir::SharedState};
 
@@ -179,8 +183,15 @@ impl fmt::Debug for EnumMember {
         }
     }
 }
+mod dump;
 pub mod smtlib;
+mod z3_timeout;
+use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
+use z3_timeout::{
+    timeout_Z3_model_eval, timeout_Z3_solver_check, timeout_Z3_solver_check_assumptions,
+    timeout_error as z3_timeout_error, Z3TimeoutError,
+};
 
 /// Snapshot of interaction with underlying solver that can be
 /// efficiently cloned and shared between threads.
@@ -216,7 +227,7 @@ impl Accessor {
         }
     }
 
-    pub fn pretty(&self, buf: &mut dyn Write, symtab: &Symtab) -> Result<(), Box<dyn Error>> {
+    pub fn pretty(&self, buf: &mut dyn Write, symtab: &Symtab) -> Result<(), Box<dyn StdError>> {
         match self {
             Accessor::Field(name) => write!(buf, ".{}", zencode::decode(symtab.to_str(*name)))?,
         }
@@ -633,13 +644,17 @@ impl<'ctx> Enums<'ctx> {
         Enums { enums: HashMap::default(), ctx }
     }
 
-    fn add_enum(&mut self, name: Name, z3_name: Sym, members: &[Sym]) {
+    fn add_enum(&mut self, name: Name, members: &[Sym], symbol_namer: &Z3SymbolNamer) {
         unsafe {
             let ctx = self.ctx.z3_ctx;
             let size = members.len();
 
-            let z3_name = Z3_mk_int_symbol(ctx, z3_name.id as c_int);
-            let members: Vec<Z3_symbol> = members.iter().map(|m| Z3_mk_int_symbol(ctx, m.id as c_int)).collect();
+            let z3_name = symbol_namer.enum_sort(self.ctx, name);
+            let members: Vec<Z3_symbol> = members
+                .iter()
+                .enumerate()
+                .map(|(member, symbol)| symbol_namer.enum_member(self.ctx, name, member, *symbol))
+                .collect();
 
             let mut consts = mem::ManuallyDrop::new(Vec::with_capacity(size));
             let mut testers = mem::ManuallyDrop::new(Vec::with_capacity(size));
@@ -753,9 +768,16 @@ struct FuncDecl<'ctx> {
 }
 
 impl<'ctx> FuncDecl<'ctx> {
-    fn new(ctx: &'ctx Context, v: Sym, enums: &Enums<'ctx>, arg_tys: &[Ty], ty: &Ty) -> Self {
+    fn new(
+        ctx: &'ctx Context,
+        v: Sym,
+        enums: &Enums<'ctx>,
+        arg_tys: &[Ty],
+        ty: &Ty,
+        symbol_namer: &Z3SymbolNamer,
+    ) -> Self {
         unsafe {
-            let name = Z3_mk_int_symbol(ctx.z3_ctx, v.id as c_int);
+            let name = symbol_namer.symbol(ctx, v);
             let arg_sorts: Vec<Sort> = arg_tys.iter().map(|ty| Sort::new(ctx, enums, ty)).collect();
             let arg_z3_sorts: Vec<Z3_sort> = arg_sorts.iter().map(|s| s.z3_sort).collect();
             let args: u32 = arg_sorts.len() as u32;
@@ -1511,6 +1533,7 @@ pub struct Solver<'ctx, B> {
     enums: Enums<'ctx>,
     z3_solver: Z3_solver,
     ctx: &'ctx Context,
+    symbol_namer: Z3SymbolNamer,
     performance_info: PerformanceInfo,
 }
 
@@ -1590,6 +1613,13 @@ impl ModelVal {
     }
 }
 
+/// thread-interrupt wrapper 在 ModelEval 超时时构造最终 `SmtError::Timeout`
+/// 所需的调用边界信息。它不是另一套错误类型。
+struct ModelEvalTimeoutContext {
+    started: Instant,
+    dump_request: SmtDumpRequest,
+}
+
 impl<'ctx, B: BV> Model<'ctx, B> {
     pub fn new(solver: &'ctx Solver<'ctx, B>) -> Self {
         unsafe {
@@ -1603,8 +1633,31 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.complete_model = b;
     }
 
+    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext) -> ExecError {
+        let dump = timeout_dump_from_checkpoint(self.solver.checkpoint_snapshot(), timeout.dump_request.clone());
+        ExecError::Smt(z3_timeout_error(SmtOperation::ModelEval, SourceLoc::unknown(), timeout.started.elapsed(), dump))
+    }
+
+    fn eval_with_timeout(
+        &self,
+        ast: Z3_ast,
+        model_completion: bool,
+        result: &mut Z3_ast,
+        timeout_context: &ModelEvalTimeoutContext,
+    ) -> Result<bool, ExecError> {
+        match timeout_Z3_model_eval(self.ctx.z3_ctx, self.z3_model, ast, model_completion, result) {
+            Ok(evaluated) => Ok(evaluated),
+            Err(Z3TimeoutError::Interrupted) => Err(self.model_eval_timeout_error(timeout_context)),
+        }
+    }
+
     #[allow(clippy::needless_range_loop)]
-    fn get_large_bv(&mut self, ast: Ast, size: u32) -> Result<Vec<bool>, ExecError> {
+    fn get_large_bv_with_timeout(
+        &mut self,
+        ast: Ast,
+        size: u32,
+        timeout_context: &ModelEvalTimeoutContext,
+    ) -> Result<Vec<bool>, ExecError> {
         let mut i = 0;
         let size = size.try_into().unwrap();
         let mut result = vec![false; size];
@@ -1616,7 +1669,9 @@ impl<'ctx, B: BV> Model<'ctx, B> {
 
             unsafe {
                 let mut result_z3_ast: Z3_ast = ptr::null_mut();
-                if !Z3_model_eval(self.ctx.z3_ctx, self.z3_model, extract_ast.z3_ast, true, &mut result_z3_ast) {
+                let evaluated =
+                    self.eval_with_timeout(extract_ast.z3_ast, true, &mut result_z3_ast, timeout_context)?;
+                if !evaluated {
                     return Err(self.ctx.error());
                 }
                 Z3_inc_ref(self.ctx.z3_ctx, result_z3_ast);
@@ -1636,12 +1691,12 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             None => return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown())),
             Some(ast) => ast.clone(),
         };
-        self.get_ast(var_ast)
+        self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })
     }
 
     pub fn get_exp(&mut self, exp: &Exp<Sym>) -> Result<ModelVal, ExecError> {
         let ast = self.solver.translate_exp(exp);
-        self.get_ast(ast)
+        self.get_ast(ast, SmtDumpRequest::GetValues { expressions: vec![exp.clone()] })
     }
 
     pub fn get_val(&mut self, var: &Val<B>) -> Result<Val<B>, ExecError> {
@@ -1784,11 +1839,23 @@ impl<'ctx, B: BV> Model<'ctx, B> {
     }
 
     // Requiring the model to be mutable as I expect Z3 will alter the underlying data
-    fn get_ast(&mut self, var_ast: Ast) -> Result<ModelVal, ExecError> {
+    fn get_ast(&mut self, var_ast: Ast, dump_request: SmtDumpRequest) -> Result<ModelVal, ExecError> {
+        let started = Instant::now();
+        let timeout_context = ModelEvalTimeoutContext { started, dump_request };
+        self.get_ast_with_timeout(var_ast, &timeout_context)
+    }
+
+    fn get_ast_with_timeout(
+        &mut self,
+        var_ast: Ast,
+        timeout_context: &ModelEvalTimeoutContext,
+    ) -> Result<ModelVal, ExecError> {
         unsafe {
             let z3_ctx = self.ctx.z3_ctx;
             let mut z3_ast: Z3_ast = ptr::null_mut();
-            if !Z3_model_eval(z3_ctx, self.z3_model, var_ast.z3_ast, self.complete_model, &mut z3_ast) {
+            let evaluated =
+                self.eval_with_timeout(var_ast.z3_ast, self.complete_model, &mut z3_ast, timeout_context)?;
+            if !evaluated {
                 return Err(self.ctx.error());
             }
             Z3_inc_ref(z3_ctx, z3_ast);
@@ -1802,7 +1869,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             let result = if sort_kind == SortKind::BV && Z3_is_numeral_ast(z3_ctx, z3_ast) {
                 let size = Z3_get_bv_sort_size(z3_ctx, sort);
                 if size > 64 {
-                    let v = self.get_large_bv(ast, size)?;
+                    let v = self.get_large_bv_with_timeout(ast, size, timeout_context)?;
                     Ok(ModelVal::Exp(Exp::Bits(v)))
                 } else {
                     let result = ast.get_numeral_u64()?;
@@ -1834,16 +1901,24 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                     let tester_app = Z3_mk_app(z3_ctx, recognizer, 1, &z3_ast);
                     Z3_inc_ref(z3_ctx, tester_app);
                     let mut eval_result: Z3_ast = ptr::null_mut();
-                    let evaluated = Z3_model_eval(z3_ctx, self.z3_model, tester_app, true, &mut eval_result);
-                    Z3_dec_ref(z3_ctx, tester_app);
-                    if evaluated {
-                        Z3_inc_ref(z3_ctx, eval_result);
-                        let is_match = Z3_get_bool_value(z3_ctx, eval_result) == Z3_L_TRUE;
-                        Z3_dec_ref(z3_ctx, eval_result);
-                        if is_match {
-                            ctor_idx = Some(i as usize);
-                            break;
+                    let evaluated = match self.eval_with_timeout(tester_app, true, &mut eval_result, timeout_context) {
+                        Ok(evaluated) => evaluated,
+                        Err(error) => {
+                            Z3_dec_ref(z3_ctx, tester_app);
+                            return Err(error);
                         }
+                    };
+                    if !evaluated {
+                        Z3_dec_ref(z3_ctx, tester_app);
+                        continue;
+                    }
+                    Z3_dec_ref(z3_ctx, tester_app);
+                    Z3_inc_ref(z3_ctx, eval_result);
+                    let is_match = Z3_get_bool_value(z3_ctx, eval_result) == Z3_L_TRUE;
+                    Z3_dec_ref(z3_ctx, eval_result);
+                    if is_match {
+                        ctor_idx = Some(i as usize);
+                        break;
                     }
                 }
 
@@ -1904,34 +1979,37 @@ impl<'ctx, B: BV> Model<'ctx, B> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SmtResult {
     Sat,
     Unsat,
     Unknown,
+    Error(SmtError),
 }
 
 use SmtResult::*;
 
 impl SmtResult {
-    pub fn is_sat(self) -> Result<bool, ExecError> {
+    pub fn is_sat(&self) -> Result<bool, ExecError> {
         match self {
             Sat => Ok(true),
             Unsat => Ok(false),
             Unknown => Err(ExecError::Z3Unknown),
+            Error(error) => Err(ExecError::Smt(error.clone())),
         }
     }
 
-    pub fn is_unsat(self) -> Result<bool, ExecError> {
+    pub fn is_unsat(&self) -> Result<bool, ExecError> {
         match self {
             Sat => Ok(false),
             Unsat => Ok(true),
             Unknown => Err(ExecError::Z3Unknown),
+            Error(error) => Err(ExecError::Smt(error.clone())),
         }
     }
 
-    pub fn is_unknown(self) -> bool {
-        self == Unknown
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Unknown)
     }
 }
 
@@ -1960,6 +2038,10 @@ unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> &'static [u8
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub fn new(ctx: &'ctx Context) -> Self {
+        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer)
+    }
+
+    fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer) -> Self {
         unsafe {
             // The QF_AUFBV solver has good performance on our problems, but we need to initialise it
             // using a tactic rather than the logic name to ensure that the enumerations are supported,
@@ -1992,6 +2074,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 decls: HashMap::new(),
                 func_decls: HashMap::new(),
                 enums: Enums::new(ctx),
+                symbol_namer,
                 performance_info: PerformanceInfo::new(),
             }
         }
@@ -2184,14 +2267,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
             Def::DeclareConst(v, ty) => {
                 self.performance_info.add_var_node(*v, info);
-                let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty);
+                let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
                 self.decls.insert(*v, Ast::mk_constant(&fd));
             }
             Def::DeclareFun(v, arg_tys, result_ty) => {
                 if cfg!(feature = "smtperf") {
                     self.performance_info.add_var_node(*v, info);
                 }
-                let fd = FuncDecl::new(self.ctx, *v, &self.enums, arg_tys, result_ty);
+                let fd = FuncDecl::new(self.ctx, *v, &self.enums, arg_tys, result_ty, &self.symbol_namer);
                 self.func_decls.insert(*v, fd);
             }
             Def::DefineConst(v, exp) => {
@@ -2212,9 +2295,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     // Member constructor names do not need to be stable: get_ast
                     // matches constructors through recognizers from the model
                     // value's own sort.
-                    let z3_name = Sym::from_u32(name.as_u32());
                     let members: Vec<Sym> = (0..*size).map(|_| self.fresh()).collect();
-                    self.enums.add_enum(*name, z3_name, &members)
+                    self.enums.add_enum(*name, &members, &self.symbol_namer)
                 }
             }
         }
@@ -2437,19 +2519,26 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         solver
     }
 
-    pub fn check_sat_with(&mut self, exp: &Exp<Sym>, _info: SourceLoc) -> SmtResult {
+    pub fn check_sat_with(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        let started = Instant::now();
         self.performance_info.start();
 
         let ast = self.translate_exp(exp);
-        let result = unsafe {
-            let z3_result = Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, 1, &ast.z3_ast);
-            if z3_result == Z3_L_TRUE {
-                Sat
-            } else if z3_result == Z3_L_FALSE {
-                Unsat
-            } else {
-                Unknown
+        let assumptions = [ast.z3_ast];
+        let z3_result = match timeout_Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, &assumptions) {
+            Ok(result) => result,
+            Err(Z3TimeoutError::Interrupted) => {
+                let dump =
+                    timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(exp.clone()));
+                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
             }
+        };
+        let result = if z3_result == Z3_L_TRUE {
+            Sat
+        } else if z3_result == Z3_L_FALSE {
+            Unsat
+        } else {
+            Unknown
         };
 
         self.performance_info.assign_cost(exp);
@@ -2460,17 +2549,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         &self.trace
     }
 
-    pub fn check_sat(&mut self, _info: SourceLoc) -> SmtResult {
-        unsafe {
-            let result = Z3_solver_check(self.ctx.z3_ctx, self.z3_solver);
-            if result == Z3_L_TRUE {
-                Sat
-            } else if result == Z3_L_FALSE {
-                Unsat
-            } else {
-                Unknown
+    pub fn check_sat(&mut self, info: SourceLoc) -> SmtResult {
+        let started = Instant::now();
+        let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver) {
+            Ok(result) => result,
+            Err(Z3TimeoutError::Interrupted) => {
+                let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
+                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
             }
-        }
+        };
+        let result = if z3_result == Z3_L_TRUE {
+            Sat
+        } else if z3_result == Z3_L_FALSE {
+            Unsat
+        } else {
+            Unknown
+        };
+        result
     }
 
     pub fn dump_solver(&mut self, filename: &str) {
@@ -2529,7 +2624,11 @@ pub fn z3_version() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use crate::bitvector::b64::B64;
+    use crate::timeout::{SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
 
     use super::Def::*;
     use super::Exp::*;
@@ -2553,6 +2652,39 @@ mod tests {
 
     fn var(id: u32) -> Exp<Sym> {
         Var(Sym::from_u32(id))
+    }
+
+    struct FixedDump;
+
+    impl SmtDumpSource for FixedDump {
+        fn materialize(&self) -> Result<String, String> {
+            Ok("(check-sat)\n".to_string())
+        }
+    }
+
+    fn timeout_artifact() -> Arc<SmtTimeout> {
+        Arc::new(SmtTimeout {
+            source_loc: SourceLoc::new(0, 1, 0, 1, 1),
+            operation: SmtOperation::CheckSat,
+            limit: Duration::from_secs(10),
+            operation_wall: Duration::from_secs(11),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
+        })
+    }
+
+    #[test]
+    fn smt_timeout_result_preserves_error_artifact_identity() {
+        let timeout = timeout_artifact();
+        let same = SmtResult::Error(SmtError::Timeout(timeout.clone()));
+        let same_again = SmtResult::Error(SmtError::Timeout(timeout.clone()));
+        let different = SmtResult::Error(SmtError::Timeout(timeout_artifact()));
+
+        assert_eq!(same, same_again);
+        assert_ne!(same, different);
+        match same.is_sat() {
+            Err(ExecError::Smt(SmtError::Timeout(error))) => assert!(Arc::ptr_eq(&error, &timeout)),
+            result => panic!("unexpected timeout conversion: {:?}", result),
+        }
     }
 
     #[test]
@@ -2597,6 +2729,22 @@ mod tests {
             Sat => (),
             _ => panic!("Round-trip failed, trace {:?}", solver.trace()),
         }
+    }
+
+    #[test]
+    fn local_model_debug_preserves_original_model_text_semantics() {
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        solver.add(DeclareConst(Sym::from_u32(0), Ty::Bool));
+        solver.add(Assert(Var(Sym::from_u32(0))));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+
+        let model = Model::new(&solver);
+        let text = format!("{:?}", model);
+
+        assert!(text.contains("true"), "unexpected model text:\n{}", text);
     }
 
     #[test]
@@ -2733,3 +2881,5 @@ mod tests {
         assert!(solver.check_sat(SourceLoc::unknown()) == Unsat);
     }
 }
+
+pub use z3_timeout::configure_z3_timeout;

@@ -36,6 +36,7 @@
 
 use sha2::{Digest, Sha256};
 use std::process::exit;
+use std::time::Duration;
 
 use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
@@ -280,11 +281,89 @@ fn parse_timeout_seconds(value: Option<&str>) -> Result<Option<u64>, String> {
     seconds.checked_mul(multiplier).map(Some).ok_or_else(|| format!("--timeout 超出 u64 秒范围: {}", value))
 }
 
+fn parse_duration_arg(flag: &str, value: Option<&str>, allow_milliseconds: bool) -> Result<Option<Duration>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{} 不能为空", flag));
+    }
+
+    let (number, unit) = if let Some(number) = value.strip_suffix("ms").or_else(|| value.strip_suffix("MS")) {
+        if !allow_milliseconds {
+            return Err(format!("{} 不支持 ms 单位", flag));
+        }
+        (number, "ms")
+    } else if let Some(number) = value.strip_suffix('s').or_else(|| value.strip_suffix('S')) {
+        (number, "s")
+    } else if let Some(number) = value.strip_suffix('m').or_else(|| value.strip_suffix('M')) {
+        (number, "m")
+    } else if let Some(number) = value.strip_suffix('h').or_else(|| value.strip_suffix('H')) {
+        (number, "h")
+    } else {
+        (value, "s")
+    };
+
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("{} 数值必须是非负整数: {}", flag, value));
+    }
+    let value = number.parse::<u64>().map_err(|error| format!("Failed to parse {}: {}", flag, error))?;
+    let duration = match unit {
+        "ms" => Duration::from_millis(value),
+        "s" => Duration::from_secs(value),
+        "m" => Duration::from_secs(value.checked_mul(60).ok_or_else(|| format!("{} 超出范围", flag))?),
+        "h" => Duration::from_secs(value.checked_mul(60 * 60).ok_or_else(|| format!("{} 超出范围", flag))?),
+        _ => unreachable!(),
+    };
+    if duration.as_millis() > u64::MAX as u128 {
+        return Err(format!("{} 超出 u64 毫秒范围", flag));
+    }
+    Ok(Some(duration))
+}
+
+fn parse_timeout_smt_output(
+    value: Option<&str>,
+    itrace_enabled: bool,
+) -> Result<isarch::exec::TimeoutSmtOutput, String> {
+    let Some(value) = value else {
+        return Ok(isarch::exec::TimeoutSmtOutput::new(true, false, itrace_enabled));
+    };
+    if value.trim().is_empty() {
+        return Err("--timeout-smt-output 不能为空".to_string());
+    }
+
+    let mut file = false;
+    let mut stdout = false;
+    let mut itrace = false;
+    for destination in value.split(',').map(str::trim) {
+        match destination {
+            "file" => file = true,
+            "stdout" => stdout = true,
+            "itrace" => itrace = true,
+            "" => return Err("--timeout-smt-output 包含空输出目标".to_string()),
+            destination => {
+                return Err(format!("--timeout-smt-output 不支持 '{}': 只能使用 file,stdout,itrace", destination))
+            }
+        }
+    }
+    if itrace && !itrace_enabled {
+        return Err("--timeout-smt-output 请求 itrace，但没有配置 --itrace".to_string());
+    }
+    if !file && !stdout && !itrace {
+        return Err("--timeout-smt-output 至少需要一个输出目标".to_string());
+    }
+    Ok(isarch::exec::TimeoutSmtOutput::new(file, stdout, itrace))
+}
+
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
     opts.optopt("", "timeout", "超时时间，默认秒；支持 s/m/h 后缀", "<n[s|m|h]>");
+    opts.optopt("", "smt-timeout", "单次 Z3 operation 的 soft interrupt 超时时间", "<n[s|m|h]>");
+    opts.optopt("", "timeout-smt-output", "timeout SMT2 输出目标，逗号分隔：file,stdout,itrace", "<destinations>");
+    opts.optopt("", "timeout-smt-dir", "timeout SMT2 文件输出目录", "<path>");
     opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
@@ -303,6 +382,29 @@ fn isla_main() -> i32 {
             return 1;
         }
     };
+    let smt_timeout = match parse_duration_arg("--smt-timeout", matches.opt_str("smt-timeout").as_deref(), false) {
+        Ok(Some(timeout)) if timeout.is_zero() => {
+            eprintln!("--smt-timeout 必须大于 0");
+            return 1;
+        }
+        Ok(timeout) => timeout,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let timeout_smt_output =
+        match parse_timeout_smt_output(matches.opt_str("timeout-smt-output").as_deref(), itrace_path.is_some()) {
+            Ok(output) => output,
+            Err(e) => {
+                eprintln!("{}", e);
+                return 1;
+            }
+        };
+    let timeout_smt_dir = matches
+        .opt_str("timeout-smt-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("output/timeout-smt"));
 
     if matches.free.is_empty() {
         print_usage(&opts);
@@ -315,6 +417,8 @@ fn isla_main() -> i32 {
             print_usage(&opts);
         }
     };
+
+    isla_lib::smt::configure_z3_timeout(smt_timeout);
 
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
@@ -358,6 +462,8 @@ fn isla_main() -> i32 {
         }
         Subcommand::Tree { .. } => cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path),
         Subcommand::SolveState { clauses, extensions, instruction_names, run_all } => {
+            let timeout_report_config =
+                isarch::exec::TimeoutReportConfig { output: timeout_smt_output, directory: timeout_smt_dir };
             let xlen = detect_xlen(*shared_state, lets);
             let success = match xlen {
                 32 => {
@@ -382,6 +488,7 @@ fn isla_main() -> i32 {
                         num_threads,
                         timeout,
                         isa_config.execution_limits.as_ref(),
+                        timeout_report_config.clone(),
                     )
                 }
                 _ => {
@@ -406,6 +513,7 @@ fn isla_main() -> i32 {
                         num_threads,
                         timeout,
                         isa_config.execution_limits.as_ref(),
+                        timeout_report_config,
                     )
                 }
             };
@@ -457,6 +565,47 @@ mod tests {
         assert!(parse_timeout_seconds(Some("1d")).is_err());
         assert!(parse_timeout_seconds(Some("1.5h")).is_err());
         assert!(parse_timeout_seconds(Some("18446744073709551615h")).is_err());
+    }
+
+    #[test]
+    fn parse_smt_duration_supports_query_units() {
+        assert_eq!(parse_duration_arg("--smt-timeout", Some("10m"), false).unwrap(), Some(Duration::from_secs(600)));
+        assert!(parse_duration_arg("--smt-timeout", Some("250ms"), false).is_err());
+    }
+
+    #[test]
+    fn parse_smt_timeout_rejects_values_outside_u64_milliseconds() {
+        let largest_whole_seconds = u64::MAX / 1000;
+        let accepted = format!("{}s", largest_whole_seconds);
+        let rejected = format!("{}s", largest_whole_seconds + 1);
+
+        assert!(parse_duration_arg("--smt-timeout", Some(&accepted), false).is_ok());
+        assert!(parse_duration_arg("--smt-timeout", Some(&rejected), false).is_err());
+    }
+
+    #[test]
+    fn parse_timeout_smt_output_accepts_combinations_and_rejects_unknown_values() {
+        let output = parse_timeout_smt_output(Some("file,stdout,itrace"), true).unwrap();
+        assert!(output.file);
+        assert!(output.stdout);
+        assert!(output.itrace);
+
+        assert!(parse_timeout_smt_output(Some("itrace"), false).is_err());
+        assert!(parse_timeout_smt_output(Some("file,network"), true).is_err());
+        assert!(parse_timeout_smt_output(Some(""), true).is_err());
+    }
+
+    #[test]
+    fn timeout_smt_output_defaults_to_file_and_enabled_itrace() {
+        let with_itrace = parse_timeout_smt_output(None, true).unwrap();
+        assert!(with_itrace.file);
+        assert!(!with_itrace.stdout);
+        assert!(with_itrace.itrace);
+
+        let without_itrace = parse_timeout_smt_output(None, false).unwrap();
+        assert!(without_itrace.file);
+        assert!(!without_itrace.stdout);
+        assert!(!without_itrace.itrace);
     }
 
     #[test]

@@ -128,7 +128,9 @@ impl<B: BV> RegisterState<B> {
             solver.add(Def::Assert(exp.clone()));
         }
 
-        solver.check_sat(SourceLoc::unknown());
+        if let crate::smt::SmtResult::Error(error) = solver.check_sat(SourceLoc::unknown()) {
+            return Err(ExecError::Smt(error));
+        }
         let mut model = Model::new(&solver);
 
         let mut vars = HashSet::default();

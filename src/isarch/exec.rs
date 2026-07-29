@@ -1,11 +1,13 @@
 use super::clause::{get_extension_clauses, normalize_clause_name};
 use super::target::{Target, RISCV};
-use super::{get_all_clause_names, get_assembly_encdec, get_assembly_name, list_instructions};
+use super::timeout_report::TimeoutReporter;
+pub use super::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
+use super::{get_all_clause_names, list_instructions, try_get_assembly_encdec, try_get_assembly_name};
 use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
-use isla_lib::error::ExecError;
 use isla_lib::error::IslaError;
-use isla_lib::executor::{backtrace_string, Run};
+use isla_lib::error::{ExecError, SmtError};
+use isla_lib::executor::{backtrace_string, LocalFrame, Run};
 use isla_lib::executor::{ExecutionLimits, LimitBehavior, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
@@ -83,6 +85,66 @@ impl AssemGenJson {
     }
 }
 
+struct SolveCollectorState {
+    json: AssemGenJson,
+    first_error: Option<ExecError>,
+}
+
+impl SolveCollectorState {
+    fn new() -> Self {
+        SolveCollectorState { json: AssemGenJson::new(Vec::new()), first_error: None }
+    }
+
+    fn record_error(&mut self, error: &ExecError) -> bool {
+        let error = match error {
+            ExecError::Timeout => ExecError::Timeout,
+            ExecError::Smt(error) => ExecError::Smt(error.clone()),
+            _ => return false,
+        };
+        if self.first_error.is_none() {
+            self.first_error = Some(error);
+        }
+        true
+    }
+}
+
+struct ErrorRecorder<'a> {
+    collected: &'a Mutex<SolveCollectorState>,
+    reporter: &'a TimeoutReporter,
+    clause: &'a str,
+}
+
+impl ErrorRecorder<'_> {
+    fn record_error_diagnostic<'ir, B: BV>(
+        &self,
+        error: &ExecError,
+        frame: &LocalFrame<'ir, B>,
+        shared_state: &SharedState<'ir, B>,
+    ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
+        frame.configure_timeout_smt_dump(error, shared_state);
+        self.record_configured_error_diagnostic(error)
+    }
+
+    fn record_configured_error_diagnostic(
+        &self,
+        error: &ExecError,
+    ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
+        if !self.collected.lock().expect("solve collector mutex poisoned").record_error(error) {
+            return Vec::new();
+        }
+        let diagnostics = match error {
+            ExecError::Smt(SmtError::Timeout(timeout)) => {
+                let diagnostic = isla_lib::timeout::TimeoutDiagnostic::Smt(timeout.clone());
+                drop(diagnostic.dump().materialize());
+                vec![(diagnostic, self.reporter.itrace_enabled())]
+            }
+            _ => Vec::new(),
+        };
+        self.reporter.report_error(self.clause, error);
+        diagnostics
+    }
+}
+
 fn should_collect_unfinished_path<B: BV>(run: &Run<B>) -> bool {
     !matches!(run, Run::Dead)
 }
@@ -149,6 +211,7 @@ pub fn solve_state_main<'ir, B: BV>(
     num_threads: usize,
     timeout: Option<u64>,
     execution_limits_config: Option<&ExecutionLimitsConfig>,
+    timeout_report_config: TimeoutReportConfig,
 ) -> bool {
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
@@ -206,6 +269,7 @@ pub fn solve_state_main<'ir, B: BV>(
     let num_clauses = clause_set.len();
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
     let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
+    let timeout_reporter = TimeoutReporter::new(timeout_report_config);
 
     for clause in clause_set {
         #[cfg(feature = "itrace")]
@@ -229,6 +293,7 @@ pub fn solve_state_main<'ir, B: BV>(
             num_threads,
             timeout,
             &execution_limits,
+            &timeout_reporter,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -287,6 +352,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     num_threads: usize,
     timeout: Option<u64>,
     execution_limits: &ExecutionLimits,
+    timeout_reporter: &TimeoutReporter,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -324,7 +390,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let cp = checkpoint(&mut solver);
 
     // 使用checkpoint执行函数，支持错误传播
-    let result: Arc<Mutex<AssemGenJson>> = Arc::new(Mutex::new(AssemGenJson::new(Vec::new())));
+    let result: Arc<Mutex<SolveCollectorState>> = Arc::new(Mutex::new(SolveCollectorState::new()));
 
     let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
 
@@ -337,20 +403,26 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         lets,
         &result,
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
-            match &exec_result {
-                Ok((Run::Finished(_), frame)) => {
-                    isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state);
+            let mut itrace_diagnostics = Vec::new();
+            let submit_itrace = |frame, diagnostics: &mut Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)>| {
+                isla_lib::executor::submit_itrace_for_local_frame_with_diagnostics(
+                    frame,
+                    shared_state,
+                    std::mem::take(diagnostics),
+                );
+            };
+            let error_recorder = ErrorRecorder { collected, reporter: timeout_reporter, clause: instruction_name };
+            let should_submit_itrace = match &exec_result {
+                Ok((Run::Finished(_), _)) => true,
+                Ok((run, _)) => should_collect_unfinished_path(run),
+                Err((ExecError::AssertionFailure(_, _), _)) => false,
+                Err((error, frame)) => {
+                    itrace_diagnostics = error_recorder.record_error_diagnostic(error, frame, shared_state);
+                    true
                 }
-                Ok((run, frame)) => {
-                    if should_collect_unfinished_path(run) {
-                        isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state);
-                    }
-                }
-                Err((ExecError::AssertionFailure(_, _), _)) => {}
-                Err((_, frame)) => isla_lib::executor::submit_itrace_for_local_frame(frame, shared_state),
-            }
+            };
 
-            match exec_result {
+            match &exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(Val::Poison) => {
                         log!(log::SYM_EXEC, &format!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_", instruction_name))
@@ -395,7 +467,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
-                        if solver.check_sat(SourceLoc::unknown()) == isla_lib::smt::SmtResult::Sat {
+                        let smt_result = solver.check_sat(SourceLoc::unknown());
+                        if let isla_lib::smt::SmtResult::Error(error) = &smt_result {
+                            let error = ExecError::Smt(error.clone());
+                            itrace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                            log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                        if smt_result == isla_lib::smt::SmtResult::Sat {
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
@@ -408,47 +488,100 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                 match model.get_val(&fun_args[0]) {
                                     Ok(arg_val) => {
-                                        let asm_opt = get_assembly_name(arg_val.clone(), shared_state, regs, lets);
+                                        let asm_opt =
+                                            match try_get_assembly_name(arg_val.clone(), shared_state, regs, lets) {
+                                                Ok(assembly) => assembly,
+                                                Err(error) => {
+                                                    itrace_diagnostics =
+                                                        error_recorder.record_configured_error_diagnostic(&error);
+                                                    log!(
+                                                        log::PATH_RESULT,
+                                                        &format!(
+                                                            "警告: clause{} 汇编名称求解失败 {:?}",
+                                                            instruction_name, error
+                                                        )
+                                                    );
+                                                    submit_itrace(frame, &mut itrace_diagnostics);
+                                                    return;
+                                                }
+                                            };
                                         log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
                                         match asm_opt {
                                             Some(asm) => test_ins = asm,
-                                            None => return,
+                                            None => {
+                                                submit_itrace(frame, &mut itrace_diagnostics);
+                                                return;
+                                            }
                                         }
                                         let asm_encdec_opt =
-                                            match get_assembly_encdec(arg_val.clone(), shared_state, regs, lets) {
-                                                Some(val) => match FmtVal::from_val(&val, &mut model) {
-                                                    Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
-                                                    Err(err) => {
-                                                        log!(
-                                                            log::PATH_RESULT,
-                                                            &format!(
-                                                                "警告: {}汇编编码不可格式化 {:?}",
-                                                                instruction_name, err
-                                                            )
-                                                        );
-                                                        None
-                                                    }
+                                            match try_get_assembly_encdec(arg_val.clone(), shared_state, regs, lets) {
+                                                Ok(encoded) => match encoded {
+                                                    Some(val) => match FmtVal::from_val(&val, &mut model) {
+                                                        Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
+                                                        Err(err) => {
+                                                            itrace_diagnostics = error_recorder
+                                                                .record_error_diagnostic(&err, frame, shared_state);
+                                                            log!(
+                                                                log::PATH_RESULT,
+                                                                &format!(
+                                                                    "警告: {}汇编编码不可格式化 {:?}",
+                                                                    instruction_name, err
+                                                                )
+                                                            );
+                                                            None
+                                                        }
+                                                    },
+                                                    None => None,
                                                 },
-                                                None => None,
+                                                Err(error) => {
+                                                    itrace_diagnostics =
+                                                        error_recorder.record_configured_error_diagnostic(&error);
+                                                    log!(
+                                                        log::PATH_RESULT,
+                                                        &format!(
+                                                            "警告: clause{} 汇编编码求解失败 {:?}",
+                                                            instruction_name, error
+                                                        )
+                                                    );
+                                                    submit_itrace(frame, &mut itrace_diagnostics);
+                                                    return;
+                                                }
                                             };
                                         log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
                                         match asm_encdec_opt {
                                             Some(encdec) => test_ins_encdec = encdec,
-                                            None => return,
+                                            None => {
+                                                submit_itrace(frame, &mut itrace_diagnostics);
+                                                return;
+                                            }
                                         }
                                     }
                                     Err(e) => {
+                                        itrace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&e, frame, shared_state);
                                         log!(
                                             log::PATH_RESULT,
                                             &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
                                         );
-                                        //*collected.lock().unwrap() = Err(e);
+                                        submit_itrace(frame, &mut itrace_diagnostics);
                                         return;
                                     }
                                 }
 
                                 // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
-                                isa_state.extend(target.solve_pre_state(&mut model, shared_state));
+                                match target.solve_pre_state(&mut model, shared_state) {
+                                    Ok(state) => isa_state.extend(state),
+                                    Err(error) => {
+                                        itrace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        log!(
+                                            log::PATH_RESULT,
+                                            &format!("警告: clause{} pre-state求解失败 {:?}", instruction_name, error)
+                                        );
+                                        submit_itrace(frame, &mut itrace_diagnostics);
+                                        return;
+                                    }
+                                }
 
                                 log!(
                                     log::PATH_RESULT,
@@ -527,8 +660,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         }
                         let single_instruction_json =
                             AssemGenJsonItem::new(target, test_ins, test_ins_encdec, isa_state, ret_val_str);
-                        let mut instruction_json = collected.lock().unwrap();
-                        instruction_json.gen.push(single_instruction_json);
+                        collected
+                            .lock()
+                            .expect("solve collector mutex poisoned")
+                            .json
+                            .gen
+                            .push(single_instruction_json);
                     }
                     Run::Exit => {
                         log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks()))
@@ -541,7 +678,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                     ),
                 },
                 Err((error, frame)) => {
-                    match &error {
+                    match error {
                         ExecError::MatchFailure(_) => {
                             // 静默处理
                         }
@@ -566,6 +703,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                     }
                 }
             }
+            if should_submit_itrace {
+                let frame = match &exec_result {
+                    Ok((_, frame)) | Err((_, frame)) => frame,
+                };
+                submit_itrace(frame, &mut itrace_diagnostics);
+            }
         },
         cp,
         num_threads,
@@ -574,13 +717,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     );
 
     // 提取字符串结果
-    if let Ok(result_mutex) = Arc::try_unwrap(result) {
-        let xlen_name_str = target.arch_pretty_name().to_string();
-        result_mutex.lock().unwrap().to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
-        Ok(None)
-    } else {
-        log!(log::SYM_EXEC, &format!("警告: {}无法获取 result 收集器", instruction_name));
-        Ok(None)
+    let result_mutex = match Arc::try_unwrap(result) {
+        Ok(result_mutex) => result_mutex,
+        Err(_) => panic!("{} 执行结束后 result 收集器仍有共享引用", instruction_name),
+    };
+    let xlen_name_str = target.arch_pretty_name().to_string();
+    let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
+    state.json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
+    match state.first_error {
+        Some(error) => Err(error),
+        None => Ok(None),
     }
 }
 
@@ -590,6 +736,57 @@ mod tests {
     use isla_lib::bitvector::b64::B64;
     use isla_lib::config::LimitBehaviorConfig;
     use isla_lib::source_loc::SourceRegion;
+    use isla_lib::timeout::{SmtDumpNames, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
+    use std::time::Duration;
+
+    struct NamesDump;
+
+    impl SmtDumpSource for NamesDump {
+        fn materialize(&self) -> Result<String, String> {
+            panic!("timeout dump test must materialize with configured names")
+        }
+
+        fn materialize_with_names(&self, names: &SmtDumpNames) -> Result<String, String> {
+            Ok(format!("{:?}", names))
+        }
+    }
+
+    #[test]
+    fn error_diagnostic_records_timeout_with_frame_names() {
+        let argument_text = zencode::encode("test_argument");
+        let function_text = zencode::encode("test_function");
+        let mut symtab = Symtab::new();
+        let argument = symtab.intern(&argument_text);
+        let function_name = symtab.intern(&function_text);
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let mut frame = LocalFrame::new(function_name, &[], &Ty::Unit, None, &instrs);
+        frame.vars_mut().insert(argument, UVal::Init(Val::Symbolic(Sym::from_u32(17))));
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: SourceLoc::unknown(),
+            operation: SmtOperation::CheckSat,
+            limit: Duration::from_secs(1),
+            operation_wall: Duration::from_secs(1),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
+        });
+        let error = ExecError::Smt(SmtError::Timeout(timeout.clone()));
+        let collected = Mutex::new(SolveCollectorState::new());
+        let reporter = TimeoutReporter::new(TimeoutReportConfig {
+            output: TimeoutSmtOutput::new(false, false, true),
+            directory: PathBuf::new(),
+        });
+
+        let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
+        let diagnostics = recorder.record_error_diagnostic(&error, &frame, &shared_state);
+
+        let state = collected.into_inner().unwrap();
+        let Some(ExecError::Smt(SmtError::Timeout(recorded))) = state.first_error else {
+            panic!("SMT timeout was not recorded")
+        };
+        assert!(Arc::ptr_eq(&recorded, &timeout));
+        assert_eq!(diagnostics.len(), 1);
+        assert!(timeout.dump.materialize().unwrap().contains("isla_test_argument__s17"));
+    }
 
     #[test]
     fn solve_execution_limits_use_local_sampling_as_primary_path_bound() {

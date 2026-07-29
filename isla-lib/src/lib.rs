@@ -62,6 +62,8 @@ pub mod register;
 pub mod simplify;
 pub mod smt;
 pub mod source_loc;
+pub mod timeout;
+pub mod timing;
 pub mod trace;
 pub mod tracetool;
 pub mod zencode;

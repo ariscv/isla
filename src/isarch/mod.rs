@@ -4,6 +4,7 @@ pub mod clause;
 pub mod exec;
 pub mod memory_builder;
 pub mod target;
+mod timeout_report;
 
 use crate::isarch::args::{ArgStruct, InstructionMap};
 use isla_lib::bitvector::BV;
@@ -20,6 +21,14 @@ use isla_lib::{ir::*, smt};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+fn configure_nested_timeout_smt_dump<'ir, B: BV>(
+    error: &ExecError,
+    frame: &LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+) {
+    frame.configure_timeout_smt_dump(error, shared_state);
+}
+
 /**
  * instruction list gen
  */
@@ -29,13 +38,22 @@ pub fn get_assembly_name<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Option<String> {
+    try_get_assembly_name(arg, shared_state, regs, lets)
+        .unwrap_or_else(|error| panic!("get_assembly_name failed: {}", error))
+}
+
+pub fn try_get_assembly_name<B: BV>(
+    arg: Val<B>,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Result<Option<String>, ExecError> {
     // 根据构造函数的参数类型生成默认值
     let arg_value = arg;
 
     // 执行 zassembly_forwards 函数
     // MatchFailure 错误会被 execute_ir_function 静默处理
-    let collected = None;
-    let collected = Arc::new(Mutex::new(collected));
+    let collected: Arc<Mutex<Option<Result<Val<B>, ExecError>>>> = Arc::new(Mutex::new(None));
     execute_ir_function(
         "zassembly_forwards",
         &[arg_value],
@@ -46,14 +64,22 @@ pub fn get_assembly_name<B: BV>(
         &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
             Ok((run, frame)) => {
                 if let Run::Finished(ret_val) = run {
-                    print_frame_args("zassembly_forwards", &frame, shared_state, solver);
-
-                    *collected.lock().unwrap() = Some(ret_val);
+                    match print_frame_args("zassembly_forwards", &frame, shared_state, solver) {
+                        Ok(()) => *collected.lock().unwrap() = Some(Ok(ret_val)),
+                        Err(error) => {
+                            configure_nested_timeout_smt_dump(&error, &frame, shared_state);
+                            *collected.lock().unwrap() = Some(Err(error));
+                        }
+                    }
                 }
             }
-            Err((error, frame)) => match &error {
+            Err((error, frame)) => match error {
                 ExecError::MatchFailure(_) => {}
-                _ => {
+                error @ (ExecError::Timeout | ExecError::Smt(_)) => {
+                    configure_nested_timeout_smt_dump(&error, &frame, shared_state);
+                    *collected.lock().unwrap() = Some(Err(error));
+                }
+                error => {
                     log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
                     log!(
                         log::SYM_EXEC,
@@ -63,14 +89,14 @@ pub fn get_assembly_name<B: BV>(
             },
         },
     );
-    let ret_val: Option<Val<B>> = collected.lock().unwrap().clone();
-    ret_val.and_then(|val| match val {
+    let ret_val = collected.lock().unwrap().take().transpose()?;
+    Ok(ret_val.and_then(|val| match val {
         Val::String(s) => Some(s),
         _ => {
             eprint!("Warning: get_assembly_name中，zassembly_forwards返回值非字符串");
             None
         }
-    })
+    }))
 }
 
 fn get_assembly_encdec_forwards<B: BV>(
@@ -79,8 +105,8 @@ fn get_assembly_encdec_forwards<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
-) -> Option<Val<B>> {
-    let collected = Arc::new(Mutex::new(None));
+) -> Result<Option<Val<B>>, ExecError> {
+    let collected: Arc<Mutex<Option<Result<Val<B>, ExecError>>>> = Arc::new(Mutex::new(None));
     execute_ir_function(
         function_name,
         &[arg],
@@ -91,13 +117,22 @@ fn get_assembly_encdec_forwards<B: BV>(
         &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
             Ok((run, frame)) => {
                 if let Run::Finished(ret_val) = run {
-                    print_frame_args(function_name, &frame, shared_state, solver);
-                    *collected.lock().unwrap() = Some(ret_val);
+                    match print_frame_args(function_name, &frame, shared_state, solver) {
+                        Ok(()) => *collected.lock().unwrap() = Some(Ok(ret_val)),
+                        Err(error) => {
+                            configure_nested_timeout_smt_dump(&error, &frame, shared_state);
+                            *collected.lock().unwrap() = Some(Err(error));
+                        }
+                    }
                 }
             }
-            Err((error, frame)) => match &error {
+            Err((error, frame)) => match error {
                 ExecError::MatchFailure(_) => {}
-                _ => {
+                error @ (ExecError::Timeout | ExecError::Smt(_)) => {
+                    configure_nested_timeout_smt_dump(&error, &frame, shared_state);
+                    *collected.lock().unwrap() = Some(Err(error));
+                }
+                error => {
                     log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
                     log!(
                         log::SYM_EXEC,
@@ -107,8 +142,8 @@ fn get_assembly_encdec_forwards<B: BV>(
             },
         },
     );
-    let ret_val = collected.lock().unwrap().clone();
-    ret_val
+    let result = collected.lock().unwrap().take().transpose();
+    result
 }
 
 pub fn get_assembly_encdec<B: BV>(
@@ -117,8 +152,20 @@ pub fn get_assembly_encdec<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Option<Val<B>> {
-    get_assembly_encdec_forwards("zencdec_forwards", arg.clone(), shared_state, regs, lets)
-        .or_else(|| get_assembly_encdec_forwards("zencdec_compressed_forwards", arg, shared_state, regs, lets))
+    try_get_assembly_encdec(arg, shared_state, regs, lets)
+        .unwrap_or_else(|error| panic!("get_assembly_encdec failed: {}", error))
+}
+
+pub fn try_get_assembly_encdec<B: BV>(
+    arg: Val<B>,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Result<Option<Val<B>>, ExecError> {
+    match get_assembly_encdec_forwards("zencdec_forwards", arg.clone(), shared_state, regs, lets)? {
+        Some(value) => Ok(Some(value)),
+        None => get_assembly_encdec_forwards("zencdec_compressed_forwards", arg, shared_state, regs, lets),
+    }
 }
 
 /// 根据类型生成默认值
@@ -192,13 +239,19 @@ fn print_frame_args<B: BV>(
     frame: &LocalFrame<B>,
     shared_state: &SharedState<B>,
     mut solver: Solver<B>,
-) {
+) -> Result<(), ExecError> {
     let mut found = false;
 
     // 首先调用 check_sat 来确保 solver 有可用的模型
-    if solver.check_sat(SourceLoc::unknown()) != isla_lib::smt::SmtResult::Sat {
-        dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
-        return;
+    match solver.check_sat(SourceLoc::unknown()) {
+        isla_lib::smt::SmtResult::Sat => (),
+        isla_lib::smt::SmtResult::Error(error) => {
+            return Err(ExecError::Smt(error));
+        }
+        isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => {
+            dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
+            return Ok(());
+        }
     }
 
     let mut model = Model::new(&solver);
@@ -231,6 +284,7 @@ fn print_frame_args<B: BV>(
                                     dlog!("    Sym({:?}) = Arbitrary ({:?})", sym, ty);
                                 }
                             },
+                            Err(e @ ExecError::Smt(_)) => return Err(e),
                             Err(e) => {
                                 dlog!("    Sym({:?}) = Error: {:?}", sym, e);
                             }
@@ -244,6 +298,7 @@ fn print_frame_args<B: BV>(
     if found {
         dlog!("==============================");
     }
+    Ok(())
 }
 
 /// 收集符号变量
@@ -535,7 +590,9 @@ pub fn get_assembly_names_all<B: BV>(
                             _task_id,
                             ret_val.clone().to_str_fmt(&shared_state)
                         );
-                        print_frame_args("zassembly_forwards", &frame, shared_state, solver);
+                        if let Err(error) = print_frame_args("zassembly_forwards", &frame, shared_state, solver) {
+                            log!(log::SYM_EXEC, &format!("zassembly_forwards 参数求解失败: {}", error));
+                        }
                         collected.lock().unwrap().push(ret_val.clone().to_str_fmt(&shared_state));
                         *result.lock().unwrap() = Some(ret_val);
                     }
@@ -985,4 +1042,50 @@ pub fn get_all_clause_names<B: BV>(shared_state: &SharedState<B>) -> Vec<String>
         return vec![];
     };
     union_members.iter().map(|(n, _)| shared_state.symtab.to_str(*n).to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isla_lib::bitvector::b64::B64;
+    use isla_lib::timeout::{SmtDumpNames, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
+    use std::time::Duration;
+
+    struct NamesTimeoutDump;
+
+    impl SmtDumpSource for NamesTimeoutDump {
+        fn materialize(&self) -> Result<String, String> {
+            panic!("timeout dump test must materialize with configured names")
+        }
+
+        fn materialize_with_names(&self, names: &SmtDumpNames) -> Result<String, String> {
+            Ok(format!("{:?}", names))
+        }
+    }
+
+    #[test]
+    fn nested_execution_timeout_uses_the_nested_frame_symbol_names() {
+        let nested_name_text = zencode::encode("nested_argument");
+        let function_text = zencode::encode("test_function");
+        let mut symtab = Symtab::new();
+        let nested_name = symtab.intern(&nested_name_text);
+        let function_name = symtab.intern(&function_text);
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let mut nested_frame = LocalFrame::new(function_name, &[], &Ty::Unit, None, &instrs);
+        nested_frame.vars_mut().insert(nested_name, UVal::Init(Val::Symbolic(Sym::from_u32(23))));
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: SourceLoc::unknown(),
+            operation: SmtOperation::CheckSat,
+            limit: Duration::from_secs(1),
+            operation_wall: Duration::from_secs(1),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesTimeoutDump))),
+        });
+        let error = ExecError::Smt(isla_lib::error::SmtError::Timeout(timeout.clone()));
+
+        configure_nested_timeout_smt_dump(&error, &nested_frame, &shared_state);
+
+        let dump = timeout.dump.materialize().unwrap();
+        assert!(dump.contains("isla_nested_argument__s23"));
+    }
 }

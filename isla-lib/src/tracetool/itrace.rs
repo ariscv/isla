@@ -1,6 +1,7 @@
 use crate::executor::Backtrace;
 use crate::ir::{Name, Symtab};
 use crate::smt::{smtlib, Sym};
+use crate::timeout::{PathTimeSnapshot, TimeoutDiagnostic};
 use crossbeam::queue::SegQueue;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -28,6 +29,59 @@ pub struct ItracePerInstr {
 pub(crate) struct ItracePerPath {
     records: Vec<ItracePerInstr>,
     branch_conditions: Vec<smtlib::Exp<Sym>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ItraceCompletedPath {
+    execution_trace: ItracePerPath,
+    completion_diagnostics: Vec<ItraceCompletionDiagnostic>,
+    path_timing: PathTimeSnapshot,
+}
+
+#[derive(Clone)]
+struct ItraceCompletionDiagnostic {
+    timeout: TimeoutDiagnostic,
+    include_smt_dump: bool,
+}
+
+impl ItraceCompletedPath {
+    pub(crate) fn new(execution_trace: ItracePerPath, completion_diagnostics: Vec<TimeoutDiagnostic>) -> Self {
+        ItraceCompletedPath {
+            execution_trace,
+            completion_diagnostics: completion_diagnostics
+                .into_iter()
+                .map(|timeout| ItraceCompletionDiagnostic { timeout, include_smt_dump: true })
+                .collect(),
+            path_timing: PathTimeSnapshot::default(),
+        }
+    }
+
+    pub(crate) fn with_timing(
+        execution_trace: ItracePerPath,
+        completion_diagnostics: Vec<TimeoutDiagnostic>,
+        path_timing: PathTimeSnapshot,
+    ) -> Self {
+        ItraceCompletedPath {
+            execution_trace,
+            completion_diagnostics: completion_diagnostics
+                .into_iter()
+                .map(|timeout| ItraceCompletionDiagnostic { timeout, include_smt_dump: true })
+                .collect(),
+            path_timing,
+        }
+    }
+
+    pub(crate) fn without_diagnostics(execution_trace: ItracePerPath) -> Self {
+        ItraceCompletedPath::new(execution_trace, Vec::new())
+    }
+
+    pub(crate) fn push_diagnostic_with_dump(&mut self, diagnostic: TimeoutDiagnostic, include_smt_dump: bool) {
+        self.completion_diagnostics.push(ItraceCompletionDiagnostic { timeout: diagnostic, include_smt_dump });
+    }
+
+    pub(crate) fn set_timing(&mut self, path_timing: PathTimeSnapshot) {
+        self.path_timing = path_timing;
+    }
 }
 
 impl ItracePerPath {
@@ -653,7 +707,7 @@ impl ItracePerPath {
         }
     }
 
-    fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
+    fn render_lines(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<Vec<String>> {
         handler.writer.output_path()?;
 
         let mut lines = Vec::new();
@@ -675,6 +729,49 @@ impl ItracePerPath {
             lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, ir_line));
         }
 
+        Some(lines)
+    }
+
+    fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
+        let mut lines = self.render_lines(handler, symtab)?;
+        lines.push(String::new());
+        lines.push("====".to_string());
+        Some(lines.join("\n"))
+    }
+}
+
+fn render_path_timing(lines: &mut Vec<String>, timing: crate::timeout::PathTimeSnapshot) {
+    crate::timeout::append_path_timing_lines(lines, timing);
+}
+
+fn render_timeout_diagnostic(lines: &mut Vec<String>, diagnostic: &ItraceCompletionDiagnostic) {
+    lines.push(String::new());
+    lines.push("---- completion diagnostic ----".to_string());
+    lines.extend(diagnostic.timeout.metadata_lines());
+    if !diagnostic.include_smt_dump {
+        return;
+    }
+    let dump = diagnostic.timeout.dump();
+
+    match dump.materialize() {
+        Ok(smt2) => {
+            lines.push("---- timeout smt2 begin ----".to_string());
+            lines.push(smt2.to_string());
+            lines.push("---- timeout smt2 end ----".to_string());
+        }
+        Err(error) => lines.push(format!("timeout_smt_dump_error: {}", error)),
+    }
+}
+
+impl ItraceCompletedPath {
+    fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
+        let mut lines = self.execution_trace.render_lines(handler, symtab)?;
+        lines.push(String::new());
+        lines.push("---- path timing ----".to_string());
+        render_path_timing(&mut lines, self.path_timing);
+        for diagnostic in &self.completion_diagnostics {
+            render_timeout_diagnostic(&mut lines, diagnostic);
+        }
         lines.push(String::new());
         lines.push("====".to_string());
         Some(lines.join("\n"))
@@ -683,7 +780,11 @@ impl ItracePerPath {
 
 impl ItraceHandler {
     /// Submit a finished itrace path; rendering and string queueing stay internal to itrace.
-    pub fn submit_path(&self, path: &ItracePerPath, symtab: &Symtab) {
+    pub(crate) fn submit_path(&self, path: &ItracePerPath, symtab: &Symtab) {
+        self.submit_completed_path(&ItraceCompletedPath::without_diagnostics(path.clone()), symtab);
+    }
+
+    pub(crate) fn submit_completed_path(&self, path: &ItraceCompletedPath, symtab: &Symtab) {
         if let Some(text) = path.render_text(self, symtab) {
             self.writer.submit_text(text);
         }
@@ -694,9 +795,114 @@ impl ItraceHandler {
 mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
+    use crate::timeout::{
+        PathTimeSnapshot, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutDiagnostic, TimeoutSmtDump,
+    };
     use crate::{ir, ir_lexer, ir_parser};
     use std::collections::HashSet;
     use std::panic::{self, AssertUnwindSafe};
+    use std::time::Duration;
+
+    struct FixedDump;
+
+    impl SmtDumpSource for FixedDump {
+        fn materialize(&self) -> Result<String, String> {
+            Ok("(check-sat)\n".to_string())
+        }
+    }
+
+    #[test]
+    fn completed_path_renders_path_wall_and_cpu_at_the_end() {
+        let shared_state = parse_shared_state();
+        let output_path = std::env::temp_dir().join(format!("itrace_completed_smt_timing_{}.txt", std::process::id()));
+        let handler =
+            ItraceHandler::init("SMT timing test", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
+        let mut execution_trace = ItracePerPath::default();
+        execution_trace.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
+        let completed = ItraceCompletedPath::with_timing(
+            execution_trace,
+            Vec::new(),
+            PathTimeSnapshot { active_wall: Duration::from_millis(19), executor_cpu: Duration::from_millis(7) },
+        );
+
+        let text = completed.render_text(&handler, &shared_state.symtab).unwrap();
+        let instruction = text.find("[zcache_ok 0]").unwrap();
+        let path_timing = text.find("---- path timing ----").unwrap();
+        assert!(instruction < path_timing);
+        assert!(text.contains("active_wall: 19ms"));
+        assert!(text.contains("executor_cpu: 7ms"));
+        assert!(text.ends_with("===="));
+
+        drop(handler);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn completed_path_renders_smt_timeout_metadata() {
+        let shared_state = parse_shared_state();
+        let output_path = std::env::temp_dir().join(format!("itrace_completed_smt_timeout_{}.txt", std::process::id()));
+        let handler =
+            ItraceHandler::init("SMT timeout test", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
+        let mut execution_trace = ItracePerPath::default();
+        execution_trace.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: crate::source_loc::SourceLoc::unknown(),
+            operation: SmtOperation::ModelEval,
+            limit: Duration::from_secs(2),
+            operation_wall: Duration::from_secs(2),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
+        });
+        let completed = ItraceCompletedPath::new(execution_trace, vec![TimeoutDiagnostic::Smt(timeout)]);
+
+        let text = completed.render_text(&handler, &shared_state.symtab).unwrap();
+
+        assert!(text.contains("operation: ModelEval"));
+        assert!(text.contains("limit: 2s"));
+        assert!(text.contains("operation_wall: 2s"));
+
+        drop(handler);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    struct PanicDump;
+
+    impl SmtDumpSource for PanicDump {
+        fn materialize(&self) -> Result<String, String> {
+            panic!("metadata-only itrace diagnostic materialized its SMT dump")
+        }
+    }
+
+    #[test]
+    fn metadata_only_timeout_diagnostic_does_not_materialize_smt() {
+        let shared_state = parse_shared_state();
+        let output_path =
+            std::env::temp_dir().join(format!("itrace_completed_metadata_only_{}.txt", std::process::id()));
+        let handler = ItraceHandler::init(
+            "SMT metadata-only test",
+            fixture_ir_path(),
+            Some(output_path.clone()),
+            &shared_state.symtab,
+        );
+        let mut execution_trace = ItracePerPath::default();
+        execution_trace.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: crate::source_loc::SourceLoc::unknown(),
+            operation: SmtOperation::ModelEval,
+            limit: Duration::from_secs(2),
+            operation_wall: Duration::from_secs(2),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(PanicDump))),
+        });
+        let mut completed = ItraceCompletedPath::without_diagnostics(execution_trace);
+        completed.push_diagnostic_with_dump(TimeoutDiagnostic::Smt(timeout), false);
+
+        let text = completed.render_text(&handler, &shared_state.symtab).unwrap();
+
+        assert!(text.contains("operation: ModelEval"));
+        assert!(!text.contains("---- timeout smt2 begin ----"));
+
+        drop(handler);
+        let _ = std::fs::remove_file(output_path);
+    }
 
     fn parse_shared_state() -> crate::ir::SharedState<'static, B64> {
         const IR_FIXTURE: &str = include_str!("../../tests/fixtures/ir_cache_assumption.ir");

@@ -113,7 +113,7 @@ where
         &self,
         model: &mut Model<'_, B>,
         shared_state: &SharedState<'state, B>,
-    ) -> BTreeMap<String, String> {
+    ) -> Result<BTreeMap<String, String>, ExecError> {
         let pre_state = self.pre_state();
         let symtab = &shared_state.symtab;
         let mut result = BTreeMap::new();
@@ -132,11 +132,14 @@ where
                     result.insert(reg_name, fmt_val.to_str(shared_state));
                 }
                 Err(e) => {
+                    if matches!(e, ExecError::Smt(_)) {
+                        return Err(e);
+                    }
                     log!(log::PATH_RESULT, &format!("警告: pre-state 寄存器 {} 无法求解: {:?}", reg_name, e));
                 }
             }
         }
-        result
+        Ok(result)
     }
 
     fn pre_state(&self) -> &PreStateCtx<B>;
@@ -391,7 +394,7 @@ impl<B: BV> RV64<B> {
     }
 
     pub fn sv48_vpn_indices(&self, va: u64) -> [u64; 4] {
-        [(va >> 12) & 0x1FF, (va >> 21) & 0x1FF, (va >> 39) & 0x1FF, (va >> 39) & 0x1FF]
+        [(va >> 12) & 0x1FF, (va >> 21) & 0x1FF, (va >> 30) & 0x1FF, (va >> 39) & 0x1FF]
     }
 }
 
