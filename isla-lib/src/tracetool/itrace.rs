@@ -36,6 +36,7 @@ pub(crate) struct ItraceCompletedPath {
     execution_trace: ItracePerPath,
     completion_diagnostics: Vec<ItraceCompletionDiagnostic>,
     path_timing: PathTimeSnapshot,
+    smtperf_summary: Option<String>,
 }
 
 #[derive(Clone)]
@@ -53,6 +54,7 @@ impl ItraceCompletedPath {
                 .map(|timeout| ItraceCompletionDiagnostic { timeout, include_smt_dump: true })
                 .collect(),
             path_timing: PathTimeSnapshot::default(),
+            smtperf_summary: None,
         }
     }
 
@@ -68,6 +70,7 @@ impl ItraceCompletedPath {
                 .map(|timeout| ItraceCompletionDiagnostic { timeout, include_smt_dump: true })
                 .collect(),
             path_timing,
+            smtperf_summary: None,
         }
     }
 
@@ -81,6 +84,10 @@ impl ItraceCompletedPath {
 
     pub(crate) fn set_timing(&mut self, path_timing: PathTimeSnapshot) {
         self.path_timing = path_timing;
+    }
+
+    pub(crate) fn set_smtperf_summary(&mut self, summary: Option<String>) {
+        self.smtperf_summary = summary;
     }
 }
 
@@ -769,6 +776,11 @@ impl ItraceCompletedPath {
         lines.push(String::new());
         lines.push("---- path timing ----".to_string());
         render_path_timing(&mut lines, self.path_timing);
+        if let Some(summary) = &self.smtperf_summary {
+            lines.push(String::new());
+            lines.push("---- smt performance ----".to_string());
+            lines.extend(summary.lines().map(str::to_string));
+        }
         for diagnostic in &self.completion_diagnostics {
             render_timeout_diagnostic(&mut lines, diagnostic);
         }
@@ -832,6 +844,29 @@ mod tests {
         assert!(text.contains("active_wall: 19ms"));
         assert!(text.contains("executor_cpu: 7ms"));
         assert!(text.ends_with("===="));
+
+        drop(handler);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn completed_path_renders_smtperf_summary() {
+        let shared_state = parse_shared_state();
+        let output_path = std::env::temp_dir().join(format!("itrace_completed_smtperf_{}.txt", std::process::id()));
+        let handler =
+            ItraceHandler::init("SMT perf test", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
+        let mut execution_trace = ItracePerPath::default();
+        execution_trace.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 0);
+        let mut completed = ItraceCompletedPath::without_diagnostics(execution_trace);
+        completed.set_smtperf_summary(Some(
+            "SMT 未超时求解耗时样本总数: 1\nSMT 最慢 #1: 7us, operation: CheckSat\n".to_string(),
+        ));
+
+        let text = completed.render_text(&handler, &shared_state.symtab).unwrap();
+
+        assert!(text.contains("---- smt performance ----"));
+        assert!(text.contains("SMT 未超时求解耗时样本总数: 1"));
+        assert!(text.contains("SMT 最慢 #1: 7us, operation: CheckSat"));
 
         drop(handler);
         let _ = std::fs::remove_file(output_path);
