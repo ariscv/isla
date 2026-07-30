@@ -2078,6 +2078,10 @@ pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
     shared_state: &SharedState<'ir, B>,
     diagnostics: Vec<(crate::timeout::TimeoutDiagnostic, bool)>,
 ) {
+    let smtperf_summary = crate::smt::take_smtperf_report();
+    if let Some(summary) = &smtperf_summary {
+        eprint!("{}", summary);
+    }
     #[cfg(feature = "tracetool")]
     {
         for (diagnostic, _) in &diagnostics {
@@ -2092,10 +2096,11 @@ pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
             completed.push_diagnostic_with_dump(diagnostic, include_smt_dump);
         }
         completed.set_timing(frame.path_time_snapshot());
+        completed.set_smtperf_summary(smtperf_summary);
         shared_state.itrace.submit_completed_path(&completed, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
-    let _ = (frame, shared_state, diagnostics);
+    let _ = (frame, shared_state, diagnostics, smtperf_summary);
 }
 
 pub fn submit_itrace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {

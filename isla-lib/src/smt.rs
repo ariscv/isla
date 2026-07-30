@@ -2013,7 +2013,7 @@ impl SmtResult {
     }
 }
 
-static QFAUFBV_STR: &[u8] = b"qfaufbv\0";
+static TASTIC_STR: &[u8] = b"default\0";
 static SEED_STR: &[u8] = b"seed\0";
 static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
 
@@ -2046,7 +2046,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             // The QF_AUFBV solver has good performance on our problems, but we need to initialise it
             // using a tactic rather than the logic name to ensure that the enumerations are supported,
             // otherwise Z3 may crash.
-            let qfaufbv_tactic = Z3_mk_tactic(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(QFAUFBV_STR).as_ptr());
+            let qfaufbv_tactic = Z3_mk_tactic(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(TASTIC_STR).as_ptr());
             Z3_tactic_inc_ref(ctx.z3_ctx, qfaufbv_tactic);
             let z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, qfaufbv_tactic);
             Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
@@ -2596,6 +2596,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         cs.to_string_lossy().to_string()
     }
+}
+
+pub(crate) fn take_smtperf_report() -> Option<String> {
+    #[cfg(feature = "smtperf")]
+    {
+        Some(z3_timeout::take_smtperf_report())
+    }
+    #[cfg(not(feature = "smtperf"))]
+    None
 }
 
 pub fn checkpoint<B: BV>(solver: &mut Solver<B>) -> Checkpoint<B> {

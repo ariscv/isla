@@ -3,11 +3,13 @@
 //! 前半部分封装 thread-interrupt 状态与 watchdog；后半部分集中封装所有受保护的
 //! `Z3_*` 调用。local/thread-interrupt 的执行差异只在这些 wrapper 内选择。
 
+#[cfg(feature = "smtperf")]
+use std::cell::RefCell;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-#[cfg(feature = "smt-thread-interrupt")]
+#[cfg(any(feature = "smt-thread-interrupt", feature = "smtperf"))]
 use std::time::Instant;
 
 use z3_sys::{
@@ -49,6 +51,70 @@ impl Z3InterruptHandle {
 }
 
 static OPERATION_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+
+// 修改这个值即可同时调整最慢和最快求解耗时的输出条数。
+#[cfg(feature = "smtperf")]
+const SMTPERF_EXTREME_COUNT: usize = 3;
+
+#[cfg(feature = "smtperf")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct SmtSolveTiming {
+    operation: SmtOperation,
+    duration: Duration,
+}
+
+#[cfg(feature = "smtperf")]
+thread_local! {
+    static SMT_SOLVE_TIMINGS: RefCell<Vec<SmtSolveTiming>> = RefCell::new(Vec::new());
+}
+
+#[cfg(feature = "smtperf")]
+fn record_solve_result<T>(operation: SmtOperation, duration: Duration, result: &Result<T, Z3TimeoutError>) {
+    if result.is_ok() {
+        SMT_SOLVE_TIMINGS.with(|timings| timings.borrow_mut().push(SmtSolveTiming { operation, duration }));
+    }
+}
+
+#[cfg(feature = "smtperf")]
+fn solve_timing_extremes(timings: &[SmtSolveTiming], count: usize) -> (Vec<&SmtSolveTiming>, Vec<&SmtSolveTiming>) {
+    let mut sorted: Vec<_> = timings.iter().collect();
+    sorted.sort_by_key(|timing| timing.duration);
+
+    let fastest = sorted.iter().take(count).copied().collect();
+    let slowest = sorted.iter().rev().take(count).copied().collect();
+    (slowest, fastest)
+}
+
+#[cfg(feature = "smtperf")]
+fn solve_timing_report(timings: &[SmtSolveTiming]) -> String {
+    let (slowest, fastest) = solve_timing_extremes(timings, SMTPERF_EXTREME_COUNT);
+    let mut msg = format!("SMT 未超时求解耗时样本总数: {}\n", timings.len());
+
+    for (index, timing) in slowest.iter().enumerate() {
+        msg += &format!(
+            "SMT 最慢 #{}: {}us, operation: {:?}\n",
+            index + 1,
+            timing.duration.as_micros(),
+            timing.operation,
+        );
+    }
+    for (index, timing) in fastest.iter().enumerate() {
+        msg += &format!(
+            "SMT 最快 #{}: {}us, operation: {:?}\n",
+            index + 1,
+            timing.duration.as_micros(),
+            timing.operation,
+        );
+    }
+
+    msg
+}
+
+#[cfg(feature = "smtperf")]
+pub(super) fn take_smtperf_report() -> String {
+    let timings = SMT_SOLVE_TIMINGS.with(|timings| std::mem::take(&mut *timings.borrow_mut()));
+    solve_timing_report(&timings)
+}
 
 #[cfg(feature = "smt-thread-interrupt")]
 fn operation_timeout() -> Duration {
@@ -156,6 +222,14 @@ fn thread_interrupt_call_with_timeout<T>(
 }
 
 macro_rules! interruptible_z3_call {
+    ($operation:expr, $context:expr, $call:expr) => {{
+        #[cfg(feature = "smtperf")]
+        let started = Instant::now();
+        let result = interruptible_z3_call!($context, $call);
+        #[cfg(feature = "smtperf")]
+        record_solve_result($operation, started.elapsed(), &result);
+        result
+    }};
     ($context:expr, $call:expr) => {{
         #[cfg(feature = "smt-thread-interrupt")]
         {
@@ -170,7 +244,7 @@ macro_rules! interruptible_z3_call {
 
 #[allow(non_snake_case)]
 pub(super) fn timeout_Z3_solver_check(context: Z3_context, solver: Z3_solver) -> Result<Z3_lbool, Z3TimeoutError> {
-    interruptible_z3_call!(context, unsafe { Z3_solver_check(context, solver) })
+    interruptible_z3_call!(SmtOperation::CheckSat, context, unsafe { Z3_solver_check(context, solver) })
 }
 
 #[allow(non_snake_case)]
@@ -180,7 +254,7 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
     assumptions: &[Z3_ast],
 ) -> Result<Z3_lbool, Z3TimeoutError> {
     let count = assumptions.len().try_into().expect("too many Z3 check assumptions");
-    interruptible_z3_call!(context, unsafe {
+    interruptible_z3_call!(SmtOperation::CheckSatAssuming, context, unsafe {
         Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
     })
 }
@@ -193,7 +267,9 @@ pub(super) fn timeout_Z3_model_eval(
     model_completion: bool,
     result: &mut Z3_ast,
 ) -> Result<bool, Z3TimeoutError> {
-    interruptible_z3_call!(context, unsafe { Z3_model_eval(context, model, ast, model_completion, result) })
+    interruptible_z3_call!(SmtOperation::ModelEval, context, unsafe {
+        Z3_model_eval(context, model, ast, model_completion, result)
+    })
 }
 
 #[cfg(all(test, not(feature = "smt-thread-interrupt")))]
@@ -236,5 +312,67 @@ mod tests {
         });
         assert_eq!(result, Err(Z3TimeoutError::Interrupted));
         assert!(started.elapsed() >= Duration::from_millis(40));
+    }
+}
+
+#[cfg(all(test, feature = "smtperf"))]
+mod smtperf_tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::smtlib::Exp;
+    use crate::smt::{Config, Context, SmtResult, Solver};
+    use z3_sys::Z3_L_TRUE;
+
+    #[test]
+    fn smtperf_wrapper_only_records_completed_solve_times() {
+        let completed = Ok(Z3_L_TRUE);
+        let timed_out: Result<Z3_lbool, Z3TimeoutError> = Err(Z3TimeoutError::Interrupted);
+
+        record_solve_result(SmtOperation::CheckSat, Duration::from_millis(7), &completed);
+        record_solve_result(SmtOperation::CheckSatAssuming, Duration::from_secs(10), &timed_out);
+
+        let report = take_smtperf_report();
+        assert!(report.contains("SMT 未超时求解耗时样本总数: 1"));
+        assert!(report.contains("7000us"));
+        assert!(!report.contains("10000000us"));
+    }
+
+    #[test]
+    fn smtperf_wrapper_selects_requested_slowest_and_fastest_solve_times() {
+        let timings: Vec<_> = [9, 1, 7, 3, 5, 2, 8]
+            .into_iter()
+            .map(|millis| SmtSolveTiming { operation: SmtOperation::CheckSat, duration: Duration::from_millis(millis) })
+            .collect();
+
+        let (slowest, fastest) = solve_timing_extremes(&timings, 3);
+        let slowest: Vec<_> = slowest.iter().map(|timing| timing.duration.as_millis()).collect();
+        let fastest: Vec<_> = fastest.iter().map(|timing| timing.duration.as_millis()).collect();
+
+        assert_eq!(slowest, vec![9, 8, 7]);
+        assert_eq!(fastest, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn smtperf_generic_wrapper_records_operation() {
+        let result = interruptible_z3_call!(SmtOperation::ModelEval, std::ptr::null_mut(), true);
+
+        assert_eq!(result, Ok(true));
+        let report = take_smtperf_report();
+        assert!(report.contains("SMT 未超时求解耗时样本总数: 1"));
+        assert!(report.contains("operation: ModelEval"));
+    }
+
+    #[test]
+    fn smtperf_solver_wrapper_collects_check_sat() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        assert_eq!(solver.check_sat_with(&Exp::Bool(true), SourceLoc::unknown()), SmtResult::Sat);
+
+        let report = take_smtperf_report();
+        assert!(report.contains("SMT 未超时求解耗时样本总数: 2"));
+        assert!(report.contains("operation: CheckSat"));
+        assert!(report.contains("operation: CheckSatAssuming"));
     }
 }
