@@ -999,6 +999,28 @@ pub struct ExecutionLimitsConfig {
     pub branch_sampling_seed: Option<u64>,
     pub on_limit_reached: Option<LimitBehaviorConfig>,
     pub regions: Option<Vec<SourceRegionSpec>>,
+    pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
+    pub region_fork_limits: Option<Vec<RegionForkLimitConfig>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRegionLimitConfig {
+    pub max_forks_per_branch: u32,
+    pub region: SourceRegionSpec,
+}
+
+/// 一条路径在整段源码区间内总共允许的 fork 次数。与 `BranchRegionLimitConfig` 的区别是
+/// 预算由区间内所有分支点共享，因此能压住 `match` 链这种"每个 arm 判定都是独立分支点"的
+/// 展开：预算 N 对应 N+1 个取值。
+///
+/// `sample_bias` 是可选的具体化方向偏置 `(分母, 方向)`：预算耗尽后的具体化抽样默认是 50/50，
+/// 配了偏置就只有 `1/分母` 的路径会抽到指定方向。方向 `true` = 跳转到 target，
+/// `false` = 顺序执行下一条。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionForkLimitConfig {
+    pub max_forks_per_region: u32,
+    pub sample_bias: Option<(u32, bool)>,
+    pub region: SourceRegionSpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1040,6 +1062,44 @@ fn required_u16(table: &toml::value::Table, key: &str, root: &str) -> Result<u16
     u16::try_from(value).map_err(|_| format!("{}.{} 超出 u16 范围", root, key))
 }
 
+/// 解析具体化抽样的方向偏置 `(分母, 方向)`；两个字段要么都配、要么都不配。
+///
+/// 偏置的作用是：一侧注定通向无趣结果（例如 `return Illegal_Instruction()`）的分支点上，
+/// 默认的 50/50 抽样会把一半路径白白送过去；配 `sample_bias = 16` 之后只有 1/16 会过去。
+/// 方向必须显式写，因为抽样器不理解语义——写错的后果只是被压制的那类结果变多，
+/// 跑一轮看条数就能发现并翻转（不会丢失路径，见 `SampleBias` 的文档）。
+fn sample_bias(table: &toml::value::Table, root: &str) -> Result<Option<(u32, bool)>, String> {
+    let denominator = optional_u32(table, "sample_bias", root)?;
+    let direction = table
+        .get("sample_bias_direction")
+        .map(|value| match value.as_str() {
+            Some("jump") => Ok(true),
+            Some("fallthrough") => Ok(false),
+            _ => Err(format!("{}.sample_bias_direction 必须是 jump 或 fallthrough", root)),
+        })
+        .transpose()?;
+
+    match (denominator, direction) {
+        (Some(denominator), Some(direction)) => {
+            if denominator < 2 {
+                return Err(format!("{}.sample_bias 必须 >= 2：1 表示每条路径都抽到该方向，等于没有偏置", root));
+            }
+            Ok(Some((denominator, direction)))
+        }
+        (None, None) => Ok(None),
+        _ => Err(format!("{}.sample_bias 与 {}.sample_bias_direction 必须同时配置", root, root)),
+    }
+}
+
+fn source_region_spec(table: &toml::value::Table, root: &str) -> Result<SourceRegionSpec, String> {
+    let file = table.get("file").and_then(Value::as_str).ok_or_else(|| format!("{}.file 是必填字符串", root))?;
+    Ok(SourceRegionSpec::new(
+        file,
+        (required_u32(table, "start_line", root)?, required_u16(table, "start_column", root)?),
+        (required_u32(table, "end_line", root)?, required_u16(table, "end_column", root)?),
+    ))
+}
+
 fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsConfig>, String> {
     let Some(value) = config.get("execution_limits") else { return Ok(None) };
     let Some(table) = value.as_table() else { return Err("[execution_limits] 必须是 TOML table".to_string()) };
@@ -1058,6 +1118,8 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "branch_sampling_seed",
             "on_limit_reached",
             "regions",
+            "branch_region_limits",
+            "region_fork_limits",
         ],
     )?;
 
@@ -1108,15 +1170,73 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
                         &root,
                         &["file", "start_line", "start_column", "end_line", "end_column"],
                     )?;
-                    let file = table
-                        .get("file")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| format!("{}.file 是必填字符串", root))?;
-                    Ok(SourceRegionSpec::new(
-                        file,
-                        (required_u32(table, "start_line", &root)?, required_u16(table, "start_column", &root)?),
-                        (required_u32(table, "end_line", &root)?, required_u16(table, "end_column", &root)?),
-                    ))
+                    source_region_spec(table, &root)
+                })
+                .collect()
+        })
+        .transpose()?;
+
+    let branch_region_limits = table
+        .get("branch_region_limits")
+        .map(|value| {
+            let limits =
+                value.as_array().ok_or_else(|| "execution_limits.branch_region_limits 必须是数组".to_string())?;
+            if limits.is_empty() {
+                return Err("execution_limits.branch_region_limits 不能为空".to_string());
+            }
+            limits
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let root = format!("execution_limits.branch_region_limits[{}]", index);
+                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
+                    allowed_table_keys(
+                        table,
+                        &root,
+                        &["max_forks_per_branch", "file", "start_line", "start_column", "end_line", "end_column"],
+                    )?;
+                    Ok(BranchRegionLimitConfig {
+                        max_forks_per_branch: required_u32(table, "max_forks_per_branch", &root)?,
+                        region: source_region_spec(table, &root)?,
+                    })
+                })
+                .collect()
+        })
+        .transpose()?;
+
+    let region_fork_limits = table
+        .get("region_fork_limits")
+        .map(|value| {
+            let limits =
+                value.as_array().ok_or_else(|| "execution_limits.region_fork_limits 必须是数组".to_string())?;
+            if limits.is_empty() {
+                return Err("execution_limits.region_fork_limits 不能为空".to_string());
+            }
+            limits
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let root = format!("execution_limits.region_fork_limits[{}]", index);
+                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
+                    allowed_table_keys(
+                        table,
+                        &root,
+                        &[
+                            "max_forks_per_region",
+                            "sample_bias",
+                            "sample_bias_direction",
+                            "file",
+                            "start_line",
+                            "start_column",
+                            "end_line",
+                            "end_column",
+                        ],
+                    )?;
+                    Ok(RegionForkLimitConfig {
+                        max_forks_per_region: required_u32(table, "max_forks_per_region", &root)?,
+                        sample_bias: sample_bias(table, &root)?,
+                        region: source_region_spec(table, &root)?,
+                    })
                 })
                 .collect()
         })
@@ -1135,6 +1255,8 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         branch_sampling_seed: optional_u64(table, "branch_sampling_seed", "execution_limits")?,
         on_limit_reached,
         regions,
+        branch_region_limits,
+        region_fork_limits,
     }))
 }
 
@@ -1410,6 +1532,84 @@ mod tests {
                 SourceRegionSpec::new("sys/vmem_utils.sail", (146, 2), (171, 0)),
             ])
         );
+    }
+
+    #[test]
+    fn execution_limits_config_parses_narrow_branch_region_limits() {
+        let value = r#"
+            [execution_limits]
+            max_forks_per_branch = 2
+            on_limit_reached = "concretize"
+
+            [[execution_limits.branch_region_limits]]
+            max_forks_per_branch = 1
+            file = "extensions/V/vext_control.sail"
+            start_line = 29
+            start_column = 2
+            end_line = 35
+            end_column = 3
+
+            [[execution_limits.branch_region_limits]]
+            max_forks_per_branch = 1
+            file = "extensions/V/vext_utils_insts.sail"
+            start_line = 729
+            start_column = 2
+            end_line = 750
+            end_column = 1
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let config = get_execution_limits_config(&value).unwrap().unwrap();
+
+        assert_eq!(
+            config.branch_region_limits,
+            Some(vec![
+                BranchRegionLimitConfig {
+                    max_forks_per_branch: 1,
+                    region: SourceRegionSpec::new("extensions/V/vext_control.sail", (29, 2), (35, 3)),
+                },
+                BranchRegionLimitConfig {
+                    max_forks_per_branch: 1,
+                    region: SourceRegionSpec::new("extensions/V/vext_utils_insts.sail", (729, 2), (750, 1)),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn execution_limits_config_parses_region_fork_limits() {
+        let value = r#"
+            [execution_limits]
+            max_forks_per_branch = 1
+            on_limit_reached = "concretize"
+
+            [[execution_limits.region_fork_limits]]
+            max_forks_per_region = 1
+            file = "extensions/V/vext_control.sail"
+            start_line = 29
+            start_column = 2
+            end_line = 35
+            end_column = 3
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let config = get_execution_limits_config(&value).unwrap().unwrap();
+
+        assert_eq!(
+            config.region_fork_limits,
+            Some(vec![RegionForkLimitConfig {
+                max_forks_per_region: 1,
+                sample_bias: None,
+                region: SourceRegionSpec::new("extensions/V/vext_control.sail", (29, 2), (35, 3)),
+            }])
+        );
+    }
+
+    #[test]
+    fn execution_limits_config_rejects_empty_region_fork_limits() {
+        let value = "[execution_limits]\nregion_fork_limits = []".parse::<Value>().unwrap();
+        let error = get_execution_limits_config(&value).unwrap_err();
+        assert!(error.contains("execution_limits.region_fork_limits 不能为空"), "{}", error);
     }
 
     #[test]
