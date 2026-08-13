@@ -806,57 +806,72 @@ fn smt_i128_width<V>(value: i128, width: u32) -> Option<Exp<V>> {
     }
 }
 
+/// 把模型里的位向量按二进制补码还原成 i128，是 `smt_i128_width` 的逆运算。
+fn i128_from_model_bits(bits: &[bool]) -> Option<i128> {
+    let width = bits.len();
+    if width == 0 || width > 128 {
+        return None;
+    }
+    let mut value: i128 = 0;
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit {
+            value |= 1_i128 << index
+        }
+    }
+    // 位宽不足 128 时最高位是符号位，需要手工符号扩展。
+    if width < 128 && bits[width - 1] {
+        value |= -1_i128 << width
+    }
+    Some(value)
+}
+
+/// 只有当前路径约束已经把 `sym` 钉成唯一常量时，才把它具体化成 i128。
+///
+/// 判定方式是"取一个模型值 `v`，再问 solver `sym != v` 是否不可满足"：不可满足说明所有
+/// 可行模型都必须让 `sym == v`，可以安全具体化；可满足说明还存在别的取值，必须保持符号量。
+/// 整个判定固定只用 1 次 check-sat + 1 次模型求值 + 1 次 check-sat-assuming。
+///
+/// 历史实现是逐个枚举候选常量（72 个常用值再加上 `0..=512` 的全部整数）各问一次 solver。
+/// 对向量元素这类永远证明不出唯一值的符号量，那 515 次查询全部落空；而 `max_int`/`min_int`
+/// 要对两个参数各做一次，于是逐 lane 的 `max(signed(a), signed(b))` 一次就是上千次 check-sat，
+/// 实测让 VMIN/VMAX 这几条指令的路径撞满 30m 单路径预算。改成模型法后不再受候选集合限制，
+/// 超过 512 或很大的负数同样能被证明。
 pub(crate) fn proven_symbolic_i128<B: BV>(
     sym: Sym,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
-    // 证明时只枚举这里列出的常见整数。把 0、1、2、4、8、16、32、64、
-    // 128 等宽度/元素个数常用值放在前面，可以让 SEW、VLEN、num_elem 这类
-    // 已经被 assert 成单一常量的符号值更快命中，减少不必要的 SAT 查询。
-    const CANDIDATES: &[i128] = &[
-        0, 1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22,
-        23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
-        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, -3, -2, -1,
-    ];
 
-    // 这里只把“在当前路径约束下已经被证明为唯一常量”的 symbolic int
-    // 转成 i128。判断方式不是找一个可满足的值，而是逐个候选值问 solver：
-    // `sym != candidate` 是否不可满足。如果不可满足，说明所有当前可行模型
-    // 都必须满足 `sym == candidate`，因此可以安全返回 Some(candidate)。
-    // `find` 会从前往后测试候选值，并在第一次返回 true 时短路；这个短路
-    // 只有在已经证明当前候选是唯一可能值时才发生。
-    //
-    // 例如当前路径已经 assert(sym == 8)，检查 `sym != 8` 会得到 Unsat，
-    // 函数返回 Some(8)。如果当前路径只是 assert(sym == 1 | sym == 2)，
-    // 那么 `sym != 1` 可由 sym=2 满足，`sym != 2` 也可由 sym=1 满足，
-    // 两次查询都会返回 Sat，闭包返回 false，不会触发 find 短路，因此不会
-    // 误选其中一个值，最终返回 None。
-    for candidate in CANDIDATES.iter().copied().chain((0..=512).filter(|candidate| !CANDIDATES.contains(candidate))) {
-        // 这个闭包是 `find` 的判定谓词：输入一个候选整数，输出它是否已经
-        // 被当前路径约束证明为 sym 的唯一取值。整体流程是：
-        // 1. 先把 candidate 编码成和 sym 相同位宽的 SMT bitvector 常量；
-        // 2. 再向 solver 查询 `sym != candidate` 在当前路径条件下是否可满足；
-        // 3. 若不可满足(Unsat)，说明 sym 不可能不是 candidate，即 candidate
-        //    是唯一值，闭包返回 true，find 立即返回 Some(candidate)；
-        // 4. 若可满足(Sat)或未知(Unknown)，说明还不能安全具体化为该候选值，
-        //    闭包返回 false，find 继续尝试下一个 candidate。
-        // 候选值必须能用 sym 当前的 SMT 位宽表示；例如过窄位宽无法表示
-        // 某些较大的正数时，直接跳过这个候选。
-        let candidate_exp = match smt_i128_width(candidate, width) {
-            Some(exp) => exp,
-            None => continue,
-        };
-        // 只有 `sym != candidate` 在当前路径条件下不可满足，才表示 candidate
-        // 是唯一可能值。Sat 表示还存在别的可能值，Unknown 也不能安全具体化。
-        match solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(sym)), Box::new(candidate_exp)), info) {
-            SmtResult::Unsat => return Ok(Some(candidate)),
-            SmtResult::Sat | SmtResult::Unknown => (),
-            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
-        }
+    // 取模型前必须先 check-sat；路径已经不可满足时没有模型可取，保持符号量交给调用方。
+    match solver.check_sat(info) {
+        SmtResult::Sat => (),
+        SmtResult::Unsat | SmtResult::Unknown => return Ok(None),
+        SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
-    Ok(None)
+
+    let candidate = {
+        let mut model = Model::new(solver);
+        match model.get_var(sym)? {
+            ModelVal::Exp(Exp::Bits64(bv)) => bv.signed(),
+            ModelVal::Exp(Exp::Bits(bits)) => match i128_from_model_bits(&bits) {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            // 模型没有给它赋值，说明当前约束根本没限制它，不可能唯一。
+            ModelVal::Arbitrary(_) => return Ok(None),
+            // 非位向量的模型值不属于 i128 具体化的范畴。
+            ModelVal::Exp(_) => return Ok(None),
+        }
+    };
+
+    let Some(candidate_exp) = smt_i128_width(candidate, width) else { return Ok(None) };
+    // Unsat 表示 sym 不可能取别的值；Sat 表示还有别的取值，Unknown 同样不能安全具体化。
+    match solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(sym)), Box::new(candidate_exp)), info) {
+        SmtResult::Unsat => Ok(Some(candidate)),
+        SmtResult::Sat | SmtResult::Unknown => Ok(None),
+        SmtResult::Error(error) => Err(ExecError::Smt(error)),
+    }
 }
 
 fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
@@ -4542,6 +4557,70 @@ mod tests {
             Val::Symbolic(_) => Ok(()),
             value => panic!("expected non-constant equality under one-of constraint, got {:?}", value),
         }
+    }
+
+    /// 模型法不再受候选常量集合限制：以前只枚举 0..=512 等值，超出范围或很大的负数
+    /// 即使已经被路径约束钉死也证明不出来。
+    #[test]
+    fn proven_symbolic_i128_concretizes_values_outside_the_old_candidate_range() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let large = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let negative = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let narrow = solver.declare_const(Ty::BitVec(64), SourceLoc::unknown());
+        solver.assert_eq(Exp::Var(large), smt_i128(70_000));
+        solver.assert_eq(Exp::Var(negative), smt_i128(-4_096));
+        solver.assert_eq(Exp::Var(narrow), Exp::Bits64(B64::new(-7_i64 as u64, 64)));
+
+        assert_eq!(proven_symbolic_i128(large, &mut solver, SourceLoc::unknown())?, Some(70_000));
+        assert_eq!(proven_symbolic_i128(negative, &mut solver, SourceLoc::unknown())?, Some(-4_096));
+        assert_eq!(proven_symbolic_i128(narrow, &mut solver, SourceLoc::unknown())?, Some(-7));
+
+        Ok(())
+    }
+
+    /// 只要还存在第二个可行取值就必须保持符号量；完全没有约束的符号量同理。
+    #[test]
+    fn proven_symbolic_i128_keeps_values_that_are_not_pinned_down() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let two_valued = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let free = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        solver.assert(Exp::Or(
+            Box::new(Exp::Eq(Box::new(Exp::Var(two_valued)), Box::new(smt_i128(70_000)))),
+            Box::new(Exp::Eq(Box::new(Exp::Var(two_valued)), Box::new(smt_i128(70_001)))),
+        ));
+
+        assert_eq!(proven_symbolic_i128(two_valued, &mut solver, SourceLoc::unknown())?, None);
+        assert_eq!(proven_symbolic_i128(free, &mut solver, SourceLoc::unknown())?, None);
+
+        Ok(())
+    }
+
+    /// 证明不出唯一值时的查询次数必须是常数级：这正是逐 lane 的 `min`/`max` 会不会
+    /// 把单路径预算耗光的关键。
+    #[test]
+    fn proven_symbolic_i128_uses_a_constant_number_of_queries() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let vs1 = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let vs2 = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+
+        crate::smt::reset_path_smt_stats();
+        assert_eq!(proven_symbolic_i128(vs1, &mut solver, SourceLoc::unknown())?, None);
+        let one_proof = crate::smt::path_smt_stats().calls;
+        assert!(one_proof <= 4, "证明失败时用了 {} 次求解", one_proof);
+
+        // max_int 会对两个参数各做一次具体化，逐 lane 调用时这里的常数就是路径预算的关键。
+        crate::smt::reset_path_smt_stats();
+        let _ = max_int(Val::Symbolic(vs1), Val::Symbolic(vs2), &mut solver, SourceLoc::unknown())?;
+        let max_calls = crate::smt::path_smt_stats().calls;
+        assert!(max_calls <= 8, "一次 max_int 用了 {} 次求解", max_calls);
+
+        Ok(())
     }
 
     #[test]
