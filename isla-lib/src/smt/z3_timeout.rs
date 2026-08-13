@@ -3,13 +3,11 @@
 //! 前半部分封装 thread-interrupt 状态与 watchdog；后半部分集中封装所有受保护的
 //! `Z3_*` 调用。local/thread-interrupt 的执行差异只在这些 wrapper 内选择。
 
-#[cfg(feature = "smtperf")]
 use std::cell::RefCell;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-#[cfg(any(feature = "smt-thread-interrupt", feature = "smtperf"))]
 use std::time::Instant;
 
 use z3_sys::{
@@ -20,7 +18,7 @@ use crate::error::SmtError;
 use crate::source_loc::SourceLoc;
 #[cfg(feature = "smt-thread-interrupt")]
 use crate::timeout::SmtTimeout;
-use crate::timeout::{SmtOperation, TimeoutSmtDump};
+use crate::timeout::{SmtCallStats, SmtOperation, TimeoutSmtDump};
 #[cfg(feature = "smt-thread-interrupt")]
 use z3_sys::Z3_interrupt;
 
@@ -51,6 +49,31 @@ impl Z3InterruptHandle {
 }
 
 static OPERATION_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+
+/// 已配置的单次 SMT operation deadline；未配置 `--smt-timeout` 时为 `None`。
+pub fn configured_operation_timeout() -> Option<Duration> {
+    OPERATION_TIMEOUT.get().copied()
+}
+
+// 每条路径的 SMT 调用统计。一个 worker 线程同一时刻只推进一条路径（`run_loop` 在路径
+// 开始时重置），所以线程局部就等于路径局部；统计本身只有几个标量，始终开启。
+thread_local! {
+    static PATH_SMT_STATS: RefCell<SmtCallStats> = const { RefCell::new(SmtCallStats::empty()) };
+}
+
+fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
+    PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out))
+}
+
+/// 清空当前线程的路径级 SMT 统计，路径开始执行时调用。
+pub fn reset_path_smt_stats() {
+    PATH_SMT_STATS.with(|stats| *stats.borrow_mut() = SmtCallStats::empty())
+}
+
+/// 读取当前线程的路径级 SMT 统计。
+pub fn path_smt_stats() -> SmtCallStats {
+    PATH_SMT_STATS.with(|stats| stats.borrow().clone())
+}
 
 // 修改这个值即可同时调整最慢和最快求解耗时的输出条数。
 #[cfg(feature = "smtperf")]
@@ -222,12 +245,13 @@ fn thread_interrupt_call_with_timeout<T>(
 }
 
 macro_rules! interruptible_z3_call {
-    ($operation:expr, $context:expr, $call:expr) => {{
-        #[cfg(feature = "smtperf")]
+    ($operation:expr, $source_loc:expr, $context:expr, $call:expr) => {{
         let started = Instant::now();
         let result = interruptible_z3_call!($context, $call);
+        let elapsed = started.elapsed();
+        record_path_smt_call($operation, $source_loc, elapsed, result.is_err());
         #[cfg(feature = "smtperf")]
-        record_solve_result($operation, started.elapsed(), &result);
+        record_solve_result($operation, elapsed, &result);
         result
     }};
     ($context:expr, $call:expr) => {{
@@ -243,8 +267,12 @@ macro_rules! interruptible_z3_call {
 }
 
 #[allow(non_snake_case)]
-pub(super) fn timeout_Z3_solver_check(context: Z3_context, solver: Z3_solver) -> Result<Z3_lbool, Z3TimeoutError> {
-    interruptible_z3_call!(SmtOperation::CheckSat, context, unsafe { Z3_solver_check(context, solver) })
+pub(super) fn timeout_Z3_solver_check(
+    context: Z3_context,
+    solver: Z3_solver,
+    source_loc: SourceLoc,
+) -> Result<Z3_lbool, Z3TimeoutError> {
+    interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe { Z3_solver_check(context, solver) })
 }
 
 #[allow(non_snake_case)]
@@ -252,9 +280,10 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
     context: Z3_context,
     solver: Z3_solver,
     assumptions: &[Z3_ast],
+    source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
     let count = assumptions.len().try_into().expect("too many Z3 check assumptions");
-    interruptible_z3_call!(SmtOperation::CheckSatAssuming, context, unsafe {
+    interruptible_z3_call!(SmtOperation::CheckSatAssuming, source_loc, context, unsafe {
         Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
     })
 }
@@ -266,8 +295,9 @@ pub(super) fn timeout_Z3_model_eval(
     ast: Z3_ast,
     model_completion: bool,
     result: &mut Z3_ast,
+    source_loc: SourceLoc,
 ) -> Result<bool, Z3TimeoutError> {
-    interruptible_z3_call!(SmtOperation::ModelEval, context, unsafe {
+    interruptible_z3_call!(SmtOperation::ModelEval, source_loc, context, unsafe {
         Z3_model_eval(context, model, ast, model_completion, result)
     })
 }
