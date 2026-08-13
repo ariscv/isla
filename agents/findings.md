@@ -157,10 +157,155 @@
 - `test_exec_main(...)` 里虽然定义了多个候选指令表，包括含有 `zSTORE` 的 `todo_instruction_table` 和 `["zSTORE", "zLOAD"]` 的 `excute_through_instruction_table`，但这些 `instruction_table.extend(...)` 语句当前都被注释掉了。
 - 由于 `instruction_table` 初始化为空且未被填充，`for ins_name in instruction_table { ... }` 当前不会执行任何指令；这会导致 `make run` 虽然进入了 `test_exec_main(...)`，但不会产出 `zSTORE` 或 `zLOAD` 的 JSON 文件。
 
-## 多线程 limit 机制入口透传（2026-07-09）
+## 多线程 limit 机制入口透传（2026-07-09，历史实现记录）
+
+> 本节记录 2026-07-09 的中间实现。后续重构已将计数状态收敛到每个 `Frame` 的
+> `ExecutionLimitPathState`；请以当前源码和 `configs/workarounds/vvtype.toml` 为准。
 
 - **入口硬编码缺口**：`isla-lib/src/executor.rs` 的 `execute_ir_function_with_checkpoint_multi_thread`（原 ~:2608）原本在函数体内硬编码 `let task_state = TaskState::new();`（无 limits），导致 `exec.rs` 调用方配置的 `ExecutionLimits` 无法传入多线程执行路径。已改为增加 `task_state: &TaskState<B>` 参数，由 `exec.rs` 构造带 limits 的 `TaskState` 透传。
 - **机制本身在多线程下本就可用**，无需改造计数器：`Task.state: &'task TaskState<B>` 是共享引用（fork 时新 Task 携带同一引用，executor.rs fork 点 ~:1504 `state: task_state`），`TaskState.limits_state: Arc<ExecutionLimitsState>` 内含 `Arc<Mutex<HashMap>>` + `AtomicU32`（task.rs ~:143-144），天然 `Send + Sync`；`start_multi` 用 `thread::scope`，所有线程 join 后才返回，故参数 `task_state` 引用生命周期安全。
-- **`max_total_forks` 在多线程下退化为 per-path 深度限制**：其检查用 `frame.forks`（per-frame 计数，executor.rs ~:1412），非全局 `total_forks()`。真正的全局跨分支点计数是 `max_forks_per_branch`（用 `increment_branch_fork`，mutex 全局）。
+- **当前计数粒度**：计数状态存于每个 `Frame` 的 `ExecutionLimitPathState`，fork 时随 frame
+  clone；`max_forks_per_path`、`max_forks_per_branch` 与 `region_fork_limits` 均为路径局部。
+  其中 `max_forks_per_branch` 的 key 是路径内 `ControlFlowScope`，不是跨 worker 的全局配额。
 - **dev-multithread 合并遗留的测试破坏**：合并把 `run_loop` 的 fork_sink 参数从 `&Worker` 改为泛型 `S: ForkSink`（trait 仅 impl 于 `SingleForkSink`/`MultiForkSink`），但 `executor.rs` 测试模块里 4 个 helper（`shared_state_and_bindings_from_ir`/`run_all_with_bindings`/`run_with_limits`/`run_all_with_shared_state`）仍传 `&queue`，导致 `cargo test --lib` 不编译（`cargo check` 不编 test 未暴露）。已将 4 处改为 `&SingleForkSink { queue: &queue }`（与 `start_single` ~:1991 同法，行为等价：push 到同一 LIFO queue）。
 - **预存无关失败**：`primop::tests::replicate_bits_rejects_unconstrained_symbolic_count`（primop.rs:4214）失败，属 V 扩展 primop 行为/测试不匹配，与 limit 机制无关，不在本次改动范围。
+
+## execution limits 外置 TOML 与 IR 哈希绑定（2026-08-04）
+
+- `--execution-limits-config <path>` 在 `src/isarch_main.rs` 解析，覆盖 `isa_config.execution_limits`；`configs/riscv64_difftest.toml` 不再携带 `[execution_limits]`，`solve_execution_limits`（`src/isarch/exec.rs`）也不再有代码内硬编码 region，无 TOML 时执行限制完全关闭。
+- `ExecutionLimitsConfig.strict=true` 要求同时配置 `ir_sha256`，执行前用 `-A` 指定文件的 SHA-256 校验；`strict=false` 时跳过。
+- 原 `ir_sha256 = c48050ef…` 对应 `../sail-riscv/build-symbolic-vtest-system-gmp/model/rv64d.ir`，但该产物使用 `rv64d_v256_e64.json`，不是 VLEN=128。现已从当前 `../sail-riscv` 源码使用 `rv64d_v128_e64.json`、`SYMBOLIC=true`、`SYMBOLIC_EXTRA_OPS=true` 重新生成 `ir/rv64d_v128_e64.ir`；它与默认入口 `./rv64d.ir` 的 SHA-256 均为 `7c626989…`。Makefile 默认加载后者，VVTYPE strict 哈希接受这两个逐字节相同的产物。
+- `vvtype.toml` 的 gather region 是 VRGATHER `181:6-187:7`、VRGATHEREI16 `190:6-196:7`，比旧硬编码值整体前移 5 行，说明它绑定的是更新后的 sail-riscv 源码；换 IR 时 region 坐标和 `ir_sha256` 必须一起改。
+- `branch_region_limits` 是比 `regions` 更窄的 per-region `max_forks_per_branch` 覆盖，多个命中取最小值（`max_forks_per_branch_for_scope`）；未命中任何 override 时回落到 `regions` 过滤后的通用预算。`Monomorphize` 的 fork 经 `on_monomorphize_fork_at` 也走同一套 scope 预算，不再只受 path fork 限制。
+
+## execution limits 的两种预算粒度与抽样采样（2026-08-05 / 08-07，含历史实验）
+
+> 下文的路径数、vtype 覆盖和超时数据均来自启用方向偏置与输出层 `case_quota` 之前的中间实验，
+> 不代表当前 `vvtype.toml` 的最终产出。当前配置额外包含 gather 重叠判断的方向偏置，以及
+> `[execution_limits.case_quota]` 的非法用例输出配额。
+
+目标口径：**每条具体汇编指令**（vadd.vv、vrgather.vv……）最终生成的 path 不超过 100 条，
+超出的部分靠局部限制抽样采样。为此需要区分两种预算粒度：
+
+- **per-scope 预算 `max_forks_per_branch`**：计数 key 是"路径 × `ControlFlowScope`"，
+  `ControlFlowScope = (function_name, pc, call_context, source_location)`。一条路径**第一次**到达
+  某 scope 时 fork 只把路径数 ×2（线性），**重复**到达同一 scope（循环体逐 lane）才是 2^n，
+  所以预算 1 的效果就是"把 2^n 压回 2，线性分支点不受影响"。
+- **region 预算 `region_fork_limits.max_forks_per_region`**（2026-08-07 新增）：计数 key 是 region 序号，
+  整段源码区间内的所有分支点共享一条路径的 fork 次数。**per-scope 预算压不住 `match` 链**：
+  Sail 的 `match` 在 IR 里是一串 `jump @not(eq_int(..))`，每个 arm 判定是不同的 pc、即不同 scope，
+  各自都能用掉自己的第一次 fork（实测 `assert_sew` 一条路径 fork 3 次展开 4 路 SEW、
+  `assert_lmul_pow` fork 6 次展开 7 路 LMUL）。region 预算 N 才能把 match 链抽样成 N+1 个取值，
+  也能把"一个循环体里有多个分支点"的 ×2^k 压成 ×2。
+
+其它要点：
+
+- **没有 Sail 源码位置的分支点选不中**：路径规模最大的分支点是 `zbool_bit_forwards`
+  （`prelude.sail:103` 的 `bool_bit` mapping，被 `bool_to_bit` 在 `get_fixed_rounding_incr` 里逐 lane 调用），
+  它在 IR 里的 jump 标注是 IR 内部编号 `` `1042 ``（`SourceLoc::unknown_unique`），
+  `location_string` 打出来是 `1042:0 - 0:0`，**任何 `regions` / `region_fork_limits` 都选不中它**。
+  实测一次运行里它 fork 1304 次，是 vssra/vssrl 路径数（315/261）的唯一来源。
+  因此 per-scope 预算必须**不配 `regions`**、让它全局生效；`configs/workarounds/vvtype.toml` 就是这么做的。
+- **具体化抽样原本不按路径分叉**：`branch_sample` 的偏好只由 `(seed, scope, 路径内序号)` 决定，
+  兄弟路径在同一 scope 上算出同一个方向，于是"抽样"退化成"把这个分支钉死成一个取值" ——
+  这就是旧配置下 64 条输出的 `vtype` 全是 `0x15` 的原因。已修：`ExecutionLimitPathState` 增加
+  `path_signature`，executor 在两处 fork 点（`Instr::Jump` 与 `Instr::Monomorphize`）分别按 true/false
+  推进父/子路径的签名，`branch_sample` 把签名混进哈希。签名只依赖本路径的分叉序列，
+  与线程数、调度顺序无关，`path_local_sampling_is_stable_across_worker_counts` 仍成立。
+- 因此 region 预算 0 是有意义的配置：**不 fork、只抽样**，只要该分支点在若干次 fork 之后才到达，
+  不同路径就会抽到不同取值。预算 0 只有在"任何 fork 之前就到达"时才会退化成单一取值。
+- **限制是否命中只在 itrace 里可见**：`executor.rs::record_execution_limit` 只在 `tracetool` feature 下写
+  `frame.itrace_path.record_summary(...)`，普通日志（`--debug=f` 的 `[FORK]`）只记录真正发生的 fork。
+  所以"某个分支点没有 [FORK] 记录"有两种可能：条件是具体值，或者被限制具体化了，必须用 `ITRACE=1` 区分。
+- `masked_select`（`vext_control.sail:293`）在本仓库的 sail-riscv 里是**无分支**实现（用 mask 位运算），
+  所以 VV_VADD 这类 arm 的逐 lane 处理本身不会 fork，只有显式写 `if mask[i] == 0b1` 的 arm 才可能。
+- VVTYPE 逐指令 path 数实测（THREADS=64）：旧配置（SEW/LMUL 被 0 预算钉死）每条 ≤12 但 vtype 只有
+  `0x15` 一个取值；完全放开线性分支点后 28 组 vtype、但 vrgatherei16/vrgather/vssrl/vssra 分别到
+  455/449/292/280，总数 >2200 条、40min 跑不完；加上 region 预算与签名修复后回到每条 ≤100。
+- **已知缺口：`Monomorphize` 的 case split 是线性的，但复用了同一套 branch 预算**。
+  `on_monomorphize_fork_at` 与 `on_branch_fork` 共用 `branch_forks[scope]`，而 monomorphize 的 k 路展开是
+  "同一个 scope、同一个 Sym 连续剥值"：父任务取一个 model 值，子任务带着 `v != value` 回到**同一个 pc**
+  重新执行同一条 `Monomorphize`。因此 k 个取值需要 k-1 次 fork，预算 1 会把它压成 2 个取值 —— 这在
+  "只到达一次"的 monomorphize 点上属于限制线性增长。要彻底区分需要按 scope 记住上一次 monomorphize 的
+  `Sym`（同 Sym = 同一次剥值，不同 Sym = 循环下一轮）。VVTYPE 当前 0 次 monomorphize fork，暂未触发。
+- `scripts/run.mk` 的 `SOLVE_TIMEOUT`（`isarch --timeout`）经 `executor::PathTimeout` 使用
+  `PathTimeSnapshot.active_wall`，是**单条路径**的活跃墙上时钟预算，不是整次运行的上限；
+  拦住整体运行的是 Makefile 外层的 `timeout $(OUTER_TIMEOUT)`（超时后 `status=124`，记 `status.timeout.log`）。
+  路径预算的检查点在两条 IR 指令之间，所以实际 `active_wall` 会略微超过预算（单条指令不会被抢占）。
+
+## 路径超时诊断：SMT 用时构成与原因判定（2026-08-08，历史测量）
+
+- 三个受保护的 Z3 调用（`Z3_solver_check`、`Z3_solver_check_assumptions`、`Z3_model_eval`）现在都会把
+  `(operation, SourceLoc, wall, 是否被中断)` 记进线程局部的 `timeout::SmtCallStats`。统计始终开启
+  （只有几个标量，相对 Z3 调用可以忽略），与 `smtperf` feature 的"最慢/最快样本列表"是两套东西。
+  `executor::run_loop` 在每条路径开始时 `smt::reset_path_smt_stats()`，所以线程局部 == 路径局部
+  （一个 worker 线程同一时刻只推进一条路径）。
+- `SourceLoc` 由 `Solver::check_sat{,_with}` 的调用点透传进 wrapper，`Model` 侧的 `ModelEval` 没有调用点
+  信息，记为 `SourceLoc::unknown()`。因此"最慢单次"能直接定位到 Sail 源码行。
+- 路径撞上 `--timeout` 时 `executor::report_path_timeout` 输出 `timeout::PathTimeoutDiagnostic`，
+  判定规则见 `spec/smt_timeout.md`：被中断调用累计 ≥ 预算 50% ⇒ `SmtOperationTimeouts`（放宽
+  `--timeout` 无效）；SMT 累计 ≥ active_wall 70% ⇒ `SlowSmtSolving`（确实需要更多预算）；否则
+  ⇒ `ExecutorWork`（瓶颈在解释执行）。输出走 `log::SYM_EXEC`（`--debug` 里的 `s`），itrace 构建下
+  同时写进 trace summary。诊断里还带**控制流步数**和**按调用点聚合的最热求解位置**，前者用来排除
+  死循环（死循环会到百万级），后者用来定位是哪一行 Sail 在反复求解。
+
+## VVTYPE 单路径超时的真正根因：`proven_symbolic_i128` 的候选枚举（2026-08-08，历史测量）
+
+- 实测（`--timeout 60s`）：控制流步数只有 **484~555**，说明**不是死循环**；但同一次超时里
+  **1034 次求解中的 1034 次都来自同一个 Sail 位置** `vext_arith_insts.sail 177:40-177:83`，也就是
+  `VV_VMAX` 逐 lane 的 `max(signed(vs2_val[i]), signed(vs1_val[i]))`。另一条路径是 2068 次 —— 正好 2 倍。
+- 原因在 `isla-lib/src/primop.rs::proven_symbolic_i128`：它判断"这个符号 int 是否已被路径约束证明为
+  唯一常量"的方式是**逐个候选值问 solver `sym != candidate` 是否 unsat**，候选集是 72 个常用值
+  **再链上 `0..=512` 里剩下的所有整数**，合计约 515 个。对向量元素这种永远证明不出唯一值的符号量，
+  515 次查询全部落空。`max_int`/`min_int` 会对**两个**参数各做一次 `concretize_proven_i128`，
+  所以**一次 `max()` ≈ 1030 次 check-sat-assuming**，与实测的 1034 完全对上。
+- 于是 VMIN/VMINU/VMAX/VMAXU 这四条（`vext_arith_insts.sail` 165/169/173/177）成了唯一会超时的 arm：
+  一个 lane 就要 ~1030 次求解，num_elem=32~128 时一条路径要 3.3 万~13 万次。30m 预算内只跑完
+  5248~11456 次（约 5~11 个 lane）。它们在 JSON 里条目最少（vmax.vv 只有 2 条）也是这个原因。
+- 而且**越往后越慢**：60s 内平均 45ms/次，30m 内平均 366ms/次（公式随 lane 累积增长），所以单纯放宽
+  `--timeout` 收益是次线性的。
+- **已修（2026-08-10）**：`proven_symbolic_i128` 改成模型法——先 `check_sat` 取一个模型值 `v`
+  （`Model::get_var`，模型没给它赋值即 `ModelVal::Arbitrary` 时直接判定"不唯一"），再查
+  `sym != v` 是否 unsat。判定固定 1 次 check-sat + 1 次模型求值 + 1 次 check-sat-assuming，
+  且不再受候选集范围限制（70000、-4096 这类以前证不出来的值现在也能具体化）。
+  实测 `make solve-VVTYPE`：**52m/29 条超时 → 6m27s/0 条超时**，路径数 423、逐指令 ≤100 不变，
+  vmin/vmax/vminu/vmaxu 从 2~6 条恢复到各 8 条（原来都死在超时上）。
+  `scripts/run.mk` 里给 VVTYPE 单独放宽的 `OUTER_TIMEOUT` 也随之删掉，回到默认 40m。
+- **对其它 clause 是中性的**（同参数 A/B，新旧两个二进制各跑一遍）：`DIVW` 旧 47s / 新 49s，
+  都是 26 条路径、都通过；`AES64IM` 在 620s 上限内旧 1179 条 / 新 1181 条，两边都跑不完。
+  说明这两类慢是**本来就有的**，不是这次改动引入的：
+  - `DIV`/`DIVW` 的 `quotient >= 2 ^ 31`（`mext_insts.sail:128`）单次查询要 ~50s，单跑能过，
+    但 `make solve -j` 并行下墙上时钟会冲过 60s 的 `--smt-timeout` 而失败；
+  - `AES64IM` 这类是路径数天然多（>1179 条），与具体化无关。
+
+## 未约束枚举字段的取值会把非法用例全记到同一条子指令上（2026-08-11，方向偏置与配额前的历史测量）
+
+- 在 funct6 dispatch 之前就 `return Illegal_Instruction()` 的路径根本没有约束过 funct6，
+  collector 里 `model.get_val(&fun_args[0])` 每次都会拿到 Z3 给的同一个成员（枚举第一个），
+  于是这些非法用例全被标注成同一条子指令。VVTYPE 实测 vadd.vv 因此被顶到 196 条，
+  其它子指令一条非法用例都分不到。
+- 修法在 `src/isarch/exec.rs::diversify_unconstrained_enums`：求最终 model 之前，按
+  `frame.path_signature()`（executor 在每个 fork 点分叉的路径签名）给每个符号枚举字段挑一个
+  候选成员，`check_sat_with` 能满足就 `Assert` 钉住；路径本身已经约束住的字段候选值会 Unsat、
+  直接跳过，所以不改变任何路径的语义，只影响"任意值"的取法。
+  实测 vadd.vv 196 → 58，394 条非法用例散布到各条子指令上。
+- 同一个道理适用于寄存器号等其它未约束字段（现在仍然全是 Z3 默认值，用例里大量 `v0`）；
+  要扩展的话把这个函数从"只处理枚举"放宽即可。
+
+## sail-riscv 生成 VLEN=128 Isla IR 的方法（2026-08-05）
+
+- `../sail-riscv/model/CMakeLists.txt:225` 把 IR/SMT/Coq 等 formal 目标的 config **写死**为 `config/rv${xlen}d_v256_e${xlen}.json`，所以 `cmake --build build --target generated_isla_rv64d` 产出的 `build/model/rv64d.ir` 恒为 **VLEN=256**（`vlen_exp=8`）。仓库根目录的 `rv64.ir` 就是这么来的。
+- `config/CMakeLists.txt` 会为 XLEN∈{32,64} × ELEN_EXP∈{5,6} × VLEN_EXP∈{7,8,9} 生成 12 份 JSON 到 `build/config/`，其中 `rv64d_v128_e64.json` 即 `vlen_exp=7`(VLEN=128)、`elen_exp=6`(ELEN=64)、`support_level=Full`。改 VLEN 只需换 `--config`，**不必改 CMakeLists**。
+- 绕过 CMake 直接调 isla-sail（`SR=<sail-riscv 绝对路径>`，工作目录必须是 `$SR/model`）：
+  ```
+  env PATH="<isla>/isla-sail:$PATH" isla-sail \
+    --strict-var --strict-bitvector --strict-exponentials --require-version 0.20.1 \
+    --memo-z3-path "$SR/build/model/sail_smt_cache" \
+    --isla-preserve encdec_compressed_forwards --isla-preserve encdec_compressed_forwards_matches \
+    --isla-preserve encdec_compressed_backwards --isla-preserve encdec_compressed_backwards_matches \
+    --isla-output-dir "$SR/build/model" -o rv64d_v128_e64 \
+    --config "$SR/build/config/rv64d_v128_e64.json" --all-modules riscv.sail_project
+  ```
+  耗时约 12 分钟；`-o` 换名可避免覆盖 `build/model/rv64d.ir`。原始命令行可用 `grep isla-sail build/model/CMakeFiles/generated_isla_rv64d.dir/build.make` 取得。
+- **构建是确定性的**：用上述命令重新生成的 IR 与 `isla/ir/rv64d_v128_e64.ir` **逐字节一致**（`7c626989…`），与 `configs/workarounds/vvtype.toml` 的 `ir_sha256` 相符。校验 IR 版本时可直接对比 SHA-256，不必重新生成。
+- IR 里判断 VLEN/ELEN 的位置：`let (zvlen_exp: %i64)` 与 `let (zelen_exp: %i64)` 中的 `zz5i64zDzKz5i(N)`，VLEN=2^N。
