@@ -65,7 +65,7 @@ use std::io::Write;
 use std::mem;
 use std::path::Path;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::bitvector::BV;
 use crate::error::{ExecError, SmtError};
@@ -2013,9 +2013,29 @@ impl SmtResult {
     }
 }
 
-static TASTIC_STR: &[u8] = b"default\0";
+static DEFAULT_TASTIC_STR: &[u8] = b"default\0";
+static TASTIC_STR: OnceLock<CString> = OnceLock::new();
 static SEED_STR: &[u8] = b"seed\0";
 static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
+
+pub fn configure_tastic(tastic: Option<&str>) {
+    let Some(tastic) = tastic else { return };
+    assert!(!tastic.is_empty(), "--tastic 不能为空");
+    let tastic = CString::new(tastic).expect("--tastic 不能包含 NUL 字节");
+
+    if let Some(configured) = TASTIC_STR.get() {
+        assert_eq!(configured, &tastic, "--tastic 被重复配置为不同值");
+    } else {
+        TASTIC_STR.set(tastic).expect("--tastic 配置发生并发冲突");
+    }
+}
+
+fn tastic() -> &'static CStr {
+    match TASTIC_STR.get() {
+        Some(tastic) => tastic.as_c_str(),
+        None => unsafe { CStr::from_bytes_with_nul_unchecked(DEFAULT_TASTIC_STR) },
+    }
+}
 
 // 不同 Z3 solver 暴露的随机种子参数名不同，按实际参数表选择。
 unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> &'static [u8] {
@@ -2043,14 +2063,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer) -> Self {
         unsafe {
-            // The QF_AUFBV solver has good performance on our problems, but we need to initialise it
-            // using a tactic rather than the logic name to ensure that the enumerations are supported,
-            // otherwise Z3 may crash.
-            let qfaufbv_tactic = Z3_mk_tactic(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(TASTIC_STR).as_ptr());
-            Z3_tactic_inc_ref(ctx.z3_ctx, qfaufbv_tactic);
-            let z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, qfaufbv_tactic);
+            // 始终通过 tactic 创建 solver，既允许命令行切换 tactic，也避免按 logic 名称创建
+            // QF_AUFBV solver 时枚举支持不完整而导致 Z3 崩溃。
+            let solver_tactic = Z3_mk_tactic(ctx.z3_ctx, tastic().as_ptr());
+            Z3_tactic_inc_ref(ctx.z3_ctx, solver_tactic);
+            let z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, solver_tactic);
             Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
-            Z3_tactic_dec_ref(ctx.z3_ctx, qfaufbv_tactic);
+            Z3_tactic_dec_ref(ctx.z3_ctx, solver_tactic);
 
             let z3_params = Z3_mk_params(ctx.z3_ctx);
             Z3_params_inc_ref(ctx.z3_ctx, z3_params);
@@ -2679,6 +2698,16 @@ mod tests {
             operation_wall: Duration::from_secs(11),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
         })
+    }
+
+    #[test]
+    fn configured_tastic_is_used_by_solver() {
+        configure_tastic(Some("qfaufbv"));
+        assert_eq!(tastic().to_bytes(), b"qfaufbv");
+
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
     }
 
     #[test]

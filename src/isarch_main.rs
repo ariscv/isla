@@ -531,15 +531,19 @@ mod tests {
     use super::*;
 
     fn make_matches(args: &[&str]) -> getopts::Matches {
-        let mut opts = getopts::Options::new();
+        let mut opts = opts::common_opts();
         opts.optflag("g", "graphviz", "");
-        opts.optopt("A", "arch", "", "");
-        opts.optopt("C", "config", "", "");
         opts.optmulti("", "clause", "", "<name>");
         opts.optmulti("", "extension", "", "<ext>");
         opts.optmulti("", "instruction-name", "", "<name>");
         opts.optflag("", "all", "");
         opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn parse_tastic_option() {
+        let matches = make_matches(&["--tastic", "qfaufbv", "list-instructions"]);
+        assert_eq!(matches.opt_str("tastic").as_deref(), Some("qfaufbv"));
     }
 
     #[test]
