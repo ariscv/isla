@@ -87,6 +87,8 @@ IR_FILE ?= ./rv64d.ir
 # itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
 ITRACE ?= 0
 CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
+# 可选 Z3 tactic；例如 `make solve-VVTYPE TASTIC=qfaufbv`。
+TASTIC ?=
 # Z3 timeout wrapper 的实现由构建 feature 选择。
 Z3_TIMEOUT_IMPL ?= thread_interrupt
 ifeq ($(Z3_TIMEOUT_IMPL),direct)
@@ -122,7 +124,7 @@ solve-%: build-isarch
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
 	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
-		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
+		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \
