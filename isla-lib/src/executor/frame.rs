@@ -299,6 +299,13 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         self.execution_limit_state.total_forks()
     }
 
+    /// 这条路径的身份签名：每个 fork 点按选择的方向推进，兄弟路径必然不同，且只由本
+    /// 路径自己的分叉序列决定（与线程数、调度顺序无关）。需要"不同路径给出不同具体值"
+    /// 的地方（受限分支的具体化抽样、用例生成时给未约束字段取值）用它当种子。
+    pub fn path_signature(&self) -> u64 {
+        self.execution_limit_state.path_signature()
+    }
+
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
         &mut self.local_state.regs
     }

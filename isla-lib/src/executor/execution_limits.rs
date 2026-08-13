@@ -43,8 +43,38 @@ pub enum LimitBehavior {
     Concretize,
 }
 
+/// 具体化抽样的方向偏置。
+///
+/// 默认抽样是 50/50 的（同一分支点在相邻两次采样上取相反方向）。对于"一侧注定通向
+/// `Illegal_Instruction` 之类无趣结果"的分支点，50/50 意味着一半路径被白白送过去；
+/// 配置偏置后，只有 `1 / denominator` 的路径会抽到 `direction` 指定的那一侧。
+///
+/// 这不是截断：`concretize_branch_condition` 仍然会在偏好方向不可满足时回退到另一侧，
+/// 所以偏置在结构上不会丢失任何路径，最坏只是少覆盖几种被压制方向的组合。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SampleBias {
+    /// 被压制方向的抽中比例分母，必须 >= 2。
+    pub denominator: u32,
+    /// 被压制的方向：`true` 表示"跳转到 target"，`false` 表示"顺序执行下一条"。
+    pub direction: bool,
+}
+
+/// region 级 fork 预算，外加可选的具体化方向偏置。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RegionForkLimit {
+    pub region: SourceRegion,
+    pub max_forks_per_region: u32,
+    pub sample_bias: Option<SampleBias>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionLimits {
+    /// 当前路径内，**单个分支点**允许的 fork 次数上限。
+    ///
+    /// 计数是"路径 × 分支点(`ControlFlowScope`)"局部的：一条路径第一次到达某分支点时
+    /// fork 只把路径数 ×2，重复到达同一个分支点（循环体逐 lane 展开）才会到 2^n。
+    /// 注意 Sail 的 `match` 在 IR 里是一串位于**不同 pc** 的 jump，每个 arm 判定都是独立
+    /// 分支点，因此这个预算压不住 match 链的多路展开，那种情况要用 `region_fork_limits`。
     pub max_forks_per_branch: Option<u32>,
     /// 一条路径从根节点到当前位置累计经历的 executor fork 数上限。
     pub max_forks_per_path: Option<u32>,
@@ -59,6 +89,14 @@ pub struct ExecutionLimits {
     /// `None` 表示不设置 region 过滤，`Some(empty)` 表示显式匹配不到任何源码位置。
     /// path fork/depth 限制不受 region 过滤。
     pub regions: Option<Vec<SourceRegion>>,
+    /// 比通用 `max_forks_per_branch` 更具体的 region 预算。多个 override 同时命中时
+    /// 取最小值；TOML 显式配置时整体替换已有 override。预算含义同 `max_forks_per_branch`，
+    /// 仍然是**每个分支点各自**一份预算。
+    pub branch_region_limits: Vec<(SourceRegion, u32)>,
+    /// 一条路径在整段源码区间内**总共**允许的 fork 次数。区间内所有分支点共享同一份
+    /// 预算，因此它能直接控制这段代码对路径数的贡献：match 链是 N+1 个取值，逐 lane
+    /// 循环体是 ≤2^N 条路径。预算耗尽后区间内的分支改走具体化抽样（`on_limit_reached`）。
+    pub region_fork_limits: Vec<RegionForkLimit>,
     /// branch/loop 计数 key 保留的最近调用点数量；`None` 时不复制或哈希调用上下文。
     pub call_context_depth: Option<usize>,
     /// 受限分支具体化时使用的可复现抽样 seed。
@@ -76,6 +114,8 @@ impl Default for ExecutionLimits {
             max_fork_pct_per_branch: None,
             max_fork_pct_check_delay: None,
             regions: None,
+            branch_region_limits: Vec::new(),
+            region_fork_limits: Vec::new(),
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             on_limit_reached: LimitBehavior::Truncate,
@@ -126,6 +166,26 @@ impl ExecutionLimits {
         self
     }
 
+    pub fn with_branch_region_limit(mut self, region: SourceRegion, max_forks_per_branch: u32) -> Self {
+        self.branch_region_limits.push((region, max_forks_per_branch));
+        self
+    }
+
+    pub fn with_region_fork_limit(mut self, region: SourceRegion, max_forks_per_region: u32) -> Self {
+        self.region_fork_limits.push(RegionForkLimit { region, max_forks_per_region, sample_bias: None });
+        self
+    }
+
+    pub fn with_biased_region_fork_limit(
+        mut self,
+        region: SourceRegion,
+        max_forks_per_region: u32,
+        sample_bias: SampleBias,
+    ) -> Self {
+        self.region_fork_limits.push(RegionForkLimit { region, max_forks_per_region, sample_bias: Some(sample_bias) });
+        self
+    }
+
     /// 在符号执行开始前，将文件名形式的 region 配置解析成运行时文件编号。
     pub fn with_region_specs(self, region_specs: &[SourceRegionSpec], symtab: &Symtab) -> Self {
         self.with_limit_regions(region_specs.iter().filter_map(|region| region.resolve(symtab.files())).collect())
@@ -169,6 +229,26 @@ impl ExecutionLimits {
         }
         if let Some(region_specs) = &config.regions {
             self = self.with_region_specs(region_specs, symtab);
+            self.branch_region_limits.clear();
+            self.region_fork_limits.clear();
+        }
+        if let Some(region_limits) = &config.branch_region_limits {
+            self.branch_region_limits.clear();
+            self.branch_region_limits.extend(region_limits.iter().filter_map(|limit| {
+                limit.region.resolve(symtab.files()).map(|region| (region, limit.max_forks_per_branch))
+            }));
+        }
+        if let Some(region_limits) = &config.region_fork_limits {
+            self.region_fork_limits.clear();
+            self.region_fork_limits.extend(region_limits.iter().filter_map(|limit| {
+                limit.region.resolve(symtab.files()).map(|region| RegionForkLimit {
+                    region,
+                    max_forks_per_region: limit.max_forks_per_region,
+                    sample_bias: limit
+                        .sample_bias
+                        .map(|(denominator, direction)| SampleBias { denominator, direction }),
+                })
+            }));
         }
 
         self
@@ -188,8 +268,41 @@ impl ExecutionLimits {
             .map_or(true, |regions| regions.iter().any(|region| region.selects_ir_location(scope.source_location)))
     }
 
+    fn max_forks_per_branch_for_scope(&self, scope: &ControlFlowScope) -> Option<u32> {
+        self.branch_region_limits
+            .iter()
+            .filter_map(|(region, max)| region.selects_ir_location(scope.source_location).then_some(*max))
+            .min()
+            .or_else(|| self.applies_to(scope).then_some(self.max_forks_per_branch).flatten())
+    }
+
     fn tracks_branch_forks(&self) -> bool {
-        self.max_forks_per_branch.is_some() || self.max_fork_pct_per_branch.is_some()
+        self.max_forks_per_branch.is_some()
+            || !self.branch_region_limits.is_empty()
+            || self.max_fork_pct_per_branch.is_some()
+    }
+
+    /// 命中当前源码位置的 region 级预算，返回 `(region 序号, 预算)`。序号用作路径内
+    /// 计数的 key，因此同一段 region 上的所有分支点共享一份 fork 预算。
+    fn region_fork_budgets(&self, source_location: SourceLoc) -> Vec<(usize, u32)> {
+        if self.region_fork_limits.is_empty() {
+            return Vec::new();
+        }
+        self.region_fork_limits
+            .iter()
+            .enumerate()
+            .filter_map(|(index, limit)| {
+                limit.region.selects_ir_location(source_location).then_some((index, limit.max_forks_per_region))
+            })
+            .collect()
+    }
+
+    /// 命中当前源码位置的方向偏置；多个 region 同时命中时取第一个配了偏置的。
+    fn sample_bias(&self, source_location: SourceLoc) -> Option<SampleBias> {
+        self.region_fork_limits
+            .iter()
+            .find(|limit| limit.sample_bias.is_some() && limit.region.selects_ir_location(source_location))
+            .and_then(|limit| limit.sample_bias)
     }
 
     pub(super) fn is_active(&self) -> bool {
@@ -198,6 +311,8 @@ impl ExecutionLimits {
             || self.max_backjumps_per_loop.is_some()
             || self.max_path_depth.is_some()
             || self.max_fork_pct_per_branch.is_some()
+            || !self.branch_region_limits.is_empty()
+            || !self.region_fork_limits.is_empty()
     }
 }
 
@@ -236,12 +351,25 @@ pub(super) struct ExecutionLimitPathState {
     total_forks: u32,
     loop_counts: HashMap<ControlFlowScope, u32>,
     branch_forks: HashMap<ControlFlowScope, u32>,
+    region_forks: HashMap<usize, u32>,
     sample_ordinals: HashMap<ControlFlowScope, u32>,
+    path_signature: u64,
 }
 
 impl ExecutionLimitPathState {
     pub(super) fn total_forks(&self) -> u32 {
         self.total_forks
+    }
+
+    pub(super) fn path_signature(&self) -> u64 {
+        self.path_signature
+    }
+
+    /// fork 时推进路径签名：父路径记 `true` 方向、子路径记 `false` 方向，两条路径的签名
+    /// 从此必然分叉。签名只由本路径自己的分叉序列决定，与线程数、调度顺序无关，因此
+    /// 具体化抽样仍然可复现。
+    pub(super) fn advance_path_signature(&mut self, direction: bool) {
+        self.path_signature = splitmix64((self.path_signature << 1) | direction as u64);
     }
 
     /// 这条路径迄今执行过的控制流步数（jump/goto/call）。
@@ -264,6 +392,15 @@ impl ExecutionLimitPathState {
         self.branch_forks.get(scope).copied().unwrap_or(0)
     }
 
+    fn region_forks(&self, region: usize) -> u32 {
+        self.region_forks.get(&region).copied().unwrap_or(0)
+    }
+
+    fn record_region_fork(&mut self, region: usize) {
+        let count = self.region_forks.entry(region).or_insert(0);
+        *count = count.checked_add(1).expect("region fork count overflow");
+    }
+
     fn sample_ordinal(&self, scope: &ControlFlowScope) -> u32 {
         self.sample_ordinals.get(scope).copied().unwrap_or(0)
     }
@@ -280,6 +417,7 @@ impl ExecutionLimitPathState {
 pub(super) enum ExecutionLimitReason {
     MaxForksPerPath { actual: u32, max: u32 },
     MaxForksPerBranch { actual: u32, max: u32 },
+    MaxForksPerRegion { region: usize, actual: u32, max: u32 },
     MaxForkPctPerBranch { branch_actual: u32, path_actual: u32, max_pct: f64, check_delay: u32 },
     MaxBackjumpsPerLoop { target: usize, actual: u32, max: u32 },
     MaxPathDepth { actual: u64, max: u64 },
@@ -428,9 +566,11 @@ impl<'config> ExecutionLimitHandler<'config> {
 
         let branch_scope = if self.config.tracks_branch_forks() {
             let scope = self.branch_scope(function_name, pc, backtrace, source_location);
-            if self.config.applies_to(&scope) {
+            let max_forks_per_branch = self.config.max_forks_per_branch_for_scope(&scope);
+            let percentage_applies = self.config.max_fork_pct_per_branch.is_some() && self.config.applies_to(&scope);
+            if max_forks_per_branch.is_some() || percentage_applies {
                 let branch_actual = path.branch_forks(&scope);
-                if let Some(max) = self.config.max_forks_per_branch {
+                if let Some(max) = max_forks_per_branch {
                     if branch_actual >= max {
                         return self.branch_limit(
                             path,
@@ -439,7 +579,7 @@ impl<'config> ExecutionLimitHandler<'config> {
                         );
                     }
                 }
-                if let Some(max_pct) = self.config.max_fork_pct_per_branch {
+                if let Some(max_pct) = self.config.max_fork_pct_per_branch.filter(|_| percentage_applies) {
                     let path_actual = path.total_forks;
                     let check_delay = self.config.max_fork_pct_check_delay.unwrap_or(0);
                     if path_actual > check_delay && (branch_actual as f64) > (path_actual as f64) * max_pct {
@@ -463,23 +603,65 @@ impl<'config> ExecutionLimitHandler<'config> {
             None
         };
 
+        let region_budgets = self.config.region_fork_budgets(source_location);
+        for &(region, max) in &region_budgets {
+            let actual = path.region_forks(region);
+            if actual >= max {
+                let scope =
+                    branch_scope.unwrap_or_else(|| self.branch_scope(function_name, pc, backtrace, source_location));
+                return self.branch_limit(path, scope, ExecutionLimitReason::MaxForksPerRegion { region, actual, max });
+            }
+        }
+
         let fork_id = Self::record_path_fork(path);
         if let Some(scope) = branch_scope {
             let count = path.branch_forks.entry(scope).or_insert(0);
             *count = count.checked_add(1).expect("branch fork count overflow");
         }
+        for &(region, _) in &region_budgets {
+            path.record_region_fork(region);
+        }
         ExecutionLimitDecision::Fork { fork_id }
     }
 
-    pub(super) fn on_monomorphize_fork(&self, path: &mut ExecutionLimitPathState) -> ExecutionLimitDecision {
+    pub(super) fn on_monomorphize_fork_at(
+        &self,
+        path: &mut ExecutionLimitPathState,
+        function_name: Name,
+        pc: usize,
+        backtrace: &[(Name, usize)],
+        source_location: SourceLoc,
+    ) -> ExecutionLimitDecision {
         if let Some(reason) = self.path_fork_limit(path) {
-            return match self.config.on_limit_reached {
-                LimitBehavior::Truncate => ExecutionLimitDecision::Truncate(reason),
-                LimitBehavior::Concretize => ExecutionLimitDecision::KeepCurrentModel { reason },
-            };
+            return self.monomorphize_limit(reason);
         }
 
-        ExecutionLimitDecision::Fork { fork_id: Self::record_path_fork(path) }
+        let scope = self.branch_scope(function_name, pc, backtrace, source_location);
+        let max_forks_per_branch = self.config.max_forks_per_branch_for_scope(&scope);
+        if let Some(max) = max_forks_per_branch {
+            let actual = path.branch_forks(&scope);
+            if actual >= max {
+                return self.monomorphize_limit(ExecutionLimitReason::MaxForksPerBranch { actual, max });
+            }
+        }
+
+        let region_budgets = self.config.region_fork_budgets(source_location);
+        for &(region, max) in &region_budgets {
+            let actual = path.region_forks(region);
+            if actual >= max {
+                return self.monomorphize_limit(ExecutionLimitReason::MaxForksPerRegion { region, actual, max });
+            }
+        }
+
+        let fork_id = Self::record_path_fork(path);
+        if max_forks_per_branch.is_some() {
+            let count = path.branch_forks.entry(scope).or_insert(0);
+            *count = count.checked_add(1).expect("monomorphize fork count overflow");
+        }
+        for &(region, _) in &region_budgets {
+            path.record_region_fork(region);
+        }
+        ExecutionLimitDecision::Fork { fork_id }
     }
 
     pub(super) fn commit_sample(&self, path: &mut ExecutionLimitPathState, sample: &BranchSample) {
@@ -535,15 +717,43 @@ impl<'config> ExecutionLimitHandler<'config> {
         }
     }
 
+    fn monomorphize_limit(&self, reason: ExecutionLimitReason) -> ExecutionLimitDecision {
+        match self.config.on_limit_reached {
+            LimitBehavior::Truncate => ExecutionLimitDecision::Truncate(reason),
+            LimitBehavior::Concretize => ExecutionLimitDecision::KeepCurrentModel { reason },
+        }
+    }
+
     fn branch_sample(&self, path: &ExecutionLimitPathState, scope: ControlFlowScope) -> BranchSample {
         let ordinal = path.sample_ordinal(&scope);
         let pair_ordinal = ordinal / 2;
         let mut hasher = DefaultHasher::new();
         self.config.branch_sampling_seed.hash(&mut hasher);
+        // 路径签名参与偏好计算，否则同一个分支点在所有兄弟路径上都会抽到同一个方向，
+        // "具体化抽样"就退化成"把这个分支钉死成一个取值"。
+        path.path_signature.hash(&mut hasher);
         scope.hash(&mut hasher);
         pair_ordinal.hash(&mut hasher);
-        let first = splitmix64(hasher.finish()) & 1 == 1;
-        let preferred = if ordinal % 2 == 0 { first } else { !first };
+        let mixed = splitmix64(hasher.finish());
+        let preferred = match self.config.sample_bias(scope.source_location) {
+            // 配了偏置就不做奇偶交替：交替会把比例硬拉回 50/50，抵消偏置。
+            Some(bias) => {
+                let biased_side = mixed % bias.denominator as u64 == 0;
+                if biased_side {
+                    bias.direction
+                } else {
+                    !bias.direction
+                }
+            }
+            None => {
+                let first = mixed & 1 == 1;
+                if ordinal % 2 == 0 {
+                    first
+                } else {
+                    !first
+                }
+            }
+        };
         BranchSample { scope, ordinal, preferred }
     }
 
@@ -585,6 +795,16 @@ mod tests {
 
     fn branch(handler: &ExecutionLimitHandler, path: &mut ExecutionLimitPathState) -> ExecutionLimitDecision {
         handler.on_branch_fork(path, Name::from_u32(3), 30, &[(Name::from_u32(1), 10)], SourceLoc::new(1, 10, 0, 10, 4))
+    }
+
+    fn monomorphize(handler: &ExecutionLimitHandler, path: &mut ExecutionLimitPathState) -> ExecutionLimitDecision {
+        handler.on_monomorphize_fork_at(
+            path,
+            Name::from_u32(3),
+            31,
+            &[(Name::from_u32(1), 10)],
+            SourceLoc::new(1, 11, 0, 11, 4),
+        )
     }
 
     #[test]
@@ -667,6 +887,22 @@ mod tests {
     }
 
     #[test]
+    fn configured_regions_replace_preconfigured_branch_region_limits() {
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["configured.sail"]);
+        let config = ExecutionLimitsConfig {
+            regions: Some(vec![SourceRegionSpec::new("configured.sail", (10, 0), (20, 0))]),
+            ..ExecutionLimitsConfig::default()
+        };
+        let limits = ExecutionLimits::default()
+            .with_branch_region_limit(SourceRegion::new(0, (1, 0), (2, 0)), 0)
+            .with_config(&config, &symtab);
+
+        assert_eq!(limits.regions.as_ref().unwrap().len(), 1);
+        assert!(limits.branch_region_limits.is_empty());
+    }
+
+    #[test]
     fn control_flow_scope_separates_function_and_call_context() {
         let info = SourceLoc::new(1, 10, 0, 10, 4);
         let caller_a = Name::from_u32(1);
@@ -735,6 +971,183 @@ mod tests {
         assert_eq!(first.preferred(), sibling.preferred());
     }
 
+    /// branch-local 限制的判定准则：只截断 2^n 规模的分支点。
+    ///
+    /// 同一条路径上，不同分支点（不同 pc）各自的第一次 fork 都只带来线性 ×2 增长，必须
+    /// 放行；`match` dispatch 这种由多个不同 pc 串起来的多路展开因此能完整展开。只有同一
+    /// 条路径重复到达同一个分支点（循环体逐 lane）才会 2^n，从第二次 fork 起被限制。
+    #[test]
+    fn only_repeated_forks_at_the_same_branch_point_are_limited() {
+        let limits = ExecutionLimits::default().with_max_forks_per_branch(1);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let mut path = ExecutionLimitPathState::default();
+        let dispatch_arm = |pc, line| (pc, SourceLoc::new(1, line, 4, line, 20));
+
+        // 一条路径依次经过 match 的 4 个 arm 判定：每个 arm 是不同 pc，都放行。
+        for (pc, source_location) in [dispatch_arm(30, 10), dispatch_arm(40, 11), dispatch_arm(50, 12)] {
+            assert!(matches!(
+                handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
+                ExecutionLimitDecision::Fork { .. }
+            ));
+        }
+        assert_eq!(path.total_forks(), 3);
+
+        // 逐 lane 循环体：同一个 pc 被同一条路径重复到达，第二次起截断。
+        let (lane_pc, lane_location) = dispatch_arm(80, 100);
+        assert!(matches!(
+            handler.on_branch_fork(&mut path, Name::from_u32(3), lane_pc, &[], lane_location),
+            ExecutionLimitDecision::Fork { .. }
+        ));
+        assert!(matches!(
+            handler.on_branch_fork(&mut path, Name::from_u32(3), lane_pc, &[], lane_location),
+            ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerBranch { actual: 1, max: 1 })
+        ));
+    }
+
+    /// region 级预算由整段区间内的所有分支点共享，因此能压住 `match` 链：Sail 的 match
+    /// 每个 arm 判定都在不同 pc 上，per-scope 预算对它无效，region 预算 N 才能把它压成
+    /// N+1 个取值。
+    #[test]
+    fn region_fork_budget_is_shared_by_every_branch_point_inside_the_region() {
+        let limits = ExecutionLimits::default().with_region_fork_limit(SourceRegion::new(1, (10, 0), (20, 0)), 1);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let mut path = ExecutionLimitPathState::default();
+        let arm = |pc, line| (pc, SourceLoc::new(1, line, 4, line, 20));
+
+        let (pc, source_location) = arm(30, 11);
+        assert!(matches!(
+            handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
+            ExecutionLimitDecision::Fork { .. }
+        ));
+        // 第二个 arm 判定是另一个分支点，但共用同一份 region 预算，所以被限制。
+        let (pc, source_location) = arm(31, 12);
+        assert!(matches!(
+            handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
+            ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerRegion { actual: 1, max: 1, .. })
+        ));
+        // region 之外不受这份预算影响。
+        let (pc, source_location) = arm(32, 30);
+        assert!(matches!(
+            handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
+            ExecutionLimitDecision::Fork { .. }
+        ));
+    }
+
+    /// 方向偏置：默认 50/50 的具体化抽样会把一半路径送进"注定非法"的那一侧；
+    /// 配了偏置之后只有 1/denominator 的路径会抽到该方向。
+    #[test]
+    fn sample_bias_skews_concretization_away_from_the_suppressed_side() {
+        let region = SourceRegion::new(1, (10, 0), (20, 0));
+        let source_location = SourceLoc::new(1, 11, 4, 11, 20);
+        let sampled = |limits: &ExecutionLimits| -> usize {
+            let handler = ExecutionLimitHandler::new(limits);
+            // 不同路径签名代表不同的兄弟路径，统计其中抽到 jump 方向的比例。
+            (0..1024u64)
+                .filter(|signature| {
+                    let mut path = ExecutionLimitPathState::default();
+                    path.path_signature = *signature;
+                    match handler.on_branch_fork(&mut path, Name::from_u32(3), 30, &[], source_location) {
+                        ExecutionLimitDecision::ConcretizeBranch { sample, .. } => sample.preferred(),
+                        decision => panic!("unexpected decision: {:?}", decision),
+                    }
+                })
+                .count()
+        };
+
+        let balanced =
+            ExecutionLimits::default().with_region_fork_limit(region, 0).with_limit_behavior(LimitBehavior::Concretize);
+        let biased = ExecutionLimits::default()
+            .with_biased_region_fork_limit(region, 0, SampleBias { denominator: 16, direction: true })
+            .with_limit_behavior(LimitBehavior::Concretize);
+
+        // 无偏置时两个方向大致各半。
+        let balanced_jumps = sampled(&balanced);
+        assert!((400..=624).contains(&balanced_jumps), "无偏置时抽到 jump 的比例异常: {}/1024", balanced_jumps);
+        // 有偏置时被压制方向只占 1/16 左右。
+        let biased_jumps = sampled(&biased);
+        assert!((20..=110).contains(&biased_jumps), "偏置 1/16 时抽到 jump 的比例异常: {}/1024", biased_jumps);
+    }
+
+    #[test]
+    fn sample_bias_only_applies_inside_its_own_region() {
+        let biased_region = SourceRegion::new(1, (10, 0), (20, 0));
+        let limits = ExecutionLimits::default()
+            .with_biased_region_fork_limit(biased_region, 0, SampleBias { denominator: 16, direction: true })
+            .with_region_fork_limit(SourceRegion::new(1, (30, 0), (40, 0)), 0)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let outside = SourceLoc::new(1, 31, 4, 31, 20);
+
+        // 另一个 region 没配偏置，仍然是 50/50 的均衡抽样。
+        let jumps = (0..1024u64)
+            .filter(|signature| {
+                let mut path = ExecutionLimitPathState::default();
+                path.path_signature = *signature;
+                match handler.on_branch_fork(&mut path, Name::from_u32(3), 30, &[], outside) {
+                    ExecutionLimitDecision::ConcretizeBranch { sample, .. } => sample.preferred(),
+                    decision => panic!("unexpected decision: {:?}", decision),
+                }
+            })
+            .count();
+        assert!((400..=624).contains(&jumps), "未配偏置的 region 抽样比例异常: {}/1024", jumps);
+    }
+
+    #[test]
+    fn region_fork_budgets_are_path_local() {
+        let limits = ExecutionLimits::default().with_region_fork_limit(SourceRegion::new(1, (10, 0), (20, 0)), 1);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let source_location = SourceLoc::new(1, 11, 4, 11, 20);
+        let mut first = ExecutionLimitPathState::default();
+        assert!(matches!(
+            handler.on_branch_fork(&mut first, Name::from_u32(3), 30, &[], source_location),
+            ExecutionLimitDecision::Fork { .. }
+        ));
+        let mut second = ExecutionLimitPathState::default();
+
+        assert!(matches!(
+            handler.on_branch_fork(&mut first, Name::from_u32(3), 31, &[], source_location),
+            ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerRegion { .. })
+        ));
+        assert!(matches!(
+            handler.on_branch_fork(&mut second, Name::from_u32(3), 31, &[], source_location),
+            ExecutionLimitDecision::Fork { .. }
+        ));
+    }
+
+    /// 具体化抽样必须按路径分叉：否则同一个分支点在所有兄弟路径上都抽到同一个方向，
+    /// 抽样退化成"把这个分支钉死成一个取值"（VVTYPE 里表现为所有路径 vtype 相同）。
+    #[test]
+    fn sibling_paths_sample_different_directions_after_they_fork() {
+        let limits = ExecutionLimits::default()
+            .with_region_fork_limit(SourceRegion::new(1, (10, 0), (20, 0)), 0)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let mut left = ExecutionLimitPathState::default();
+        let mut right = left.clone();
+        // executor 在 fork 点做的事：父路径记 true 方向，子路径记 false 方向。
+        left.advance_path_signature(true);
+        right.advance_path_signature(false);
+
+        let sampled = |path: &mut ExecutionLimitPathState| -> Vec<bool> {
+            (0..8)
+                .map(|index| {
+                    match handler.on_branch_fork(
+                        path,
+                        Name::from_u32(3),
+                        30 + index,
+                        &[],
+                        SourceLoc::new(1, 11 + index as u32, 4, 11 + index as u32, 20),
+                    ) {
+                        ExecutionLimitDecision::ConcretizeBranch { sample, .. } => sample.preferred(),
+                        decision => panic!("unexpected decision: {:?}", decision),
+                    }
+                })
+                .collect()
+        };
+
+        assert_ne!(sampled(&mut left), sampled(&mut right));
+    }
+
     #[test]
     fn sibling_branch_budgets_are_path_local() {
         let limits = ExecutionLimits::default().with_max_forks_per_branch(1);
@@ -791,7 +1204,7 @@ mod tests {
         let handler = ExecutionLimitHandler::new(&limits);
         let mut path = ExecutionLimitPathState::default();
 
-        assert!(matches!(handler.on_monomorphize_fork(&mut path), ExecutionLimitDecision::Fork { fork_id: 0 }));
+        assert!(matches!(monomorphize(&handler, &mut path), ExecutionLimitDecision::Fork { fork_id: 0 }));
         assert!(matches!(branch(&handler, &mut path), ExecutionLimitDecision::Fork { fork_id: 1 }));
         assert!(matches!(branch(&handler, &mut path), ExecutionLimitDecision::Fork { fork_id: 2 }));
         assert!(matches!(
@@ -852,7 +1265,7 @@ mod tests {
         let mut path = ExecutionLimitPathState::default();
 
         assert!(matches!(branch(&handler, &mut path), ExecutionLimitDecision::Fork { fork_id: 0 }));
-        assert!(matches!(handler.on_monomorphize_fork(&mut path), ExecutionLimitDecision::Fork { fork_id: 1 }));
+        assert!(matches!(monomorphize(&handler, &mut path), ExecutionLimitDecision::Fork { fork_id: 1 }));
         assert!(matches!(
             branch(&handler, &mut path),
             ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerPath { actual: 2, max: 2 })
@@ -887,6 +1300,32 @@ mod tests {
         assert!(matches!(
             handler.on_branch_fork(&mut inside, Name::from_u32(99), 30, &[], SourceLoc::new(1, 25, 0, 25, 4)),
             ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerBranch { actual: 0, max: 0 })
+        ));
+    }
+
+    #[test]
+    fn narrower_region_branch_budget_overrides_general_region_budget() {
+        let broad = SourceRegion::from_source_loc(SourceLoc::new(1, 20, 0, 40, 0));
+        let narrow = SourceRegion::from_source_loc(SourceLoc::new(1, 25, 0, 30, 0));
+        let limits = ExecutionLimits::default()
+            .with_max_forks_per_branch(1)
+            .with_limit_region(broad)
+            .with_branch_region_limit(narrow, 0)
+            .with_limit_behavior(LimitBehavior::Concretize);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let mut narrow_path = ExecutionLimitPathState::default();
+        let mut broad_path = ExecutionLimitPathState::default();
+
+        assert!(matches!(
+            handler.on_branch_fork(&mut narrow_path, Name::from_u32(99), 30, &[], SourceLoc::new(1, 27, 0, 27, 4)),
+            ExecutionLimitDecision::ConcretizeBranch {
+                reason: ExecutionLimitReason::MaxForksPerBranch { actual: 0, max: 0 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            handler.on_branch_fork(&mut broad_path, Name::from_u32(99), 30, &[], SourceLoc::new(1, 35, 0, 35, 4)),
+            ExecutionLimitDecision::Fork { fork_id: 0 }
         ));
     }
 

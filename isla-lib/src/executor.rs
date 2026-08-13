@@ -67,7 +67,7 @@ use crate::register::RegisterBindings;
 #[cfg(test)]
 use execution_limits::ExecutionLimitPathState;
 use execution_limits::{BranchSample, ExecutionLimitDecision, ExecutionLimitHandler, ExecutionLimitReason};
-pub use execution_limits::{ExecutionLimits, LimitBehavior};
+pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
@@ -1361,6 +1361,10 @@ fn record_execution_limit<B: BV>(frame: &mut LocalFrame<'_, B>, reason: Executio
                 "max_forks_per_branch exceeded: path_branch_forks={}, max_forks_per_branch={}",
                 actual, max
             ),
+            ExecutionLimitReason::MaxForksPerRegion { region, actual, max } => format!(
+                "max_forks_per_region exceeded: region={}, path_region_forks={}, max_forks_per_region={}",
+                region, actual, max
+            ),
             ExecutionLimitReason::MaxForkPctPerBranch {
                 branch_actual,
                 path_actual,
@@ -1396,6 +1400,7 @@ fn execution_limit_error(reason: ExecutionLimitReason, function_name: Name, pc: 
         ExecutionLimitReason::MaxBackjumpsPerLoop { target, .. } => ExecError::LoopLimitReached(function_name, target),
         ExecutionLimitReason::MaxForksPerPath { .. }
         | ExecutionLimitReason::MaxForksPerBranch { .. }
+        | ExecutionLimitReason::MaxForksPerRegion { .. }
         | ExecutionLimitReason::MaxForkPctPerBranch { .. } => ExecError::BranchLimitReached(function_name, pc),
     }
 }
@@ -1611,8 +1616,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                             let point = checkpoint(solver);
                             frame.capture_path_smt_stats();
-                            let frozen =
+                            let mut frozen =
                                 itrace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
+                            // 父子路径的采样签名从这次 fork 起分叉，受限分支的具体化抽样
+                            // 才会在不同路径上抽到不同方向。
+                            Arc::make_mut(&mut frozen.execution_limit_state).advance_path_signature(false);
+                            frame.execution_limit_state.advance_path_signature(true);
                             task_fraction.halve();
                             fork_sink.submit(Task {
                                 id: task_id,
@@ -2004,7 +2013,13 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     let remainder = Neq(Box::new(Var(v)), Box::new(result_exp.clone()));
                     if solver.check_sat_with(&remainder, *info).is_sat()? {
                         let decision = match limit_handler.as_ref() {
-                            Some(handler) => handler.on_monomorphize_fork(&mut frame.execution_limit_state),
+                            Some(handler) => handler.on_monomorphize_fork_at(
+                                &mut frame.execution_limit_state,
+                                frame.function_name,
+                                frame.pc,
+                                &frame.backtrace,
+                                *info,
+                            ),
                             None => ExecutionLimitDecision::Fork { fork_id: frame.execution_limit_state.record_fork() },
                         };
                         let fork_id = match decision {
@@ -2029,11 +2044,15 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             // give it a larger part of the fraction (otherwise the denominator becomes
                             // small very fast).
                             let child_frac = task_fraction.min_split(6);
+                            // 与条件分支 fork 一样，让父子路径的采样签名从这里分叉。
                             frame.capture_path_smt_stats();
+                            let mut child_frame = freeze_frame(frame);
+                            Arc::make_mut(&mut child_frame.execution_limit_state).advance_path_signature(false);
+                            frame.execution_limit_state.advance_path_signature(true);
                             fork_sink.submit(Task {
                                 id: task_id,
                                 fraction: child_frac,
-                                frame: freeze_frame(frame),
+                                frame: child_frame,
                                 checkpoint: point,
                                 fork_cond: Some((Assert(remainder), Event::Fork(fork_id, v, 1, *info))),
                                 state: task_state,
@@ -2845,6 +2864,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 mod tests {
     use super::*;
     use crate::config::{ISAConfig, Tool};
+    use crate::source_loc::SourceRegion;
     use std::path::PathBuf;
 
     const REAL_RV64D_ZRX_IR: &str = r#"
@@ -4082,6 +4102,51 @@ fn zrX(z3zE1756) {
     }
 
     #[test]
+    fn monomorphize_branch_local_limit_keeps_one_model_inside_selected_region() {
+        let var = test_name(100);
+        let selected = SourceLoc::new(1, 20, 0, 20, 8);
+        let results = run_all_with_shared_state(
+            vec![
+                Instr::Decl(var, Ty::Bool, selected),
+                Instr::Monomorphize(var, Ty::Bool, selected),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, selected),
+                Instr::End,
+            ],
+            ExecutionLimits::default()
+                .with_max_forks_per_branch(0)
+                .with_limit_region(SourceRegion::from_source_loc(selected))
+                .with_limit_behavior(LimitBehavior::Concretize),
+            empty_shared_state(),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], Ok(Run::Finished(Val::Unit))));
+    }
+
+    #[test]
+    fn monomorphize_branch_local_limit_does_not_apply_outside_selected_region() {
+        let var = test_name(100);
+        let selected = SourceLoc::new(1, 20, 0, 20, 8);
+        let outside = SourceLoc::new(2, 20, 0, 20, 8);
+        let results = run_all_with_shared_state(
+            vec![
+                Instr::Decl(var, Ty::Bool, outside),
+                Instr::Monomorphize(var, Ty::Bool, outside),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, outside),
+                Instr::End,
+            ],
+            ExecutionLimits::default()
+                .with_max_forks_per_branch(0)
+                .with_limit_region(SourceRegion::from_source_loc(selected))
+                .with_limit_behavior(LimitBehavior::Concretize),
+            empty_shared_state(),
+        );
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| matches!(result, Ok(Run::Finished(Val::Unit)))));
+    }
+
+    #[test]
     fn monomorphize_last_model_does_not_consume_path_fork_budget() {
         let var = test_name(100);
         let results = run_all_with_shared_state(
@@ -4657,8 +4722,11 @@ fn zsteptest(zu) {
 
     #[test]
     fn path_local_sampling_is_stable_across_worker_counts() {
+        // 返回值编码 (marker, 受限分支抽到的方向)：{0,1} 是抽到 false 的两条路径，{2,3} 是抽到
+        // true 的两条路径。两条兄弟路径的签名在第一个分支点就分叉，因此必然一条落在 {0,1}、
+        // 另一条落在 {2,3}；同时这个结果不随 worker 数变化。
         let expected = run_worker_invariant_sampling_program(0);
-        assert!(expected == vec![(0, 1), (1, 1)] || expected == vec![(2, 1), (3, 1)]);
+        assert!(expected == vec![(0, 1), (3, 1)] || expected == vec![(1, 1), (2, 1)], "{:?}", expected);
 
         for _ in 0..20 {
             assert_eq!(run_worker_invariant_sampling_program(1), expected);
