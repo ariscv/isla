@@ -1436,9 +1436,9 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 ) -> Result<Run<B>, ExecError> {
     let mut last_z3_reset = Instant::now();
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
-    // 路径级 SMT 统计是线程局部的：一个 worker 线程同一时刻只推进一条路径，因此在路径
-    // 开始执行时清零，撞上预算时读到的就是这条路径自己的 SMT 用时构成。
-    crate::smt::reset_path_smt_stats();
+    // 路径级 SMT 调用本身以线程局部方式计时；调度器会在 fork 时把累计值冻结在 Frame，
+    // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
+    crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
 
     'main_loop: loop {
         // Completion is checked before the soft timeout. Therefore a path that
@@ -1610,6 +1610,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             });
 
                             let point = checkpoint(solver);
+                            frame.capture_path_smt_stats();
                             let frozen =
                                 itrace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
                             task_fraction.halve();
@@ -2028,6 +2029,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             // give it a larger part of the fraction (otherwise the denominator becomes
                             // small very fast).
                             let child_frac = task_fraction.min_split(6);
+                            frame.capture_path_smt_stats();
                             fork_sink.submit(Task {
                                 id: task_id,
                                 fraction: child_frac,
