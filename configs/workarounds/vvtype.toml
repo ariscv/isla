@@ -1,0 +1,142 @@
+# VVTYPE 专用执行限制。
+#
+# strict=true 时，isarch 会在执行前校验 -A 指定 IR 的 SHA-256；不一致立即报错退出。
+# strict=false 时跳过 IR hash 校验，保持原有的宽松行为。
+#
+# 目标：**每条具体汇编指令**（vadd.vv、vrgather.vv……）最终生成的 path 不超过 100 条，
+# 超出的部分靠局部限制做抽样采样，而不是把某个字段钉死成单一取值。两种预算配合使用：
+#
+# - `max_forks_per_branch = 1`（不配 `regions`，因此**全局生效**）：per-scope 预算，
+#   一条路径在同一个分支点只允许 fork 一次。一次性到达的分支点（合法性前导、funct6
+#   dispatch）每条路径只经过一次，不受影响；同一条路径**重复到达**的分支点（逐 lane
+#   循环体）由此从 2^n 压回 2。
+#   这里刻意不配 `regions`：路径规模最大的分支点是 `bool_bit_forwards`（prelude.sail 的
+#   `bool_bit` mapping，被 `bool_to_bit` 逐 lane 调用），它在 IR 里的 jump **没有 Sail 源码
+#   位置**（标注是 `1042 这类 IR 内部编号），任何源码 region 都选不中它。
+# - `region_fork_limits`：region 级预算，整段区间内所有分支点共享一条路径的 fork 次数。
+#   Sail 的 `match` 在 IR 里是一串位于不同 pc 的 jump，每个 arm 判定都是独立分支点，
+#   per-scope 预算对它无效，只有 region 预算能把 SEW/LMUL 的多路展开抽样成 N+1 个取值。
+#
+# Region 使用半开区间 [start, end)。每项都记录当前 sail-riscv 的源码首尾锚点；
+# sail-riscv 修改造成行号偏移后，应按锚点内容重新搜索并更新坐标与 ir_sha256。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 档 A：输出层配额。每条具体汇编指令、每种返回值类别最多保留这么多条。
+# 数据支持：vrgather.vv 的 141 条非法用例只有 25 种不同汇编串（同一编码配不同 vtype 各算一条），
+# 按 (助记符, 完整 test-ins) 分组后每组平均 5.6 条，配额 2 即可压到 ~50。
+# `Retire_Success` 故意不列出：成功用例全保留，覆盖契约要求成功路径数不下降。
+[execution_limits.case_quota]
+Illegal_Instruction = 2
+
+# 注意：`assert_sew` / `assert_lmul_pow` 的 SEW、LMUL match 故意**不加** region 预算。
+# 它们在 funct6 dispatch 之前，一旦限制就会同时削掉所有子指令的 vtype 覆盖率
+# （4×7=28 组组合会被抽样成 2×2）；而大部分子指令展开后本来就不到 100 条路径，
+# 属于不该被限制的那一类。只有下面这些"理论上路径数很大"的子指令才单独配预算。
+
+# VV_VRGATHER 的逐 lane 循环体：区间内有 mask 判定和 idx < VLMAX 判定两个分支点。
+# vrgather.vv 是路径数最多的子指令（全展开实测 491 条），预算 0 表示整段只抽样、不 fork。
+# Sail start 181:      if mask[i] == 0b1 then {
+# ...
+# Sail end   187:      }
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 181
+start_column = 6
+end_line = 187
+end_column = 7
+
+# VV_VRGATHEREI16 的逐 lane 循环体：同上，全展开实测 623 条，是最多的一条。
+# Sail start 190:      if mask[i] == 0b1 then {
+# ...
+# Sail end   196:      }
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 190
+start_column = 6
+end_line = 196
+end_column = 7
+
+# get_fixed_rounding_incr 由 VV_VSMUL/VV_VSSRL/VV_VSSRA 逐 lane 调用，区间内有 shift==0
+# 判定和 4 路 rounding mode 判定等多个分支点，只靠 per-scope 预算会得到 2^k。
+# 这三条子指令全展开实测 149/113/109 条，都过了 100，所以预算取 0：整段只抽样、不 fork。
+# Sail start 728:  if shift_amount == 0 then 0b0
+# ...
+# Sail end   748:  }
+# 配置终点使用紧随函数后的空行 750:1。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 728
+start_column = 2
+end_line = 750
+end_column = 1
+
+# valid_reg_overlap：vrgather/vrgatherei16 的 vs1 EMUL 与 vd 不同，会走进这里的
+# 大小比较分支反复 fork（实测 77:5 与 77:2 合计近 200 次）；非 gather 的两个 EMUL
+# 相等，内层是具体值、根本不 fork，所以这个预算实际只压 gather 这两条子指令。
+# Sail start 71:function valid_reg_overlap(rs : vregidx, rd : vregidx, EMUL_pow_rs : int, EMUL_pow_rd : int) -> bool = {
+# ...
+# Sail end   85:  } else true;
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 71
+start_column = 2
+end_line = 85
+end_column = 3
+
+# VV_VRGATHER / VV_VRGATHEREI16 专属的 src/dst 重叠判定 `vs1 == vd | vs2 == vd`。
+# IR 把这段 OR 短路求值编译成 jump（65:36-65:57），jump=true 一侧短路命中（重叠为真 →
+# 最终走 illegal），fallthrough 一侧继续判定或落空（合法）。funct6 已被外层 64:31-66:41
+# 的判定确定为 gather，所以这段只作用于 gather 两条子指令。
+#
+# 16:1 偏置 jump 方向 = 只让 1/16 的路径采样到"重叠为真"，其余 15/16 继续走合法分支。
+# 这会让原本非法的路径转去合法侧、成功覆盖变广——是想要的效果。代价是总路径数会升高，
+# 由下面 gather 逐 lane 循环体上的局部 limit 控制不爆炸（>1000），最终条数由档 A 兜底。
+# Sail start 65:                               then vs1 == vd | vs2 == vd
+# Sail end   65:                               then vs1 == vd | vs2 == vd
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+sample_bias = 16
+sample_bias_direction = "jump"
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 65
+start_column = 36
+end_line = 65
+end_column = 57
+
+# 注意：70:2-74:35 的公共非法前导不加偏置。它是所有 VVTYPE 子指令共享的，偏置会把
+# vadd/vsub 等所有子指令的非法路径都送进合法侧、放大下游 fork，总路径数难以控制。
+# 这段的非法用例条数由档 A 的输出层配额在收尾阶段控制。
+
+# VV_VSSUBU 的逐 lane 循环体：除了 mask 判定还多一个 unsigned 比较分支，比其它算术
+# arm 多一倍（全展开实测 133 条）。预算 0 => 整段只抽样。
+# Sail start 121:      if mask[i] == 0b1 then {
+# ...
+# Sail end   124:      }
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 121
+start_column = 6
+end_line = 124
+end_column = 7
+
+# VV_VSMUL 的逐 lane 循环体：mask 判定之外还有 rounding 与 saturation，比其它算术 arm
+# 多一档（全展开实测 101 条，刚好过线）。预算 0 => 整段只抽样。
+# Sail start 131:      if mask[i] == 0b1 then {
+# ...
+# Sail end   136:      }
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 0
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 131
+start_column = 6
+end_line = 136
+end_column = 7

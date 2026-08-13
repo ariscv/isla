@@ -8,7 +8,7 @@ use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
 use isla_lib::error::{ExecError, SmtError};
 use isla_lib::executor::{backtrace_string, LocalFrame, Run};
-use isla_lib::executor::{ExecutionLimits, LimitBehavior, TaskState};
+use isla_lib::executor::{ExecutionLimits, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
 use isla_lib::log;
@@ -16,7 +16,7 @@ use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
-use isla_lib::source_loc::{SourceLoc, SourceRegionSpec};
+use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -336,37 +336,9 @@ fn apply_case_quota(cases: Vec<CollectedCase>, quota: &CaseQuota) -> Vec<Collect
 }
 
 fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig>) -> ExecutionLimits {
-    const GATHER_SOURCE_FILE: &str = "extensions/V/vext_arith_insts.sail";
-
-    // 执行限制配置：局部 branch/loop 预算负责压制路径规模；达到预算后按固定 seed
-    // 可复现抽样一侧继续执行，而不是固定选择 true 或直接丢弃整条路径。
-    //
-    // - max_forks_per_branch=2：每个 (函数, IR PC, 最近两层调用点, SourceLoc) 最多实际 fork 2 次；
-    //   后续访问成对均衡地抽样 true/false，避免循环热点吃光深层分支预算。
-    // - max_forks_per_path=None：不设置全局 path fork 上限，避免在 SourceLoc region 之外裁剪路径。
-    // - max_backjumps_per_loop=None：当前只限制下面四个 gather 条件分支，不提前退出有界 vector 循环。
-    // - max_path_depth=None：不使用全局路径深度限制，区域外控制流保持完整遍历。
-    // - regions：只选择两个 gather 指令的 mask 和 idx < VLMAX 逐元素热点；constructor、编码 guard、
-    //   合法性检查与主 match 保持完整展开，避免影响 VVTYPE 指令种类覆盖。
-    let default_region_specs = [
-        // VV_VRGATHER：逐元素 mask 分支。
-        SourceRegionSpec::new(GATHER_SOURCE_FILE, (186, 6), (192, 7)),
-        // VV_VRGATHER：逐元素 idx < VLMAX 分支。
-        SourceRegionSpec::new(GATHER_SOURCE_FILE, (191, 20), (191, 65)),
-        // VV_VRGATHEREI16：逐元素 mask 分支。
-        SourceRegionSpec::new(GATHER_SOURCE_FILE, (195, 6), (201, 7)),
-        // VV_VRGATHEREI16：逐元素 idx < VLMAX 分支。
-        SourceRegionSpec::new(GATHER_SOURCE_FILE, (200, 20), (200, 65)),
-    ];
-    let limits = ExecutionLimits::default()
-        .with_max_forks_per_branch(2)
-        .with_limit_behavior(LimitBehavior::Concretize)
-        .with_region_specs(&default_region_specs, symtab);
-
-    // TOML 中出现的字段逐项覆盖代码默认策略；regions 出现时整体替换默认 SourceRegion 集合。
     match config {
-        Some(config) => limits.with_config(config, symtab),
-        None => limits,
+        Some(config) => ExecutionLimits::default().with_config(config, symtab),
+        None => ExecutionLimits::default(),
     }
 }
 
@@ -929,10 +901,38 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 mod tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
-    use isla_lib::config::LimitBehaviorConfig;
-    use isla_lib::source_loc::SourceRegion;
+    use isla_lib::config::{LimitBehaviorConfig, RegionForkLimitConfig};
+    use isla_lib::executor::{LimitBehavior, SampleBias};
+    use isla_lib::source_loc::SourceRegionSpec;
     use isla_lib::timeout::{SmtDumpNames, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
     use std::time::Duration;
+
+    /// 构造一个内联的 `ExecutionLimitsConfig`，用来测 `solve_execution_limits` 这个函数本身的
+    /// 行为（region 解析、文件名匹配、偏置/预算传递）。不读任何真实配置文件 / IR / Sail 源码，
+    /// 避免测试随 workaround TOML 漂移。
+    fn inline_config(max_forks_per_branch: u32, region_limits: Vec<RegionForkLimitConfig>) -> ExecutionLimitsConfig {
+        ExecutionLimitsConfig {
+            max_forks_per_branch: Some(max_forks_per_branch),
+            on_limit_reached: Some(LimitBehaviorConfig::Concretize),
+            region_fork_limits: Some(region_limits),
+            ..ExecutionLimitsConfig::default()
+        }
+    }
+
+    fn vext_arith_region(start: (u32, u16), end: (u32, u16)) -> SourceRegionSpec {
+        SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", start, end)
+    }
+
+    /// 含 vext_arith / vext_utils / vext_control 三个文件的 symtab，方便测试里构造 SourceLoc。
+    fn vext_symtab() -> Symtab<'static> {
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec![
+            "extensions/V/vext_arith_insts.sail",
+            "extensions/V/vext_utils_insts.sail",
+            "extensions/V/vext_control.sail",
+        ]);
+        symtab
+    }
 
     struct NamesDump;
 
@@ -984,34 +984,100 @@ mod tests {
     }
 
     #[test]
-    fn solve_execution_limits_use_local_sampling_as_primary_path_bound() {
-        let mut symtab = Symtab::new();
-        symtab.set_files(vec!["extensions/V/vext_arith_insts.sail"]);
-        let limits = solve_execution_limits(&symtab, None);
-
-        assert_eq!(limits.max_forks_per_branch, Some(2));
-        assert_eq!(limits.max_forks_per_path, None);
-        assert_eq!(limits.max_backjumps_per_loop, None);
-        assert_eq!(limits.max_path_depth, None);
-        assert_eq!(limits.call_context_depth, None);
-        assert_eq!(limits.on_limit_reached, LimitBehavior::Concretize);
-        assert_eq!(limits.regions.as_ref().unwrap().len(), 4);
-
-        assert_eq!(
-            limits.regions,
-            Some(vec![
-                SourceRegion::from_source_loc(SourceLoc::new(0, 186, 6, 192, 7)),
-                SourceRegion::from_source_loc(SourceLoc::new(0, 191, 20, 191, 65)),
-                SourceRegion::from_source_loc(SourceLoc::new(0, 195, 6, 201, 7)),
-                SourceRegion::from_source_loc(SourceLoc::new(0, 200, 20, 200, 65)),
-            ])
+    fn solve_execution_limits_passes_through_inline_region_limits() {
+        let symtab = vext_symtab();
+        let config = inline_config(
+            1,
+            vec![
+                RegionForkLimitConfig {
+                    max_forks_per_region: 0,
+                    sample_bias: None,
+                    region: vext_arith_region((65, 36), (65, 57)),
+                },
+                RegionForkLimitConfig {
+                    max_forks_per_region: 0,
+                    sample_bias: Some((16, true)),
+                    region: vext_arith_region((181, 6), (187, 7)),
+                },
+            ],
         );
+        let limits = solve_execution_limits(&symtab, Some(&config));
+
+        assert_eq!(limits.max_forks_per_branch, Some(1));
+        assert_eq!(limits.on_limit_reached, LimitBehavior::Concretize);
+        // 不配 `regions`：per-scope 预算必须全局生效，否则选不中没有 Sail 源码位置的分支点。
+        assert_eq!(limits.regions, None);
+        assert!(limits.branch_region_limits.is_empty());
+        assert_eq!(limits.region_fork_limits.len(), 2);
+        // 解析出的 region 坐标 + 偏置都按配置原样传递。
+        let biased = limits
+            .region_fork_limits
+            .iter()
+            .find(|limit| limit.sample_bias.is_some())
+            .expect("应该有一条带偏置的 region");
+        assert_eq!(biased.sample_bias, Some(SampleBias { denominator: 16, direction: true }));
+        assert!(biased.region.selects_ir_location(SourceLoc::new(0, 181, 6, 187, 7)));
+    }
+
+    /// `regions` 过滤器不开启时，没有 Sail 源码位置（`SourceLoc::unknown`）的分支点也必须
+    /// 受 per-scope 预算约束——这是 `bool_bit_forwards` 那类 IR 内部编号 jump 能被压住的前提。
+    #[test]
+    fn solve_execution_limits_keeps_branch_budget_when_regions_filter_is_absent() {
+        let symtab = vext_symtab();
+        let config = inline_config(1, Vec::new());
+        let limits = solve_execution_limits(&symtab, Some(&config));
+
+        assert_eq!(limits.max_forks_per_branch, Some(1));
+        assert!(limits.regions.is_none());
+        // 不应该因为某条 region 配置选不中 unknown 位置就 panic。
+        assert!(limits.region_fork_limits.iter().all(|limit| !limit.region.selects_ir_location(SourceLoc::unknown())));
+    }
+
+    /// `region_fork_limits` 解析时按文件名匹配到运行时 file 编号；坐标在配置给的范围内才命中。
+    /// 这条测试用一个内联配置覆盖"命中、不命中、文件不存在"三种情况。
+    #[test]
+    fn solve_execution_limits_region_fork_limits_match_by_source_location() {
+        let symtab = vext_symtab();
+        let config = inline_config(
+            1,
+            vec![
+                RegionForkLimitConfig {
+                    max_forks_per_region: 0,
+                    sample_bias: None,
+                    region: vext_arith_region((181, 6), (187, 7)),
+                },
+                RegionForkLimitConfig {
+                    max_forks_per_region: 0,
+                    sample_bias: None,
+                    // 故意写一个 symtab 里没有的文件，解析时应该整体落空、不 panic。
+                    region: SourceRegionSpec::new("not/a/real/file.sail", (1, 1), (2, 2)),
+                },
+            ],
+        );
+        let limits = solve_execution_limits(&symtab, Some(&config));
+        let budgeted =
+            |location| limits.region_fork_limits.iter().any(|limit| limit.region.selects_ir_location(location));
+
+        // 文件名能匹配、坐标在区间内 => 命中。
+        assert!(budgeted(SourceLoc::new(0, 181, 6, 187, 7)));
+        assert!(budgeted(SourceLoc::new(0, 185, 10, 186, 20)));
+        // 坐标在区间外 => 不命中。
+        assert!(!budgeted(SourceLoc::new(0, 180, 1, 180, 5)));
+        assert!(!budgeted(SourceLoc::new(0, 188, 1, 188, 5)));
+        // 别的文件 => 不命中。
+        assert!(!budgeted(SourceLoc::new(1, 181, 6, 187, 7)));
+        // 配置里那条不存在的文件应该被滤掉，不进 region_fork_limits。
+        assert_eq!(limits.region_fork_limits.len(), 1);
     }
 
     #[test]
-    fn solve_execution_limits_applies_toml_override_after_defaults() {
+    fn solve_execution_limits_uses_only_the_supplied_toml_config() {
         let mut symtab = Symtab::new();
-        symtab.set_files(vec!["extensions/V/vext_arith_insts.sail"]);
+        symtab.set_files(vec![
+            "extensions/V/vext_arith_insts.sail",
+            "extensions/V/vext_utils_insts.sail",
+            "extensions/V/vext_control.sail",
+        ]);
         let config = ExecutionLimitsConfig {
             max_forks_per_branch: Some(7),
             max_forks_per_path: Some(11),
@@ -1026,7 +1092,8 @@ mod tests {
         assert_eq!(limits.max_forks_per_path, Some(11));
         assert_eq!(limits.call_context_depth, Some(3));
         assert_eq!(limits.on_limit_reached, LimitBehavior::Truncate);
-        assert_eq!(limits.regions.as_ref().unwrap().len(), 4);
+        assert!(limits.regions.is_none());
+        assert!(limits.branch_region_limits.is_empty());
     }
 
     #[test]
@@ -1042,16 +1109,37 @@ mod tests {
     }
 
     #[test]
-    fn solve_execution_limits_missing_default_region_file_matches_nothing_without_panicking() {
+    fn solve_execution_limits_without_toml_is_inactive() {
+        let limits = solve_execution_limits(&Symtab::new(), None);
+
+        assert_eq!(limits.max_forks_per_branch, None);
+        assert_eq!(limits.max_forks_per_path, None);
+        assert_eq!(limits.max_backjumps_per_loop, None);
+        assert_eq!(limits.max_path_depth, None);
+        assert_eq!(limits.regions, None);
+        assert!(limits.branch_region_limits.is_empty());
+    }
+
+    /// region 预算配置里的文件名在 symtab 中找不到时，那条 region 整体落空、不 panic；
+    /// per-scope 预算不受影响。
+    #[test]
+    fn solve_execution_limits_drops_region_limits_whose_file_is_unknown() {
         let mut symtab = Symtab::new();
         symtab.set_files(vec!["core/types.sail"]);
+        let config = inline_config(
+            7,
+            vec![RegionForkLimitConfig {
+                max_forks_per_region: 0,
+                sample_bias: None,
+                region: SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (181, 6), (187, 7)),
+            }],
+        );
+        let limits = solve_execution_limits(&symtab, Some(&config));
 
-        let limits = solve_execution_limits(&symtab, None);
-
-        assert_eq!(limits.max_forks_per_branch, Some(2));
-        assert_eq!(limits.max_fork_pct_per_branch, None);
-        assert_eq!(limits.max_backjumps_per_loop, None);
-        assert_eq!(limits.regions, Some(Vec::new()));
+        // per-scope 预算照常生效。
+        assert_eq!(limits.max_forks_per_branch, Some(7));
+        // region 预算因文件名解析不到而落空。
+        assert!(limits.region_fork_limits.is_empty());
     }
 
     #[test]
