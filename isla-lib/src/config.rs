@@ -31,7 +31,7 @@
 //! architecture.
 
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
@@ -1001,6 +1001,8 @@ pub struct ExecutionLimitsConfig {
     pub regions: Option<Vec<SourceRegionSpec>>,
     pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
     pub region_fork_limits: Option<Vec<RegionForkLimitConfig>>,
+    /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
+    pub case_quota: Option<BTreeMap<String, u32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1120,6 +1122,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "regions",
             "branch_region_limits",
             "region_fork_limits",
+            "case_quota",
         ],
     )?;
 
@@ -1257,7 +1260,25 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         regions,
         branch_region_limits,
         region_fork_limits,
+        case_quota: case_quota_table(table)?,
     }))
+}
+
+fn case_quota_table(table: &toml::value::Table) -> Result<Option<BTreeMap<String, u32>>, String> {
+    let Some(value) = table.get("case_quota") else { return Ok(None) };
+    let sub = value.as_table().ok_or_else(|| "execution_limits.case_quota 必须是 TOML table".to_string())?;
+    if sub.is_empty() {
+        return Err("execution_limits.case_quota 不能为空".to_string());
+    }
+    let mut map = BTreeMap::new();
+    for (key, value) in sub {
+        let value = value.as_integer().ok_or_else(|| format!("execution_limits.case_quota.{} 必须是非负整数", key))?;
+        map.insert(
+            key.clone(),
+            u32::try_from(value).map_err(|_| format!("execution_limits.case_quota.{} 超出 u32 范围", key))?,
+        );
+    }
+    Ok(Some(map))
 }
 
 pub struct ISAConfig<B> {
@@ -1610,6 +1631,26 @@ mod tests {
         let value = "[execution_limits]\nregion_fork_limits = []".parse::<Value>().unwrap();
         let error = get_execution_limits_config(&value).unwrap_err();
         assert!(error.contains("execution_limits.region_fork_limits 不能为空"), "{}", error);
+    }
+
+    #[test]
+    fn execution_limits_config_parses_case_quota_including_zero() {
+        let value = r#"
+            [execution_limits]
+
+            [execution_limits.case_quota]
+            Illegal_Instruction = 0
+            Retire_Success = 3
+        "#
+        .parse::<Value>()
+        .unwrap();
+
+        let config = get_execution_limits_config(&value).unwrap().unwrap();
+
+        assert_eq!(
+            config.case_quota,
+            Some(BTreeMap::from([(String::from("Illegal_Instruction"), 0), (String::from("Retire_Success"), 3)]))
+        );
     }
 
     #[test]

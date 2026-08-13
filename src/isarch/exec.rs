@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[allow(non_camel_case_types)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct AssemGenJsonItem {
     arch: BTreeMap<String, String>,
     #[serde(rename = "test-ins")]
@@ -85,14 +85,27 @@ impl AssemGenJson {
     }
 }
 
+/// 一条完成的用例 + 它的路径签名。签名用于收尾阶段的稳定排序与配额取样，让多线程下
+/// 的产出顺序不影响最终落盘的用例集合（按 codex 评审意见的"路径局部指纹 + 全量 canonical sort"）。
+#[derive(Clone)]
+struct CollectedCase {
+    path_signature: u64,
+    item: AssemGenJsonItem,
+}
+
 struct SolveCollectorState {
-    json: AssemGenJson,
+    cases: Vec<CollectedCase>,
+    case_quota: Option<CaseQuota>,
     first_error: Option<ExecError>,
 }
 
 impl SolveCollectorState {
     fn new() -> Self {
-        SolveCollectorState { json: AssemGenJson::new(Vec::new()), first_error: None }
+        Self::with_case_quota(None)
+    }
+
+    fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
+        SolveCollectorState { first_error: None, cases: Vec::new(), case_quota }
     }
 
     fn record_error(&mut self, error: &ExecError) -> bool {
@@ -147,6 +160,179 @@ impl ErrorRecorder<'_> {
 
 fn should_collect_unfinished_path<B: BV>(run: &Run<B>) -> bool {
     !matches!(run, Run::Dead)
+}
+
+/// 收集一个值里出现的全部符号变量，按出现顺序去重。
+fn collect_symbolic_vars<B: BV>(value: &Val<B>, symbols: &mut Vec<Sym>) {
+    match value {
+        Val::Symbolic(sym) => {
+            if !symbols.contains(sym) {
+                symbols.push(*sym)
+            }
+        }
+        Val::Vector(values) | Val::List(values) => {
+            for value in values {
+                collect_symbolic_vars(value, symbols)
+            }
+        }
+        Val::Struct(fields) => {
+            for value in fields.values() {
+                collect_symbolic_vars(value, symbols)
+            }
+        }
+        Val::Ctor(_, value) => collect_symbolic_vars(value, symbols),
+        Val::SymbolicCtor(sym, fields) => {
+            if !symbols.contains(sym) {
+                symbols.push(*sym)
+            }
+            for value in fields.values() {
+                collect_symbolic_vars(value, symbols)
+            }
+        }
+        _ => (),
+    }
+}
+
+/// 让路径没有约束到的枚举字段在不同路径上取到不同成员。
+///
+/// 在 funct6 dispatch 之前就 `return Illegal_Instruction()` 的路径根本没有约束过 funct6，
+/// Z3 于是在每条这样的路径上都给出同一个成员（枚举里的第一个），结果所有这类非法用例
+/// 都被标注成同一条子指令——VVTYPE 里就是 vadd.vv，实测被顶到 196 条，而其它子指令一条
+/// 非法用例都分不到。这里按路径签名给每个符号枚举字段挑一个候选成员，能满足就钉住，
+/// 让非法用例散布到各条子指令上，覆盖面也更广。
+///
+/// 路径本身已经约束住的字段（例如走进某个 funct6 arm 的路径）候选值会 Unsat，直接跳过，
+/// 因此不会改变任何一条路径的语义，只影响"任意值"的取法。
+fn diversify_unconstrained_enums<'ir, B: BV>(
+    args: &[Val<B>],
+    signature: u64,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) {
+    let mut symbols = Vec::new();
+    for arg in args {
+        collect_symbolic_vars(arg, &mut symbols)
+    }
+    if symbols.is_empty() {
+        return;
+    }
+
+    // 先用一个模型认出哪些符号是枚举，同时拿到它们的 enum_id。
+    let mut enum_symbols = Vec::new();
+    if solver.check_sat(SourceLoc::unknown()) != isla_lib::smt::SmtResult::Sat {
+        return;
+    }
+    {
+        let mut model = Model::new(solver);
+        for sym in symbols {
+            if let Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(member))) = model.get_var(sym) {
+                enum_symbols.push((sym, member))
+            }
+        }
+    }
+
+    for (index, (sym, member)) in enum_symbols.into_iter().enumerate() {
+        let members = match shared_state.type_info.enums.get(&member.enum_id.to_name()) {
+            Some(members) if members.len() > 1 => members.len(),
+            _ => continue,
+        };
+        let candidate = (signature.wrapping_add(index as u64) % members as u64) as usize;
+        if candidate == member.member {
+            continue;
+        }
+        let preferred = isla_lib::smt::smtlib::Exp::Eq(
+            Box::new(isla_lib::smt::smtlib::Exp::Var(sym)),
+            Box::new(isla_lib::smt::smtlib::Exp::Enum(isla_lib::smt::EnumMember {
+                enum_id: member.enum_id,
+                member: candidate,
+            })),
+        );
+        // Unsat 说明这条路径已经把该字段约束成别的成员了，保持原样。
+        if solver.check_sat_with(&preferred, SourceLoc::unknown()) == isla_lib::smt::SmtResult::Sat {
+            solver.add(isla_lib::smt::smtlib::Def::Assert(preferred))
+        }
+    }
+}
+
+/// 输出层配额：按 `(助记符, 完整 test-ins, ret_val 类别)` 分组，每组最多保留 N 条。
+///
+/// 这是 KLEE `emittedErrors` 的可复现改写——把"限流只作用在输出层、执行路径一条不少"
+/// 的设计原样保留，把全局 static 集合换成"所有 worker join 后做一次确定性归并"。
+/// 成功用例（`Retire_Success`）默认不限量，配额只压非法用例。
+///
+/// 分组键带了完整 `test-ins`：同一个非法编码配不同 vtype 各算一条是主要冗余形态，
+/// 按 `(助记符, test-ins)` 分组能让这些落在同一个桶里被均匀取样。
+#[derive(Clone, Debug, Default)]
+pub struct CaseQuota {
+    /// 按 `ret_val` 类别名做前缀过滤的配额。key 是 ret_val 字符串里的构造子名
+    /// （例如 `Illegal_Instruction`、`Retire_Success`），value 是每组上限。
+    /// 未列出的类别不限量。
+    pub per_class: BTreeMap<String, u32>,
+}
+
+impl CaseQuota {
+    fn from_config(map: &BTreeMap<String, u32>) -> Self {
+        CaseQuota { per_class: map.clone() }
+    }
+
+    fn limit_for(&self, ret_val: &str) -> Option<u32> {
+        // ret_val 形如 "Illegal_Instruction(())" / "Retire_Success(())"，取构造子名做匹配。
+        let name = ret_val.split('(').next().unwrap_or(ret_val);
+        self.per_class.get(name).copied()
+    }
+}
+
+/// 收尾阶段的确定性归并：分组配额 + 全量 canonical sort。
+///
+/// 顺序由 `path_signature` + 序列化文本（tie-breaker）决定，与 worker 调度无关，
+/// 因此 THREADS=1/4/64 跑出来的 JSON 逐字节一致。
+fn finalize_cases(mut cases: Vec<CollectedCase>, quota: &Option<CaseQuota>) -> Vec<AssemGenJsonItem> {
+    // 1. 组内配额：按 (助记符, 完整 test-ins, ret_val 类别) 分桶，每组按签名均匀取样。
+    if let Some(quota) = quota {
+        cases = apply_case_quota(cases, quota);
+    }
+    // 2. 全量稳定排序：签名 + 序列化文本做 tie-breaker，杜绝签名碰撞时的调度依赖。
+    cases.sort_by(|a, b| {
+        let a_text = serde_json::to_string(&a.item).expect("AssemGenJsonItem 序列化失败");
+        let b_text = serde_json::to_string(&b.item).expect("AssemGenJsonItem 序列化失败");
+        a.path_signature.cmp(&b.path_signature).then_with(|| a_text.cmp(&b_text))
+    });
+    cases.into_iter().map(|case| case.item).collect()
+}
+
+fn apply_case_quota(cases: Vec<CollectedCase>, quota: &CaseQuota) -> Vec<CollectedCase> {
+    use std::collections::HashMap;
+    // 先按分组键装桶。
+    let mut buckets: HashMap<(String, String, String), Vec<CollectedCase>> = HashMap::new();
+    for case in cases {
+        let mnemonic = case.item.test_ins.split_whitespace().next().unwrap_or("").to_string();
+        let ret_class = case.item.ret_val.split('(').next().unwrap_or("").to_string();
+        let key = (mnemonic, case.item.test_ins.clone(), ret_class);
+        buckets.entry(key).or_default().push(case);
+    }
+    // 每个桶按 ret_val 类别查配额；超过配额的按签名均匀取样。
+    let mut kept = Vec::with_capacity(buckets.values().map(|v| v.len()).sum());
+    for (_, mut bucket) in buckets {
+        let limit = bucket.first().and_then(|c| quota.limit_for(&c.item.ret_val));
+        match limit {
+            Some(0) => {}
+            Some(n) if (n as usize) < bucket.len() => {
+                bucket.sort_by(|a, b| {
+                    let a_text = serde_json::to_string(&a.item).expect("AssemGenJsonItem 序列化失败");
+                    let b_text = serde_json::to_string(&b.item).expect("AssemGenJsonItem 序列化失败");
+                    a.path_signature.cmp(&b.path_signature).then_with(|| a_text.cmp(&b_text))
+                });
+                let k = bucket.len();
+                for i in 0..n as usize {
+                    // 均匀取样：在排序后的桶里等间距取 n 个，比取前 n 更能让 vtype/操作数分散。
+                    let idx = if n == 1 { 0 } else { i * (k - 1) / (n as usize - 1) };
+                    kept.push(bucket[idx].clone());
+                }
+            }
+            _ => kept.extend(bucket),
+        }
+    }
+    kept
 }
 
 fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig>) -> ExecutionLimits {
@@ -213,6 +399,7 @@ pub fn solve_state_main<'ir, B: BV>(
     execution_limits_config: Option<&ExecutionLimitsConfig>,
     timeout_report_config: TimeoutReportConfig,
 ) -> bool {
+    let case_quota = execution_limits_config.and_then(|cfg| cfg.case_quota.as_ref().map(CaseQuota::from_config));
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
 
@@ -294,6 +481,7 @@ pub fn solve_state_main<'ir, B: BV>(
             timeout,
             &execution_limits,
             &timeout_reporter,
+            case_quota.clone(),
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -353,6 +541,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     timeout: Option<u64>,
     execution_limits: &ExecutionLimits,
     timeout_reporter: &TimeoutReporter,
+    case_quota: Option<CaseQuota>,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -390,7 +579,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let cp = checkpoint(&mut solver);
 
     // 使用checkpoint执行函数，支持错误传播
-    let result: Arc<Mutex<SolveCollectorState>> = Arc::new(Mutex::new(SolveCollectorState::new()));
+    let result: Arc<Mutex<SolveCollectorState>> =
+        Arc::new(Mutex::new(SolveCollectorState::with_case_quota(case_quota)));
 
     let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
 
@@ -465,6 +655,10 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         let mut test_ins = String::new();
                         let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
+                        // 未被这条路径约束的枚举字段（典型是提前返回 Illegal 的路径上的
+                        // funct6）先按路径签名挑一个成员钉住，否则所有这类用例都会被标注
+                        // 成同一条子指令。
+                        diversify_unconstrained_enums(&fun_args, frame.path_signature(), shared_state, &mut solver);
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
                         let smt_result = solver.check_sat(SourceLoc::unknown());
@@ -660,12 +854,10 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         }
                         let single_instruction_json =
                             AssemGenJsonItem::new(target, test_ins, test_ins_encdec, isa_state, ret_val_str);
-                        collected
-                            .lock()
-                            .expect("solve collector mutex poisoned")
-                            .json
-                            .gen
-                            .push(single_instruction_json);
+                        collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
+                            path_signature: frame.path_signature(),
+                            item: single_instruction_json,
+                        });
                     }
                     Run::Exit => {
                         log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks()))
@@ -723,7 +915,10 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     };
     let xlen_name_str = target.arch_pretty_name().to_string();
     let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
-    state.json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
+    let quota = state.case_quota;
+    let items = finalize_cases(state.cases, &quota);
+    let json = AssemGenJson::new(items);
+    json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
     match state.first_error {
         Some(error) => Err(error),
         None => Ok(None),
@@ -882,6 +1077,49 @@ mod tests {
         assert!(!should_collect_unfinished_path::<B64>(&Run::Dead));
         assert!(should_collect_unfinished_path::<B64>(&Run::Exit));
         assert!(should_collect_unfinished_path::<B64>(&Run::Suspended));
+    }
+
+    fn collected_case(signature: u64, test_ins: &str, ret_val: &str) -> CollectedCase {
+        CollectedCase {
+            path_signature: signature,
+            item: AssemGenJsonItem {
+                arch: BTreeMap::new(),
+                test_ins: test_ins.to_string(),
+                test_ins_encdec: "32'h0000_0000".to_string(),
+                isa_state: BTreeMap::new(),
+                ret_val: ret_val.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn case_quota_zero_discards_every_case_in_the_bucket() {
+        let quota = CaseQuota { per_class: BTreeMap::from([(String::from("Illegal_Instruction"), 0)]) };
+        let cases = vec![
+            collected_case(1, "vadd.vv v0, v1, v2", "Illegal_Instruction(())"),
+            collected_case(2, "vadd.vv v0, v1, v2", "Illegal_Instruction(())"),
+            collected_case(3, "vadd.vv v0, v1, v2", "Retire_Success(())"),
+        ];
+
+        let finalized = finalize_cases(cases, &Some(quota));
+
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].ret_val, "Retire_Success(())");
+    }
+
+    #[test]
+    fn case_quota_same_signature_uses_canonical_json_tie_breaker() {
+        let quota = CaseQuota { per_class: BTreeMap::from([(String::from("Illegal_Instruction"), 1)]) };
+        let first = vec![
+            collected_case(9, "vadd.vv v0, v1, v2", "Illegal_Instruction(())"),
+            collected_case(9, "vadd.vv v0, v1, v3", "Illegal_Instruction(())"),
+        ];
+        let second = first.iter().cloned().rev().collect();
+
+        let first = serde_json::to_string(&finalize_cases(first, &Some(quota.clone()))).unwrap();
+        let second = serde_json::to_string(&finalize_cases(second, &Some(quota))).unwrap();
+
+        assert_eq!(first, second);
     }
 
     #[cfg(feature = "itrace")]
