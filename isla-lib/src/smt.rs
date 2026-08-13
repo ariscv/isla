@@ -1645,7 +1645,8 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         result: &mut Z3_ast,
         timeout_context: &ModelEvalTimeoutContext,
     ) -> Result<bool, ExecError> {
-        match timeout_Z3_model_eval(self.ctx.z3_ctx, self.z3_model, ast, model_completion, result) {
+        match timeout_Z3_model_eval(self.ctx.z3_ctx, self.z3_model, ast, model_completion, result, SourceLoc::unknown())
+        {
             Ok(evaluated) => Ok(evaluated),
             Err(Z3TimeoutError::Interrupted) => Err(self.model_eval_timeout_error(timeout_context)),
         }
@@ -2544,7 +2545,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
         let ast = self.translate_exp(exp);
         let assumptions = [ast.z3_ast];
-        let z3_result = match timeout_Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, &assumptions) {
+        let z3_result = match timeout_Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, &assumptions, info) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
                 let dump =
@@ -2570,7 +2571,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn check_sat(&mut self, info: SourceLoc) -> SmtResult {
         let started = Instant::now();
-        let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver) {
+        let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver, info) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
                 let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
@@ -2615,6 +2616,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         cs.to_string_lossy().to_string()
     }
+}
+
+/// 清空当前线程的路径级 SMT 统计；executor 在每条路径开始执行时调用。
+pub fn reset_path_smt_stats() {
+    z3_timeout::reset_path_smt_stats()
+}
+
+/// 当前线程正在执行的这条路径迄今为止的 SMT 调用统计。
+pub fn path_smt_stats() -> crate::timeout::SmtCallStats {
+    z3_timeout::path_smt_stats()
+}
+
+/// 已配置的单次 SMT operation deadline（`--smt-timeout`）。
+pub fn configured_smt_operation_timeout() -> Option<std::time::Duration> {
+    z3_timeout::configured_operation_timeout()
 }
 
 pub(crate) fn take_smtperf_report() -> Option<String> {
@@ -2688,6 +2704,40 @@ mod tests {
         fn materialize(&self) -> Result<String, String> {
             Ok("(check-sat)\n".to_string())
         }
+    }
+
+    #[test]
+    fn path_smt_stats_accumulate_protected_z3_calls_with_their_source_location() {
+        reset_path_smt_stats();
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(smtlib::Ty::BitVec(8), SourceLoc::unknown());
+        let check_sat_loc = SourceLoc::new(1, 30, 2, 30, 40);
+        let check_sat_with_loc = SourceLoc::new(1, 41, 6, 41, 20);
+
+        assert_eq!(solver.check_sat(check_sat_loc), SmtResult::Sat);
+        let one_call = path_smt_stats();
+        assert_eq!(one_call.calls, 1);
+        assert_eq!(one_call.timeouts, 0);
+        let slowest = one_call.slowest.expect("check_sat 应当被记录");
+        assert_eq!(slowest.operation, SmtOperation::CheckSat);
+        assert_eq!(slowest.source_loc, check_sat_loc);
+
+        // check_sat_with 的位置来自调用点的 SourceLoc，用于定位最慢的那次求解。
+        let exp = Eq(Box::new(Var(x)), Box::new(bits64(0, 8)));
+        assert_eq!(solver.check_sat_with(&exp, check_sat_with_loc), SmtResult::Sat);
+        let two_calls = path_smt_stats();
+        assert_eq!(two_calls.calls, 2);
+        assert!(two_calls.wall >= one_call.wall);
+        assert!(matches!(
+            two_calls.slowest.map(|slowest| slowest.source_loc),
+            Some(location) if location == check_sat_loc || location == check_sat_with_loc
+        ));
+
+        // 路径开始执行时清零，统计才是"这条路径的"。
+        reset_path_smt_stats();
+        assert_eq!(path_smt_stats(), crate::timeout::SmtCallStats::empty());
     }
 
     fn timeout_artifact() -> Arc<SmtTimeout> {

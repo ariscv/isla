@@ -115,6 +115,11 @@ impl PathTimeout {
         self.duration.map_or(false, |duration| timing.active_wall >= duration)
     }
 
+    /// 配置的单路径预算；`--timeout` 未配置时为 `None`。
+    pub(super) fn limit(self) -> Option<Duration> {
+        self.duration
+    }
+
     pub(super) fn timed_out_with(self, snapshot: impl FnOnce() -> PathTimeSnapshot) -> bool {
         match self.duration {
             Some(duration) => snapshot().active_wall >= duration,

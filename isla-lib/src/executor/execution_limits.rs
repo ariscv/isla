@@ -244,6 +244,11 @@ impl ExecutionLimitPathState {
         self.total_forks
     }
 
+    /// 这条路径迄今执行过的控制流步数（jump/goto/call）。
+    pub(super) fn control_flow_steps(&self) -> u32 {
+        self.control_flow_steps
+    }
+
     pub(super) fn advance_control_flow(&mut self) -> u32 {
         self.control_flow_steps = self.control_flow_steps.checked_add(1).expect("control-flow step count overflow");
         self.control_flow_steps
@@ -580,6 +585,16 @@ mod tests {
 
     fn branch(handler: &ExecutionLimitHandler, path: &mut ExecutionLimitPathState) -> ExecutionLimitDecision {
         handler.on_branch_fork(path, Name::from_u32(3), 30, &[(Name::from_u32(1), 10)], SourceLoc::new(1, 10, 0, 10, 4))
+    }
+
+    #[test]
+    fn path_state_reports_control_flow_steps() {
+        let mut path = ExecutionLimitPathState::default();
+
+        assert_eq!(path.control_flow_steps(), 0);
+        path.advance_control_flow();
+        path.advance_control_flow();
+        assert_eq!(path.control_flow_steps(), 2);
     }
 
     #[test]

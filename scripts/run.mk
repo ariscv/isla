@@ -94,11 +94,13 @@ CARGO_SMT_FEATURE =
 SMT_TIMEOUT ?=
 else ifeq ($(Z3_TIMEOUT_IMPL),thread_interrupt)
 CARGO_SMT_FEATURE = --features smt-thread-interrupt
-SMT_TIMEOUT ?= 10m
+SMT_TIMEOUT ?= 1m
 else
 $(error Z3_TIMEOUT_IMPL 必须是 direct 或 thread_interrupt)
 endif
 # 外层命令、isarch 符号执行和单条 Z3 operation 的默认验收时间上限。
+# OUTER_TIMEOUT 是整条 solve-% 命令的墙上时钟上限；SOLVE_TIMEOUT 透传给 isarch 的
+# --timeout，是**单条路径**的活跃墙上时钟预算（executor::PathTimeout），不是全局上限。
 OUTER_TIMEOUT ?= 40m
 SOLVE_TIMEOUT ?= 30m
 # timeout SMT 输出目的地与目录；目的地示例：file,itrace 或 file,stdout,itrace。

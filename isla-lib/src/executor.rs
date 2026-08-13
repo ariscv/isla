@@ -55,6 +55,7 @@ use crate::probe;
 use crate::smt::smtlib::Def;
 use crate::smt::*;
 use crate::source_loc::SourceLoc;
+use crate::timeout::PathTimeoutDiagnostic;
 use crate::zencode;
 
 mod execution_limits;
@@ -1319,6 +1320,34 @@ macro_rules! itrace_fork_frame_with_branch_condition {
     }};
 }
 
+/// 路径撞上 `--timeout` 预算时，输出这条路径的 SMT 用时构成与超时原因判定。
+///
+/// 关键区分是"确实需要更多时间"还是"少数 SMT 操作打满单次上限把预算吃掉了"：前者放宽
+/// `--timeout` 有效，后者只有放宽 `--smt-timeout` 或简化约束才有用。
+fn report_path_timeout<'ir, B: BV>(
+    tid: usize,
+    timeout: PathTimeout,
+    frame: &mut LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+) {
+    let diagnostic = PathTimeoutDiagnostic {
+        limit: timeout.limit().expect("path timeout fired without a configured budget"),
+        timing: frame.path_time_snapshot(),
+        smt: crate::smt::path_smt_stats(),
+        smt_operation_limit: crate::smt::configured_smt_operation_timeout(),
+        control_flow_steps: frame.execution_limit_state.control_flow_steps(),
+        position: format!("{}:{}", zencode::decode(shared_state.symtab.to_str(frame.function_name)), frame.pc),
+    };
+    let lines = diagnostic.report_lines(shared_state.symtab.files());
+    for line in &lines {
+        log_from!(tid, log::SYM_EXEC, line);
+    }
+    #[cfg(feature = "tracetool")]
+    frame.itrace_path.record_summary(frame.function_name, frame.backtrace.clone(), frame.pc as u64, lines.join("\n"));
+    #[cfg(not(feature = "tracetool"))]
+    let _ = frame;
+}
+
 /// 将执行限制触发事件记录到 itrace 追踪日志中，包含限制原因和采取的动作（如 truncate、
 /// sample_branch_condition 等）。需要 `tracetool` feature 启用才生效。
 fn record_execution_limit<B: BV>(frame: &mut LocalFrame<'_, B>, reason: ExecutionLimitReason, action: &str) {
@@ -1407,6 +1436,9 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 ) -> Result<Run<B>, ExecError> {
     let mut last_z3_reset = Instant::now();
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
+    // 路径级 SMT 统计是线程局部的：一个 worker 线程同一时刻只推进一条路径，因此在路径
+    // 开始执行时清零，撞上预算时读到的就是这条路径自己的 SMT 用时构成。
+    crate::smt::reset_path_smt_stats();
 
     'main_loop: loop {
         // Completion is checked before the soft timeout. Therefore a path that
@@ -1420,6 +1452,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
         }
 
         if timeout.timed_out_with(|| frame.path_timing.snapshot()) {
+            report_path_timeout(tid, timeout, frame, shared_state);
             return Err(ExecError::Timeout);
         }
 
