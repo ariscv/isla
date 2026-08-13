@@ -55,8 +55,8 @@ pub fn configured_operation_timeout() -> Option<Duration> {
     OPERATION_TIMEOUT.get().copied()
 }
 
-// 每条路径的 SMT 调用统计。一个 worker 线程同一时刻只推进一条路径（`run_loop` 在路径
-// 开始时重置），所以线程局部就等于路径局部；统计本身只有几个标量，始终开启。
+// 每条路径的 SMT 调用统计。一个 worker 线程同一时刻只推进一条路径；调度器在 fork 时
+// 将其冻结到 Frame，并在任务恢复时写回这个线程局部变量。统计本身只有几个标量，始终开启。
 thread_local! {
     static PATH_SMT_STATS: RefCell<SmtCallStats> = const { RefCell::new(SmtCallStats::empty()) };
 }
@@ -65,7 +65,7 @@ fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Du
     PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out))
 }
 
-/// 清空当前线程的路径级 SMT 统计，路径开始执行时调用。
+/// 清空当前线程的路径级 SMT 统计。
 pub fn reset_path_smt_stats() {
     PATH_SMT_STATS.with(|stats| *stats.borrow_mut() = SmtCallStats::empty())
 }
@@ -73,6 +73,11 @@ pub fn reset_path_smt_stats() {
 /// 读取当前线程的路径级 SMT 统计。
 pub fn path_smt_stats() -> SmtCallStats {
     PATH_SMT_STATS.with(|stats| stats.borrow().clone())
+}
+
+/// 用调度快照恢复当前线程正在推进的路径级 SMT 统计。
+pub fn restore_path_smt_stats(stats: SmtCallStats) {
+    PATH_SMT_STATS.with(|current| *current.borrow_mut() = stats)
 }
 
 // 修改这个值即可同时调整最慢和最快求解耗时的输出条数。

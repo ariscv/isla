@@ -2618,7 +2618,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 }
 
-/// 清空当前线程的路径级 SMT 统计；executor 在每条路径开始执行时调用。
+/// 清空当前线程的路径级 SMT 统计。
 pub fn reset_path_smt_stats() {
     z3_timeout::reset_path_smt_stats()
 }
@@ -2626,6 +2626,11 @@ pub fn reset_path_smt_stats() {
 /// 当前线程正在执行的这条路径迄今为止的 SMT 调用统计。
 pub fn path_smt_stats() -> crate::timeout::SmtCallStats {
     z3_timeout::path_smt_stats()
+}
+
+/// 恢复某条已调度路径的 SMT 统计快照。
+pub fn restore_path_smt_stats(stats: crate::timeout::SmtCallStats) {
+    z3_timeout::restore_path_smt_stats(stats)
 }
 
 /// 已配置的单次 SMT operation deadline（`--smt-timeout`）。

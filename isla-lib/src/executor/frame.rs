@@ -45,7 +45,7 @@ use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
 use crate::smt::{Checkpoint, Solver, Sym};
-use crate::timeout::SmtDumpNames;
+use crate::timeout::{SmtCallStats, SmtDumpNames};
 #[cfg(feature = "tracetool")]
 use crate::tracetool::itrace::ItracePerPath;
 
@@ -111,6 +111,7 @@ pub fn backtrace_string<'ir>(backtrace: &[(Name, usize)], symtab: &Symtab<'ir>) 
 #[derive(Clone)]
 pub struct Frame<'ir, B> {
     pub(super) path_time_totals: PathTimeTotals,
+    pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
@@ -143,6 +144,7 @@ pub struct Frame<'ir, B> {
 pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
     LocalFrame {
         path_timing: PathTiming::from_snapshot(frame.path_time_totals),
+        path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
         execution_limit_state: (*frame.execution_limit_state).clone(),
@@ -165,6 +167,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
 /// control flow forks on a choice, which can be shared by threads.
 pub struct LocalFrame<'ir, B> {
     pub(super) path_timing: PathTiming,
+    pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) execution_limit_state: ExecutionLimitPathState,
@@ -201,6 +204,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         // is taken at a fork while the parent remains active, both paths inherit
         // exactly the timing prefix observed at this point and diverge afterwards.
         path_time_totals: frame.path_timing.fork_snapshot(),
+        path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
         execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
@@ -219,6 +223,11 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    /// 在把当前路径交给调度器前，固定它已累计的 SMT 调用统计。
+    pub(super) fn capture_path_smt_stats(&mut self) {
+        self.path_smt_stats = crate::smt::path_smt_stats();
+    }
+
     pub fn path_time_snapshot(&self) -> crate::timeout::PathTimeSnapshot {
         self.path_timing.snapshot()
     }
@@ -385,6 +394,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
         LocalFrame {
             path_timing: PathTiming::default(),
+            path_smt_stats: SmtCallStats::empty(),
             function_name: name,
             pc: 0,
             execution_limit_state: ExecutionLimitPathState::default(),
@@ -412,6 +422,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
         new_frame.path_timing = self.path_timing.clone();
+        new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
@@ -485,6 +496,8 @@ pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
 mod timing_tests {
     use super::*;
     use crate::bitvector::b64::B64;
+    use crate::source_loc::SourceLoc;
+    use crate::timeout::{SmtCallStats, SmtOperation};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -502,6 +515,28 @@ mod timing_tests {
         let resumed = unfreeze_frame(&frozen);
         assert!(!resumed.path_timing.is_active());
         assert_eq!(resumed.path_time_snapshot(), frozen.path_time_snapshot());
+    }
+
+    #[test]
+    fn forked_frames_restore_the_path_smt_statistics_prefix() {
+        let mut prefix = SmtCallStats::empty();
+        prefix.record(SmtOperation::CheckSat, SourceLoc::new(1, 10, 0, 10, 4), Duration::from_millis(12), false);
+        prefix.record(SmtOperation::ModelEval, SourceLoc::new(1, 11, 0, 11, 4), Duration::from_millis(3), false);
+
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+        crate::smt::restore_path_smt_stats(prefix.clone());
+        local.capture_path_smt_stats();
+        let first_child = freeze_frame(&local);
+        let second_child = freeze_frame(&local);
+
+        crate::smt::reset_path_smt_stats();
+        for child in [&first_child, &second_child] {
+            let resumed = unfreeze_frame(child);
+            crate::smt::restore_path_smt_stats(resumed.path_smt_stats);
+            assert_eq!(crate::smt::path_smt_stats(), prefix);
+        }
+        crate::smt::reset_path_smt_stats();
     }
 
     #[test]
