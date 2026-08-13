@@ -35,11 +35,13 @@
 //! - `solve-state [--clause|--extension|--instruction-name|--all]`: Solve for concrete ISA state values
 
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::process::exit;
 use std::time::Duration;
 
 use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
+use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::init::{initialize_architecture, InitArchWithConfig};
 use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings, SharedState};
 use isla_lib::log;
@@ -356,6 +358,16 @@ fn parse_timeout_smt_output(
     Ok(isarch::exec::TimeoutSmtOutput::new(file, stdout, itrace))
 }
 
+fn validate_execution_limits_ir(config: &ExecutionLimitsConfig, arch_path: &Path) -> Result<(), String> {
+    if !config.strict {
+        return Ok(());
+    }
+    let contents =
+        std::fs::read(arch_path).map_err(|error| format!("无法读取 IR {}：{}", arch_path.display(), error))?;
+    let actual = format!("{:x}", Sha256::digest(&contents));
+    config.validate_ir_sha256(&actual).map_err(|error| format!("{}（IR 文件：{}）", error, arch_path.display()))
+}
+
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
@@ -364,6 +376,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "smt-timeout", "单次 Z3 operation 的 soft interrupt 超时时间", "<n[s|m|h]>");
     opts.optopt("", "timeout-smt-output", "timeout SMT2 输出目标，逗号分隔：file,stdout,itrace", "<destinations>");
     opts.optopt("", "timeout-smt-dir", "timeout SMT2 文件输出目录", "<path>");
+    opts.optopt("", "execution-limits-config", "加载独立的执行限制 TOML 配置", "<path>");
     opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
@@ -418,10 +431,33 @@ fn isla_main() -> i32 {
         }
     };
 
+    let execution_limits_override = if let Some(path) = matches.opt_str("execution-limits-config") {
+        match ExecutionLimitsConfig::from_file(&path) {
+            Ok(config) => {
+                let arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
+                if let Err(error) = validate_execution_limits_ir(&config, arch_path) {
+                    eprintln!("{}: {}", path, error);
+                    return 1;
+                }
+                Some(config)
+            }
+            Err(error) => {
+                eprintln!("{}", error);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
     isla_lib::smt::configure_z3_timeout(smt_timeout);
 
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
+
+    if let Some(config) = execution_limits_override {
+        isa_config.execution_limits = Some(config);
+    }
 
     let assertion_mode = AssertionMode::Optimistic;
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");

@@ -988,6 +988,8 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionLimitsConfig {
+    pub strict: bool,
+    pub ir_sha256: Option<String>,
     pub enabled: Option<bool>,
     pub max_forks_per_branch: Option<u32>,
     pub max_forks_per_path: Option<u32>,
@@ -1055,6 +1057,19 @@ fn optional_u64(table: &toml::value::Table, key: &str, root: &str) -> Result<Opt
         .transpose()
 }
 
+fn optional_sha256(table: &toml::value::Table, key: &str, root: &str) -> Result<Option<String>, String> {
+    table
+        .get(key)
+        .map(|value| {
+            let value = value.as_str().ok_or_else(|| format!("{}.{} 必须是字符串", root, key))?;
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(format!("{}.{} 必须是 64 位十六进制 SHA-256", root, key));
+            }
+            Ok(value.to_ascii_lowercase())
+        })
+        .transpose()
+}
+
 fn required_u32(table: &toml::value::Table, key: &str, root: &str) -> Result<u32, String> {
     optional_u32(table, key, root)?.ok_or_else(|| format!("{}.{} 是必填项", root, key))
 }
@@ -1102,6 +1117,30 @@ fn source_region_spec(table: &toml::value::Table, root: &str) -> Result<SourceRe
     ))
 }
 
+impl ExecutionLimitsConfig {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let mut file = File::open(path).map_err(|error| format!("{}: {}", path.display(), error))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).map_err(|error| format!("{}: {}", path.display(), error))?;
+        let value = contents.parse::<Value>().map_err(|error| format!("{}: {}", path.display(), error))?;
+        allowed_keys(&value, "execution limits config", &["execution_limits"])?;
+        get_execution_limits_config(&value)?.ok_or_else(|| format!("{}: 缺少 [execution_limits] 配置", path.display()))
+    }
+
+    pub fn validate_ir_sha256(&self, actual: &str) -> Result<(), String> {
+        if !self.strict {
+            return Ok(());
+        }
+        let expected = self.ir_sha256.as_deref().expect("strict execution limits config 必须包含 ir_sha256");
+        if expected.eq_ignore_ascii_case(actual) {
+            Ok(())
+        } else {
+            Err(format!("IR SHA-256 不匹配：期望 {}，实际 {}", expected, actual))
+        }
+    }
+}
+
 fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsConfig>, String> {
     let Some(value) = config.get("execution_limits") else { return Ok(None) };
     let Some(table) = value.as_table() else { return Err("[execution_limits] 必须是 TOML table".to_string()) };
@@ -1109,6 +1148,8 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         table,
         "[execution_limits]",
         &[
+            "strict",
+            "ir_sha256",
             "enabled",
             "max_forks_per_branch",
             "max_forks_per_path",
@@ -1129,6 +1170,12 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
     let enabled = optional_bool(table, "enabled", "execution_limits")?;
     if enabled == Some(false) && table.len() != 1 {
         return Err("execution_limits.enabled=false 时不能再配置其他 execution limit 字段".to_string());
+    }
+
+    let strict = optional_bool(table, "strict", "execution_limits")?.unwrap_or(false);
+    let ir_sha256 = optional_sha256(table, "ir_sha256", "execution_limits")?;
+    if strict && ir_sha256.is_none() {
+        return Err("execution_limits.strict=true 时必须配置 execution_limits.ir_sha256".to_string());
     }
 
     let max_fork_pct_per_branch = table
@@ -1246,6 +1293,8 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         .transpose()?;
 
     Ok(Some(ExecutionLimitsConfig {
+        strict,
+        ir_sha256,
         enabled,
         max_forks_per_branch: optional_u32(table, "max_forks_per_branch", "execution_limits")?,
         max_forks_per_path: optional_u32(table, "max_forks_per_path", "execution_limits")?,
@@ -1651,6 +1700,64 @@ mod tests {
             config.case_quota,
             Some(BTreeMap::from([(String::from("Illegal_Instruction"), 0), (String::from("Retire_Success"), 3)]))
         );
+    }
+
+    #[test]
+    fn execution_limits_config_strict_mode_requires_matching_ir_hash() {
+        let value = r#"
+            [execution_limits]
+            strict = true
+            ir_sha256 = "c48050efa221b53ac70a2ae924d1b4d4794e8b4cc6dd78e8a0612451a34559cf"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let config = get_execution_limits_config(&value).unwrap().unwrap();
+
+        assert!(config.validate_ir_sha256("c48050efa221b53ac70a2ae924d1b4d4794e8b4cc6dd78e8a0612451a34559cf").is_ok());
+        let error =
+            config.validate_ir_sha256("d48050efa221b53ac70a2ae924d1b4d4794e8b4cc6dd78e8a0612451a34559cf").unwrap_err();
+        assert!(error.contains("期望 c48050ef"));
+        assert!(error.contains("实际 d48050ef"));
+    }
+
+    #[test]
+    fn execution_limits_config_rejects_invalid_strict_hash() {
+        let missing = "[execution_limits]\nstrict = true".parse::<Value>().unwrap();
+        let error = get_execution_limits_config(&missing).unwrap_err();
+        assert!(error.contains("strict=true"));
+        assert!(error.contains("ir_sha256"));
+
+        let invalid = r#"
+            [execution_limits]
+            strict = true
+            ir_sha256 = "not-a-sha256"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let error = get_execution_limits_config(&invalid).unwrap_err();
+        assert!(error.contains("64 位十六进制"));
+    }
+
+    #[test]
+    fn execution_limits_config_reads_standalone_toml_file() {
+        let path = std::env::temp_dir().join(format!("isla-execution-limits-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+                [execution_limits]
+                strict = true
+                ir_sha256 = "c48050efa221b53ac70a2ae924d1b4d4794e8b4cc6dd78e8a0612451a34559cf"
+                max_forks_per_branch = 1
+            "#,
+        )
+        .unwrap();
+
+        let config = ExecutionLimitsConfig::from_file(&path).unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(config.strict);
+        assert_eq!(config.max_forks_per_branch, Some(1));
+        assert!(config.validate_ir_sha256("c48050efa221b53ac70a2ae924d1b4d4794e8b4cc6dd78e8a0612451a34559cf").is_ok());
     }
 
     #[test]
