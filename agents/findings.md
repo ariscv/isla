@@ -284,13 +284,16 @@
   collector 里 `model.get_val(&fun_args[0])` 每次都会拿到 Z3 给的同一个成员（枚举第一个），
   于是这些非法用例全被标注成同一条子指令。VVTYPE 实测 vadd.vv 因此被顶到 196 条，
   其它子指令一条非法用例都分不到。
-- 修法在 `src/isarch/exec.rs::diversify_unconstrained_enums`：求最终 model 之前，按
-  `frame.path_signature()`（executor 在每个 fork 点分叉的路径签名）给每个符号枚举字段挑一个
-  候选成员，`check_sat_with` 能满足就 `Assert` 钉住；路径本身已经约束住的字段候选值会 Unsat、
-  直接跳过，所以不改变任何路径的语义，只影响"任意值"的取法。
-  实测 vadd.vv 196 → 58，394 条非法用例散布到各条子指令上。
-- 同一个道理适用于寄存器号等其它未约束字段（现在仍然全是 Z3 默认值，用例里大量 `v0`）；
-  要扩展的话把这个函数从"只处理枚举"放宽即可。
+- 修法现为 `src/isarch/exec.rs::diversify_unconstrained_finite_domains`：仅对
+  `Illegal_Instruction` 返回路径，按 `frame.path_signature()`（executor 在每个 fork 点分叉的
+  路径签名）给符号 enum、模型标为 `Arbitrary` 的 bool/bitvector 字段挑候选值。enum 逐字段用
+  `check_sat_with` 验证，bool/bitvector 的候选合并为一次检查；满足才 `Assert` 钉住。因此不改变
+  任何路径语义，只影响"任意值"的取法，也不会为成功路径增加查询。位向量每条路径只尝试一个同宽
+  候选，不枚举其完整空间。
+  enum 多样化的历史实测为 vadd.vv 196 → 58，394 条非法用例散布到各条子指令上。
+- 同一个道理适用于寄存器号等其它未约束字段；该函数现已覆盖这些位向量字段。单元测试已确认
+  `Illegal_Instruction` 参数在最终 `Model::get_val` 前得到确定候选，并确认成功构造子会被排除；
+  完整 VVTYPE 的寄存器分布仍待重新实测。
 
 ## sail-riscv 生成 VLEN=128 Isla IR 的方法（2026-08-05）
 

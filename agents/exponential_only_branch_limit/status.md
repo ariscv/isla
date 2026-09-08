@@ -86,8 +86,10 @@ check-sat-assuming 累积掉了。放宽 `--smt-timeout` 对这批路径完全�
 
 另外修掉一个标注 artifact：在 funct6 dispatch 之前就 `return Illegal_Instruction()` 的路径
 没有约束过 funct6，Z3 每次都给同一个成员，于是这些非法用例全被记到 vadd.vv 头上（196 条）。
-`src/isarch/exec.rs::diversify_unconstrained_enums` 按路径签名给未约束的枚举字段挑成员并钉住，
-非法用例因此散布到各条子指令上。
+`src/isarch/exec.rs::diversify_unconstrained_finite_domains` 只在非法路径按路径签名给未约束的
+enum、模型标为 `Arbitrary` 的 bool/位向量字段挑代表值并钉住；非法用例因而散布到各条子指令，
+寄存器号等字段也不再总取默认值，成功路径不增加查询。单元测试已覆盖非法构造子的判断及
+`Model::get_val` 取值，并确认成功构造子会被排除；位向量分布仍需重新运行完整 VVTYPE 验收。
 
 中间基线实测（`make solve-VVTYPE THREADS=64`，SEW/LMUL 全展开）：
 
