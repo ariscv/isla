@@ -433,14 +433,7 @@ fn isla_main() -> i32 {
 
     let execution_limits_override = if let Some(path) = matches.opt_str("execution-limits-config") {
         match ExecutionLimitsConfig::from_file(&path) {
-            Ok(config) => {
-                let arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
-                if let Err(error) = validate_execution_limits_ir(&config, arch_path) {
-                    eprintln!("{}: {}", path, error);
-                    return 1;
-                }
-                Some(config)
-            }
+            Ok(config) => Some(config),
             Err(error) => {
                 eprintln!("{}", error);
                 return 1;
@@ -457,6 +450,14 @@ fn isla_main() -> i32 {
 
     if let Some(config) = execution_limits_override {
         isa_config.execution_limits = Some(config);
+    }
+
+    let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
+    if let Some(config) = isa_config.execution_limits.as_ref() {
+        if let Err(error) = validate_execution_limits_ir(config, configured_arch_path) {
+            eprintln!("{}", error);
+            return 1;
+        }
     }
 
     let assertion_mode = AssertionMode::Optimistic;
@@ -503,6 +504,7 @@ fn isla_main() -> i32 {
             let xlen = detect_xlen(*shared_state, lets);
             let success = match xlen {
                 32 => {
+                    panic!("RV32 solve-state 暂不支持");
                     let mut target = RV32::default();
                     target.pmp_symbolic = pmp_symbolic;
                     let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
@@ -527,7 +529,7 @@ fn isla_main() -> i32 {
                         timeout_report_config.clone(),
                     )
                 }
-                _ => {
+                64 => {
                     let mut target = RV64::default();
                     target.pmp_symbolic = pmp_symbolic;
                     let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
@@ -549,9 +551,10 @@ fn isla_main() -> i32 {
                         num_threads,
                         timeout,
                         isa_config.execution_limits.as_ref(),
-                        timeout_report_config,
+                        timeout_report_config.clone(),
                     )
                 }
+                _ => panic!("不支持 XLEN={} 的 solve-state", xlen),
             };
             if success {
                 0
@@ -565,6 +568,7 @@ fn isla_main() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_matches(args: &[&str]) -> getopts::Matches {
         let mut opts = opts::common_opts();
@@ -580,6 +584,26 @@ mod tests {
     fn parse_tastic_option() {
         let matches = make_matches(&["--tastic", "qfaufbv", "list-instructions"]);
         assert_eq!(matches.opt_str("tastic").as_deref(), Some("qfaufbv"));
+    }
+
+    #[test]
+    fn strict_execution_limits_rejects_changed_ir() {
+        let path = std::env::temp_dir().join(format!(
+            "isarch-strict-limits-{}-{}.ir",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, "changed IR").unwrap();
+        let config = ExecutionLimitsConfig {
+            strict: true,
+            ir_sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            ..ExecutionLimitsConfig::default()
+        };
+
+        let error = validate_execution_limits_ir(&config, &path).unwrap_err();
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(error.contains("IR SHA-256 不匹配"));
     }
 
     #[test]
