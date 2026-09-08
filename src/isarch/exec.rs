@@ -163,6 +163,8 @@ fn should_collect_unfinished_path<B: BV>(run: &Run<B>) -> bool {
 }
 
 /// 收集一个值里出现的全部符号变量，按出现顺序去重。
+///
+/// 结构体字段按 `Name`（符号 ID）排序，避免随机哈希表迭代顺序影响候选的字段序号。
 fn collect_symbolic_vars<B: BV>(value: &Val<B>, symbols: &mut Vec<Sym>) {
     match value {
         Val::Symbolic(sym) => {
@@ -176,7 +178,9 @@ fn collect_symbolic_vars<B: BV>(value: &Val<B>, symbols: &mut Vec<Sym>) {
             }
         }
         Val::Struct(fields) => {
-            for value in fields.values() {
+            let mut fields: Vec<_> = fields.iter().collect();
+            fields.sort_unstable_by_key(|(name, _)| name.as_u32());
+            for (_, value) in fields {
                 collect_symbolic_vars(value, symbols)
             }
         }
@@ -185,7 +189,9 @@ fn collect_symbolic_vars<B: BV>(value: &Val<B>, symbols: &mut Vec<Sym>) {
             if !symbols.contains(sym) {
                 symbols.push(*sym)
             }
-            for value in fields.values() {
+            let mut fields: Vec<_> = fields.iter().collect();
+            fields.sort_unstable_by_key(|(name, _)| name.as_u32());
+            for (_, value) in fields {
                 collect_symbolic_vars(value, symbols)
             }
         }
@@ -193,65 +199,148 @@ fn collect_symbolic_vars<B: BV>(value: &Val<B>, symbols: &mut Vec<Sym>) {
     }
 }
 
-/// 让路径没有约束到的枚举字段在不同路径上取到不同成员。
+/// SplitMix64 的单轮混合；同一路径和字段序号始终得到同一候选值。
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+/// 生成给定宽度位向量的一个确定性候选值。
 ///
-/// 在 funct6 dispatch 之前就 `return Illegal_Instruction()` 的路径根本没有约束过 funct6，
-/// Z3 于是在每条这样的路径上都给出同一个成员（枚举里的第一个），结果所有这类非法用例
-/// 都被标注成同一条子指令——VVTYPE 里就是 vadd.vv，实测被顶到 196 条，而其它子指令一条
-/// 非法用例都分不到。这里按路径签名给每个符号枚举字段挑一个候选成员，能满足就钉住，
-/// 让非法用例散布到各条子指令上，覆盖面也更广。
+/// 位宽超过 64 时仍是有限域，但不能只复用一个 64 位随机数；这里每 64 位独立混合一次，
+/// 并保持 `Exp::Bits` 所要求的低位在前的位序。
+fn bitvector_candidate(seed: u64, width: u32) -> isla_lib::smt::smtlib::Exp<Sym> {
+    if width <= 64 {
+        let value = if width == 64 { splitmix64(seed) } else { splitmix64(seed) & ((1u64 << width) - 1) };
+        return isla_lib::smt::smtlib::Exp::Bits64(isla_lib::bitvector::b64::B64::new(value, width));
+    }
+
+    let mut bits = Vec::with_capacity(width as usize);
+    for word_index in 0..((width + 63) / 64) {
+        let word = splitmix64(seed.wrapping_add(word_index as u64));
+        let word_width = (width - word_index * 64).min(64);
+        for bit_index in 0..word_width {
+            bits.push((word >> bit_index) & 1 == 1);
+        }
+    }
+    isla_lib::smt::smtlib::Exp::Bits(bits)
+}
+
+/// 为路径未约束到的有限域字段选择不同的代表值。
 ///
-/// 路径本身已经约束住的字段（例如走进某个 funct6 arm 的路径）候选值会 Unsat，直接跳过，
-/// 因此不会改变任何一条路径的语义，只影响"任意值"的取法。
-fn diversify_unconstrained_enums<'ir, B: BV>(
+/// `funct6` 等枚举字段若在 dispatch 前就走到 `Illegal_Instruction()`，Z3 会在每条这样的
+/// 非法路径上都返回同一个默认成员，致使全部非法用例集中标到同一条子指令。布尔值和位向量也有同样
+/// 问题，例如未约束的寄存器号会反复取 `v0`。这里按路径签名和字段序号为 enum、bool、
+/// bitvector 各生成一个确定性候选；位向量虽可能很宽，但每条非法路径只尝试一个候选，绝不
+/// 枚举指数大小的完整取值空间。bool/bitvector 只处理模型明确标为 `Arbitrary` 的字段，并把
+/// 全部候选合并成一次 `check_sat_with`；成功路径不会调用本函数，避免不必要地增加高路径数
+/// 指令的 SMT 查询。
+///
+/// 每个候选必须先经 `check_sat_with` 验证才能 `Assert`。路径已约束到其它值时验证为
+/// `Unsat`，不会被改动；可满足时钉住的值本来就是该路径的模型，因此只影响原先的
+/// "任意值"如何实例化，不改变路径语义。
+fn diversify_unconstrained_finite_domains<'ir, B: BV>(
     args: &[Val<B>],
     signature: u64,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
-) {
+) -> Result<(), ExecError> {
     let mut symbols = Vec::new();
     for arg in args {
         collect_symbolic_vars(arg, &mut symbols)
     }
     if symbols.is_empty() {
-        return;
+        return Ok(());
     }
 
-    // 先用一个模型认出哪些符号是枚举，同时拿到它们的 enum_id。
-    let mut enum_symbols = Vec::new();
-    if solver.check_sat(SourceLoc::unknown()) != isla_lib::smt::SmtResult::Sat {
-        return;
+    // 先用一个模型识别各符号的有限域类型。bool/bitvector 只有在模型明确标为 Arbitrary
+    // 时才多样化；有具体模型值说明路径至少部分依赖它，不能为每个这样的字段额外做 SMT 查询。
+    let mut finite_domain_symbols = Vec::new();
+    match solver.check_sat(SourceLoc::unknown()) {
+        isla_lib::smt::SmtResult::Sat => (),
+        isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => return Ok(()),
+        isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
     {
         let mut model = Model::new(solver);
         for sym in symbols {
-            if let Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(member))) = model.get_var(sym) {
-                enum_symbols.push((sym, member))
+            match model.get_finite_domain_var(sym)? {
+                Some(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(member))) => {
+                    finite_domain_symbols.push((sym, FiniteDomain::Enum(member)))
+                }
+                Some(isla_lib::smt::ModelVal::Arbitrary(isla_lib::smt::smtlib::Ty::Bool)) => {
+                    finite_domain_symbols.push((sym, FiniteDomain::ArbitraryBool))
+                }
+                Some(isla_lib::smt::ModelVal::Arbitrary(isla_lib::smt::smtlib::Ty::BitVec(width))) => {
+                    finite_domain_symbols.push((sym, FiniteDomain::ArbitraryBitVec(width)))
+                }
+                Some(_) | None => (),
             }
         }
     }
 
-    for (index, (sym, member)) in enum_symbols.into_iter().enumerate() {
-        let members = match shared_state.type_info.enums.get(&member.enum_id.to_name()) {
-            Some(members) if members.len() > 1 => members.len(),
-            _ => continue,
-        };
-        let candidate = (signature.wrapping_add(index as u64) % members as u64) as usize;
-        if candidate == member.member {
-            continue;
-        }
-        let preferred = isla_lib::smt::smtlib::Exp::Eq(
-            Box::new(isla_lib::smt::smtlib::Exp::Var(sym)),
-            Box::new(isla_lib::smt::smtlib::Exp::Enum(isla_lib::smt::EnumMember {
-                enum_id: member.enum_id,
-                member: candidate,
-            })),
-        );
-        // Unsat 说明这条路径已经把该字段约束成别的成员了，保持原样。
-        if solver.check_sat_with(&preferred, SourceLoc::unknown()) == isla_lib::smt::SmtResult::Sat {
-            solver.add(isla_lib::smt::smtlib::Def::Assert(preferred))
+    // 枚举保留旧实现的成员轮转顺序，避免无关 bool/bitvector 字段的加入改变既有 enum 用例。
+    let mut enum_index = 0;
+    let mut arbitrary_preferred = None;
+    for (index, (sym, domain)) in finite_domain_symbols.into_iter().enumerate() {
+        let seed = signature ^ index as u64;
+        match domain {
+            FiniteDomain::Enum(member) => {
+                let member_index = enum_index;
+                enum_index += 1;
+                let members = match shared_state.type_info.enums.get(&member.enum_id.to_name()) {
+                    Some(members) if members.len() > 1 => members.len(),
+                    _ => continue,
+                };
+                let candidate = (signature.wrapping_add(member_index) % members as u64) as usize;
+                if candidate == member.member {
+                    continue;
+                }
+                let candidate = isla_lib::smt::smtlib::Exp::Enum(isla_lib::smt::EnumMember {
+                    enum_id: member.enum_id,
+                    member: candidate,
+                });
+                let preferred =
+                    isla_lib::smt::smtlib::Exp::Eq(Box::new(isla_lib::smt::smtlib::Exp::Var(sym)), Box::new(candidate));
+                // Unsat 说明这条路径已经把该字段约束成别的值了，保持原样。
+                match solver.check_sat_with(&preferred, SourceLoc::unknown()) {
+                    isla_lib::smt::SmtResult::Sat => solver.add(isla_lib::smt::smtlib::Def::Assert(preferred)),
+                    isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
+                    isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+                }
+            }
+            FiniteDomain::ArbitraryBool | FiniteDomain::ArbitraryBitVec(_) => {
+                let candidate = match domain {
+                    FiniteDomain::ArbitraryBool => isla_lib::smt::smtlib::Exp::Bool(splitmix64(seed) & 1 == 1),
+                    FiniteDomain::ArbitraryBitVec(width) => bitvector_candidate(seed, width),
+                    FiniteDomain::Enum(_) => unreachable!(),
+                };
+                let preferred =
+                    isla_lib::smt::smtlib::Exp::Eq(Box::new(isla_lib::smt::smtlib::Exp::Var(sym)), Box::new(candidate));
+                arbitrary_preferred = Some(match arbitrary_preferred {
+                    Some(previous) => isla_lib::smt::smtlib::Exp::And(Box::new(previous), Box::new(preferred)),
+                    None => preferred,
+                });
+            }
         }
     }
+    // 同一条路径的全部无解释 bool/bitvector 候选一起验证，避免字段数线性放大 SMT 查询数。
+    if let Some(preferred) = arbitrary_preferred {
+        match solver.check_sat_with(&preferred, SourceLoc::unknown()) {
+            isla_lib::smt::SmtResult::Sat => solver.add(isla_lib::smt::smtlib::Def::Assert(preferred)),
+            isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
+            isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+        }
+    }
+    Ok(())
+}
+
+enum FiniteDomain {
+    Enum(isla_lib::smt::EnumMember),
+    ArbitraryBool,
+    ArbitraryBitVec(u32),
 }
 
 /// 输出层配额：按 `(助记符, 完整 test-ins, ret_val 类别)` 分组，每组最多保留 N 条。
@@ -627,10 +716,34 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         let mut test_ins = String::new();
                         let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
-                        // 未被这条路径约束的枚举字段（典型是提前返回 Illegal 的路径上的
-                        // funct6）先按路径签名挑一个成员钉住，否则所有这类用例都会被标注
-                        // 成同一条子指令。
-                        diversify_unconstrained_enums(&fun_args, frame.path_signature(), shared_state, &mut solver);
+                        if matches!(
+                            ret_val,
+                            Val::Ctor(ctor, _)
+                                if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
+                                    == "Illegal_Instruction"
+                        ) {
+                            // 未被这条非法路径约束的有限域字段（典型是提前返回 Illegal 的路径上的
+                            // funct6）先按路径签名挑一个代表值钉住，否则所有这类用例都会被标注
+                            // 成同一条子指令，寄存器号等位向量字段也会反复取 Z3 默认值。
+                            match diversify_unconstrained_finite_domains(
+                                &fun_args,
+                                frame.path_signature(),
+                                shared_state,
+                                &mut solver,
+                            ) {
+                                Ok(()) => (),
+                                Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
+                                    itrace_diagnostics =
+                                        error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                    log!(log::SYM_EXEC, &format!("finite-domain diversification failed: {}", error));
+                                    submit_itrace(frame, &mut itrace_diagnostics);
+                                    return;
+                                }
+                                Err(error) => {
+                                    panic!("finite-domain diversification invariant violated: {}", error)
+                                }
+                            }
+                        }
                         // 获取ISA状态（寄存器、lets变量等）
                         // 首先检查solver是否可满足
                         let smt_result = solver.check_sat(SourceLoc::unknown());
@@ -900,6 +1013,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use isla_lib::bitvector::b129::B129;
     use isla_lib::bitvector::b64::B64;
     use isla_lib::config::{LimitBehaviorConfig, RegionForkLimitConfig};
     use isla_lib::executor::{LimitBehavior, SampleBias};
@@ -981,6 +1095,128 @@ mod tests {
         assert!(Arc::ptr_eq(&recorded, &timeout));
         assert_eq!(diagnostics.len(), 1);
         assert!(timeout.dump.materialize().unwrap().contains("isla_test_argument__s17"));
+    }
+
+    #[test]
+    fn collect_symbolic_vars_sorts_struct_fields_by_name() {
+        let mut fields: ahash::HashMap<Name, Val<B64>> =
+            ahash::HashMap::with_hasher(ahash::RandomState::with_seeds(0, 0, 0, 0));
+        fields.insert(Name::from_u32(3), Val::Symbolic(Sym::from_u32(30)));
+        fields.insert(Name::from_u32(1), Val::Symbolic(Sym::from_u32(10)));
+        fields.insert(Name::from_u32(2), Val::Symbolic(Sym::from_u32(20)));
+        let value = Val::Struct(fields);
+        let mut symbols = Vec::new();
+
+        collect_symbolic_vars(&value, &mut symbols);
+
+        assert_eq!(
+            symbols,
+            vec![Sym::from_u32(10), Sym::from_u32(20), Sym::from_u32(30)],
+            "结构体字段的哈希表迭代顺序不得影响有限域候选的序号"
+        );
+    }
+
+    #[test]
+    fn diversify_unconstrained_finite_domains_diversifies_bool_and_bitvectors() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let boolean = solver.declare_const(isla_lib::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let bits = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(5), SourceLoc::unknown());
+        let args = [Val::Symbolic(boolean), Val::Symbolic(bits)];
+        let shared_state = SharedState::empty(Symtab::new());
+        let signature = 0x5a31_7c9d_f024_6be8;
+
+        diversify_unconstrained_finite_domains(&args, signature, &shared_state, &mut solver)
+            .expect("有限域候选必须能钉住未约束的布尔值和位向量");
+
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        assert_eq!(
+            model.get_var(boolean).unwrap().unwrap_exp(),
+            isla_lib::smt::smtlib::Exp::Bool(splitmix64(signature) & 1 == 1)
+        );
+        assert_eq!(model.get_var(bits).unwrap().unwrap_exp(), bitvector_candidate(signature ^ 1, 5));
+    }
+
+    #[test]
+    fn diversify_unconstrained_finite_domains_diversifies_wide_bitvectors() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&context);
+        let bits = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(65), SourceLoc::unknown());
+        let args = [Val::Symbolic(bits)];
+        let shared_state = SharedState::empty(Symtab::new());
+        let signature = 0xf126_dab7_0c49_5e83;
+
+        diversify_unconstrained_finite_domains(&args, signature, &shared_state, &mut solver)
+            .expect("有限域候选必须支持超过 B64 的位向量");
+
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        let candidate = bitvector_candidate(signature, 65);
+        assert_eq!(model.get_var(bits).unwrap().unwrap_exp(), candidate);
+
+        let isla_lib::smt::smtlib::Exp::Bits(candidate_bits) = candidate else {
+            panic!("65 位候选必须使用 Exp::Bits 表示")
+        };
+        let mut expected = B129::zeros(65);
+        for (index, bit) in candidate_bits.into_iter().enumerate() {
+            if bit {
+                expected = expected.set_slice(index as u32, B129::BIT_ONE);
+            }
+        }
+        assert_eq!(
+            model.get_val(&args[0]).expect("可由 B129 表示的宽位候选必须能物化为 Val::Bits"),
+            Val::Bits(expected)
+        );
+    }
+
+    #[test]
+    fn diversify_unconstrained_finite_domains_skips_non_target_smt_types() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let floating = solver.declare_const(isla_lib::smt::smtlib::Ty::Float(8, 24), SourceLoc::unknown());
+        let rounding = solver.declare_const(isla_lib::smt::smtlib::Ty::RoundingMode, SourceLoc::unknown());
+        let args = [Val::Symbolic(floating), Val::Symbolic(rounding)];
+        let shared_state = SharedState::empty(Symtab::new());
+
+        diversify_unconstrained_finite_domains(&args, 0, &shared_state, &mut solver)
+            .expect("Float 和 RoundingMode 不属于目标有限域，必须按声明类型跳过");
+
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+    }
+
+    #[test]
+    fn diversify_unconstrained_finite_domains_preserves_constrained_fields() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let bits = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(4), SourceLoc::unknown());
+        let constrained_value = B64::new(3, 4);
+        solver.assert_eq(isla_lib::smt::smtlib::Exp::Var(bits), isla_lib::smt::smtlib::Exp::Bits64(constrained_value));
+        let args = [Val::Symbolic(bits)];
+        let shared_state = SharedState::empty(Symtab::new());
+        let signature = (0..u64::MAX)
+            .find(|signature| B64::new(splitmix64(*signature) & 0xf, 4) != constrained_value)
+            .expect("必须存在不等于已约束值的候选");
+
+        diversify_unconstrained_finite_domains(&args, signature, &shared_state, &mut solver)
+            .expect("候选不可满足时必须保留已有约束");
+
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        assert_eq!(model.get_var(bits).unwrap().unwrap_exp(), isla_lib::smt::smtlib::Exp::Bits64(constrained_value));
+    }
+
+    #[test]
+    fn diversify_unconstrained_finite_domains_propagates_model_errors() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let shared_state = SharedState::empty(Symtab::new());
+        let args = [Val::Symbolic(Sym::from_u32(999))];
+
+        let error = diversify_unconstrained_finite_domains(&args, 0, &shared_state, &mut solver)
+            .expect_err("读取枚举模型失败必须向调用方传播");
+
+        assert!(matches!(error, ExecError::Type(_, _)));
     }
 
     #[test]
