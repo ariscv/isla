@@ -12,8 +12,8 @@
   `vrgatherei16.vv` 144（其中 **132 条非法**）
 - 这 141 条非法用例：**没有一条完全重复**，但只有 **25 种不同汇编串**，即同一个非法编码
   （例如 `vrgather.vv v0, v0, v0`）被配上 26 种不同 vtype 各算一条
-- 全部 1345 条用例里操作数高度集中：`v0` 出现 2870 次、`v31` 655 次（未被路径约束的
-  位向量字段仍取 Z3 默认值；上一轮的 `diversify_unconstrained_enums` 只处理了枚举）
+- 全部 1345 条用例里操作数高度集中：`v0` 出现 2870 次、`v31` 655 次（这是泛化前的
+  历史基线；现已由 `diversify_unconstrained_finite_domains` 覆盖未约束位向量字段）
 
 目标：把非法用例的数量压下来，同时**不要**削掉成功路径的覆盖。
 
@@ -129,14 +129,20 @@
 
 ---
 
-## 7. 未实施的后续设想：把取值多样化扩展到位向量字段
+## 7. 已实施：有限域字段的取值多样化
 
-`diversify_unconstrained_enums`（`src/isarch/exec.rs`）目前只处理枚举。扩展到位向量字段
-（寄存器号）后，25 种汇编串能变成上百种——同样的用例条数，覆盖面更高。这与 riscv-dv 的
-寄存器加权表、sail-riscv-test-generation 的 `frequency` 权重是同一思路。
+`diversify_unconstrained_finite_domains`（`src/isarch/exec.rs`）只在
+`Illegal_Instruction` 路径处理 enum、bool 和位向量字段，成功路径不增加额外 SMT 查询。对于
+模型明确标为 `Arbitrary` 的 bool/位向量字段（如未约束的寄存器号），按
+`splitmix64(path_signature ^ 序号)` 生成同宽候选；位宽超过 64 时按 64 位分块生成。全部这类
+候选合并为一次 `check_sat_with`，为 Sat 后才整体 `Assert`，所以路径语义不变，也不会枚举
+位向量的指数取值空间。模型已有具体值的 bool/位向量字段保持原模型。
 
-实现：对每个符号位向量字段，按 `splitmix64(path_signature ^ 序号)` 取候选值，
-`check_sat_with(sym == candidate)` 能满足就 `Assert`。成本是每条完成路径多几次求解。
+枚举仍保持原有按路径签名轮转成员的顺序，避免新增 bool/位向量字段改变既有的子指令归属。
+枚举按字段单独验证；bool/位向量在每条非法路径至多增加一次合并检查。
+
+单元测试已覆盖 `Illegal_Instruction` 构造子判断及最终 `Model::get_val` 取值，也确认
+`Retire_Success` 构造子会被排除；完整 VVTYPE 的寄存器分布与运行开销仍属于下一节的实测验收项。
 
 ## 8. 当前验收口径
 
@@ -147,6 +153,7 @@
 - 成功用例数及成功用例的 vtype 覆盖不低于方向偏置与配额前基线；
 - 每条子指令的每个 vill 类别至少保留一条非法代表；
 - 每条具体汇编指令的用例数不超过 100；
+- 未约束寄存器号不再集中取 Z3 默认值；
 - 使用 `THREADS=1/4/64` 运行后，JSON 逐字节一致。
 
 ## 9. 历史设计取舍
