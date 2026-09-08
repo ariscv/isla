@@ -1613,6 +1613,24 @@ impl ModelVal {
     }
 }
 
+fn model_bits_to_bv<B: BV>(bits: &[bool]) -> Result<B, ExecError> {
+    let width: u32 = bits.len().try_into().expect("模型位向量长度超出 u32");
+    if width > B::MAX_WIDTH {
+        return Err(ExecError::Type(
+            format!("Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH={})", width, B::MAX_WIDTH),
+            SourceLoc::unknown(),
+        ));
+    }
+
+    let mut bitvector = B::zeros(width);
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit {
+            bitvector = bitvector.set_slice(index.try_into().expect("模型位序超出 u32"), B::BIT_ONE);
+        }
+    }
+    Ok(bitvector)
+}
+
 /// thread-interrupt wrapper 在 ModelEval 超时时构造最终 `SmtError::Timeout`
 /// 所需的调用边界信息。它不是另一套错误类型。
 struct ModelEvalTimeoutContext {
@@ -1695,6 +1713,29 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })
     }
 
+    /// 只读取输出多样化支持的 enum、bool 和 bitvector；其它合法 SMT sort 不参与取值选择。
+    pub fn get_finite_domain_var(&mut self, var: Sym) -> Result<Option<ModelVal>, ExecError> {
+        let var_ast = match self.solver.decls.get(&var) {
+            None => return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown())),
+            Some(ast) => ast.clone(),
+        };
+        let sort_kind = unsafe {
+            let sort = Z3_get_sort(self.ctx.z3_ctx, var_ast.z3_ast);
+            Z3_inc_ref(self.ctx.z3_ctx, Z3_sort_to_ast(self.ctx.z3_ctx, sort));
+            let sort_kind = Z3_get_sort_kind(self.ctx.z3_ctx, sort);
+            Z3_dec_ref(self.ctx.z3_ctx, Z3_sort_to_ast(self.ctx.z3_ctx, sort));
+            sort_kind
+        };
+
+        match sort_kind {
+            SortKind::Bool | SortKind::BV | SortKind::Datatype => {
+                self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] }).map(Some)
+            }
+            SortKind::Array | SortKind::FloatingPoint | SortKind::RoundingMode => Ok(None),
+            _ => panic!("不支持的符号常量 sort: {:?}", sort_kind),
+        }
+    }
+
     pub fn get_exp(&mut self, exp: &Exp<Sym>) -> Result<ModelVal, ExecError> {
         let ast = self.solver.translate_exp(exp);
         self.get_ast(ast, SmtDumpRequest::GetValues { expressions: vec![exp.clone()] })
@@ -1709,13 +1750,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                     ModelVal::Exp(Exp::Bits64(bv)) => Ok(Val::Bits(B::new(bv.lower_u64(), bv.len()))),
                     ModelVal::Exp(Exp::Bool(b)) => Ok(Val::Bool(b)),
                     ModelVal::Exp(Exp::Enum(m)) => Ok(Val::Enum(m)),
-                    ModelVal::Exp(Exp::Bits(bv)) => {
-                        // 对于大的位向量（> MAX_WIDTH），暂时返回错误
-                        Err(ExecError::Type(
-                            format!("Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH)", bv.len()),
-                            SourceLoc::unknown(),
-                        ))
-                    }
+                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::Bits(model_bits_to_bv(&bv)?)),
                     ModelVal::Exp(exp) => {
                         // 对于其他复杂的表达式，返回错误
                         Err(ExecError::Type(
@@ -1786,13 +1821,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                                         .push(crate::ir::BitsSegment::Concrete(B::new(bv.lower_u64(), bv.len())));
                                 }
                                 ModelVal::Exp(Exp::Bits(bv)) => {
-                                    return Err(ExecError::Type(
-                                        format!(
-                                            "Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH)",
-                                            bv.len()
-                                        ),
-                                        SourceLoc::unknown(),
-                                    ));
+                                    new_segments.push(crate::ir::BitsSegment::Concrete(model_bits_to_bv(&bv)?));
                                 }
                                 ModelVal::Arbitrary(smtlib::Ty::BitVec(len)) => {
                                     new_segments.push(crate::ir::BitsSegment::Concrete(B::new(0, len)));
