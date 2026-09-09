@@ -1479,6 +1479,7 @@ mod tests {
                 test_ins_encdec: "32'h0000_0000".to_string(),
                 isa_state: BTreeMap::new(),
                 ret_val: ret_val.to_string(),
+                memory_events: Vec::new(),
             },
         }
     }
