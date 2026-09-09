@@ -988,6 +988,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
         },
         cp,
+        initial_memory,
         num_threads,
         timeout,
         &task_state,
