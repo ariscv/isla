@@ -507,10 +507,11 @@ fn isla_main() -> i32 {
                     panic!("RV32 solve-state 暂不支持");
                     let mut target = RV32::default();
                     target.pmp_symbolic = pmp_symbolic;
-                    let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
-                        .and_then(|builder| builder.build())
-                        .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
-                        .ok();
+                    let initial_memory = Some(
+                        isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
+                            .and_then(|builder| builder.build())
+                            .unwrap_or_else(|e| panic!("MemoryBuilder 构建初始内存失败: {}", e)),
+                    );
                     isarch::exec::solve_state_main(
                         shared_state,
                         regs,
@@ -532,10 +533,11 @@ fn isla_main() -> i32 {
                 64 => {
                     let mut target = RV64::default();
                     target.pmp_symbolic = pmp_symbolic;
-                    let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
-                        .and_then(|builder| builder.build())
-                        .map_err(|e| eprintln!("Warning: MemoryBuilder error: {}", e))
-                        .ok();
+                    let initial_memory = Some(
+                        isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
+                            .and_then(|builder| builder.build())
+                            .unwrap_or_else(|e| panic!("MemoryBuilder 构建初始内存失败: {}", e)),
+                    );
                     isarch::exec::solve_state_main(
                         shared_state,
                         regs,
