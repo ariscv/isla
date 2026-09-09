@@ -85,6 +85,9 @@ THREADS ?= 64
 # solve 使用的 IR；默认的 ./rv64d.ir 已是 VLEN=128、ELEN=64，其 SHA-256 与
 # configs/workarounds/vvtype.toml 的 ir_sha256 对应，换 IR 时两者必须同步更新。
 IR_FILE ?= ./rv64d.ir
+# solve 使用的 ISA 配置；默认与既有行为一致。内存符号化验收用：
+# `make solve-C_LD SOLVE_CONFIG=./configs/riscv64_difftest_mem.toml`
+SOLVE_CONFIG ?= ./configs/riscv64_difftest.toml
 # itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
 ITRACE ?= 0
 CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
@@ -128,7 +131,7 @@ solve-%: build-isarch
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
 	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
-		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
+		-A $(IR_FILE) -C $(SOLVE_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \
