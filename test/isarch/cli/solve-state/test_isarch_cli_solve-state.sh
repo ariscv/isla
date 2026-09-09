@@ -53,19 +53,21 @@ need_ir()   { [ -f "$IR_FILE" ]   || { skip "IR not found: $IR_FILE";       retu
 need_all()  { need_bin && need_ir; }
 
 # 运行 solve-state 并捕获结果
-# 用法: run_solve_state <clause_name> <env_overrides>
+# 用法: run_solve_state <clause_name> <env_overrides> [config_file]
+#   config_file 缺省时使用全局 CONFIG_FILE
 #   返回: 0=正常完成, 124=timeout超时, 其他=错误
 #   在 OUTPUT_DIR 下生成 JSON 和日志
 run_solve_state() {
     local clause="$1"
     local env_overrides="${2:-}"
+    local config="${3:-${CONFIG_FILE}}"
     local output_dir="${REPO_ROOT}/output/solve-state/${clause}"
     mkdir -p "$output_dir"
 
     local rc=0
     eval "${env_overrides} ${RUN_ACCESS_ENV} \
         timeout ${CLAUSE_TIMEOUT} ${ISARCH_BIN} \
-        -A ${IR_FILE} -C ${CONFIG_FILE} --verbose --probe-all --trace-all \
+        -A ${IR_FILE} -C ${config} --verbose --probe-all --trace-all \
         solve-state --clause ${clause} \
         >${output_dir}/log 2>&1" || rc=$?
 
@@ -211,6 +213,92 @@ t_store_with_gates() {
     pass
 }
 
+# ========== 内存符号化测试 ==========
+
+# solve-state 的 JSON 落盘在进程 CWD 的 output/rv64_<clause>.json
+# （exec.rs to_json 用相对路径，与 run.mk 的 make solve-* 同款），
+# 因此本节用例需从仓库根目录运行脚本。
+
+# memory_sym.toml（sym_ram symbolic region）下 zC_LD 全链路应正常：
+# MemoryBuilder 接受配置、执行完成、JSON 含 memory-events 字段且 isa-state 结构保留。
+# 注：zC_LD 是 clause 重写（zExecuteAs(zLOAD)），不产生访存事件，故此处不断言 region 条目；
+# region 语义链（注入→read_mem→region 名）由 isla-lib executor 测试
+# multi_thread_read_mem_symbolic_region_event 锁定。真实访存 clause（zLOAD 等）
+# 在本机 >15min 无法作为 CLI 用例。
+t_memory_symbolic_region_load() {
+    need_all || return
+    local rc; rc=$(run_solve_state "zC_LD" "" "${REPO_ROOT}/configs/memory_sym.toml")
+    local json="${REPO_ROOT}/output/rv64_zC_LD.json"
+    if [ "$rc" -ne 0 ]; then
+        fail "memory_sym.toml 下 zC_LD 退出码 $rc（预期 0）"
+        return
+    fi
+    if [ ! -f "$json" ]; then
+        fail "JSON 未生成: $json"
+        return
+    fi
+    if ! grep -q '"memory-events"' "$json"; then
+        fail "JSON 缺少 memory-events 字段"
+        return
+    fi
+    local isa_state_ok
+    isa_state_ok=$(python3 -c "import json; d=json.load(open('$json')); print(1 if all('isa-state' in item for item in d.get('gen',[])) else 0)" 2>/dev/null || echo 0)
+    if [ "$isa_state_ok" != "1" ]; then
+        fail "memory_sym.toml 下 isa-state 结构缺失"
+        return
+    fi
+    pass
+}
+
+# 原版配置（无 memory_regions）下 zC_LD 应兼容：JSON 含 memory-events 字段、
+# gen 有路径输出、isa-state 原有结构保留
+t_memory_default_region_compat() {
+    need_all || return
+    local rc; rc=$(run_solve_state "zC_LD" "" "${CONFIG_FILE}")
+    local json="${REPO_ROOT}/output/rv64_zC_LD.json"
+    if [ "$rc" -ne 0 ]; then
+        fail "默认配置下 zC_LD 退出码 $rc（预期 0）"
+        return
+    fi
+    local count; count=$(json_gen_count "$json")
+    if [ "$count" -le 0 ]; then
+        fail "默认配置下 zC_LD gen_count=$count（无路径输出）"
+        return
+    fi
+    local isa_state_ok
+    isa_state_ok=$(python3 -c "import json; d=json.load(open('$json')); print(1 if all('isa-state' in item for item in d.get('gen',[])) else 0)" 2>/dev/null || echo 0)
+    if [ "$isa_state_ok" != "1" ]; then
+        fail "isa-state 原有结构缺失"
+        return
+    fi
+    if ! grep -q '"memory-events"' "$json"; then
+        fail "JSON 缺少 memory-events 字段（default region 兼容行为未实现？）"
+        return
+    fi
+    pass
+}
+
+# memory_bad_overlap.toml 的重叠 region 应硬失败：
+# 退出码非 0、报 MemoryBuilder 的 overlapping regions 错误、不再 Warning 降级
+t_memory_config_error_hard_fails() {
+    need_all || return
+    local rc; rc=$(run_solve_state "zC_LD" "" "${REPO_ROOT}/configs/memory_bad_overlap.toml")
+    local log="${REPO_ROOT}/output/solve-state/zC_LD/log"
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+        fail "重叠 region 配置退出码 $rc：0=仍 Warning 降级，124=超时（未快速硬失败）"
+        return
+    fi
+    if ! grep -q "overlapping regions" "$log"; then
+        fail "输出缺少 overlapping regions 错误信息"
+        return
+    fi
+    if grep -q "Warning: MemoryBuilder" "$log"; then
+        fail "MemoryBuilder 错误仍以 Warning: MemoryBuilder 降级，未硬失败"
+        return
+    fi
+    pass
+}
+
 # ========== 注册表 ==========
 
 ALL_TESTS=(
@@ -220,6 +308,9 @@ ALL_TESTS=(
     t_load_with_gates
     t_store_no_gates_timeout
     t_store_with_gates
+    t_memory_symbolic_region_load
+    t_memory_default_region_compat
+    t_memory_config_error_hard_fails
 )
 
 # ========== main ==========

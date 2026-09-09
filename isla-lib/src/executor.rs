@@ -4604,6 +4604,58 @@ fn zmemtest(zu) {
     }
 
     #[test]
+    fn multi_thread_read_mem_symbolic_region_event() {
+        // read_mem primop 读 concrete 地址 0x1000（落入注入 Memory 的 0x1000..0x2000
+        // symbol region），断言 solver trace 产生 region 为 "symbolic" 的 ReadMem 事件，
+        // 锁定 注入 → primop → Memory::read → read_symbolic → Event 链路。
+        const MEM_IR: &str = r#"
+val zreadmem = "read_mem" : (%unit, %i64, %bv, %i) -> %bv
+val zmemread : (%unit) -> %unit
+fn zmemread(zu) {
+  zv : %bv;
+  zv = zreadmem(zu, 0, 0x0000000000001000, 1);
+  end;
+}
+"#;
+        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(MEM_IR);
+        let task_state = TaskState::new();
+        let mut mem = crate::memory::Memory::<B64>::new();
+        mem.add_symbolic_region(0x1000..0x2000);
+        let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+
+        execute_ir_function_with_checkpoint_multi_thread(
+            "zmemread",
+            &[Val::Unit],
+            &shared_state,
+            &regs,
+            &lets,
+            &collected,
+            &|_tid, _id, result, _ss, solver, count| {
+                if let Ok((Run::Finished(_), _frame)) = result {
+                    let hit = solver.trace().to_vec().into_iter().any(|event| {
+                        matches!(event, Event::ReadMem { region, bytes, .. } if *region == "symbolic" && *bytes == 1)
+                    });
+                    if hit {
+                        *count.lock().unwrap() += 1;
+                    }
+                }
+            },
+            Checkpoint::new(),
+            Some(mem),
+            4,
+            None,
+            &task_state,
+        );
+
+        let hits = *collected.lock().unwrap();
+        assert!(
+            hits >= 1,
+            "期望 read_mem 落入注入的 symbol region 并产生 region 为 symbolic 的 ReadMem 事件，实际命中 {} 次",
+            hits
+        );
+    }
+
+    #[test]
     fn start_single_timeout_none_is_unlimited() {
         let shared_state = empty_shared_state();
         let task_state = TaskState::new();

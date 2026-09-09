@@ -14,7 +14,7 @@ use isla_lib::ir::*;
 use isla_lib::log;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
-use isla_lib::smt::{Config, Context, Model};
+use isla_lib::smt::{Config, Context, Event, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
@@ -23,6 +23,26 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+/// 执行轨迹中访存事件（Event::ReadMem/WriteMem）的物化结果。
+/// value/data 等 model 中查不到取值的分量序列化为 null（外部数据边界，不编造也不 panic）。
+/// 同一事件可能跨路径重复，按 trace 顺序原样输出，不去重。
+#[derive(Serialize, Deserialize, Clone)]
+struct MemoryEventJson {
+    kind: String,
+    region: String,
+    address: Option<String>,
+    bytes: u32,
+    /// read：读出的值；write：Bool 成功标志
+    value: Option<String>,
+    /// write：写入的数据
+    data: Option<String>,
+}
+
+/// 经 model 把 Val 物化为 FmtVal 输出风格的字符串；物化失败返回 None。
+fn fmt_val_str<B: BV>(val: &Val<B>, model: &mut Model<'_, B>, shared_state: &SharedState<B>) -> Option<String> {
+    FmtVal::from_val(val, model).ok().map(|fmt_val| fmt_val.to_str(shared_state))
+}
 
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize, Clone)]
@@ -35,6 +55,8 @@ struct AssemGenJsonItem {
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
     ret_val: String,
+    #[serde(rename = "memory-events")]
+    memory_events: Vec<MemoryEventJson>,
 }
 impl AssemGenJsonItem {
     pub fn new<B: BV>(
@@ -43,13 +65,14 @@ impl AssemGenJsonItem {
         test_ins_encdec: String,
         isa_state: BTreeMap<String, String>,
         ret_val: String,
+        memory_events: Vec<MemoryEventJson>,
     ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val }
+        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, memory_events }
     }
 }
 trait ToJSON: Serialize {
@@ -716,6 +739,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         let mut test_ins = String::new();
                         let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
+                        let mut memory_events: Vec<MemoryEventJson> = Vec::new();
                         if matches!(
                             ret_val,
                             Val::Ctor(ctor, _)
@@ -934,11 +958,53 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         _ => println!(" [event] {:?}", event),
                                     }
                                 } */
+                                // 物化执行轨迹中的访存事件：ReadMem/WriteMem 逐个经 model 取具体值。
+                                // model 中查不到的分量输出 null（外部数据边界，不编造）。
+                                let trace_events = solver.trace().to_vec();
+                                for event in trace_events {
+                                    match event {
+                                        Event::ReadMem { value, address, bytes, region, .. } => {
+                                            memory_events.push(MemoryEventJson {
+                                                kind: "read".to_string(),
+                                                region: region.to_string(),
+                                                address: fmt_val_str(address, &mut model, shared_state),
+                                                bytes: *bytes,
+                                                value: fmt_val_str(value, &mut model, shared_state),
+                                                data: None,
+                                            });
+                                        }
+                                        Event::WriteMem { value, address, data, bytes, region, .. } => {
+                                            memory_events.push(MemoryEventJson {
+                                                kind: "write".to_string(),
+                                                region: region.to_string(),
+                                                address: fmt_val_str(address, &mut model, shared_state),
+                                                bytes: *bytes,
+                                                value: model
+                                                    .get_var(*value)
+                                                    .ok()
+                                                    .and_then(|model_val| FmtVal::from_model_val(&model_val))
+                                                    .map(|fmt_val| fmt_val.to_str(shared_state)),
+                                                data: fmt_val_str(data, &mut model, shared_state),
+                                            });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                log!(
+                                    log::PATH_RESULT,
+                                    &format!("memory_events={}", serde_json::to_string_pretty(&memory_events).unwrap())
+                                );
                                 log!(log::PATH_RESULT, "3. ==============================");
                             }
                         }
-                        let single_instruction_json =
-                            AssemGenJsonItem::new(target, test_ins, test_ins_encdec, isa_state, ret_val_str);
+                        let single_instruction_json = AssemGenJsonItem::new(
+                            target,
+                            test_ins,
+                            test_ins_encdec,
+                            isa_state,
+                            ret_val_str,
+                            memory_events,
+                        );
                         collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                             path_signature: frame.path_signature(),
                             item: single_instruction_json,

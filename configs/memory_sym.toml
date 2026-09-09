@@ -1,0 +1,162 @@
+# This is a config for Sail RISC-V in 64-bit mode
+# 在 riscv64_difftest.toml 基础上启用内存符号化：
+#   - sym_ram：0x80000000 起 0x10000000 大小的 symbolic region
+#   - code：0x0 起 0x1000 大小的 concrete region
+# 供 test/isarch/cli/solve-state/test_isarch_cli_solve-state.sh 与 make solve-memory 抽查使用
+
+pc = "PC"
+
+zero_announce_exit = true
+
+default_sizeof = 4
+
+in_program_order = ["sail_barrier"]
+
+# 执行限制不再放在通用 ISA 配置中。需要时由命令行
+# --execution-limits-config 加载 configs/workarounds/ 下的独立 TOML。
+
+[[toolchain]]
+name = "macos-riscv64"
+os = "macos"
+arch = "aarch64"
+assembler = "riscv64-elf-as"
+objdump = "riscv64-elf-objdump"
+nm = "riscv64-elf-nm"
+linker = "riscv64-elf-ld"
+
+[[toolchain]]
+name = "default"
+assembler = "riscv64-linux-gnu-as -march=rv64imac"
+objdump = "riscv64-linux-gnu-objdump"
+linker = "riscv64-linux-gnu-ld"
+nm = "riscv64-linux-gnu-nm"
+
+# Currently not used for RISC-V
+[mmu]
+page_table_base = "0x300000"
+page_size = "4096"
+s2_page_table_base = "0x300000"
+s2_page_size = "4096"
+
+[threads]
+base = "0x80100000"
+top = "0x80300000"
+stride = "0x10000"
+
+[symbolic_addrs]
+base = "0x80310000"
+top = "0x80410000"
+stride = "0x10"
+
+[registers]
+
+[registers.defaults]
+"__isla_vector_gpr" = true
+"__isla_vector_vpr" = true
+"__isla_vector_fpr" = true
+"__isla_use_extra_ops" = true
+satp = "0x0000000000000000"
+misa = "{ bits = 0x800000000034112f }"
+mstatus = "{ bits = 0x0000000000000600 }"
+mcountinhibit = " { bits = 0x00000000 }"
+mcyclecfg = "{ bits = 0x0000000000000000 }"
+minstretcfg = "{ bits = 0x0000000000000000 }"
+mtimecmp = "0x0000000000000000"
+stimecmp = "0x0000000000000000"
+__isla_always_aligned = "true"
+
+[const_primops]
+get_config_print_reg = false
+get_config_print_instr = false
+get_config_print_platform = false
+get_config_print_mem = false
+sys_enable_fdext = false
+sys_enable_zfinx = false
+sys_enable_rvc = true
+sys_enable_next = false
+sys_enable_vext = true
+sys_enable_writable_fiom = true
+sys_enable_writable_misa = true
+sys_enable_bext = false
+sys_enable_experimental_extensions = false
+sys_pmp_count = "0 : %i64"
+plat_enable_pmp = false
+plat_enable_dirty_update = false
+plat_enable_misaligned_access = false
+plat_mtval_has_illegal_inst_bits = false
+plat_insns_per_tick = 10
+plat_ram_base = "0x0000000080000000"
+plat_ram_size = "0x0000000004000000"
+plat_rom_base = "0x0000000000001000"
+plat_rom_size = "0x0000000000000100"
+plat_clint_base = "0x0000000002000000"
+plat_clint_size = "0x00000000000c0000"
+plat_htif_tohost = "0x0000000040001000"
+plat_get_16_random_bits = "undefined : %bv16"
+plat_term_write = "()"
+print_reg = "()"
+print_platform = "()"
+print_instr = "()"
+print_mem_access = "()"
+speculate_conditional = "undefined : %bool"
+match_reservation = "true"
+cancel_reservation = "()"
+load_reservation = "()"
+csr_full_write_callback = "()"
+mem_read_callback = "()"
+xreg_full_write_callback = "()"
+mem_write_callback = "()"
+mem_exception_callback = "()"
+pc_write_callback = "()"
+get_config_rvfi = "false"
+plat_enable_htif = "false"
+get_config_use_abi_names = "false"
+
+# === Memory Symbolization Configuration（已启用） ===
+# base/size 均为 4K 对齐；区域之间及与默认 CLINT（0x2000000-0x20c0000）不重叠
+[[memory_regions]]
+name = "code"
+base = "0x0"
+size = "0x1000"
+region_type = "concrete"
+
+[[memory_regions]]
+name = "sym_ram"
+base = "0x80000000"
+size = "0x10000000"
+region_type = "symbolic"
+
+# CLINT toggle — 保持默认（启用），如需关闭再取消注释
+# clint_enabled = true
+#
+# Page table configuration — pre-populate page tables
+# [page_table_config]
+# mode = "sv39"         # "sv39" or "sv48"
+# preset = "identity"   # "identity", "offset", "protected", "symbolic"
+# base = "0x300000"     # page table physical base address
+# page_size = 4096
+# offset = "0x10000000" # only for "offset" preset
+#
+# Optional: add protected ranges when using the "protected" preset
+# protected_ranges = [
+# #   { base = "0x80000000", size = "0x1000", flags = "rx" },
+# ]
+#
+# PMP (Physical Memory Protection) configuration
+# [pmp]
+# symbolic = false
+#
+# [[pmp.rules]]
+# index = 0
+# mode = "tor"
+# base = "0x80000000"
+# permissions = "rw"
+# locked = false
+#
+# [[pmp.rules]]
+# index = 1
+# mode = "napot"
+# base = "0x80200000"
+# size = "0x200000"
+# permissions = "rwx"
+# locked = true
