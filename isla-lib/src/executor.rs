@@ -2837,6 +2837,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     collected: &Arc<R>,
     collector: &'ir Collector<'ir, B, R>,
     checkpoint: Checkpoint<B>,
+    initial_memory: Option<crate::memory::Memory<B>>,
     num_threads: usize,
     timeout: Option<u64>,
     task_state: &TaskState<B>,
@@ -2852,6 +2853,10 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
     let mut initial_frame = LocalFrame::new(function_id, func_args, ret_ty, Some(args), instrs);
     initial_frame.add_regs(regs);
     initial_frame.add_lets(lets);
+
+    if let Some(memory) = initial_memory {
+        initial_frame.set_memory(memory);
+    }
 
     // handler 在本次执行会话内只读共享；所有影响路径选择的计数随 Frame 复制。
     let task_id = TaskId::fresh();
@@ -4466,6 +4471,7 @@ fn zsteptest(zu) {
                 }
             },
             Checkpoint::new(),
+            None,
             4,
             None,
             &task_state,
@@ -4502,6 +4508,7 @@ fn zsteptest(zu) {
                 }
             },
             Checkpoint::new(),
+            None,
             4,
             Some(0),
             &task_state,
@@ -4509,6 +4516,91 @@ fn zsteptest(zu) {
 
         let timeout_hits = *collected.lock().unwrap();
         assert_eq!(timeout_hits, 1, "timeout 后应通过 collector 返回一次，实际 {} 次", timeout_hits);
+    }
+
+    #[test]
+    fn multi_thread_entry_injects_initial_memory() {
+        const MEM_IR: &str = r#"
+val zmemtest : (%unit) -> %unit
+fn zmemtest(zu) {
+  goto 1;
+  goto 2;
+  end;
+}
+"#;
+        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(MEM_IR);
+        let task_state = TaskState::new();
+        let mut mem = crate::memory::Memory::<B64>::new();
+        mem.add_symbolic_region(0x1000..0x2000);
+        let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+
+        execute_ir_function_with_checkpoint_multi_thread(
+            "zmemtest",
+            &[Val::Unit],
+            &shared_state,
+            &regs,
+            &lets,
+            &collected,
+            &|_tid, _id, result, _ss, _solver, count| {
+                if let Ok((Run::Finished(_), frame)) = result {
+                    let regions = frame.memory().regions();
+                    if !regions.is_empty() && regions.iter().any(|r| r.region_range() == &(0x1000..0x2000)) {
+                        *count.lock().unwrap() += 1;
+                    }
+                }
+            },
+            Checkpoint::new(),
+            Some(mem),
+            4,
+            None,
+            &task_state,
+        );
+
+        let injected_hits = *collected.lock().unwrap();
+        assert!(
+            injected_hits >= 1,
+            "期望 multi_thread 入口注入 initial_memory，Finished 帧 memory 应含 0x1000..0x2000 symbol region，实际命中 {} 次",
+            injected_hits
+        );
+    }
+
+    #[test]
+    fn multi_thread_entry_none_keeps_default_memory() {
+        const MEM_IR: &str = r#"
+val zmemtest : (%unit) -> %unit
+fn zmemtest(zu) {
+  goto 1;
+  goto 2;
+  end;
+}
+"#;
+        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(MEM_IR);
+        let task_state = TaskState::new();
+        let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+
+        execute_ir_function_with_checkpoint_multi_thread(
+            "zmemtest",
+            &[Val::Unit],
+            &shared_state,
+            &regs,
+            &lets,
+            &collected,
+            &|_tid, _id, result, _ss, _solver, count| {
+                if let Ok((Run::Finished(_), frame)) = result {
+                    if frame.memory().regions().is_empty() {
+                        *count.lock().unwrap() += 1;
+                    }
+                }
+            },
+            Checkpoint::new(),
+            None,
+            4,
+            None,
+            &task_state,
+        );
+
+        let default_hits = *collected.lock().unwrap();
+        assert!(default_hits >= 1, "期望传 None 时保持默认空 Memory（region 为空），实际命中 {} 次", default_hits);
     }
 
     #[test]
