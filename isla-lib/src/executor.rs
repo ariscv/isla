@@ -1193,6 +1193,40 @@ fn run_special_primop<'ir, B: BV>(
         let arg = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
         assign(tid, loc, Val::Ctor(f, Box::new(arg)), &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
+    } else if let Some(op) = primop::float::softfloat_dispatch(&zencode::decode(shared_state.symtab.to_str(f))) {
+        let args = args
+            .iter()
+            .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, info).map(Cow::into_owned))
+            .collect::<Result<Vec<Val<B>>, _>>()?;
+        let struct_name = primop::float::softfloat_result_struct(op);
+        let struct_id = shared_state
+            .symtab
+            .get(&struct_name)
+            .unwrap_or_else(|| panic!("softfloat: IR 中缺少返回结构体 {} 的定义", struct_name));
+        let struct_fields = shared_state
+            .typedefs()
+            .structs
+            .get(&struct_id)
+            .unwrap_or_else(|| panic!("softfloat: IR 中缺少返回结构体 {} 的字段", struct_name));
+        assert!(struct_fields.len() == 2, "softfloat: 返回结构体 {} 应恰有两个字段", struct_name);
+        let mut flags_field = None;
+        let mut result_field = None;
+        for (field, ty) in struct_fields.iter() {
+            match ty {
+                Ty::Bits(5) => flags_field = Some(*field),
+                _ => result_field = Some(*field),
+            }
+        }
+        let value = primop::float::softfloat_call(
+            op,
+            args,
+            flags_field.expect("softfloat: 返回结构体缺少 bv5 flags 字段"),
+            result_field.expect("softfloat: 返回结构体缺少结果字段"),
+            solver,
+            info,
+        )?;
+        assign(tid, loc, value, &mut frame.local_state, shared_state, solver, info)?;
+        frame.pc += 1
     } else {
         let symbol = zencode::decode(shared_state.symtab.to_str(f));
         return Err(ExecError::NoFunction(symbol, info));
