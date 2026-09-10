@@ -82,6 +82,8 @@ ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
 COUNTER=output/.solve_progress_counter
 # isarch 多线程执行的工作线程数（-T），默认 64；单测可 `make solve-X THREADS=110` 覆盖
 THREADS ?= 64
+# 默认求解配置；FD/浮点、内存等目标组可在下方按 target-specific 变量覆盖。
+ISA_CONFIG ?= ./configs/riscv64_difftest.toml
 # solve 使用的 IR；默认的 ./rv64d.ir 已是 VLEN=128、ELEN=64，其 SHA-256 与
 # configs/workarounds/vvtype.toml 的 ir_sha256 对应，换 IR 时两者必须同步更新。
 IR_FILE ?= ./rv64d.ir
@@ -128,7 +130,7 @@ solve-%: build-isarch
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
 	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
-		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
+		-A $(IR_FILE) -C $(ISA_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \
@@ -143,6 +145,9 @@ solve-%: build-isarch
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
 MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
+
+# FD/浮点 clause 需要启用 F/D 扩展的专用配置（sys_enable_fdext + mstatus FS=Dirty）。
+$(FD_FLOAT_SOLVE_TARGETS): ISA_CONFIG := ./configs/riscv64_difftest_fd.toml
 
 .PHONY: build-isarch solve solve-fd-float solve-memory
 # Ctrl-C 清理是【可选插件】：scripts/run_ctrl_c.mk 若存在，会给 solve-% 注入 Ctrl-C 清理逻辑
