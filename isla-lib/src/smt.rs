@@ -1261,6 +1261,10 @@ impl<'ctx> Ast<'ctx> {
         }
     }
 
+    fn mk_fpa_to_ieee_bv(&self) -> Self {
+        z3_unary_op!(Z3_mk_fpa_to_ieee_bv, self)
+    }
+
     fn mk_fpa_to_fp_float(&self, exp: &Ast<'ctx>, ebits: u32, sbits: u32) -> Self {
         unsafe {
             let sort = Sort::float(self.ctx, ebits, sbits);
@@ -2233,6 +2237,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     IsNegative => Ast::mk_fpa_is_negative(&self.translate_exp(exp)),
                     IsPositive => Ast::mk_fpa_is_positive(&self.translate_exp(exp)),
                     FromIEEE(ebits, sbits) => Ast::mk_fpa_to_fp_bv(&self.translate_exp(exp), *ebits, *sbits),
+                    ToIEEE(..) => Ast::mk_fpa_to_ieee_bv(&self.translate_exp(exp)),
                 }
             }
             FPRoundingUnary(op, rm, exp) => {

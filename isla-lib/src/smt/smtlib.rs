@@ -86,13 +86,16 @@ pub enum FPUnary {
     IsPositive,
     /// Create a floating point number from a bitvector in IEEE 754-2008 interchange format
     FromIEEE(u32, u32),
+    /// Convert a floating point number to its IEEE 754-2008 interchange format bitvector
+    ToIEEE(u32, u32),
 }
 
 impl FPUnary {
     fn result_ty(self) -> Option<Ty> {
         use FPUnary::*;
         match self {
-            FromIEEE(sbits, ebits) => Some(Ty::Float(ebits, sbits)),
+            FromIEEE(ebits, sbits) => Some(Ty::Float(ebits, sbits)),
+            ToIEEE(ebits, sbits) => Some(Ty::BitVec(ebits + sbits)),
             IsNormal | IsSubnormal | IsZero | IsInfinite | IsNaN | IsNegative | IsPositive => Some(Ty::Bool),
             Abs | Neg => None,
         }
@@ -126,7 +129,7 @@ impl FPRoundingUnary {
 /// Note that SMTLIB is slightly inconsistent w.r.t. whether it uses
 /// le or leq as a suffix for less than or equal to between bitvectors
 /// and floating point. We follow SMTLIB exactly here.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FPBinary {
     Rem,
     Min,
@@ -146,7 +149,7 @@ impl FPBinary {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FPRoundingBinary {
     Add,
     Sub,
