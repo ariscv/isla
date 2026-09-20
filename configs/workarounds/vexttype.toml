@@ -1,0 +1,53 @@
+# VEXTTYPE 专用局部执行限制。
+# 只限制 execute 调用的合法性/起始元素 helper 与逐 lane 循环，
+# 不固定 funct6、vtype、vl、vstart 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# valid_rd_mask：中间验证累计 fork 132 次。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 46
+start_column = 2
+end_line = 46
+end_column = 25
+
+# illegal_variable_width：中间验证累计 fork 112 次。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 184
+start_column = 2
+end_line = 185
+end_column = 1
+
+# valid_reg_overlap：中间验证在 77–82 行累计 fork 99 次。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 77
+start_column = 2
+end_line = 85
+end_column = 14
+
+# get_start_element：中间验证累计 fork 77 次。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 282
+start_column = 2
+end_line = 284
+end_column = 24
+
+# execute 内按 num_elem 展开的逐 lane 循环。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 2080
+start_column = 2
+end_line = 2089
+end_column = 3

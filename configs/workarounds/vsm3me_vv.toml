@@ -1,0 +1,21 @@
+# VSM3ME_VV 专用局部执行限制。
+# 只限制 execute 内的 element-group 消息扩展循环，不限制循环外 encdec。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 60 秒 ITRACE 基线完成 71 条路径后 timeout；明确的 execute 热点为
+# 39:2-52:3。内部两个 8 次循环以及 zvk_sh_w/rev8 都是定宽运算，
+# 没有数据相关分支，因此不增加 helper region 或方向偏置。
+# 16:38-16:129 是循环外 SEW、element-group 对齐与寄存器重叠合法性条件，
+# 不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+# Region 使用半开区间 [39:2,52:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvksh_insts.sail"
+start_line = 39
+start_column = 2
+end_line = 52
+end_column = 3

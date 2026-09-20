@@ -1,0 +1,32 @@
+# VCPOP_V 专用局部执行限制。
+# 只限制 execute 内的逐 lane/逐 bit popcount 循环，不固定运行态、vm 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 独立 60 秒基线仅产生 52 条路径。日志显示外层 mask 在 345:4-351:5
+# 逐 lane fork，且内层对符号 vs2 数据的逐 bit 判断在 347:8-349:9 反复 fork。
+# 初次限制后的 ITRACE 诊断显示单条成功路径 active_wall 可达约 20-28 秒：
+# 50/50 具体化会让大量符号位走加一侧，形成稠密累加约束。内层分支单独采用
+# 256:1 fallthrough 抑制；该分支的 fallthrough 即条件为真、执行 result[i] + 1。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 256
+sample_bias_direction = "fallthrough"
+file = "extensions/vector_crypto/zvbb_insts.sail"
+start_line = 347
+start_column = 8
+end_line = 349
+end_column = 9
+
+# 半开区间 [344:2,351:4) 覆盖完整双层循环，压制外层 mask 与内层分支爆炸；
+# 内层方向偏置由上面更精确的 region 提供，外层 mask 保持无偏采样。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvbb_insts.sail"
+start_line = 344
+start_column = 2
+end_line = 351
+end_column = 4

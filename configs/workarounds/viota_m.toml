@@ -1,0 +1,29 @@
+# VIOTA_M 专用局部执行限制。
+# 只限制 execute 内逐元素生成索引的循环，不固定 vtype、vl、vstart、vm 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 独立 60 秒基线完成 174 条路径后超时；内层源 bit 判断在日志中 fork 214 次。
+# fallthrough 对应源 bit 为 1、递增 sum，使用 256:1 抑制该方向以避免稠密约束。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 256
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_mask_insts.sail"
+start_line = 340
+start_column = 6
+end_line = 340
+end_column = 45
+
+# 超时路径的主要 SMT 调用点是完整循环与外层 mask 判断；半开区间
+# [337:2,342:3) 精确覆盖 foreach，外层 mask 保持无偏采样。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_mask_insts.sail"
+start_line = 337
+start_column = 2
+end_line = 342
+end_column = 3

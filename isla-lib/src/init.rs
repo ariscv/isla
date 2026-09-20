@@ -67,10 +67,18 @@ fn initialize_letbinding<'ir, B: BV>(
     bindings: &'ir [(Name, Ty<Name>)],
     setup: &'ir [Instr<Name, B>],
     shared_state: &SharedState<'ir, B>,
+    const_primops: &HashMap<String, Reset<B>>,
     registers: &Mutex<RegisterBindings<'ir, B>>,
     letbindings: &Mutex<Bindings<'ir, B>>,
 ) {
     let vars: Vec<_> = bindings.iter().map(|(id, ty)| (*id, ty)).collect();
+    let configured_resets: HashMap<_, _> = bindings
+        .iter()
+        .filter_map(|(id, _)| {
+            let symbol = zencode::decode(shared_state.symtab.to_str(*id));
+            const_primops.get(&symbol).cloned().map(|reset| (*id, reset))
+        })
+        .collect();
     let task_state = TaskState::new();
     let task = {
         let regs = registers.lock().unwrap();
@@ -85,18 +93,32 @@ fn initialize_letbinding<'ir, B: BV>(
         task,
         shared_state,
         &letbindings,
-        &move |_tid, _task_id, result, shared_state, _solver, letbindings| match result {
+        &move |_tid, _task_id, result, shared_state, mut solver, letbindings| match result {
             Ok((_, frame)) => {
-                for (id, _) in bindings.iter() {
-                    match frame.vars().get(id) {
-                        Some(value) => {
-                            let mut state = letbindings.lock().unwrap();
-                            state.insert(*id, value.clone());
-                        }
-                        None => {
-                            let symbol = zencode::decode(shared_state.symtab.to_str(*id));
-                            log!(log::VERBOSE, &format!("No value for symbol {}", symbol))
-                        }
+                let mut state = letbindings.lock().unwrap();
+                for (id, ty) in bindings.iter() {
+                    if let Some(reset) = configured_resets.get(id) {
+                        let value =
+                            reset(frame.memory(), shared_state.typedefs(), &mut solver).unwrap_or_else(|error| {
+                                panic!(
+                                    "配置的顶层 let {} 求值失败: {:?}",
+                                    zencode::decode(shared_state.symtab.to_str(*id)),
+                                    error
+                                )
+                            });
+                        value.plausible(ty, shared_state).unwrap_or_else(|error| {
+                            panic!(
+                                "配置的顶层 let {} 类型不匹配: {}",
+                                zencode::decode(shared_state.symtab.to_str(*id)),
+                                error
+                            )
+                        });
+                        state.insert(*id, UVal::Init(value));
+                    } else if let Some(value) = frame.vars().get(id) {
+                        state.insert(*id, value.clone());
+                    } else {
+                        let symbol = zencode::decode(shared_state.symtab.to_str(*id));
+                        log!(log::VERBOSE, &format!("No value for symbol {}", symbol))
                     }
                 }
             }
@@ -220,7 +242,9 @@ pub fn initialize_architecture<'ir, B: BV>(
 
     for def in arch.iter() {
         match def {
-            Def::Let(bindings, setup) => initialize_letbinding(bindings, setup, &shared_state, &regs, &lets),
+            Def::Let(bindings, setup) => {
+                initialize_letbinding(bindings, setup, &shared_state, &isa_config.const_primops, &regs, &lets)
+            }
             Def::Register(id, ty, setup) => initialize_register(
                 id,
                 ty,
@@ -256,5 +280,49 @@ where
         isa_config: &'ir ISAConfig<B>,
     ) -> InitArchWithConfig<'ir, B> {
         InitArchWithConfig { regs: &iarch.regs, lets: &iarch.lets, shared_state: &iarch.shared_state, isa_config }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::source_loc::SourceLoc;
+    use std::sync::Arc;
+
+    #[test]
+    fn const_primop_can_override_same_named_top_level_let() {
+        let mut symtab = Symtab::new();
+        let id = symtab.intern("zsys_pmp_count");
+        let defs = vec![Def::Let(
+            vec![(id, Ty::I64)],
+            vec![Instr::Copy(Loc::Id(id), Exp::I64(16), SourceLoc::unknown()), Instr::End],
+        )];
+        let type_info = IRTypeInfo::new(&defs);
+        let shared_state = SharedState::new(
+            symtab,
+            &defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut const_primops = HashMap::new();
+        let reset: Reset<B64> = Arc::new(|_, _, _| Ok(Val::I64(0)));
+        const_primops.insert("sys_pmp_count".to_string(), reset);
+        let registers = Mutex::new(RegisterBindings::new());
+        let letbindings = Mutex::new(HashMap::default());
+        let Def::Let(bindings, setup) = &defs[0] else { panic!("测试定义必须是顶层 let") };
+
+        initialize_letbinding(bindings, setup, &shared_state, &const_primops, &registers, &letbindings);
+
+        let state = letbindings.into_inner().unwrap();
+        match state.get(&id) {
+            Some(UVal::Init(Val::I64(value))) => assert_eq!(*value, 0),
+            value => panic!("顶层 let 未被配置覆盖: {:?}", value),
+        }
     }
 }

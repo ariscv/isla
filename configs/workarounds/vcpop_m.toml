@@ -1,0 +1,20 @@
+# VCPOP_M 专用局部执行限制。
+# 只限制 execute 内固定 vlen 次数的逐 bit popcount 循环，不固定运行态、vm 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 独立 60 秒基线仅完成 2 条路径；线程在 113:4-113:56 的符号 bit 判定上
+# 反复 fork，并因 count 累加形成昂贵 SMT。半开区间精确覆盖逐 bit foreach。
+# 该 if 的 fallthrough 是条件为真、执行 count + 1，使用 256:1 抑制该方向。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 256
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_mask_insts.sail"
+start_line = 112
+start_column = 2
+end_line = 114
+end_column = 4

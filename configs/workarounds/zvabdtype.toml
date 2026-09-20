@@ -1,0 +1,19 @@
+# ZVABDTYPE 专用局部执行限制。
+# 只限制 execute 内按 mask 计算差值绝对值的逐 lane 循环，不限制循环外 encdec/funct6。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 60 秒 ITRACE 基线完成 114 条路径后 timeout；91:2-98:3 的逐 lane
+# mask/funct6 计算区域 fork 555 次，是明确热点。funct6 已由循环外编码分派确定，
+# region 只压重复到达的 lane 计算，不固定 funct6、vm、vl、vstart、vtype 或寄存器。
+# 66:1-68:70 的循环外 encdec 不限制。Region 使用半开区间 [91:2,98:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/Zvabd/zvabd_insts.sail"
+start_line = 91
+start_column = 2
+end_line = 98
+end_column = 3

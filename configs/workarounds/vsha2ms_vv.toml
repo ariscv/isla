@@ -1,0 +1,20 @@
+# VSHA2MS_VV 专用局部执行限制。
+# 只限制 execute 内的 element-group 消息调度循环，不限制循环外 encdec。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 60 秒 ITRACE 基线完成 58 条路径后 timeout；唯一 execute 循环热点为
+# 44:2-70:3。zvk_sig0/zvk_sig1 在 SEW 已确定后只做定宽 rotate/xor，
+# 不额外限制，以保留 SEW=32/64 覆盖。
+# 第 17 行是循环外扩展选择、SEW 与寄存器重叠合法性条件，不限制，也不固定
+# vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [44:2,70:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvknhab_insts.sail"
+start_line = 44
+start_column = 2
+end_line = 70
+end_column = 3

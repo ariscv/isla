@@ -1,0 +1,117 @@
+# VXTYPE 专用局部执行限制。
+# 只限制 execute 内证据明确的逐 lane 饱和运算循环与定点舍入 helper，
+# 不固定 funct6、vtype、vl、vstart 或寄存器选择，也不覆盖 571 行的 funct6 分派。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# init_masked_result 调用的 vstart 合法上界检查。带现有逐 lane 限制的
+# 60 秒 ITRACE 中，该比较仍累计 33 次 fork；最慢的多条已完成路径均在这里
+# 花费 23-30 秒后走 Err/Illegal。只限制这个比较，不固定 vstart 的具体值。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 282
+start_column = 2
+end_line = 284
+end_column = 24
+
+# VX_VSADDU 逐 lane mask/saturation 分支；60 秒基线累计 31 次 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 591
+start_column = 6
+end_line = 593
+end_column = 5
+
+# VX_VSADD 逐 lane mask/saturation 分支；60 秒基线累计 31 次 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 595
+start_column = 6
+end_line = 597
+end_column = 5
+
+# VX_VSSUBU 完整 arm 的逐 lane mask 与 unsigned 比较；基线分别累计 26/25 次 fork，
+# 正式运行还在 arm 入口 598:17-603:5 出现单次 SMT timeout。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 598
+start_column = 5
+end_line = 603
+end_column = 5
+
+# VX_VSSUB 逐 lane mask/saturation 分支；60 秒基线累计 26 次 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 605
+start_column = 6
+end_line = 607
+end_column = 5
+
+# VX_VSMUL 逐 lane mask/舍入/饱和分支；60 秒基线累计 17 次 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 609
+start_column = 6
+end_line = 615
+end_column = 5
+
+# VX_VSMUL/VX_VSSRL/VX_VSSRA 逐 lane 调用的定点舍入 helper；
+# 基线在 728:2-748:3、742:4-747:5 与 746:26-746:63 持续 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 728
+start_column = 2
+end_line = 750
+end_column = 1
+
+# get_fixed_rounding_incr 的 0b11 arm 会判断被丢弃位是否非零。正式运行在
+# 1209 条路径后于该比较的 CheckSatAssuming 单次超时；对应 IR 是
+# `jump @not(discarded_nonzero)`，target 为直接返回 0 的便宜侧，fallthrough
+# 才是 discarded_nonzero=true 的昂贵侧。只让 1/4294967295 的路径采到 fallthrough，
+# 同时保留上方无偏置 match 对四种 vxrm 的跨路径采样。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 4294967295
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 741
+start_column = 28
+end_line = 741
+end_column = 72
+
+# sticky_below_rounding 的 IR 在 vxrm=01 arm 中以 `jump sticky_below_rounding`
+# 短路 OR；jump 即昂贵的 nonzero=true 侧。正式运行已在 740:11-740:59
+# 多次记录单次 SMT timeout，因此以最大 u32 分母压制该侧。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 4294967295
+sample_bias_direction = "jump"
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 740
+start_column = 11
+end_line = 740
+end_column = 59
+
+# vxrm=01 arm 的短路 AND 在 IR 中是 `jump (rounding_bit == 1)` 后才计算
+# sticky_below_rounding/shifted[0]，jump 为昂贵侧。正式运行在 1208 条路径后
+# 于该表达式单次 SMT 超时；只让 1/4294967295 的路径进入 jump，仍保留 vxrm=01
+# 以及少量完整右侧条件样本。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 4294967295
+sample_bias_direction = "jump"
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 744
+start_column = 26
+end_line = 744
+end_column = 91

@@ -1,0 +1,20 @@
+# VCLMUL_VX 专用局部执行限制。
+# 只限制 execute 内逐 lane 的 mask/carryless-multiply 循环，
+# 不固定 vtype、vl、vstart、vm 或寄存器选择，也不限制 encdec。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 未加限制的 90 秒 ITRACE 基线完成 123 条路径后 timeout，日志持续在
+# 88:4-91:5 由 vl/vstart/vtype/vr0 驱动逐 lane fork，活跃 lane 随后调用
+# 昂贵的 carryless_mul。Region 为 execute VCLMUL_VX 的 foreach 半开区间
+# [87:2,92:4)，循环外合法性检查及 encdec 保持完整符号执行。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvbc_insts.sail"
+start_line = 87
+start_column = 2
+end_line = 92
+end_column = 4

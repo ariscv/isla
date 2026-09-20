@@ -43,7 +43,7 @@ Illegal_Instruction = 2
 # ...
 # Sail end   187:      }
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
 start_line = 181
 start_column = 6
@@ -55,7 +55,7 @@ end_column = 7
 # ...
 # Sail end   196:      }
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
 start_line = 190
 start_column = 6
@@ -70,7 +70,7 @@ end_column = 7
 # Sail end   748:  }
 # 配置终点使用紧随函数后的空行 750:1。
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 file = "extensions/V/vext_utils_insts.sail"
 start_line = 728
 start_column = 2
@@ -84,7 +84,7 @@ end_column = 1
 # ...
 # Sail end   85:  } else true;
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 file = "extensions/V/vext_utils_insts.sail"
 start_line = 71
 start_column = 2
@@ -102,7 +102,7 @@ end_column = 3
 # Sail start 65:                               then vs1 == vd | vs2 == vd
 # Sail end   65:                               then vs1 == vd | vs2 == vd
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "jump"
 file = "extensions/V/vext_arith_insts.sail"
@@ -121,7 +121,7 @@ end_column = 57
 # ...
 # Sail end   124:      }
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
 start_line = 121
 start_column = 6
@@ -134,7 +134,7 @@ end_column = 7
 # ...
 # Sail end   136:      }
 [[execution_limits.region_fork_limits]]
-max_forks_per_region = 0
+max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
 start_line = 131
 start_column = 6

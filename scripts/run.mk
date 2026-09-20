@@ -85,14 +85,107 @@ THREADS ?= 64
 # solve 使用的 IR；默认的 ./rv64d.ir 已是 VLEN=128、ELEN=64，其 SHA-256 与
 # configs/workarounds/vvtype.toml 的 ir_sha256 对应，换 IR 时两者必须同步更新。
 IR_FILE ?= ./rv64d.ir
+# solve 使用的 Isla 运行时配置；实验扩展 clause 可通过 target-specific value 覆盖。
+ISA_CONFIG ?= ./configs/riscv64_difftest.toml
 # itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
 ITRACE ?= 0
 CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
+# solve 使用 Homebrew 的 Z3。z3-sys 直接以 -lz3 链接，故必须同时提供链接搜索路径
+# 与运行时 rpath；否则系统 libz3 会在 `make` 重建 isarch 时覆盖手工验证的 Brew Z3。
+Z3_PREFIX ?= /home/linuxbrew/.linuxbrew/opt/z3
+Z3_RUSTFLAGS = -L native=$(Z3_PREFIX)/lib -C link-arg=-Wl,-rpath,$(Z3_PREFIX)/lib
 # 可选 Z3 tactic；例如 `make solve-VVTYPE TASTIC=qfaufbv`。
 TASTIC ?=
-# 可选的独立 execution-limit TOML；VVTYPE 默认加载专用 workaround，其它 clause 不加载。
+# 可选的独立 execution-limit TOML；下方有局部路径爆炸的 clause 加载各自的 workaround。
 EXECUTION_LIMITS_CONFIG ?=
 solve-VVTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vvtype.toml
+solve-MASKTYPEI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/masktypei.toml
+solve-MASKTYPEV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/masktypev.toml
+solve-MASKTYPEX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/masktypex.toml
+solve-MVVTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/mvvtype.toml
+solve-MVXTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/mvxtype.toml
+solve-VXTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vxtype.toml
+solve-VXTYPE: OUTER_TIMEOUT = 90m
+solve-VXTYPE: SOLVE_TIMEOUT = 85m
+solve-MVXMATYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/mvxmatype.toml
+solve-NISTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/nistype.toml
+solve-NITYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/nitype.toml
+solve-VITYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vitype.toml
+solve-VIMSTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vimstype.toml
+solve-VICMPTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vicmptype.toml
+solve-VVCMPTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vvcmptype.toml
+solve-VXCMPTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vxcmptype.toml
+solve-VXMTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vxmtype.toml
+solve-VXSG: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vxsg.toml
+solve-NVTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/nvtype.toml
+solve-NXSTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/nxstype.toml
+solve-NXTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/nxtype.toml
+solve-VIMTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vimtype.toml
+solve-VIMCTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vimctype.toml
+solve-VVMCTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vvmctype.toml
+solve-VXMCTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vxmctype.toml
+solve-VXMSTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vxmstype.toml
+solve-VVMSTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vvmstype.toml
+solve-VVMTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vvmtype.toml
+solve-VMTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vmtype.toml
+solve-VISG: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/visg.toml
+solve-MVVCOMPRESS: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/mvvcompress.toml
+solve-VMVRTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vmvrtype.toml
+solve-VEXTTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vexttype.toml
+solve-RIVVTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/rivvtype.toml
+solve-RMVVTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/rmvvtype.toml
+solve-VANDN_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vandn_vv.toml
+solve-VANDN_VX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vandn_vx.toml
+solve-VCLMULH_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vclmulh_vv.toml
+solve-VCLMULH_VX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vclmulh_vx.toml
+solve-VCLMUL_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vclmul_vv.toml
+solve-VCLMUL_VX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vclmul_vx.toml
+solve-VBREV_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vbrev_v.toml
+solve-VBREV8_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vbrev8_v.toml
+solve-VREV8_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vrev8_v.toml
+solve-VCLZ_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vclz_v.toml
+solve-VCTZ_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vctz_v.toml
+solve-VROL_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vrol_vv.toml
+solve-VROL_VX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vrol_vx.toml
+solve-VROR_VI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vror_vi.toml
+solve-VROR_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vror_vv.toml
+solve-VROR_VX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vror_vx.toml
+solve-VWSLL_VI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vwsll_vi.toml
+solve-VWSLL_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vwsll_vv.toml
+solve-VWSLL_VX: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vwsll_vx.toml
+solve-VAESDF: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vaesdf.toml
+solve-VAESDM: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vaesdm.toml
+solve-VAESEF: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vaesef.toml
+solve-VAESEM: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vaesem.toml
+solve-VAESKF1_VI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vaeskf1_vi.toml
+solve-VAESKF2_VI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vaeskf2_vi.toml
+solve-VGHSH_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vghsh_vv.toml
+solve-VGMUL_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vgmul_vv.toml
+solve-VSM3C_VI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vsm3c_vi.toml
+solve-VSM3ME_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vsm3me_vv.toml
+solve-VSM4K_VI: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vsm4k_vi.toml
+solve-VSHA2MS_VV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vsha2ms_vv.toml
+solve-ZVKSHA2TYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/zvksha2type.toml
+solve-ZVKSM4RTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/zvksm4rtype.toml
+solve-ZVABDTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/zvabdtype.toml
+solve-ZVABDTYPE: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
+solve-ZVWABDATYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/zvwabdatatype.toml
+solve-ZVWABDATYPE: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
+solve-VFMERGE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vfmerge.toml
+solve-VFMERGE: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VFMV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vfmv.toml
+solve-VFMV: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VFMVFS: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VFMVSF: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VCPOP_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vcpop_v.toml
+solve-VCPOP_M: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vcpop_m.toml
+solve-VFIRST_M: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vfirst_m.toml
+solve-VMSBF_M: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vmsbf_m.toml
+solve-VMSIF_M: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vmsif_m.toml
+solve-VMSOF_M: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vmsof_m.toml
+solve-VIOTA_M: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/viota_m.toml
+solve-VABS_V: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vabs_v.toml
+solve-VABS_V: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
 # Z3 timeout wrapper 的实现由构建 feature 选择。
 Z3_TIMEOUT_IMPL ?= thread_interrupt
 ifeq ($(Z3_TIMEOUT_IMPL),direct)
@@ -117,7 +210,7 @@ TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
-	cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE) $(CARGO_SMT_FEATURE)
+	RUSTFLAGS="$(RUSTFLAGS) $(Z3_RUSTFLAGS)" cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE) $(CARGO_SMT_FEATURE)
 
 # 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
 #
@@ -128,7 +221,7 @@ solve-%: build-isarch
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
 	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
-		-A $(IR_FILE) -C ./configs/riscv64_difftest.toml $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
+		-A $(IR_FILE) -C $(ISA_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \

@@ -1,0 +1,38 @@
+# RMVVTYPE 专用局部执行限制。
+# 只限制 execute 调用的逐 lane mask helper 与 reduction 循环，
+# 不固定 funct6、vtype、vl、vstart 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# read_vmask 根据 vm 选择全 1 或 v0。前两处逐 lane region 受限后的 60 秒 ITRACE
+# 诊断完成 73 条路径，该 helper 仍在 559:2-559:80 fork 18 次，是最后的 execute 热点。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_control.sail"
+start_line = 557
+start_column = 2
+end_line = 560
+end_column = 1
+
+# init_masked_source 的逐 lane foreach。基线 162 条完成路径时，
+# 452:11-464:5 与其内层 458:11-464:5 已累计 fork 58 次。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 448
+start_column = 2
+end_line = 465
+end_column = 4
+
+# execute RMVVTYPE 的 single-width reduction foreach。八个 funct6 arm 在基线中
+# 各 fork 43 次；区间不包含循环外 encdec/funct6 分派。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_red_insts.sail"
+start_line = 124
+start_column = 2
+end_line = 136
+end_column = 4

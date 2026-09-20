@@ -1,0 +1,20 @@
+# MASKTYPEX 专用执行限制。
+#
+# vmerge.vxm 的逐 lane 循环重复根据 vstart、vl 和 real_num_elem 分支，
+# 未限制时会组合成大量路径。这些字段是真实运行态，因此不在入口
+# 处固定任何单一值，只对 foreach 循环体内的重复 fork 做局部抽样。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+on_limit_reached = "concretize"
+
+# Region 是半开区间 [start, end)：
+# Sail start 963:  foreach (i from 0 to (num_elem - 1)) {
+# Sail end   973:  };
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 963
+start_column = 2
+end_line = 974
+end_column = 1

@@ -1,0 +1,17 @@
+# VFIRST_M 专用局部执行限制。
+# 只限制 execute 内寻找首个置位 bit 的循环，不固定运行态、vm 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 独立 60 秒基线已产生 255 条路径，仍在 153:6-153:50 对符号 mask/source bit
+# 持续 fork，展开不同 first-index。半开区间精确覆盖 foreach，保持无偏采样。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_mask_insts.sail"
+start_line = 151
+start_column = 2
+end_line = 155
+end_column = 4

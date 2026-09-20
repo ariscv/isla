@@ -1,0 +1,114 @@
+# VITYPE 专用局部执行限制。
+# 只限制 execute 内各 funct6 分支的逐 lane 循环及定点舍入 helper；
+# 不固定 funct6、vtype、vl、vstart 或其他运行态。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# VI_VSSRL / VI_VSSRA 逐 lane 调用的定点舍入 helper。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 728
+start_column = 2
+end_line = 750
+end_column = 1
+
+# 下列区间只覆盖各 funct6 arm 的 foreach，不包含 1077 行的 funct6 分派。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1078
+start_column = 15
+end_line = 1080
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1081
+start_column = 16
+end_line = 1083
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1084
+start_column = 15
+end_line = 1086
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1087
+start_column = 14
+end_line = 1089
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1090
+start_column = 15
+end_line = 1092
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1093
+start_column = 17
+end_line = 1096
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1097
+start_column = 16
+end_line = 1100
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1101
+start_column = 15
+end_line = 1104
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1105
+start_column = 15
+end_line = 1108
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1109
+start_column = 15
+end_line = 1113
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1114
+start_column = 16
+end_line = 1119
+end_column = 6
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1120
+start_column = 16
+end_line = 1127
+end_column = 3

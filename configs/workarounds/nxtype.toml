@@ -1,0 +1,39 @@
+# NXTYPE 专用局部执行限制。
+# 只限制 execute 内的逐 lane 循环，不固定 funct6、vtype、vl 或 vstart。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# NXTYPE 的逐 lane foreach 循环，半开区间为 [812:4, 826:5)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 812
+start_column = 4
+end_line = 826
+end_column = 5
+
+# 每个活跃 lane 都会调用 get_fixed_rounding_incr。限制 foreach 后的中间验收在一分钟内
+# 只新增 4 条路径，日志持续停在该 helper 的 728:2-748:3 和 746:26-746:63。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 728
+start_column = 2
+end_line = 750
+end_column = 1
+
+# rounding_mode match 的第一条 IR 分支是 `jump @not(rounding_mode == 0b00)`。
+# 高偏置令大部分路径直接覆盖 0b00 arm，只保留少量样本进入其余 vxrm arm；
+# 不固定 vcsr、输入寄存器或任何向量运行态。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 65536
+sample_bias_direction = "jump"
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 742
+start_column = 4
+end_line = 747
+end_column = 5
