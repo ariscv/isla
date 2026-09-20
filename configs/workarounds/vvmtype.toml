@@ -1,0 +1,17 @@
+# VVMTYPE 专用局部执行限制。
+# 只限制 execute 内逐 lane 的 carry/borrow 计算，不固定 funct6、vtype、vl 或 vstart。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 基线路径 51→83→119 时，循环体分支 79→164→231，两个算术 arm 均重复增长。
+# 区域为 foreach 内的 mask 判断、funct6 加减与 result 写入，半开区间 [55:4, 61:5)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_vm_insts.sail"
+start_line = 55
+start_column = 4
+end_line = 61
+end_column = 5

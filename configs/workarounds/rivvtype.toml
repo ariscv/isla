@@ -1,0 +1,40 @@
+# RIVVTYPE 专用局部执行限制。
+# 只限制 execute 调用的逐 lane mask helper 与 reduction 循环，
+# 不固定 funct6、vtype、vl、vstart 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# read_vmask 根据 vm 选择全 1 或 v0。逐 lane region 受限后的日志仍在
+# 559:2-559:80 fork；同类 RMVVTYPE 的短诊断也确认这是 reduction 的最后 helper 热点。
+# IR 为 `jump (vm == 1)`：16:1 偏置 fallthrough 方向，仅少量路径采样
+# fallthrough 的 masked reduction，其余路径走无需读取 v0 的快速 jump 侧。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 16
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_control.sail"
+start_line = 557
+start_column = 2
+end_line = 560
+end_column = 1
+
+# init_masked_source 的逐 lane foreach。基线日志在 452:11-464:5 持续因 vl/vr0 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 448
+start_column = 2
+end_line = 465
+end_column = 4
+
+# execute RIVVTYPE 的 widening reduction foreach。基线日志持续命中 59:8-59:21。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_red_insts.sail"
+start_line = 57
+start_column = 2
+end_line = 63
+end_column = 4

@@ -1,0 +1,25 @@
+# VGHSH_VV 专用局部执行限制。
+# 只限制 execute 内的 element-group/逐 bit GHASH 循环，不限制循环外 encdec。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 60 秒 ITRACE 基线完成 76 条路径后 timeout。
+# 内层 128 次迭代的 S[b] 判定（49:6-49:35）与约简判定
+# （53:6-53:53）各 fork 505 次，是明确的路径爆炸热点。
+# 无偏预算轮仍在一分钟后长尾。VGHSH_VV 自身 ITRACE 显示外层 foreach 入口的
+# jump @gt(...) 直接跳到 set_vstart，故 jump=退出、fallthrough=进入循环；内层两个
+# if 的 jump 同样跳过异或更新。使用 256:1 fallthrough 偏置降低进入循环及累积
+# 符号异或的比例。16:36-16:78 是循环外 encdec，不限制，也不固定
+# vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [38:2,57:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 256
+sample_bias_direction = "fallthrough"
+file = "extensions/vector_crypto/zvkg_insts.sail"
+start_line = 38
+start_column = 2
+end_line = 57
+end_column = 3

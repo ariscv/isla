@@ -1,0 +1,29 @@
+# VMSIF_M 专用局部执行限制。
+# 只限制 execute 内逐 bit 生成 mask 的循环，不固定运行态、vm 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 独立 60 秒基线仅完成 9 条路径；超时路径的 SMT 调用约 533--542 次，
+# 最热点是 241 行 mask 判断与 243 行符号源 bit 判断。内层 if 的
+# fallthrough 是 vs2 bit 为 1、设置 found_elem，使用 256:1 抑制该方向。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 256
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_mask_insts.sail"
+start_line = 243
+start_column = 6
+end_line = 243
+end_column = 49
+
+# 半开区间 [240:2,245:4) 精确覆盖逐 bit foreach；外层 mask 保持无偏采样。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_mask_insts.sail"
+start_line = 240
+start_column = 2
+end_line = 245
+end_column = 4

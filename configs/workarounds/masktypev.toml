@@ -1,0 +1,23 @@
+# MASKTYPEV 专用执行限制。
+#
+# MASKTYPEV 的 vmerge.vvm 遍历 num_elem 个 lane，循环内先后根据 vstart、vl
+# 和 real_num_elem 进行分支。这些都是真实合法的运行态，不能在入口处固定成
+# 单一值；但逐 lane 重复 fork 会产生幂次路径组合。
+#
+# 因此只在 foreach 循环体内做 region 级具体化抽样，保留循环之前对
+# vtype、vl、vstart、寄存器组等合法上下文的符号化覆盖。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+on_limit_reached = "concretize"
+
+# Sail start 422:  foreach (i from 0 to (num_elem - 1)) {
+# ...
+# Sail end   432:  };
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 422
+start_column = 2
+end_line = 433
+end_column = 1

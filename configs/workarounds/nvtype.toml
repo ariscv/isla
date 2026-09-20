@@ -1,0 +1,32 @@
+# NVTYPE 专用局部执行限制。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 354
+start_column = 2
+end_line = 370
+end_column = 4
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 728
+start_column = 2
+end_line = 750
+end_column = 1
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 65536
+sample_bias_direction = "jump"
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 742
+start_column = 4
+end_line = 747
+end_column = 5

@@ -1,0 +1,18 @@
+# VMTYPE 专用局部执行限制。
+# 只限制 process_vm 内逐元素访存循环，不固定运行态，不限制循环外 encdec 和分派。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 修复 sys_pmp_count 配置应用后，60 秒 ITRACE 基线完成 421 条路径。
+# PMP 检查均走 count=0 早退，唯一 clause 私有热点为 661:2-682:3 的 foreach。
+# 649-651 是循环外 encdec，不限制；Region 使用半开区间 [661:2,682:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_mem_insts.sail"
+start_line = 661
+start_column = 2
+end_line = 682
+end_column = 3

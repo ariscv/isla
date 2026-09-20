@@ -1,0 +1,23 @@
+# VGMUL_VV 专用局部执行限制。
+# 只限制 execute 内的 element-group/逐 bit GF 循环，不限制循环外 encdec。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 90 秒 ITRACE 基线仅完成 29 条路径后 timeout。
+# 内层 128 次迭代的 Y[b] 判定（99:6-99:35）与约简判定
+# （103:6-103:53）各 fork 573 次，是明确的路径爆炸热点。
+# 71:36-71:78 是循环外 encdec，不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+# 与同文件 VGHSH_VV 沿用一致的 256:1 fallthrough 偏置；Region 使用半开区间
+# [91:2,107:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 256
+sample_bias_direction = "fallthrough"
+file = "extensions/vector_crypto/zvkg_insts.sail"
+start_line = 91
+start_column = 2
+end_line = 107
+end_column = 3

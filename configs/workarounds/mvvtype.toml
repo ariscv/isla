@@ -1,0 +1,96 @@
+# MVVTYPE 专用执行限制。
+#
+# strict=true 将配置绑定到当前 rv64d.ir，Sail/IR 变化导致源码行号偏移时立即失败。
+# 这里不固定 vtype、vl、vstart、funct6 或寄存器；只限制同一路径在逐 lane 计算中
+# 重复到达的分支点。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# MVVTYPE 的逐 lane 主循环。除法与余数指令会在每个元素重复判断 divisor == 0，
+# 未限制的基线在 1686、1694、1702、1709 行持续产生新路径。区域预算为 0 后，
+# 这些数据相关分支在该循环内进行确定性采样，而循环外的指令与运行态分派不受影响。
+#
+# Region 为半开区间 [start, end)：
+# Sail start 1657:  foreach (i from 0 to (num_elem - 1)) {
+# Sail end   1714:  };
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1657
+start_column = 2
+end_line = 1714
+end_column = 4
+
+# 四个 div/rem arm 的条件在 IR 中都是 `jump (divisor == 0) goto ...`：jump 侧直接
+# 返回 ISA 规定的除零结果，fallthrough 侧进入昂贵的符号 quot/rem。偏置压制
+# fallthrough，使大部分路径优先走合法的除零边界，同时按路径签名保留少量非零除数
+# 样本；没有把寄存器值或运行态固定成单值。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 16
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1686
+start_column = 40
+end_line = 1686
+end_column = 103
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 16
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1694
+start_column = 40
+end_line = 1694
+end_column = 103
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 16
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1702
+start_column = 40
+end_line = 1702
+end_column = 108
+
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 16
+sample_bias_direction = "fallthrough"
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1709
+start_column = 40
+end_line = 1709
+end_column = 108
+
+# 有符号除法的 q > elem_max 在 IR 中 jump 侧为溢出结果 elem_min。该边界仍保留，
+# 但只让少量路径采到 jump 侧，避免在同一条昂贵除法结果上继续放大分支。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 16
+sample_bias_direction = "jump"
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1696
+start_column = 41
+end_line = 1696
+end_column = 77
+
+# VAADDU/VAADD/VASUBU/VASUB 每个元素都会调用 get_fixed_rounding_incr。短时 itrace
+# 显示最慢路径耗时 240.5s，停在 0b11 arm 的 bool_to_bit；837 次 SMT 累计 239.7s，
+# 其中 746:26-746:63 被调用 48 次。match 的第一条 IR 分支是
+# `jump @not(rounding_mode == 0b00)`：jump 方向只采样 1/65536 后，当前规模的大部分路径选择直接返回
+# rounding_bit 的 0b00 arm，少量路径继续覆盖其余 vxrm arm。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+sample_bias = 65536
+sample_bias_direction = "jump"
+file = "extensions/V/vext_utils_insts.sail"
+start_line = 742
+start_column = 4
+end_line = 747
+end_column = 5

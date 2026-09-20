@@ -1,0 +1,20 @@
+# ZVKSHA2TYPE 专用局部执行限制。
+# 只限制 SYMBOLIC execute 内的 element-group 压缩循环，不限制循环外 encdec/funct6。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 60 秒 ITRACE 基线完成 60 条路径后 timeout；唯一 execute 循环热点为
+# SYMBOLIC 分支的 188:2-233:3。zvk_sum/ch/maj 在 SEW 与 funct6 已确定后
+# 只做定宽位运算，不额外限制。
+# 第 86 行是循环外扩展选择、SEW、funct6 编码与寄存器合法性条件，不限制，
+# 也不固定 vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [188:2,233:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvknhab_insts.sail"
+start_line = 188
+start_column = 2
+end_line = 233
+end_column = 3

@@ -1,0 +1,17 @@
+# VABS_V 专用局部执行限制。
+# 只限制 execute 内按 mask 计算绝对值的逐 lane 循环，不固定 vtype、vl 或 vstart。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 基线从 29 增至 147 条完成路径时，该循环内分支从 174 增至 532 次 fork；
+# 同期其余 execute/helper 热点最高仅 42 次。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/Zvabd/zvabd_insts.sail"
+start_line = 45
+start_column = 2
+end_line = 48
+end_column = 3

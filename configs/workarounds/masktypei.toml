@@ -1,0 +1,29 @@
+# MASKTYPEI 专用执行限制。
+#
+# strict=true 将限制配置绑定到当前 rv64d.ir，避免 Sail/IR 更新后继续使用已经偏移的
+# 源码区间。该配置只限制 masktypei_result 的逐 lane 循环，不固定 vtype、vl、vstart
+# 或寄存器等运行态。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+on_limit_reached = "concretize"
+
+# masktypei_result 的逐 lane 循环会在每个元素上重复判断：
+#
+#   if i < start_element ...
+#   else if i > end_element | i >= real_num_elem ...
+#
+# 未限制时，这两处分别随 vstart、vl 反复 fork，基线超过 1700 条完成路径后仍持续
+# 增长。region 预算为 0 表示在该局部区间内对后续分支进行确定性采样/具体化，不再
+# fork；循环之外的合法 vtype、vl、vstart 域及指令编码分支仍保持符号执行。
+#
+# Region 是半开区间 [start, end)：
+# Sail start 1448:    if i < start_element then {
+# Sail end   1458:    }
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_arith_insts.sail"
+start_line = 1448
+start_column = 4
+end_line = 1458
+end_column = 5

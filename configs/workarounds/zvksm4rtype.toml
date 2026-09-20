@@ -1,0 +1,20 @@
+# ZVKSM4RTYPE 专用局部执行限制。
+# 只限制 execute 内的 element-group SM4 轮循环，不限制 VV/VS 的循环外 encdec。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 60 秒 ITRACE 基线完成 85 条路径后 timeout；明确的 execute 热点为
+# 100:2-128:3。SM4 S-box 是动态查表但没有源码分支，首轮不增加 helper
+# region 或方向偏置，以保留 VV/VS 的活跃执行覆盖。
+# 73:38-75:80 与 78:38-80:129 是两种形式的循环外 encdec 合法性条件，
+# 不限制，也不固定 vl/vstart/vtype/vm/寄存器。Region 为 [100:2,128:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvksed_insts.sail"
+start_line = 100
+start_column = 2
+end_line = 128
+end_column = 3

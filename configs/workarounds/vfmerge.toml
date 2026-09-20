@@ -1,0 +1,19 @@
+# VFMERGE 专用局部执行限制。
+# 只限制 execute 内根据 vstart/vl/tail/mask 合并标量与向量的逐 lane 循环；
+# 不固定向量、浮点运行态或寄存器，也不限制循环外 encdec/SEW 分派。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 无 workaround 的 60 秒 ITRACE 完成 239 条路径后 timeout；逐 lane merge 循环
+# 1363:4-1373:5 fork 330 次，是本 clause 的明确热点。Region 使用半开区间
+# [1362:2,1374:3)，不包含 1327:1-1331:55 的循环外 encdec/SEW 分派。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/V/vext_fp_insts.sail"
+start_line = 1362
+start_column = 2
+end_line = 1374
+end_column = 3

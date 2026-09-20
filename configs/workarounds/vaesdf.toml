@@ -1,0 +1,19 @@
+# VAESDF 专用局部执行限制。
+# 只限制 execute 内的 element-group 循环，不限制循环外 encdec/funct6 分派。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 90 秒 ITRACE 基线仅完成 48 条路径后 timeout。
+# 热点为 42:2-55:3 的 element-group foreach；21:38-22:49 是循环外
+# encdec/funct6 合法性条件，不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+# Region 使用半开区间 [42:2,55:3)。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvkned_insts.sail"
+start_line = 42
+start_column = 2
+end_line = 55
+end_column = 3

@@ -1,0 +1,18 @@
+# VREV8_V 专用局部执行限制。
+# 只限制 execute 内的逐 lane 循环，不固定 vtype、vl、vstart、vm 或寄存器选择。
+[execution_limits]
+strict = true
+ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+max_forks_per_branch = 1
+on_limit_reached = "concretize"
+
+# 独立 60 秒基线已产生 201 条路径，日志持续在 217:4-219:5 因
+# mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+# rev8 helper 的逐字节重排循环由已分派 SEW 确定，无数据相关 fork。
+[[execution_limits.region_fork_limits]]
+max_forks_per_region = 1
+file = "extensions/vector_crypto/zvbb_insts.sail"
+start_line = 216
+start_column = 2
+end_line = 220
+end_column = 4
