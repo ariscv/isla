@@ -185,6 +185,8 @@ impl fmt::Debug for EnumMember {
 }
 mod dump;
 pub mod smtlib;
+mod tactic;
+pub use tactic::Tactic;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
@@ -1484,6 +1486,7 @@ impl PerformanceInfo {
 /// # use isla_lib::smt::smtlib::Def::*;
 /// # use isla_lib::smt::smtlib::*;
 /// # use isla_lib::smt::*;
+/// # configure_tastic(Tactic::Qfaufbv);
 /// # let x = Sym::from_u32(0);
 /// let cfg = Config::new();
 /// let ctx = Context::new(cfg);
@@ -1509,6 +1512,7 @@ impl PerformanceInfo {
 /// # use isla_lib::smt::smtlib::Def::*;
 /// # use isla_lib::smt::smtlib::*;
 /// # use isla_lib::smt::*;
+/// # configure_tastic(Tactic::Qfaufbv);
 /// # let x = Sym::from_u32(0);
 /// let point = {
 ///     let cfg = Config::new();
@@ -1557,6 +1561,7 @@ impl<B> Drop for Solver<'_, B> {
 /// # use isla_lib::smt::smtlib::Def::*;
 /// # use isla_lib::smt::smtlib::*;
 /// # use isla_lib::smt::*;
+/// # configure_tastic(Tactic::Qfaufbv);
 /// # let x = Sym::from_u32(0);
 /// let mut cfg = Config::new();
 /// cfg.set_param_value("model", "true");
@@ -2043,47 +2048,62 @@ impl SmtResult {
     }
 }
 
-static DEFAULT_TASTIC_STR: &[u8] = b"default\0";
-static TASTIC_STR: OnceLock<CString> = OnceLock::new();
-static SEED_STR: &[u8] = b"seed\0";
-static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
-
-pub fn configure_tastic(tastic: Option<&str>) {
-    let Some(tastic) = tastic else { return };
-    assert!(!tastic.is_empty(), "--tastic 不能为空");
-    let tastic = CString::new(tastic).expect("--tastic 不能包含 NUL 字节");
-
-    if let Some(configured) = TASTIC_STR.get() {
-        assert_eq!(configured, &tastic, "--tastic 被重复配置为不同值");
-    } else {
-        TASTIC_STR.set(tastic).expect("--tastic 配置发生并发冲突");
-    }
+struct SmtConfig {
+    tactic: Tactic,
+    seed_param: &'static CStr,
 }
 
-fn tastic() -> &'static CStr {
-    match TASTIC_STR.get() {
-        Some(tastic) => tastic.as_c_str(),
-        None => unsafe { CStr::from_bytes_with_nul_unchecked(DEFAULT_TASTIC_STR) },
-    }
-}
+static SMT_CONFIG: OnceLock<SmtConfig> = OnceLock::new();
 
-// 不同 Z3 solver 暴露的随机种子参数名不同，按实际参数表选择。
-unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> &'static [u8] {
-    let param_descrs = Z3_solver_get_param_descrs(ctx, solver);
-    Z3_param_descrs_inc_ref(ctx, param_descrs);
-    let mut seed_param_name = RANDOM_SEED_STR;
-    for i in 0..Z3_param_descrs_size(ctx, param_descrs) {
-        let symbol = Z3_param_descrs_get_name(ctx, param_descrs, i);
-        if Z3_get_symbol_kind(ctx, symbol) == SymbolKind::String {
-            let name = CStr::from_ptr(Z3_get_symbol_string(ctx, symbol)).to_bytes();
-            if name == &SEED_STR[..SEED_STR.len() - 1] {
-                seed_param_name = SEED_STR;
-                break;
-            }
+/// 在启动执行任务前显式初始化 SMT。相同配置可以重复传入，但只探测一次。
+/// Z3 参数支持取决于版本及 tactic，因此按实际加载的库查询能力，不硬编码版本分界。
+/// 不支持随机种子或试图更改已确定的 tactic 时直接终止。
+pub fn configure_tastic(tactic: Tactic) {
+    let config = SMT_CONFIG.get_or_init(|| {
+        let version = z3_version();
+        let ctx = Context::new(Config::new());
+        unsafe {
+            assert!(
+                (0..Z3_get_num_tactics(ctx.z3_ctx))
+                    .any(|i| CStr::from_ptr(Z3_get_tactic_name(ctx.z3_ctx, i)) == tactic.as_c_str()),
+                "Z3 {version} 不存在 tactic {tactic:?}",
+            );
+            let solver = new_z3_solver(ctx.z3_ctx, tactic.as_c_str());
+            let descrs = Z3_solver_get_param_descrs(ctx.z3_ctx, solver);
+            Z3_param_descrs_inc_ref(ctx.z3_ctx, descrs);
+            let seed_param = [b"seed\0".as_slice(), b"random_seed\0".as_slice()]
+                .into_iter()
+                .map(|name| CStr::from_bytes_with_nul(name).unwrap())
+                .find(|name| {
+                    let exists = (0..Z3_param_descrs_size(ctx.z3_ctx, descrs)).any(|i| {
+                        let symbol = Z3_param_descrs_get_name(ctx.z3_ctx, descrs, i);
+                        Z3_get_symbol_kind(ctx.z3_ctx, symbol) == SymbolKind::String
+                            && CStr::from_ptr(Z3_get_symbol_string(ctx.z3_ctx, symbol)) == *name
+                    });
+                    if !exists {
+                        return false;
+                    }
+                    let symbol = Z3_mk_string_symbol(ctx.z3_ctx, name.as_ptr());
+                    Z3_param_descrs_get_kind(ctx.z3_ctx, descrs, symbol) == ParamKind::UInt
+                });
+            Z3_param_descrs_dec_ref(ctx.z3_ctx, descrs);
+            Z3_solver_dec_ref(ctx.z3_ctx, solver);
+            let seed_param = seed_param
+                .unwrap_or_else(|| panic!("Z3 {version} 的 tactic {tactic:?} 不支持随机种子参数 seed / random_seed"));
+            SmtConfig { tactic, seed_param }
         }
-    }
-    Z3_param_descrs_dec_ref(ctx, param_descrs);
-    seed_param_name
+    });
+    assert_eq!(config.tactic, tactic, "SMT 已初始化，不能更改 tactic");
+}
+
+// 初始化能力探测与实际求解必须使用相同的 tactic 创建方式。
+unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr) -> Z3_solver {
+    let solver_tactic = Z3_mk_tactic(ctx, tactic.as_ptr());
+    Z3_tactic_inc_ref(ctx, solver_tactic);
+    let solver = Z3_mk_solver_from_tactic(ctx, solver_tactic);
+    Z3_solver_inc_ref(ctx, solver);
+    Z3_tactic_dec_ref(ctx, solver_tactic);
+    solver
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -2092,22 +2112,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer) -> Self {
+        let config = SMT_CONFIG.get().expect("SMT 尚未初始化，请在程序启动时调用 smt::configure_tastic");
         unsafe {
-            // 始终通过 tactic 创建 solver，既允许命令行切换 tactic，也避免按 logic 名称创建
-            // QF_AUFBV solver 时枚举支持不完整而导致 Z3 崩溃。
-            let solver_tactic = Z3_mk_tactic(ctx.z3_ctx, tastic().as_ptr());
-            Z3_tactic_inc_ref(ctx.z3_ctx, solver_tactic);
-            let z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, solver_tactic);
-            Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
-            Z3_tactic_dec_ref(ctx.z3_ctx, solver_tactic);
+            // 始终通过 tactic 创建 solver，避免按 logic 创建时枚举支持不完整。
+            let z3_solver = new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str());
 
             let z3_params = Z3_mk_params(ctx.z3_ctx);
             Z3_params_inc_ref(ctx.z3_ctx, z3_params);
 
-            let seed_symbol = Z3_mk_string_symbol(
-                ctx.z3_ctx,
-                CStr::from_bytes_with_nul_unchecked(z3_seed_param_name(ctx.z3_ctx, z3_solver)).as_ptr(),
-            );
+            let seed_symbol = Z3_mk_string_symbol(ctx.z3_ctx, config.seed_param.as_ptr());
             Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, fresh_random_seed());
             Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
 
@@ -2702,7 +2715,7 @@ pub fn z3_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
     use crate::bitvector::b64::B64;
@@ -2742,6 +2755,7 @@ mod tests {
 
     #[test]
     fn path_smt_stats_accumulate_protected_z3_calls_with_their_source_location() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         reset_path_smt_stats();
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -2786,8 +2800,8 @@ mod tests {
 
     #[test]
     fn configured_tastic_is_used_by_solver() {
-        configure_tastic(Some("qfaufbv"));
-        assert_eq!(tastic().to_bytes(), b"qfaufbv");
+        configure_tastic(Tactic::Qfaufbv);
+        assert_eq!(SMT_CONFIG.get().unwrap().tactic, Tactic::Qfaufbv);
 
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
@@ -2811,6 +2825,7 @@ mod tests {
 
     #[test]
     fn bv_macro() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -2820,6 +2835,7 @@ mod tests {
 
     #[test]
     fn get_const() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2855,6 +2871,7 @@ mod tests {
 
     #[test]
     fn local_model_debug_preserves_original_model_text_semantics() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2871,6 +2888,7 @@ mod tests {
 
     #[test]
     fn get_enum_const() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2895,6 +2913,7 @@ mod tests {
 
     #[test]
     fn get_single_member_enum_const_after_checkpoint_replay() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2913,6 +2932,7 @@ mod tests {
 
     #[test]
     fn get_multi_member_enum_const_after_checkpoint_replay() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2932,6 +2952,7 @@ mod tests {
 
     #[test]
     fn get_struct_with_enum_field_after_checkpoint_replay() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2966,6 +2987,7 @@ mod tests {
 
     #[test]
     fn smt_func() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -2988,6 +3010,7 @@ mod tests {
 
     #[test]
     fn array() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);

@@ -49,7 +49,7 @@ use isla_lib::ir::*;
 use isla_lib::ir_parser;
 use isla_lib::log;
 use isla_lib::primop_util::symbolic_from_typedefs;
-use isla_lib::smt::{configure_tastic, z3_version};
+use isla_lib::smt::{configure_tastic, z3_version, Tactic};
 use isla_lib::smt_parser;
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::value_parser;
@@ -105,7 +105,7 @@ pub fn common_opts() -> Options {
     opts.optflag("", "fork-assertions", "change assertions into explicit control flow");
     opts.optmulti("", "fun-assumption", "add an assumption about the behaviour of a Sail function", "<assumption>");
     opts.optflag("", "no-model-reg-init", "don't use register initializers from the model");
-    opts.optopt("", "tastic", "指定 Z3 tactic（默认 default）", "<name>");
+    opts.optopt("", "tastic", "指定 Z3 tactic：default、qfaufbv、smt（默认 qfaufbv）", "<name>");
     opts.optflag("", "version", "print out version and stop.");
     opts
 }
@@ -181,7 +181,14 @@ pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architectu
         print_version()
     }
 
-    configure_tastic(matches.opt_str("tastic").as_deref());
+    let tactic = match matches.opt_str("tastic") {
+        Some(name) => name.parse::<Tactic>().unwrap_or_else(|error| {
+            eprintln!("{error}");
+            print_usage(opts, "", 1)
+        }),
+        None => Tactic::default(),
+    };
+    configure_tastic(tactic);
 
     if !matches.opt_present("arch") {
         eprintln!("Required option 'arch' missing");

@@ -7,6 +7,7 @@ use isla_lib::source_loc::SourceLoc;
 
 #[test]
 fn solver_and_model_obey_the_common_contract() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let mut config = Config::new();
     config.set_param_value("model", "true");
     let context = Context::new(config);

@@ -847,6 +847,7 @@ mod tests {
 
     #[test]
     fn setup_pre_state_resolves_vector_anybits_from_vlen() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let mut symtab = Symtab::new();
@@ -874,6 +875,7 @@ mod tests {
 
     #[test]
     fn setup_pre_state_overrides_initialized_non_anybits_register() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let mut symtab = Symtab::new();
@@ -941,6 +943,7 @@ mod tests {
 
     #[test]
     fn vector_context_smt_constraint_accepts_only_legal_vtype_and_vl_pairs() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         assert_eq!(rv64_setup_pre_state_smt_result(0, 16), SmtResult::Sat);
         assert_eq!(rv64_setup_pre_state_smt_result(0, 17), SmtResult::Unsat);
         assert_eq!(rv64_setup_pre_state_smt_result(0x17, 2), SmtResult::Sat);
@@ -953,6 +956,7 @@ mod tests {
 
     #[test]
     fn solve_pre_state_serializes_all_arbitrary_vector_context_registers() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let vector_context_registers = ["vl", "vstart", "vtype", "vcsr"];
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
