@@ -132,6 +132,8 @@ fn main() {
         std::process::exit(1)
     }
 
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::default());
+
     let response = match handle_request() {
         Ok(resp) => match serde_json::to_vec(&resp) {
             Ok(resp) => resp,

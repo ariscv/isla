@@ -399,6 +399,7 @@ mod smtperf_tests {
 
     #[test]
     fn smtperf_solver_wrapper_collects_check_sat() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
 

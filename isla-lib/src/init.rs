@@ -292,6 +292,7 @@ mod tests {
 
     #[test]
     fn const_primop_can_override_same_named_top_level_let() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut symtab = Symtab::new();
         let id = symtab.intern("zsys_pmp_count");
         let defs = vec![Def::Let(

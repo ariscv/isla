@@ -1169,6 +1169,7 @@ mod tests {
 
     #[test]
     fn exp_eval_tests() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let v0 = Sym::from_u32(0);
         let v1 = Sym::from_u32(1);
 

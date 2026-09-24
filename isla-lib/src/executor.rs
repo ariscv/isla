@@ -3603,6 +3603,7 @@ fn zrX(z3zE1756) {
     #[cfg(feature = "tracetool")]
     #[test]
     fn itrace_integration_run_loop_collector_writes_executed_path() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = itrace_fixture_shared_state();
         let temp_dir = std::env::temp_dir();
         let output_path = temp_dir.join(format!("itrace_run_loop_collector_test_{}.txt", std::process::id()));
@@ -3871,6 +3872,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn branch_limit_truncate_reports_error_after_max_forks() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default().with_max_forks_per_branch(2).with_call_context_depth(0);
         let (instrs, shared_state) = repeated_call_fork_program(5);
         let results = run_all_with_shared_state(instrs, limits, shared_state);
@@ -3890,6 +3892,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn branch_limit_concretize_finishes_without_error() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default()
             .with_max_forks_per_branch(2)
             .with_call_context_depth(0)
@@ -3913,6 +3916,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn branch_fork_count_is_inherited_by_both_successors() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame =
@@ -3944,6 +3948,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn repeated_runs_from_one_task_state_do_not_share_branch_budget() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let task_state =
@@ -3979,6 +3984,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_fork_count_is_inherited_by_both_successors() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame = make_frame(vec![
@@ -4014,6 +4020,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_path_limit_can_keep_current_model_without_forking() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame = make_frame(vec![
@@ -4051,6 +4058,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_path_limit_truncates_before_child_submission() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame = make_frame(vec![
@@ -4085,6 +4093,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_does_not_submit_an_unsatisfiable_remainder_child() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let results = run_all_with_shared_state(
             vec![
@@ -4103,6 +4112,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_branch_local_limit_keeps_one_model_inside_selected_region() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let selected = SourceLoc::new(1, 20, 0, 20, 8);
         let results = run_all_with_shared_state(
@@ -4125,6 +4135,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_branch_local_limit_does_not_apply_outside_selected_region() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let selected = SourceLoc::new(1, 20, 0, 20, 8);
         let outside = SourceLoc::new(2, 20, 0, 20, 8);
@@ -4148,6 +4159,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_last_model_does_not_consume_path_fork_budget() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let results = run_all_with_shared_state(
             vec![
@@ -4166,6 +4178,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn monomorphize_enumerates_all_two_bit_models_with_three_path_forks() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let instrs: &'static [Instr<Name, B64>] = Box::leak(
@@ -4222,6 +4235,7 @@ fn zrX(z3zE1756) {
     #[cfg(feature = "tracetool")]
     #[test]
     fn execution_limit_concretize_records_itrace_summary() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame =
@@ -4259,6 +4273,7 @@ fn zrX(z3zE1756) {
     #[cfg(feature = "tracetool")]
     #[test]
     fn execution_limit_truncate_records_itrace_summary() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let mut frame = make_frame(vec![Instr::Goto(0)]);
         let task_state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_max_path_depth(0));
@@ -4290,6 +4305,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn depth_limit_reports_error_after_max_steps() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default().with_max_path_depth(2);
         let result = run_with_limits(vec![Instr::Goto(1), Instr::Goto(2), Instr::Goto(3), Instr::End], limits);
 
@@ -4301,6 +4317,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn loop_limit_reports_error_after_max_backjumps() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default().with_max_backjumps_per_loop(2);
         let result = run_with_limits(vec![Instr::Goto(0)], limits);
 
@@ -4315,6 +4332,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn loop_sampling_truncates_when_exit_direction_becomes_unsatisfiable() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let info = info();
         let seed = (0..1024)
@@ -4362,6 +4380,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn path_fork_limit_truncates_serial_if_else_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state) = repeated_call_fork_program(5);
         let limits = ExecutionLimits::default().with_max_forks_per_branch(100).with_max_forks_per_path(2);
         let results = run_all_with_shared_state(instrs, limits, shared_state);
@@ -4381,6 +4400,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn path_fork_limit_concretize_finishes_serial_if_else_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state) = repeated_call_fork_program(5);
         let limits = ExecutionLimits::default()
             .with_max_forks_per_branch(100)
@@ -4394,6 +4414,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn real_ir_path_forks_limit_register_read_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state, regs, lets) = real_zrx_program();
         let zrx = shared_state.symtab.lookup("zrX");
         let limits = ExecutionLimits::default().with_max_forks_per_branch(100).with_max_forks_per_path(5);
@@ -4414,6 +4435,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn real_ir_per_branch_cannot_detect_serial_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state, regs, lets) = real_zrx_program();
         let limits = ExecutionLimits::default().with_max_forks_per_branch(2);
         let results = run_all_with_bindings(instrs, limits, shared_state, regs, lets);
@@ -4424,6 +4446,7 @@ fn zrX(z3zE1756) {
 
     #[test]
     fn real_ir_concretize_continues_register_read() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state, regs, lets) = real_zrx_program();
         let limits = ExecutionLimits::default()
             .with_max_forks_per_branch(100)
@@ -4440,6 +4463,7 @@ fn zrX(z3zE1756) {
     // 故 max_path_depth 不会触发；改动后透传生效，第二条 goto 触发 DepthLimitReached。
     #[test]
     fn entry_function_respects_passed_task_state_limits() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         const STEPT_IR: &str = r#"
 val zsteptest : (%unit) -> %unit
 fn zsteptest(zu) {
@@ -4477,6 +4501,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn entry_function_timeout_returns_through_collector() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         const STEPT_IR: &str = r#"
 val zsteptest : (%unit) -> %unit
 fn zsteptest(zu) {
@@ -4513,6 +4538,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn start_single_timeout_none_is_unlimited() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let task_state = TaskState::new();
         let timeout_hits = std::sync::Mutex::new(0);
@@ -4550,6 +4576,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn completed_path_wins_over_zero_timeout_at_the_completion_boundary() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let task_state = TaskState::new();
         let completed = std::sync::Mutex::new(false);
@@ -4706,6 +4733,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn execution_limits_have_identical_single_and_multi_worker_semantics() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let expected = vec![
             ("finished:false".to_string(), 2),
             ("finished:false".to_string(), 2),
@@ -4722,6 +4750,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn path_local_sampling_is_stable_across_worker_counts() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         // 返回值编码 (marker, 受限分支抽到的方向)：{0,1} 是抽到 false 的两条路径，{2,3} 是抽到
         // true 的两条路径。两条兄弟路径的签名在第一个分支点就分叉，因此必然一条落在 {0,1}、
         // 另一条落在 {2,3}；同时这个结果不随 worker 数变化。

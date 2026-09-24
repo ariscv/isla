@@ -908,6 +908,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_overlap() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut mem = Memory::<B64>::new();
         mem.add_zero_region(0x00..0xFF);
 
