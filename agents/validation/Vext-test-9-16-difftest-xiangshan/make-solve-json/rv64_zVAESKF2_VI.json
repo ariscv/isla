@@ -1,0 +1,814 @@
+{
+  "gen": [
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x2",
+      "test-ins-encdec": "32'haa01_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xf",
+      "test-ins-encdec": "32'haa07_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0020",
+        "vstart": "64'hffff_ffff_fe00_0000",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x0",
+      "test-ins-encdec": "32'haa00_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000c",
+        "vstart": "64'h0000_0000_0000_0008",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v2, v0, 0x0",
+      "test-ins-encdec": "32'haa00_2177",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001a"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v28, v1, 0x13",
+      "test-ins-encdec": "32'haa19_ae77",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0002"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x0",
+      "test-ins-encdec": "32'haa00_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0012"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v4, v0, 0x15",
+      "test-ins-encdec": "32'haa0a_a277",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000b",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v2, v1, 0x1e",
+      "test-ins-encdec": "32'haa1f_2177",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001a"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x8",
+      "test-ins-encdec": "32'haa04_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x6",
+      "test-ins-encdec": "32'haa03_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v4, v0, 0x1f",
+      "test-ins-encdec": "32'haa0f_a277",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0003"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v8, v1, 0x5",
+      "test-ins-encdec": "32'haa12_a477",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0019"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v9, v1, 0x1e",
+      "test-ins-encdec": "32'haa1f_24f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000a"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v6, v4, 0x1",
+      "test-ins-encdec": "32'haa40_a377",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x7",
+      "test-ins-encdec": "32'haa03_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0017"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xf",
+      "test-ins-encdec": "32'haa07_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0017"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v14, v2, 0x11",
+      "test-ins-encdec": "32'haa28_a777",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x1d",
+      "test-ins-encdec": "32'haa0e_a0f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000a"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x0",
+      "test-ins-encdec": "32'haa00_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'hffff_ffff_ffff_fff0",
+        "vtype": "64'h0000_0000_0000_0011"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v4, v0, 0x9",
+      "test-ins-encdec": "32'haa04_a277",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x1b",
+      "test-ins-encdec": "32'haa0d_a0f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0009"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v7, v2, 0x18",
+      "test-ins-encdec": "32'haa2c_23f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0003"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v13, v1, 0x5",
+      "test-ins-encdec": "32'haa12_a6f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0009"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v4, v0, 0xb",
+      "test-ins-encdec": "32'haa05_a277",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x0",
+      "test-ins-encdec": "32'haa00_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0017"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x4",
+      "test-ins-encdec": "32'haa02_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xa",
+      "test-ins-encdec": "32'haa05_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xf",
+      "test-ins-encdec": "32'haa07_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0008",
+        "vstart": "64'h0000_0000_0000_0004",
+        "vtype": "64'h0000_0000_0000_0011"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xc",
+      "test-ins-encdec": "32'haa06_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v22, v1, 0x3",
+      "test-ins-encdec": "32'haa11_ab77",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0001"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x7",
+      "test-ins-encdec": "32'haa03_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0010",
+        "vstart": "64'h0000_0000_0000_0010",
+        "vtype": "64'h0000_0000_0000_0012"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x6",
+      "test-ins-encdec": "32'haa03_20f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0012"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x7",
+      "test-ins-encdec": "32'haa03_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'hdfc0_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x14",
+      "test-ins-encdec": "32'haa0a_20f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0001"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x10",
+      "test-ins-encdec": "32'haa08_20f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0019"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v24, v2, 0xd",
+      "test-ins-encdec": "32'haa26_ac77",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x4",
+      "test-ins-encdec": "32'haa02_20f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0002"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v23, v2, 0x2",
+      "test-ins-encdec": "32'haa21_2bf7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0012"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xf",
+      "test-ins-encdec": "32'haa07_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0004",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x7",
+      "test-ins-encdec": "32'haa03_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0004",
+        "vtype": "64'h0000_0000_0000_0011"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v17, v1, 0x1",
+      "test-ins-encdec": "32'haa10_a8f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0011"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0x0",
+      "test-ins-encdec": "32'haa00_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v1, v0, 0x14",
+      "test-ins-encdec": "32'haa0a_20f7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0011"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xf",
+      "test-ins-encdec": "32'haa07_a077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0010",
+        "vstart": "64'h0000_0000_0000_000c",
+        "vtype": "64'h0000_0000_0000_0012"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vaeskf2.vi v0, v0, 0xe",
+      "test-ins-encdec": "32'haa07_2077",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0004",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0010"
+      },
+      "ret_val": "Retire_Success(())"
+    }
+  ]
+}

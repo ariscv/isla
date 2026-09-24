@@ -1,0 +1,292 @@
+{
+  "gen": [
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f4, v22",
+      "test-ins-encdec": "32'h4360_1257",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f17, v24",
+      "test-ins-encdec": "32'h4380_18d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0007"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f9, v31",
+      "test-ins-encdec": "32'h43f0_14d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f13, v27",
+      "test-ins-encdec": "32'h43b0_16d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0003",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000f"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f0, v4",
+      "test-ins-encdec": "32'h4240_1057",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0017"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f17, v26",
+      "test-ins-encdec": "32'h43a0_18d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0006"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f10, v2",
+      "test-ins-encdec": "32'h4220_1557",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h8000_0000_0000_0000"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f1, v16",
+      "test-ins-encdec": "32'h4300_10d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0007",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0007"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f10, v25",
+      "test-ins-encdec": "32'h4390_1557",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_001f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f1, v17",
+      "test-ins-encdec": "32'h4310_10d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0006",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f0, v6",
+      "test-ins-encdec": "32'h4260_1057",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0017"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f16, v0",
+      "test-ins-encdec": "32'h4200_1857",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000b",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_000a"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f15, v27",
+      "test-ins-encdec": "32'h43b0_17d7",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_000f",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_001b"
+      },
+      "ret_val": "Illegal_Instruction(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f0, v0",
+      "test-ins-encdec": "32'h4200_1057",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0019"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f0, v0",
+      "test-ins-encdec": "32'h4200_1057",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0008"
+      },
+      "ret_val": "Retire_Success(())"
+    },
+    {
+      "arch": {
+        "ext": "IMACFD",
+        "name": "riscv",
+        "pretty-name": "rv64",
+        "xlen": "64"
+      },
+      "test-ins": "vfmv.f.s f0, v0",
+      "test-ins-encdec": "32'h4200_1057",
+      "isa-state": {
+        "cur_privilege": "User",
+        "vcsr": "3'h0",
+        "vl": "64'h0000_0000_0000_0000",
+        "vstart": "64'h0000_0000_0000_0000",
+        "vtype": "64'h0000_0000_0000_0013"
+      },
+      "ret_val": "Retire_Success(())"
+    }
+  ]
+}
