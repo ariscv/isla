@@ -2,7 +2,7 @@
 # 只限制 execute 内的 element-group/逐 bit GHASH 循环，不限制循环外 encdec。
 [execution_limits]
 strict = true
-ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+ir_sha256 = "6fc39efd0f72b0ee8eae247d9965e680b6874f9954334c20d748b42c0987792c"
 max_forks_per_branch = 1
 on_limit_reached = "concretize"
 

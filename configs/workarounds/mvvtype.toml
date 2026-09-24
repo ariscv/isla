@@ -5,7 +5,7 @@
 # 重复到达的分支点。
 [execution_limits]
 strict = true
-ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+ir_sha256 = "6fc39efd0f72b0ee8eae247d9965e680b6874f9954334c20d748b42c0987792c"
 max_forks_per_branch = 1
 on_limit_reached = "concretize"
 
@@ -14,14 +14,14 @@ on_limit_reached = "concretize"
 # 这些数据相关分支在该循环内进行确定性采样，而循环外的指令与运行态分派不受影响。
 #
 # Region 为半开区间 [start, end)：
-# Sail start 1657:  foreach (i from 0 to (num_elem - 1)) {
-# Sail end   1714:  };
+# Sail start 1575:  foreach (i from 0 to (num_elem - 1)) {
+# Sail end   1632:  };
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 1657
+start_line = 1575
 start_column = 2
-end_line = 1714
+end_line = 1632
 end_column = 4
 
 # 四个 div/rem arm 的条件在 IR 中都是 `jump (divisor == 0) goto ...`：jump 侧直接
@@ -33,9 +33,9 @@ max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "fallthrough"
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 1686
+start_line = 1604
 start_column = 40
-end_line = 1686
+end_line = 1604
 end_column = 103
 
 [[execution_limits.region_fork_limits]]
@@ -43,9 +43,9 @@ max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "fallthrough"
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 1694
+start_line = 1612
 start_column = 40
-end_line = 1694
+end_line = 1612
 end_column = 103
 
 [[execution_limits.region_fork_limits]]
@@ -53,9 +53,9 @@ max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "fallthrough"
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 1702
+start_line = 1620
 start_column = 40
-end_line = 1702
+end_line = 1620
 end_column = 108
 
 [[execution_limits.region_fork_limits]]
@@ -63,9 +63,9 @@ max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "fallthrough"
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 1709
+start_line = 1627
 start_column = 40
-end_line = 1709
+end_line = 1627
 end_column = 108
 
 # 有符号除法的 q > elem_max 在 IR 中 jump 侧为溢出结果 elem_min。该边界仍保留，
@@ -75,9 +75,9 @@ max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "jump"
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 1696
+start_line = 1614
 start_column = 41
-end_line = 1696
+end_line = 1614
 end_column = 77
 
 # VAADDU/VAADD/VASUBU/VASUB 每个元素都会调用 get_fixed_rounding_incr。短时 itrace
@@ -90,7 +90,7 @@ max_forks_per_region = 1
 sample_bias = 65536
 sample_bias_direction = "jump"
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 742
+start_line = 626
 start_column = 4
-end_line = 747
+end_line = 631
 end_column = 5

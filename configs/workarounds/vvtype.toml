@@ -21,7 +21,7 @@
 # sail-riscv 修改造成行号偏移后，应按锚点内容重新搜索并更新坐标与 ir_sha256。
 [execution_limits]
 strict = true
-ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+ir_sha256 = "6fc39efd0f72b0ee8eae247d9965e680b6874f9954334c20d748b42c0987792c"
 max_forks_per_branch = 1
 on_limit_reached = "concretize"
 
@@ -65,16 +65,16 @@ end_column = 7
 # get_fixed_rounding_incr 由 VV_VSMUL/VV_VSSRL/VV_VSSRA 逐 lane 调用，区间内有 shift==0
 # 判定和 4 路 rounding mode 判定等多个分支点，只靠 per-scope 预算会得到 2^k。
 # 这三条子指令全展开实测 149/113/109 条，都过了 100，所以预算取 0：整段只抽样、不 fork。
-# Sail start 728:  if shift_amount == 0 then 0b0
+# Sail start 612:  if shift_amount == 0 then 0b0
 # ...
-# Sail end   748:  }
-# 配置终点使用紧随函数后的空行 750:1。
+# Sail end   632:  }
+# 配置终点使用紧随函数后的空行 634:1。
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 728
+start_line = 612
 start_column = 2
-end_line = 750
+end_line = 634
 end_column = 1
 
 # valid_reg_overlap：vrgather/vrgatherei16 的 vs1 EMUL 与 vd 不同，会走进这里的

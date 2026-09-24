@@ -2,7 +2,7 @@
 # 只限制 execute 内逐 lane 的带 carry/borrow 加减，不固定 funct6、vtype、vl 或 vstart。
 [execution_limits]
 strict = true
-ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+ir_sha256 = "6fc39efd0f72b0ee8eae247d9965e680b6874f9954334c20d748b42c0987792c"
 max_forks_per_branch = 1
 on_limit_reached = "concretize"
 
