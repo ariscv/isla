@@ -6,7 +6,8 @@
 
 - 89 个状态触发 DiffTest 失败，涉及 27 条完整汇编、7 个 opcode。
 - 80 个状态（`vmerge.vim/.vvm/.vxm`、`vmv.s.x`、`vmv4r.v`、`vmv8r.v`）均为 `vstart=1` 的“继续执行 vs 非法指令”差异。RVV 规范允许实现对自己不可能由中断产生的非零 `vstart` 抛非法指令，因此不构成 RISC-V ISA 违例；它们是 DiffTest 参考模型能力与 DUT 能力不一致造成的误报。
-- 9 个 `vsetvl` 状态在完整标量上下文重放后 30 秒超时。它们没有非零 `vstart` 豁免，规范不允许实现无穷不退休；标为“疑似标准违例 / 活性问题”。尚须用 trap handler、`--no-diff` 与 Spike 三方复核，才能确定归属 XiangShan RTL、NEMU 或测试入口。
+- 9 个 `vsetvl` 状态在完整标量上下文重放后 30 秒超时；代表样本 `case-086` 在 `--no-diff` 下运行 35 秒仍无任何提交、异常或 GOODTRAP。故它不依赖 NEMU，属于已公开的 XiangShan `vsetvl rd=x0` 活性 bug（9 个触发状态、5 个编码），与 [OpenXiangShan/XiangShan#6039](https://github.com/OpenXiangShan/XiangShan/issues/6039) 重复。
+- 因此，本批次没有发现可作为新 issue 提交的原创 ISA 违规或 XiangShan 实现 bug：80 条是规范允许的实现差异，9 条是 #6039 的额外复现样本。
 
 ## 验证方法与产物
 
@@ -20,14 +21,11 @@
 
 RVV 1.0 的 [`vstart` 章节](https://docs.riscv.org/reference/isa/unpriv/v-st-ext)允许实现：当某个 `vstart` 值不可能由该实现、该 `vtype` 下执行同一指令产生时，执行该指令可抛非法指令。规范还以“实现不会在向量算术中断”为示例。这直接覆盖本批次 80 个 `vstart=1` 的差异；[`vmerge` 章节](https://docs.riscv.org/reference/isa/unpriv/v-st-ext)同时明确按从 `vstart` 到 `vl` 的 body elements 操作，XiangShan 的继续执行也符合正常语义。
 
-`vsetvl` 的 9 个样本均为 `vstart=0`，其失败形态为 emulator 30 秒超时而非一个已定义的架构异常。因此本报告将其标成疑似违例，但不把“超时”直接等同于 RTL 缺陷。
+`vsetvl` 的 9 个样本均为 `vstart=0`，且 `rd=x0`、`rs1≠x0`。它们是合法的配置指令；即使 `rs2` 给出保留 `vtype`，规范语义也是写入 VILL/`vl=0`，而不是停止提交。代表样本在 `--no-diff` 下同样 35 秒不前进，已经排除参考模型导致的假阳性；这是**RISC-V 架构语义违例（活性 / 不退休）**，但已由 #6039 公开报告。
 
-## GitHub 同类问题检索
+## GitHub 已知问题关联
 
-- [XiangShan #5725](https://github.com/OpenXiangShan/XiangShan/issues/5725)：`vsetvl x0, x0, rs2` 路径的 XiangShan/Spike 行为不一致，状态为已修复。与本报告的 `vsetvl` 超时高度相关，但寄存器组合不同。
-- [XiangShan #5772](https://github.com/OpenXiangShan/XiangShan/issues/5772)：`vmv4r.v` 寄存器对齐非法编码未触发非法指令，已确认。与本报告的 `vmv4r.v` 同指令族，但本批次 `vd=v0` 对齐，根因不同。
-- [NEMU #952](https://github.com/OpenXiangShan/NEMU/issues/952)：`vsetvli/vsetivli/vsetvl` 解码掩码错误，已关闭。说明该指令族的 NEMU 解码曾有已知问题，但本批次编码 `funct3=111`，不能直接归因于该 issue。
-- [NEMU #1078](https://github.com/OpenXiangShan/NEMU/issues/1078)：NEMU 对保留 RVV 编码解码过宽导致 DiffTest 不一致，仍开放；其描述还引用 `vmv<nr>r.v` 的相关解码校验问题。该 issue 与本次“参考模型/DUT 边界语义不一致”的现象相似，但不是本次非零 `vstart` 差异的直接根因。
+[OpenXiangShan/XiangShan#6039](https://github.com/OpenXiangShan/XiangShan/issues/6039) 已报告“`vsetvl` 的 `rd=zero` 导致 core hang”：其 `vsetvl zero, sp, a2` 提交后，后续指令超过 15,000 周期不再提交；替换为 NOP 后可正常到达 GOODTRAP。本批次 9 条样本同为 `rd=x0`，且在不接参考模型时也无前进。按用户复核结论，二者归为同一已知问题；这些 PoC 仅补充 #6039 的输入状态、寄存器组合和 `vtype` 覆盖，不能作为原创 bug 报告。
 
 ## 每个失败 PoC
 
@@ -115,21 +113,21 @@ RVV 1.0 的 [`vstart` 章节](https://docs.riscv.org/reference/isa/unpriv/v-st-e
 | `3306` | `vmv8r.v v0, v0` | `32'h9e03_b057` | `64'h0000_0000_0000_0001` / `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0011` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3306` | 允许差异：vstart 非零，参考模型可合法抛非法指令 |
 | `3318` | `vmv.s.x v0, x31` | `32'h420f_e057` | `64'h0000_0000_0000_0001` / `64'h0000_0000_0000_000f` / `64'h0000_0000_0000_0052` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3318` | 允许差异：vstart 非零，参考模型可合法抛非法指令 |
 | `3335` | `vmv.s.x v0, x0` | `32'h4200_6057` | `64'h0000_0000_0000_0004` / `64'h0000_0000_0000_001f` / `64'h0000_0000_0000_0041` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3335` | 允许差异：vstart 非零，参考模型可合法抛非法指令 |
-| `3715` | `vsetvl x0, x31, x0` | `32'h800f_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3715` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3718` | `vsetvl x0, x26, x1` | `32'h801d_7057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0010` / `64'h0000_0000_0000_0040` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3718` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3719` | `vsetvl x0, x31, x31` | `32'h81ff_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3719` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3722` | `vsetvl x0, x8, x1` | `32'h8014_7057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3722` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3724` | `vsetvl x0, x2, x1` | `32'h8011_7057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3724` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3731` | `vsetvl x0, x31, x0` | `32'h800f_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0003` / `64'h0000_0000_0000_0010` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3731` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3736` | `vsetvl x0, x31, x31` | `32'h81ff_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3736` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3739` | `vsetvl x0, x31, x0` | `32'h800f_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3739` | 疑似：完整标量重放后超时；无 vstart 许可 |
-| `3747` | `vsetvl x0, x31, x31` | `32'h81ff_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0018` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3747` | 疑似：完整标量重放后超时；无 vstart 许可 |
+| `3715` | `vsetvl x0, x31, x0` | `32'h800f_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3715` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3718` | `vsetvl x0, x26, x1` | `32'h801d_7057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0010` / `64'h0000_0000_0000_0040` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3718` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3719` | `vsetvl x0, x31, x31` | `32'h81ff_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3719` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3722` | `vsetvl x0, x8, x1` | `32'h8014_7057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3722` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3724` | `vsetvl x0, x2, x1` | `32'h8011_7057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3724` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3731` | `vsetvl x0, x31, x0` | `32'h800f_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0003` / `64'h0000_0000_0000_0010` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3731` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3736` | `vsetvl x0, x31, x31` | `32'h81ff_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3736` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3739` | `vsetvl x0, x31, x0` | `32'h800f_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h8000_0000_0000_0000` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3739` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
+| `3747` | `vsetvl x0, x31, x31` | `32'h81ff_f057` | `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0000` / `64'h0000_0000_0000_0018` | `../difftest-xiangshan/work/isla-solve-success-all/elf/case-3747` | 已知重复 #6039：完整标量重放后超时；无 vstart 许可 |
 
 ## vsetvl 完整标量重放位置
 
 | 指令 | 修正后 PoC 目录 | 结果 |
 |---|---|---|
-| `vsetvl x0, x31, x0`（3 条） | `case-086`、`case-099`、`case-107` | 30 秒 execution timeout |
+| `vsetvl x0, x31, x0`（3 条） | `case-086`、`case-099`、`case-107` | 30 秒 DiffTest timeout；`case-086 --no-diff` 35 秒也无前进 |
 | `vsetvl x0, x26, x1` | `case-088` | 30 秒 execution timeout |
 | `vsetvl x0, x31, x31`（3 条） | `case-089`、`case-104`、`case-115` | 30 秒 execution timeout |
 | `vsetvl x0, x8, x1` | `case-091` | 30 秒 execution timeout |
@@ -139,6 +137,6 @@ RVV 1.0 的 [`vstart` 章节](https://docs.riscv.org/reference/isa/unpriv/v-st-e
 
 ## 下一步建议
 
-1. 对 9 条 `vsetvl` 用独立的 Machine-mode trap handler 与 `--no-diff` 运行，记录是否退休、是否陷入、`mcause/mepc/mtval`，再与 Spike 比较。
+1. 为 9 条 `vsetvl` 的最小版加入 trap handler，并导出最后提交 PC / 波形，定位 `vsetvl rd=x0, rs1≠x0` 的配置提交或 flush 死锁。
 2. 将非零 `vstart` 的“非法指令允许集”编码到 DiffTest 过滤规则，或只在被测实现可产生的 `vstart` 值上做锁步比较，避免将规范许可的选择误报为 bug。
-3. 若 `vsetvl` 在无 DiffTest 时仍不退休，以最小化的 `case-086` 报告 XiangShan issue，并引用 #5725；若仅 NEMU/DiffTest 时失败，则向 NEMU/ready-to-run 报告。
+3. 将最小化的 `case-086` 及其余 8 条状态作为 #6039 的复现覆盖补充；不要重复提交新 issue。

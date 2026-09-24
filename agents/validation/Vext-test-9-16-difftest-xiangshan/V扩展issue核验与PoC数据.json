@@ -1,0 +1,3647 @@
+{
+  "schema_version": "2.0",
+  "retrieved_at": "2026-09-17T13:53:18.387Z",
+  "source_scope": {
+    "fixed_source": "原始表的 89 个去重编号；逐项读取本地 GitHub issue 与 comments 缓存，未网络抓取",
+    "issue_numbers": [
+      2890,
+      3012,
+      3200,
+      3488,
+      3962,
+      4017,
+      4190,
+      4368,
+      5279,
+      5288,
+      5424,
+      5425,
+      5426,
+      5449,
+      5702,
+      5725,
+      5739,
+      5765,
+      5766,
+      5767,
+      5768,
+      5769,
+      5770,
+      5772,
+      5777,
+      5790,
+      5808,
+      5809,
+      5829,
+      5830,
+      5831,
+      5832,
+      5840,
+      5845,
+      5865,
+      5919,
+      5921,
+      5922,
+      5927,
+      5928,
+      5929,
+      5930,
+      5931,
+      5932,
+      5933,
+      5934,
+      5943,
+      5958,
+      6015,
+      6022,
+      6034,
+      6035,
+      6036,
+      6037,
+      6039,
+      6042,
+      6063,
+      6064,
+      6065,
+      6066,
+      6079,
+      6085,
+      6093,
+      6151,
+      6152,
+      6168,
+      6262,
+      6289,
+      6292,
+      6293,
+      6295,
+      6296,
+      6298,
+      6302,
+      6399,
+      6407,
+      6410,
+      6467,
+      6475,
+      6482,
+      6486,
+      6536,
+      6540,
+      6543,
+      6544,
+      6545,
+      6555,
+      6561,
+      6576
+    ],
+    "github_cache_dir": "/tmp/vext-ppt-research-20260917/github-cache"
+  },
+  "issues": [
+    {
+      "number": 2890,
+      "title": "Simulation hangs for longer running functions using the vector extension",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/2890",
+      "author": "camel-cdr",
+      "created_at": "2024-04-16T22:16:50Z",
+      "closed_at": "2024-08-18T12:37:27Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/reported"
+      ],
+      "confirmation": "partial",
+      "bug_scope": "历史混合/部分确认",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/2890",
+          "label_snapshot": "type: bug/reported"
+        },
+        {
+          "kind": "最终全评论复核",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/2890#issuecomment-2220740793",
+          "summary": "维护者给出RTL修复PR3140/commit1a0c5d且报告者验证；同帖后续还有nexus-am与VS配置问题，不整帖算单一RTL缺陷",
+          "quote": "We have fixed the issue at this commit(1a0c5d77fed8b13a9fa5f70d1f25d808a311dd7b) in this pull requests (https://github.com/OpenXiangShan/XiangShan/pull/3140). This will later be integrated into the master.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "历史长程序/混合问题",
+        "status": "原帖代码/静态片段，类别按实际证据单列",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/2890",
+        "code_completeness": "不以日志或静态RTL条件冒充独立汇编程序",
+        "raw_original_code_blocks": [
+          "// asm.S\r\n.text\r\n.balign 8\r\n.global ascii_to_utf16\r\nascii_to_utf16:\r\n1:\r\n\tvsetvli t0, a2, e8, m1, ta, ma\r\n\tvle8.v v0, (a1)\r\n\tvsetvli x0, x0, e16, m2, ta, ma # this originally had a bug, and used mf2\r\n\tvzext.vf2 v8, v0\r\n\tvse16.v v8, (a0)\r\n\tadd a1, a1, t0\r\n\tsub a2, a2, t0\r\n\tslli t0, t0, 1\r\n\tadd a0, a0, t0\r\n\tbnez a2, 1b\r\n\tret\r\n// hello.c\r\n#include <klib.h>\r\nsize_t ascii_to_utf16(uint16_t *dst, uint8_t *src, size_t n);\r\nint main(void) {\r\n\tstatic uint8_t src[100] = {1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0};\r\n\tstatic uint16_t dst[sizeof src]={};\r\n\tprintf(\"beg\\n\");\r\n\tascii_to_utf16(dst, src, sizeof src);\r\n\tprintf(\"end\\n\");\r\n\treturn 0;\r\n}\r\n",
+          "# asm.S\r\n.text\r\n.balign 8\r\n.global LUT4\r\nLUT4:\r\n\tli t0, 16\r\n\tvsetvli zero, t0, e8, m1, ta, ma\r\n\tvle8.v v0, (a0)\r\n1:\r\n\tvsetvli a0, a2, e8, m1, ta, ma\r\n\tvle8.v v8, (a1)\r\n\tvand.vi v8, v8, 15\r\n\tvrgather.vv v16, v0, v8\r\n\tvse8.v v16, (a1)\r\n\tsub a2, a2, a0\r\n\tadd a1, a1, a0\r\n\tbnez a2, 1b\r\n\tret\r\n// hello.c\r\n#include <klib.h>\r\nsize_t LUT4(uint8_t lut[16], uint8_t *ptr, size_t n);\r\nint main(void) {\r\n\tstatic uint8_t mem[100];\r\n\tstatic uint8_t lut[16] = { 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6 };\r\n\tprintf(\"beg\\n\");\r\n\tLUT4((uint8_t *)lut, mem, sizeof mem);\r\n\tprintf(\"end\\n\");\r\n\treturn 0;\r\n}\r\n",
+          "FROM ubuntu:22.04\r\nRUN apt-get update && apt-get install -y build-essential clang libclang-dev llvm-dev cmake libspdlog-dev vim git libmlpack-dev curl wget time default-jre default-jdk\r\nRUN git clone --recursive https://github.com/OpenXiangShan/xs-env\r\n\r\nWORKDIR /xs-env\r\nRUN sed 's/apt\\S* install/\\0 -y/g;s/source /. /g;s/sudo //g' -i ./*.sh && echo 1\r\nRUN . ./env.sh && sed 's/$/; cd \\/xs-env/g' -i ./update-submodule.sh && ./update-submodule.sh\r\nRUN . ./env.sh && ./setup-tools.sh\r\nRUN . ./env.sh && . ./install-verilator.sh\r\nRUN . ./env.sh && sed 's/^git submodule.*$//g;s/env.*$//g' -i ./setup.sh && . ./setup.sh\r\n\r\nRUN . ./env.sh && make -C XiangShan init\r\nRUN . ./env.sh && make -C XiangShan emu CONFIG=DefaultConfig MFC=1 -j 8\r\nRUN . ./env.sh && sed 's/unknown-//g;s/rv64gc/rv64gcv/g' -i $AM_HOME/am/arch/isa/riscv64.mk\r\n# Once in the docker enviroment, I used the following to build and simulate the programs:\r\n# source env.sh; cd $AM_HOME/apps/hello\r\n# make ARCH=riscv64-xs && $NOOP_HOME/build/emu --no-diff -i ./build/hello-riscv64-xs.bin 2>/dev/null\r\n"
+        ]
+      },
+      "confirmation_detail": "维护者给出RTL修复PR3140/commit1a0c5d且报告者验证；同帖后续还有nexus-am与VS配置问题，不整帖算单一RTL缺陷"
+    },
+    {
+      "number": 3012,
+      "title": "Difftest failed on a RISC-V Vector memcpy workload with misaligned(in vlen granularity, not element) unit stride load",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/3012",
+      "author": "cyyself",
+      "created_at": "2024-05-27T10:14:49Z",
+      "closed_at": "2024-05-28T02:06:39Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/reported"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "工具/历史修复记录",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3012",
+          "label_snapshot": "type: bug/reported"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3012#issuecomment-2134233149",
+          "summary": "作者cyyself：Fixed NEMU commit b9796f4ec8b8427b4fb995ec948ed345f1caeaf4",
+          "quote": "Fixed [https://github.com/OpenXiangShan/NEMU/commit/b9796f4ec8b8427b4fb995ec948ed345f1caeaf4](https://github.com/OpenXiangShan/NEMU/commit/b9796f4ec8b8427b4fb995ec948ed345f1caeaf4) .",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "作者给出NEMU修复commit；非独立维护者RTL确认"
+    },
+    {
+      "number": 3200,
+      "title": "rvv-bench: XiangShan performance problems",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/3200",
+      "author": "camel-cdr",
+      "created_at": "2024-07-14T23:03:13Z",
+      "closed_at": "2025-05-07T13:36:14Z",
+      "state": "closed",
+      "labels": [
+        "type: problem/answered"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3200",
+          "label_snapshot": "type: problem/answered"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3200",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 3488,
+      "title": " Why does only one execution unit support vppu? & vcompress optimization suggestion",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/3488",
+      "author": "camel-cdr",
+      "created_at": "2024-09-03T16:35:26Z",
+      "closed_at": "2024-09-05T18:52:06Z",
+      "state": "closed",
+      "labels": [
+        "type: question/answered"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3488",
+          "label_snapshot": "type: question/answered"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3488",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 3962,
+      "title": "How to turn off vector instruction extension？",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/3962",
+      "author": "H-Y-B",
+      "created_at": "2024-11-29T08:11:59Z",
+      "closed_at": "2024-11-29T08:29:13Z",
+      "state": "closed",
+      "labels": [
+        "type: question/answered"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3962",
+          "label_snapshot": "type: question/answered"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/3962",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 4017,
+      "title": "Store-load violation checking for vector instruction",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/4017",
+      "author": "jlong299",
+      "created_at": "2024-12-10T08:49:40Z",
+      "closed_at": "2024-12-11T06:48:05Z",
+      "state": "closed",
+      "labels": [
+        "type: question/answered"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/4017",
+          "label_snapshot": "type: question/answered"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/4017",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 4190,
+      "title": "KunminghuV2Config doesn't seem to dual issue vector instructions",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/4190",
+      "author": "camel-cdr",
+      "created_at": "2025-01-16T21:56:29Z",
+      "closed_at": "2025-01-20T07:51:16Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/reported"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "性能/假依赖",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/4190",
+          "label_snapshot": "type: bug/reported"
+        },
+        {
+          "kind": "最终全评论复核",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/4190#issuecomment-2597589506",
+          "summary": "维护者确认不必要vd依赖性能问题，PR4198修复且报告者回测；LMUL1解码限制另属设计取舍",
+          "quote": "The above issue has been fixed by https://github.com/OpenXiangShan/XiangShan/pull/4198",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "性能/假依赖",
+        "status": "原帖完整C/汇编benchmark可读；展示LMUL2循环节选",
+        "code": "vsetvli t0, x0, e32, m2, ta, ma\n        li a0, LOOP\n        csrr a1, cycle\n1:\n.rept UNROLL\nvadd.vv v8,v16,v24\nvadd.vv v10,v18,v26\nvadd.vv v12,v20,v28\nvadd.vv v14,v22,v30\n.endr\n        addi a0, a0, -1\n        bnez a0, 1b\n        fence.i\n        csrr a0, cycle\n        sub a0, a0, a1",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/4190",
+        "code_completeness": "UNROLL=8、LOOP=64，节选原始LMUL2测时循环，不含main/构建文件",
+        "raw_original_code_blocks": [
+          "vadd.vv v8,v16,v24\nvadd.vv v9,v17,v25\nvadd.vv v10,v18,v26\nvadd.vv v11,v19,v27\n...\n",
+          "// asm.S\n.text\n.balign 8\n\n#define UNROLL 8\n#define LOOP 64\n\n.global bench_add\nbench_add:\n        li a0, LOOP\n        csrr a1, cycle\n1:\n.rept UNROLL\nadd t0,t1,t2\nadd t3,t4,t5\nadd t6,a2,a3\nadd a4,a5,a6\nadd t0,t1,t2\nadd t3,t4,t5\nadd t6,a2,a3\nadd a4,a5,a6\n.endr\n        addi a0, a0, -1\n        bnez a0, 1b\n        fence.i\n        csrr a0, cycle\n        sub a0, a0, a1\nret\n\n\n.global bench_mul\nbench_mul:\n        li a0, LOOP\n        csrr a1, cycle\n1:\n.rept UNROLL\nmul t0,t1,t2\nmul t3,t4,t5\nmul t6,a2,a3\nmul a4,a5,a6\nmul t0,t1,t2\nmul t3,t4,t5\nmul t6,a2,a3\nmul a4,a5,a6\n.endr\n        addi a0, a0, -1\n        bnez a0, 1b\n        fence.i\n        csrr a0, cycle\n        sub a0, a0, a1\nret\n\n.global bench_vaddvv_m1\nbench_vaddvv_m1:\n        vsetvli t0, x0, e32, m1, ta, ma\n        li a0, LOOP\n        csrr a1, cycle\n1:\n.rept UNROLL\nvadd.vv v8,v16,v24\nvadd.vv v9,v17,v25\nvadd.vv v10,v18,v26\nvadd.vv v11,v19,v27\nvadd.vv v12,v20,v28\nvadd.vv v13,v21,v29\nvadd.vv v14,v22,v30\nvadd.vv v15,v23,v31\n.endr\n        addi a0, a0, -1\n        bnez a0, 1b\n        fence.i\n        csrr a0, cycle\n        sub a0, a0, a1\nret\n\n.global bench_vaddvv_m2\nbench_vaddvv_m2:\n        vsetvli t0, x0, e32, m2, ta, ma\n        li a0, LOOP\n        csrr a1, cycle\n1:\n.rept UNROLL\nvadd.vv v8,v16,v24\nvadd.vv v10,v18,v26\nvadd.vv v12,v20,v28\nvadd.vv v14,v22,v30\n.endr\n        addi a0, a0, -1\n        bnez a0, 1b\n        fence.i\n        csrr a0, cycle\n        sub a0, a0, a1\nret\n\n// main.c\n#include <klib.h>\n\nsize_t bench_add(void);\nsize_t bench_vaddvv_m1(void);\nsize_t bench_vaddvv_m2(void);\n\nint main(void) {\n\tfor (size_t i = 0; i < 10; ++i) {\n\t\tprintf(\"add:         %u\\n\", bench_add());\n\t\tprintf(\"mul:         %u\\n\", bench_mul());\n\t\tprintf(\"LMUL=1 vadd: %u\\n\", bench_vaddvv_m1());\n\t\tprintf(\"LMUL=2 vadd: %u\\n\", bench_vaddvv_m2());\n\t}\n\treturn 0;\n}\n\n\n// Makefile\nSRCS = asm.S main.c\ninclude $(AM_HOME)/Makefile.app\n",
+          "$ make ARCH=riscv64-xs && /xs-env/XiangShan/build/emu --no-diff -i ./build/-riscv64-xs.bin 2>/dev/null\nadd:         1294\nmul:         2125\nLMUL=1 vadd: 4244\nLMUL=2 vadd: 3136\n"
+        ]
+      },
+      "confirmation_detail": "维护者确认不必要vd依赖性能问题，PR4198修复且报告者回测；LMUL1解码限制另属设计取舍"
+    },
+    {
+      "number": 4368,
+      "title": "Vector Configuration",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/4368",
+      "author": "WaltJr-OH",
+      "created_at": "2025-03-06T06:28:58Z",
+      "closed_at": "2025-09-05T07:14:27Z",
+      "state": "closed",
+      "labels": [
+        "type: question/answered"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/4368",
+          "label_snapshot": "type: question/answered"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/4368",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5279,
+      "title": "Mismatch in vector store commit behavior under misaligned base address",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5279",
+      "author": "youzi27",
+      "created_at": "2025-11-29T08:23:48Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: tool"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "工具/差分测试",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5279",
+          "label_snapshot": "type: bug/confirmed, module: tool"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5279#issuecomment-3595092909",
+          "summary": "维护者 Yan-Muzi 明确：\"known bug of difftest\"，非 RTL。",
+          "quote": "It is a known bug of difftest. We have not really figured out how to compare store commits of vector stores. We may fix this in the future.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "工具/差分提交比较",
+        "status": "正文日志/附件证据；本轮未提取可执行汇编，不以日志冒充源码",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5279",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5288,
+      "title": "Unexpected interaction between vs1r.v and fence.i instructions",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5288",
+      "author": "youzi27",
+      "created_at": "2025-12-01T06:00:57Z",
+      "closed_at": "2025-12-01T08:20:48Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: unknown"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5288",
+          "label_snapshot": "type: bug/invalid, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5288",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5424,
+      "title": "Mismatch for store commits on vector indexed segment store instructions",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5424",
+      "author": "cesarus777",
+      "created_at": "2025-12-24T14:35:42Z",
+      "closed_at": "2025-12-24T14:40:51Z",
+      "state": "closed",
+      "labels": [
+        "note: duplicate",
+        "module: tool"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "工具/重复映射",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5424",
+          "label_snapshot": "note: duplicate, module: tool"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5424#issuecomment-3689978534",
+          "summary": "Yan-Muzi：Please refer to #5279",
+          "quote": "Please refer to #5279.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "维护者指向已知DiffTest工具问题，非独立RTL确认"
+    },
+    {
+      "number": 5425,
+      "title": "Assertion failed at DCache on vector indexed segment store instructions",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5425",
+      "author": "cesarus777",
+      "created_at": "2025-12-24T14:56:59Z",
+      "closed_at": "2025-12-29T07:15:51Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: unknown"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5425",
+          "label_snapshot": "type: bug/invalid, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5425",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5426,
+      "title": "v31_low different on vfredusum.vs",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5426",
+      "author": "cesarus777",
+      "created_at": "2025-12-24T15:05:14Z",
+      "closed_at": "2025-12-29T02:43:54Z",
+      "state": "closed",
+      "labels": [
+        "module: tool",
+        "type: bug/fixed"
+      ],
+      "confirmation": "fixed",
+      "bug_scope": "工具/参考模型",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5426",
+          "label_snapshot": "module: tool, type: bug/fixed"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5426#issuecomment-3692247360",
+          "summary": "维护者 lewislzh 明确 NEMU bug、\"RTL implementation is correct\"。",
+          "quote": "Thanks for the issue report. This is indeed a bug in the NEMU simulator (the RTL implementation is correct)：\nThe RISC-V Vector specification states that for the vfredusum instruction, when an operand is masked off, it may be treated as -0 if the rounding mode is not RDN; for RDN, the operand needs to be treated as +0. NEMU’s handling of the RDN case was incorrect. A fix has been submitted.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "工具/参考模型",
+        "status": "正文日志/附件证据；本轮未提取可执行汇编，不以日志冒充源码",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5426",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5449,
+      "title": "VectorFloatFMA module operation alignment logic error",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5449",
+      "author": "I3eg1nner",
+      "created_at": "2025-12-26T16:11:48Z",
+      "closed_at": "2025-12-27T04:03:05Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5449",
+          "label_snapshot": "type: bug/invalid"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5449",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5702,
+      "title": "Vector memory access",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5702",
+      "author": "biquanha",
+      "created_at": "2026-03-19T07:17:11Z",
+      "closed_at": "2026-03-19T07:35:05Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: unknown"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5702",
+          "label_snapshot": "type: bug/invalid, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5702",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5725,
+      "title": "Behavior mismatch on RVV testcase (`vsetvl x0, x0, rs2` path)",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5725",
+      "author": "KnightGOKU",
+      "created_at": "2026-03-25T13:45:42Z",
+      "closed_at": "2026-04-03T09:05:37Z",
+      "state": "closed",
+      "labels": [
+        "module: backend",
+        "module: tool",
+        "type: bug/fixed"
+      ],
+      "confirmation": "fixed",
+      "bug_scope": "预期/行为对齐",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5725",
+          "label_snapshot": "module: backend, module: tool, type: bug/fixed"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5725#issuecomment-4132725504",
+          "summary": "维护者 huxuan0307 明确 \"not a bug but a feature\"；后来 NEMU 与 XiangShan 统一对 reserved 情形报非法。",
+          "quote": "Thank you for your bug report. As described in the vector section of the specification, the vsetvl[i] instruction is reserved when rs1 = x0 and rd = x0. Since there is no explicit description of how to implement reserved, the hardware can implement it in any reasonable way. In other words, this is not a bug but a \"feature\".",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "预期/行为对齐",
+        "status": "正文日志/附件证据；本轮未提取可执行汇编，不以日志冒充源码",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5725",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5739,
+      "title": "`csrr vl` reads stale zero immediately after `vsetvli`",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5739",
+      "author": "KnightGOKU",
+      "created_at": "2026-03-29T16:10:54Z",
+      "closed_at": "2026-04-09T10:06:13Z",
+      "state": "closed",
+      "labels": [
+        "module: backend",
+        "type: bug/fixed"
+      ],
+      "confirmation": "fixed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5739",
+          "label_snapshot": "module: backend, type: bug/fixed"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5739",
+          "summary": "GitHub `type: bug/fixed` 标签；无 tool 标签，按 XiangShan 已确认且已有修复标签记录。"
+        }
+      ],
+      "poc": {
+        "category": "配置 CSR",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "li t6, 0x600\ncsrs mstatus, t6\nli a0, 16\nvsetvli t1, a0, e8, m1, ta, ma\ncsrr t2, vl",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5739",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5739。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "预期 t1=t2=16，原始故障为 t2=0。\n维护者定位 VL bypass 错误并给出修复 PR #5743。"
+      }
+    },
+    {
+      "number": 5765,
+      "title": "Difftest mismatch on tail bits of v0 after vlm.v",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5765",
+      "author": "KnightGOKU",
+      "created_at": "2026-04-03T14:51:49Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5765",
+          "label_snapshot": "type: bug/confirmed, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5765",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "mask-tail",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "li a0, 16\nvsetvli t0, a0, e8, m1, tu, mu\nvmv.v.i v0, 0\n\nli a0, 10\nvsetvli t0, a0, e8, m1, tu, mu\nla a1, mask_data\nvlm.v v0, (a1)\nla a2, out_data\nvsm.v v0, (a2)",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5765",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5765。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "mask_data 与 expected_data 均为 .byte 0x80, 0x03。\n原程序逐字节比较读回数据，省略初始化、比较循环和 trap handler。"
+      }
+    },
+    {
+      "number": 5766,
+      "title": "`vle8ff` fault-only-first followed by immediate `csrr vl` returns 0 on XiangShan, while Spike returns the expected `vl`",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5766",
+      "author": "KnightGOKU",
+      "created_at": "2026-04-05T08:55:35Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5766",
+          "label_snapshot": "type: bug/confirmed, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5766",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "FOF",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v8, 0\n\nla a1, deny_start\naddi a1, a1, -7\n\nvle8ff.v v8, (a1)\ncsrr t4, vl\nla t0, observed_vl\nsw t4, 0(t0)",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5766",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5766。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "原程序用 PMP 将 deny_start 至 deny_end 设为不可访问。\n前 7 字节可访问，第 8 字节 fault：期望读取 vl=7，原报告得到 0。"
+      }
+    },
+    {
+      "number": 5767,
+      "title": "`vlseg2e8ff.v` with later-element fault triggers XiangShan internal critical error",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5767",
+      "author": "KnightGOKU",
+      "created_at": "2026-04-05T09:32:40Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5767",
+          "label_snapshot": "type: bug/confirmed, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5767",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "FOF",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v16, 0\nvmv.v.i v17, 0\n\nla a2, deny_start\naddi a2, a2, -12\n\nvlseg2e8ff.v v16, (a2)\ncsrr t4, vl",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5767",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5767。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "同样使用 PMP deny 区，nf=2，每元素占 2 字节，故障落在后续元素。\n原报告触发内部 critical error，期望按 FOF 语义处理。省略 PMP 初始化和 handler。"
+      }
+    },
+    {
+      "number": 5768,
+      "title": "Vector FP move/merge instructions missing `frm` reserved value check",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5768",
+      "author": "Hoshi44",
+      "created_at": "2026-04-05T13:49:12Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5768",
+          "label_snapshot": "type: bug/confirmed, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5768",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "非法编码/源码条件",
+        "status": "只有RTL译码条件作为实现证据；未取得可执行PoC",
+        "code": "(decodedInst.needFrm.vectorNeedFrm || FuType.isVectorNeedFrm(decodedInst.fuType)) && io.fromCSR.illegalInst.frm",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5768",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容",
+        "code_kind": "RTL实现条件，不是可执行PoC"
+      }
+    },
+    {
+      "number": 5769,
+      "title": "Vector indexed segment store (vsuxseg*ei*) reports only base address in mtval on exception",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5769",
+      "author": "zhangkanqi",
+      "created_at": "2026-04-06T09:22:12Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: backend",
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5769",
+          "label_snapshot": "module: backend, module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5769",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5770,
+      "title": "Vector whole register load(vl2re32.v) partially updates destination on exception",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5770",
+      "author": "zhangkanqi",
+      "created_at": "2026-04-06T15:31:33Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: backend",
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5770",
+          "label_snapshot": "module: backend, module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5770",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5772,
+      "title": "vmv4r.v with misaligned registers dosen't raise illegal instruction exception",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5772",
+      "author": "zhangkanqi",
+      "created_at": "2026-04-06T17:49:33Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5772",
+          "label_snapshot": "type: bug/confirmed, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5772",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "非法编码",
+        "status": "公开附件完整汇编源码已取得；PPT展示关键节选",
+        "code": "vmv4r.v v12, v22",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5772",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容",
+        "attachment_verified": {
+          "local_cache": "/tmp/vext-ppt-research-20260917/attachments/5772.zip",
+          "file_count": 7,
+          "elf_count": 0,
+          "source_files": [
+            "vmv4r_illInstr_mismatch/vmv4r_illInstr.S"
+          ],
+          "verification": "只静态读取ZIP清单/源码，未执行ELF"
+        },
+        "attachment_source_code": ".globl _start\n.section .text\n_start:\ntrap_vec_init:\n  la x13, other_exp\n  csrw 0x305, x13 # MTVEC\n  la x13, other_exp_s\n  csrw 0x105, x13 # STVEC\nmepc_setup:\n  la x13, init\n  csrw 0x341, x13\ninit_env:\n  li x26, 0x00000069001d6aa8\n  csrw 0x300, x26 # MSTATUS (mode is 1)\n  li x16, 0x2fffffff\n  csrw 0x3b0, x16\n  li x16, 0xf\n  csrw 0x3a0, x16\n  sfence.vma x0, x0\n  li x26, 0x0\n  csrw 0x304, x26 # MIE\n  mret\ninit:\n  fsrmi 2\n  li x0, 0xdb7d548a56e8beda\n  fmv.h.x f0, x0\n  li x1, 0x492bf97bfac3d9cc\n  fmv.w.x f1, x1\n  li x2, 0x2ef73280227feeb8\n  fmv.d.x f2, x2\n  li x3, 0xde0ef00afaece77d\n  fmv.w.x f3, x3\n  li x4, 0x9614d626104fc8d0\n  fmv.w.x f4, x4\n  li x5, 0xcffc4c0ff56a16b3\n  fmv.d.x f5, x5\n  li x6, 0x05de2e9282a45444\n  fmv.d.x f6, x6\n  li x7, 0x7f2bed04699e7199\n  fmv.h.x f7, x7\n  li x8, 0xbc773336cd38c784\n  fmv.h.x f8, x8\n  li x9, 0xce1017aaceed3622\n  fmv.w.x f9, x9\n  li x10, 0xa4933cf92ed17402\n  fmv.h.x f10, x10\n  li x11, 0x86faabe501a7ece8\n  fmv.h.x f11, x11\n  li x12, 0x87eb36fffea73e95\n  fmv.w.x f12, x12\n  li x13, 0x3e19bb1d4c22e155\n  fmv.d.x f13, x13\n  li x14, 0xe408346e20068b25\n  fmv.w.x f14, x14\n  li x15, 0x62bbf685ef0bc4de\n  fmv.w.x f15, x15\n  la t6, mem_region\n  j main\n.align 12\nother_exp:\n.option norvc\n  csrr x13, 0x341\n  addi x13, x13, 4\n  csrw 0x341, x13\n  mret\n.option rvc\nother_exp_s:\n.option norvc\n  csrr x13, 0x141\n  addi x13, x13, 4\n  csrw 0x141, x13\n  sret\n.option rvc\n.align 2\n.option norvc\nmain:\n  li x27, 0x600\n  csrrs x0, mstatus, x27\n  vsetivli s3, 25, e8, m1, ta, ma\n  sh3add.uw t2, s3, s3\n  fsw fa1, 1424(t6)\n  vsm4r.vs v29, v10\n  sh3add.uw s5, s3, s1\n  vghsh.vv v12, v1, v18\n  fcvt.s.h fs5, fs5\n  xori a5, a2, -1662\n  sc.w sp, s5, (t6)\n  div s2, s5, sp\n  xnor zero, s2, s2\n  vsm3me.vv v7, v12, v30\n  fcvt.h.lu fs7, zero, dyn\n  fence.i\n  vaesem.vs v22, v10\n  vmv4r.v v12, v22\n  cpopw a2, s11\n  fmv.h.x ft11, a5\n  clmulh s9, a2, zero\n  vclmulh.vx v31, v29, a2\n  bext s3, a2, s2\n  amomax.w s11, s10, (t6)\n  slli.uw a1, s3, 47\n  fence.i\n  amomax.d a0, s11, (t6)\n  amomin.w ra, s9, (t6)\n  vaeskf2.vi v30, v5, 29\n  clmulh t0, a1, t0\n  mul s4, a0, ra\n  fence.i\n  fcvt.lu.s zero, fs7\n  fence.i\n  vsha2ch.vv v2, v10, v24\n  amomaxu.w a3, t4, (t6)\n  clzw s5, t0\n  add.uw s7, s4, t0\n  vsha2ch.vv v15, v2, v19\n  vgmul.vv v2, v1\n  vlseg6e8.v v20, (gp)\n  fcvt.lu.h s10, fs1, rdn\n  vsm4r.vs v19, v26\n  fmv.x.d a7, fs7\n  fsw fs8, 1228(t6)\n  vwsll.vx v24, v24, zero, v0.t\n  vsha2cl.vv v31, v16, v15\n  fmv.h.x fa3, a7\n  vlseg6e64.v v13, (s7), v0.t\n  csrrsi t1, mhpmcounter19, 1\n  vsm4k.vi v28, v15, 17\n  amoxor.w t0, t0, (t6)\n  fence.i\n  add.uw s1, t1, t1\n  vclmulh.vv v18, v14, v28, v0.t\n  clmulh zero, t3, zero\n  vror.vv v8, v18, v31, v0.t\n  andi a7, s10, 2047\n  xperm4 a2, zero, s1\n  flw ft1, 900(t6)\n  ctzw a3, a2\n  mulw ra, a2, zero\n  roriw a5, a2, 0\n  rori s7, a2, 63\n  amomin.d s2, s7, (t6)\n  vsm3c.vi v15, v22, 27\n  vgmul.vv v14, v2\n  vgmul.vv v3, v5\n  fsw ft7, -660(t6)\n  fld ft8, -648(t6)\n  fcvt.s.lu fa5, s7\n  fcvt.lu.s t1, ft11\n  xperm4 a7, a0, a5\n  fld ft10, 232(t6)\n  vmseq.vx v10, v7, a6, v0.t\n  fmv.x.d zero, ft11\n  fcvt.h.l ft0, a5, rmm\n  packw s10, a7, s2\n  csrrs a6, mhpmcounter12, a7\n  ctzw s0, a7\n  fmul.h fs3, ft6, fa5, rtz\n  bexti s11, s0, 46\n  mulh a5, s0, a6\n  vclmulh.vx v9, v15, a1, v0.t\n  fsw ft10, -448(t6)\n.4byte 0x0000006b\n.option rvc\nwrite_tohost:\n  la t1, tohost\n  li t2, 0x1\n  sw t2, 0(t1)\n_exit:\n  j write_tohost\ndebug_rom:\n  dret\ndebug_exception:\n  dret\ninstr_end:\n  nop\n.section .data\n.align 6\n.global tohost\ntohost:\n.dword 0x0\n.align 6\n.global fromhost\nfromhost:\n.dword 0x0\n.section .region_0, \"aw\", @progbits\nregion_0:\n.word 0x4d93fdd5, 0x6f2c6e95, 0xade0e616, 0xe402ff8a, 0xd808a483, 0x3ad6a899, 0x19c728f2, 0x61c8198b\n.section .mem_region, \"aw\", @progbits\n.align 4\nmem_region:\n.space 8192\nmem_region_end:\n"
+      }
+    },
+    {
+      "number": 5777,
+      "title": "No instructions have been submitted for a long time. Could this be a case of deadlock?",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5777",
+      "author": "zhangkanqi",
+      "created_at": "2026-04-07T08:12:21Z",
+      "closed_at": "2026-04-09T06:22:38Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5777",
+          "label_snapshot": "type: bug/invalid"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5777",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5790,
+      "title": "Mismatch mcause and mtval when executing vssseg3e16.v",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5790",
+      "author": "zhangkanqi",
+      "created_at": "2026-04-08T14:35:39Z",
+      "closed_at": "2026-04-09T06:18:39Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5790",
+          "label_snapshot": "type: bug/invalid"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5790",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5808,
+      "title": "`vstart` mismatch after a minimal `vsse16.v` RVV testcase",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5808",
+      "author": "KnightGOKU",
+      "created_at": "2026-04-14T05:42:27Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5808",
+          "label_snapshot": "module: vector, type: bug/WIP feature"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5808",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5809,
+      "title": "`vmv.x.s` executes instead of raising illegal-instruction when `vsetvli` leaves `vtype.vill=1`",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5809",
+      "author": "KnightGOKU",
+      "created_at": "2026-04-14T06:41:16Z",
+      "closed_at": "2026-04-14T09:45:29Z",
+      "state": "closed",
+      "labels": [
+        "module: backend",
+        "type: bug/fixed"
+      ],
+      "confirmation": "fixed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5809",
+          "label_snapshot": "module: backend, type: bug/fixed"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5809",
+          "summary": "GitHub `type: bug/fixed` 标签；无 tool 标签，按 XiangShan 已确认且已有修复标签记录。"
+        }
+      ],
+      "poc": {
+        "category": "非法编码",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "vsetvli x21, x21, 992\ncsrr x23, vl\ncsrr x22, vtype\nvmv.x.s x21, v16",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5809",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5809。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "原日志：vl=0，vtype=0x8000000000000000（vill=1）。\n预期 mcause=2、mtval=0x43002ad7。原故障却提交了 x21 写回。"
+      }
+    },
+    {
+      "number": 5829,
+      "title": "[Bug] vmv.x.s instruction fails to sign-extend when SEW < XLEN",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5829",
+      "author": "jimmymtest",
+      "created_at": "2026-04-20T05:47:00Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5829",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5829",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "数据/标量扩展",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "vsetivli x0, 2, e64, m1, ta, ma\nvmv.v.i  v9, 0\n\nvsetivli x0, 1, e32, m1, tu, mu\nla       x10, data_word\nvle32.v  v9, (x10)\nvmv.x.s  x15, v9\n\nli       x16, 0xffffffffe01d7b92\nli       gp, 1\nbeq      x15, x16, exit\nli       gp, 2",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5829",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5829。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "data_word 的值为 0xe01d7b92，预期 x15 为其 XLEN 符号扩展。\n省略 VS/FS 初始化、trap handler、退出和数据段，其余扩展类按完整目标结果比较。"
+      }
+    },
+    {
+      "number": 5830,
+      "title": "[BUG] `vfmv.f.s` fails to NaN-box 32-bit values when writing to a 64-bit floating-point registe",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5830",
+      "author": "jimmymtest",
+      "created_at": "2026-04-20T06:29:03Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5830",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5830",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "数据/标量扩展",
+        "status": "公开正文/评论含代码或日志",
+        "code": "user_code:\n    vsetivli x0, 2, e64, m1, ta, ma\n    vmv.v.i  v21, 0\n    vsetivli x0, 1, e32, m1, tu, mu\n    la       x10, data_word\n    vle32.v  v21, (x10)\n    vfmv.f.s f23, v21\n    fmv.x.d  x15, f23\n    li       x16, -1\n    slli     x16, x16, 32\n    li       x17, 0x55555555\n    or       x16, x16, x17       # expected 0xffffffff55555555\n    li       gp, 1\n    beq      x15, x16, exit\n…（仅保留目标指令前置条件与观察点）",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5830",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5831,
+      "title": "[BUG] `vlse32.v` corrupts packed 32-bit element data under SEW=64, LMUL=8 mixed-EEW execution",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5831",
+      "author": "jimmymtest",
+      "created_at": "2026-04-20T08:11:57Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5831",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5831",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "合法内存",
+        "status": "公开正文/评论含代码或日志",
+        "code": "vsetvli x8, x0, e64, m8\nli x9, 2415919032\nli x13, 4\nvlse32.v v24, (x9), x13",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5831",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5832,
+      "title": "[BUG] `vl8re64.v` truncates upper 64-bit data in whole-register loads",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5832",
+      "author": "jimmymtest",
+      "created_at": "2026-04-20T08:54:26Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5832",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5832",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "合法内存",
+        "status": "公开正文/评论含代码或日志",
+        "code": "vsetivli x8, 10, e8, m8\nli x10, 2415919032\nvl8re64.v v8, (x10)",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5832",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5840,
+      "title": "[BUG] `vzext.vf8` can compute the wrong zero-extended result for an active destination element.",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5840",
+      "author": "jimmymtest",
+      "created_at": "2026-04-22T06:22:30Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5840",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5840",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "数据/标量扩展",
+        "status": "公开正文/评论含代码或日志",
+        "code": "    j       user_code\nuser_code:\n    li x9, 0xa04f\n    vsetivli x8, 1, e16, mf4\n    vmv.s.x v28, x9\n    vsetivli x8, 27, e64, m1\n    vzext.vf8 v14, v28\n    j exit\nexit:\n    li      t0, 1\n    la      t1, tohost\n    sd      t0, 0(t1)\n1:\n    j       1b\n…（仅保留目标指令前置条件与观察点）",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5840",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5845,
+      "title": "[Assertion Failure] XiangShan crashes in `LoadUnitS0` on a reduced `vmsbf.m -> vl1re64.v -> vlseg4e8.v` sequence",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5845",
+      "author": "jimmymtest",
+      "created_at": "2026-04-22T15:10:10Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5845",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5845",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5865,
+      "title": "XiangShan misses illegal-instruction trap for reserved masked `vmerge.vvm` with vd = v0",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5865",
+      "author": "KnightGOKU",
+      "created_at": "2026-04-27T06:35:54Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5865",
+          "label_snapshot": "type: bug/confirmed, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5865",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "非法编码",
+        "status": "公开正文/评论含代码或日志",
+        "code": "vsetvli x8, x0, e16, m4\nvmv.v.i v4, 1\nvmv.v.i v24, 0\nvmv.v.i v0, -1\nvmerge.vvm v0, v24, v4, v0",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5865",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5919,
+      "title": "Reserved `vmv<nr>r.v` encodings are executed instead of being rejected",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5919",
+      "author": "youzi27",
+      "created_at": "2026-05-08T14:56:57Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5919",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5919",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5921,
+      "title": "Incorrect `vstart` update after faulting vector indexed store",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5921",
+      "author": "youzi27",
+      "created_at": "2026-05-09T04:43:24Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: memory",
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5921",
+          "label_snapshot": "module: memory, module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5921",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5922,
+      "title": "Incorrect handling of invalid `frm` for `vfmerge.vfm`",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5922",
+      "author": "youzi27",
+      "created_at": "2026-05-09T06:25:51Z",
+      "closed_at": "2026-05-09T06:30:21Z",
+      "state": "closed",
+      "labels": [
+        "note: duplicate"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "报告者重复/未独立确认",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5922",
+          "label_snapshot": "note: duplicate"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5922#issuecomment-4411727439",
+          "summary": "youzi27：This issue seems similar to #5768",
+          "quote": "This issue seems similar to #5768 , so I will close it. Sorry for the confusion.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "报告者自报与#5768相似后关闭"
+    },
+    {
+      "number": 5927,
+      "title": "Incorrect scalar result from `vmv.x.s` when SEW is smaller than XLEN",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5927",
+      "author": "youzi27",
+      "created_at": "2026-05-09T14:20:36Z",
+      "closed_at": "2026-05-09T14:22:57Z",
+      "state": "closed",
+      "labels": [
+        "note: duplicate"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "报告者重复/未独立确认",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5927",
+          "label_snapshot": "note: duplicate"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5927#issuecomment-4412737115",
+          "summary": "youzi27：This issue seems similar to #5829",
+          "quote": "This issue seems similar to #5829  , so I will close it. Sorry for the confusion.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "报告者自报与#5829相似后关闭"
+    },
+    {
+      "number": 5928,
+      "title": "Incorrect source element selection in `vsext`",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5928",
+      "author": "youzi27",
+      "created_at": "2026-05-09T15:20:52Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5928",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5928",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "数据/标量扩展",
+        "status": "公开正文/评论含代码或日志",
+        "code": "vsetivli x0, 4, e32, m1, ta, ma\n...\nvsext.vf4 v21, v16",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5928",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5929,
+      "title": "`vloxseg5ei64.v` misses load access fault and commits destination vector registers",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5929",
+      "author": "KnightGOKU",
+      "created_at": "2026-05-10T02:15:08Z",
+      "closed_at": "2026-05-12T03:09:12Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5929",
+          "label_snapshot": "type: bug/invalid"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5929",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 5930,
+      "title": "`vle8ff.v` corrupts active loaded byte value",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5930",
+      "author": "KnightGOKU",
+      "created_at": "2026-05-10T02:42:09Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5930",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5930",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "FOF",
+        "status": "公开正文/评论含代码或日志",
+        "code": "li x8, 2415919058\nvle8ff.v v14, (x8), v0.t",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5930",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5931,
+      "title": "`vlseg2e32ff.v` loads wrong field0 data for misaligned fault-only-first segment load",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5931",
+      "author": "KnightGOKU",
+      "created_at": "2026-05-10T02:59:45Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5931",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5931",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "FOF",
+        "status": "公开正文/评论含代码或日志",
+        "code": "li x12, 2415919058\nvlseg2e32ff.v v20, (x12)",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5931",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5932,
+      "title": "`vluxseg5ei32.v` corrupts active destination data for indexed segment load",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5932",
+      "author": "KnightGOKU",
+      "created_at": "2026-05-10T11:24:50Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5932",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5932",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "合法内存",
+        "status": "公开正文/评论含代码或日志",
+        "code": "li x11, 0x8fffffde\nvluxseg5ei32.v v18, (x11), v14",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5932",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5933,
+      "title": "`vlsseg3e64.v` loads wrong active destination data for zero-stride segment load",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5933",
+      "author": "KnightGOKU",
+      "created_at": "2026-05-10T11:38:44Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5933",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5933",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "合法内存",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "li      x9, 0x8fffffb8\nli      x10, 0x3803444b2551a2ae\nsd      x10, 16(x9)\nli      x10, 0x1000\nsd      x10, 24(x9)\n\n# ... original intervening instructions omitted ...\n\nli      x8, 0x8fffffcd\nvlsseg3e64.v v18, (x8), x19",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5933",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5933。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "原始触发状态：SEW=64、LMUL=1、x19=0，base 未对齐。\n节选保留关键内存写入与目标指令，其余前置代码见原帖，逐 field 比较 active 数据。"
+      }
+    },
+    {
+      "number": 5934,
+      "title": "`vlseg2e16.v` corrupts an active destination lane during masked segment load",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5934",
+      "author": "KnightGOKU",
+      "created_at": "2026-05-10T11:51:10Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5934",
+          "label_snapshot": "type: bug/confirmed, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5934",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "合法内存",
+        "status": "公开正文/评论含代码或日志",
+        "code": "li x9, 0x8fffffca\nvlseg2e16.v v13, (x9), v0.t",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5934",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5943,
+      "title": "Incorrect `mtval` for faulting `vsse16.v` on kunminghu-v2",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5943",
+      "author": "youzi27",
+      "created_at": "2026-05-11T09:22:11Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5943",
+          "label_snapshot": "type: bug/confirmed, module: unknown, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5943#issuecomment-4437990329",
+          "summary": "confirmed 标签；维护者最终复现并明确 \"I think this issue is a bug\"。",
+          "quote": "@youzi27 Ah ha,  I finally reproduce this issue, I think this issue is a bug, which was introduced by (https://github.com/OpenXiangShan/XiangShan/commit/2bec9bddf90fa1ddd2690f344ef3f34e4346bb9e#diff-6db620258edc695befb5c4de9a76e239e89ff74d881e35a4ab978f931efb21aeR119) .",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "异常链/故障地址",
+        "status": "公开正文/评论含代码或日志",
+        "code": "vsse16.v v20, (s3), t4",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5943",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 5958,
+      "title": "Kunminghu-v2: LoadQueueReplay assertion on translated cross-page vector byte load/store",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/5958",
+      "author": "0x1B05",
+      "created_at": "2026-05-14T03:53:56Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5958",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/5958",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6015,
+      "title": "Pipeline hangs on `vluxei32.v` when accessing unmapped physical addresses",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6015",
+      "author": "lhb-sec",
+      "created_at": "2026-05-25T07:15:08Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: memory"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6015",
+          "label_snapshot": "type: bug/confirmed, module: memory"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6015#issuecomment-4539489076",
+          "summary": "维护者可复现并称 \"indeed a bug\"，后称已由 PR #6020 修复。",
+          "quote": "Thank you for your report! That's indeed a bug caused by `d38fc34`, we will fix it later!",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "访存活性",
+        "status": "正文含HTML反汇编；附件为1个ELF，未附汇编源码",
+        "code": "80001234:  fcvt.d.l    fa7, a7\n80001238:  sha256sum0  s7, a7\n8000123c:  aes64ds     sp, s6, s7\n80001240:  vluxei32.v  v25, (a1), v17\n80001244:  aes64ks2    s4, s4, a4",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6015",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/6015。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "a1=0x4ff0b1eb，VL=4，SEW=32，LMUL=1，各索引地址落入未映射区域。\n观察异常与提交进度，原报告有 15000 周期无提交。附件提供 ELF，不是汇编源码。",
+        "attachment_verified": {
+          "local_cache": "/tmp/vext-ppt-research-20260917/attachments/6015.zip",
+          "file_count": 1,
+          "elf_count": 1,
+          "source_files": [],
+          "verification": "只静态读取ZIP清单/源码，未执行ELF"
+        }
+      },
+      "repair_evidence": {
+        "pr": 6020,
+        "status": "维护者给出修复证据；不以Issue Open状态否定修复，不在此声称PR已合并"
+      }
+    },
+    {
+      "number": 6022,
+      "title": "`vlse64.v` fails to trigger Load Access Fault upon illegal address access",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6022",
+      "author": "lhb-sec",
+      "created_at": "2026-05-25T16:31:48Z",
+      "closed_at": "2026-08-11T08:56:53Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/confirmed",
+        "note: duplicate",
+        "module: memory"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL（重复根因）",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6022",
+          "label_snapshot": "type: bug/confirmed, note: duplicate, module: memory"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6022#issuecomment-4539692989",
+          "summary": "confirmed 标签；维护者称已由 PR #6020 修复的 vec-load hang，作为 #6015 同根因映射，不独计根因。",
+          "quote": "This is a known issue caused by a vec load hang; we have already fixed it.https://github.com/OpenXiangShan/XiangShan/pull/6020",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "访存活性",
+        "status": "重复根因映射；以#6015真实反汇编代表，不把错误日志当代码",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6022",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      },
+      "repair_evidence": {
+        "pr": 6020,
+        "status": "维护者给出修复证据；不以Issue Open状态否定修复，不在此声称PR已合并"
+      }
+    },
+    {
+      "number": 6034,
+      "title": "【BUG】 `vfsgnj.vv` incorrectly dirties `mstatus.FS`",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6034",
+      "author": "nyh1",
+      "created_at": "2026-05-28T03:00:36Z",
+      "closed_at": "2026-05-29T06:57:15Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/reported",
+        "module: backend"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/维护者否认",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6034",
+          "label_snapshot": "type: bug/reported, module: backend"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6034#issuecomment-4570036662",
+          "summary": "sinceforYy：We do not believe this is a bug；fflags功能正确",
+          "quote": "We do not believe this is a bug.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "维护者明确不认为是bug"
+    },
+    {
+      "number": 6035,
+      "title": "`vle32ff.v` fails to update exception CSRs upon Load Access Fault",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6035",
+      "author": "lhb-sec",
+      "created_at": "2026-05-28T06:00:48Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6035",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6035",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6036,
+      "title": "[Bug] vmv1r_vstart_ge_evl",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6036",
+      "author": "nyh1",
+      "created_at": "2026-05-28T06:54:35Z",
+      "closed_at": "2026-05-28T09:23:32Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: backend"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6036",
+          "label_snapshot": "type: bug/invalid, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6036",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6037,
+      "title": "[Bug] vmvnr_unaligned_regs",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6037",
+      "author": "nyh1",
+      "created_at": "2026-05-28T06:58:43Z",
+      "closed_at": "2026-05-28T09:23:37Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: backend"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6037",
+          "label_snapshot": "type: bug/invalid, module: backend"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6037",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6039,
+      "title": "`vsetvl` with `rd=zero` causes core hang",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6039",
+      "author": "lhb-sec",
+      "created_at": "2026-05-28T16:18:56Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6039",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6039",
+          "summary": "只有 reported；维护者回复尚未 review/fix，不能视作确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6042,
+      "title": "`vle16.v` fault handling incorrectly sets `vstart` to `vl` instead of the faulting element index",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6042",
+      "author": "lhb-sec",
+      "created_at": "2026-05-29T06:43:51Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6042",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6042",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6063,
+      "title": "```CVT16.scala``` fflags ```NV``` lost for ```vfrec7 -inf```",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6063",
+      "author": "LeeHaofeng",
+      "created_at": "2026-06-07T09:16:26Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: vector",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/格式问题",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6063",
+          "label_snapshot": "type: bug/reported, module: vector, version: kunminghu-v3"
+        },
+        {
+          "kind": "最终全评论复核",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6063#issuecomment-4678966210",
+          "summary": "维护者说明fflags截断结果正确，仅代码格式问题，非功能bug",
+          "quote": "Here `fflags0` is `5` bits, and the result after `Cat` is truncated to exactly `0`, so although it looks wrong, the result is correct.\nWe will fix the formatting issue in the `kunminghu-v3` branch later.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "维护者说明fflags截断结果正确，仅代码格式问题，非功能bug"
+    },
+    {
+      "number": 6064,
+      "title": "Copy-Paste Typo in Mux1H Default Condition — ```isvrgatherei16``` Repeated Instead of ```isvcompress``` in   VPermSrcTypeModule",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6064",
+      "author": "LeeHaofeng",
+      "created_at": "2026-06-07T09:34:26Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6064",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6064",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6065,
+      "title": "```genVUopOffset``` uses wrong ```nf``` semantics",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6065",
+      "author": "LeeHaofeng",
+      "created_at": "2026-06-07T10:14:45Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: vector",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6065",
+          "label_snapshot": "type: bug/reported, module: vector, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6065",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6066,
+      "title": "VMask.scala ```shift``` truncation bug for ```SEW=8``` and large ```uopIdx```",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6066",
+      "author": "LeeHaofeng",
+      "created_at": "2026-06-07T10:46:56Z",
+      "closed_at": "2026-09-04T15:20:33Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: vector",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6066",
+          "label_snapshot": "type: bug/invalid, module: vector, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6066",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6079,
+      "title": "`vl1re16.v` incorrectly computes `vstart` on Load Access Fault",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6079",
+      "author": "lhb-sec",
+      "created_at": "2026-06-10T04:08:11Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6079",
+          "label_snapshot": "module: vector, type: bug/WIP feature"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6079",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6085,
+      "title": "`vsoxei32.v` fails to commit store",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6085",
+      "author": "lhb-sec",
+      "created_at": "2026-06-11T06:02:40Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6085",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6085",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6093,
+      "title": "```VectorFloatAdder.scala``` overflow rounding uses wrong normal-path GRS bits",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6093",
+      "author": "LeeHaofeng",
+      "created_at": "2026-06-13T05:05:44Z",
+      "closed_at": "2026-09-04T15:16:41Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: vector"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6093",
+          "label_snapshot": "type: bug/invalid, module: vector"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6093",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6151,
+      "title": "[Performance] VSegmentUnit: segment instructions with vl=0 stall the memory unit hundreds of cycles instead of retiring immediately",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6151",
+      "author": "maplejty814",
+      "created_at": "2026-06-26T12:25:25Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/invalid",
+        "topic: performance",
+        "module: vector",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6151",
+          "label_snapshot": "type: bug/invalid, topic: performance, module: vector, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6151",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6152,
+      "title": "[RVV] vzext.vf4 / vsext.vf4 writes zero to high 64-bit (elements 2..3)",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6152",
+      "author": "Security-HC",
+      "created_at": "2026-06-26T12:41:05Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6152",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6152",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6168,
+      "title": "[Bug] debug watchpoint trigger lost on FOF non-first element",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6168",
+      "author": "maplejty814",
+      "created_at": "2026-06-29T08:26:31Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: unknown"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL/调试触发器",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6168",
+          "label_snapshot": "type: bug/reported, module: unknown"
+        },
+        {
+          "kind": "最终全评论复核",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6168#issuecomment-4913753242",
+          "summary": "维护者确认known issue，计划后续修复",
+          "quote": "This is a known issue. We are evaluating the specific matters for subsequent fixes. Thank you for your point.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "调试触发器/静态实现证据",
+        "status": "静态RTL代码分析；原帖明确PoC仍在调试，尚未提供可执行PoC",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6168",
+        "code_completeness": "不以日志或静态RTL条件冒充独立汇编程序",
+        "raw_original_code_blocks": [
+          "when(!entry.fof || vstart === 0.U){\n  entry.vstart       := vstart\n  entry.exceptionVec := selExceptionVec\n  entry.uop.trigger  := selPort.trigger   // trigger only saved here\n  entry.vaddr        := vaddr\n  ...\n}.otherwise{\n  entry.vl           := Mux(entry.vl < vstart, entry.vl, vstart)  // trigger lost\n}\n"
+        ]
+      },
+      "confirmation_detail": "维护者确认known issue，计划后续修复"
+    },
+    {
+      "number": 6262,
+      "title": "XS bug-report — vlseg to unmapped page deadlocks (VSegmentUnit)",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6262",
+      "author": "wndmll643",
+      "created_at": "2026-07-21T07:25:03Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6262",
+          "label_snapshot": "module: vector, type: bug/WIP feature"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6262",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6289,
+      "title": "AMO deadlocks after `vse32.v` store access fault",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6289",
+      "author": "lhb-sec",
+      "created_at": "2026-07-27T12:56:30Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6289",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6289",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6292,
+      "title": "vstart set to wrong element on a page-faulting vector load (for debugging assistance)",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6292",
+      "author": "wndmll643",
+      "created_at": "2026-07-28T01:59:03Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6292",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6292",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6293,
+      "title": "`vle64ff.v` misses Load Access Fault on misaligned access to I/O PMA region",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6293",
+      "author": "lhb-sec",
+      "created_at": "2026-07-28T03:37:33Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6293",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6293",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6295,
+      "title": "`vle32ff.v` corrupts destination vector register on Load Access Fault",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6295",
+      "author": "lhb-sec",
+      "created_at": "2026-07-28T07:48:59Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6295",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6295",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6296,
+      "title": "Vector store reports wrong `mcause` in M-mode",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6296",
+      "author": "lhb-sec",
+      "created_at": "2026-07-28T08:18:53Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6296",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6296",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6298,
+      "title": "XiangShan misses illegal-instruction trap for out-of-range vstart",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6298",
+      "author": "lhb-sec",
+      "created_at": "2026-07-28T09:19:08Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "未实现功能/维护者否认",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6298",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "最终全评论复核",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6298#issuecomment-5542251829",
+          "summary": "维护者明确unimplemented feature, not a bug",
+          "quote": "I must claim that this issue just report a unimplemented feature, not a bug.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "维护者明确unimplemented feature, not a bug"
+    },
+    {
+      "number": 6302,
+      "title": "XiangShan does not trap on vector instruction with reserved vsew encoding",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6302",
+      "author": "lhb-sec",
+      "created_at": "2026-07-28T13:28:51Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6302",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6302",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6399,
+      "title": "`mtval` mismatch on scalar store access fault after a vector store access fault",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6399",
+      "author": "lhb-sec",
+      "created_at": "2026-08-21T09:01:58Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend",
+        "module: memory",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6399",
+          "label_snapshot": "type: bug/confirmed, module: backend, module: memory, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6399",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "异常链/故障地址",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "vsetivli x0, 4, e32, m1, ta, ma\nvsse32.v v11, (t4), s1\nli a5, 0x0000020000000000\nli t2, 0x917af882bf50788e\nsrl t6, t2, a5\nsb sp, -1918(t6)",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6399",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/6399。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "向量 store 与后续标量 store 依次触发 access fault。\n原程序通过 handler 恢复执行，检查第二次 mtval 为本次地址，不能残留第一次地址。"
+      }
+    },
+    {
+      "number": 6407,
+      "title": "Vector load doesn't trigger illegal instruction trap when VSEW is invalid",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6407",
+      "author": "kds1123001",
+      "created_at": "2026-08-24T14:28:38Z",
+      "closed_at": "2026-09-06T03:33:06Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: vector",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6407",
+          "label_snapshot": "type: bug/invalid, module: vector, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6407",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6410,
+      "title": "vmove-class instructions (vmv.v.*, vmerge.*) with misaligned register groups don't raise illegal instruction (test-matrix confirmed, extends #5772)",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6410",
+      "author": "msuadOf",
+      "created_at": "2026-08-24T17:10:47Z",
+      "closed_at": "2026-09-04T15:51:04Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/invalid",
+        "module: backend",
+        "module: vector",
+        "type: bug/WIP feature"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "预期/无效/重复",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6410",
+          "label_snapshot": "type: bug/invalid, module: backend, module: vector, type: bug/WIP feature"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6410",
+          "summary": "标签为 invalid、已答复问题或 duplicate；关闭本身不构成确认。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6467,
+      "title": "StoreQueue `deqPtr > rdataPtr` assertion fails at the physical-queue wrap boundary under vector stores",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6467",
+      "author": "wndmll643",
+      "created_at": "2026-09-02T07:07:14Z",
+      "closed_at": "2026-09-08T07:47:50Z",
+      "state": "closed",
+      "labels": [
+        "type: bug/reported",
+        "module: memory",
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6467",
+          "label_snapshot": "type: bug/reported, module: memory, module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6467#issuecomment-5522852062",
+          "summary": "weidingliu：indeed a bug of deqPtr update；We fixed it in #6474",
+          "quote": "1. That's indeed a bug of `deqPtr` update, and it's the first time to be observed.\n2. The asymmetric `dataQueue.io.empty` gate between the `deqPtr` (:1272) and `rdataPtr` (:1302) inactive skips is intentional. We fixed it in #6474",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "流水队列/压力序列",
+        "status": "公开附件含ELF、源代码/反汇编及波形；正文给出故障指令与前置压力条件",
+        "code": "vse16.v v10, (t1)",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6467",
+        "code_completeness": "正文原始故障指令节选；t1=0x80060050，完整压力前序见附件，不是独立可运行PoC",
+        "attachment_url": "https://github.com/user-attachments/files/31725941/xs_v3_storequeue_deqptr_rdataptr_wrap_attachments.tar.gz"
+      },
+      "confirmation_detail": "维护者明确确认，已有修复证据",
+      "repair_evidence": {
+        "pr": 6474,
+        "status": "维护者给出修复证据；不以Issue Open状态否定修复，不在此声称PR已合并"
+      }
+    },
+    {
+      "number": 6475,
+      "title": "Legal segmented store `vsseg3e32.v` triggers `robEntries uopNum is overflow!` (ROB uop-count underflow) — deterministic assertion abort on kunminghu-v3",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6475",
+      "author": "wndmll643",
+      "created_at": "2026-09-03T08:52:44Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/reported",
+        "module: backend",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6475",
+          "label_snapshot": "type: bug/reported, module: backend, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6475",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6482,
+      "title": "Stale mtval after consecutive same-direction RVV memory access faults",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6482",
+      "author": "lhb-sec",
+      "created_at": "2026-09-04T01:59:52Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: unknown",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6482",
+          "label_snapshot": "type: bug/confirmed, module: unknown, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6482",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "异常链/故障地址",
+        "status": "正文含目标指令列表；附件静态核实为98个ELF，未附汇编源码",
+        "code": "vle8.v   vlse8.v   vluxei8.v   vloxei8.v   vle8ff.v   vl1re8.v   vlm.v",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6482",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容",
+        "attachment_verified": {
+          "local_cache": "/tmp/vext-ppt-research-20260917/attachments/6482.zip",
+          "file_count": 98,
+          "elf_count": 98,
+          "source_files": [],
+          "verification": "只静态读取ZIP清单/源码，未执行ELF"
+        }
+      }
+    },
+    {
+      "number": 6486,
+      "title": "Legal segmented store `vsseg2e16.v` silently commits wrong store data (0 instead of the source value) — vector store-data unit emits 0 for a field on kunminghu-v3",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6486",
+      "author": "wndmll643",
+      "created_at": "2026-09-04T08:09:31Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: vector",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6486",
+          "label_snapshot": "module: vector, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6486",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6536,
+      "title": "`vmadc.vi` zeroes mask-destination tail bits",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6536",
+      "author": "lhb-sec",
+      "created_at": "2026-09-09T13:38:01Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: backend",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6536",
+          "label_snapshot": "module: backend, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6536",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6540,
+      "title": "`stval` mismatch on a scalar store **page** fault after a vector store **page** fault (S-mode) — kunminghu-v2",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6540",
+      "author": "wndmll643",
+      "created_at": "2026-09-10T04:41:40Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: memory",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6540",
+          "label_snapshot": "type: bug/confirmed, module: memory, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6540",
+          "summary": "GitHub `type: bug/confirmed` 标签；无 tool 标签，按 XiangShan 已确认 RTL/实现问题记录。"
+        }
+      ],
+      "poc": {
+        "category": "异常链/故障地址",
+        "status": "公开正文/评论含代码或日志",
+        "code": "80002688: ... (setup)\n800026d8: vse32.v  v26,(t1)     ; t1 = 0x10020 (VA of symbol d_0_0) -> STORE page-faults here\n...\n800026f4: addi     t3,t3,2      ; t3 = 0x60112\n800026f6: fsd      fs10,-24(t3) ; scalar STORE, target = t3-24 = 0x600fa -> STORE page-faults here",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6540",
+        "code_completeness": "保真 8–14 行节选；未补写缺失初始化/附件内容"
+      }
+    },
+    {
+      "number": 6543,
+      "title": "`vdiv.vx` with a zero divisor deadlocks the core",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6543",
+      "author": "lhb-sec",
+      "created_at": "2026-09-10T07:27:37Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: backend",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6543",
+          "label_snapshot": "module: backend, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6543",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6544,
+      "title": "`vcpop.m` is incorrectly reported as an illegal instruction when `LMUL=8` and `vs2` is not group-aligned",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6544",
+      "author": "lhb-sec",
+      "created_at": "2026-09-10T07:56:44Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: backend",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6544",
+          "label_snapshot": "module: backend, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6544",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6545,
+      "title": "`vsrl.vv` with `v0.t` mask hangs and never writes back the destination register",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6545",
+      "author": "lhb-sec",
+      "created_at": "2026-09-10T08:04:24Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: backend",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "reported",
+      "bug_scope": "未明",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6545",
+          "label_snapshot": "module: backend, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6545",
+          "summary": "无 confirmed/fixed 标签且缓存评论没有明确维护者确认；WIP/reported/closed 均不作确认依据。"
+        }
+      ],
+      "poc": null
+    },
+    {
+      "number": 6555,
+      "title": "`vssubu.vx` (vector fixed-point unsigned saturating subtract) does not set `vxsat` when it saturates — kunminghu-v3",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6555",
+      "author": "wndmll643",
+      "created_at": "2026-09-11T04:19:44Z",
+      "closed_at": "2026-09-12T01:54:49Z",
+      "state": "closed",
+      "labels": [
+        "module: backend",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "not_confirmed",
+      "bug_scope": "报告者撤回/实现定义",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6555",
+          "label_snapshot": "module: backend, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "最终评论核验",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6555#issuecomment-5642683809",
+          "summary": "报告者：implementation-defined behavior, not a bug，关闭Issue",
+          "quote": "Thanks for your reply. While re-analyzing some other bug, I found out that this is an implementation-defined behavior, not a bug. Closing the issue.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": null,
+      "confirmation_detail": "报告者自行撤回，非维护者确认"
+    },
+    {
+      "number": 6561,
+      "title": "Incorrect `mstatus.VS` Dirty update for `vl=0` vector memory instructions",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6561",
+      "author": "lhb-sec",
+      "created_at": "2026-09-11T12:31:16Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "type: bug/confirmed",
+        "module: backend",
+        "version: kunminghu-v2"
+      ],
+      "confirmation": "confirmed",
+      "bug_scope": "RTL",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6561",
+          "label_snapshot": "type: bug/confirmed, module: backend, version: kunminghu-v2"
+        },
+        {
+          "kind": "判定",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6561#issuecomment-5661448507",
+          "summary": "confirmed 标签；维护者说明已在 PR #6570 修复，报告者回测通过。",
+          "quote": "If the value of the `vstart` register is 0, a `vector store` instruction will not alter the vector state and therefore will not generate a `DirtyVS`; if the value of the `vstart` register is not 0, all successfully executed vector instructions will reset `vstart` to `0` upon completion, thereby altering the vector state and generating a `DirtyVS`.\nI have fixed this in this PR. [https://github.com/OpenXiangShan/XiangShan/pull/6570](https://github.com/OpenXiangShan/XiangShan/pull/6570)\nI successfully ran the test cases locally.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "配置 CSR",
+        "status": "已核对原帖目标触发代码节选",
+        "code": "main:\n  csrwi vcsr, 4\n  csrwi vstart, 0\n  vsetivli zero, 0, e64, m1, tu, ma\n\n  fmv.x.d s7, fa0\n  csrrw t2, sstatus, s7\n  vsseg4e32.v v13, (t6), v0.t",
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6561",
+        "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/6561。展示原始代码节选，不是独立可运行的完整测试。",
+        "expected": "初值 fa0=0xffffffffbf361d42，使 VS=Clean。\n本例 vstart=0、vl=0，观察 VS 是否错误变 Dirty，不能忽略 vstart 条件。"
+      },
+      "repair_evidence": {
+        "pr": 6570,
+        "status": "维护者给出修复证据；不以Issue Open状态否定修复，不在此声称PR已合并"
+      }
+    },
+    {
+      "number": 6576,
+      "title": "`mtval` is not written on a load access fault taken by a vector strided load (`vlse32.v`) — kunminghu-v3",
+      "url": "https://github.com/OpenXiangShan/XiangShan/issues/6576",
+      "author": "wndmll643",
+      "created_at": "2026-09-16T04:06:54Z",
+      "closed_at": null,
+      "state": "open",
+      "labels": [
+        "module: memory",
+        "type: bug/WIP feature",
+        "version: kunminghu-v3"
+      ],
+      "confirmation": "partial",
+      "bug_scope": "RTL/分支相关修复线索",
+      "evidence": [
+        {
+          "kind": "标签",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6576",
+          "label_snapshot": "module: memory, type: bug/WIP feature, version: kunminghu-v3"
+        },
+        {
+          "kind": "最终全评论复核",
+          "url": "https://github.com/OpenXiangShan/XiangShan/issues/6576#issuecomment-5692218398",
+          "summary": "维护者认为v2由PR6548修复，v3计划移植；分支相关线索单列，不视为当前v3已完整确认/修复",
+          "quote": "I think this issue has been fixed in `kunminghu-v2`. See PR https://github.com/OpenXiangShan/XiangShan/pull/6548.\nVector support for `kunminghu-v3` is still under development, and we'll apply the corresponding fixes to v3 in the future.",
+          "quote_language": "original",
+          "quote_note": "原评论逐行摘录；多行以换行连接，可能省略其他行"
+        }
+      ],
+      "poc": {
+        "category": "访存异常/分支相关修复线索",
+        "status": "原帖代码/静态片段，类别按实际证据单列",
+        "code": null,
+        "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6576",
+        "code_completeness": "不以日志或静态RTL条件冒充独立汇编程序",
+        "raw_original_code_blocks": [
+          "[31] exception pc 000000008000016c inst 0bd96187 cause 0000000000000005 <--\n  mtval different at pc = ..., right = 0x0000000080002000, wrong = 0xffffffffffffffff\n",
+          "        li      t0, MSTATUS_VS\n        csrs    mstatus, t0             # enable the vector unit\n        li      t0, -1\n        csrw    pmpaddr0, t0            # pmp0: NAPOT over the whole address space,\n        li      t0, 0x1c\n        csrw    pmpcfg0, t0             #   X only -> in U-mode fetch is allowed, loads/stores fault\n        la      s2, target\n        li      t4, 4\n        li      t0, MSTATUS_MPP\n        csrc    mstatus, t0             # MPP = U\n        la      t0, umode\n        csrw    mepc, t0\n        mret\numode:\n        vsetivli t0, 4, e32, m1, tu, mu\n        vlse32.v v3, (s2), t4           # load access fault (5); mtval must be s2\n        ...                             # mtvec_handler records mcause/mtval, re-opens PMP, mepc += 4, mret\n        bne     s6, s2, fail            # s6 = recorded mtval  <-- XiangShan takes this branch\n        RVTEST_PASS\n",
+          "riscv64-unknown-elf-gcc -march=rv64gcv -mabi=lp64 -static -mcmodel=medany -nostdlib -nostartfiles \\\n    -I env -I env/p -T env/link.ld mtval_vlse_u.S -o mtval_vlse_u.elf\n./build/emu -i mtval_vlse_u.elf --diff ./ready-to-run/riscv64-nemu-interpreter-so -C 20000\n"
+        ]
+      },
+      "confirmation_detail": "维护者认为v2由PR6548修复，v3计划移植；分支相关线索单列，不视为当前v3已完整确认/修复"
+    }
+  ],
+  "summary": {
+    "total": 89,
+    "authors": {
+      "camel-cdr": {
+        "count": 4,
+        "first": "2024-04-16T22:16:50Z",
+        "last": "2025-01-16T21:56:29Z",
+        "open": 0,
+        "closed": 4
+      },
+      "cyyself": {
+        "count": 1,
+        "first": "2024-05-27T10:14:49Z",
+        "last": "2024-05-27T10:14:49Z",
+        "open": 0,
+        "closed": 1
+      },
+      "H-Y-B": {
+        "count": 1,
+        "first": "2024-11-29T08:11:59Z",
+        "last": "2024-11-29T08:11:59Z",
+        "open": 0,
+        "closed": 1
+      },
+      "jlong299": {
+        "count": 1,
+        "first": "2024-12-10T08:49:40Z",
+        "last": "2024-12-10T08:49:40Z",
+        "open": 0,
+        "closed": 1
+      },
+      "WaltJr-OH": {
+        "count": 1,
+        "first": "2025-03-06T06:28:58Z",
+        "last": "2025-03-06T06:28:58Z",
+        "open": 0,
+        "closed": 1
+      },
+      "youzi27": {
+        "count": 8,
+        "first": "2025-11-29T08:23:48Z",
+        "last": "2026-05-11T09:22:11Z",
+        "open": 5,
+        "closed": 3
+      },
+      "cesarus777": {
+        "count": 3,
+        "first": "2025-12-24T14:35:42Z",
+        "last": "2025-12-24T15:05:14Z",
+        "open": 0,
+        "closed": 3
+      },
+      "I3eg1nner": {
+        "count": 1,
+        "first": "2025-12-26T16:11:48Z",
+        "last": "2025-12-26T16:11:48Z",
+        "open": 0,
+        "closed": 1
+      },
+      "biquanha": {
+        "count": 1,
+        "first": "2026-03-19T07:17:11Z",
+        "last": "2026-03-19T07:17:11Z",
+        "open": 0,
+        "closed": 1
+      },
+      "KnightGOKU": {
+        "count": 14,
+        "first": "2026-03-25T13:45:42Z",
+        "last": "2026-05-10T11:51:10Z",
+        "open": 10,
+        "closed": 4
+      },
+      "Hoshi44": {
+        "count": 1,
+        "first": "2026-04-05T13:49:12Z",
+        "last": "2026-04-05T13:49:12Z",
+        "open": 1,
+        "closed": 0
+      },
+      "zhangkanqi": {
+        "count": 5,
+        "first": "2026-04-06T09:22:12Z",
+        "last": "2026-04-08T14:35:39Z",
+        "open": 3,
+        "closed": 2
+      },
+      "jimmymtest": {
+        "count": 6,
+        "first": "2026-04-20T05:47:00Z",
+        "last": "2026-04-22T15:10:10Z",
+        "open": 6,
+        "closed": 0
+      },
+      "0x1B05": {
+        "count": 1,
+        "first": "2026-05-14T03:53:56Z",
+        "last": "2026-05-14T03:53:56Z",
+        "open": 1,
+        "closed": 0
+      },
+      "lhb-sec": {
+        "count": 20,
+        "first": "2026-05-25T07:15:08Z",
+        "last": "2026-09-11T12:31:16Z",
+        "open": 19,
+        "closed": 1
+      },
+      "nyh1": {
+        "count": 3,
+        "first": "2026-05-28T03:00:36Z",
+        "last": "2026-05-28T06:58:43Z",
+        "open": 0,
+        "closed": 3
+      },
+      "LeeHaofeng": {
+        "count": 5,
+        "first": "2026-06-07T09:16:26Z",
+        "last": "2026-06-13T05:05:44Z",
+        "open": 3,
+        "closed": 2
+      },
+      "maplejty814": {
+        "count": 2,
+        "first": "2026-06-26T12:25:25Z",
+        "last": "2026-06-29T08:26:31Z",
+        "open": 2,
+        "closed": 0
+      },
+      "Security-HC": {
+        "count": 1,
+        "first": "2026-06-26T12:41:05Z",
+        "last": "2026-06-26T12:41:05Z",
+        "open": 1,
+        "closed": 0
+      },
+      "wndmll643": {
+        "count": 8,
+        "first": "2026-07-21T07:25:03Z",
+        "last": "2026-09-16T04:06:54Z",
+        "open": 6,
+        "closed": 2
+      },
+      "kds1123001": {
+        "count": 1,
+        "first": "2026-08-24T14:28:38Z",
+        "last": "2026-08-24T14:28:38Z",
+        "open": 0,
+        "closed": 1
+      },
+      "msuadOf": {
+        "count": 1,
+        "first": "2026-08-24T17:10:47Z",
+        "last": "2026-08-24T17:10:47Z",
+        "open": 0,
+        "closed": 1
+      }
+    },
+    "date_range": {
+      "first": "2024-04-16T22:16:50Z",
+      "last": "2026-09-16T04:06:54Z"
+    },
+    "monthly_counts": {
+      "2024-04": 1,
+      "2024-05": 1,
+      "2024-07": 1,
+      "2024-09": 1,
+      "2024-11": 1,
+      "2024-12": 1,
+      "2025-01": 1,
+      "2025-03": 1,
+      "2025-11": 1,
+      "2025-12": 5,
+      "2026-03": 3,
+      "2026-04": 18,
+      "2026-05": 21,
+      "2026-06": 10,
+      "2026-07": 8,
+      "2026-08": 3,
+      "2026-09": 12
+    },
+    "state_counts": {
+      "closed": 32,
+      "open": 57
+    },
+    "confirmation_counts": {
+      "partial": 2,
+      "not_confirmed": 27,
+      "confirmed": 28,
+      "fixed": 4,
+      "reported": 28
+    },
+    "scope_counts": {
+      "历史混合/部分确认": 1,
+      "工具/历史修复记录": 1,
+      "预期/无效/重复": 19,
+      "性能/假依赖": 1,
+      "工具/差分测试": 1,
+      "工具/重复映射": 1,
+      "工具/参考模型": 1,
+      "预期/行为对齐": 1,
+      "RTL": 26,
+      "未明": 28,
+      "报告者重复/未独立确认": 2,
+      "RTL（重复根因）": 1,
+      "预期/维护者否认": 1,
+      "预期/格式问题": 1,
+      "RTL/调试触发器": 1,
+      "未实现功能/维护者否认": 1,
+      "报告者撤回/实现定义": 1,
+      "RTL/分支相关修复线索": 1
+    },
+    "confirmed_total": 32,
+    "confirmed_rtl": 28,
+    "confirmed_tool": 2,
+    "confirmed_expected": 1,
+    "confirmed_performance": 1,
+    "partially_confirmed": 2
+  },
+  "poc_categories": [
+    {
+      "id": "工具/差分提交比较",
+      "name": "工具/差分提交比较",
+      "issue_numbers": [
+        5279
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5279",
+      "code_completeness": "仅实现条件、日志、附件或重复映射；不把它们冒充可执行PoC",
+      "mutations": "保留原始 commit trace/附件，比较器按 RVV store 的 byte-enable 与提交粒度建立规范，不把差分器问题归 RTL。",
+      "examples": []
+    },
+    {
+      "id": "工具/参考模型",
+      "name": "工具/参考模型",
+      "issue_numbers": [
+        5426
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5426",
+      "code_completeness": "仅实现条件、日志、附件或重复映射；不把它们冒充可执行PoC",
+      "mutations": "对 rounding mode（尤其 RDN）做 reference A/B 与 RTL 独立执行对照，升级参考模型后回归。",
+      "examples": []
+    },
+    {
+      "id": "预期/行为对齐",
+      "name": "预期/行为对齐",
+      "issue_numbers": [
+        5725
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5725",
+      "code_completeness": "仅实现条件、日志、附件或重复映射；不把它们冒充可执行PoC",
+      "mutations": "根据触发指令、初值、期望与观察点做受约束变异。",
+      "examples": []
+    },
+    {
+      "id": "配置 CSR",
+      "name": "配置 CSR",
+      "issue_numbers": [
+        5739,
+        6561
+      ],
+      "representative_code": "li t6, 0x600\ncsrs mstatus, t6\nli a0, 16\nvsetvli t1, a0, e8, m1, ta, ma\ncsrr t2, vl",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5739",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5739。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "生成 `vsetvli/vsetivli -> csrr vl` 与 `VS=Clean + vl=0 memory-op` 两指令序列，检查 CSR 可见性与 Dirty 位。",
+      "examples": [
+        {
+          "title": "PoC：配置后立即读取 vl",
+          "subtitle": "配置与 CSR 组，原帖 #5739 的最小程序",
+          "code": "li t6, 0x600\ncsrs mstatus, t6\nli a0, 16\nvsetvli t1, a0, e8, m1, ta, ma\ncsrr t2, vl",
+          "explanation": "预期 t1=t2=16，原始故障为 t2=0。\n维护者定位 VL bypass 错误并给出修复 PR #5743。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5739",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5739。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5739,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5739"
+        },
+        {
+          "title": "PoC：vl=0 时的 VS 状态副作用",
+          "subtitle": "配置与 CSR 组，原帖 #6561 的 failing seed",
+          "code": "main:\n  csrwi vcsr, 4\n  csrwi vstart, 0\n  vsetivli zero, 0, e64, m1, tu, ma\n\n  fmv.x.d s7, fa0\n  csrrw t2, sstatus, s7\n  vsseg4e32.v v13, (t6), v0.t",
+          "explanation": "初值 fa0=0xffffffffbf361d42，使 VS=Clean。\n本例 vstart=0、vl=0，观察 VS 是否错误变 Dirty，不能忽略 vstart 条件。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/6561",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/6561。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 6561,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6561"
+        }
+      ]
+    },
+    {
+      "id": "mask-tail",
+      "name": "mask-tail",
+      "issue_numbers": [
+        5765
+      ],
+      "representative_code": "li a0, 16\nvsetvli t0, a0, e8, m1, tu, mu\nvmv.v.i v0, 0\n\nli a0, 10\nvsetvli t0, a0, e8, m1, tu, mu\nla a1, mask_data\nvlm.v v0, (a1)\nla a2, out_data\nvsm.v v0, (a2)",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5765",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5765。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "交叉 vl、tu/ta、mu/ma，先写 v0 全寄存器哨兵，再 vlm/vsm 比较全部尾位。",
+      "examples": [
+        {
+          "title": "PoC：mask load 后完整读回",
+          "subtitle": "mask / tail 组，原帖 #5765 节选",
+          "code": "li a0, 16\nvsetvli t0, a0, e8, m1, tu, mu\nvmv.v.i v0, 0\n\nli a0, 10\nvsetvli t0, a0, e8, m1, tu, mu\nla a1, mask_data\nvlm.v v0, (a1)\nla a2, out_data\nvsm.v v0, (a2)",
+          "explanation": "mask_data 与 expected_data 均为 .byte 0x80, 0x03。\n原程序逐字节比较读回数据，省略初始化、比较循环和 trap handler。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5765",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5765。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5765,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5765"
+        }
+      ]
+    },
+    {
+      "id": "FOF",
+      "name": "FOF",
+      "issue_numbers": [
+        5766,
+        5767,
+        5930,
+        5931
+      ],
+      "representative_code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v8, 0\n\nla a1, deny_start\naddi a1, a1, -7\n\nvle8ff.v v8, (a1)\ncsrr t4, vl\nla t0, observed_vl\nsw t4, 0(t0)",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5766",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5766。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "以 PMP/PMA 边界控制首元素与后续元素 fault，检查 vl、vstart、目的寄存器及不发生内部 assertion。",
+      "examples": [
+        {
+          "title": "PoC：FOF 后立即读取缩短的 vl",
+          "subtitle": "FOF 组，原帖 #5766 的 payload 节选",
+          "code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v8, 0\n\nla a1, deny_start\naddi a1, a1, -7\n\nvle8ff.v v8, (a1)\ncsrr t4, vl\nla t0, observed_vl\nsw t4, 0(t0)",
+          "explanation": "原程序用 PMP 将 deny_start 至 deny_end 设为不可访问。\n前 7 字节可访问，第 8 字节 fault：期望读取 vl=7，原报告得到 0。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5766",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5766。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5766,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5766"
+        },
+        {
+          "title": "PoC：FOF segment 的后元素 fault",
+          "subtitle": "FOF 组，原帖 #5767 的 payload 节选",
+          "code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v16, 0\nvmv.v.i v17, 0\n\nla a2, deny_start\naddi a2, a2, -12\n\nvlseg2e8ff.v v16, (a2)\ncsrr t4, vl",
+          "explanation": "同样使用 PMP deny 区，nf=2，每元素占 2 字节，故障落在后续元素。\n原报告触发内部 critical error，期望按 FOF 语义处理。省略 PMP 初始化和 handler。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5767",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5767。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5767,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5767"
+        }
+      ]
+    },
+    {
+      "id": "非法编码/源码条件",
+      "name": "非法编码/源码条件",
+      "issue_numbers": [
+        5768
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5768",
+      "code_completeness": "仅实现条件、日志、附件或重复映射；不把它们冒充可执行PoC",
+      "mutations": "根据触发指令、初值、期望与观察点做受约束变异。",
+      "examples": []
+    },
+    {
+      "id": "非法编码",
+      "name": "非法编码",
+      "issue_numbers": [
+        5772,
+        5809,
+        5865
+      ],
+      "representative_code": "vsetvli x21, x21, 992\ncsrr x23, vl\ncsrr x22, vtype\nvmv.x.s x21, v16",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5809",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5809。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "按编码字段构造 vill、reserved frm、vd=v0 mask、寄存器组未对齐；trap handler 检查 mcause=2。",
+      "examples": [
+        {
+          "title": "PoC：非法 vtype 后执行向量指令",
+          "subtitle": "非法编码 / 上下文组，原帖 #5809 的关键序列",
+          "code": "vsetvli x21, x21, 992\ncsrr x23, vl\ncsrr x22, vtype\nvmv.x.s x21, v16",
+          "explanation": "原日志：vl=0，vtype=0x8000000000000000（vill=1）。\n预期 mcause=2、mtval=0x43002ad7。原故障却提交了 x21 写回。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5809",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5809。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5809,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5809"
+        }
+      ]
+    },
+    {
+      "id": "数据/标量扩展",
+      "name": "数据/标量扩展",
+      "issue_numbers": [
+        5829,
+        5830,
+        5840,
+        5928
+      ],
+      "representative_code": "vsetivli x0, 2, e64, m1, ta, ma\nvmv.v.i  v9, 0\n\nvsetivli x0, 1, e32, m1, tu, mu\nla       x10, data_word\nvle32.v  v9, (x10)\nvmv.x.s  x15, v9\n\nli       x16, 0xffffffffe01d7b92\nli       gp, 1\nbeq      x15, x16, exit\nli       gp, 2",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5829",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5829。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "枚举 SEW=8/16/32 与符号位、NaN-box、高半 lane 哨兵；在目标指令后读回标量/浮点/向量结果。",
+      "examples": [
+        {
+          "title": "PoC：窄整数移到标量后的符号扩展",
+          "subtitle": "数据扩展组，原帖 #5829 的 user_code 节选",
+          "code": "vsetivli x0, 2, e64, m1, ta, ma\nvmv.v.i  v9, 0\n\nvsetivli x0, 1, e32, m1, tu, mu\nla       x10, data_word\nvle32.v  v9, (x10)\nvmv.x.s  x15, v9\n\nli       x16, 0xffffffffe01d7b92\nli       gp, 1\nbeq      x15, x16, exit\nli       gp, 2",
+          "explanation": "data_word 的值为 0xe01d7b92，预期 x15 为其 XLEN 符号扩展。\n省略 VS/FS 初始化、trap handler、退出和数据段，其余扩展类按完整目标结果比较。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5829",
+          "size": 23,
+          "explanationY": 560,
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5829。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5829,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5829"
+        }
+      ]
+    },
+    {
+      "id": "合法内存",
+      "name": "合法内存",
+      "issue_numbers": [
+        5831,
+        5832,
+        5932,
+        5933,
+        5934
+      ],
+      "representative_code": "li      x9, 0x8fffffb8\nli      x10, 0x3803444b2551a2ae\nsd      x10, 16(x9)\nli      x10, 0x1000\nsd      x10, 24(x9)\n\n# ... original intervening instructions omitted ...\n\nli      x8, 0x8fffffcd\nvlsseg3e64.v v18, (x8), x19",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5933",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/5933。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "变异 EEW/SEW/LMUL、stride=0、indexed、segment nf、mask 与每 lane 唯一哨兵，核对 active lane/存储数据。",
+      "examples": [
+        {
+          "title": "PoC：零 stride 的 segment load",
+          "subtitle": "合法访存数据组，原帖 #5933 的触发指令节选",
+          "code": "li      x9, 0x8fffffb8\nli      x10, 0x3803444b2551a2ae\nsd      x10, 16(x9)\nli      x10, 0x1000\nsd      x10, 24(x9)\n\n# ... original intervening instructions omitted ...\n\nli      x8, 0x8fffffcd\nvlsseg3e64.v v18, (x8), x19",
+          "explanation": "原始触发状态：SEW=64、LMUL=1、x19=0，base 未对齐。\n节选保留关键内存写入与目标指令，其余前置代码见原帖，逐 field 比较 active 数据。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5933",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5933。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 5933,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5933"
+        }
+      ]
+    },
+    {
+      "id": "异常链/故障地址",
+      "name": "异常链/故障地址",
+      "issue_numbers": [
+        5943,
+        6399,
+        6482,
+        6540
+      ],
+      "representative_code": "vsetivli x0, 4, e32, m1, ta, ma\nvsse32.v v11, (t4), s1\nli a5, 0x0000020000000000\nli t2, 0x917af882bf50788e\nsrl t6, t2, a5\nsb sp, -1918(t6)",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6399",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/6399。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "生成 vector fault -> mret 跳过 -> 同方向 vector/scalar fault；分别断言 mtval/stval 为第二个有效地址。",
+      "examples": [
+        {
+          "title": "PoC：向量异常后的标量异常",
+          "subtitle": "连续异常 / fault 地址组，原帖 #6399 的关键序列",
+          "code": "vsetivli x0, 4, e32, m1, ta, ma\nvsse32.v v11, (t4), s1\nli a5, 0x0000020000000000\nli t2, 0x917af882bf50788e\nsrl t6, t2, a5\nsb sp, -1918(t6)",
+          "explanation": "向量 store 与后续标量 store 依次触发 access fault。\n原程序通过 handler 恢复执行，检查第二次 mtval 为本次地址，不能残留第一次地址。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/6399",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/6399。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 6399,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6399"
+        }
+      ]
+    },
+    {
+      "id": "访存活性",
+      "name": "访存活性",
+      "issue_numbers": [
+        6015,
+        6022
+      ],
+      "representative_code": "80001234:  fcvt.d.l    fa7, a7\n80001238:  sha256sum0  s7, a7\n8000123c:  aes64ds     sp, s6, s7\n80001240:  vluxei32.v  v25, (a1), v17\n80001244:  aes64ks2    s4, s4, a4",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6015",
+      "code_completeness": "原帖：github.com/OpenXiangShan/XiangShan/issues/6015。展示原始代码节选，不是独立可运行的完整测试。",
+      "mutations": "对未映射/PMP deny 的 indexed/strided 地址施压；以 commit progress 和周期上限作 oracle。",
+      "examples": [
+        {
+          "title": "PoC：未映射地址上的 indexed load 挂死",
+          "subtitle": "访存活性组，原帖 #6015 的反汇编摘录",
+          "code": "80001234:  fcvt.d.l    fa7, a7\n80001238:  sha256sum0  s7, a7\n8000123c:  aes64ds     sp, s6, s7\n80001240:  vluxei32.v  v25, (a1), v17\n80001244:  aes64ks2    s4, s4, a4",
+          "explanation": "a1=0x4ff0b1eb，VL=4，SEW=32，LMUL=1，各索引地址落入未映射区域。\n观察异常与提交进度，原报告有 15000 周期无提交。附件提供 ELF，不是汇编源码。",
+          "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/6015",
+          "type": "code",
+          "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/6015。展示原始代码节选，不是独立可运行的完整测试。",
+          "issue_number": 6015,
+          "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6015"
+        }
+      ],
+      "duplicate_note": "#6022按维护者修复PR6020映射到#6015同根因，Issue条目计数保留"
+    },
+    {
+      "id": "流水队列/压力序列",
+      "name": "流水队列/压力序列",
+      "issue_numbers": [
+        6467
+      ],
+      "representative_code": "vse16.v v10, (t1)",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6467",
+      "code_completeness": "正文原始故障指令节选；t1=0x80060050，完整压力前序见附件，不是独立可运行PoC",
+      "examples": [],
+      "mutations": "按维护者建议以跨cache line大量store造成Sbuffer L1 miss eviction，再执行inactive向量store；变异队列wrap、mask和提交时序，观察deqPtr/rdataPtr不变量与store实际字节地址。"
+    },
+    {
+      "id": "调试触发器/静态实现证据",
+      "name": "调试触发器/静态实现证据",
+      "issue_numbers": [
+        6168
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6168",
+      "code_completeness": "不以日志或静态RTL条件冒充独立汇编程序",
+      "examples": [],
+      "mutations": "FOF后元素fault与watchpoint trigger组合，观察trigger命中、vl/vstart和异常优先级；需要独立debug oracle。"
+    },
+    {
+      "id": "性能/假依赖",
+      "name": "性能/假依赖",
+      "issue_numbers": [
+        4190
+      ],
+      "representative_code": "vsetvli t0, x0, e32, m2, ta, ma\n        li a0, LOOP\n        csrr a1, cycle\n1:\n.rept UNROLL\nvadd.vv v8,v16,v24\nvadd.vv v10,v18,v26\nvadd.vv v12,v20,v28\nvadd.vv v14,v22,v30\n.endr\n        addi a0, a0, -1\n        bnez a0, 1b\n        fence.i\n        csrr a0, cycle\n        sub a0, a0, a1",
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/4190",
+      "code_completeness": "UNROLL=8、LOOP=64，节选原始LMUL2测时循环，不含main/构建文件",
+      "examples": [],
+      "mutations": "保持相同工作量，改变LMUL和无用vd依赖链；测cycle/吞吐，不与功能差分失败混计。"
+    },
+    {
+      "id": "历史长程序/混合问题",
+      "name": "历史长程序/混合问题",
+      "issue_numbers": [
+        2890
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/2890",
+      "code_completeness": "不以日志或静态RTL条件冒充独立汇编程序",
+      "examples": [],
+      "mutations": "复现时固定分支、配置、nexus-am版本、VS状态与DRAMsim3；拆分长程序失效点后建立单根因回归。"
+    },
+    {
+      "id": "访存异常/分支相关修复线索",
+      "name": "访存异常/分支相关修复线索",
+      "issue_numbers": [
+        6576
+      ],
+      "representative_code": null,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6576",
+      "code_completeness": "不以日志或静态RTL条件冒充独立汇编程序",
+      "examples": [],
+      "mutations": "分别在v2/v3运行同一strided-load fault条件，检查mtval；记录修复PR与实际分支版本。"
+    }
+  ],
+  "presentation_examples": [
+    {
+      "title": "PoC：配置后立即读取 vl",
+      "subtitle": "配置与 CSR 组，原帖 #5739 的最小程序",
+      "code": "li t6, 0x600\ncsrs mstatus, t6\nli a0, 16\nvsetvli t1, a0, e8, m1, ta, ma\ncsrr t2, vl",
+      "explanation": "预期 t1=t2=16，原始故障为 t2=0。\n维护者定位 VL bypass 错误并给出修复 PR #5743。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5739",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5739。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5739,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5739"
+    },
+    {
+      "title": "PoC：vl=0 时的 VS 状态副作用",
+      "subtitle": "配置与 CSR 组，原帖 #6561 的 failing seed",
+      "code": "main:\n  csrwi vcsr, 4\n  csrwi vstart, 0\n  vsetivli zero, 0, e64, m1, tu, ma\n\n  fmv.x.d s7, fa0\n  csrrw t2, sstatus, s7\n  vsseg4e32.v v13, (t6), v0.t",
+      "explanation": "初值 fa0=0xffffffffbf361d42，使 VS=Clean。\n本例 vstart=0、vl=0，观察 VS 是否错误变 Dirty，不能忽略 vstart 条件。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/6561",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/6561。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 6561,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6561"
+    },
+    {
+      "title": "PoC：窄整数移到标量后的符号扩展",
+      "subtitle": "数据扩展组，原帖 #5829 的 user_code 节选",
+      "code": "vsetivli x0, 2, e64, m1, ta, ma\nvmv.v.i  v9, 0\n\nvsetivli x0, 1, e32, m1, tu, mu\nla       x10, data_word\nvle32.v  v9, (x10)\nvmv.x.s  x15, v9\n\nli       x16, 0xffffffffe01d7b92\nli       gp, 1\nbeq      x15, x16, exit\nli       gp, 2",
+      "explanation": "data_word 的值为 0xe01d7b92，预期 x15 为其 XLEN 符号扩展。\n省略 VS/FS 初始化、trap handler、退出和数据段，其余扩展类按完整目标结果比较。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5829",
+      "size": 23,
+      "explanationY": 560,
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5829。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5829,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5829"
+    },
+    {
+      "title": "PoC：mask load 后完整读回",
+      "subtitle": "mask / tail 组，原帖 #5765 节选",
+      "code": "li a0, 16\nvsetvli t0, a0, e8, m1, tu, mu\nvmv.v.i v0, 0\n\nli a0, 10\nvsetvli t0, a0, e8, m1, tu, mu\nla a1, mask_data\nvlm.v v0, (a1)\nla a2, out_data\nvsm.v v0, (a2)",
+      "explanation": "mask_data 与 expected_data 均为 .byte 0x80, 0x03。\n原程序逐字节比较读回数据，省略初始化、比较循环和 trap handler。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5765",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5765。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5765,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5765"
+    },
+    {
+      "title": "PoC：非法 vtype 后执行向量指令",
+      "subtitle": "非法编码 / 上下文组，原帖 #5809 的关键序列",
+      "code": "vsetvli x21, x21, 992\ncsrr x23, vl\ncsrr x22, vtype\nvmv.x.s x21, v16",
+      "explanation": "原日志：vl=0，vtype=0x8000000000000000（vill=1）。\n预期 mcause=2、mtval=0x43002ad7。原故障却提交了 x21 写回。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5809",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5809。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5809,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5809"
+    },
+    {
+      "title": "PoC：零 stride 的 segment load",
+      "subtitle": "合法访存数据组，原帖 #5933 的触发指令节选",
+      "code": "li      x9, 0x8fffffb8\nli      x10, 0x3803444b2551a2ae\nsd      x10, 16(x9)\nli      x10, 0x1000\nsd      x10, 24(x9)\n\n# ... original intervening instructions omitted ...\n\nli      x8, 0x8fffffcd\nvlsseg3e64.v v18, (x8), x19",
+      "explanation": "原始触发状态：SEW=64、LMUL=1、x19=0，base 未对齐。\n节选保留关键内存写入与目标指令，其余前置代码见原帖，逐 field 比较 active 数据。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5933",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5933。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5933,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5933"
+    },
+    {
+      "title": "PoC：FOF 后立即读取缩短的 vl",
+      "subtitle": "FOF 组，原帖 #5766 的 payload 节选",
+      "code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v8, 0\n\nla a1, deny_start\naddi a1, a1, -7\n\nvle8ff.v v8, (a1)\ncsrr t4, vl\nla t0, observed_vl\nsw t4, 0(t0)",
+      "explanation": "原程序用 PMP 将 deny_start 至 deny_end 设为不可访问。\n前 7 字节可访问，第 8 字节 fault：期望读取 vl=7，原报告得到 0。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5766",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5766。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5766,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5766"
+    },
+    {
+      "title": "PoC：FOF segment 的后元素 fault",
+      "subtitle": "FOF 组，原帖 #5767 的 payload 节选",
+      "code": "li a0, 8\nvsetvli t3, a0, e8, m1, tu, mu\nvmv.v.i v16, 0\nvmv.v.i v17, 0\n\nla a2, deny_start\naddi a2, a2, -12\n\nvlseg2e8ff.v v16, (a2)\ncsrr t4, vl",
+      "explanation": "同样使用 PMP deny 区，nf=2，每元素占 2 字节，故障落在后续元素。\n原报告触发内部 critical error，期望按 FOF 语义处理。省略 PMP 初始化和 handler。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/5767",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/5767。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 5767,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/5767"
+    },
+    {
+      "title": "PoC：向量异常后的标量异常",
+      "subtitle": "连续异常 / fault 地址组，原帖 #6399 的关键序列",
+      "code": "vsetivli x0, 4, e32, m1, ta, ma\nvsse32.v v11, (t4), s1\nli a5, 0x0000020000000000\nli t2, 0x917af882bf50788e\nsrl t6, t2, a5\nsb sp, -1918(t6)",
+      "explanation": "向量 store 与后续标量 store 依次触发 access fault。\n原程序通过 handler 恢复执行，检查第二次 mtval 为本次地址，不能残留第一次地址。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/6399",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/6399。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 6399,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6399"
+    },
+    {
+      "title": "PoC：未映射地址上的 indexed load 挂死",
+      "subtitle": "访存活性组，原帖 #6015 的反汇编摘录",
+      "code": "80001234:  fcvt.d.l    fa7, a7\n80001238:  sha256sum0  s7, a7\n8000123c:  aes64ds     sp, s6, s7\n80001240:  vluxei32.v  v25, (a1), v17\n80001244:  aes64ks2    s4, s4, a4",
+      "explanation": "a1=0x4ff0b1eb，VL=4，SEW=32，LMUL=1，各索引地址落入未映射区域。\n观察异常与提交进度，原报告有 15000 周期无提交。附件提供 ELF，不是汇编源码。",
+      "source": "原帖：github.com/OpenXiangShan/XiangShan/issues/6015",
+      "type": "code",
+      "notes": "原帖：github.com/OpenXiangShan/XiangShan/issues/6015。展示原始代码节选，不是独立可运行的完整测试。",
+      "issue_number": 6015,
+      "source_url": "https://github.com/OpenXiangShan/XiangShan/issues/6015"
+    }
+  ]
+}

@@ -1,0 +1,1055 @@
+{
+ "total": 44,
+ "bugs": [
+  {
+   "bug_id": "B-vaaddu.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vaaddu.vx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-984"
+   ],
+   "representative": {
+    "instruction": "vaaddu.vx v22, v13, x0",
+    "encoding": "32'h22d0_6b57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0001",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0006"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-984/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vslide1up.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vslide1up.vx",
+   "poc_count": 2,
+   "case_ids": [
+    "case-1072",
+    "case-1170"
+   ],
+   "representative": {
+    "instruction": "vslide1up.vx v0, v31, x0",
+    "encoding": "32'h3bf0_6057",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1072/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vslide1down.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vslide1down.vx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-1101"
+   ],
+   "representative": {
+    "instruction": "vslide1down.vx v5, v17, x31",
+    "encoding": "32'h3f1f_e2d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0001",
+     "vstart": "64'h0008_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0017"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1101/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnsrl.wi",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnsrl.wi",
+   "poc_count": 1,
+   "case_ids": [
+    "case-1219"
+   ],
+   "representative": {
+    "instruction": "vnsrl.wi v31, v30, 0xe, v0.t",
+    "encoding": "32'hb1e7_3fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_000e"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1219/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnclipu.wi",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnclipu.wi",
+   "poc_count": 1,
+   "case_ids": [
+    "case-1392"
+   ],
+   "representative": {
+    "instruction": "vnclipu.wi v31, v6, 0x1a",
+    "encoding": "32'hba6d_3fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1392/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnsrl.wv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnsrl.wv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-1606"
+   ],
+   "representative": {
+    "instruction": "vnsrl.wv v24, v0, v0, v0.t",
+    "encoding": "32'hb000_0c57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h2000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0012"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1606/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnsra.wx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnsra.wx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-1851"
+   ],
+   "representative": {
+    "instruction": "vnsra.wx v31, v31, x0, v0.t",
+    "encoding": "32'hb5f0_4fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0001",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0005"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1851/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnsrl.wx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnsrl.wx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-1912"
+   ],
+   "representative": {
+    "instruction": "vnsrl.wx v0, v0, x0",
+    "encoding": "32'hb200_4057",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0003",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_000f"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1912/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnclip.wx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnclip.wx",
+   "poc_count": 2,
+   "case_ids": [
+    "case-2065",
+    "case-2094"
+   ],
+   "representative": {
+    "instruction": "vnclip.wx v31, v31, x31, v0.t",
+    "encoding": "32'hbdff_cfd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0001",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0005"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-2065/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vnclipu.wx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vnclipu.wx",
+   "poc_count": 2,
+   "case_ids": [
+    "case-2141",
+    "case-2168"
+   ],
+   "representative": {
+    "instruction": "vnclipu.wx v31, v31, x31, v0.t",
+    "encoding": "32'hb9ff_cfd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_000e"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-2141/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vandn.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vandn.vx",
+   "poc_count": 3,
+   "case_ids": [
+    "case-2589",
+    "case-2625",
+    "case-2629"
+   ],
+   "representative": {
+    "instruction": "vandn.vx v0, v0, x31",
+    "encoding": "32'h060f_c057",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_001a"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-2589/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vmsne.vi",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vmsne.vi",
+   "poc_count": 1,
+   "case_ids": [
+    "case-3772"
+   ],
+   "representative": {
+    "instruction": "vmsne.vi v16, v0, -0xc",
+    "encoding": "32'h660a_3857",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0020",
+     "vstart": "64'h0010_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0013"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-3772/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vid.v",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vid.v",
+   "poc_count": 3,
+   "case_ids": [
+    "case-3802",
+    "case-3804",
+    "case-3829"
+   ],
+   "representative": {
+    "instruction": "vid.v v0",
+    "encoding": "32'h5208_a057",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0002"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-3802/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vadc.vim",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vadc.vim",
+   "poc_count": 1,
+   "case_ids": [
+    "case-3968"
+   ],
+   "representative": {
+    "instruction": "vadc.vim v31, v5, -0x6, v0",
+    "encoding": "32'h405d_3fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0003",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0006"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-3968/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vmadc.vim",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vmadc.vim",
+   "poc_count": 2,
+   "case_ids": [
+    "case-4026",
+    "case-4029"
+   ],
+   "representative": {
+    "instruction": "vmadc.vim v28, v20, -0x10, v0",
+    "encoding": "32'h4548_3e57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-4026/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vrev8.v",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vrev8.v",
+   "poc_count": 1,
+   "case_ids": [
+    "case-4859"
+   ],
+   "representative": {
+    "instruction": "vrev8.v v1, v14",
+    "encoding": "32'h4ae4_a0d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0018"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-4859/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vrol.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vrol.vx",
+   "poc_count": 3,
+   "case_ids": [
+    "case-5016",
+    "case-5031",
+    "case-5042"
+   ],
+   "representative": {
+    "instruction": "vrol.vx v4, v0, x31",
+    "encoding": "32'h560f_c257",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5016/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vror.vi",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vror.vi",
+   "poc_count": 3,
+   "case_ids": [
+    "case-5087",
+    "case-5097",
+    "case-5136"
+   ],
+   "representative": {
+    "instruction": "vror.vi v0, v0, 0x24",
+    "encoding": "32'h5602_3057",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_001a"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5087/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vror.vv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vror.vv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-5157"
+   ],
+   "representative": {
+    "instruction": "vror.vv v19, v17, v26, v0.t",
+    "encoding": "32'h511d_09d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0005"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5157/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vror.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vror.vx",
+   "poc_count": 3,
+   "case_ids": [
+    "case-5306",
+    "case-5321",
+    "case-5329"
+   ],
+   "representative": {
+    "instruction": "vror.vx v27, v22, x31",
+    "encoding": "32'h536f_cdd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_000e"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5306/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vmseq.vv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vmseq.vv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-5468"
+   ],
+   "representative": {
+    "instruction": "vmseq.vv v15, v17, v11, v0.t",
+    "encoding": "32'h6115_87d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0017"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5468/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vmsltu.vv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vmsltu.vv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-5501"
+   ],
+   "representative": {
+    "instruction": "vmsltu.vv v11, v0, v0, v0.t",
+    "encoding": "32'h6800_05d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_003f",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0002"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5501/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vrgather.vv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vrgather.vv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-5690"
+   ],
+   "representative": {
+    "instruction": "vrgather.vv v31, v0, v0, v0.t",
+    "encoding": "32'h3000_0fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0003",
+     "vstart": "64'h0008_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0010"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5690/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwsll.vi",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwsll.vi",
+   "poc_count": 3,
+   "case_ids": [
+    "case-5968",
+    "case-6075",
+    "case-6076"
+   ],
+   "representative": {
+    "instruction": "vwsll.vi v28, v6, 0x17, v0.t",
+    "encoding": "32'hd46b_be57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0011"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-5968/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwsll.vv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwsll.vv",
+   "poc_count": 2,
+   "case_ids": [
+    "case-6141",
+    "case-6225"
+   ],
+   "representative": {
+    "instruction": "vwsll.vv v2, v26, v3, v0.t",
+    "encoding": "32'hd5a1_8157",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0008"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-6141/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwsll.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwsll.vx",
+   "poc_count": 10,
+   "case_ids": [
+    "case-6295",
+    "case-6401",
+    "case-6420",
+    "case-6424",
+    "case-6461",
+    "case-6527",
+    "case-6530",
+    "case-6531",
+    "case-6532",
+    "case-6535"
+   ],
+   "representative": {
+    "instruction": "vwsll.vx v8, v9, x0, v0.t",
+    "encoding": "32'hd490_4457",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h0000_8000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0010"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-6295/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vmsgt.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vmsgt.vx",
+   "poc_count": 2,
+   "case_ids": [
+    "case-6545",
+    "case-6552"
+   ],
+   "representative": {
+    "instruction": "vmsgt.vx v25, v4, x31, v0.t",
+    "encoding": "32'h7c4f_ccd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0001",
+     "vstart": "64'h0008_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0017"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-6545/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vmsbc.vxm",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vmsbc.vxm",
+   "poc_count": 2,
+   "case_ids": [
+    "case-6827",
+    "case-6836"
+   ],
+   "representative": {
+    "instruction": "vmsbc.vxm v14, v8, x31, v0",
+    "encoding": "32'h4c8f_c757",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0007"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-6827/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vslidedown.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vslidedown.vx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-6887"
+   ],
+   "representative": {
+    "instruction": "vslidedown.vx v8, v11, x31",
+    "encoding": "32'h3ebf_c457",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0002",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0005"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-6887/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwmacc.vv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwmacc.vv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-7315"
+   ],
+   "representative": {
+    "instruction": "vwmacc.vv v16, v14, v14, v0.t",
+    "encoding": "32'hf4e7_2857",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-7315/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwmaccsu.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwmaccsu.vx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-7558"
+   ],
+   "representative": {
+    "instruction": "vwmaccsu.vx v24, x31, v16",
+    "encoding": "32'hff0f_ec57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_001f",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0002"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-7558/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwadd.wv",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwadd.wv",
+   "poc_count": 1,
+   "case_ids": [
+    "case-7860"
+   ],
+   "representative": {
+    "instruction": "vwadd.wv v28, v0, v8, v0.t",
+    "encoding": "32'hd404_2e57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h0000_0000_0040_0000",
+     "vtype": "64'h0000_0000_0000_0011"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-7860/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwaddu.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwaddu.vx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-8587"
+   ],
+   "representative": {
+    "instruction": "vwaddu.vx v16, v15, x31",
+    "encoding": "32'hc2ff_e857",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h0000_0000_0000_0080",
+     "vtype": "64'h0000_0000_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-8587/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "B-vwmul.vx",
+   "kind": "vstart超界挂死",
+   "mnemonic": "vwmul.vx",
+   "poc_count": 1,
+   "case_ids": [
+    "case-8625"
+   ],
+   "representative": {
+    "instruction": "vwmul.vx v16, v8, x0",
+    "encoding": "32'hee80_6857",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_001f",
+     "vstart": "64'h0040_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0002"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-8625/program.elf"
+   },
+   "behavior": "csrw vstart 写入超出当前 vtype VLMAX 的值(如 0x40>VLMAX=16 或 0x8000000000000000)后执行该指令,XiangShan 仿真器(emu)完全停止提交(零 commit),--no-diff 纯 RTL 模式与 --diff 模式均复现;Sail 参考模型对超界 vstart 报 illegal instruction"
+  },
+  {
+   "bug_id": "C-vmerge.vim",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmerge.vim",
+   "poc_count": 46,
+   "case_ids": [
+    "case-007",
+    "case-004",
+    "case-003",
+    "..."
+   ],
+   "representative": {
+    "instruction": "vmerge.vim v31, v1, 0x0, v0",
+    "encoding": "32'h5c10_3fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0019"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-007/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmerge.vvm",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmerge.vvm",
+   "poc_count": 58,
+   "case_ids": [
+    "case-048",
+    "case-049",
+    "case-061",
+    "..."
+   ],
+   "representative": {
+    "instruction": "vmerge.vvm v31, v1, v0, v0",
+    "encoding": "32'h5c10_0fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0009"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-048/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmerge.vxm",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmerge.vxm",
+   "poc_count": 46,
+   "case_ids": [
+    "case-108",
+    "case-117",
+    "case-112",
+    "..."
+   ],
+   "representative": {
+    "instruction": "vmerge.vxm v1, v0, x20, v0",
+    "encoding": "32'h5c0a_40d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0009"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-108/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmv.v.i",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmv.v.i",
+   "poc_count": 12,
+   "case_ids": [
+    "case-158",
+    "case-162",
+    "case-161",
+    "..."
+   ],
+   "representative": {
+    "instruction": "vmv.v.i v1, -0x2",
+    "encoding": "32'h5e0f_30d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0001"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-158/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmv.v.v",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmv.v.v",
+   "poc_count": 24,
+   "case_ids": [
+    "case-202",
+    "case-198",
+    "case-199",
+    "..."
+   ],
+   "representative": {
+    "instruction": "vmv.v.v v30, v2",
+    "encoding": "32'h5e01_0f57",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_001a"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-202/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmv.v.x",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmv.v.x",
+   "poc_count": 12,
+   "case_ids": [
+    "case-246",
+    "case-247",
+    "case-244",
+    "..."
+   ],
+   "representative": {
+    "instruction": "vmv.v.x v1, x25",
+    "encoding": "32'h5e0c_c0d7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_000f",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_000b"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-246/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmv8r.v",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmv8r.v",
+   "poc_count": 2,
+   "case_ids": [
+    "case-4799",
+    "case-4802"
+   ],
+   "representative": {
+    "instruction": "vmv8r.v v4, v0",
+    "encoding": "32'h9e03_b257",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0000",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0009"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-4799/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "C-vmv4r.v",
+   "kind": "LMUL组未对齐漏检",
+   "mnemonic": "vmv4r.v",
+   "poc_count": 1,
+   "case_ids": [
+    "case-4805"
+   ],
+   "representative": {
+    "instruction": "vmv4r.v v2, v0",
+    "encoding": "32'h9e01_b157",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0003",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0010"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-4805/program.elf"
+   },
+   "behavior": "该指令的寄存器组因 LMUL 未对齐而非法时(如 LMUL=2 时 vd=v31),NEMU 报 illegal instruction(mcause=2),XiangShan RTL 直接执行并写回目的向量寄存器,difftest ABORT"
+  },
+  {
+   "bug_id": "D-vnclipu.wv-vxsat",
+   "kind": "vxsat不置位",
+   "mnemonic": "vnclipu.wv",
+   "poc_count": 2,
+   "case_ids": [
+    "case-1750",
+    "case-1792"
+   ],
+   "representative": {
+    "instruction": "vnclipu.wv v31, v6, v23, v0.t",
+    "encoding": "32'hb86b_8fd7",
+    "isa-state": {
+     "cur_privilege": "User",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0007",
+     "vstart": "64'h8000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0008"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-1750/program.elf"
+   },
+   "behavior": "vnclipu.wv 带 v0.t mask、SEW=16 narrowing 执行发生饱和时,XiangShan RTL 不置 vxsat(保持 0),NEMU 置 vxsat=1,difftest ABORT(vxsat/vcsr different);两模型都执行了指令本体"
+  },
+  {
+   "bug_id": "VSM-MMIO-store",
+   "kind": "MMIO store 不 fault",
+   "mnemonic": "vsm.v",
+   "poc_count": 3,
+   "case_ids": [
+    "case-4737",
+    "case-4740",
+    "case-4755"
+   ],
+   "representative": {
+    "instruction": "vsm.v v0, (x31)",
+    "encoding": "32'h02bf_8027",
+    "isa-state": {
+     "cur_privilege": "User",
+     "mstatus": "64'h0000_0008_0002_0800",
+     "vcsr": "3'h0",
+     "vl": "64'h0000_0000_0000_0012",
+     "vstart": "64'h0000_0000_0000_0000",
+     "vtype": "64'h0000_0000_0000_0013",
+     "x1": "64'h0000_0001_0000_0000",
+     "x10": "64'h0000_0001_0000_0000",
+     "x11": "64'h0000_0001_0000_0000",
+     "x12": "64'h0000_0001_0000_0000",
+     "x13": "64'h0000_0001_0000_0000",
+     "x14": "64'h0000_0001_0000_0000",
+     "x15": "64'h0000_0001_0000_0000",
+     "x16": "64'h0000_0001_0000_0000",
+     "x17": "64'h0000_0001_0000_0000",
+     "x18": "64'h0000_0001_0000_0000",
+     "x19": "64'h0000_0001_0000_0000",
+     "x2": "64'h0000_0001_0000_0000",
+     "x20": "64'h0000_0001_0000_0000",
+     "x21": "64'h0000_0001_0000_0000",
+     "x22": "64'h0000_0001_0000_0000",
+     "x23": "64'h0000_0001_0000_0000",
+     "x24": "64'h0000_0001_0000_0000",
+     "x25": "64'h0000_0001_0000_0000",
+     "x26": "64'h0000_0001_0000_0000",
+     "x27": "64'h0000_0001_0000_0000",
+     "x28": "64'h0000_0001_0000_0000",
+     "x29": "64'h0000_0001_0000_0000",
+     "x3": "64'h0000_0001_0000_0000",
+     "x30": "64'h0000_0001_0000_0000",
+     "x31": "64'h0000_0001_0000_0000",
+     "x4": "64'h0000_0001_0000_0000",
+     "x5": "64'h0000_0001_0000_0000",
+     "x6": "64'h0000_0001_0000_0000",
+     "x7": "64'h0000_0001_0000_0000",
+     "x8": "64'h0000_0001_0000_0000",
+     "x9": "64'h0000_0001_0000_0000"
+    },
+    "elf": "/home/baiyifan/workplace-local/isla-runner/difftest-xiangshan/work/isla-trap-entries/elf/case-4737/program.elf"
+   },
+   "behavior": "vsm.v v0,(x31) 以 x31 指向 MMIO/未映射地址执行时,XiangShan RTL 与 NEMU 双侧一致地未触发 access fault(指令正常提交),而 Sail 参考模型报 Memory_Exception(access fault)"
+  }
+ ]
+}
