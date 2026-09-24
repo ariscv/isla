@@ -3,7 +3,7 @@
 # 不固定 funct6、vtype、vl、vstart 或寄存器选择，也不覆盖 571 行的 funct6 分派。
 [execution_limits]
 strict = true
-ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+ir_sha256 = "6fc39efd0f72b0ee8eae247d9965e680b6874f9954334c20d748b42c0987792c"
 max_forks_per_branch = 1
 on_limit_reached = "concretize"
 
@@ -22,18 +22,18 @@ end_column = 24
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 591
+start_line = 557
 start_column = 6
-end_line = 593
+end_line = 559
 end_column = 5
 
 # VX_VSADD 逐 lane mask/saturation 分支；60 秒基线累计 31 次 fork。
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 595
+start_line = 561
 start_column = 6
-end_line = 597
+end_line = 563
 end_column = 5
 
 # VX_VSSUBU 完整 arm 的逐 lane mask 与 unsigned 比较；基线分别累计 26/25 次 fork，
@@ -41,27 +41,27 @@ end_column = 5
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 598
+start_line = 564
 start_column = 5
-end_line = 603
+end_line = 569
 end_column = 5
 
 # VX_VSSUB 逐 lane mask/saturation 分支；60 秒基线累计 26 次 fork。
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 605
+start_line = 571
 start_column = 6
-end_line = 607
+end_line = 573
 end_column = 5
 
 # VX_VSMUL 逐 lane mask/舍入/饱和分支；60 秒基线累计 17 次 fork。
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_arith_insts.sail"
-start_line = 609
+start_line = 575
 start_column = 6
-end_line = 615
+end_line = 581
 end_column = 5
 
 # VX_VSMUL/VX_VSSRL/VX_VSSRA 逐 lane 调用的定点舍入 helper；
@@ -69,9 +69,9 @@ end_column = 5
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 728
+start_line = 612
 start_column = 2
-end_line = 750
+end_line = 634
 end_column = 1
 
 # get_fixed_rounding_incr 的 0b11 arm 会判断被丢弃位是否非零。正式运行在
@@ -84,9 +84,9 @@ max_forks_per_region = 1
 sample_bias = 4294967295
 sample_bias_direction = "fallthrough"
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 741
+start_line = 625
 start_column = 28
-end_line = 741
+end_line = 625
 end_column = 72
 
 # sticky_below_rounding 的 IR 在 vxrm=01 arm 中以 `jump sticky_below_rounding`
@@ -97,9 +97,9 @@ max_forks_per_region = 1
 sample_bias = 4294967295
 sample_bias_direction = "jump"
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 740
+start_line = 624
 start_column = 11
-end_line = 740
+end_line = 624
 end_column = 59
 
 # vxrm=01 arm 的短路 AND 在 IR 中是 `jump (rounding_bit == 1)` 后才计算
@@ -111,7 +111,7 @@ max_forks_per_region = 1
 sample_bias = 4294967295
 sample_bias_direction = "jump"
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 744
+start_line = 628
 start_column = 26
-end_line = 744
+end_line = 628
 end_column = 91

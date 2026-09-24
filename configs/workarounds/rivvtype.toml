@@ -3,7 +3,7 @@
 # 不固定 funct6、vtype、vl、vstart 或寄存器选择。
 [execution_limits]
 strict = true
-ir_sha256 = "7c626989a03056c43c67c81de8f40f611cef4c43ed1069a81526b37856d7e37b"
+ir_sha256 = "6fc39efd0f72b0ee8eae247d9965e680b6874f9954334c20d748b42c0987792c"
 max_forks_per_branch = 1
 on_limit_reached = "concretize"
 
@@ -16,18 +16,18 @@ max_forks_per_region = 1
 sample_bias = 16
 sample_bias_direction = "fallthrough"
 file = "extensions/V/vext_control.sail"
-start_line = 557
+start_line = 512
 start_column = 2
-end_line = 560
+end_line = 515
 end_column = 1
 
 # init_masked_source 的逐 lane foreach。基线日志在 452:11-464:5 持续因 vl/vr0 fork。
 [[execution_limits.region_fork_limits]]
 max_forks_per_region = 1
 file = "extensions/V/vext_utils_insts.sail"
-start_line = 448
+start_line = 414
 start_column = 2
-end_line = 465
+end_line = 431
 end_column = 4
 
 # execute RIVVTYPE 的 widening reduction foreach。基线日志持续命中 59:8-59:21。
