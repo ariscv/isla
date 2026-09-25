@@ -1252,6 +1252,7 @@ mod tests {
 
     #[test]
     fn test_translate() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         use Def::*;
         use Exp::*;
         use SmtResult::*;

@@ -1118,6 +1118,7 @@ mod tests {
 
     #[test]
     fn diversify_unconstrained_finite_domains_diversifies_bool_and_bitvectors() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let boolean = solver.declare_const(isla_lib::smt::smtlib::Ty::Bool, SourceLoc::unknown());
@@ -1140,6 +1141,7 @@ mod tests {
 
     #[test]
     fn diversify_unconstrained_finite_domains_diversifies_wide_bitvectors() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&context);
         let bits = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(65), SourceLoc::unknown());
@@ -1172,6 +1174,7 @@ mod tests {
 
     #[test]
     fn diversify_unconstrained_finite_domains_skips_non_target_smt_types() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let floating = solver.declare_const(isla_lib::smt::smtlib::Ty::Float(8, 24), SourceLoc::unknown());
@@ -1187,6 +1190,7 @@ mod tests {
 
     #[test]
     fn diversify_unconstrained_finite_domains_preserves_constrained_fields() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let bits = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(4), SourceLoc::unknown());
@@ -1208,6 +1212,7 @@ mod tests {
 
     #[test]
     fn diversify_unconstrained_finite_domains_propagates_model_errors() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let shared_state = SharedState::empty(Symtab::new());
