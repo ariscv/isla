@@ -93,9 +93,10 @@ pub struct ExecutionLimits {
     /// 取最小值；TOML 显式配置时整体替换已有 override。预算含义同 `max_forks_per_branch`，
     /// 仍然是**每个分支点各自**一份预算。
     pub branch_region_limits: Vec<(SourceRegion, u32)>,
-    /// 一条路径在整段源码区间内**总共**允许的 fork 次数。区间内所有分支点共享同一份
-    /// 预算，因此它能直接控制这段代码对路径数的贡献：match 链是 N+1 个取值，逐 lane
-    /// 循环体是 ≤2^N 条路径。预算耗尽后区间内的分支改走具体化抽样（`on_limit_reached`）。
+    /// 在指定源码区间内，单个静态分支点允许的 fork 次数。预算 key 是
+    /// `region × ControlFlowScope`：同一个逐 lane 条件的重复到达会被限制，但同一区间内
+    /// 不同的 match/rounding/opcode 分支各自保留首次 fork。预算耗尽后该分支改走具体化
+    /// 抽样（`on_limit_reached`）。
     pub region_fork_limits: Vec<RegionForkLimit>,
     /// branch/loop 计数 key 保留的最近调用点数量；`None` 时不复制或哈希调用上下文。
     pub call_context_depth: Option<usize>,
@@ -282,8 +283,9 @@ impl ExecutionLimits {
             || self.max_fork_pct_per_branch.is_some()
     }
 
-    /// 命中当前源码位置的 region 级预算，返回 `(region 序号, 预算)`。序号用作路径内
-    /// 计数的 key，因此同一段 region 上的所有分支点共享一份 fork 预算。
+    /// 命中当前源码位置的 region 级预算，返回 `(region 序号, 预算)`。region 只限定
+    /// 生效范围；路径内预算仍按静态分支点计数，不能让一个 lane 条件吞掉同一区间内
+    /// 其他普通语义分支的首次覆盖。
     fn region_fork_budgets(&self, source_location: SourceLoc) -> Vec<(usize, u32)> {
         if self.region_fork_limits.is_empty() {
             return Vec::new();
@@ -351,7 +353,7 @@ pub(super) struct ExecutionLimitPathState {
     total_forks: u32,
     loop_counts: HashMap<ControlFlowScope, u32>,
     branch_forks: HashMap<ControlFlowScope, u32>,
-    region_forks: HashMap<usize, u32>,
+    region_forks: HashMap<(usize, ControlFlowScope), u32>,
     sample_ordinals: HashMap<ControlFlowScope, u32>,
     path_signature: u64,
 }
@@ -392,12 +394,12 @@ impl ExecutionLimitPathState {
         self.branch_forks.get(scope).copied().unwrap_or(0)
     }
 
-    fn region_forks(&self, region: usize) -> u32 {
-        self.region_forks.get(&region).copied().unwrap_or(0)
+    fn region_forks(&self, region: usize, scope: &ControlFlowScope) -> u32 {
+        self.region_forks.get(&(region, scope.clone())).copied().unwrap_or(0)
     }
 
-    fn record_region_fork(&mut self, region: usize) {
-        let count = self.region_forks.entry(region).or_insert(0);
+    fn record_region_fork(&mut self, region: usize, scope: &ControlFlowScope) {
+        let count = self.region_forks.entry((region, scope.clone())).or_insert(0);
         *count = count.checked_add(1).expect("region fork count overflow");
     }
 
@@ -604,11 +606,12 @@ impl<'config> ExecutionLimitHandler<'config> {
         };
 
         let region_budgets = self.config.region_fork_budgets(source_location);
+        let region_scope =
+            (!region_budgets.is_empty()).then(|| self.branch_scope(function_name, pc, backtrace, source_location));
         for &(region, max) in &region_budgets {
-            let actual = path.region_forks(region);
+            let actual = path.region_forks(region, region_scope.as_ref().unwrap());
             if actual >= max {
-                let scope =
-                    branch_scope.unwrap_or_else(|| self.branch_scope(function_name, pc, backtrace, source_location));
+                let scope = branch_scope.unwrap_or_else(|| region_scope.as_ref().unwrap().clone());
                 return self.branch_limit(path, scope, ExecutionLimitReason::MaxForksPerRegion { region, actual, max });
             }
         }
@@ -619,7 +622,7 @@ impl<'config> ExecutionLimitHandler<'config> {
             *count = count.checked_add(1).expect("branch fork count overflow");
         }
         for &(region, _) in &region_budgets {
-            path.record_region_fork(region);
+            path.record_region_fork(region, region_scope.as_ref().unwrap());
         }
         ExecutionLimitDecision::Fork { fork_id }
     }
@@ -647,7 +650,7 @@ impl<'config> ExecutionLimitHandler<'config> {
 
         let region_budgets = self.config.region_fork_budgets(source_location);
         for &(region, max) in &region_budgets {
-            let actual = path.region_forks(region);
+            let actual = path.region_forks(region, &scope);
             if actual >= max {
                 return self.monomorphize_limit(ExecutionLimitReason::MaxForksPerRegion { region, actual, max });
             }
@@ -655,11 +658,11 @@ impl<'config> ExecutionLimitHandler<'config> {
 
         let fork_id = Self::record_path_fork(path);
         if max_forks_per_branch.is_some() {
-            let count = path.branch_forks.entry(scope).or_insert(0);
+            let count = path.branch_forks.entry(scope.clone()).or_insert(0);
             *count = count.checked_add(1).expect("monomorphize fork count overflow");
         }
         for &(region, _) in &region_budgets {
-            path.record_region_fork(region);
+            path.record_region_fork(region, &scope);
         }
         ExecutionLimitDecision::Fork { fork_id }
     }
@@ -1004,11 +1007,11 @@ mod tests {
         ));
     }
 
-    /// region 级预算由整段区间内的所有分支点共享，因此能压住 `match` 链：Sail 的 match
-    /// 每个 arm 判定都在不同 pc 上，per-scope 预算对它无效，region 预算 N 才能把它压成
-    /// N+1 个取值。
+    /// region 级预算必须按静态分支点分别计数。否则 foreach 的首个 mask 分支会耗尽整段
+    /// region 的预算，连同一区间内普通的 match/rounding 分支也会在首次到达时被具体化。
+    /// 这会把本应完整覆盖的 opcode 分派错误地当成逐 lane 指数爆炸的一部分。
     #[test]
-    fn region_fork_budget_is_shared_by_every_branch_point_inside_the_region() {
+    fn region_fork_budget_keeps_the_first_fork_of_each_branch_point() {
         let limits = ExecutionLimits::default().with_region_fork_limit(SourceRegion::new(1, (10, 0), (20, 0)), 1);
         let handler = ExecutionLimitHandler::new(&limits);
         let mut path = ExecutionLimitPathState::default();
@@ -1019,8 +1022,14 @@ mod tests {
             handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
             ExecutionLimitDecision::Fork { .. }
         ));
-        // 第二个 arm 判定是另一个分支点，但共用同一份 region 预算，所以被限制。
+        // 第二个 arm 判定是另一个分支点，必须保留其首次 fork。
         let (pc, source_location) = arm(31, 12);
+        assert!(matches!(
+            handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
+            ExecutionLimitDecision::Fork { .. }
+        ));
+        // 同一分支点第二次到达才受限，仍可抑制逐 lane 指数展开。
+        let (pc, source_location) = arm(30, 11);
         assert!(matches!(
             handler.on_branch_fork(&mut path, Name::from_u32(3), pc, &[], source_location),
             ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerRegion { actual: 1, max: 1, .. })
@@ -1105,11 +1114,11 @@ mod tests {
         let mut second = ExecutionLimitPathState::default();
 
         assert!(matches!(
-            handler.on_branch_fork(&mut first, Name::from_u32(3), 31, &[], source_location),
+            handler.on_branch_fork(&mut first, Name::from_u32(3), 30, &[], source_location),
             ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForksPerRegion { .. })
         ));
         assert!(matches!(
-            handler.on_branch_fork(&mut second, Name::from_u32(3), 31, &[], source_location),
+            handler.on_branch_fork(&mut second, Name::from_u32(3), 30, &[], source_location),
             ExecutionLimitDecision::Fork { .. }
         ));
     }

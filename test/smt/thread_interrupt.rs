@@ -7,6 +7,7 @@ use isla_lib::source_loc::SourceLoc;
 
 #[test]
 fn thread_interrupt_wrapper_uses_the_public_solver_and_model_types() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let context = Context::new(isla_lib::smt::Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let symbol = solver.declare_const(Ty::Bool, SourceLoc::unknown());
@@ -19,6 +20,7 @@ fn thread_interrupt_wrapper_uses_the_public_solver_and_model_types() {
 
 #[test]
 fn model_formatting_keeps_direct_z3_semantics() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let mut config = isla_lib::smt::Config::new();
     config.set_param_value("model", "true");
     let context = Context::new(config);

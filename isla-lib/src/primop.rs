@@ -4537,6 +4537,7 @@ mod tests {
 
     #[test]
     fn symbolic_integer_compare_uses_asserted_bounds_without_picking_candidate() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4563,6 +4564,7 @@ mod tests {
     /// 即使已经被路径约束钉死也证明不出来。
     #[test]
     fn proven_symbolic_i128_concretizes_values_outside_the_old_candidate_range() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4583,6 +4585,7 @@ mod tests {
     /// 只要还存在第二个可行取值就必须保持符号量；完全没有约束的符号量同理。
     #[test]
     fn proven_symbolic_i128_keeps_values_that_are_not_pinned_down() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4603,6 +4606,7 @@ mod tests {
     /// 把单路径预算耗光的关键。
     #[test]
     fn proven_symbolic_i128_uses_a_constant_number_of_queries() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4625,6 +4629,7 @@ mod tests {
 
     #[test]
     fn zeros_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4641,6 +4646,7 @@ mod tests {
 
     #[test]
     fn zeros_rejects_unconstrained_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4653,6 +4659,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in zeros")]
     fn zeros_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4664,6 +4671,7 @@ mod tests {
 
     #[test]
     fn ones_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4680,6 +4688,7 @@ mod tests {
 
     #[test]
     fn ones_rejects_unconstrained_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4692,6 +4701,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in ones")]
     fn ones_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4704,6 +4714,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in pow2")]
     fn pow2_panics_on_negative_proven_symbolic_exponent() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4715,6 +4726,7 @@ mod tests {
 
     #[test]
     fn replicate_bits_accepts_proven_symbolic_count() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4731,6 +4743,7 @@ mod tests {
 
     #[test]
     fn replicate_bits_accepts_symbolic_bits_with_proven_symbolic_count() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4748,6 +4761,7 @@ mod tests {
 
     #[test]
     fn replicate_bits_rejects_unconstrained_symbolic_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4762,6 +4776,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in replicate_bits")]
     fn replicate_bits_panics_on_negative_proven_symbolic_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4773,6 +4788,7 @@ mod tests {
 
     #[test]
     fn vector_init_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4792,6 +4808,7 @@ mod tests {
 
     #[test]
     fn vector_init_rejects_unconstrained_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4805,6 +4822,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in vector_init")]
     fn vector_init_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4817,6 +4835,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in subrange_internal")]
     fn subrange_panics_on_negative_proven_symbolic_bounds() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4836,6 +4855,7 @@ mod tests {
 
     #[test]
     fn subrange_accepts_proven_symbolic_bounds() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4860,6 +4880,7 @@ mod tests {
 
     #[test]
     fn subrange_accepts_symbolic_bounds_with_proven_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4894,6 +4915,7 @@ mod tests {
 
     #[test]
     fn i64_to_i128_accepts_bits_as_signed_i64() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4905,6 +4927,7 @@ mod tests {
 
     #[test]
     fn get_slice_int_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4928,6 +4951,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in get_slice_int")]
     fn get_slice_int_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4946,6 +4970,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in get_slice_int")]
     fn get_slice_int_panics_on_negative_concrete_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4957,6 +4982,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in expect_usize_or_symbolic_bound test")]
     fn expect_usize_or_symbolic_bound_panics_on_negative_proven_symbolic_value() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4974,6 +5000,7 @@ mod tests {
 
     #[test]
     fn extension_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -4990,6 +5017,7 @@ mod tests {
 
     #[test]
     fn extension_accepts_proven_symbolic_length_from_fallback_candidate() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B129>::new(&ctx);
@@ -5007,6 +5035,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in extension")]
     fn extension_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5018,6 +5047,7 @@ mod tests {
 
     #[test]
     fn isla_brev8_reverses_bits_inside_each_byte() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5032,6 +5062,7 @@ mod tests {
 
     #[test]
     fn isla_rev8_reverses_byte_order() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5051,6 +5082,7 @@ mod tests {
 
     #[test]
     fn isla_rev8_symbolic_path_preserves_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5066,6 +5098,7 @@ mod tests {
 
     #[test]
     fn isla_vector_rev8_maps_each_element() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5084,6 +5117,7 @@ mod tests {
 
     #[test]
     fn isla_cpop_counts_full_register_or_low_word() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5108,6 +5142,7 @@ mod tests {
 
     #[test]
     fn isla_cpop_symbolic_path_has_register_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5128,6 +5163,7 @@ mod tests {
 
     #[test]
     fn count_trailing_zeros_symbolic_counts_from_low_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5149,6 +5185,7 @@ mod tests {
 
     #[test]
     fn isla_clmul_variants_extract_expected_product_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5208,6 +5245,7 @@ mod tests {
 
     #[test]
     fn isla_carryless_mul_symbolic_paths_have_double_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5236,6 +5274,7 @@ mod tests {
 
     #[test]
     fn isla_xperm4_handles_concrete_operands() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5253,6 +5292,7 @@ mod tests {
 
     #[test]
     fn isla_xperm8_handles_concrete_operands() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5270,6 +5310,7 @@ mod tests {
 
     #[test]
     fn isla_xperm4_symbolic_path_has_input_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5290,6 +5331,7 @@ mod tests {
 
     #[test]
     fn isla_read_vreg_splits_concrete_registers() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5323,6 +5365,7 @@ mod tests {
 
     #[test]
     fn isla_read_vreg_splits_symbolic_registers() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5360,6 +5403,7 @@ mod tests {
 
     #[test]
     fn isla_read_vreg_allows_symbolic_num_elem() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5393,6 +5437,7 @@ mod tests {
 
     #[test]
     fn isla_init_mask_builds_concrete_active_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5408,6 +5453,7 @@ mod tests {
 
     #[test]
     fn isla_init_mask_builds_concrete_b129_high_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B129>::new(&ctx);
@@ -5424,6 +5470,7 @@ mod tests {
 
     #[test]
     fn isla_init_mask_builds_symbolic_mask_with_fixed_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5448,6 +5495,7 @@ mod tests {
 
     #[test]
     fn bool_to_bit_builds_one_bit_result() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5466,6 +5514,7 @@ mod tests {
 
     #[test]
     fn isla_fixed_rounding_incr_handles_concrete_modes() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5509,6 +5558,7 @@ mod tests {
 
     #[test]
     fn isla_fixed_rounding_incr_builds_symbolic_bit() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5529,6 +5579,7 @@ mod tests {
 
     #[test]
     fn isla_select_int_selects_concrete_and_symbolic_values() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5565,6 +5616,7 @@ mod tests {
 
     #[test]
     fn isla_mask_from_low_bits_handles_concrete_fill_and_source() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5600,6 +5652,7 @@ mod tests {
 
     #[test]
     fn isla_mask_from_low_bits_uses_source_width_for_symbolic_len_without_template() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5620,6 +5673,7 @@ mod tests {
 
     #[test]
     fn isla_mask_from_low_bits_builds_symbolic_width_preserving_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5646,6 +5700,7 @@ mod tests {
 
     #[test]
     fn isla_vector_select_uses_mask_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5669,6 +5724,7 @@ mod tests {
 
     #[test]
     fn isla_vector_access_or_default_handles_concrete_bounds() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5698,6 +5754,7 @@ mod tests {
 
     #[test]
     fn isla_vector_access_or_default_builds_smt_array_select() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5755,6 +5812,7 @@ mod tests {
 
     #[test]
     fn isla_masktypei_result_merges_body_elements() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5802,6 +5860,7 @@ mod tests {
 
     #[test]
     fn isla_masktypev_result_merges_body_elements() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5857,6 +5916,7 @@ mod tests {
 
     #[test]
     fn isla_pack_vreg_packs_elements_little_endian_per_register() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5877,6 +5937,7 @@ mod tests {
 
     #[test]
     fn isla_mux2_selects_bitvector_operand() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5921,6 +5982,7 @@ mod tests {
 
     #[test]
     fn mixed_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
