@@ -280,6 +280,34 @@ pub(super) fn timeout_Z3_solver_check(
     interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe { Z3_solver_check(context, solver) })
 }
 
+/// 带独立 deadline 的 `Z3_solver_check`：与全局 `--smt-timeout` 相互独立，
+/// 供需要单独预算的查询（如 solve-state 的路径终值物化）使用。未启用
+/// `smt-thread-interrupt` 时无法中断，deadline 不生效。
+#[allow(non_snake_case)]
+pub(super) fn timeout_Z3_solver_check_deadline(
+    context: Z3_context,
+    solver: Z3_solver,
+    source_loc: SourceLoc,
+    deadline: Duration,
+) -> Result<Z3_lbool, Z3TimeoutError> {
+    let started = Instant::now();
+    let result = {
+        #[cfg(feature = "smt-thread-interrupt")]
+        {
+            thread_interrupt_call_with_timeout(context, deadline, || unsafe { Z3_solver_check(context, solver) })
+        }
+        #[cfg(not(feature = "smt-thread-interrupt"))]
+        {
+            let _ = deadline;
+            Ok(unsafe { Z3_solver_check(context, solver) })
+        }
+    };
+    record_path_smt_call(SmtOperation::CheckSat, source_loc, started.elapsed(), result.is_err());
+    #[cfg(feature = "smtperf")]
+    record_solve_result(SmtOperation::CheckSat, started.elapsed(), &result);
+    result
+}
+
 #[allow(non_snake_case)]
 pub(super) fn timeout_Z3_solver_check_assumptions(
     context: Z3_context,

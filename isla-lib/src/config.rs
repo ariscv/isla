@@ -122,6 +122,9 @@ impl Tool {
 pub enum MemoryRegionType {
     Concrete,
     Symbolic,
+    /// 判死区域：声明"这一段不关心"，读写（符号或具体地址）落到区域内即把
+    /// 该执行路径判死（Unsat / BadRead/BadWrite），不产生任何访存事件。
+    Excluded,
 }
 
 impl FromStr for MemoryRegionType {
@@ -131,6 +134,7 @@ impl FromStr for MemoryRegionType {
         match s {
             "concrete" => Ok(MemoryRegionType::Concrete),
             "symbolic" => Ok(MemoryRegionType::Symbolic),
+            "excluded" => Ok(MemoryRegionType::Excluded),
             _ => Err(format!("Unknown memory region type {}", s)),
         }
     }
@@ -142,6 +146,157 @@ pub struct MemoryRegionConfig {
     pub base: u64,
     pub size: u64,
     pub region_type: MemoryRegionType,
+}
+
+/// `zmisaligned_fault` 枚举（IR rv64d.ir:671）的配置镜像。模型字段语义见
+/// zpmaCheck：NoFault 不因未对齐 trap；AccessFault/AlignmentFault 在地址
+/// 未对齐时分别转 access/alignment fault。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmaMisalignedFault {
+    NoFault,
+    AccessFault,
+    AlignmentFault,
+}
+
+impl FromStr for PmaMisalignedFault {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "no_fault" => Ok(PmaMisalignedFault::NoFault),
+            "access_fault" => Ok(PmaMisalignedFault::AccessFault),
+            "alignment_fault" => Ok(PmaMisalignedFault::AlignmentFault),
+            _ => Err(format!("Unknown PMA misaligned policy {}", s)),
+        }
+    }
+}
+
+/// `zReservability` 枚举（IR rv64d.ir:3161）的配置镜像。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmaReservability {
+    None,
+    NonEventual,
+    Eventual,
+}
+
+impl FromStr for PmaReservability {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(PmaReservability::None),
+            "non_eventual" => Ok(PmaReservability::NonEventual),
+            "eventual" => Ok(PmaReservability::Eventual),
+            _ => Err(format!("Unknown PMA reservability {}", s)),
+        }
+    }
+}
+
+/// `zPMA` record（IR rv64d.ir:3295）的配置镜像：别名（ram/rom/mmio/hole）
+/// 与明细字段都解析到这个结构。字段语义由模型 zpmaCheck 消费。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmaAttributes {
+    pub readable: bool,
+    pub writable: bool,
+    pub executable: bool,
+    pub cacheable: bool,
+    pub coherent: bool,
+    pub read_idempotent: bool,
+    pub write_idempotent: bool,
+    pub supports_cbo_zzero: bool,
+    pub misaligned_fault: PmaMisalignedFault,
+    pub reservability: PmaReservability,
+    pub include_in_device_tree: bool,
+}
+
+impl PmaAttributes {
+    /// attr 别名底座。ram/mmio 镜像 IR 固化 zpma_regions 默认 region 的属性，
+    /// rom/hole 取最保守值（rom 只读；hole 全 false）。
+    fn from_alias(alias: &str) -> Option<PmaAttributes> {
+        let attributes = match alias {
+            "ram" => PmaAttributes {
+                readable: true,
+                writable: true,
+                executable: true,
+                cacheable: true,
+                coherent: true,
+                read_idempotent: true,
+                write_idempotent: true,
+                supports_cbo_zzero: true,
+                misaligned_fault: PmaMisalignedFault::NoFault,
+                reservability: PmaReservability::Eventual,
+                include_in_device_tree: true,
+            },
+            "rom" => PmaAttributes {
+                readable: true,
+                writable: false,
+                executable: false,
+                cacheable: true,
+                coherent: true,
+                read_idempotent: true,
+                write_idempotent: true,
+                supports_cbo_zzero: false,
+                misaligned_fault: PmaMisalignedFault::NoFault,
+                reservability: PmaReservability::None,
+                include_in_device_tree: false,
+            },
+            "mmio" => PmaAttributes {
+                readable: true,
+                writable: true,
+                executable: false,
+                cacheable: false,
+                coherent: true,
+                read_idempotent: false,
+                write_idempotent: false,
+                supports_cbo_zzero: false,
+                misaligned_fault: PmaMisalignedFault::AlignmentFault,
+                reservability: PmaReservability::None,
+                include_in_device_tree: false,
+            },
+            "hole" => PmaAttributes {
+                readable: false,
+                writable: false,
+                executable: false,
+                cacheable: false,
+                coherent: false,
+                read_idempotent: false,
+                write_idempotent: false,
+                supports_cbo_zzero: false,
+                misaligned_fault: PmaMisalignedFault::NoFault,
+                reservability: PmaReservability::None,
+                include_in_device_tree: false,
+            },
+            _ => return None,
+        };
+        Some(attributes)
+    }
+
+    /// 无 attr 明细字段模式的基线：除 include_in_device_tree=true 外全 false。
+    fn detailed_default() -> PmaAttributes {
+        PmaAttributes {
+            readable: false,
+            writable: false,
+            executable: false,
+            cacheable: false,
+            coherent: false,
+            read_idempotent: false,
+            write_idempotent: false,
+            supports_cbo_zzero: false,
+            misaligned_fault: PmaMisalignedFault::NoFault,
+            reservability: PmaReservability::None,
+            include_in_device_tree: true,
+        }
+    }
+}
+
+/// `zPMA_Region` record（IR rv64d.ir:3309）的配置镜像：base+size 布局
+/// （非 base+end），属性见 [PmaAttributes]。
+#[derive(Debug, Clone)]
+pub struct PmaRegionConfig {
+    pub name: String,
+    pub base: u64,
+    pub size: u64,
+    pub attributes: PmaAttributes,
 }
 
 #[non_exhaustive]
@@ -314,6 +469,137 @@ fn get_memory_regions(config: &Value) -> Result<Option<Vec<MemoryRegionConfig>>,
             Ok(MemoryRegionConfig { name, base, size, region_type })
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(regions))
+}
+
+/// 解析 `[[pma_regions]]`（W10/S1 配置化 PMA 地图）。返回的列表按 base 降序
+/// （与 IR 固化 zpma_regions 列表次序一致），并完成 size/溢出/重叠自校验——
+/// isarch 不经过模型的 zcheck_mem_layout，排序与重叠检查必须在配置解析做。
+fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, String> {
+    let Some(pma_regions) = config.get("pma_regions") else { return Ok(None) };
+    let Some(pma_regions) = pma_regions.as_array() else {
+        return Err("pma_regions should be an array of tables".to_string());
+    };
+
+    let mut regions = Vec::with_capacity(pma_regions.len());
+    for (index, region) in pma_regions.iter().enumerate() {
+        let Some(region) = region.as_table() else {
+            return Err("pma_regions should be an array of tables".to_string());
+        };
+
+        allowed_table_keys(
+            region,
+            "[[pma_regions]]",
+            &[
+                "name",
+                "base",
+                "size",
+                "attr",
+                "readable",
+                "writable",
+                "executable",
+                "cacheable",
+                "coherent",
+                "read_idempotent",
+                "write_idempotent",
+                "supports_cbo_zero",
+                "misaligned",
+                "reservability",
+                "include_in_device_tree",
+            ],
+        )?;
+
+        let name =
+            region.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("pma{}", index));
+        let context = format!("pma_regions.{}", name);
+        let base = region
+            .get("base")
+            .ok_or_else(|| format!("No {}.base found", context))
+            .and_then(|value| parse_u64_value(value, &format!("{}.base", context)))?;
+        let size = region
+            .get("size")
+            .ok_or_else(|| format!("No {}.size found", context))
+            .and_then(|value| parse_u64_value(value, &format!("{}.size", context)))?;
+        if size == 0 {
+            return Err(format!("{}.size must be greater than 0", context));
+        }
+        if base.checked_add(size).is_none() {
+            return Err(format!("{}.base + size overflows 64-bit address space", context));
+        }
+
+        // attr 别名给底座（无 attr 用明细模式基线），明细字段逐项覆盖
+        let mut attributes = match region.get("attr") {
+            Some(Value::String(alias)) => PmaAttributes::from_alias(alias)
+                .ok_or_else(|| format!("Unknown PMA attr alias {} in {}", alias, context))?,
+            Some(_) => return Err(format!("{}.attr should be a string", context)),
+            None => PmaAttributes::detailed_default(),
+        };
+        let mut has_detail = false;
+        let bool_field = |region: &toml::value::Table, key: &str| -> Result<Option<bool>, String> {
+            match region.get(key) {
+                Some(Value::Boolean(b)) => Ok(Some(*b)),
+                Some(_) => Err(format!("{}.{} should be a boolean", context, key)),
+                None => Ok(None),
+            }
+        };
+        for (key, target) in [
+            ("readable", &mut attributes.readable),
+            ("writable", &mut attributes.writable),
+            ("executable", &mut attributes.executable),
+            ("cacheable", &mut attributes.cacheable),
+            ("coherent", &mut attributes.coherent),
+            ("read_idempotent", &mut attributes.read_idempotent),
+            ("write_idempotent", &mut attributes.write_idempotent),
+            ("supports_cbo_zero", &mut attributes.supports_cbo_zzero),
+            ("include_in_device_tree", &mut attributes.include_in_device_tree),
+        ] {
+            if let Some(value) = bool_field(region, key)? {
+                *target = value;
+                has_detail = true;
+            }
+        }
+        match region.get("misaligned") {
+            Some(Value::String(s)) => {
+                attributes.misaligned_fault = s.parse::<PmaMisalignedFault>()?;
+                has_detail = true;
+            }
+            Some(_) => return Err(format!("{}.misaligned should be a string", context)),
+            None => (),
+        }
+        match region.get("reservability") {
+            Some(Value::String(s)) => {
+                attributes.reservability = s.parse::<PmaReservability>()?;
+                has_detail = true;
+            }
+            Some(_) => return Err(format!("{}.reservability should be a string", context)),
+            None => (),
+        }
+        if !region.contains_key("attr") && !has_detail {
+            return Err(format!("{} 需要 attr 别名或至少一个明细属性字段", context));
+        }
+
+        regions.push(PmaRegionConfig { name, base, size, attributes });
+    }
+
+    // 按 base 降序（IR 固化 zpma_regions 的列表次序），再做相邻重叠检查。
+    // 区间按起点排序后，任意重叠必然产生一对相邻重叠。
+    regions.sort_by(|a, b| b.base.cmp(&a.base));
+    for pair in regions.windows(2) {
+        let (upper, lower) = (&pair[0], &pair[1]);
+        let lower_end = lower.base.checked_add(lower.size).expect("已校验 base+size 不溢出");
+        if lower_end > upper.base {
+            return Err(format!(
+                "pma_regions.{} [0x{:x},0x{:x}) 与 pma_regions.{} [0x{:x},0x{:x}) 重叠",
+                upper.name,
+                upper.base,
+                upper.base + upper.size,
+                lower.name,
+                lower.base,
+                lower_end
+            ));
+        }
+    }
 
     Ok(Some(regions))
 }
@@ -1398,6 +1684,8 @@ pub struct ISAConfig<B> {
     pub zero_announce_exit: bool,
     /// Optional memory regions for symbolic/concrete setup
     pub memory_regions: Option<Vec<MemoryRegionConfig>>,
+    /// Optional PMA map regions written into the zpma_regions register (W10/S1)
+    pub pma_regions: Option<Vec<PmaRegionConfig>>,
     /// Optional page table configuration
     pub page_table_config: Option<PageTableConfig>,
     /// Optional PMP configuration
@@ -1468,6 +1756,7 @@ impl<B: BV> ISAConfig<B> {
             default_sizeof: get_default_sizeof(&config)?,
             zero_announce_exit: get_zero_announce_exit(&config)?,
             memory_regions: get_memory_regions(&config)?,
+            pma_regions: get_pma_regions(&config)?,
             page_table_config: get_page_table_config(&config)?,
             pmp,
             clint_enabled: get_clint_enabled(&config)?,
@@ -1774,5 +2063,264 @@ mod tests {
         let error = get_execution_limits_config(&value).unwrap_err();
 
         assert!(error.contains("max_global_forks"));
+    }
+
+    /// W9 判死区域解析：region_type = "excluded" 进入 MemoryRegionConfig，
+    /// 与 concrete/symbolic 并存；未知取值仍报错。
+    #[test]
+    fn memory_regions_parse_excluded_type() {
+        let value = r#"
+            [[memory_regions]]
+            name = "code"
+            base = "0x0"
+            size = "0x1000"
+            region_type = "concrete"
+
+            [[memory_regions]]
+            name = "mmio_hole"
+            base = "0x02000000"
+            size = "0x02000000"
+            region_type = "excluded"
+        "#
+        .parse::<Value>()
+        .unwrap();
+
+        let regions = get_memory_regions(&value).unwrap().unwrap();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].region_type, MemoryRegionType::Concrete);
+        assert_eq!(regions[1].name, "mmio_hole");
+        assert_eq!(regions[1].base, 0x0200_0000);
+        assert_eq!(regions[1].size, 0x0200_0000);
+        assert_eq!(regions[1].region_type, MemoryRegionType::Excluded);
+
+        let bad = r#"
+            [[memory_regions]]
+            name = "x"
+            base = "0x0"
+            size = "0x1000"
+            region_type = "dead"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        assert!(get_memory_regions(&bad).is_err(), "未知 region_type 仍应报错");
+    }
+
+    /// W10（S1）[[pma_regions]] 未配置时必须返回 Ok(None)：不注入任何地图，
+    /// 行为与现状（IR 固化 zpma_regions 默认值）逐项一致。
+    #[test]
+    fn pma_regions_absent_returns_none() {
+        let value = r#"
+            [[memory_regions]]
+            name = "sym_ram"
+            base = "0x80000000"
+            size = "0x10000000"
+            region_type = "symbolic"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        assert!(matches!(get_pma_regions(&value), Ok(None)));
+    }
+
+    /// 别名 ram/rom/mmio/hole 的关键字段映射（S1 别名映射完整性）：
+    /// ram=RWX+cacheable+no_fault+eventual，rom=R 只，mmio=RW 不 cacheable+
+    /// alignment_fault，hole=全 false。别名取值镜像 IR 固化 zpma_regions 的
+    /// 默认 region 属性（ram/mmio）与最保守取值（rom/hole）。
+    #[test]
+    fn pma_regions_alias_mapping() {
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "0x10000000"
+            attr = "ram"
+
+            [[pma_regions]]
+            base = "0x1000"
+            size = "0x1000"
+            attr = "rom"
+
+            [[pma_regions]]
+            base = "0x02000000"
+            size = "0x02000000"
+            attr = "mmio"
+
+            [[pma_regions]]
+            base = "0x40000000"
+            size = "0x10000000"
+            attr = "hole"
+        "#
+        .parse::<Value>()
+        .unwrap();
+
+        // 输出按 base 降序：ram(0x80000000) > hole(0x40000000) > mmio(0x02000000) > rom(0x1000)
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        assert_eq!(regions.len(), 4);
+
+        let ram = &regions[0];
+        assert_eq!((ram.base, ram.size), (0x8000_0000, 0x1000_0000));
+        let a = &ram.attributes;
+        assert!(a.readable && a.writable && a.executable && a.cacheable && a.coherent);
+        assert!(a.read_idempotent && a.write_idempotent && a.supports_cbo_zzero);
+        assert_eq!(a.misaligned_fault, PmaMisalignedFault::NoFault);
+        assert_eq!(a.reservability, PmaReservability::Eventual);
+        assert!(a.include_in_device_tree);
+
+        let hole = &regions[1];
+        let a = &hole.attributes;
+        assert!(!a.readable && !a.writable && !a.executable && !a.cacheable && !a.coherent);
+        assert!(!a.read_idempotent && !a.write_idempotent && !a.supports_cbo_zzero);
+        assert_eq!(a.misaligned_fault, PmaMisalignedFault::NoFault);
+        assert_eq!(a.reservability, PmaReservability::None);
+        assert!(!a.include_in_device_tree);
+
+        let mmio = &regions[2];
+        let a = &mmio.attributes;
+        assert!(a.readable && a.writable && !a.executable && !a.cacheable);
+        assert!(!a.read_idempotent && !a.write_idempotent && !a.supports_cbo_zzero);
+        assert_eq!(a.misaligned_fault, PmaMisalignedFault::AlignmentFault);
+        assert_eq!(a.reservability, PmaReservability::None);
+
+        let rom = &regions[3];
+        let a = &rom.attributes;
+        assert!(a.readable && !a.writable && !a.executable && a.cacheable);
+        assert_eq!(a.misaligned_fault, PmaMisalignedFault::NoFault);
+        assert_eq!(a.reservability, PmaReservability::None);
+        assert!(!a.include_in_device_tree);
+
+        // 未知别名必须报错
+        let bad = r#"
+            [[pma_regions]]
+            base = "0x0"
+            size = "0x1000"
+            attr = "sram"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        assert!(get_pma_regions(&bad).is_err(), "未知 attr 别名仍应报错");
+    }
+
+    /// 明细字段模式：无 attr 时以 include_in_device_tree=true、其余全 false 为
+    /// 基线，明细字段逐项覆盖；attr 与明细字段可同时出现（attr 给底、明细覆盖）。
+    #[test]
+    fn pma_regions_detailed_fields_and_override() {
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "0x1000"
+            readable = true
+            misaligned = "alignment_fault"
+            reservability = "eventual"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        let a = &regions[0].attributes;
+        assert!(a.readable && !a.writable && !a.executable);
+        assert!(a.include_in_device_tree, "明细模式 include_in_device_tree 默认 true");
+        assert_eq!(a.misaligned_fault, PmaMisalignedFault::AlignmentFault);
+        assert_eq!(a.reservability, PmaReservability::Eventual);
+
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "0x1000"
+            attr = "mmio"
+            executable = true
+            include_in_device_tree = true
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        let a = &regions[0].attributes;
+        assert!(a.executable, "明细字段应覆盖 attr 底座");
+        assert!(!a.cacheable, "未被覆盖的 attr 字段保持 mmio 取值");
+        assert_eq!(a.misaligned_fault, PmaMisalignedFault::AlignmentFault);
+        assert!(a.include_in_device_tree);
+
+        // 既无 attr 也无任何明细属性字段的 region 是配置疑点，直接报错
+        let bare = r#"
+            [[pma_regions]]
+            base = "0x0"
+            size = "0x1000"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        assert!(get_pma_regions(&bare).is_err(), "无 attr 且无明细字段应报错");
+    }
+
+    /// 配置解析自校验（对齐 MemoryBuilder 硬失败风格）：size=0、base+size 溢出、
+    /// 区域重叠都必须报错；重叠检测与 TOML 书写顺序无关（解析内部按 base 降序
+    /// 排序后再做相邻重叠检查，注入的 zpma_regions 列表即该降序）。
+    #[test]
+    fn pma_regions_validation_hard_fails() {
+        let cases = [
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "0x0"
+                attr = "ram"
+                "#,
+                "size 为 0",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0xffffffffffffffff"
+                size = "0x2"
+                attr = "ram"
+                "#,
+                "base+size 溢出",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "0x10000000"
+                attr = "ram"
+
+                [[pma_regions]]
+                base = "0x8ffff000"
+                size = "0x1000"
+                attr = "ram"
+                "#,
+                "相邻区域重叠",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x0"
+                size = "0x2000"
+                attr = "rom"
+
+                [[pma_regions]]
+                base = "0x1000"
+                size = "0x2000"
+                attr = "ram"
+                "#,
+                "乱序书写仍检出重叠",
+            ),
+        ];
+        for (toml, why) in cases {
+            let value = toml.parse::<Value>().unwrap();
+            let err = get_pma_regions(&value).unwrap_err();
+            assert!(!err.is_empty(), "{} 应报错", why);
+        }
+
+        // 合法乱序配置：输出按 base 降序（与 IR 固化 zpma_regions 的列表次序一致）
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "0x10000000"
+            attr = "ram"
+
+            [[pma_regions]]
+            base = "0x1000"
+            size = "0x1000"
+            attr = "rom"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        assert!(regions[0].base > regions[1].base, "输出应按 base 降序");
     }
 }

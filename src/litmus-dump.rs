@@ -590,6 +590,7 @@ fn print_human_memory<W: Write, B: BV>(writer: &mut W, memory: &Memory<B>) {
                 write!(writer, "From {:x} to {:x}: constrained memory\n", r.start, r.end).unwrap()
             }
             Region::Symbolic(r) => write!(writer, "From {:x} to {:x}: symbolic memory\n", r.start, r.end).unwrap(),
+            Region::Excluded(r) => write!(writer, "From {:x} to {:x}: excluded memory\n", r.start, r.end).unwrap(),
             Region::SymbolicCode(r) => {
                 write!(writer, "From {:x} to {:x}: symbolic code memory\n", r.start, r.end).unwrap()
             }
@@ -1480,6 +1481,7 @@ where
         match self {
             Region::Constrained(range, _) => parens![coqpp.alloc, parens, "Constrained", Line, range.prettyp(coqpp)],
             Region::Symbolic(range) => parens![coqpp.alloc, parens, "Symbolic", Line, range.prettyp(coqpp)],
+            Region::Excluded(range) => parens![coqpp.alloc, parens, "Excluded", Line, range.prettyp(coqpp)],
             Region::SymbolicCode(range) => parens![coqpp.alloc, parens, "SymbolicCode", Line, range.prettyp(coqpp)],
             Region::Concrete(range, contents) => {
                 parens![

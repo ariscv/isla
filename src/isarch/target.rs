@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use isla_lib::bitvector::BV;
-use isla_lib::config::{PmpConfig, PmpMode};
+use isla_lib::config::{PmaAttributes, PmaMisalignedFault, PmaRegionConfig, PmaReservability, PmpConfig, PmpMode};
 use isla_lib::error::ExecError;
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::{Bindings, IRTypeInfo, Name, SharedState, Symtab, Ty, UVal, Val};
@@ -9,7 +9,7 @@ use isla_lib::log;
 use isla_lib::primop_util::{smt_value, symbolic};
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::Model;
-use isla_lib::smt::{smtlib, Solver};
+use isla_lib::smt::{smtlib, EnumId, EnumMember, Solver};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 
@@ -76,36 +76,42 @@ where
         lets: &Bindings<'ir, B>,
         shared_state: &SharedState<'ir, B>,
         solver: &mut Solver<B>,
+        fixed_prestate: &HashMap<Name, Val<B>>,
     ) -> Result<(), ExecError> {
         // reg_list 是本次求解关注的寄存器集合；这里对集合中的每个寄存器建立独立的 pre-state 符号值。
         let reg_names = self.reg_list();
         // pre_state 保存这些符号值，供执行路径结束后的 solve_pre_state 从模型中取回。
         let pre_state = self.pre_state_mut();
         let symtab = &shared_state.symtab;
+        let mut assigned = HashSet::new();
         for reg_name_str in reg_names.into_iter() {
             // 某些目标配置可能列出了当前 IR 中不存在的寄存器；这种寄存器不参与本次执行。
             let Some(name) = symtab.get(&zencode::encode(&reg_name_str)) else { continue };
             // shared_state.registers 是寄存器类型表。名称存在但不在类型表中说明 IR 内部不变量被破坏。
             let ty =
                 shared_state.registers.get(&name).unwrap_or_else(|| panic!("防御性编程：{} 不是寄存器", reg_name_str));
-            let recorded = match ty {
-                // Sail 的 %bv 没有宽度信息；向量寄存器的宽度由已初始化的 let vlen 决定。
-                Ty::AnyBits if is_vector_register_name(&reg_name_str) => {
-                    let vlen = u32::try_from(integer_let_from_lets(lets, symtab, "vlen"))
-                        .unwrap_or_else(|err| panic!("防御性编程：let vlen 不能作为 bitvector 宽度: {}", err));
-                    let vector_ty = Ty::Bits(vlen);
-                    symbolic(&vector_ty, shared_state, solver, SourceLoc::unknown()).unwrap_or_else(|err| {
-                        panic!("防御性编程：寄存器 {} 无法符号化，类型 {:?}: {:?}", reg_name_str, vector_ty, err)
-                    })
+            let recorded = if let Some(value) = fixed_prestate.get(&name) {
+                value.clone()
+            } else {
+                match ty {
+                    // Sail 的 %bv 没有宽度信息；向量寄存器的宽度由已初始化的 let vlen 决定。
+                    Ty::AnyBits if is_vector_register_name(&reg_name_str) => {
+                        let vlen = u32::try_from(integer_let_from_lets(lets, symtab, "vlen"))
+                            .unwrap_or_else(|err| panic!("防御性编程：let vlen 不能作为 bitvector 宽度: {}", err));
+                        let vector_ty = Ty::Bits(vlen);
+                        symbolic(&vector_ty, shared_state, solver, SourceLoc::unknown()).unwrap_or_else(|err| {
+                            panic!("防御性编程：寄存器 {} 无法符号化，类型 {:?}: {:?}", reg_name_str, vector_ty, err)
+                        })
+                    }
+                    // 非向量 %bv 无法从当前上下文安全推断宽度，因此直接报告模型/配置错误。
+                    Ty::AnyBits => {
+                        panic!("防御性编程：寄存器 {} 是 %bv，但不是已知可由 vlen 定宽的 vr* 寄存器", reg_name_str)
+                    }
+                    // 普通位向量、结构体、枚举等类型都按 IR 类型递归创建 fresh symbolic value。
+                    _ => symbolic(ty, shared_state, solver, SourceLoc::unknown()).unwrap_or_else(|err| {
+                        panic!("防御性编程：寄存器 {} 无法符号化，类型 {:?}: {:?}", reg_name_str, ty, err)
+                    }),
                 }
-                // 非向量 %bv 无法从当前上下文安全推断宽度，因此直接报告模型/配置错误。
-                Ty::AnyBits => {
-                    panic!("防御性编程：寄存器 {} 是 %bv，但不是已知可由 vlen 定宽的 vr* 寄存器", reg_name_str)
-                }
-                // 普通位向量、结构体、枚举等类型都按 IR 类型递归创建 fresh symbolic value。
-                _ => symbolic(ty, shared_state, solver, SourceLoc::unknown()).unwrap_or_else(|err| {
-                    panic!("防御性编程：寄存器 {} 无法符号化，类型 {:?}: {:?}", reg_name_str, ty, err)
-                }),
             };
             // Poison 表示该类型不能表达为求解器值；这是不可恢复的内部错误。
             if matches!(recorded, Val::Poison) {
@@ -114,6 +120,14 @@ where
             // 同一个符号值既覆盖执行帧中的寄存器，也记录到 pre_state，保证执行和输出使用同一变量。
             regs.assign(name, recorded.clone(), shared_state);
             pre_state.insert(name, recorded);
+            assigned.insert(name);
+        }
+
+        for (&name, value) in fixed_prestate {
+            if assigned.insert(name) {
+                regs.assign(name, value.clone(), shared_state);
+                pre_state.insert(name, value.clone());
+            }
         }
 
         // 通用符号化完成后，再由具体 Target 为 pre-state 补充架构特有的合法性约束，例如向量 vtype/vl 配对。
@@ -203,6 +217,113 @@ fn integer_let_from_lets<B: BV>(lets: &Bindings<B>, symtab: &Symtab, let_name: &
         UVal::Init(value) => panic!("防御性编程：let {} 不是整数值: {:?}", let_name, value),
         UVal::Uninit(ty) => panic!("防御性编程：let {} 仍未求值，类型 {:?}", let_name, ty),
     }
+}
+
+/// CLI 固定 pre-state 输入的严格结构校验。只接受具体值，且递归核对字段、枚举
+/// 身份和向量长度；不能使用 Val::plausible 的浅检查替代。
+pub fn validate_fixed_prestate_value<B: BV>(
+    reg_name: &str,
+    reg_id: Name,
+    value: &Val<B>,
+    ty: &Ty<Name>,
+    shared_state: &SharedState<B>,
+    lets: &Bindings<B>,
+    regs: &RegisterBindings<B>,
+) -> Result<(), String> {
+    fn validate<B: BV>(
+        value: &Val<B>,
+        ty: &Ty<Name>,
+        shared_state: &SharedState<B>,
+        anybits_width: Option<u32>,
+    ) -> Result<(), String> {
+        let valid = match (value, ty) {
+            (Val::I64(_), Ty::I64)
+            | (Val::I128(_), Ty::I128)
+            | (Val::Bool(_), Ty::Bool)
+            | (Val::Unit, Ty::Unit)
+            | (Val::String(_), Ty::String) => true,
+            (Val::Bits(bits), Ty::Bits(width)) => bits.len() == *width,
+            (Val::Bits(bits), Ty::Bit) => bits.len() == 1,
+            (Val::Bits(bits), Ty::AnyBits) => anybits_width == Some(bits.len()),
+            (Val::MixedBits(segments), Ty::Bits(width)) => {
+                let total: Option<u32> = segments.iter().try_fold(0u32, |length, segment| match segment {
+                    isla_lib::ir::BitsSegment::Concrete(bits) => length.checked_add(bits.len()),
+                    isla_lib::ir::BitsSegment::Symbolic(_) => None,
+                });
+                total == Some(*width)
+            }
+            (Val::Enum(member), Ty::Enum(enum_id)) => {
+                member.enum_id.to_name() == *enum_id
+                    && shared_state.type_info.enums.get(enum_id).is_some_and(|members| member.member < members.len())
+            }
+            (Val::Struct(fields), Ty::Struct(struct_id)) => {
+                let field_types = shared_state
+                    .type_info
+                    .structs
+                    .get(struct_id)
+                    .ok_or_else(|| format!("IR 缺少结构体 {:?} 定义", struct_id))?;
+                if fields.len() != field_types.len() {
+                    return Err(format!("结构体字段数不匹配: 期望 {}，实际 {}", field_types.len(), fields.len()));
+                }
+                for (name, field_ty) in field_types {
+                    let field = fields.get(name).ok_or_else(|| format!("结构体缺少字段 {:?}", name))?;
+                    validate(field, field_ty, shared_state, None)?;
+                }
+                true
+            }
+            (Val::Vector(values), Ty::FixedVector(length, element_ty)) => {
+                if values.len() != *length as usize {
+                    return Err(format!("定长向量长度不匹配: 期望 {}，实际 {}", length, values.len()));
+                }
+                for element in values {
+                    validate(element, element_ty, shared_state, None)?;
+                }
+                true
+            }
+            (Val::Vector(values), Ty::Vector(element_ty)) | (Val::List(values), Ty::List(element_ty)) => {
+                for element in values {
+                    validate(element, element_ty, shared_state, None)?;
+                }
+                true
+            }
+            (Val::Ctor(ctor, payload), Ty::Union(union_id)) => {
+                let constructors = shared_state
+                    .type_info
+                    .unions
+                    .get(union_id)
+                    .ok_or_else(|| format!("IR 缺少 union {:?} 定义", union_id))?;
+                let payload_ty = constructors
+                    .iter()
+                    .find_map(|(name, ty)| if name == ctor { Some(ty) } else { None })
+                    .ok_or_else(|| format!("union {:?} 不含构造子 {:?}", union_id, ctor))?;
+                validate(payload, payload_ty, shared_state, None)?;
+                true
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(format!("固定值 {:?} 与寄存器类型 {:?} 不匹配", value, ty))
+        }
+    }
+
+    let anybits_width = if matches!(ty, Ty::AnyBits) {
+        if is_vector_register_name(reg_name) {
+            Some(
+                u32::try_from(integer_let_from_lets(lets, &shared_state.symtab, "vlen"))
+                    .map_err(|error| format!("vlen 不能作寄存器宽度: {}", error))?,
+            )
+        } else {
+            match regs.get_last_if_initialized(reg_id) {
+                Some(Val::Bits(bits)) => Some(bits.len()),
+                _ => None,
+            }
+        }
+    } else {
+        None
+    };
+    validate(value, ty, shared_state, anybits_width).map_err(|error| format!("{}: {}", reg_name, error))
 }
 
 pub trait RISCV<B: BV>: Target<B> {
@@ -663,6 +784,134 @@ fn insert_register<B: BV>(
     }
 }
 
+/// 枚举成员的 IR 名（z 前缀）到 Val::Enum 的转换：symtab 查成员名，enum_members
+/// 拿 (序号, 所在枚举)，构造与 IR 枚举身份一致的 EnumMember。
+fn pma_enum_member<B: BV>(
+    symtab: &Symtab,
+    type_info: &IRTypeInfo,
+    member_ir_name: &str,
+    context: &str,
+) -> Result<Val<B>, String> {
+    let member_name = symtab
+        .get(&zencode::encode(member_ir_name))
+        .ok_or_else(|| format!("IR 缺少枚举成员 {}（{}）", member_ir_name, context))?;
+    let (member, _size, enum_name) = type_info
+        .enum_members
+        .get(&member_name)
+        .ok_or_else(|| format!("type_info 缺少枚举成员 {}（{}）", member_ir_name, context))?;
+    Ok(Val::Enum(EnumMember { enum_id: EnumId::from_name(*enum_name), member: *member }))
+}
+
+/// 按 zPMA record 的字段定义，把配置属性构造成 Val::Struct。字段名从
+/// type_info 取（decode 回原始名后匹配配置），IR 新增字段没有对应配置时
+/// 硬报错，避免静默产出缺字段的错误地图。
+fn pma_attributes_value<B: BV>(
+    attributes: &PmaAttributes,
+    pma_struct_name: Name,
+    symtab: &Symtab,
+    type_info: &IRTypeInfo,
+) -> Result<Val<B>, String> {
+    let struct_def = type_info
+        .structs
+        .get(&pma_struct_name)
+        .ok_or_else(|| format!("type_info 缺少 struct {}（PMA 属性 record）", symtab.to_str(pma_struct_name)))?;
+
+    let mut fields: ahash::HashMap<Name, Val<B>> =
+        HashMap::with_capacity_and_hasher(struct_def.len(), ahash::RandomState::new());
+    for (field_name, field_ty) in struct_def {
+        let field = zencode::decode(symtab.to_str(*field_name));
+        let value = match (field.as_str(), field_ty) {
+            ("cacheable", Ty::Bool) => Val::Bool(attributes.cacheable),
+            ("coherent", Ty::Bool) => Val::Bool(attributes.coherent),
+            ("executable", Ty::Bool) => Val::Bool(attributes.executable),
+            ("read_idempotent", Ty::Bool) => Val::Bool(attributes.read_idempotent),
+            ("readable", Ty::Bool) => Val::Bool(attributes.readable),
+            ("supports_cbo_zero", Ty::Bool) => Val::Bool(attributes.supports_cbo_zzero),
+            ("writable", Ty::Bool) => Val::Bool(attributes.writable),
+            ("write_idempotent", Ty::Bool) => Val::Bool(attributes.write_idempotent),
+            ("misaligned_fault", Ty::Enum(_)) => match attributes.misaligned_fault {
+                PmaMisalignedFault::NoFault => pma_enum_member(symtab, type_info, "NoFault", "misaligned_fault")?,
+                PmaMisalignedFault::AccessFault => {
+                    pma_enum_member(symtab, type_info, "AccessFault", "misaligned_fault")?
+                }
+                PmaMisalignedFault::AlignmentFault => {
+                    pma_enum_member(symtab, type_info, "AlignmentFault", "misaligned_fault")?
+                }
+            },
+            ("reservability", Ty::Enum(_)) => match attributes.reservability {
+                PmaReservability::None => pma_enum_member(symtab, type_info, "RsrvNone", "reservability")?,
+                PmaReservability::NonEventual => {
+                    pma_enum_member(symtab, type_info, "RsrvNonEventual", "reservability")?
+                }
+                PmaReservability::Eventual => pma_enum_member(symtab, type_info, "RsrvEventual", "reservability")?,
+            },
+            _ => return Err(format!("zPMA 字段 {}（类型 {:?}）无法从 [[pma_regions]] 配置映射", field, field_ty)),
+        };
+        fields.insert(*field_name, value);
+    }
+    Ok(Val::Struct(fields))
+}
+
+/// 把配置的 [[pma_regions]] 构造成 zpma_regions 寄存器的值：
+/// `Val::List(vec![Val::Struct(zPMA_Region {...})])`。字段名/类型全部从
+/// symtab + type_info 查（结构同 generate_default_value 的按 Ty 递归构造，
+/// 但取配置值）；配置列表的次序（解析时已按 base 降序）原样保留。
+fn pma_regions_list_value<B: BV>(
+    regions: &[PmaRegionConfig],
+    symtab: &Symtab,
+    type_info: &IRTypeInfo,
+) -> Result<Val<B>, String> {
+    let region_struct_name = symtab
+        .get(&zencode::encode("PMA_Region"))
+        .ok_or_else(|| "symtab 缺少 struct PMA_Region：当前 IR 不含 zpma_regions 模型".to_string())?;
+    let struct_def = type_info
+        .structs
+        .get(&region_struct_name)
+        .ok_or_else(|| "type_info 缺少 struct PMA_Region 定义".to_string())?;
+
+    let mut items = Vec::with_capacity(regions.len());
+    for region in regions {
+        let mut fields: ahash::HashMap<Name, Val<B>> =
+            HashMap::with_capacity_and_hasher(struct_def.len(), ahash::RandomState::new());
+        for (field_name, field_ty) in struct_def {
+            let field = zencode::decode(symtab.to_str(*field_name));
+            let value = match (field.as_str(), field_ty) {
+                ("attributes", Ty::Struct(pma_struct_name)) => {
+                    pma_attributes_value(&region.attributes, *pma_struct_name, symtab, type_info)?
+                }
+                ("base", Ty::Bits(64)) => Val::Bits(B::new(region.base, 64)),
+                ("size", Ty::Bits(64)) => Val::Bits(B::new(region.size, 64)),
+                ("include_in_device_tree", Ty::Bool) => Val::Bool(region.attributes.include_in_device_tree),
+                _ => {
+                    return Err(format!(
+                        "zPMA_Region 字段 {}（类型 {:?}）无法从 [[pma_regions]] 配置映射",
+                        field, field_ty
+                    ))
+                }
+            };
+            fields.insert(*field_name, value);
+        }
+        items.push(Val::Struct(fields));
+    }
+    Ok(Val::List(items))
+}
+
+/// W10（S1）：[[pma_regions]] 配置注入。把配置地图构造成 list-of-records 值写入
+/// default_registers 的 zpma_regions 键——solve-state 启动时
+/// initialize_architecture/initialize_register 用它替代 IR 固化默认地图，模型
+/// 的 zpmaCheck/zmatching_pma 逻辑零改动。未配置时调用方不调本函数，沿用 IR
+/// 固化默认。
+pub fn apply_pma_regions_to_config<B: BV>(
+    regions: &[PmaRegionConfig],
+    symtab: &Symtab,
+    type_info: &IRTypeInfo,
+    default_registers: &mut HashMap<Name, Val<B>>,
+) -> Result<(), String> {
+    let list = pma_regions_list_value(regions, symtab, type_info)?;
+    // IR 寄存器名 zpma_regions 即 zencode("pma_regions")，insert_register 内部按 zencode 查找
+    insert_register(symtab, default_registers, "pma_regions", list)
+}
+
 fn insert_symbolic_register<'ir, B: BV>(
     symtab: &Symtab,
     default_registers: &mut RegisterBindings<'ir, B>,
@@ -863,7 +1112,7 @@ mod tests {
         lets.insert(vlen_name, UVal::Init(Val::I64(128)));
         let mut target = rv64();
 
-        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver).unwrap();
+        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver, &HashMap::new()).unwrap();
 
         let vr0 = match target.pre_state().get(&vr0_name).unwrap() {
             Val::Symbolic(sym) => *sym,
@@ -886,7 +1135,7 @@ mod tests {
         let lets = Bindings::default();
         let mut target = rv64();
 
-        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver).unwrap();
+        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver, &HashMap::new()).unwrap();
 
         let pre_state_symbol = match target.pre_state().get(&mstatus_name).unwrap() {
             Val::Symbolic(symbol) => *symbol,
@@ -898,6 +1147,34 @@ mod tests {
         };
         assert_eq!(register_symbol, pre_state_symbol);
         assert_eq!(solver.length(pre_state_symbol), Some(64));
+    }
+
+    #[test]
+    fn setup_pre_state固定值覆盖寄存器且同步输出() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let x1_text = zencode::encode("x1");
+        let satp_text = zencode::encode("satp");
+        let name = symtab.intern(&x1_text);
+        let satp_name = symtab.intern(&satp_text);
+        let mut shared_state = SharedState::empty(symtab);
+        shared_state.registers.insert(name, Ty::Bits(64));
+        shared_state.registers.insert(satp_name, Ty::Bits(64));
+        let mut regs = RegisterBindings::new();
+        let ty = Ty::Bits(64);
+        regs.insert(name, false, UVal::Uninit(&ty));
+        regs.insert(satp_name, false, UVal::Uninit(&ty));
+        let fixed = Val::Bits(B64::new(0x8000_1000, 64));
+        let satp_fixed = Val::Bits(B64::new(0, 64));
+        let overrides = HashMap::from([(name, fixed.clone()), (satp_name, satp_fixed.clone())]);
+        let mut target = rv64();
+
+        target.setup_pre_state(&mut regs, &Bindings::default(), &shared_state, &mut solver, &overrides).unwrap();
+        assert_eq!(target.pre_state().get(&name), Some(&fixed));
+        assert_eq!(regs.get_last_if_initialized(name), Some(&fixed));
+        assert_eq!(target.pre_state().get(&satp_name), Some(&satp_fixed));
+        assert_eq!(regs.get_last_if_initialized(satp_name), Some(&satp_fixed));
     }
 
     fn rv64_setup_pre_state_smt_result(vtype_value: u64, vl_value: u64) -> SmtResult {
@@ -925,7 +1202,7 @@ mod tests {
         lets.insert(elen_name, UVal::Init(Val::I64(64)));
         let mut target = rv64();
 
-        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver).unwrap();
+        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver, &HashMap::new()).unwrap();
         let vtype = match target.pre_state().get(&vtype_name).unwrap() {
             Val::Symbolic(sym) => *sym,
             value => panic!("防御性编程：vtype 未被符号化: {:?}", value),
@@ -990,5 +1267,201 @@ mod tests {
         assert_eq!(r.pte_r(), 2);
         assert_eq!(r.pte_w(), 4);
         assert_eq!(r.pte_x(), 8);
+    }
+
+    /// W10（S1）[[pma_regions]] → zpma_regions 寄存器值构造的测试夹具：
+    /// 手工搭出与 rv64d.ir 相同形状的 symtab/type_info（struct zPMA_Region、
+    /// struct zPMA、enum zmisaligned_fault、enum zReservability、寄存器名
+    /// zpma_regions），使构造逻辑可在单测中全量验证；真实 IR 的形状保真由
+    /// 端到端测试（zSTORE 圈外 fault）兜底。
+    fn pma_type_fixture() -> (Symtab<'static>, IRTypeInfo) {
+        let mut symtab = Symtab::new();
+        let pma_region_name = symtab.intern("zPMA_Region");
+        let pma_name = symtab.intern("zPMA");
+        let misaligned_enum = symtab.intern("zmisaligned_fault");
+        let reservability_enum = symtab.intern("zReservability");
+
+        let mut pma_fields = BTreeMap::new();
+        pma_fields.insert(symtab.intern("zcacheable"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zcoherent"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zexecutable"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zmisaligned_fault"), Ty::Enum(misaligned_enum));
+        pma_fields.insert(symtab.intern("zread_idempotent"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zreadable"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zreservability"), Ty::Enum(reservability_enum));
+        pma_fields.insert(symtab.intern("zsupports_cbo_zzero"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zwritable"), Ty::Bool);
+        pma_fields.insert(symtab.intern("zwrite_idempotent"), Ty::Bool);
+
+        let mut region_fields = BTreeMap::new();
+        region_fields.insert(symtab.intern("zattributes"), Ty::Struct(pma_name));
+        region_fields.insert(symtab.intern("zbase"), Ty::Bits(64));
+        region_fields.insert(symtab.intern("zinclude_in_device_tree"), Ty::Bool);
+        region_fields.insert(symtab.intern("zsizze"), Ty::Bits(64));
+
+        let mut structs = HashMap::new();
+        structs.insert(pma_name, pma_fields);
+        structs.insert(pma_region_name, region_fields);
+
+        let mut enums = HashMap::new();
+        let misaligned_members =
+            vec![symtab.intern("zNoFault"), symtab.intern("zAccessFault"), symtab.intern("zAlignmentFault")];
+        let reservability_members =
+            vec![symtab.intern("zRsrvNone"), symtab.intern("zRsrvNonEventual"), symtab.intern("zRsrvEventual")];
+        enums.insert(misaligned_enum, misaligned_members.clone());
+        enums.insert(reservability_enum, reservability_members.clone());
+
+        let mut enum_members = HashMap::new();
+        for (pos, member) in misaligned_members.iter().enumerate() {
+            enum_members.insert(*member, (pos, misaligned_members.len(), misaligned_enum));
+        }
+        for (pos, member) in reservability_members.iter().enumerate() {
+            enum_members.insert(*member, (pos, reservability_members.len(), reservability_enum));
+        }
+
+        let type_info =
+            IRTypeInfo { structs, enums, enum_members, unions: HashMap::new(), union_ctors: HashSet::new() };
+        (symtab, type_info)
+    }
+
+    fn pma_region(base: u64, size: u64, attr: &str) -> isla_lib::config::PmaRegionConfig {
+        use isla_lib::config::{PmaAttributes, PmaMisalignedFault, PmaRegionConfig, PmaReservability};
+        // 别名取值与 config.rs 的 pma_regions_alias_mapping 测试锁定的映射一致；
+        // 这里直接构造，聚焦验证 Val 构造侧。
+        let attributes = match attr {
+            "ram" => PmaAttributes {
+                readable: true,
+                writable: true,
+                executable: true,
+                cacheable: true,
+                coherent: true,
+                read_idempotent: true,
+                write_idempotent: true,
+                supports_cbo_zzero: true,
+                misaligned_fault: PmaMisalignedFault::NoFault,
+                reservability: PmaReservability::Eventual,
+                include_in_device_tree: true,
+            },
+            "mmio" => PmaAttributes {
+                readable: true,
+                writable: true,
+                executable: false,
+                cacheable: false,
+                coherent: true,
+                read_idempotent: false,
+                write_idempotent: false,
+                supports_cbo_zzero: false,
+                misaligned_fault: PmaMisalignedFault::AlignmentFault,
+                reservability: PmaReservability::None,
+                include_in_device_tree: false,
+            },
+            other => panic!("测试不支持别名 {}", other),
+        };
+        PmaRegionConfig { name: attr.to_string(), base, size, attributes }
+    }
+
+    /// 构造出的 zpma_regions 值必须是 Val::List(Val::Struct...)，record 的
+    /// base/size（注意 IR 字段名 zsizze 是 size 的 zencode）与别名属性逐字段
+    /// 正确，枚举成员身份（enum_id + 序号）与 IR 定义一致。
+    #[test]
+    fn pma_regions_list_value_alias_fields() {
+        let (symtab, type_info) = pma_type_fixture();
+        let regions = vec![pma_region(0x8000_0000, 0x1000_0000, "ram"), pma_region(0x0200_0000, 0x0200_0000, "mmio")];
+
+        let value = pma_regions_list_value::<B64>(&regions, &symtab, &type_info).unwrap();
+        let Val::List(items) = &value else { panic!("zpma_regions 值必须是 Val::List，实际 {:?}", value) };
+        assert_eq!(items.len(), 2);
+
+        let ram = match &items[0] {
+            Val::Struct(fields) => fields,
+            other => panic!("region 必须是 Struct，实际 {:?}", other),
+        };
+        let field = |name: &str| {
+            let id = symtab.get(&zencode::encode(name)).unwrap_or_else(|| panic!("夹具缺字段 {}", name));
+            ram.get(&id).unwrap_or_else(|| panic!("构造值缺字段 {}", name))
+        };
+        match field("base") {
+            Val::Bits(bv) => assert_eq!(bv.lower_u64(), 0x8000_0000),
+            other => panic!("base 必须是 Bits，实际 {:?}", other),
+        }
+        match field("size") {
+            Val::Bits(bv) => assert_eq!(bv.lower_u64(), 0x1000_0000, "IR 字段 zsizze 应取配置 size"),
+            other => panic!("size 必须是 Bits，实际 {:?}", other),
+        }
+        assert!(matches!(field("include_in_device_tree"), Val::Bool(true)));
+
+        let attributes = match field("attributes") {
+            Val::Struct(fields) => fields,
+            other => panic!("attributes 必须是 Struct，实际 {:?}", other),
+        };
+        let attr_field = |name: &str| {
+            let id = symtab.get(&zencode::encode(name)).unwrap();
+            attributes.get(&id).unwrap_or_else(|| panic!("attributes 缺字段 {}", name))
+        };
+        assert!(matches!(attr_field("readable"), Val::Bool(true)));
+        assert!(matches!(attr_field("writable"), Val::Bool(true)));
+        assert!(matches!(attr_field("executable"), Val::Bool(true)));
+        assert!(matches!(attr_field("cacheable"), Val::Bool(true)));
+        assert!(matches!(attr_field("read_idempotent"), Val::Bool(true)));
+        assert!(matches!(attr_field("write_idempotent"), Val::Bool(true)));
+        assert!(matches!(attr_field("supports_cbo_zero"), Val::Bool(true)));
+        let misaligned_enum = symtab.get(&zencode::encode("misaligned_fault")).unwrap();
+        match attr_field("misaligned_fault") {
+            Val::Enum(member) => {
+                assert_eq!(member.enum_id.to_name(), misaligned_enum);
+                assert_eq!(member.member, 0, "ram 的 misaligned 应是 zNoFault（首成员）");
+            }
+            other => panic!("misaligned_fault 必须是 Enum，实际 {:?}", other),
+        }
+        let reservability_enum = symtab.get(&zencode::encode("Reservability")).unwrap();
+        match attr_field("reservability") {
+            Val::Enum(member) => {
+                assert_eq!(member.enum_id.to_name(), reservability_enum);
+                assert_eq!(member.member, 2, "ram 的 reservability 应是 zRsrvEventual（第 3 成员）");
+            }
+            other => panic!("reservability 必须是 Enum，实际 {:?}", other),
+        }
+
+        // mmio：misaligned=AlignmentFault（第 3 成员）、reservability=RsrvNone（首成员）
+        let mmio = match &items[1] {
+            Val::Struct(fields) => fields,
+            other => panic!("region 必须是 Struct，实际 {:?}", other),
+        };
+        let attributes = match mmio.get(&symtab.get(&zencode::encode("attributes")).unwrap()) {
+            Some(Val::Struct(fields)) => fields,
+            other => panic!("attributes 必须是 Struct，实际 {:?}", other),
+        };
+        let misaligned = symtab.get(&zencode::encode("misaligned_fault")).unwrap();
+        match attributes.get(&symtab.get(&zencode::encode("misaligned_fault")).unwrap()) {
+            Some(Val::Enum(member)) => {
+                assert_eq!(member.enum_id.to_name(), misaligned);
+                assert_eq!(member.member, 2, "mmio 的 misaligned 应是 zAlignmentFault");
+            }
+            other => panic!("misaligned_fault 必须是 Enum，实际 {:?}", other),
+        }
+    }
+
+    /// 注入：apply_pma_regions_to_config 把构造值写入 default_registers 的
+    /// zpma_regions 键；symtab 缺 zpma_regions 寄存器名（IR 不含 PMA 模型）时
+    /// 报错而非静默注入。
+    #[test]
+    fn pma_regions_apply_to_config_registers() {
+        let regions = vec![pma_region(0x8000_0000, 0x1000_0000, "ram")];
+
+        // 夹具 symtab 尚未 intern zpma_regions：等价于"IR 无该寄存器"
+        let (symtab, type_info) = pma_type_fixture();
+        let mut default_registers = HashMap::new();
+        assert!(
+            apply_pma_regions_to_config::<B64>(&regions, &symtab, &type_info, &mut default_registers).is_err(),
+            "缺 zpma_regions 寄存器名应报错"
+        );
+        assert!(default_registers.is_empty(), "失败时不得注入任何值");
+
+        // intern 寄存器名后注入成功
+        let (mut symtab, type_info) = pma_type_fixture();
+        let zpma = symtab.intern("zpma_regions");
+        let mut default_registers = HashMap::new();
+        apply_pma_regions_to_config::<B64>(&regions, &symtab, &type_info, &mut default_registers).unwrap();
+        assert!(matches!(default_registers.get(&zpma), Some(Val::List(_))), "zpma_regions 应已注入");
     }
 }

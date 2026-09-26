@@ -101,6 +101,11 @@ pub enum Region<B> {
     SymbolicCode(Range<Address>),
     /// A region of concrete read-only memory
     Concrete(Range<Address>, HashMap<Address, u8>),
+    /// 判死区域（W9 语义）：声明"这一段不关心"。任何访问（读或写，符号或
+    /// 具体地址）与该区域重叠即判死该执行路径——具体地址直接 BadRead/
+    /// BadWrite；符号地址由回调追加 NOT(与判死区域并集重叠) 约束，与路径
+    /// 既有断言联立 Unsat 时经 W7 机制立即判死。区域内没有任何内容语义。
+    Excluded(Range<Address>),
     /// A custom region
     Custom(Range<Address>, Box<dyn Send + Sync + CustomRegion<B>>),
 }
@@ -113,6 +118,7 @@ impl<B> Clone for Region<B> {
             Symbolic(r) => Symbolic(r.clone()),
             SymbolicCode(r) => SymbolicCode(r.clone()),
             Concrete(r, contents) => Concrete(r.clone(), contents.clone()),
+            Excluded(r) => Excluded(r.clone()),
             Custom(r, contents) => Custom(r.clone(), contents.clone_dyn()),
         }
     }
@@ -132,6 +138,7 @@ impl<B> fmt::Debug for Region<B> {
             Symbolic(r) => write!(f, "Symbolic({:?})", r),
             SymbolicCode(r) => write!(f, "SymbolicCode({:?})", r),
             Concrete(r, locs) => write!(f, "Concrete({:?}, {:?})", r, locs),
+            Excluded(r) => write!(f, "Excluded({:?})", r),
             Custom(r, _) => write!(f, "Custom({:?}, <trait object>)", r),
         }
     }
@@ -144,6 +151,7 @@ impl<B> Region<B> {
             Region::Symbolic(_) => "symbolic",
             Region::SymbolicCode(_) => "symbolic code",
             Region::Concrete(_, _) => "concrete",
+            Region::Excluded(_) => "excluded",
             Region::Custom(_, contents) => contents.region_name(),
         }
     }
@@ -154,6 +162,7 @@ impl<B> Region<B> {
             Region::Symbolic(r) => r,
             Region::SymbolicCode(r) => r,
             Region::Concrete(r, _) => r,
+            Region::Excluded(r) => r,
             Region::Custom(r, _) => r,
         }
     }
@@ -166,6 +175,24 @@ impl<B> Region<B> {
 // Memory struct instead.
 
 pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync {
+    /// 回调若会用区域约束排除非符号内存的写入，可直接处理尚未收窄的符号地址。
+    /// 默认仍由 Memory 提前拒绝可能与具体区域重叠的地址。
+    fn constrains_symbolic_writes(&self) -> bool {
+        false
+    }
+
+    /// 回调若会用区域约束收窄符号读地址（如数组内存模型的 OR 链），可直接处理
+    /// 尚未收窄的符号地址。默认仍由 Memory 先做具体区域重叠检查，可能因符号
+    /// 地址尚可落入具体区域而以 BadRead 拒绝。
+    fn constrains_symbolic_reads(&self) -> bool {
+        false
+    }
+
+    /// 符号读回调。返回值表示本次调用是否向 solver 追加了**读地址约束**
+    /// （W9 起如数组内存模型的判死区域 NOT 链）：为真时 `read_symbolic` 会在
+    /// 回调返回后立即检查可满足性，约束与路径上更早的断言矛盾（例如模型侧
+    /// PMA/PMP 分支已把地址钉进判死区域）时直接以 BadRead 判死路径，而不是
+    /// 把 Unsat 留到路径终值查询。
     #[allow(clippy::too_many_arguments)]
     fn symbolic_read(
         &self,
@@ -177,7 +204,9 @@ pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync
         bytes: u32,
         tag: &Option<Val<B>>,
         opts: &ReadOpts,
-    );
+    ) -> bool;
+    /// 符号写回调。返回值语义与 `symbolic_read` 对称：为真表示追加了写地址
+    /// 约束，`write_symbolic` 随后立即做可满足性检查，矛盾时以 BadWrite 判死。
     #[allow(clippy::too_many_arguments)]
     fn symbolic_write(
         &mut self,
@@ -190,7 +219,7 @@ pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync
         bytes: u32,
         tag: &Option<Val<B>>,
         opts: &WriteOpts,
-    );
+    ) -> bool;
     fn symbolic_write_tag(
         &mut self,
         regions: &[Region<B>],
@@ -274,6 +303,9 @@ impl<B: BV> Memory<B> {
                 Region::Concrete(range, _) => {
                     log!(log::MEMORY, &format!("Memory range: [0x{:x}, 0x{:x}) concrete", range.start, range.end))
                 }
+                Region::Excluded(range) => {
+                    log!(log::MEMORY, &format!("Memory range: [0x{:x}, 0x{:x}) excluded", range.start, range.end))
+                }
                 Region::Custom(range, contents) => log!(
                     log::MEMORY,
                     &format!(
@@ -313,6 +345,10 @@ impl<B: BV> Memory<B> {
         self.regions.push(Region::Concrete(range, contents))
     }
 
+    pub fn add_excluded_region(&mut self, range: Range<Address>) {
+        self.regions.push(Region::Excluded(range))
+    }
+
     pub fn add_zero_region(&mut self, range: Range<Address>) {
         self.regions.push(Region::Concrete(range, HashMap::new()))
     }
@@ -344,6 +380,7 @@ impl<B: BV> Memory<B> {
                 Concrete(range, contents) if range.contains(&address) => {
                     return Ok(contents.get(&address).copied().unwrap_or(0))
                 }
+                Excluded(range) if range.contains(&address) => return Err(ExecError::BadRead("Excluded initial byte")),
                 Custom(range, contents) if range.contains(&address) => {
                     return contents
                         .initial_value(address, 1)
@@ -462,6 +499,11 @@ impl<B: BV> Memory<B> {
 
             match address {
                 Val::Bits(concrete_addr) => {
+                    // 判死区域（W9）参与具体地址分派：访问与判死区域重叠直接
+                    // BadRead 判死该路径，不查内容、不发事件。
+                    if excluded_concrete_hit(&self.regions, concrete_addr.lower_u64(), bytes) {
+                        return Err(ExecError::BadRead("excluded memory region"));
+                    }
                     for region in &self.regions {
                         match region {
                             Region::Constrained(range, generator) if range.contains(&concrete_addr.lower_u64()) => {
@@ -531,27 +573,33 @@ impl<B: BV> Memory<B> {
                 }
 
                 Val::Symbolic(symbolic_addr) => {
-                    // If the symbolic address overlaps a concrete
-                    // region, but actually only has a single unique
-                    // satisfiable value, then we can recursively call
-                    // read again with that satisfiable value.
-                    match self.check_concrete_overlap(
-                        symbolic_addr,
-                        ExecError::BadRead("Possible symbolic address overlap"),
-                        solver,
-                    )? {
-                        Overlap::Unique(concrete_addr) => self.read(
-                            read_kind,
-                            Val::Bits(B::new(concrete_addr, 64)),
-                            Val::I128(bytes as i128),
+                    // 数组内存模型等自约束回调负责读地址的合法性（区域 OR 链会把地址
+                    // 收窄进合法区域），跳过具体区域重叠预检查，避免尚未收窄的符号地址
+                    // 被提前以 BadRead 拒绝（与写侧 constrains_symbolic_writes 对称）。
+                    if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads()) {
+                        // If the symbolic address overlaps a concrete
+                        // region, but actually only has a single unique
+                        // satisfiable value, then we can recursively call
+                        // read again with that satisfiable value.
+                        match self.check_concrete_overlap(
+                            symbolic_addr,
+                            ExecError::BadRead("Possible symbolic address overlap"),
                             solver,
-                            tag,
-                            opts,
-                        ),
-                        Overlap::NoOverlap => {
-                            self.read_symbolic(read_kind, address, bytes, solver, tag, opts, DEFAULT_REGION_NAME)
+                        )? {
+                            Overlap::Unique(concrete_addr) => {
+                                return self.read(
+                                    read_kind,
+                                    Val::Bits(B::new(concrete_addr, 64)),
+                                    Val::I128(bytes as i128),
+                                    solver,
+                                    tag,
+                                    opts,
+                                )
+                            }
+                            Overlap::NoOverlap => {}
                         }
                     }
+                    self.read_symbolic(read_kind, address, bytes, solver, tag, opts, DEFAULT_REGION_NAME)
                 }
 
                 _ => Err(ExecError::Type("Non bitvector address in read".to_string(), SourceLoc::unknown())),
@@ -574,6 +622,12 @@ impl<B: BV> Memory<B> {
 
         match address {
             Val::Bits(concrete_addr) => {
+                // 判死区域（W9）参与具体地址分派：访问与判死区域重叠直接
+                // BadWrite 判死该路径，不写数组、不发事件。
+                let bytes = data_bytes(&data, solver)?;
+                if excluded_concrete_hit(&self.regions, concrete_addr.lower_u64(), bytes) {
+                    return Err(ExecError::BadWrite("excluded memory region"));
+                }
                 for region in self.regions.iter_mut() {
                     match region {
                         Region::Custom(range, contents) if range.contains(&concrete_addr.lower_u64()) => {
@@ -588,11 +642,13 @@ impl<B: BV> Memory<B> {
             }
 
             Val::Symbolic(symbolic_addr) => {
-                self.check_concrete_overlap(
-                    symbolic_addr,
-                    ExecError::BadWrite("possible symbolic address overlap"),
-                    solver,
-                )?;
+                if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_writes()) {
+                    self.check_concrete_overlap(
+                        symbolic_addr,
+                        ExecError::BadWrite("possible symbolic address overlap"),
+                        solver,
+                    )?;
+                }
                 self.write_symbolic(write_kind, address, data, solver, tag, opts, DEFAULT_REGION_NAME)
             }
 
@@ -639,7 +695,7 @@ impl<B: BV> Memory<B> {
             None
         };
         let tag_ir_value = tag_value.map(Val::Symbolic);
-        if let Some(c) = &self.client_info {
+        let constrained = if let Some(c) = &self.client_info {
             c.symbolic_read(
                 &self.regions,
                 solver,
@@ -650,7 +706,17 @@ impl<B: BV> Memory<B> {
                 &tag_ir_value,
                 &opts,
             )
+        } else {
+            false
         };
+        // W7：回调追加了读地址约束（W9 起即判死区域的 NOT 链）时立即检查可
+        // 满足性。真实访存路径在读之前已先经模型侧 PMA/PMP 检查，其
+        // range_subset 分支可能已把地址断言进判死区域内的 PMA 区间；不在此处
+        // 判死的话路径会跑完整条指令、烧掉一次终值模型查询后才在 collector 被
+        // 丢弃（W7 修复，端到端证据 /tmp/isla-memimpl-w6-1532/unsat_dump/）。
+        if constrained && solver.check_sat(SourceLoc::unknown()).is_unsat()? {
+            return Err(ExecError::BadRead("symbolic address falls in excluded memory region"));
+        }
         solver.add_event(Event::ReadMem {
             value: Val::Symbolic(value),
             read_kind,
@@ -688,17 +754,20 @@ impl<B: BV> Memory<B> {
     ) -> Result<Val<B>, ExecError> {
         use crate::smt::smtlib::*;
 
-        let data_length = crate::primop_util::length_bits(&data, solver, SourceLoc::unknown())?;
-        if data_length % 8 != 0 {
-            return Err(ExecError::Type(format!("write_symbolic {:?}", &data_length), SourceLoc::unknown()));
-        };
-        let bytes = data_length / 8;
+        let bytes = data_bytes(&data, solver)?;
 
         let value = solver.fresh();
         solver.add(Def::DeclareConst(value, Ty::Bool));
-        if let Some(c) = &mut self.client_info {
+        let constrained = if let Some(c) = &mut self.client_info {
             c.symbolic_write(&self.regions, solver, value, &write_kind, &address, &data, bytes, &tag, &opts)
+        } else {
+            false
         };
+        // W7：与读侧对称——回调追加了写地址约束（W9 起即判死区域的 NOT 链）
+        // 时立即判死矛盾路径（见 `read_symbolic` 的 W7 注释）。
+        if constrained && solver.check_sat(SourceLoc::unknown()).is_unsat()? {
+            return Err(ExecError::BadWrite("symbolic address falls in excluded memory region"));
+        }
         solver.add_event(Event::WriteMem { value, write_kind, address, data, bytes, tag_value: tag, opts, region });
 
         Ok(Val::Symbolic(value))
@@ -749,6 +818,31 @@ impl<B: BV> Memory<B> {
     }
 }
 
+/// 具体访问区间 `[address, address+bytes)` 与判死区域是否重叠（u128 加法
+/// 避免 address+bytes 回绕）。起始在区域外、末字节伸入区域的跨界访问同样
+/// 算重叠——与符号侧 NOT 链的"触到任一字节即死"语义一致。
+fn excluded_overlap(range: &Range<Address>, address: Address, bytes: u32) -> bool {
+    address < range.end && (address as u128 + u128::from(bytes)) > range.start as u128
+}
+
+/// 具体地址（读或写）是否落在任一判死区域内。
+fn excluded_concrete_hit<B: BV>(regions: &[Region<B>], address: Address, bytes: u32) -> bool {
+    regions.iter().any(|region| match region {
+        Region::Excluded(range) => excluded_overlap(range, address, bytes),
+        _ => false,
+    })
+}
+
+/// 写数据的字节长度（位长必须是 8 的倍数，否则类型错误——与
+/// `write_symbolic` 的既有检查一致，供具体地址分派复用）。
+fn data_bytes<B: BV>(data: &Val<B>, solver: &mut Solver<B>) -> Result<u32, ExecError> {
+    let data_length = crate::primop_util::length_bits(data, solver, SourceLoc::unknown())?;
+    if data_length % 8 != 0 {
+        return Err(ExecError::Type(format!("write_symbolic {:?}", &data_length), SourceLoc::unknown()));
+    }
+    Ok(data_length / 8)
+}
+
 fn ranges_for_access_checks<B: BV>(
     regions: &[Region<B>],
     bytes: u32,
@@ -757,7 +851,7 @@ fn ranges_for_access_checks<B: BV>(
     regions
         .iter()
         .filter(move |r| match kind {
-            SmtKind::ReadData => true,
+            SmtKind::ReadData => !matches!(r, Region::Excluded(_)),
             SmtKind::ReadInstr => matches!(r, Region::SymbolicCode(_)),
             SmtKind::WriteData => matches!(r, Region::Symbolic(_)),
         })
@@ -792,7 +886,7 @@ pub fn smt_address_constraint<B: BV>(
             let in_range = And(
                 Box::new(Bvule(Box::new(bits64(r.start, addr_size)), Box::new(Var(addr_var)))),
                 // Use an extra bit to prevent wrapping
-                Box::new(Bvult(
+                Box::new(Bvule(
                     Box::new(Bvadd(
                         Box::new(ZeroExtend(1, Box::new(Var(addr_var)))),
                         Box::new(ZeroExtend(1, Box::new(bits64(bytes as u64, addr_size)))),
@@ -811,6 +905,51 @@ pub fn smt_address_constraint<B: BV>(
             Bool(false) => e,
             _ => Or(Box::new(acc), Box::new(e)),
         })
+}
+
+/// 判死区域（`Region::Excluded`）的符号地址约束：NOT(访问区间与任一判死
+/// 区域重叠)。访问区间 `[addr, addr+bytes)` 与 `[start, end)` 重叠定义为
+/// `addr <u end && addr + bytes >u start`（加法在 addr_size+1 位上做，避免
+/// 回绕）。零判死区域返回 `None`——零约束零开销，与默认全符号化一致。
+/// 注意与白名单 OR 链（`smt_address_constraint`，W8 已从 solve-state 移除）
+/// 相反：这里任何与区域**重叠**（哪怕一字节）都判死，不要求访问完整落入
+/// 区域内，区域也不需要装得下整个访问。
+pub fn smt_excluded_constraint<B: BV>(
+    regions: &[Region<B>],
+    address: &Exp<Sym>,
+    bytes: u32,
+    solver: &mut Solver<B>,
+) -> Option<Exp<Sym>> {
+    use crate::smt::smtlib::Exp::*;
+    let addr_var = match address {
+        Var(v) => *v,
+        _ => {
+            let v = solver.fresh();
+            solver.add(Def::DefineConst(v, address.clone()));
+            v
+        }
+    };
+    let addr_size = solver.length(addr_var).unwrap_or_else(|| panic!("address is not a bitvector"));
+    let mut overlap: Option<Exp<Sym>> = None;
+    for region in regions {
+        let Region::Excluded(range) = region else { continue };
+        let in_range = And(
+            Box::new(Bvult(Box::new(Var(addr_var)), Box::new(bits64(range.end, addr_size)))),
+            // 多一位加法防止 addr+bytes 回绕成小值
+            Box::new(Bvugt(
+                Box::new(Bvadd(
+                    Box::new(ZeroExtend(1, Box::new(Var(addr_var)))),
+                    Box::new(ZeroExtend(1, Box::new(bits64(u64::from(bytes), addr_size)))),
+                )),
+                Box::new(ZeroExtend(1, Box::new(bits64(range.start, addr_size)))),
+            )),
+        );
+        overlap = match overlap {
+            None => Some(in_range),
+            Some(acc) => Some(Or(Box::new(acc), Box::new(in_range))),
+        };
+    }
+    overlap.map(|union| Not(Box::new(union)))
 }
 
 fn reverse_endianness(bytes: &mut [u8]) {

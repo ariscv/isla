@@ -3456,6 +3456,7 @@ fn zrX(z3zE1756) {
             default_sizeof: 0,
             zero_announce_exit: false,
             memory_regions: None,
+            pma_regions: None,
             page_table_config: None,
             pmp: None,
             clint_enabled: None,
@@ -4652,6 +4653,76 @@ fn zmemread(zu) {
             hits >= 1,
             "期望 read_mem 落入注入的 symbol region 并产生 region 为 symbolic 的 ReadMem 事件，实际命中 {} 次",
             hits
+        );
+    }
+
+    #[test]
+    fn multi_thread_read_mem_event_survives_fork() {
+        // fork 后再 read_mem：两条 Finished 路径中 false 分支做了读，
+        // 断言该路径 collector 收到的 solver.trace() 仍含 ReadMem 事件
+        // （锁定 checkpoint/fork 不丢访存事件，对应 solve-state 物化链路）。
+        // 初始 checkpoint 非空（先声明若干符号变量再 checkpoint），对齐
+        // solve-state 的 setup（symbolic_args）→ checkpoint → multi_thread 形态。
+        const MEM_IR: &str = r#"
+val zreadmem = "read_mem" : (%unit, %i64, %bv, %i) -> %bv
+val zmemreadfork : (%unit) -> %unit
+fn zmemreadfork(zu) {
+  zb : %bool;
+  zv : %bv;
+  jump zb goto 4;
+  zv = zreadmem(zu, 0, 0x0000000000001000, 1);
+  end;
+}
+"#;
+        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(MEM_IR);
+        let task_state = TaskState::new();
+        let mut mem = crate::memory::Memory::<B64>::new();
+        mem.add_symbolic_region(0x1000..0x2000);
+        let collected: Arc<std::sync::Mutex<(u32, u32)>> = Arc::new(std::sync::Mutex::new((0, 0)));
+
+        let cfg = crate::smt::Config::new();
+        let ctx = crate::smt::Context::new(cfg);
+        let mut setup_solver = crate::smt::Solver::<B64>::new(&ctx);
+        for _ in 0..3 {
+            let sym = setup_solver.fresh();
+            setup_solver.add(crate::smt::smtlib::Def::DeclareConst(sym, crate::smt::smtlib::Ty::BitVec(8)));
+        }
+        let cp = checkpoint(&mut setup_solver);
+
+        execute_ir_function_with_checkpoint_multi_thread(
+            "zmemreadfork",
+            &[Val::Unit],
+            &shared_state,
+            &regs,
+            &lets,
+            &collected,
+            &|_tid, _id, result, _ss, solver, count| {
+                if let Ok((Run::Finished(_), _frame)) = result {
+                    let hit = solver
+                        .trace()
+                        .to_vec()
+                        .into_iter()
+                        .any(|event| matches!(event, Event::ReadMem { region, bytes, .. } if *region == "symbolic" && *bytes == 1));
+                    let mut count = count.lock().unwrap();
+                    count.0 += 1;
+                    if hit {
+                        count.1 += 1;
+                    }
+                }
+            },
+            cp,
+            Some(mem),
+            4,
+            None,
+            &task_state,
+        );
+
+        let (finished, event_hits) = *collected.lock().unwrap();
+        assert!(finished >= 2, "期望符号分支 fork 出至少 2 条 Finished 路径，实际 {}", finished);
+        assert!(
+            event_hits >= 1,
+            "期望做读的分支在 collector 收到的 solver trace 中保留 ReadMem 事件，实际命中 {} 次",
+            event_hits
         );
     }
 

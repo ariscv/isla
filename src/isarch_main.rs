@@ -380,6 +380,8 @@ fn isla_main() -> i32 {
     opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
+    opts.optopt("", "instruction-bits", "定向执行真实16/32位编码（需单一--clause）", "<0xNNNN|0xNNNNNNNN>");
+    opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optflag("", "all", "执行所有clause");
     opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
 
@@ -473,6 +475,20 @@ fn isla_main() -> i32 {
         }
     }
 
+    // W10（S1）：[[pma_regions]] 配置化 PMA 地图。构造 list-of-records 值写入
+    // zpma_regions 寄存器默认值，替代 IR 固化地图；未配置时不注入，沿用 IR 默认。
+    if let Some(pma_regions) = &isa_config.pma_regions {
+        if let Err(error) = isarch::target::apply_pma_regions_to_config(
+            pma_regions,
+            &symtab,
+            &type_info,
+            &mut isa_config.default_registers,
+        ) {
+            eprintln!("{}", error);
+            return 1;
+        }
+    }
+
     let iarch = initialize_architecture(&mut arch, symtab, type_info, &isa_config, assertion_mode, use_model_reg_init);
     let iarch_config = InitArchWithConfig::from_initialized(&iarch, &isa_config);
     let regs = &iarch.regs;
@@ -499,6 +515,30 @@ fn isla_main() -> i32 {
         }
         Subcommand::Tree { .. } => cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path),
         Subcommand::SolveState { clauses, extensions, instruction_names, run_all } => {
+            let instruction_bits = matches.opt_str("instruction-bits");
+            let prestate_args = matches.opt_strs("prestate");
+            if (instruction_bits.is_some() || !prestate_args.is_empty())
+                && (clauses.len() != 1 || !extensions.is_empty() || !instruction_names.is_empty() || run_all)
+            {
+                eprintln!("--instruction-bits/--prestate 只支持单一 --clause，不能与 --extension/--instruction-name/--all 混用");
+                return 1;
+            }
+            let instruction = match instruction_bits.as_deref().map(isarch::exec::parse_fixed_instruction_bits) {
+                Some(Ok(instruction)) => Some(instruction),
+                Some(Err(error)) => {
+                    eprintln!("{}", error);
+                    return 1;
+                }
+                None => None,
+            };
+            let prestate = match isarch::exec::parse_fixed_prestate(&prestate_args, shared_state, regs, lets) {
+                Ok(prestate) => prestate,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    return 1;
+                }
+            };
+            let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
             let timeout_report_config =
                 isarch::exec::TimeoutReportConfig { output: timeout_smt_output, directory: timeout_smt_dir };
             let xlen = detect_xlen(*shared_state, lets);
@@ -528,6 +568,7 @@ fn isla_main() -> i32 {
                         timeout,
                         isa_config.execution_limits.as_ref(),
                         timeout_report_config.clone(),
+                        &fixed_inputs,
                     )
                 }
                 64 => {
@@ -554,6 +595,7 @@ fn isla_main() -> i32 {
                         timeout,
                         isa_config.execution_limits.as_ref(),
                         timeout_report_config.clone(),
+                        &fixed_inputs,
                     )
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),

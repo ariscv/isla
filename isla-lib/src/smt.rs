@@ -52,9 +52,7 @@ use petgraph::{
 
 use z3_sys::*;
 
-#[cfg(feature = "smtperf")]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -190,7 +188,7 @@ use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
 use z3_timeout::{
     timeout_Z3_model_eval, timeout_Z3_solver_check, timeout_Z3_solver_check_assumptions,
-    timeout_error as z3_timeout_error, Z3TimeoutError,
+    timeout_Z3_solver_check_deadline, timeout_error as z3_timeout_error, Z3TimeoutError,
 };
 
 /// Snapshot of interaction with underlying solver that can be
@@ -259,6 +257,10 @@ pub struct WriteOpts {
 impl WriteOpts {
     pub fn exclusive() -> Self {
         WriteOpts { is_exclusive: true }
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.is_exclusive
     }
 }
 
@@ -1535,12 +1537,24 @@ pub struct Solver<'ctx, B> {
     ctx: &'ctx Context,
     symbol_namer: Z3SymbolNamer,
     performance_info: PerformanceInfo,
+    /// 最后一次 check 以来新增的 `Def::Assert` 数量。用于判断 solver 里是否仍
+    /// 持有"与当前断言集一致的 Sat 模型"（见 `take_stashed_model`）。
+    asserts_since_check: usize,
+    /// 最后一次 check（含 `check_sat_with` 的 assumption 查询）是否返回 Sat。
+    last_check_sat: bool,
+    /// 最近一次返回 Sat 的 check 所产生的模型（已 inc_ref）。断言集此后未变时
+    /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
+    /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
+    stashed_model: Option<Z3_model>,
 }
 
 impl<B> Drop for Solver<'_, B> {
     fn drop(&mut self) {
         unsafe {
             Z3_solver_dec_ref(self.ctx.z3_ctx, self.z3_solver);
+            if let Some(model) = self.stashed_model.take() {
+                Z3_model_dec_ref(self.ctx.z3_ctx, model);
+            }
         }
     }
 }
@@ -2067,18 +2081,23 @@ fn tastic() -> &'static CStr {
     }
 }
 
-// 不同 Z3 solver 暴露的随机种子参数名不同，按实际参数表选择。
-unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> &'static [u8] {
+// 不同 Z3 solver 暴露的随机种子参数名不同，按实际参数表选择；两个名字都不支持
+// 的 solver（如 default tactic 生成的）不设置种子参数，避免 Z3 对未知参数触发
+// 致命错误导致进程退出。
+unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> Option<&'static [u8]> {
     let param_descrs = Z3_solver_get_param_descrs(ctx, solver);
     Z3_param_descrs_inc_ref(ctx, param_descrs);
-    let mut seed_param_name = RANDOM_SEED_STR;
+    let mut seed_param_name = None;
     for i in 0..Z3_param_descrs_size(ctx, param_descrs) {
         let symbol = Z3_param_descrs_get_name(ctx, param_descrs, i);
         if Z3_get_symbol_kind(ctx, symbol) == SymbolKind::String {
             let name = CStr::from_ptr(Z3_get_symbol_string(ctx, symbol)).to_bytes();
             if name == &SEED_STR[..SEED_STR.len() - 1] {
-                seed_param_name = SEED_STR;
+                seed_param_name = Some(SEED_STR);
                 break;
+            }
+            if name == &RANDOM_SEED_STR[..RANDOM_SEED_STR.len() - 1] {
+                seed_param_name = Some(RANDOM_SEED_STR);
             }
         }
     }
@@ -2104,12 +2123,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let z3_params = Z3_mk_params(ctx.z3_ctx);
             Z3_params_inc_ref(ctx.z3_ctx, z3_params);
 
-            let seed_symbol = Z3_mk_string_symbol(
-                ctx.z3_ctx,
-                CStr::from_bytes_with_nul_unchecked(z3_seed_param_name(ctx.z3_ctx, z3_solver)).as_ptr(),
-            );
-            Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, fresh_random_seed());
-            Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
+            if let Some(seed_param_name) = z3_seed_param_name(ctx.z3_ctx, z3_solver) {
+                let seed_symbol =
+                    Z3_mk_string_symbol(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(seed_param_name).as_ptr());
+                Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, fresh_random_seed());
+                Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
+            }
 
             Z3_params_dec_ref(ctx.z3_ctx, z3_params);
 
@@ -2125,6 +2144,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 enums: Enums::new(ctx),
                 symbol_namer,
                 performance_info: PerformanceInfo::new(),
+                asserts_since_check: 0,
+                last_check_sat: false,
+                stashed_model: None,
             }
         }
     }
@@ -2302,6 +2324,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
         match &def {
             Def::Assert(exp) => {
+                self.asserts_since_check += 1;
+                self.clear_stashed_model();
                 let vars = exp.variables();
                 if cfg!(feature = "smtperf") {
                     for v1 in vars.iter() {
@@ -2577,6 +2601,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let z3_result = match timeout_Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, &assumptions, info) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
+                // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
+                self.last_check_sat = false;
+                self.asserts_since_check = 0;
                 let dump =
                     timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(exp.clone()));
                 return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
@@ -2590,6 +2617,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Unknown
         };
 
+        self.record_check_result(&result);
         self.performance_info.assign_cost(exp);
         result
     }
@@ -2603,6 +2631,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver, info) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
+                // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
+                self.last_check_sat = false;
+                self.asserts_since_check = 0;
                 let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
                 return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
             }
@@ -2614,6 +2645,90 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else {
             Unknown
         };
+        self.record_check_result(&result);
+        result
+    }
+
+    /// 记录一次 check 的结果：Sat 时缓存其模型（断言未变前可复用，见
+    /// `take_stashed_model`）；同时重置断言计数。Unsat/Unknown 不会让既有
+    /// 缓存失效——缓存模型满足的是当前断言集（自缓存以来没有新增
+    /// `Def::Assert`），与这次探测的假设和结果无关。
+    fn record_check_result(&mut self, result: &SmtResult) {
+        self.last_check_sat = matches!(result, Sat);
+        self.asserts_since_check = 0;
+        if self.last_check_sat {
+            unsafe {
+                let model = Z3_solver_get_model(self.ctx.z3_ctx, self.z3_solver);
+                if !model.is_null() {
+                    Z3_model_inc_ref(self.ctx.z3_ctx, model);
+                    self.clear_stashed_model();
+                    self.stashed_model = Some(model);
+                }
+            }
+        }
+    }
+
+    fn clear_stashed_model(&mut self) {
+        if let Some(model) = self.stashed_model.take() {
+            unsafe { Z3_model_dec_ref(self.ctx.z3_ctx, model) }
+        }
+    }
+
+    /// 最后一次 check 以来新增的 `Def::Assert` 数量（诊断/日志用）。
+    pub fn asserts_since_check(&self) -> usize {
+        self.asserts_since_check
+    }
+
+    /// 是否持有可复用的"最近一次 Sat check"模型缓存（断言未变）。
+    pub fn has_stashed_model(&self) -> bool {
+        self.stashed_model.is_some()
+    }
+
+    /// 最后一次 check 是否返回 Sat（诊断/日志用）。
+    pub fn last_check_was_sat(&self) -> bool {
+        self.last_check_sat
+    }
+
+    /// 取出缓存的"最近一次 Sat check"模型（所有权转移，取出后缓存为空）。
+    ///
+    /// 自那次 Sat check 后没有新增 `Def::Assert` 时，该模型满足当前全部
+    /// 断言（`check_sat_with` 的 assumption 只会额外收紧），可直接用于取值
+    /// 而不必重解。这是 `Z3_solver_get_model` 语义的强化版：后续 Unsat 探测
+    /// （如 `__monomorphize` 的唯一性探测）会让 Z3 丢弃它自己的"最后模型"，
+    /// 但不会使本缓存失效。
+    pub fn take_stashed_model(&mut self) -> Option<Model<'_, B>> {
+        // Z3_model 是裸指针（Copy），必须用 take() 真正移出，避免字段残留导致
+        // 重复取出、双重 dec_ref。
+        let model = self.stashed_model.take()?;
+        Some(Model { z3_model: model, solver: &*self, ctx: self.ctx, complete_model: false })
+    }
+
+    /// 带独立时间盒的 `check_sat`：deadline 到期后软中断 Z3 并返回超时错误。
+    ///
+    /// 与 `--smt-timeout` 的全局单次 operation 上限相互独立，供"路径终值
+    /// 物化"这类需要单独预算的查询使用。未启用 `smt-thread-interrupt`
+    /// feature 时无法中断 Z3，退化为普通 `check_sat`（deadline 不生效，
+    /// 与 `--smt-timeout` 在该构建下的既有行为一致）。
+    pub fn check_sat_deadline(&mut self, info: SourceLoc, deadline: Duration) -> SmtResult {
+        let started = Instant::now();
+        let z3_result = match timeout_Z3_solver_check_deadline(self.ctx.z3_ctx, self.z3_solver, info, deadline) {
+            Ok(result) => result,
+            Err(Z3TimeoutError::Interrupted) => {
+                // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
+                self.last_check_sat = false;
+                self.asserts_since_check = 0;
+                let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
+                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+            }
+        };
+        let result = if z3_result == Z3_L_TRUE {
+            Sat
+        } else if z3_result == Z3_L_FALSE {
+            Unsat
+        } else {
+            Unknown
+        };
+        self.record_check_result(&result);
         result
     }
 
@@ -3001,6 +3116,124 @@ mod tests {
             Box::new(bv!("0101")),
         )));
         assert!(solver.check_sat(SourceLoc::unknown()) == Unsat);
+    }
+
+    /// `take_stashed_model` 是"跳过终值重解"的依据：Sat check 后缓存模型，
+    /// 新增 `Def::Assert` 使缓存失效。关键语义：后续 **Unsat 探测**
+    /// （check_sat_with 探针，如 `__monomorphize` 的唯一性探测）不能让缓存
+    /// 失效——Z3 自己会丢弃"最后模型"，但缓存模型满足的当前断言集没变。
+    #[test]
+    fn 模型缓存跟踪新增断言且不被unsat探测失效() {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        solver.add(DeclareConst(Sym::from_u32(0), Ty::Bool));
+
+        assert!(solver.take_stashed_model().is_none(), "从未 check 过的 solver 无缓存模型");
+
+        // Unsat 的 check 不产生缓存
+        solver.add(Assert(Bool(false)));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Unsat);
+        assert!(solver.take_stashed_model().is_none());
+
+        // Sat 后缓存可用
+        let cfg2 = Config::new();
+        let ctx2 = Context::new(cfg2);
+        let mut solver = Solver::<B64>::new(&ctx2);
+        solver.add(DeclareConst(Sym::from_u32(0), Ty::Bool));
+        // 钉住 var0 = true（此断言先使缓存失效，随后重新 Sat 产生新缓存）
+        solver.add(Assert(Var(Sym::from_u32(0))));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+        assert!(solver.take_stashed_model().is_some(), "Sat check 后应缓存模型");
+        assert!(solver.take_stashed_model().is_none(), "取出后缓存应转移为空");
+
+        // 重新 Sat 恢复缓存
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+        assert!(solver.has_stashed_model());
+
+        // Unsat 探测（var0 已钉成 true，取反必 Unsat）不清空缓存
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(Sym::from_u32(0)))), SourceLoc::unknown()), Unsat);
+        assert!(solver.take_stashed_model().is_some(), "Unsat 探测不应使缓存失效");
+
+        // check_sat_with 的 Sat 查询同样刷新缓存（assumption 只收紧约束）
+        assert_eq!(solver.check_sat_with(&Var(Sym::from_u32(0)), SourceLoc::unknown()), Sat);
+        assert!(solver.take_stashed_model().is_some());
+
+        // 新增 Assert 后缓存失效（即使是语义上恒真的断言）
+        solver.add(Assert(Bool(true)));
+        assert!(solver.take_stashed_model().is_none(), "新增断言后缓存必须失效");
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+        assert!(solver.take_stashed_model().is_some());
+    }
+
+    /// 复用缓存模型与重解取模型结果一致：断言集未变时，缓存模型满足当前
+    /// 全部断言，跳过重解不改变物化值的可用性。
+    #[test]
+    fn 复用缓存模型与重解结果一致() {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        solver.add(DeclareConst(Sym::from_u32(0), Ty::BitVec(8)));
+        solver.add(Assert(Bvugt(Box::new(var(0)), Box::new(bv!("00000101")))));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+
+        // 模拟 __monomorphize 的唯一性探测：Unsat 的 check_sat_with 之后再取缓存
+        assert_eq!(
+            solver.check_sat_with(&Bvult(Box::new(var(0)), Box::new(bv!("00000010"))), SourceLoc::unknown()),
+            Unsat
+        );
+        let reused = {
+            let mut model = solver.take_stashed_model().expect("Unsat 探测后缓存应仍可用");
+            match model.get_var(Sym::from_u32(0)).unwrap() {
+                ModelVal::Exp(Bits64(value)) => value,
+                other => panic!("期望位向量模型值，实际 {:?}", other),
+            }
+        };
+        assert!(reused.lower_u64() > 5, "缓存模型应满足既有约束 x > 5，实际 {}", reused.lower_u64());
+
+        // 重解一次取模型，值同样满足约束（两个模型可以不同，但都必须满足约束）
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+        let resolved = {
+            let mut model = Model::new(&solver);
+            match model.get_var(Sym::from_u32(0)).unwrap() {
+                ModelVal::Exp(Bits64(value)) => value,
+                other => panic!("期望位向量模型值，实际 {:?}", other),
+            }
+        };
+        assert!(resolved.lower_u64() > 5, "重解模型应满足既有约束 x > 5，实际 {}", resolved.lower_u64());
+    }
+
+    /// `check_sat_deadline` 到期后软中断 Z3 并返回 CheckSat 超时错误；同一
+    /// 查询给足时间则正常返回 Sat。仅 `smt-thread-interrupt` 构建可中断。
+    #[cfg(feature = "smt-thread-interrupt")]
+    #[test]
+    fn deadline到期中断check返回超时错误() {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        // 64 位乘法逆运算：已知乘积求因子，短 deadline 内无法完成
+        let p = Sym::from_u32(0);
+        let q = Sym::from_u32(1);
+        solver.add(DeclareConst(p, Ty::BitVec(64)));
+        solver.add(DeclareConst(q, Ty::BitVec(64)));
+        solver.add(DeclareConst(Sym::from_u32(2), Ty::BitVec(64)));
+        solver.add(Assert(Eq(Box::new(Bvmul(Box::new(Var(p)), Box::new(Var(q)))), Box::new(Var(Sym::from_u32(2))))));
+        // 把乘积钉在一个大素数上，只能靠搜索分解
+        let prime_bits: Vec<bool> = (0..64).rev().map(|i| (0xC71CA6CBB5F1B7AEu64 >> i) & 1 == 1).collect();
+        solver.add(Assert(Eq(Box::new(Var(Sym::from_u32(2))), Box::new(Bits(prime_bits)))));
+
+        let result = solver.check_sat_deadline(SourceLoc::unknown(), Duration::from_millis(1));
+        match result {
+            SmtResult::Error(smt_error) => {
+                let message = format!("{}", smt_error);
+                assert!(message.contains("CheckSat"), "超时错误应标记 CheckSat 操作，实际 {}", message);
+            }
+            other => panic!("1ms deadline 下应超时，实际 {:?}", other),
+        }
+
+        // 给足时间后同一 solver 状态可正常求解（软中断不破坏 solver 状态的后续使用）
+        let result = solver.check_sat_deadline(SourceLoc::unknown(), Duration::from_secs(60));
+        assert_eq!(result, Sat);
     }
 }
 

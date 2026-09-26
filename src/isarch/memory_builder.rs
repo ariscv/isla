@@ -9,6 +9,7 @@ use isla_lib::memory::{Memory, Region};
 enum PendingRegion {
     Concrete { base: u64, size: u64 },
     Symbolic { base: u64, size: u64 },
+    Excluded { base: u64, size: u64 },
 }
 
 pub struct MemoryBuilder<'a, B: BV> {
@@ -39,7 +40,10 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
                 builder = match region.region_type {
                     MemoryRegionType::Concrete => builder.add_concrete_region(region.base, region.size),
                     MemoryRegionType::Symbolic => builder.add_symbolic_region(region.base, region.size),
-                    _ => return Err("unsupported memory region type".to_string()),
+                    MemoryRegionType::Excluded => builder.add_excluded_region(region.base, region.size),
+                    // MemoryRegionType 标了 non_exhaustive，穷举需要兜底臂；三个
+                    // 已知变体都已处理，走到这里说明 isla 与 isla-lib 版本不一致。
+                    _ => panic!("MemoryRegionType 出现未覆盖的变体（isla 与 isla-lib 版本不一致）"),
                 };
             }
         }
@@ -57,6 +61,11 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
 
     pub fn add_symbolic_region(mut self, base: u64, size: u64) -> Self {
         self.regions.push(PendingRegion::Symbolic { base, size });
+        self
+    }
+
+    pub fn add_excluded_region(mut self, base: u64, size: u64) -> Self {
+        self.regions.push(PendingRegion::Excluded { base, size });
         self
     }
 
@@ -147,6 +156,7 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
             let (label, base, size) = match region {
                 PendingRegion::Concrete { base, size } => ("concrete", *base, *size),
                 PendingRegion::Symbolic { base, size } => ("symbolic", *base, *size),
+                PendingRegion::Excluded { base, size } => ("excluded", *base, *size),
             };
             let end = base
                 .checked_add(size)
@@ -195,6 +205,9 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
                 }
                 PendingRegion::Symbolic { base, size } => {
                     memory.add_symbolic_region(*base..base + size);
+                }
+                PendingRegion::Excluded { base, size } => {
+                    memory.add_excluded_region(*base..base + size);
                 }
             }
         }
@@ -436,6 +449,57 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
     }
 }
 
+/// solve-state 内存装配的可选兜底：`add_default_ram=true` 且配置未声明任何
+/// `Region::Symbolic` 区域时补一个默认符号 RAM 区域。
+///
+/// W6 起零配置的语义是**彻底全符号化**：数组内存模型（W2
+/// `memory_model::SeqMemory`）下地址与数组内容全部自由，可满足性不依赖区域
+/// （写侧空 OR 链折叠成 `false` 的 bug 已修复），因此默认**不再**隐式补区域。
+/// `ISLA_RISCV_DEFAULT_SYM_RAM=1`（`default_sym_ram_enabled`）显式要求时才补，
+/// 范围与 riscv64_difftest_mem.toml 的 sym_ram 对齐（0x80000000 起 256MB），
+/// 供 difftest 重放在未配置 `[[memory_regions]]` 时把访存地址圈进常规 RAM。
+/// 已配置符号区域时保持不变；默认范围与既有区域重叠属于配置错误，直接
+/// panic 提示显式声明 `[[memory_regions]]`。
+pub fn ensure_solve_state_memory<B: BV>(mut memory: Memory<B>, add_default_ram: bool) -> Memory<B> {
+    if !add_default_ram {
+        return memory;
+    }
+    if memory.regions().iter().any(|region| matches!(region, Region::Symbolic(_))) {
+        return memory;
+    }
+    const DEFAULT_SYMBOLIC_RAM_BASE: u64 = 0x8000_0000;
+    const DEFAULT_SYMBOLIC_RAM_SIZE: u64 = 0x1000_0000;
+    let default_range = DEFAULT_SYMBOLIC_RAM_BASE..DEFAULT_SYMBOLIC_RAM_BASE + DEFAULT_SYMBOLIC_RAM_SIZE;
+    let overlaps = memory.regions().iter().any(|region| {
+        region.region_range().start < default_range.end && default_range.start < region.region_range().end
+    });
+    if overlaps {
+        panic!(
+            "solve-state 默认符号 RAM 区域 [0x{:x}, 0x{:x}) 与配置的内存区域重叠，请在配置中显式声明 [[memory_regions]] 的 symbolic 区域",
+            default_range.start, default_range.end
+        );
+    }
+    memory.add_symbolic_region(default_range);
+    memory
+}
+
+/// 环境变量 `ISLA_RISCV_DEFAULT_SYM_RAM` 是否要求 solve-state 补默认符号 RAM。
+///
+/// 默认关闭（尊重零配置 = 彻底全符号化的设计语义）；`1`/`true`/`on`（大小写
+/// 不敏感）开启，供 difftest 重放等需要固定 RAM 竞技场的场景显式声明。
+pub fn default_sym_ram_enabled() -> bool {
+    let value = match std::env::var("ISLA_RISCV_DEFAULT_SYM_RAM") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return false,
+        Err(err) => panic!("读取环境变量 ISLA_RISCV_DEFAULT_SYM_RAM 失败: {}", err),
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" => true,
+        "0" | "false" | "off" => false,
+        other => panic!("ISLA_RISCV_DEFAULT_SYM_RAM 仅支持 1/true/on 或 0/false/off，实际为 '{}'", other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +521,55 @@ mod tests {
             .any(|region| matches!(region, Region::Symbolic(range) if range.start == base && range.end == base + size))
     }
 
+    fn has_excluded_region(memory: &Memory<B64>, base: u64, size: u64) -> bool {
+        memory
+            .regions()
+            .iter()
+            .any(|region| matches!(region, Region::Excluded(range) if range.start == base && range.end == base + size))
+    }
+
+    /// W9 判死区域构造：`add_excluded_region` 产出 `Region::Excluded`，与
+    /// concrete/symbolic 区域并存。
+    #[test]
+    fn excluded_region_builds_and_coexists() {
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64)
+            .add_concrete_region(0x8000_0000, 0x1000)
+            .add_symbolic_region(0x9000_0000, 0x2000)
+            .add_excluded_region(0x0200_0000, 0x0200_0000)
+            .set_clint_enabled(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.regions().len(), 3);
+        assert!(has_concrete_region(&memory, 0x8000_0000, 0x1000));
+        assert!(has_symbolic_region(&memory, 0x9000_0000, 0x2000));
+        assert!(has_excluded_region(&memory, 0x0200_0000, 0x0200_0000), "应构造出 MMIO 判死区域");
+        assert_eq!(memory.region_name_at(0x0300_0000), "excluded", "判死区域命名应可用于事件标注");
+    }
+
+    /// 判死区域与其他区域重叠属于配置错误，构建直接失败（与既有重叠校验一致）。
+    #[test]
+    fn excluded_region_overlap_rejected() {
+        let rv64: RV64<B64> = RV64::default();
+        let result = MemoryBuilder::<B64>::new(&rv64)
+            .add_symbolic_region(0x1000, 0x2000)
+            .add_excluded_region(0x2000, 0x1000)
+            .set_clint_enabled(false)
+            .build();
+        assert!(result.is_err(), "判死区域与 symbolic 区域重叠应构建失败");
+    }
+
+    /// 默认 CLINT 与判死段重叠同样拒绝——演示配置需显式 clint_enabled=false
+    /// 或收缩判死段边界（见 configs/riscv64_difftest_mem_excluded.toml）。
+    #[test]
+    fn excluded_region_overlap_clint_rejected() {
+        let rv64: RV64<B64> = RV64::default();
+        // CLINT 默认 [0x2000000,0x20c0000) 落在判死段 [0x02000000,0x04000000) 内
+        let result = MemoryBuilder::<B64>::new(&rv64).add_excluded_region(0x0200_0000, 0x0200_0000).build();
+        assert!(result.is_err(), "判死段包住默认 CLINT 应构建失败");
+    }
+
     #[test]
     fn new_builder_defaults() {
         let rv64: RV64<B64> = RV64::default();
@@ -465,6 +578,49 @@ mod tests {
 
         assert_eq!(memory.regions().len(), 1);
         assert!(has_concrete_region(&memory, 0x2000000, 0xc0000));
+    }
+
+    /// W6 语义调整：零配置（默认 difftest 配置只有 CLINT concrete 区域）不再
+    /// 隐式补默认符号 RAM——数组模型下地址与数组内容全部符号化，可满足性不
+    /// 依赖区域。W5 版本曾默认补 RAM 救活访存路径，当时的写侧空 OR 链折叠
+    /// bug（空 Symbolic 区域集被折成 `false` 判死写路径）已在 memory_model
+    /// 的 `region_address_constraint` 修复，因此默认关闭改为显式开关。
+    #[test]
+    fn ensure_solve_state_memory_默认不补ram尊重零配置() {
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64).build().unwrap();
+        assert!(!memory.regions().iter().any(|r| matches!(r, Region::Symbolic(_))), "默认配置内存应无符号区域");
+
+        let memory = ensure_solve_state_memory(memory, false);
+        assert!(
+            !memory.regions().iter().any(|r| matches!(r, Region::Symbolic(_))),
+            "默认（开关关闭）不应隐式补符号 RAM"
+        );
+        assert!(has_concrete_region(&memory, 0x2000000, 0xc0000), "原有 CLINT concrete 区域保留");
+    }
+
+    /// 开关打开且未配置符号区域时补与 riscv64_difftest_mem.toml 的 sym_ram
+    /// 对齐的默认 RAM（difftest 重放兜底，经 ISLA_RISCV_DEFAULT_SYM_RAM=1 开启）。
+    #[test]
+    fn ensure_solve_state_memory_开关打开时补默认ram() {
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64).build().unwrap();
+
+        let memory = ensure_solve_state_memory(memory, true);
+        assert!(has_symbolic_region(&memory, 0x8000_0000, 0x1000_0000), "开关打开时应补默认符号 RAM");
+        assert!(has_concrete_region(&memory, 0x2000000, 0xc0000), "原有 CLINT concrete 区域保留");
+    }
+
+    /// 配置已声明符号区域（如 riscv64_difftest_mem.toml 的 sym_ram）时装配应保持不变
+    /// （无论开关状态，都不重复追加）。
+    #[test]
+    fn ensure_solve_state_memory_已有符号区域时不变() {
+        let rv64: RV64<B64> = RV64::default();
+        let memory = MemoryBuilder::<B64>::new(&rv64).add_symbolic_region(0x9000_0000, 0x2000).build().unwrap();
+
+        let memory = ensure_solve_state_memory(memory, true);
+        assert_eq!(memory.regions().len(), 2, "不应重复追加区域");
+        assert!(has_symbolic_region(&memory, 0x9000_0000, 0x2000));
     }
 
     #[test]

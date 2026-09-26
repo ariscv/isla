@@ -1,5 +1,7 @@
 use super::clause::{get_extension_clauses, normalize_clause_name};
-use super::target::{Target, RISCV};
+use super::memory_builder;
+use super::memory_model;
+use super::target::{validate_fixed_prestate_value, Target, RISCV};
 use super::timeout_report::TimeoutReporter;
 pub use super::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
 use super::{get_all_clause_names, list_instructions, try_get_assembly_encdec, try_get_assembly_name};
@@ -7,22 +9,189 @@ use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
 use isla_lib::error::{ExecError, SmtError};
-use isla_lib::executor::{backtrace_string, LocalFrame, Run};
-use isla_lib::executor::{ExecutionLimits, TaskState};
+use isla_lib::executor::{backtrace_string, execute_ir_function, LocalFrame, Run};
+use isla_lib::executor::{ExecutionLimits, TaskId, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
+use isla_lib::ir_lexer::new_ir_lexer;
 use isla_lib::log;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
-use isla_lib::smt::{Config, Context, Event, Model};
+use isla_lib::smt::smtlib::Exp;
+use isla_lib::smt::{Config, Context, Event, Model, ModelVal, Trace};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
+use isla_lib::value_parser;
 use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedInstruction {
+    pub bits: u64,
+    pub width: u32,
+}
+
+pub struct FixedSolveInputs<B: BV> {
+    pub instruction: Option<FixedInstruction>,
+    pub prestate: HashMap<Name, Val<B>>,
+}
+
+impl<B: BV> Default for FixedSolveInputs<B> {
+    fn default() -> Self {
+        FixedSolveInputs { instruction: None, prestate: HashMap::new() }
+    }
+}
+
+pub fn parse_fixed_instruction_bits(text: &str) -> Result<FixedInstruction, String> {
+    let digits = text.strip_prefix("0x").ok_or_else(|| "--instruction-bits 需要 0x 前缀".to_string())?;
+    let width = match digits.len() {
+        4 => 16,
+        8 => 32,
+        _ => return Err("--instruction-bits 只接受四位或八位十六进制编码".to_string()),
+    };
+    if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("--instruction-bits 含非十六进制字符".to_string());
+    }
+    let bits = u64::from_str_radix(digits, 16).expect("已验证的十六进制编码应可解析");
+    if (width == 16 && bits & 3 == 3) || (width == 32 && bits & 3 != 3) {
+        return Err("--instruction-bits 的编码长度与低两位不符".to_string());
+    }
+    Ok(FixedInstruction { bits, width })
+}
+
+pub fn parse_fixed_prestate<B: BV>(
+    args: &[String],
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Result<HashMap<Name, Val<B>>, String> {
+    let mut fixed = HashMap::new();
+    for arg in args {
+        let (loc, value) = value_parser::AssignParser::new()
+            .parse(&shared_state.symtab, &shared_state.type_info, new_ir_lexer(arg))
+            .map_err(|error| format!("--prestate '{}' 无法解析: {}", arg, error))?;
+        let Loc::Id(reg_text) = loc else {
+            return Err(format!("--prestate 只支持完整顶层寄存器赋值: {}", arg));
+        };
+        let reg_name = zencode::decode(&reg_text);
+        let reg_id =
+            shared_state.symtab.get(&reg_text).ok_or_else(|| format!("--prestate 未知寄存器: {}", reg_name))?;
+        let ty = shared_state.registers.get(&reg_id).ok_or_else(|| format!("--prestate {} 不是寄存器", reg_name))?;
+        if fixed.contains_key(&reg_id) {
+            return Err(format!("--prestate 重复指定寄存器 {}", reg_name));
+        }
+        validate_fixed_prestate_value(&reg_name, reg_id, &value, ty, shared_state, lets, regs)?;
+        fixed.insert(reg_id, value);
+    }
+    Ok(fixed)
+}
+
+fn fixed_value_is_concrete<B: BV>(value: &Val<B>) -> bool {
+    match value {
+        Val::Symbolic(_) | Val::SymbolicCtor(..) | Val::Poison => false,
+        Val::MixedBits(segments) => segments.iter().all(|segment| matches!(segment, BitsSegment::Concrete(_))),
+        Val::Vector(values) | Val::List(values) => values.iter().all(fixed_value_is_concrete),
+        Val::Struct(fields) => fields.values().all(fixed_value_is_concrete),
+        Val::Ctor(_, payload) => fixed_value_is_concrete(payload),
+        _ => true,
+    }
+}
+
+fn concrete_function_result<'ir, B: BV + Send + Sync>(
+    function: &str,
+    arg: Val<B>,
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+) -> Result<Val<B>, String> {
+    let outcomes: Mutex<Vec<Result<Val<B>, String>>> = Mutex::new(Vec::new());
+    execute_ir_function(
+        function,
+        &[arg],
+        shared_state,
+        regs,
+        lets,
+        &outcomes,
+        &|_, _, result, _, mut solver, outcomes| match result {
+            Ok((Run::Finished(value), _)) => match solver.check_sat(SourceLoc::unknown()) {
+                isla_lib::smt::SmtResult::Sat => {
+                    outcomes.lock().expect("decode outcomes mutex poisoned").push(Ok(value))
+                }
+                isla_lib::smt::SmtResult::Unsat => (),
+                other => outcomes
+                    .lock()
+                    .expect("decode outcomes mutex poisoned")
+                    .push(Err(format!("{} SMT 未得到 Sat/Unsat: {:?}", function, other))),
+            },
+            Ok((_, _)) => {
+                outcomes.lock().expect("decode outcomes mutex poisoned").push(Err(format!("{} 未完成", function)))
+            }
+            Err((error, _)) => outcomes
+                .lock()
+                .expect("decode outcomes mutex poisoned")
+                .push(Err(format!("{} 执行失败: {}", function, error))),
+        },
+    );
+    let outcomes = outcomes.into_inner().expect("decode outcomes mutex poisoned");
+    if outcomes.is_empty() {
+        return Err(format!("{} 没有可满足路径", function));
+    }
+    let mut values = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        values.push(outcome?);
+    }
+    if values.iter().any(|value| !fixed_value_is_concrete(value)) {
+        return Err(format!("{} 返回依赖符号状态的值，不能跨solver复用", function));
+    }
+    if !values.iter().all(|value| *value == values[0]) {
+        return Err(format!("{} 的多个可满足路径返回不同值", function));
+    }
+    Ok(values.remove(0))
+}
+
+fn decode_fixed_instruction<'ir, B: BV + Send + Sync>(
+    fixed: FixedInstruction,
+    instruction_name: &str,
+    shared_state: &'ir SharedState<'ir, B>,
+    regs: &RegisterBindings<'ir, B>,
+    lets: &Bindings<'ir, B>,
+) -> Result<Val<B>, String> {
+    let compressed = fixed.width == 16;
+    let decoded = concrete_function_result(
+        if compressed { "zext_decode_compressed" } else { "zext_decode" },
+        Val::Bits(B::new(fixed.bits, fixed.width)),
+        shared_state,
+        regs,
+        lets,
+    )?;
+    let Val::Ctor(ctor, _) = &decoded else {
+        return Err("固定编码没有译码为指令构造子".to_string());
+    };
+    let expected = shared_state.symtab.lookup(instruction_name);
+    if *ctor != expected {
+        return Err(format!(
+            "固定编码译码为 {}，与 --clause {} 不符",
+            zencode::decode(shared_state.symtab.to_str_demangled(*ctor)),
+            zencode::decode(shared_state.symtab.to_str_demangled(expected))
+        ));
+    }
+    let encoded = concrete_function_result(
+        if compressed { "zencdec_compressed_forwards" } else { "zencdec_forwards" },
+        decoded.clone(),
+        shared_state,
+        regs,
+        lets,
+    )?;
+    if encoded != Val::Bits(B::new(fixed.bits, fixed.width)) {
+        return Err(format!("固定编码译码后重新编码不一致: {:?}", encoded));
+    }
+    Ok(decoded)
+}
 
 /// 执行轨迹中访存事件（Event::ReadMem/WriteMem）的物化结果。
 /// value/data 等 model 中查不到取值的分量序列化为 null（外部数据边界，不编造也不 panic）。
@@ -30,10 +199,12 @@ use std::sync::{Arc, Mutex};
 #[derive(Serialize, Deserialize, Clone)]
 struct MemoryEventJson {
     kind: String,
+    /// exclusive/CAS 写的 Bool 决定是否提交；普通写的 Bool 不表示提交成败。
+    exclusive: bool,
     region: String,
     address: Option<String>,
     bytes: u32,
-    /// read：读出的值；write：Bool 成功标志
+    /// read：读出的值；write：返回 Bool（仅独占写用作提交条件）
     value: Option<String>,
     /// write：写入的数据
     data: Option<String>,
@@ -42,6 +213,234 @@ struct MemoryEventJson {
 /// 经 model 把 Val 物化为 FmtVal 输出风格的字符串；物化失败返回 None。
 fn fmt_val_str<B: BV>(val: &Val<B>, model: &mut Model<'_, B>, shared_state: &SharedState<B>) -> Option<String> {
     FmtVal::from_val(val, model).ok().map(|fmt_val| fmt_val.to_str(shared_state))
+}
+
+/// pre/post 内存输出的稀疏记录：address 是连续段起始地址，bytes 是段长（不超过 8），
+/// value 是把段内字节按小端拼成位向量后的 FmtVal 十六进制（如 `32'h1122_3344`）；
+/// 段内任一字节内容未知时 value 为 null。
+#[derive(Serialize, Deserialize, Clone)]
+struct MemorySpanJson {
+    address: String,
+    bytes: u32,
+    value: Option<String>,
+}
+
+/// 轨迹按真实执行顺序返回的访存事件（ReadMem/WriteMem）。
+///
+/// `smt.rs` 的 `Trace::to_vec` 先访问最新段、段内反向遍历，整体是逆时间序
+/// （事件 push 在段 head 末尾）；这里先取出再整体反转，恢复事件发生的先后顺序。
+fn memory_events_chronological<B: BV>(trace: &Trace<B>) -> Vec<&Event<B>> {
+    let mut events = trace.to_vec();
+    events.reverse();
+    events.into_iter().filter(|event| event.is_memory_read_or_write()).collect()
+}
+
+/// 单条访存事件物化后的重放输入。
+///
+/// payload 是读事件的读值或写事件的写数据按小端拆出的字节序列，长度等于事件
+/// 的 bytes；地址或数值分量查不到模型具体值时对应字段为 None（不编造）。
+struct ReplayAccess {
+    is_read: bool,
+    is_exclusive: bool,
+    /// 仅 exclusive 写事件使用；None 表示 model 无法判定是否提交。
+    write_success: Option<bool>,
+    address: Option<u64>,
+    bytes: u32,
+    payload: Option<Vec<u8>>,
+}
+
+/// pre/post 内存重放结果（字节 → 内容稀疏映射）。
+struct ReplayMemory {
+    /// 每个触碰字节在首次被触碰时的内容：首触是读则取该读值的对应字节；
+    /// 首触是已提交写则该字节初值自由，记 None（输出 null）。
+    pre: BTreeMap<u64, Option<u8>>,
+    /// 重放结束后的最终字节内容：只读未写的字节取最后一次读值（数组模型下同址
+    /// 读值一致，与写数据一致）；最后一次触碰的分量未知时记 None。
+    post: BTreeMap<u64, Option<u8>>,
+    /// 地址或数值分量查不到模型值的事件分量计数（物化失败的诊断计数）。
+    unknown_components: usize,
+}
+
+/// 按真实执行顺序重放访存事件，维护"字节 → 当前内容"映射。
+///
+/// 读事件把读值按小端拆到 `addr..addr+bytes`，写事件把写数据拆进去（覆盖），
+/// 小端字节序与 W2 数组内存模型（`memory_model.rs` 的 Select/Store 链）一致。
+/// 地址未知的事件整体跳过并计数。
+fn replay_memory(accesses: &[ReplayAccess]) -> ReplayMemory {
+    let mut replay = ReplayMemory { pre: BTreeMap::new(), post: BTreeMap::new(), unknown_components: 0 };
+    for access in accesses {
+        if !access.is_read && access.is_exclusive {
+            match access.write_success {
+                Some(false) => continue,
+                None => {
+                    replay.unknown_components += 1;
+                    if let Some(address) = access.address {
+                        for index in 0..access.bytes {
+                            let byte_address = address.wrapping_add(u64::from(index));
+                            replay.pre.entry(byte_address).or_insert(None);
+                            replay.post.insert(byte_address, None);
+                        }
+                    } else {
+                        replay.unknown_components += 1;
+                    }
+                    continue;
+                }
+                Some(true) => (),
+            }
+        }
+        let Some(address) = access.address else {
+            replay.unknown_components += 1;
+            continue;
+        };
+        let payload = match &access.payload {
+            Some(payload) => payload.as_slice(),
+            None => {
+                replay.unknown_components += 1;
+                &[]
+            }
+        };
+        for index in 0..access.bytes as usize {
+            let byte_address = address.wrapping_add(index as u64);
+            let byte = payload.get(index).copied();
+            // 首触是读：pre 取读值对应字节；首触是写：初值自由记 None，
+            // 不拿写数据编造初值；首触分量查不到模型值（byte 为 None）同样记 None
+            replay.pre.entry(byte_address).or_insert_with(|| if access.is_read { byte } else { None });
+            replay.post.insert(byte_address, byte);
+        }
+    }
+    replay
+}
+
+/// 小端字节序列（不超过 8 字节）转 u64；超长返回 None（RV64 地址恒 64 位）。
+fn le_bytes_to_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() > 8 {
+        return None;
+    }
+    let mut buffer = [0u8; 8];
+    buffer[..bytes.len()].copy_from_slice(bytes);
+    Some(u64::from_le_bytes(buffer))
+}
+
+/// 位序列（下标 0 是最低位）按小端拼成字节序列。
+fn le_bytes_from_bits(bits: &[bool]) -> Vec<u8> {
+    bits.chunks(8)
+        .map(|chunk| chunk.iter().enumerate().fold(0u8, |acc, (i, bit)| acc | (u8::from(*bit) << i)))
+        .collect()
+}
+
+/// 经 model 把位向量 Val 物化为小端字节序列。
+///
+/// 支持 Symbolic / Bits / MixedBits；模型未给出具体值（Arbitrary 等）或类型不是
+/// 位向量时返回 None（外部数据边界，不编造）。
+fn materialize_le_bytes<B: BV>(val: &Val<B>, model: &mut Model<'_, B>) -> Option<Vec<u8>> {
+    match val {
+        Val::Symbolic(sym) => match model.get_var(*sym).ok()? {
+            ModelVal::Exp(Exp::Bits64(bv)) => Some(bv.to_le_bytes()),
+            ModelVal::Exp(Exp::Bits(bits)) => Some(le_bytes_from_bits(&bits)),
+            ModelVal::Exp(_) | ModelVal::Arbitrary(_) => None,
+        },
+        Val::Bits(bv) => Some(bv.to_le_bytes()),
+        Val::MixedBits(segments) => {
+            let mut bits = Vec::new();
+            for segment in segments {
+                match segment {
+                    BitsSegment::Concrete(bv) => {
+                        for index in 0..bv.len() {
+                            bits.push(bv.slice(index, 1).expect("混合位串索引必须有效").lower_u64() == 1);
+                        }
+                    }
+                    BitsSegment::Symbolic(sym) => match model.get_var(*sym).ok()? {
+                        ModelVal::Exp(Exp::Bits64(bv)) => {
+                            for index in 0..bv.len() {
+                                bits.push(bv.slice(index, 1).expect("模型位串索引必须有效").lower_u64() == 1);
+                            }
+                        }
+                        ModelVal::Exp(Exp::Bits(part)) => bits.extend(part.iter().copied()),
+                        ModelVal::Exp(_) | ModelVal::Arbitrary(_) => return None,
+                    },
+                }
+            }
+            Some(le_bytes_from_bits(&bits))
+        }
+        _ => None,
+    }
+}
+
+/// 经 model 物化单条访存事件为重放输入：读事件传读值、写事件传写数据，
+/// 地址经 `le_bytes_to_u64` 收窄为 u64；分量查不到模型值时对应字段为 None。
+fn materialize_replay_access<B: BV>(
+    is_read: bool,
+    is_exclusive: bool,
+    write_success: Option<bool>,
+    payload: &Val<B>,
+    address: &Val<B>,
+    bytes: u32,
+    model: &mut Model<'_, B>,
+) -> ReplayAccess {
+    let address = materialize_le_bytes(address, model).and_then(|bytes| le_bytes_to_u64(&bytes));
+    let payload = match materialize_le_bytes(payload, model) {
+        Some(payload) => {
+            assert_eq!(payload.len(), bytes as usize, "访存事件的载荷位宽必须与 bytes 一致");
+            Some(payload)
+        }
+        None => None,
+    };
+    ReplayAccess { is_read, is_exclusive, write_success, address, bytes, payload }
+}
+
+/// 把重放得到的字节映射序列化为稀疏连续段：相邻字节且已知性一致时合并为一段，
+/// 段长封顶 8 字节（FmtVal 位向量以 64 位为限）。
+fn memory_spans_json<B: BV>(bytes: &BTreeMap<u64, Option<u8>>, shared_state: &SharedState<B>) -> Vec<MemorySpanJson> {
+    let fmt_bits = |value: u64, len: u32| -> String {
+        FmtVal::from_exp(&Exp::Bits64(isla_lib::bitvector::b64::B64::new(value, len)))
+            .expect("FmtVal 必须能格式化 64 位以内的具体位向量")
+            .to_str(shared_state)
+    };
+
+    let mut spans = Vec::new();
+    let mut entries = bytes.iter().peekable();
+    while let Some((&address, &first)) = entries.next() {
+        let mut run = vec![first];
+        while let Some((&next_address, &next_value)) = entries.peek() {
+            if address.checked_add(run.len() as u64) == Some(next_address)
+                && next_value.is_some() == first.is_some()
+                && run.len() < 8
+            {
+                run.push(next_value);
+                entries.next();
+            } else {
+                break;
+            }
+        }
+        let value = if first.is_some() {
+            let mut value = 0u64;
+            for (index, byte) in run.iter().enumerate() {
+                value |= u64::from(byte.expect("已知段内的字节内容必须存在")) << (8 * index);
+            }
+            Some(fmt_bits(value, (run.len() * 8) as u32))
+        } else {
+            None
+        };
+        spans.push(MemorySpanJson { address: fmt_bits(address, 64), bytes: run.len() as u32, value });
+    }
+    spans
+}
+
+/// 若 `zexecute` 的返回值是 `ExecuteAs(转换后的指令)`，返回转换后的指令。
+///
+/// 参照 sail 模型外层模式（sail-riscv `postlude/step.sail`：
+/// `ExecuteAs(other_inst) => execute(other_inst)`），solve-state 收集到该返回值
+/// 时应继续执行转换后的指令。载荷不是指令构造子属于模型不变量违反，直接 panic。
+fn execute_as_instruction<'a, B: BV>(ret_val: &'a Val<B>, shared_state: &SharedState<B>) -> Option<&'a Val<B>> {
+    match ret_val {
+        Val::Ctor(ctor, payload) if zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "ExecuteAs" => {
+            match &**payload {
+                Val::Ctor(..) => Some(payload),
+                other => panic!("ExecuteAs 载荷应是指令构造子，实际 {:?}", other),
+            }
+        }
+        _ => None,
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -55,8 +454,15 @@ struct AssemGenJsonItem {
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
     ret_val: String,
+    /// 按真实执行顺序排列的访存事件（地址/数值经 model 物化，查不到输出 null）
     #[serde(rename = "memory-events")]
     memory_events: Vec<MemoryEventJson>,
+    /// 指令执行前每个被触碰字节的初始内容（稀疏连续段；首触是写的字节初值自由，输出 null）
+    #[serde(rename = "pre-memory")]
+    pre_memory: Vec<MemorySpanJson>,
+    /// 指令执行后每个被触碰字节的最终内容（稀疏连续段；只读未写的字节取最后一次读值）
+    #[serde(rename = "post-memory")]
+    post_memory: Vec<MemorySpanJson>,
 }
 impl AssemGenJsonItem {
     pub fn new<B: BV>(
@@ -66,13 +472,15 @@ impl AssemGenJsonItem {
         isa_state: BTreeMap<String, String>,
         ret_val: String,
         memory_events: Vec<MemoryEventJson>,
+        pre_memory: Vec<MemorySpanJson>,
+        post_memory: Vec<MemorySpanJson>,
     ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, memory_events }
+        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, memory_events, pre_memory, post_memory }
     }
 }
 trait ToJSON: Serialize {
@@ -114,12 +522,17 @@ impl AssemGenJson {
 struct CollectedCase {
     path_signature: u64,
     item: AssemGenJsonItem,
+    /// 终值查询超时的降级路径：test-ins/isa-state/访存分量均未物化（置空），
+    /// 但 ret_val 真实可用，finalize 阶段不按"空壳"丢弃。
+    materialization_timed_out: bool,
 }
 
 struct SolveCollectorState {
     cases: Vec<CollectedCase>,
     case_quota: Option<CaseQuota>,
     first_error: Option<ExecError>,
+    /// 终值查询（最终 check_sat + 取模型）超过时间盒而降级输出的路径数。
+    model_query_timeouts: usize,
 }
 
 impl SolveCollectorState {
@@ -128,19 +541,50 @@ impl SolveCollectorState {
     }
 
     fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
-        SolveCollectorState { first_error: None, cases: Vec::new(), case_quota }
+        SolveCollectorState { first_error: None, cases: Vec::new(), case_quota, model_query_timeouts: 0 }
     }
 
     fn record_error(&mut self, error: &ExecError) -> bool {
         let error = match error {
             ExecError::Timeout => ExecError::Timeout,
             ExecError::Smt(error) => ExecError::Smt(error.clone()),
+            ExecError::Z3Unknown => ExecError::Z3Unknown,
             _ => return false,
         };
         if self.first_error.is_none() {
             self.first_error = Some(error);
         }
         true
+    }
+
+    fn record_model_query_timeout(&mut self) {
+        self.model_query_timeouts += 1;
+    }
+}
+
+/// solve-state 路径终值物化（最终 `check_sat` + 取模型）的时间盒。
+///
+/// 环境变量 `ISLA_RISCV_MODEL_TIMEOUT_MS`（毫秒，默认 30000）。数组内存模型
+/// （W2）在路径尾部累积的 Select/Store + 区域约束可能让终值重解远慢于执行期
+/// 查询；超时路径按 W3"查不到输出 null 不编造"规则降级输出而不是卡死整个
+/// clause。真正中断 Z3 需 `smt-thread-interrupt` feature（`make solve-%` 默认
+/// 开启），否则 deadline 不生效、行为与普通 `check_sat` 一致。
+fn parse_model_timeout_ms(raw: Option<&str>) -> Duration {
+    const DEFAULT_MODEL_TIMEOUT_MS: u64 = 30_000;
+    match raw {
+        None => Duration::from_millis(DEFAULT_MODEL_TIMEOUT_MS),
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            _ => panic!("ISLA_RISCV_MODEL_TIMEOUT_MS 必须是正整数毫秒，实际 '{}'", raw),
+        },
+    }
+}
+
+fn model_query_deadline() -> Duration {
+    match std::env::var("ISLA_RISCV_MODEL_TIMEOUT_MS") {
+        Ok(value) => parse_model_timeout_ms(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_model_timeout_ms(None),
+        Err(err) => panic!("读取环境变量 ISLA_RISCV_MODEL_TIMEOUT_MS 失败: {}", err),
     }
 }
 
@@ -399,6 +843,11 @@ impl CaseQuota {
 /// 顺序由 `path_signature` + 序列化文本（tie-breaker）决定，与 worker 调度无关，
 /// 因此 THREADS=1/4/64 跑出来的 JSON 逐字节一致。
 fn finalize_cases(mut cases: Vec<CollectedCase>, quota: &Option<CaseQuota>) -> Vec<AssemGenJsonItem> {
+    // 只有已物化出指令与编码的用例能作为路径结果落盘；终值查询超时的降级
+    // 路径（materialization_timed_out）保留 ret_val 与空分量，不按空壳丢弃。
+    cases.retain(|case| {
+        case.materialization_timed_out || (!case.item.test_ins.is_empty() && !case.item.test_ins_encdec.is_empty())
+    });
     // 1. 组内配额：按 (助记符, 完整 test-ins, ret_val 类别) 分桶，每组按签名均匀取样。
     if let Some(quota) = quota {
         cases = apply_case_quota(cases, quota);
@@ -482,6 +931,7 @@ pub fn solve_state_main<'ir, B: BV>(
     timeout: Option<u64>,
     execution_limits_config: Option<&ExecutionLimitsConfig>,
     timeout_report_config: TimeoutReportConfig,
+    fixed_inputs: &FixedSolveInputs<B>,
 ) -> bool {
     let case_quota = execution_limits_config.and_then(|cfg| cfg.case_quota.as_ref().map(CaseQuota::from_config));
     let mut clause_set: HashSet<String> = HashSet::new();
@@ -566,6 +1016,7 @@ pub fn solve_state_main<'ir, B: BV>(
             &execution_limits,
             &timeout_reporter,
             case_quota.clone(),
+            fixed_inputs,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -614,6 +1065,565 @@ fn symbolic_args_from_types<B: BV>(
 
     symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())
 }
+
+/// ExecuteAs 续执行快照（不携带 'ir，避免 Vec 不变性把收集闭包的生命周期钉死在
+/// 外层 'ir 上）：转换后的指令 + 本路径 solver 的 checkpoint。
+///
+/// 模型中 ExecuteAs 仅由压缩指令解码 clause 产生（sail-riscv extensions/C/*），
+/// 返回前没有访存或寄存器写入副作用，因此续执行轮次直接用初始符号寄存器/初始
+/// 内存重建 zexecute 调用帧：数组内存模型的状态链（DefineConst 序列）随
+/// checkpoint 重放延续，语义等价于在外层重新执行解码出的指令。
+struct ExecuteAsContinuation<B: BV> {
+    instruction: Val<B>,
+    checkpoint: isla_lib::smt::Checkpoint<B>,
+}
+
+/// solve-state 路径收集的共享只读环境：首段闭包与续执行轮次的转发闭包共用，
+/// 保证续执行路径与首段路径走同一套收集逻辑（同一 JSON 项结构、同一配额桶）。
+struct SolvePathCtx<'a, 'ir, B: BV> {
+    target: &'a dyn Target<B>,
+    instruction_name: &'a str,
+    fun_args: &'a [Val<B>],
+    regs: &'a RegisterBindings<'ir, B>,
+    lets: &'a Bindings<'ir, B>,
+    timeout_reporter: &'a TimeoutReporter,
+    task_state: &'a TaskState<B>,
+    continuations: &'a Mutex<Vec<ExecuteAsContinuation<B>>>,
+}
+
+/// solve-state 单条完成路径的收集逻辑（自 collector 闭包迁出）：Sat 路径物化 JSON 项；
+/// ExecuteAs 返回值入队续执行快照，由外层循环统一多线程执行。
+fn solve_collect_path<'ir, B: BV>(
+    ctx: &SolvePathCtx<'_, 'ir, B>,
+    thread: usize,
+    _task_id: TaskId,
+    exec_result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
+    shared_state: &SharedState<'ir, B>,
+    mut solver: Solver<B>,
+    collected: &Mutex<SolveCollectorState>,
+) {
+    let mut itrace_diagnostics = Vec::new();
+    let submit_itrace = |frame, diagnostics: &mut Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)>| {
+        isla_lib::executor::submit_itrace_for_local_frame_with_diagnostics(
+            frame,
+            shared_state,
+            std::mem::take(diagnostics),
+        );
+    };
+    let error_recorder = ErrorRecorder { collected, reporter: ctx.timeout_reporter, clause: ctx.instruction_name };
+    let should_submit_itrace = match &exec_result {
+        Ok((Run::Finished(_), _)) => true,
+        Ok((run, _)) => should_collect_unfinished_path(run),
+        Err((ExecError::AssertionFailure(_, _), _)) => false,
+        Err((error, frame)) => {
+            itrace_diagnostics = error_recorder.record_error_diagnostic(error, frame, shared_state);
+            true
+        }
+    };
+
+    match &exec_result {
+        Ok((run, frame)) => match run {
+            Run::Finished(Val::Poison) => {
+                log!(log::SYM_EXEC, &format!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_", ctx.instruction_name))
+            }
+            Run::Finished(ret_val) => {
+                // 压缩指令（如 C_LD/C_SD）的 clause 解码后直接返回 ExecuteAs(转换后的指令)，
+                // 不产生访存；参照模型外层模式（sail-riscv postlude/step.sail：
+                // `ExecuteAs(other_inst) => execute(other_inst)`）继续执行转换后的指令。
+                // 这里入队（转换后的指令、本路径 solver 的 checkpoint），外层轮次循环统一
+                // 重建调用帧执行：checkpoint 重放含前段全部事件，W2 数组内存模型的状态链
+                // （DefineConst 序列）随之延续，续执行产生的访存事件进入同一条路径轨迹。
+                if let Some(instruction) = execute_as_instruction(ret_val, shared_state) {
+                    log!(log::SYM_EXEC, &format!("{} 返回 ExecuteAs，入队续执行转换后的指令", ctx.instruction_name));
+                    if should_submit_itrace {
+                        submit_itrace(frame, &mut itrace_diagnostics);
+                    }
+                    // 只入队不执行：外层循环在本轮全部首段路径完成后统一排空队列并
+                    // 用多线程池跑续执行（转换后的指令如 LOAD 自身会大量 fork，
+                    // 串行执行会把整棵子树压在单个 worker 上）。
+                    ctx.continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned").push(
+                        ExecuteAsContinuation {
+                            instruction: instruction.clone(),
+                            checkpoint: isla_lib::smt::checkpoint(&mut solver),
+                        },
+                    );
+                    return;
+                }
+                let ret_val_str = ret_val.to_str(shared_state).to_string();
+                log!(
+                    log::PATH_RESULT,
+                    &format!("1. tid:{} 执行好一条路径，fork={}，ret_val={}", thread, frame.forks(), ret_val_str)
+                );
+                // Illegal_Instruction is a valid Sail ExecutionResult; JSON keeps every finished ret_val.
+                /* let assembly = {
+                    // 获取 zexecute 函数的参数信息
+                    let execute_fn_id = shared_state.symtab.lookup("zexecute");
+                    let (fn_args, _, _) = shared_state.functions.get(&execute_fn_id).unwrap();
+
+                    // 提取第一个参数（指令）的值
+                    match fn_args.first() {
+                        Some((arg_name, _)) => {
+                            match frame.vars().get(arg_name) {
+                                // arg_val 就是指令的参数值
+                                Some(UVal::Init(arg_val)) => {
+                                    println!("{:#?}", arg_val);
+                                    get_assembly_name(arg_val.clone(), &shared_state, ctx.regs, ctx.lets)
+                                }
+                                _ => panic!(""),
+                            }
+                        }
+                        _ => panic!(""),
+                    }
+                };
+                println!("assembly:{:#?}", assembly); */
+                // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, ctx.regs, ctx.lets);
+
+                let mut test_ins = String::new();
+                let mut test_ins_encdec = String::new();
+                let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
+                let mut memory_events: Vec<MemoryEventJson> = Vec::new();
+                let mut pre_memory: Vec<MemorySpanJson> = Vec::new();
+                let mut post_memory: Vec<MemorySpanJson> = Vec::new();
+                if matches!(
+                    ret_val,
+                    Val::Ctor(ctor, _)
+                        if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
+                            == "Illegal_Instruction"
+                ) {
+                    // 未被这条非法路径约束的有限域字段（典型是提前返回 Illegal 的路径上的
+                    // funct6）先按路径签名挑一个代表值钉住，否则所有这类用例都会被标注
+                    // 成同一条子指令，寄存器号等位向量字段也会反复取 Z3 默认值。
+                    match diversify_unconstrained_finite_domains(
+                        &ctx.fun_args,
+                        frame.path_signature(),
+                        shared_state,
+                        &mut solver,
+                    ) {
+                        Ok(()) => (),
+                        Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
+                            itrace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                            log!(log::SYM_EXEC, &format!("finite-domain diversification failed: {}", error));
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                        Err(error) => {
+                            panic!("finite-domain diversification invariant violated: {}", error)
+                        }
+                    }
+                }
+                // 获取ISA状态（寄存器、lets变量等）
+                // 首先检查solver是否可满足。
+                // 终值查询策略（W6）：真实访存路径的最后一次 SMT 操作通常是
+                // `__monomorphize` 的唯一性探测（Unsat 的 check_sat_with），Z3 随后
+                // 丢弃自己的"最后模型"，旧实现此处重解整条路径（数组模型的
+                // Select/Store + 区域约束累积后极慢，W5 观测 202/310 条卡死）。因此：
+                // 1) 优先取 solver 缓存的"最近一次 Sat check"模型——自那次 check 后
+                //    没有新增 Assert（探测不改变断言集）时它与当前断言集一致，
+                //    直接取值跳过重解（零成本）；
+                // 2) 无缓存（缓存后被新增 Assert 失效，或从未 Sat 过）时带时间盒
+                //    重解（ISLA_RISCV_MODEL_TIMEOUT_MS，默认 30s），超时按 W3
+                //    "查不到输出 null 不编造"规则降级输出：ret_val 照常，其余模型
+                //    物化字段置空并计数，保证真实访存 clause 一定能出完整 JSON。
+                if solver.has_stashed_model() {
+                    log!(
+                        log::PATH_RESULT,
+                        &format!("2. tid:{} 终值复用缓存的 Sat 模型（断言集未变，跳过重解）", thread)
+                    );
+                } else {
+                    log!(
+                        log::PATH_RESULT,
+                        &format!(
+                            "2. tid:{} 终值重解（最后一次 check 是否 Sat：{}，其后新增 Assert {} 条）",
+                            thread,
+                            solver.last_check_was_sat(),
+                            solver.asserts_since_check()
+                        )
+                    );
+                    match solver.check_sat_deadline(SourceLoc::unknown(), model_query_deadline()) {
+                        // Sat 的重解会刷新 solver 的模型缓存，与复用路径统一从缓存取
+                        isla_lib::smt::SmtResult::Sat => (),
+                        isla_lib::smt::SmtResult::Unsat => {
+                            log!(log::SYM_EXEC, "collector 丢弃 Unsat 完成路径");
+                            if let Ok(dir) = std::env::var("ISLA_RISCV_DUMP_UNSAT_DIR") {
+                                // 目录不存在时先创建：W7 复跑曾因 dump 目录缺失让
+                                // File::create panic 杀掉整个进程（rc=134），诊断
+                                // 开关不应有杀死主流程的能力。
+                                std::fs::create_dir_all(&dir)
+                                    .unwrap_or_else(|err| panic!("创建 Unsat dump 目录 {} 失败: {}", dir, err));
+                                let path = format!("{}/unsat_{}_t{}.smt2", dir, ctx.instruction_name, thread);
+                                solver.dump_solver(&path);
+                                log!(log::SYM_EXEC, &format!("已导出 Unsat 路径求解器: {}", path));
+                            }
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                        isla_lib::smt::SmtResult::Unknown => {
+                            let error = ExecError::Z3Unknown;
+                            itrace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                            log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                        isla_lib::smt::SmtResult::Error(error)
+                            if matches!(error, isla_lib::error::SmtError::Timeout(_)) =>
+                        {
+                            // 整路径超时降级：与"单分量查不到输出 null"同一规则（W3），
+                            // 只是范围扩大到整条路径的模型物化字段。
+                            collected.lock().expect("solve collector mutex poisoned").record_model_query_timeout();
+                            log!(
+                                log::PATH_RESULT,
+                                &format!(
+                                    "警告: clause{} 路径终值查询超过时间盒 {:?}，降级输出（ret_val 照常，访存与 pre-state 分量置空）",
+                                    ctx.instruction_name,
+                                    model_query_deadline()
+                                )
+                            );
+                            let single_instruction_json = AssemGenJsonItem::new(
+                                ctx.target,
+                                String::new(),
+                                String::new(),
+                                BTreeMap::new(),
+                                ret_val_str.clone(),
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                            );
+                            collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
+                                path_signature: frame.path_signature(),
+                                item: single_instruction_json,
+                                materialization_timed_out: true,
+                            });
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                        isla_lib::smt::SmtResult::Error(error) => {
+                            let error = ExecError::Smt(error);
+                            itrace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                            log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                    }
+                }
+                // 先取 trace（模型借用存活期间不再访问 solver）：复用与重解两条
+                // 路径的事件序列都来自路径终态轨迹，与取模型顺序无关。clone 成
+                // 所有值，避免事件引用延续对 solver 的不可变借用。
+                let trace_events: Vec<Event<B>> =
+                    memory_events_chronological(solver.trace()).into_iter().cloned().collect();
+                // 统一取模型：复用路径取既有缓存，重解路径取刚刷新的缓存。
+                let mut model = match solver.take_stashed_model() {
+                    Some(model) => model,
+                    None => panic!("collector 在 SAT 完成路径上无法取得 SMT model"),
+                };
+                {
+                    // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
+                    // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
+                    // model.set_complete_model(true);
+                    log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
+                    let test = Sym::from_u32(6);
+                    // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
+                    // dlog!("ctx.fun_args={:#?}", model.get_val(&ctx.fun_args[0]));
+                    match model.get_val(&ctx.fun_args[0]) {
+                        Ok(arg_val) => {
+                            let asm_opt = match try_get_assembly_name(arg_val.clone(), shared_state, ctx.regs, ctx.lets)
+                            {
+                                Ok(assembly) => assembly,
+                                Err(error) => {
+                                    itrace_diagnostics = error_recorder.record_configured_error_diagnostic(&error);
+                                    log!(
+                                        log::PATH_RESULT,
+                                        &format!("警告: clause{} 汇编名称求解失败 {:?}", ctx.instruction_name, error)
+                                    );
+                                    submit_itrace(frame, &mut itrace_diagnostics);
+                                    return;
+                                }
+                            };
+                            log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
+                            match asm_opt {
+                                Some(asm) => test_ins = asm,
+                                None => {
+                                    submit_itrace(frame, &mut itrace_diagnostics);
+                                    return;
+                                }
+                            }
+                            let asm_encdec_opt =
+                                match try_get_assembly_encdec(arg_val.clone(), shared_state, ctx.regs, ctx.lets) {
+                                    Ok(encoded) => match encoded {
+                                        Some(val) => match FmtVal::from_val(&val, &mut model) {
+                                            Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
+                                            Err(err) => {
+                                                itrace_diagnostics =
+                                                    error_recorder.record_error_diagnostic(&err, frame, shared_state);
+                                                log!(
+                                                    log::PATH_RESULT,
+                                                    &format!(
+                                                        "警告: {}汇编编码不可格式化 {:?}",
+                                                        ctx.instruction_name, err
+                                                    )
+                                                );
+                                                None
+                                            }
+                                        },
+                                        None => None,
+                                    },
+                                    Err(error) => {
+                                        itrace_diagnostics = error_recorder.record_configured_error_diagnostic(&error);
+                                        log!(
+                                            log::PATH_RESULT,
+                                            &format!(
+                                                "警告: clause{} 汇编编码求解失败 {:?}",
+                                                ctx.instruction_name, error
+                                            )
+                                        );
+                                        submit_itrace(frame, &mut itrace_diagnostics);
+                                        return;
+                                    }
+                                };
+                            log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
+                            match asm_encdec_opt {
+                                Some(encdec) => test_ins_encdec = encdec,
+                                None => {
+                                    submit_itrace(frame, &mut itrace_diagnostics);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            itrace_diagnostics = error_recorder.record_error_diagnostic(&e, frame, shared_state);
+                            log!(
+                                log::PATH_RESULT,
+                                &format!("警告: clause{} model.get_val失败 {:?}", ctx.instruction_name, e)
+                            );
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                    }
+
+                    // pre-state 取值：通过 ctx.target 和 setup 阶段生成的 PreStateCtx 查询具体解。
+                    match ctx.target.solve_pre_state(&mut model, shared_state) {
+                        Ok(state) => isa_state.extend(state),
+                        Err(error) => {
+                            itrace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                            log!(
+                                log::PATH_RESULT,
+                                &format!("警告: clause{} pre-state求解失败 {:?}", ctx.instruction_name, error)
+                            );
+                            submit_itrace(frame, &mut itrace_diagnostics);
+                            return;
+                        }
+                    }
+
+                    log!(log::PATH_RESULT, &format!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap()));
+                    // 遍历lets中的特殊变量（如current_privilege等）
+                    /* for (let_name, let_val) in frame.lets().iter() {
+                        let let_name_str = shared_state.symtab.to_str(*let_name);
+                        // 过滤掉一些内部变量
+                        if !let_name_str.starts_with("__") && let_name_str != "NULL" {
+                            match let_val {
+                                UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
+                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits64(bv))) => {
+                                        println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
+                                    }
+                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits(bv))) => {
+                                        let hex_str: String = bv
+                                            .chunks(4)
+                                            .rev()
+                                            .map(|chunk: &[bool]| {
+                                                let mut n = 0u8;
+                                                for (i, bit) in chunk.iter().enumerate() {
+                                                    if *bit {
+                                                        n |= 1 << i;
+                                                    }
+                                                }
+                                                format!("{:x}", n)
+                                            })
+                                            .collect();
+                                        println!("  let {} = 0b{}", let_name_str, hex_str);
+                                    }
+                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bool(b))) => {
+                                        println!("  let {} = {}", let_name_str, b);
+                                    }
+                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(
+                                        member,
+                                    ))) => {
+                                        let name = member.to_name(shared_state);
+                                        println!(
+                                            "  let {} = {}",
+                                            let_name_str,
+                                            shared_state.symtab.to_str(name)
+                                        );
+                                    }
+                                    _ => {}
+                                },
+                                UVal::Init(Val::Bits(bv)) => {
+                                    println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
+                                }
+                                UVal::Init(Val::Bool(b)) => {
+                                    println!("  let {} = {}", let_name_str, b);
+                                }
+                                _ => {}
+                            }
+                        }
+                    } */
+
+                    // events
+                    /* let mut events_vec = solver.trace().to_vec();
+                    let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
+                    for event in events {
+                        match event {
+                            Event::Fork(fork_id, sym, branch_number, _) => {
+                                println!(
+                                    " [event] Fork({}, {:?}, {}, _ )",
+                                    fork_id,
+                                    model.get_var(sym).unwrap(),
+                                    branch_number
+                                )
+                            }
+                            _ => println!(" [event] {:?}", event),
+                        }
+                    } */
+                    // 物化执行轨迹中的访存事件：smt.rs Trace::to_vec 是逆时间序，
+                    // memory_events_chronological 整体反转恢复真实执行顺序；
+                    // ReadMem/WriteMem 逐个经 model 取具体值，
+                    // model 中查不到的分量输出 null（外部数据边界，不编造）。
+                    let mut replay_accesses = Vec::with_capacity(trace_events.len());
+                    for event in &trace_events {
+                        match event {
+                            Event::ReadMem { value, address, bytes, region, opts, .. } => {
+                                memory_events.push(MemoryEventJson {
+                                    kind: "read".to_string(),
+                                    exclusive: opts.is_exclusive,
+                                    region: region.to_string(),
+                                    address: fmt_val_str(address, &mut model, shared_state),
+                                    bytes: *bytes,
+                                    value: fmt_val_str(value, &mut model, shared_state),
+                                    data: None,
+                                });
+                                replay_accesses.push(materialize_replay_access(
+                                    true, false, None, value, address, *bytes, &mut model,
+                                ));
+                            }
+                            Event::WriteMem { value, address, data, bytes, region, opts, .. } => {
+                                memory_events.push(MemoryEventJson {
+                                    kind: "write".to_string(),
+                                    exclusive: opts.is_exclusive(),
+                                    region: region.to_string(),
+                                    address: fmt_val_str(address, &mut model, shared_state),
+                                    bytes: *bytes,
+                                    value: model
+                                        .get_var(*value)
+                                        .ok()
+                                        .and_then(|model_val| FmtVal::from_model_val(&model_val))
+                                        .map(|fmt_val| fmt_val.to_str(shared_state)),
+                                    data: fmt_val_str(data, &mut model, shared_state),
+                                });
+                                let write_success = if opts.is_exclusive() {
+                                    match model.get_var(*value) {
+                                        Ok(ModelVal::Exp(Exp::Bool(success))) => Some(success),
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                                replay_accesses.push(materialize_replay_access(
+                                    false,
+                                    opts.is_exclusive(),
+                                    write_success,
+                                    data,
+                                    address,
+                                    *bytes,
+                                    &mut model,
+                                ));
+                            }
+                            _ => panic!("memory_events_chronological 只返回访存事件，实际 {:?}", event),
+                        }
+                    }
+                    // 按真实执行顺序重放 pre/post 内存（与 memory-events 同一事件序列）。
+                    // pre：首触是读取读值字节，首触是写初值自由输出 null；
+                    // post：最终字节内容，只读未写的字节取最后一次读值。
+                    // 分量查不到模型值时输出 null 并计数（不编造）。
+                    let replay = replay_memory(&replay_accesses);
+                    if replay.unknown_components > 0 {
+                        log!(
+                            log::PATH_RESULT,
+                            &format!(
+                                "警告: clause{} pre/post 内存物化有 {} 个分量查不到模型值",
+                                ctx.instruction_name, replay.unknown_components
+                            )
+                        );
+                    }
+                    pre_memory = memory_spans_json(&replay.pre, shared_state);
+                    post_memory = memory_spans_json(&replay.post, shared_state);
+                    log!(
+                        log::PATH_RESULT,
+                        &format!(
+                            "memory_events={}\npre_memory={}\npost_memory={}",
+                            serde_json::to_string_pretty(&memory_events).unwrap(),
+                            serde_json::to_string_pretty(&pre_memory).unwrap(),
+                            serde_json::to_string_pretty(&post_memory).unwrap()
+                        )
+                    );
+                    log!(log::PATH_RESULT, "3. ==============================");
+                }
+                let single_instruction_json = AssemGenJsonItem::new(
+                    ctx.target,
+                    test_ins,
+                    test_ins_encdec,
+                    isa_state,
+                    ret_val_str,
+                    memory_events,
+                    pre_memory,
+                    post_memory,
+                );
+                collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
+                    path_signature: frame.path_signature(),
+                    item: single_instruction_json,
+                    materialization_timed_out: false,
+                });
+            }
+            Run::Exit => {
+                log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks()))
+            }
+            Run::Dead => {}
+
+            Run::Suspended => {
+                log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks()))
+            }
+        },
+        Err((error, frame)) => {
+            match error {
+                ExecError::MatchFailure(_) => {
+                    // 静默处理
+                }
+                ExecError::AssertionFailure(_, _) => {
+                    // assert 失败表示当前路径不满足模型前置条件，丢弃该路径。
+                }
+                _ => {
+                    log!(
+                        log::SYM_EXEC,
+                        &format!(
+                            "执行错误: {}({:?})[{}]",
+                            error,
+                            error,
+                            error.source_loc().location_string(shared_state.symtab.files())
+                        )
+                    );
+                    log!(
+                        log::SYM_EXEC,
+                        &format!("调用栈: {}", backtrace_string(frame.backtrace(), &shared_state.symtab))
+                    );
+                }
+            }
+        }
+    }
+    if should_submit_itrace {
+        let frame = match &exec_result {
+            Ok((_, frame)) | Err((_, frame)) => frame,
+        };
+        submit_itrace(frame, &mut itrace_diagnostics);
+    }
+}
+
 fn run_symbolic_execute_with_target<'ir, B: BV>(
     target: &mut dyn RISCV<B>,
     instruction_name: &str,
@@ -626,6 +1636,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     execution_limits: &ExecutionLimits,
     timeout_reporter: &TimeoutReporter,
     case_quota: Option<CaseQuota>,
+    fixed_inputs: &FixedSolveInputs<B>,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -637,21 +1648,49 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let mut solver = Solver::new(&ctx);
     let mut symbolic_regs = regs.clone();
 
+    // W2 数组内存模型装配：同址读写一致。数组常量必须在下方生成 checkpoint
+    // 之前声明，使所有执行路径共享初始数组定义；每个 clause 的内存克隆通过
+    // Clone 快照保留回调，各路径独立持有数组状态。
+    // ISLA_RISCV_MEMORY_MODEL=array（默认）启用，fresh 退回旧的独立变量行为。
+    // W9 语义：默认全符号化——符号读写地址全域自由、内容来自字节数组，
+    // 可访问性/trap 交给模型自身 PMA/PMP，成功与 fault 路径并存；
+    // [[memory_regions]] 的 excluded（判死）区域把"落到这段就 Unsat"的语义
+    // 下推到内存层（符号地址 NOT 链 + W7 立即判死，具体地址直接 Err）。
+    // 零配置（未声明 [[memory_regions]]）语义：地址与数组内容全部符号化，
+    // 不再依赖默认区域救活（W6 修复了写侧空 OR 链折叠成 false 的 bug）；
+    // ISLA_RISCV_DEFAULT_SYM_RAM=1 可显式要求补默认符号 RAM（对齐
+    // riscv64_difftest_mem.toml 的 sym_ram，供 difftest 重放兜底）。
+    let initial_memory = if memory_model::array_model_enabled() {
+        initial_memory.map(|mut memory| {
+            // Sail 的 Mem_read_request/Mem_write_request 地址固定为 bits(64)。
+            // RV32 的物理地址先从 34 位零扩到 64 位，不能用 XLEN 声明数组索引。
+            memory = memory_builder::ensure_solve_state_memory(memory, memory_builder::default_sym_ram_enabled());
+            memory_model::install_seq_memory(&mut memory, 64, &mut solver);
+            memory
+        })
+    } else {
+        initial_memory
+    };
+
     // pre-state 主动符号化：遍历 target 提供的寄存器、按类型符号化并覆盖，返回 PreStateCtx 供求解后取 pre-state。
-    target.setup_pre_state(&mut symbolic_regs, lets, shared_state, &mut solver)?;
+    target.setup_pre_state(&mut symbolic_regs, lets, shared_state, &mut solver, &fixed_inputs.prestate)?;
 
     //不要删掉这个注释！！！留着以后改pmp的时候用
     /* if target.pmp_symbolic() {
         target.apply_symbolic_pmp_to_registers(&shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver)?;
     } */
 
-    // 使用 symbolic_args_from_types 生成符号化参数
-    let ctor_name = shared_state.symtab.lookup(instruction_name);
-
-    let fun_args = vec![Val::<B>::Ctor(
-        ctor_name,
-        Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
-    )];
+    let instruction = if let Some(fixed) = fixed_inputs.instruction {
+        decode_fixed_instruction(fixed, instruction_name, shared_state, &symbolic_regs, lets)
+            .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?
+    } else {
+        let ctor_name = shared_state.symtab.lookup(instruction_name);
+        Val::<B>::Ctor(
+            ctor_name,
+            Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
+        )
+    };
+    let fun_args = vec![instruction];
     log!(log::SYM_EXEC, &format!("fun_args:{:?}", fun_args));
     log!(log::ARCH_INFO, &format!("{:?}", state_regs));
 
@@ -668,6 +1707,26 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
 
+    // ExecuteAs 续执行任务队列：collector 阶段入队，每轮执行后排空再跑下一轮。
+    // 首轮执行 clause 本体（如 C_LD 解码），其后每轮执行一轮 ExecuteAs 续执行
+    // 任务（如转换出的 LOAD/STORE），直到队列不再增长（模型里 ExecuteAs 不链式
+    // 嵌套，正常一轮即收敛）。
+    let continuations: Mutex<Vec<ExecuteAsContinuation<B>>> = Mutex::new(Vec::new());
+    // 续执行轮次重建调用帧用的初始内存（首轮传 clone，此份留给轮次循环）。
+    let round_memory = initial_memory.clone();
+
+    // solve-state 路径收集环境：首段闭包与续执行轮次的转发闭包共用。
+    let solve_ctx = SolvePathCtx {
+        target: &*target,
+        instruction_name,
+        fun_args: &fun_args,
+        regs,
+        lets,
+        timeout_reporter: &timeout_reporter,
+        task_state: &task_state,
+        continuations: &continuations,
+    };
+
     //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
     isla_lib::executor::execute_ir_function_with_checkpoint_multi_thread(
         "zexecute",
@@ -676,389 +1735,54 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         &symbolic_regs,
         lets,
         &result,
-        &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
-            let mut itrace_diagnostics = Vec::new();
-            let submit_itrace = |frame, diagnostics: &mut Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)>| {
-                isla_lib::executor::submit_itrace_for_local_frame_with_diagnostics(
-                    frame,
-                    shared_state,
-                    std::mem::take(diagnostics),
-                );
-            };
-            let error_recorder = ErrorRecorder { collected, reporter: timeout_reporter, clause: instruction_name };
-            let should_submit_itrace = match &exec_result {
-                Ok((Run::Finished(_), _)) => true,
-                Ok((run, _)) => should_collect_unfinished_path(run),
-                Err((ExecError::AssertionFailure(_, _), _)) => false,
-                Err((error, frame)) => {
-                    itrace_diagnostics = error_recorder.record_error_diagnostic(error, frame, shared_state);
-                    true
-                }
-            };
-
-            match &exec_result {
-                Ok((run, frame)) => match run {
-                    Run::Finished(Val::Poison) => {
-                        log!(log::SYM_EXEC, &format!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_", instruction_name))
-                    }
-                    Run::Finished(ret_val) => {
-                        let ret_val_str = ret_val.to_str(shared_state).to_string();
-                        log!(
-                            log::PATH_RESULT,
-                            &format!(
-                                "1. tid:{} 执行好一条路径，fork={}，ret_val={}",
-                                thread,
-                                frame.forks(),
-                                ret_val_str
-                            )
-                        );
-                        // Illegal_Instruction is a valid Sail ExecutionResult; JSON keeps every finished ret_val.
-                        /* let assembly = {
-                            // 获取 zexecute 函数的参数信息
-                            let execute_fn_id = shared_state.symtab.lookup("zexecute");
-                            let (fn_args, _, _) = shared_state.functions.get(&execute_fn_id).unwrap();
-
-                            // 提取第一个参数（指令）的值
-                            match fn_args.first() {
-                                Some((arg_name, _)) => {
-                                    match frame.vars().get(arg_name) {
-                                        // arg_val 就是指令的参数值
-                                        Some(UVal::Init(arg_val)) => {
-                                            println!("{:#?}", arg_val);
-                                            get_assembly_name(arg_val.clone(), &shared_state, regs, lets)
-                                        }
-                                        _ => panic!(""),
-                                    }
-                                }
-                                _ => panic!(""),
-                            }
-                        };
-                        println!("assembly:{:#?}", assembly); */
-                        // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, regs, lets);
-
-                        let mut test_ins = String::new();
-                        let mut test_ins_encdec = String::new();
-                        let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
-                        let mut memory_events: Vec<MemoryEventJson> = Vec::new();
-                        if matches!(
-                            ret_val,
-                            Val::Ctor(ctor, _)
-                                if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
-                                    == "Illegal_Instruction"
-                        ) {
-                            // 未被这条非法路径约束的有限域字段（典型是提前返回 Illegal 的路径上的
-                            // funct6）先按路径签名挑一个代表值钉住，否则所有这类用例都会被标注
-                            // 成同一条子指令，寄存器号等位向量字段也会反复取 Z3 默认值。
-                            match diversify_unconstrained_finite_domains(
-                                &fun_args,
-                                frame.path_signature(),
-                                shared_state,
-                                &mut solver,
-                            ) {
-                                Ok(()) => (),
-                                Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
-                                    itrace_diagnostics =
-                                        error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                                    log!(log::SYM_EXEC, &format!("finite-domain diversification failed: {}", error));
-                                    submit_itrace(frame, &mut itrace_diagnostics);
-                                    return;
-                                }
-                                Err(error) => {
-                                    panic!("finite-domain diversification invariant violated: {}", error)
-                                }
-                            }
-                        }
-                        // 获取ISA状态（寄存器、lets变量等）
-                        // 首先检查solver是否可满足
-                        let smt_result = solver.check_sat(SourceLoc::unknown());
-                        if let isla_lib::smt::SmtResult::Error(error) = &smt_result {
-                            let error = ExecError::Smt(error.clone());
-                            itrace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                            log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
-                            submit_itrace(frame, &mut itrace_diagnostics);
-                            return;
-                        }
-                        if smt_result == isla_lib::smt::SmtResult::Sat {
-                            if let Ok(mut model) =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
-                            {
-                                // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
-                                // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
-                                // model.set_complete_model(true);
-                                log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
-                                let test = Sym::from_u32(6);
-                                // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
-                                // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
-                                match model.get_val(&fun_args[0]) {
-                                    Ok(arg_val) => {
-                                        let asm_opt =
-                                            match try_get_assembly_name(arg_val.clone(), shared_state, regs, lets) {
-                                                Ok(assembly) => assembly,
-                                                Err(error) => {
-                                                    itrace_diagnostics =
-                                                        error_recorder.record_configured_error_diagnostic(&error);
-                                                    log!(
-                                                        log::PATH_RESULT,
-                                                        &format!(
-                                                            "警告: clause{} 汇编名称求解失败 {:?}",
-                                                            instruction_name, error
-                                                        )
-                                                    );
-                                                    submit_itrace(frame, &mut itrace_diagnostics);
-                                                    return;
-                                                }
-                                            };
-                                        log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
-                                        match asm_opt {
-                                            Some(asm) => test_ins = asm,
-                                            None => {
-                                                submit_itrace(frame, &mut itrace_diagnostics);
-                                                return;
-                                            }
-                                        }
-                                        let asm_encdec_opt =
-                                            match try_get_assembly_encdec(arg_val.clone(), shared_state, regs, lets) {
-                                                Ok(encoded) => match encoded {
-                                                    Some(val) => match FmtVal::from_val(&val, &mut model) {
-                                                        Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
-                                                        Err(err) => {
-                                                            itrace_diagnostics = error_recorder
-                                                                .record_error_diagnostic(&err, frame, shared_state);
-                                                            log!(
-                                                                log::PATH_RESULT,
-                                                                &format!(
-                                                                    "警告: {}汇编编码不可格式化 {:?}",
-                                                                    instruction_name, err
-                                                                )
-                                                            );
-                                                            None
-                                                        }
-                                                    },
-                                                    None => None,
-                                                },
-                                                Err(error) => {
-                                                    itrace_diagnostics =
-                                                        error_recorder.record_configured_error_diagnostic(&error);
-                                                    log!(
-                                                        log::PATH_RESULT,
-                                                        &format!(
-                                                            "警告: clause{} 汇编编码求解失败 {:?}",
-                                                            instruction_name, error
-                                                        )
-                                                    );
-                                                    submit_itrace(frame, &mut itrace_diagnostics);
-                                                    return;
-                                                }
-                                            };
-                                        log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
-                                        match asm_encdec_opt {
-                                            Some(encdec) => test_ins_encdec = encdec,
-                                            None => {
-                                                submit_itrace(frame, &mut itrace_diagnostics);
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        itrace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&e, frame, shared_state);
-                                        log!(
-                                            log::PATH_RESULT,
-                                            &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
-                                        );
-                                        submit_itrace(frame, &mut itrace_diagnostics);
-                                        return;
-                                    }
-                                }
-
-                                // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
-                                match target.solve_pre_state(&mut model, shared_state) {
-                                    Ok(state) => isa_state.extend(state),
-                                    Err(error) => {
-                                        itrace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                                        log!(
-                                            log::PATH_RESULT,
-                                            &format!("警告: clause{} pre-state求解失败 {:?}", instruction_name, error)
-                                        );
-                                        submit_itrace(frame, &mut itrace_diagnostics);
-                                        return;
-                                    }
-                                }
-
-                                log!(
-                                    log::PATH_RESULT,
-                                    &format!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap())
-                                );
-                                // 遍历lets中的特殊变量（如current_privilege等）
-                                /* for (let_name, let_val) in frame.lets().iter() {
-                                    let let_name_str = shared_state.symtab.to_str(*let_name);
-                                    // 过滤掉一些内部变量
-                                    if !let_name_str.starts_with("__") && let_name_str != "NULL" {
-                                        match let_val {
-                                            UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits64(bv))) => {
-                                                    println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
-                                                }
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits(bv))) => {
-                                                    let hex_str: String = bv
-                                                        .chunks(4)
-                                                        .rev()
-                                                        .map(|chunk: &[bool]| {
-                                                            let mut n = 0u8;
-                                                            for (i, bit) in chunk.iter().enumerate() {
-                                                                if *bit {
-                                                                    n |= 1 << i;
-                                                                }
-                                                            }
-                                                            format!("{:x}", n)
-                                                        })
-                                                        .collect();
-                                                    println!("  let {} = 0b{}", let_name_str, hex_str);
-                                                }
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bool(b))) => {
-                                                    println!("  let {} = {}", let_name_str, b);
-                                                }
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(
-                                                    member,
-                                                ))) => {
-                                                    let name = member.to_name(shared_state);
-                                                    println!(
-                                                        "  let {} = {}",
-                                                        let_name_str,
-                                                        shared_state.symtab.to_str(name)
-                                                    );
-                                                }
-                                                _ => {}
-                                            },
-                                            UVal::Init(Val::Bits(bv)) => {
-                                                println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
-                                            }
-                                            UVal::Init(Val::Bool(b)) => {
-                                                println!("  let {} = {}", let_name_str, b);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                } */
-
-                                // events
-                                /* let mut events_vec = solver.trace().to_vec();
-                                let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
-                                for event in events {
-                                    match event {
-                                        Event::Fork(fork_id, sym, branch_number, _) => {
-                                            println!(
-                                                " [event] Fork({}, {:?}, {}, _ )",
-                                                fork_id,
-                                                model.get_var(sym).unwrap(),
-                                                branch_number
-                                            )
-                                        }
-                                        _ => println!(" [event] {:?}", event),
-                                    }
-                                } */
-                                // 物化执行轨迹中的访存事件：ReadMem/WriteMem 逐个经 model 取具体值。
-                                // model 中查不到的分量输出 null（外部数据边界，不编造）。
-                                let trace_events = solver.trace().to_vec();
-                                for event in trace_events {
-                                    match event {
-                                        Event::ReadMem { value, address, bytes, region, .. } => {
-                                            memory_events.push(MemoryEventJson {
-                                                kind: "read".to_string(),
-                                                region: region.to_string(),
-                                                address: fmt_val_str(address, &mut model, shared_state),
-                                                bytes: *bytes,
-                                                value: fmt_val_str(value, &mut model, shared_state),
-                                                data: None,
-                                            });
-                                        }
-                                        Event::WriteMem { value, address, data, bytes, region, .. } => {
-                                            memory_events.push(MemoryEventJson {
-                                                kind: "write".to_string(),
-                                                region: region.to_string(),
-                                                address: fmt_val_str(address, &mut model, shared_state),
-                                                bytes: *bytes,
-                                                value: model
-                                                    .get_var(*value)
-                                                    .ok()
-                                                    .and_then(|model_val| FmtVal::from_model_val(&model_val))
-                                                    .map(|fmt_val| fmt_val.to_str(shared_state)),
-                                                data: fmt_val_str(data, &mut model, shared_state),
-                                            });
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                log!(
-                                    log::PATH_RESULT,
-                                    &format!("memory_events={}", serde_json::to_string_pretty(&memory_events).unwrap())
-                                );
-                                log!(log::PATH_RESULT, "3. ==============================");
-                            }
-                        }
-                        let single_instruction_json = AssemGenJsonItem::new(
-                            target,
-                            test_ins,
-                            test_ins_encdec,
-                            isa_state,
-                            ret_val_str,
-                            memory_events,
-                        );
-                        collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
-                            path_signature: frame.path_signature(),
-                            item: single_instruction_json,
-                        });
-                    }
-                    Run::Exit => {
-                        log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks()))
-                    }
-                    Run::Dead => {}
-
-                    Run::Suspended => log!(
-                        log::PATH_RESULT,
-                        &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks())
-                    ),
-                },
-                Err((error, frame)) => {
-                    match error {
-                        ExecError::MatchFailure(_) => {
-                            // 静默处理
-                        }
-                        ExecError::AssertionFailure(_, _) => {
-                            // assert 失败表示当前路径不满足模型前置条件，丢弃该路径。
-                        }
-                        _ => {
-                            log!(
-                                log::SYM_EXEC,
-                                &format!(
-                                    "执行错误: {}({:?})[{}]",
-                                    error,
-                                    error,
-                                    error.source_loc().location_string(shared_state.symtab.files())
-                                )
-                            );
-                            log!(
-                                log::SYM_EXEC,
-                                &format!("调用栈: {}", backtrace_string(frame.backtrace(), &shared_state.symtab))
-                            );
-                        }
-                    }
-                }
-            }
-            if should_submit_itrace {
-                let frame = match &exec_result {
-                    Ok((_, frame)) | Err((_, frame)) => frame,
-                };
-                submit_itrace(frame, &mut itrace_diagnostics);
-            }
+        &|thread, task_id, exec_result, shared_state, solver, collected| {
+            solve_collect_path(&solve_ctx, thread, task_id, exec_result, shared_state, solver, collected)
         },
         cp,
-        initial_memory,
+        initial_memory.clone(),
         num_threads,
         timeout,
         &task_state,
     );
+
+    // ExecuteAs 续执行轮次：排空 collector 入队的续执行任务，多线程并行执行；
+    // 续执行路径里再次出现 ExecuteAs 时由下一轮继续处理。
+    loop {
+        let next_continuations: Vec<ExecuteAsContinuation<B>> =
+            std::mem::take(&mut *continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned"));
+        if next_continuations.is_empty() {
+            break;
+        }
+        log!(
+            log::SYM_EXEC,
+            &format!("{} 第 {} 个 ExecuteAs 续执行任务开始执行", instruction_name, next_continuations.len())
+        );
+        let execute_fn_id = shared_state.symtab.lookup("zexecute");
+        let (func_args, ret_ty, instrs) = shared_state.functions.get(&execute_fn_id).unwrap();
+        let mut next_tasks = Vec::with_capacity(next_continuations.len());
+        for continuation in next_continuations {
+            // 用初始符号寄存器/初始内存重建 zexecute 调用帧（ExecuteAs 返回前无副作用，
+            // 等价于外层重新执行解码出的指令），checkpoint 携带前段全部 SMT 状态。
+            let mut frame =
+                LocalFrame::new(execute_fn_id, func_args, ret_ty, Some(&[continuation.instruction]), instrs);
+            frame.add_regs(&symbolic_regs);
+            frame.add_lets(lets);
+            if let Some(memory) = round_memory.clone() {
+                frame.set_memory(memory);
+            }
+            next_tasks.push(frame.task_with_checkpoint(TaskId::fresh(), &task_state, continuation.checkpoint));
+        }
+        isla_lib::executor::start_multi(
+            num_threads,
+            timeout,
+            next_tasks,
+            shared_state,
+            result.clone(),
+            &|thread, task_id, exec_result, shared_state, solver, collected| {
+                solve_collect_path(&solve_ctx, thread, task_id, exec_result, shared_state, solver, collected)
+            },
+        );
+    }
 
     // 提取字符串结果
     let result_mutex = match Arc::try_unwrap(result) {
@@ -1068,6 +1792,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let xlen_name_str = target.arch_pretty_name().to_string();
     let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
     let quota = state.case_quota;
+    if state.model_query_timeouts > 0 {
+        log!(
+            log::SYM_EXEC,
+            &format!(
+                "{} 有 {} 条完成路径的终值查询超过时间盒，已降级输出（访存与 pre-state 分量置空）",
+                instruction_name, state.model_query_timeouts
+            )
+        );
+    }
     let items = finalize_cases(state.cases, &quota);
     let json = AssemGenJson::new(items);
     json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
@@ -1084,9 +1817,22 @@ mod tests {
     use isla_lib::bitvector::b64::B64;
     use isla_lib::config::{LimitBehaviorConfig, RegionForkLimitConfig};
     use isla_lib::executor::{LimitBehavior, SampleBias};
+    use isla_lib::smt::{ReadOpts, WriteOpts};
     use isla_lib::source_loc::SourceRegionSpec;
     use isla_lib::timeout::{SmtDumpNames, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
     use std::time::Duration;
+
+    #[test]
+    fn fixed_instruction_bits保留压缩和普通编码宽度() {
+        assert_eq!(parse_fixed_instruction_bits("0x6008").unwrap(), FixedInstruction { bits: 0x6008, width: 16 });
+        assert_eq!(
+            parse_fixed_instruction_bits("0x0000b183").unwrap(),
+            FixedInstruction { bits: 0x0000b183, width: 32 }
+        );
+        assert!(parse_fixed_instruction_bits("0x6").is_err());
+        assert!(parse_fixed_instruction_bits("0x00006008").is_err());
+        assert!(parse_fixed_instruction_bits("6008").is_err());
+    }
 
     /// 构造一个内联的 `ExecutionLimitsConfig`，用来测 `solve_execution_limits` 这个函数本身的
     /// 行为（region 解析、文件名匹配、偏置/预算传递）。不读任何真实配置文件 / IR / Sail 源码，
@@ -1470,9 +2216,318 @@ mod tests {
         assert!(should_collect_unfinished_path::<B64>(&Run::Suspended));
     }
 
+    // ===== W3：memory-events 执行顺序、pre/post 内存物化、ExecuteAs 识别 =====
+
+    fn read_mem_event(address: u64, bytes: u32, value: u64) -> Event<B64> {
+        Event::ReadMem {
+            value: Val::Bits(B64::new(value, 8 * bytes)),
+            read_kind: Val::Unit,
+            address: Val::Bits(B64::new(address, 64)),
+            bytes,
+            tag_value: None,
+            opts: ReadOpts::default(),
+            region: "default",
+        }
+    }
+
+    fn write_mem_event(address: u64, bytes: u32, data: u64) -> Event<B64> {
+        Event::WriteMem {
+            value: Sym::from_u32(4242),
+            write_kind: Val::Unit,
+            address: Val::Bits(B64::new(address, 64)),
+            data: Val::Bits(B64::new(data, 8 * bytes)),
+            bytes,
+            tag_value: None,
+            opts: WriteOpts::default(),
+            region: "default",
+        }
+    }
+
+    /// 轨迹是逆时间序（smt.rs Trace::to_vec 先最新段、段内反向），
+    /// 收集层必须整体反转恢复真实执行顺序；本用例跨两个轨迹段（中间夹 checkpoint）。
+    #[test]
+    fn memory_events_chronological_跨段恢复执行顺序() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        solver.add_event(read_mem_event(0x100, 4, 0xAABBCCDD));
+        // 模拟一次 fork 产生的 checkpoint：当前 head 段化进 tail，轨迹跨两段
+        let _ = isla_lib::smt::checkpoint(&mut solver);
+        solver.add_event(write_mem_event(0x200, 4, 0x11223344));
+
+        let events = memory_events_chronological(solver.trace());
+
+        assert_eq!(events.len(), 2, "只应返回访存事件");
+        assert!(matches!(events[0], Event::ReadMem { .. }), "先发生的读应排在最前");
+        assert!(matches!(events[1], Event::WriteMem { .. }), "后发生的写应排在最后");
+    }
+
+    #[test]
+    fn memory_events_chronological_段内恢复执行顺序() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        solver.add_event(read_mem_event(0x100, 4, 0xAABBCCDD));
+        solver.add_event(write_mem_event(0x100, 4, 0x11223344));
+
+        let events = memory_events_chronological(solver.trace());
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], Event::ReadMem { .. }), "同一 head 段内也要按发生顺序");
+        assert!(matches!(events[1], Event::WriteMem { .. }));
+    }
+
+    #[test]
+    fn 真实memory回调事件可物化普通假返回写的前后态() {
+        use isla_lib::memory::Memory;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut memory = Memory::<B64>::new();
+        memory_model::install_seq_memory(&mut memory, 64, &mut solver);
+        let address = Val::Bits(B64::new(0x8000_1000, 64));
+        let before =
+            memory.read(Val::Unit, address.clone(), Val::I128(1), &mut solver, false, ReadOpts::default()).unwrap();
+        let Val::Symbolic(before_sym) = before else { panic!("初始读应为符号值") };
+        solver.assert_eq(Exp::Var(before_sym), Exp::Bits64(B64::new(0x11, 8)));
+        let write = memory
+            .write(Val::Unit, address.clone(), Val::Bits(B64::new(0xA5, 8)), &mut solver, None, WriteOpts::default())
+            .unwrap();
+        let Val::Symbolic(write_sym) = write else { panic!("写结果应为符号Bool") };
+        solver.add(isla_lib::smt::smtlib::Def::Assert(Exp::Not(Box::new(Exp::Var(write_sym)))));
+        let after = memory.read(Val::Unit, address, Val::I128(1), &mut solver, false, ReadOpts::default()).unwrap();
+        let Val::Symbolic(after_sym) = after else { panic!("写后读应为符号值") };
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(
+                &Exp::Neq(Box::new(Exp::Var(after_sym)), Box::new(Exp::Bits64(B64::new(0xA5, 8)))),
+                SourceLoc::unknown(),
+            ),
+            isla_lib::smt::SmtResult::Unsat,
+        );
+
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let trace = memory_events_chronological(solver.trace());
+        assert_eq!(trace.len(), 3);
+        assert!(matches!(trace[0], Event::ReadMem { .. }));
+        assert!(matches!(trace[1], Event::WriteMem { .. }));
+        assert!(matches!(trace[2], Event::ReadMem { .. }));
+        let mut model = Model::new(&solver);
+        let accesses: Vec<_> = trace
+            .into_iter()
+            .map(|event| match event {
+                Event::ReadMem { value, address, bytes, .. } => {
+                    materialize_replay_access(true, false, None, value, address, *bytes, &mut model)
+                }
+                Event::WriteMem { address, data, bytes, opts, .. } => {
+                    materialize_replay_access(false, opts.is_exclusive(), None, data, address, *bytes, &mut model)
+                }
+                other => panic!("非访存事件: {:?}", other),
+            })
+            .collect();
+        let replay = replay_memory(&accesses);
+        assert_eq!(replay.pre, BTreeMap::from([(0x8000_1000, Some(0x11))]));
+        assert_eq!(replay.post, BTreeMap::from([(0x8000_1000, Some(0xA5))]));
+        assert_eq!(replay.unknown_components, 0);
+        let shared_state: SharedState<B64> = SharedState::empty(Symtab::new());
+        let spans = memory_spans_json(&replay.post, &shared_state);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].value.as_deref(), Some("8'ha5"));
+    }
+
+    fn replay_access(is_read: bool, address: Option<u64>, bytes: u32, payload: Option<Vec<u8>>) -> ReplayAccess {
+        ReplayAccess { is_read, is_exclusive: false, write_success: None, address, bytes, payload }
+    }
+
+    #[test]
+    fn replay_memory_先读后写() {
+        let replay = replay_memory(&[
+            replay_access(true, Some(0x100), 4, Some(vec![0xDD, 0xCC, 0xBB, 0xAA])),
+            replay_access(false, Some(0x100), 4, Some(vec![0x44, 0x33, 0x22, 0x11])),
+        ]);
+
+        // 首触是读：pre 取读值对应字节（小端拆分）
+        assert_eq!(
+            replay.pre,
+            BTreeMap::from([(0x100, Some(0xDD)), (0x101, Some(0xCC)), (0x102, Some(0xBB)), (0x103, Some(0xAA))])
+        );
+        // 写覆盖后 post 取写数据字节
+        assert_eq!(
+            replay.post,
+            BTreeMap::from([(0x100, Some(0x44)), (0x101, Some(0x33)), (0x102, Some(0x22)), (0x103, Some(0x11))])
+        );
+        assert_eq!(replay.unknown_components, 0);
+    }
+
+    #[test]
+    fn replay_memory_写后再读同地址() {
+        let replay = replay_memory(&[
+            replay_access(false, Some(0x100), 4, Some(vec![0x44, 0x33, 0x22, 0x11])),
+            replay_access(true, Some(0x100), 4, Some(vec![0x44, 0x33, 0x22, 0x11])),
+        ]);
+
+        // 首触是写：该字节初值自由，pre 输出 null，不拿写数据编造初值
+        assert_eq!(replay.pre, BTreeMap::from([(0x100, None), (0x101, None), (0x102, None), (0x103, None)]));
+        // 数组模型下写后读值等于写数据，post 为最后一次触碰（读）的字节
+        assert_eq!(
+            replay.post,
+            BTreeMap::from([(0x100, Some(0x44)), (0x101, Some(0x33)), (0x102, Some(0x22)), (0x103, Some(0x11))])
+        );
+    }
+
+    #[test]
+    fn replay_memory_四字节写后读中间一字节() {
+        let replay = replay_memory(&[
+            replay_access(false, Some(0x100), 4, Some(vec![0xDD, 0xCC, 0xBB, 0xAA])),
+            replay_access(true, Some(0x102), 1, Some(vec![0xBB])),
+        ]);
+
+        // 0x102 首触是写：pre 为 null；读回值等于写数据第 2 字节（小端）
+        assert_eq!(replay.pre, BTreeMap::from([(0x100, None), (0x101, None), (0x102, None), (0x103, None)]));
+        assert_eq!(
+            replay.post,
+            BTreeMap::from([(0x100, Some(0xDD)), (0x101, Some(0xCC)), (0x102, Some(0xBB)), (0x103, Some(0xAA))])
+        );
+    }
+
+    #[test]
+    fn replay_memory_独占失败写保留先前读取的字节() {
+        let mut failed_write = replay_access(false, Some(0x100), 1, Some(vec![0xA5]));
+        failed_write.is_exclusive = true;
+        failed_write.write_success = Some(false);
+        let replay = replay_memory(&[replay_access(true, Some(0x100), 1, Some(vec![0x11])), failed_write]);
+        assert_eq!(replay.pre, BTreeMap::from([(0x100, Some(0x11))]));
+        assert_eq!(replay.post, BTreeMap::from([(0x100, Some(0x11))]));
+    }
+
+    #[test]
+    fn replay_memory_普通写返回假仍提交() {
+        let mut ordinary_write = replay_access(false, Some(0x100), 1, Some(vec![0xA5]));
+        ordinary_write.write_success = Some(false);
+        let replay = replay_memory(&[replay_access(true, Some(0x100), 1, Some(vec![0x11])), ordinary_write]);
+        assert_eq!(replay.pre, BTreeMap::from([(0x100, Some(0x11))]));
+        assert_eq!(replay.post, BTreeMap::from([(0x100, Some(0xA5))]));
+    }
+
+    #[test]
+    fn replay_memory_未知写结果不声称已提交() {
+        let mut unknown_write = replay_access(false, Some(0x100), 1, Some(vec![0xA5]));
+        unknown_write.is_exclusive = true;
+        unknown_write.write_success = None;
+        let replay = replay_memory(&[replay_access(true, Some(0x100), 1, Some(vec![0x11])), unknown_write]);
+        assert_eq!(replay.pre, BTreeMap::from([(0x100, Some(0x11))]));
+        assert_eq!(replay.post, BTreeMap::from([(0x100, None)]));
+        assert_eq!(replay.unknown_components, 1);
+    }
+
+    #[test]
+    fn replay_memory_未知分量计数() {
+        let replay = replay_memory(&[
+            replay_access(true, None, 4, Some(vec![0, 0, 0, 0])),
+            replay_access(false, Some(0x100), 2, None),
+        ]);
+
+        // 地址未知：整条事件无法定位字节；数据未知：字节计入触碰但内容为 null
+        assert_eq!(replay.unknown_components, 2);
+        assert_eq!(replay.pre, BTreeMap::from([(0x100, None), (0x101, None)]));
+        assert_eq!(replay.post, BTreeMap::from([(0x100, None), (0x101, None)]));
+    }
+
+    #[test]
+    fn replay_memory_无区域时地址按位向量回绕() {
+        let replay = replay_memory(&[replay_access(true, Some(u64::MAX), 2, Some(vec![0x11, 0x22]))]);
+        assert_eq!(replay.pre, BTreeMap::from([(0, Some(0x22)), (u64::MAX, Some(0x11))]));
+        assert_eq!(replay.post, replay.pre);
+    }
+
+    #[test]
+    fn memory_spans_合并连续字节并按已知性分段() {
+        let shared_state: SharedState<B64> = SharedState::empty(Symtab::new());
+        let mut bytes = BTreeMap::new();
+        bytes.insert(0x100, Some(0x44));
+        bytes.insert(0x101, Some(0x33));
+        bytes.insert(0x102, None);
+        bytes.insert(0x103, None);
+        bytes.insert(0x110, Some(0xAB));
+
+        let spans = memory_spans_json(&bytes, &shared_state);
+
+        assert_eq!(spans.len(), 3, "已知/未知混排时按已知性切分连续段");
+        assert_eq!(
+            (spans[0].address.as_str(), spans[0].bytes, spans[0].value.as_deref()),
+            ("64'h0000_0000_0000_0100", 2, Some("16'h3344"))
+        );
+        assert_eq!(
+            (spans[1].address.as_str(), spans[1].bytes, spans[1].value.as_deref()),
+            ("64'h0000_0000_0000_0102", 2, None)
+        );
+        assert_eq!(
+            (spans[2].address.as_str(), spans[2].bytes, spans[2].value.as_deref()),
+            ("64'h0000_0000_0000_0110", 1, Some("8'hab"))
+        );
+    }
+
+    #[test]
+    fn materialize_le_bytes_物化符号与具体值() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let sym = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(32), SourceLoc::unknown());
+        solver.assert_eq(
+            isla_lib::smt::smtlib::Exp::Var(sym),
+            isla_lib::smt::smtlib::Exp::Bits64(B64::new(0xAABBCCDD, 32)),
+        );
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+
+        let mut model = Model::new(&solver);
+        assert_eq!(
+            materialize_le_bytes(&Val::Bits(B64::new(0x11223344, 32)), &mut model),
+            Some(vec![0x44, 0x33, 0x22, 0x11])
+        );
+        assert_eq!(materialize_le_bytes(&Val::Symbolic(sym), &mut model), Some(vec![0xDD, 0xCC, 0xBB, 0xAA]));
+    }
+
+    #[test]
+    fn materialize_le_bytes_宽混合位串不截断高位() {
+        use isla_lib::bitvector::b129::B129;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&context);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        let value = Val::MixedBits(vec![BitsSegment::Concrete(B129::ones(80))]);
+        assert_eq!(materialize_le_bytes(&value, &mut model), Some(vec![0xff; 10]));
+    }
+
+    #[test]
+    fn execute_as_instruction_识别转换指令() {
+        let execute_as_text = zencode::encode("ExecuteAs");
+        let load_text = zencode::encode("LOAD");
+        let illegal_text = zencode::encode("Illegal_Instruction");
+        let mut symtab = Symtab::new();
+        let execute_as = symtab.intern(&execute_as_text);
+        let load = symtab.intern(&load_text);
+        let illegal = symtab.intern(&illegal_text);
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+
+        let ret = Val::Ctor(execute_as, Box::new(Val::Ctor(load, Box::new(Val::Unit))));
+        assert!(matches!(execute_as_instruction(&ret, &shared_state), Some(Val::Ctor(name, _)) if *name == load));
+
+        let illegal_ret = Val::Ctor(illegal, Box::new(Val::Unit));
+        assert!(execute_as_instruction(&illegal_ret, &shared_state).is_none(), "其它 ExecutionResult 不触发续执行");
+        assert!(execute_as_instruction(&Val::Unit, &shared_state).is_none(), "非构造子返回值不触发续执行");
+    }
+
+    #[test]
+    #[should_panic(expected = "ExecuteAs 载荷")]
+    fn execute_as_instruction_载荷不是指令构造子时panic() {
+        let execute_as_text = zencode::encode("ExecuteAs");
+        let mut symtab = Symtab::new();
+        let execute_as = symtab.intern(&execute_as_text);
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+
+        let _ = execute_as_instruction(&Val::Ctor(execute_as, Box::new(Val::Unit)), &shared_state);
+    }
+
     fn collected_case(signature: u64, test_ins: &str, ret_val: &str) -> CollectedCase {
         CollectedCase {
             path_signature: signature,
+            materialization_timed_out: false,
             item: AssemGenJsonItem {
                 arch: BTreeMap::new(),
                 test_ins: test_ins.to_string(),
@@ -1480,8 +2535,45 @@ mod tests {
                 isa_state: BTreeMap::new(),
                 ret_val: ret_val.to_string(),
                 memory_events: Vec::new(),
+                pre_memory: Vec::new(),
+                post_memory: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn finalize_cases_不输出无指令的完成路径空壳() {
+        let cases =
+            vec![collected_case(1, "", "Retire_Success(())"), collected_case(2, "sd x1, 0(x2)", "Retire_Success(())")];
+        let finalized = finalize_cases(cases, &None);
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].test_ins, "sd x1, 0(x2)");
+    }
+
+    /// 终值查询超时的降级路径不按"空壳"丢弃：ret_val 真实可用，其余模型物化
+    /// 字段置空（W3"查不到输出 null 不编造"规则扩展到整路径超时，W6）。
+    #[test]
+    fn finalize_cases_保留终值超时的降级路径() {
+        let mut degraded = collected_case(1, "", "Retire_Success(())");
+        degraded.materialization_timed_out = true;
+        let cases = vec![degraded, collected_case(2, "sd x1, 0(x2)", "Retire_Success(())")];
+        let finalized = finalize_cases(cases, &None);
+        assert_eq!(finalized.len(), 2, "降级路径应保留在输出中");
+        assert_eq!(finalized[0].ret_val, "Retire_Success(())");
+        assert!(finalized[0].test_ins.is_empty(), "降级路径的 test-ins 未物化，输出为空");
+    }
+
+    #[test]
+    fn parse_model_timeout_ms_默认与显式值() {
+        assert_eq!(parse_model_timeout_ms(None), Duration::from_millis(30_000));
+        assert_eq!(parse_model_timeout_ms(Some("5000")), Duration::from_millis(5000));
+        assert_eq!(parse_model_timeout_ms(Some(" 5000 ")), Duration::from_millis(5000));
+    }
+
+    #[test]
+    #[should_panic(expected = "ISLA_RISCV_MODEL_TIMEOUT_MS")]
+    fn parse_model_timeout_ms_拒绝零与非数字() {
+        let _ = parse_model_timeout_ms(Some("0"));
     }
 
     #[test]

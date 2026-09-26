@@ -127,6 +127,235 @@ The `isla-axiomatic` tool has a seperate manual
 and a guide to its support for virtual memory and address translation
 [here](https://github.com/rems-project/isla/blob/master/doc/translation.adoc).
 
+## solve-state 内存符号化模型（isarch）
+
+`solve-state` 对符号内存的建模由环境变量 `ISLA_RISCV_MEMORY_MODEL` 控制：
+
+* `array`（默认）：用 SMT 字节数组 `(Array (_ BitVec 64) (_ BitVec 8))` 建模
+  内存（`src/isarch/memory_model.rs`）。同一条执行路径内同地址读写保持一致：
+  读值逐字节等于数组内容（小端），符号写把数组逐字节 `Store` 后重定义为新
+  常量；符号读写地址全域自由（见下方"语义分层"）。
+* `fresh`：退回 `isla-lib` `Memory` 的默认行为，每次符号读新建独立的位向量
+  变量，同地址读写之间没有一致性关系。
+
+### 语义分层：内存层只管内容，可访问性交给模型 PMA/PMP
+
+默认（W9 语义）**全符号化**：符号读写地址全域自由，读值/写效来自字节数组，
+内存层不做任何可访问性判断。
+
+* **Isla 内存层只管内容**：符号读写地址全域自由，读值/写效来自字节数组，
+  内存层不做任何可访问性判断；
+* **可访问性/trap 完全交给模型自身的 PMA/PMP**（PMA 地图：默认沿用 IR 固化
+  的 `pma_regions`——ROM [0x1000,0x2000) 只读、MMIO [0x02000000,0x04000000)、
+  RAM [0x80000000,0x100000000)；W10 起可经 `[[pma_regions]]` 配置替换，见
+  下文专节）：可访问 → 正常访存（成功路径，带访存事件）；
+  不可访问 → 访存 trap / access fault（`ret_val` 为异常类）。**fault 路径是
+  合法且有价值的测试输出，不会被内存层抹掉**——两类路径在结果 JSON 中并存。
+
+`[[memory_regions]]` 支持三种区域类型，语义各司其职：
+
+| `region_type` | 语义 | 作用 |
+| --- | --- | --- |
+| `concrete` | 固定内容快照 | 具体地址命中时初值/读值来自快照，内容不进数组；沿用 `Memory` 的 `Concrete` 种类约定，不承诺作为统一可写 RAM |
+| `symbolic` | **纯声明**元数据 | 只表示"这一段明确是 RAM、内容未知"（由字节数组提供内容），**不产生任何地址或内容约束**（W9 起降级为纯声明；W8 曾配合开关圈地址，该机制已删除） |
+| `excluded` | **判死区域** | 声明"这一段不关心，遇到了是 unsat"，详见下节 |
+
+`MemoryBuilder` 拒绝重叠区域（含判死区域之间、判死与 concrete/symbolic、
+以及与内置 CLINT 的重叠），手工构造的重叠 `Region` 未纳入保证。
+
+> 历史限制（W10 前版本适用，已被 `[[pma_regions]]` 修订）：曾认为"模型的
+> PMA 地图固化在 IR，声明 sym_ram = [0x80000000,0x90000000) 只是模型 RAM
+> 的子集，落在 [0x90000000,0x100000000) 的访问按模型 PMA 不 trap，要精确
+> 边界需重新生成 IR"。W10 起用 `[[pma_regions]]` 把 `zpma_regions` 寄存器
+> 替换为配置地图即可消除该限制，无需改 IR（见下节）。
+
+### 判死区域：`region_type = "excluded"`
+
+配置声明某些区域"**不关心**"：任何访问（读或写，判死对两者一视同仁）与
+判死区域重叠——哪怕只有一个字节——该执行路径即判死（Unsat），不产生访存
+事件：
+
+* **符号地址**：数组内存模型回调追加 `NOT(与判死区域并集重叠)` 约束
+  （`smt_excluded_constraint`，`isla-lib/src/memory.rs`），并沿用 W7 的
+  "回调追加约束后立即 `check_sat`"机制——地址解进判死区域（含被路径既有
+  断言如模型 PMA 分支钉进去）时立即以 `BadRead`/`BadWrite` 判死、尽早剪枝；
+* **具体地址**：`Memory` 的具体地址分派识别判死区域，直接返回
+  `BadRead`/`BadWrite`，不经 solver。
+
+零判死区域 = 零约束零开销，与默认全符号化完全一致；concrete/symbolic
+区域行为不受判死配置影响。判死语义是"路径过滤器"而非可访问性判断：判死
+只删掉**落到这片区域**的路径，区域之外的 PMA trap/access fault 路径照常
+与成功路径并存输出。
+
+示例（`configs/riscv64_difftest_mem_excluded.toml`，把模型 PMA 的 MMIO 段
+[0x02000000,0x04000000) 判死）：
+
+```toml
+[[memory_regions]]
+name = "mmio_hole"
+base = "0x02000000"
+size = "0x02000000"          # [0x02000000, 0x04000000)
+region_type = "excluded"
+
+# mmio_hole 包住默认 CLINT [0x02000000,0x020c0000)，区域不允许重叠，须关闭：
+clint_enabled = false
+```
+
+### 配置化 PMA 地图：`[[pma_regions]]`（W10）
+
+把模型 PMA 地图写入 IR 顶层寄存器 `zpma_regions`（`%list(%struct zPMA_Region)`，
+模型的 `zpmaCheck`/`zmatching_pma` 逐项遍历）——启动时按配置构造
+list-of-records 值注入 `default_registers`，模型逻辑与 IR **零改动**。
+region 布局与 IR record 对齐：**base+size（非 base+end）**；配置列表按 base
+降序注入（与 IR 固化列表次序一致）。与 `[[memory_regions]]` 的关系是**正交
+两层**：
+
+| 层 | 配置 | 管什么 |
+| --- | --- | --- |
+| 内容层 | `[[memory_regions]]`（concrete/symbolic/excluded） | "存什么、哪些不关心"：字节数组内容、判死过滤 |
+| 属性层 | `[[pma_regions]]` | "哪里可访问、属性、trap 边界"：模型 PMA 逻辑自身执行 |
+
+字段：`base`、`size`（必填，size>0 且 base+size 不溢出）；属性二选一——
+`attr` 别名，或明细字段（可覆盖别名/基线的个别位）：
+
+| 字段 | 取值 | 无 attr 时的基线 |
+| --- | --- | --- |
+| `attr` | `"ram"` / `"rom"` / `"mmio"` / `"hole"` | — |
+| `readable`/`writable`/`executable`/`cacheable`/`coherent`/`read_idempotent`/`write_idempotent`/`supports_cbo_zero`/`include_in_device_tree` | bool | 全 false，唯 `include_in_device_tree=true` |
+| `misaligned` | `"no_fault"` / `"access_fault"` / `"alignment_fault"` | `no_fault` |
+| `reservability` | `"eventual"` / `"non_eventual"` / `"none"` | `none` |
+
+注意 `supports_cbo_zero` 是单个 z（IR 里 `zsupports_cbo_zzero` 的双 z 是
+Sail zencode）。别名映射（ram/mmio 镜像 IR 固化默认 region 属性）：
+
+| attr | r/w/x | cacheable | idempotent(r/w) | cbo_zzero | misaligned | reservability | in_dev_tree |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ram` | T/T/T | T | T/T | T | no_fault | eventual | T |
+| `rom` | T/F/F | T | T/T | F | no_fault | none | F |
+| `mmio` | T/T/F | F | F/F | F | alignment_fault | none | F |
+| `hole` | F/F/F | F | F/F | F | no_fault | none | F |
+
+自校验（对齐 MemoryBuilder 硬失败风格，isarch 不经过模型 `zcheck_mem_layout`，
+排序/重叠须在配置解析做）：size=0、base+size 溢出、任意两区域重叠（与 TOML
+书写顺序无关）都会在配置加载时报错退出；既无 `attr` 也无任何明细字段同样
+报错。**未配置 `[[pma_regions]]` 时不注入任何值**，`zpma_regions` 沿用 IR
+固化默认（ROM/MMIO/RAM 三段），行为与 W9 及之前逐项一致。
+
+示例（`configs/riscv64_difftest_mem_excluded_pma.toml`，RAM-only 地图，
+W14 起对齐重放 emu 实际有效 RAM [0x80000000,0x80000000000) 8TB）：
+
+```toml
+[[pma_regions]]
+name = "ram"
+base = "0x80000000"
+size = "0x7FFF80000000"       # [0x80000000, 0x80000000000)
+attr = "ram"
+```
+
+> **W14 修订注记**：W10 初版示例 size=0x10000000（[0x80000000,0x90000000)），
+> 依据是"重放环境 DRAM 256MB（emu 默认）"。W13 对账证伪：所借用 emu
+> （isla-xiangshanv2 @f86f50b83）源码 SoC.scala:335 `memRange`、
+> Parameters.scala:568 `SimMemSize=8190GB "same as PMA (0x80000000,
+> 0x80000000000)"，探针实测 0x90000000..0x1000000000 放行、0x80000000000
+> 顶界 fault——**"DRAM 256MB"结论对该 emu 不适用**（该宏属 difftest csrc
+> 侧），地图 size 以 SimMemSize/实测为准。语义后果：旧地图把 @0x90000000
+> 等（8TB 内、256MB 外）的合法写判成 fault，与 emu 退休行为错位。
+
+配置后地图外的访存按 `zpmaCheck` 走 access-fault 路径而非成功路径；
+写事件地址全部落入配置区域，成功与 fault 两类路径仍并存输出。
+
+### 钉死 PMP 寄存器：`[registers.defaults]`（W14）
+
+solve-state 中未给默认值的寄存器初值为符号变量。PMP 族寄存器
+（IR：`register zpmpcfg_n : %fvec(64, %struct zPmpcfg_ent)`、
+`register zpmpaddr_n : %fvec(64, %bv64)`，注意是 fvec 族寄存器、
+不存在独立 `pmpcfg0` 等符号）符号化时，`pmpCheck` 的"PMP 拒绝"分支
+可满足，图内对齐写会产出假 AccessFault（W13：定向 92 fault/120 路径，
+green 全量 107/2479）。
+
+不能只钉 A=OFF：IR 里 `let sys_pmp_count = 16`（Sail `config
+memory.pmp.count`，非 primop，`[const_primops]` 的 `sys_pmp_count=0`
+是死配置），`pmpCheck` 循环结构性生效，全 OFF 空匹配后 U/S 态
+fallthrough 必产 AccessFault（pmp_control.sail 循环尾部）。正确钉法＝
+全 64 项 NAPOT-全1-RWX（entry0 匹配全地址空间且 RWX，pmpCheck 恒
+None），与 emu 重放侧自配的 `pmpaddr0=-1/pmpcfg0=0x1f` 语义一致：
+
+```toml
+[registers.defaults]
+# PMP 关闭态：NAPOT 全地址空间 RWX（cfg 字节 0x1f = L0|A=11|RWX）
+"pmpcfg_n" = "[ { bits = 0x1f } ; 64 ]"
+"pmpaddr_n" = "[ 0xffffffffffffffff ; 64 ]"
+```
+
+值语法：`[ v ; n ]` 复制向量（Val 解析器）；位向量字面量按十六进制
+位数×4 定宽，`0x1f`=8bit、16 位十六进制=64bit，`plausible` 要求精确
+位宽。验证口径：图内对齐写（如 sd@0x840b3200）重解为 Retire_Success，
+地图外（<0x80000000 或 ≥8TB）仍全 fault。
+
+零配置（未声明 `[[memory_regions]]`）的语义是彻底全符号化：符号读写的
+地址全域自由、数组内容全部符号化，不隐式补任何默认区域。若需要声明常规
+RAM 区域（如 difftest 重放兜底），两种显式方式二选一：
+
+* 配置 `[[memory_regions]]` 的 `symbolic` 区域（纯声明，参考
+  `configs/riscv64_difftest_mem.toml` 的 `sym_ram`）；
+* 或设置环境变量 `ISLA_RISCV_DEFAULT_SYM_RAM=1`，在未配置任何 symbolic
+  区域时自动补 `0x80000000` 起 256MB 的符号 RAM（与 `sym_ram` 对齐）。
+  默认关闭——隐式区域会改变"零配置 = 全符号化"的设计语义，因此只在
+  用户显式要求时生效。
+
+路径结果 JSON（`output/<arch>_<clause>.json`）中的内存相关字段：
+
+* `memory-events`：本路径的 ReadMem/WriteMem 访存事件，按**真实执行顺序**排列
+  （轨迹本身是逆时间序，收集层已整体反转）。地址/数值经 model 物化为
+  `N'hHEX` 字符串，查不到模型值的分量输出 null。
+* `pre-memory` / `post-memory`：按事件顺序重放得到的稀疏内存快照，元素为
+  `{address, bytes, value}` 连续段（段长不超过 8 字节，`value` 是段内字节按
+  小端拼成位向量的十六进制）。规则：
+  * `pre-memory`：每个被触碰字节在**首次被触碰时**的内容——首触是读则取该
+    读值对应字节；首触是写则初值自由，`value` 为 null（不编造）。
+  * `post-memory`：重放结束后的最终字节内容；只读未写的字节取最后一次读值
+    （数组模型下与写数据一致）。
+  * 地址或数值分量查不到模型值时输出 null 并在日志中计数。
+
+`WriteMem` 的 `value` 是返回布尔值，`data` 才是写入位串，`exclusive`
+标明独占写。普通写发出事件即更新数组，与布尔值无关；独占写仅在布尔值
+为 true 时更新，false 时不更新，未知时 `post-memory` 对相关字节输出 null。
+异常路径上的 `post-memory` 描述这些事件的重放结果，不单独证明硬件提交。
+
+路径终值物化（最终 `check_sat` + 取模型）的两层策略（W6）：
+
+* 若路径最后一次 `check_sat` 已返回 Sat 且其后没有新增断言，直接复用
+  solver 中仍持有的那次模型，跳过重复求解（数组模型的读写约束是在最后
+  一次 check 之后直接 Assert 的，重解代价可能远高于执行期查询）。
+* 否则按时间盒重解：环境变量 `ISLA_RISCV_MODEL_TIMEOUT_MS`（毫秒，默认
+  30000）。超时路径不卡死整个 clause，而是降级输出 JSON——`ret_val` 等
+  无需模型的结果字段照常，`test-ins`/`isa-state`/`memory-events`/
+  `pre-memory`/`post-memory` 等模型物化字段置空，日志汇总降级路径数。
+  真正中断 Z3 需要 `smt-thread-interrupt` feature（`make solve-%` 默认
+  启用）；未启用该 feature 的构建无法中断，行为退化为普通 `check_sat`。
+
+历史问题（W6/W7 已定位，W8 落定分层，W9 移除白名单机制）：配置显式
+`symbolic` 区域（如 `riscv64_difftest_mem.toml` 的 `sym_ram`）且无条件
+生成"地址圈进 Symbolic 并集"的区域地址约束时，约束链与模型内 PMA/PMP
+路径约束联立会把带真实访存事件的完成路径判成 Unsat（根因：PMA 首析取
+分支把地址钉进 ROM [0x1000,0x2000)，与 sym_ram OR 链不相交）。W8 曾以
+`ISLA_RISCV_CONSTRAIN_ADDR_TO_REGIONS` 开关（定向重放档）承载该机制；
+W9 按新语义整体删除该开关与白名单链——symbolic 区域降级为纯声明，需要
+"路径过滤"的场景改用 excluded 判死区域（NOT 链 + W7 立即判死，
+BadRead/BadWrite 尽早剪枝）。排查残留 Unsat 可设
+`ISLA_RISCV_DUMP_UNSAT_DIR=<目录>`，被丢弃的 Unsat 完成路径会导出求解器
+断言集（`<目录>/unsat_<clause>_t<tid>.smt2`）。
+
+压缩指令（如 C_LD/C_SD）的 clause 返回 `ExecuteAs(转换后的指令)` 后，
+`solve-state` 参照模型外层模式（`postlude/step.sail` 的
+`ExecuteAs(other_inst) => execute(other_inst)`）继续执行转换后的指令：收集阶段
+把（转换后的指令、该路径 solver 的 checkpoint）入队，本轮全部路径完成后由外层
+循环统一用多线程池执行下一轮（转换出的 LOAD/STORE 自身会大量 fork，须并行；
+嵌套或串行执行都会显著变慢）。续执行以 checkpoint 重放重建 Z3 会话，数组内存
+模型的状态链（DefineConst 序列）随轨迹重放延续；调用帧用初始符号寄存器/初始
+内存重建（模型中 ExecuteAs 仅由解码 clause 产生，返回前无访存/寄存器副作用），
+访存事件进入同一条路径的轨迹并一起物化。
+
 ## Project structure
 
 * __isla-lib__ Is a Rust library which contains the core symbolic
