@@ -457,6 +457,197 @@ binary_primop!(gteq_int, "gteq".to_string(), Val::I128, Val::Bool, i128::ge, Exp
 binary_primop!(lt_int, "lt".to_string(), Val::I128, Val::Bool, i128::lt, Exp::Bvslt, smt_i128);
 binary_primop!(gt_int, "gt".to_string(), Val::I128, Val::Bool, i128::gt, Exp::Bvsgt, smt_i128);
 
+/// `<_u`/`<=_u`/`>_u`/`>=_u`/`<_s`/`<=_s`/`>_s`/`>=_s` 的位向量比较内核。
+///
+/// Sail 把这些算子编译为 `unsigned(x) op unsigned(y)`（IR 函数
+/// `zz8operatorz0zI_uz9` 等），经 `sail_unsigned`/`sail_signed` 转成 %i（i128）
+/// 再用整数比较。但无符号 128 位值无法用 i128 表示（`sail_unsigned` 对
+/// length >= 128 直接断言失败），AMOCAS.Q 路径的 AMOMINU/AMOMAXU 因此必然 panic。
+///
+/// 修复方式是同宽位向量的比较不经 %i 往返，直接在原宽位向量上发
+/// `Bvult/Bvule/Bvugt/Bvuge`（无符号）或 `Bvslt/Bvsle/Bvsgt/Bvsge`（有符号），
+/// 与旧实现严格等价：
+/// - 无符号：旧实现零扩展到 128 位后做 `Bvslt`，扩展后两值均落在 [0, 2^n)
+///   的非负区间，有符号比较与无符号比较一致，即等于 n 位 `Bvult`；
+/// - 有符号：符号扩展保序，128 位 `Bvslt` 上的序与 n 位 `Bvslt` 相同。
+/// n < 128 时与旧实现逐一致；n >= 128 时旧实现必 panic（无符号）或表示受限，
+/// 新实现给出唯一正确的位向量语义。
+#[derive(Clone, Copy)]
+enum BitsCmp {
+    LtU,
+    LeU,
+    GtU,
+    GeU,
+    LtS,
+    LeS,
+    GtS,
+    GeS,
+}
+
+impl BitsCmp {
+    fn name(self) -> &'static str {
+        match self {
+            BitsCmp::LtU => "<_u",
+            BitsCmp::LeU => "<=_u",
+            BitsCmp::GtU => ">_u",
+            BitsCmp::GeU => ">=_u",
+            BitsCmp::LtS => "<_s",
+            BitsCmp::LeS => "<=_s",
+            BitsCmp::GtS => ">_s",
+            BitsCmp::GeS => ">=_s",
+        }
+    }
+
+    fn exp(self, lhs: Box<Exp<Sym>>, rhs: Box<Exp<Sym>>) -> Exp<Sym> {
+        match self {
+            BitsCmp::LtU => Exp::Bvult(lhs, rhs),
+            BitsCmp::LeU => Exp::Bvule(lhs, rhs),
+            BitsCmp::GtU => Exp::Bvugt(lhs, rhs),
+            BitsCmp::GeU => Exp::Bvuge(lhs, rhs),
+            BitsCmp::LtS => Exp::Bvslt(lhs, rhs),
+            BitsCmp::LeS => Exp::Bvsle(lhs, rhs),
+            BitsCmp::GtS => Exp::Bvsgt(lhs, rhs),
+            BitsCmp::GeS => Exp::Bvsge(lhs, rhs),
+        }
+    }
+
+    fn unsigned(self) -> bool {
+        matches!(self, BitsCmp::LtU | BitsCmp::LeU | BitsCmp::GtU | BitsCmp::GeU)
+    }
+
+    fn holds(self, ordering: std::cmp::Ordering) -> bool {
+        match self {
+            BitsCmp::LtU | BitsCmp::LtS => ordering == std::cmp::Ordering::Less,
+            BitsCmp::LeU | BitsCmp::LeS => ordering != std::cmp::Ordering::Greater,
+            BitsCmp::GtU | BitsCmp::GtS => ordering == std::cmp::Ordering::Greater,
+            BitsCmp::GeU | BitsCmp::GeS => ordering != std::cmp::Ordering::Less,
+        }
+    }
+}
+
+fn bits_compare<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    cmp: BitsCmp,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    let lhs = replace_mixed_bits(lhs, solver, info)?;
+    let rhs = replace_mixed_bits(rhs, solver, info)?;
+    match (lhs, rhs) {
+        (Val::Bits(lhs), Val::Bits(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Err(ExecError::Type(
+                    format!("bits_compare {} (length mismatch) {} {}", cmp.name(), lhs.len(), rhs.len()),
+                    info,
+                ));
+            }
+            let ordering = if cmp.unsigned() { lhs.unsigned_cmp(rhs) } else { lhs.signed().cmp(&rhs.signed()) };
+            Ok(Val::Bool(cmp.holds(ordering)))
+        }
+        (Val::Symbolic(lhs), Val::Symbolic(rhs)) => match (solver.length(lhs), solver.length(rhs)) {
+            (Some(lhs_len), Some(rhs_len)) if lhs_len == rhs_len => {
+                try_concretize_bool_exp(cmp.exp(Box::new(Exp::Var(lhs)), Box::new(Exp::Var(rhs))), solver, info)
+            }
+            (lhs_len, rhs_len) => Err(ExecError::Type(
+                format!("bits_compare {} (length mismatch) {:?} {:?}", cmp.name(), &lhs_len, &rhs_len),
+                info,
+            )),
+        },
+        (Val::Bits(lhs), Val::Symbolic(rhs)) => match solver.length(rhs) {
+            Some(rhs_len) if rhs_len == lhs.len() => {
+                try_concretize_bool_exp(cmp.exp(Box::new(smt_sbits(lhs)), Box::new(Exp::Var(rhs))), solver, info)
+            }
+            rhs_len => Err(ExecError::Type(
+                format!("bits_compare {} (length mismatch) {:?} {:?}", cmp.name(), &Some(lhs.len()), &rhs_len),
+                info,
+            )),
+        },
+        (Val::Symbolic(lhs), Val::Bits(rhs)) => match solver.length(lhs) {
+            Some(lhs_len) if lhs_len == rhs.len() => {
+                try_concretize_bool_exp(cmp.exp(Box::new(Exp::Var(lhs)), Box::new(smt_sbits(rhs))), solver, info)
+            }
+            lhs_len => Err(ExecError::Type(
+                format!("bits_compare {} (length mismatch) {:?} {:?}", cmp.name(), &lhs_len, &Some(rhs.len())),
+                info,
+            )),
+        },
+        (lhs, rhs) => Err(ExecError::Type(format!("bits_compare {} {:?} {:?}", cmp.name(), &lhs, &rhs), info)),
+    }
+}
+
+pub fn lt_bits_u<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::LtU, solver, info)
+}
+
+pub fn lteq_bits_u<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::LeU, solver, info)
+}
+
+pub fn gt_bits_u<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::GtU, solver, info)
+}
+
+pub fn gteq_bits_u<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::GeU, solver, info)
+}
+
+pub fn lt_bits_s<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::LtS, solver, info)
+}
+
+pub fn lteq_bits_s<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::LeS, solver, info)
+}
+
+pub fn gt_bits_s<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::GtS, solver, info)
+}
+
+pub fn gteq_bits_s<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    bits_compare(lhs, rhs, BitsCmp::GeS, solver, info)
+}
+
 pub fn and_bool<B: BV>(lhs: Val<B>, rhs: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match (lhs, rhs) {
         (Val::Bool(false), _) => Ok(Val::Bool(false)),
@@ -1334,8 +1525,14 @@ fn sail_signed<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> 
         Val::Bits(bits) => Ok(Val::I128(bits.signed())),
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
-                assert!(length < 128);
-                solver.define_const(Exp::SignExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
+                // 有符号解释恰好可用 i128 表示：128 位时符号化 %i 本身就是
+                // 128 位位向量，符号扩展 0 位即恒等，直接返回原符号量。
+                if length == 128 {
+                    Ok(Val::Symbolic(bits))
+                } else {
+                    assert!(length < 128);
+                    solver.define_const(Exp::SignExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
+                }
             }
             None => Err(ExecError::Type(format!("sail_signed (solver cannot determine length) {:?}", &bits), info)),
         },
@@ -4557,6 +4754,214 @@ mod tests {
             Val::Symbolic(_) => Ok(()),
             value => panic!("expected non-constant equality under one-of constraint, got {:?}", value),
         }
+    }
+
+    fn b129_128(value: &str) -> B129 {
+        B129::from_str(value).unwrap()
+    }
+
+    /// 128 位无符号比较的边界值：2^127-1 与 2^127、全 1 与 0、相等。
+    /// 旧的 `<_u` 实现经 `sail_unsigned` 转 %i（i128），128 位无符号值装不下，
+    /// 具体（B129::unsigned 的 try_from unwrap）与符号（assert length < 128）两条路都失败。
+    #[test]
+    fn bits_compare_u_128_boundary_values() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B129>::new(&ctx);
+        let max_pos = Val::Bits(b129_128("0x7fffffffffffffffffffffffffffffff"));
+        let two_pow_127 = Val::Bits(b129_128("0x80000000000000000000000000000000"));
+        let all_ones = Val::Bits(b129_128("0xffffffffffffffffffffffffffffffff"));
+        let zero = Val::Bits(B129::zeros(128));
+        let loc = SourceLoc::unknown();
+
+        // 无符号下 2^127-1 < 2^127，全 1 是最大值
+        assert_eq!(lt_bits_u(max_pos.clone(), two_pow_127.clone(), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(lt_bits_u(all_ones.clone(), zero.clone(), &mut solver, loc)?, Val::Bool(false));
+        assert_eq!(gt_bits_u(all_ones.clone(), zero.clone(), &mut solver, loc)?, Val::Bool(true));
+        // 相等
+        assert_eq!(lt_bits_u(two_pow_127.clone(), two_pow_127.clone(), &mut solver, loc)?, Val::Bool(false));
+        assert_eq!(lteq_bits_u(two_pow_127.clone(), two_pow_127.clone(), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(gteq_bits_u(two_pow_127.clone(), two_pow_127.clone(), &mut solver, loc)?, Val::Bool(true));
+        Ok(())
+    }
+
+    /// 128 位有符号比较跨符号位：0x7F..F 是 i128 最大正数，0x80..0 是 i128 最小负数，
+    /// 0xFF..F 是 -1。
+    #[test]
+    fn bits_compare_s_128_cross_sign_boundary() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B129>::new(&ctx);
+        let max_pos = Val::Bits(b129_128("0x7fffffffffffffffffffffffffffffff"));
+        let min_neg = Val::Bits(b129_128("0x80000000000000000000000000000000"));
+        let minus_one = Val::Bits(b129_128("0xffffffffffffffffffffffffffffffff"));
+        let zero = Val::Bits(B129::zeros(128));
+        let loc = SourceLoc::unknown();
+
+        assert_eq!(lt_bits_s(min_neg.clone(), max_pos.clone(), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(lt_bits_s(max_pos.clone(), min_neg.clone(), &mut solver, loc)?, Val::Bool(false));
+        assert_eq!(gt_bits_s(max_pos.clone(), min_neg.clone(), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(lt_bits_s(minus_one.clone(), zero.clone(), &mut solver, loc)?, Val::Bool(true));
+        // -2^127 < -1
+        assert_eq!(lt_bits_s(min_neg.clone(), minus_one.clone(), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(gteq_bits_s(minus_one.clone(), zero.clone(), &mut solver, loc)?, Val::Bool(false));
+        Ok(())
+    }
+
+    /// G3 根因回归：符号化 128 位操作数（AMOCAS.Q 的 X_pair 读出值/内存值）
+    /// 走 `<_u`/`<_s` 不得再 panic；路径约束钉死后应能具体化。
+    #[test]
+    fn bits_compare_symbolic_128_no_panic_and_concretizes() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let y = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let loc = SourceLoc::unknown();
+
+        // 未约束时应保持符号化而不是 panic
+        match lt_bits_u(Val::Symbolic(x), Val::Symbolic(y), &mut solver, loc)? {
+            Val::Symbolic(_) => (),
+            value => panic!("expected symbolic unsigned comparison, got {:?}", value),
+        }
+        match lt_bits_s(Val::Symbolic(x), Val::Symbolic(y), &mut solver, loc)? {
+            Val::Symbolic(_) => (),
+            value => panic!("expected symbolic signed comparison, got {:?}", value),
+        }
+
+        // x = 0，y = 2^127-1：无符号下 x < y 恒真；有符号下同为非负，仍恒真
+        let ones_below_top: Vec<bool> = (0..128).map(|i| i < 127).collect();
+        solver.assert(Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits(vec![false; 128]))));
+        solver.assert(Exp::Eq(Box::new(Exp::Var(y)), Box::new(Exp::Bits(ones_below_top))));
+        assert_eq!(lt_bits_u(Val::Symbolic(x), Val::Symbolic(y), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(lt_bits_s(Val::Symbolic(x), Val::Symbolic(y), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(gteq_bits_u(Val::Symbolic(x), Val::Symbolic(y), &mut solver, loc)?, Val::Bool(false));
+        Ok(())
+    }
+
+    /// AMOMINU/AMOMIN 形状：`if a <_op b then a else b` 的比较分支在 128 位
+    /// 符号操作数（X_pair 读出值 a 与内存读出值 b）上按各自语义分叉——
+    /// 无符号 a=2^127 > b=2^127-1，有符号 a 为负数 < b。
+    #[test]
+    fn bits_compare_amo_min_shape_128_symbolic() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let a = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let b = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let loc = SourceLoc::unknown();
+
+        // Exp::Bits 为低位在前：a = 2^127（最高位 1），b = 2^127-1（低 127 位全 1）
+        let a_value: Vec<bool> = (0..128).map(|i| i == 127).collect();
+        let b_value: Vec<bool> = (0..128).map(|i| i < 127).collect();
+        solver.assert(Exp::Eq(Box::new(Exp::Var(a)), Box::new(Exp::Bits(a_value))));
+        solver.assert(Exp::Eq(Box::new(Exp::Var(b)), Box::new(Exp::Bits(b_value))));
+
+        // AMOMINU 选 b，AMOMIN 选 a
+        assert_eq!(lt_bits_u(Val::Symbolic(a), Val::Symbolic(b), &mut solver, loc)?, Val::Bool(false));
+        assert_eq!(lt_bits_s(Val::Symbolic(a), Val::Symbolic(b), &mut solver, loc)?, Val::Bool(true));
+        Ok(())
+    }
+
+    /// 既有宽度回归：64 位及以下与旧实现（sail_unsigned/sail_signed + lt_int）语义一致。
+    #[test]
+    fn bits_compare_64_equivalent_to_int_roundtrip() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+
+        let operands = [
+            (B64::ones(64), B64::zeros(64)),
+            (B64::new(0xff, 8), B64::new(0x01, 8)),
+            (B64::new(0x80, 8), B64::new(0x7f, 8)),
+            (B64::new(5, 16), B64::new(5, 16)),
+        ];
+        for (x, y) in operands {
+            let (xv, yv) = (Val::Bits(x), Val::Bits(y));
+            let expected_u = lt_int(
+                sail_unsigned(xv.clone(), &mut solver, loc)?,
+                sail_unsigned(yv.clone(), &mut solver, loc)?,
+                &mut solver,
+                loc,
+            )?;
+            let expected_s = lt_int(
+                sail_signed(xv.clone(), &mut solver, loc)?,
+                sail_signed(yv.clone(), &mut solver, loc)?,
+                &mut solver,
+                loc,
+            )?;
+            assert_eq!(lt_bits_u(xv.clone(), yv.clone(), &mut solver, loc)?, expected_u, "unsigned {:?} {:?}", x, y);
+            assert_eq!(lt_bits_s(xv.clone(), yv.clone(), &mut solver, loc)?, expected_s, "signed {:?} {:?}", x, y);
+        }
+        Ok(())
+    }
+
+    /// 具体与符号化操作数混合时仍按位向量宽度直接比较。
+    #[test]
+    fn bits_compare_mixed_concrete_symbolic() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
+        let loc = SourceLoc::unknown();
+        solver.assert(Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(3, 8)))));
+
+        assert_eq!(lt_bits_u(Val::Symbolic(x), Val::Bits(B64::new(5, 8)), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(gt_bits_u(Val::Symbolic(x), Val::Bits(B64::new(2, 8)), &mut solver, loc)?, Val::Bool(true));
+        assert_eq!(lteq_bits_s(Val::Bits(B64::new(4, 8)), Val::Symbolic(x), &mut solver, loc)?, Val::Bool(false));
+        Ok(())
+    }
+
+    /// 非位向量或宽度不一致的比较是类型错误（Sail 类型系统保证同宽，此处防御）。
+    #[test]
+    fn bits_compare_length_mismatch_is_type_error() {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+
+        let narrow = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
+        let wide = solver.declare_const(Ty::BitVec(16), SourceLoc::unknown());
+        assert!(lt_bits_u(Val::Bits(B64::new(1, 8)), Val::Bits(B64::new(1, 16)), &mut solver, loc).is_err());
+        assert!(lt_bits_u(Val::Symbolic(narrow), Val::Symbolic(wide), &mut solver, loc).is_err());
+        assert!(lt_bits_u(Val::Bits(B64::new(1, 8)), Val::Symbolic(wide), &mut solver, loc).is_err());
+        assert!(lt_bits_u(Val::I128(1), Val::I128(2), &mut solver, loc).is_err());
+    }
+
+    /// sail_unsigned 对 128 位符号量保留诚实 panic：无符号 128 位值没有 %i 表示，
+    /// `<_u` 等比较已改写为不经 %i 往返（见 lt_bits_u），其余调用方仍应立即暴露。
+    #[test]
+    #[should_panic(expected = "length < 128")]
+    fn sail_unsigned_symbolic_128_still_panics() {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let _ = sail_unsigned(Val::Symbolic(x), &mut solver, SourceLoc::unknown());
+    }
+
+    /// sail_signed 放宽到 128 位：有符号解释恰好可由 i128 表示，符号化 128 位
+    /// 位向量本身就是 %i 的 SMT 表示（128 位位向量），直接恒等返回。
+    #[test]
+    fn sail_signed_symbolic_128_is_identity() -> Result<(), ExecError> {
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        let loc = SourceLoc::unknown();
+
+        match sail_signed(Val::Symbolic(x), &mut solver, loc)? {
+            Val::Symbolic(sym) => assert_eq!(sym, x),
+            value => panic!("expected identity symbolic value, got {:?}", value),
+        }
+        // 具体 128 位：0x80..0 的有符号解释是 i128 最小值
+        let mut b129_solver = Solver::<B129>::new(&ctx);
+        assert_eq!(
+            sail_signed(Val::Bits(b129_128("0x80000000000000000000000000000000")), &mut b129_solver, loc)?,
+            Val::I128(i128::MIN)
+        );
+        Ok(())
     }
 
     /// 模型法不再受候选常量集合限制：以前只枚举 0..=512 等值，超出范围或很大的负数

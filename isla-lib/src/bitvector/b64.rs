@@ -289,6 +289,11 @@ impl BV for B64 {
         i128::from(self.sign_extend(64).bits as i64)
     }
 
+    fn unsigned_cmp(self, other: Self) -> std::cmp::Ordering {
+        assert!(self.len == other.len, "unsigned_cmp 需要同宽位向量: {} vs {}", self.len, other.len);
+        self.bits.cmp(&other.bits)
+    }
+
     fn slice(self, from: u32, len: u32) -> Option<Self> {
         if from + len <= self.len {
             Some(B64 { len, bits: bzhi_u64(self.bits >> from, len) })

@@ -1322,6 +1322,7 @@ fn insert_instr_primops<B: BV>(
     instr: Instr<Name, B>,
     externs: &HashMap<Name, (String, bool)>,
     primops: &Primops<B>,
+    comparison_fns: &HashMap<Name, Binary<B>>,
 ) -> Instr<Name, B> {
     match &instr {
         Instr::Call(loc, _, f, args, info) => match externs.get(f) {
@@ -1362,7 +1363,13 @@ fn insert_instr_primops<B: BV>(
                     Instr::Call(loc.clone(), false, *f, args.clone(), *info)
                 }
             }
-            None => instr,
+            None => match comparison_fns.get(f) {
+                Some(comparison) => {
+                    assert!(args.len() == 2);
+                    Instr::PrimopBinary(loc.clone(), *comparison, args[0].clone(), args[1].clone(), *info)
+                }
+                None => instr,
+            },
         },
         _ => instr,
     }
@@ -1380,7 +1387,12 @@ pub enum AssertionMode {
 }
 
 /// Change Calls without implementations into Primops
-pub(crate) fn insert_primops<B: BV>(defs: &mut [Def<Name, B>], mode: AssertionMode, isa_config: &ISAConfig<B>) {
+pub(crate) fn insert_primops<B: BV>(
+    defs: &mut [Def<Name, B>],
+    symtab: &Symtab,
+    mode: AssertionMode,
+    isa_config: &ISAConfig<B>,
+) {
     let mut externs: HashMap<Name, (String, bool)> = HashMap::new();
     for def in defs.iter() {
         if let Def::Extern(f, is_abstract, ext, _, _) = def {
@@ -1399,6 +1411,27 @@ pub(crate) fn insert_primops<B: BV>(defs: &mut [Def<Name, B>], mode: AssertionMo
     externs.insert(SAIL_ASSUME, ("assume".to_string(), false));
     externs.insert(BITVECTOR_UPDATE, ("bitvector_update".to_string(), false));
 
+    // Sail 把 `<_u` 等算子编译为带函数体的 IR 函数（如 `(operator <_u)` 即
+    // `zz8operatorz0zI_uz9`），函数体经 sail_unsigned/sail_signed 转 %i 再做整数
+    // 比较。128 位无符号值无法用 %i（i128）表示，这些调用点统一改写为直接在
+    // 位向量上比较的 primop（语义等价性见 primop.rs 的 BitsCmp）。
+    let comparison_primops: [(&str, Binary<B>); 8] = [
+        ("(operator <_u)", primop::lt_bits_u),
+        ("(operator <=_u)", primop::lteq_bits_u),
+        ("(operator >_u)", primop::gt_bits_u),
+        ("(operator >=_u)", primop::gteq_bits_u),
+        ("(operator <_s)", primop::lt_bits_s),
+        ("(operator <=_s)", primop::lteq_bits_s),
+        ("(operator >_s)", primop::gt_bits_s),
+        ("(operator >=_s)", primop::gteq_bits_s),
+    ];
+    let mut comparison_fns: HashMap<Name, Binary<B>> = HashMap::new();
+    for (sail_name, comparison) in comparison_primops {
+        if let Some(f) = symtab.get(&zencode::encode(sail_name)) {
+            comparison_fns.insert(f, comparison);
+        }
+    }
+
     let mut primops = Primops::default();
 
     for (primop, reset) in isa_config.const_primops.iter() {
@@ -1411,20 +1444,31 @@ pub(crate) fn insert_primops<B: BV>(defs: &mut [Def<Name, B>], mode: AssertionMo
                 *def = Def::Fn(
                     *f,
                     args.to_vec(),
-                    body.iter().cloned().map(|instr| insert_instr_primops(instr, &externs, &primops)).collect(),
+                    body.iter()
+                        .cloned()
+                        .map(|instr| insert_instr_primops(instr, &externs, &primops, &comparison_fns))
+                        .collect(),
                 )
             }
             Def::Let(bindings, setup) => {
                 *def = Def::Let(
                     bindings.clone(),
-                    setup.iter().cloned().map(|instr| insert_instr_primops(instr, &externs, &primops)).collect(),
+                    setup
+                        .iter()
+                        .cloned()
+                        .map(|instr| insert_instr_primops(instr, &externs, &primops, &comparison_fns))
+                        .collect(),
                 )
             }
             Def::Register(name, ty, setup) => {
                 *def = Def::Register(
                     *name,
                     ty.clone(),
-                    setup.iter().cloned().map(|instr| insert_instr_primops(instr, &externs, &primops)).collect(),
+                    setup
+                        .iter()
+                        .cloned()
+                        .map(|instr| insert_instr_primops(instr, &externs, &primops, &comparison_fns))
+                        .collect(),
                 )
             }
             _ => (),

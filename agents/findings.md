@@ -319,3 +319,11 @@
 - 判定依据：Sail `range_subset`（model/core/range_util.sail，IR `zrange_subset`）环绕三点比较；对任一 size 值，`x = A − base mod 2^64 ≤ b_end = size` 且 `a_end = x + 访宽 ≤ b_end` 决定 PMA 匹配。W14 全部 22 个钉址探针实测与"[2^31, 2^47)"手算 100% 吻合，Isla 求值无 bug；W14 报告的"高址非单调 fault"是探针误读——`top_exact`/`top_p100`/`tr_top` 钉的 `0x0000_8000_0000_0000` 是 2^47（16 位十六进制写法），不是 2^43。
 - 复验（W15，`sb x0,0(x31)` 钉址 13 探针）：修正后 [2^31,2^43) 内（0x90000000、2^43−1、2^43−0x100）放行，2^43、2^43+1、2^43+0x100、1.5×2^43、2^44、2^46、2^47−1、2^47、2^63、图下界外全部 AccessFault，与手算一致（红 7 败→绿 13/13）。
 - zSTORE 全量 solve-state 基线 24 OK/104 FAULT 在修正后计数不变，且 24 条写事件全部落入 8TB 内（修正前 20 条在"8TB 外"）；fault32 重放集无 ≥2^43 事件，零影响。
+
+## `<_u`/`<_s` 比较算子的加载期改写与 128 位 %i 表示边界（2026-09-28，W20）
+
+- **求值链**：Sail 把 `<_u/<=_u/>_u/>=_u/<_s/<=_s/>_s/>=_s` 编译为带体 IR 函数（`(operator <_u)` 编码名 `zz8operatorz0zI_uz9`，IR:7925-8004），函数体 = `zunsigned×2 + zlt_int`。`%i` 的表示是 i128（具体）/128 位 BV（符号，`lt_int` 发 `Bvslt` 有符号比较）。`sail_unsigned` 对符号量 `assert length<128`——无符号 128 位值没有 %i 表示；B129 具体路径 `unsigned()` 是 `i128::try_from(u128).unwrap()`，≥2^127 同样 panic。width=16 AMO（`X_pair` 128 位）× AMOMIN* 必炸（G3 ④缺陷）。
+- **修复（d643e0e 之后）**：`insert_primops`（ir.rs）新增 symtab 查名（`zencode::encode("(operator <_u)")` 等 8 个）建立 `Name → Binary` 表，`insert_instr_primops` 在非 extern 分支把对这些函数的 `Call` 改写为 `PrimopBinary`，落到 primop.rs 的 `lt_bits_u/lteq_bits_u/gt_bits_u/gteq_bits_u` 与 `_s` 系列（内核 `BitsCmp::bits_compare`）。直接在原宽位向量发 `Bvult/Bvule/Bvugt/Bvuge/Bvslt/...`，语义等价：无符号零扩展到 128 后两值非负、`Bvslt` 与无符号序一致；有符号符号扩展保序。
+- **配套**：`BV` trait 新增 `unsigned_cmp`（B64 按 u64、B129 按 `(tag,bits)` 字典序，tag 是第 129 位 MSB）；具体有符号比较走既有 `signed()`（B129 已正确处理 128/129）。`sail_signed` 放宽 length==128 为恒等返回（符号化 %i 本就是 128 位 BV，`SignExtend(0)`≡恒等）；`sail_unsigned` 保留 panic（无符号 128 位确无 %i 表示，诚实暴露），其余调用方（zrem 等）不受影响。
+- **zAMO 端到端**（riscv64_difftest_mem_excluded_pma.toml + limits_b12 + 600s 盒 + -T 24）：rc=0、23s、670 gen JSON 落盘（修复前 rc=134、0 产物）。`amominu.q.aq x31,x31,(x15)` → Retire_Success + 16B 独占读写事件 + 2×8B post-memory，原 panic 形态复现通过。宽度 {b,h,w,d,q}、aq/rl/aqrl 变体、Addr_Align×4、Access_Fault×408、Retire_Success×258；min/max 家族 9 条（含 minu.q）。AMOCAS 0 条（预算内未探索到，非缺陷）。
+- **环境坑**：/tmp 用户配额满时 `println` 写失败 panic→`panic="abort"`（release profile）→ SIGABRT 且 panic 信息也写不出（空 stderr），现象酷似引擎 abort；跑批产物目录放 /data1 下。产物：`/data1/baiyifan/tmp/isla-memimpl-w20-20260928/`。

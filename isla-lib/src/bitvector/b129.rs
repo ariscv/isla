@@ -341,6 +341,12 @@ impl BV for B129 {
         }
     }
 
+    fn unsigned_cmp(self, other: Self) -> std::cmp::Ordering {
+        assert!(self.len == other.len, "unsigned_cmp 需要同宽位向量: {} vs {}", self.len, other.len);
+        // tag 是第 129 位（最高位），作为无符号比较的最高有效位参与字典序
+        (self.tag, self.bits).cmp(&(other.tag, other.bits))
+    }
+
     fn slice(self, from: u32, len: u32) -> Option<Self> {
         if from + len <= self.len {
             Some(bzhi(B129 { len, ..self >> shift_u32(from, self.len) }, len))

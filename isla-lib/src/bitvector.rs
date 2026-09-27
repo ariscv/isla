@@ -284,6 +284,16 @@ where
 
     fn signed(self) -> i128;
 
+    /// 按无符号数值比较两个同宽位向量的大小。
+    ///
+    /// 超出 i128 表示范围的宽位向量（如 128 位）无法经 [`BV::unsigned`] 走
+    /// i128 比较（无符号 128 位值装不下 i128），必须直接按位序比较。
+    ///
+    /// # Panics
+    ///
+    /// `self` 与 `other` 长度必须相同
+    fn unsigned_cmp(self, other: Self) -> std::cmp::Ordering;
+
     fn append(self, suffix: Self) -> Option<Self> {
         let new_len = self.len() + suffix.len();
         if new_len <= Self::MAX_WIDTH {

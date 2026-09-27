@@ -3519,6 +3519,47 @@ fn zspike_match(zaddr, zwidth) {
         (symtab, defs)
     }
 
+    /// Sail 把 `<_u` 编译为 `(operator <_u)`（编码名 zz8operatorz0zI_uz9）的带体
+    /// 函数，函数体经 zunsigned 转 %i 再做整数比较，128 位无符号值无法用 %i 表示。
+    /// 加载期应把这些算子的调用点改写为直接在位向量上比较的 PrimopBinary，
+    /// 不再进入原函数体。
+    #[test]
+    fn operator_comparison_calls_rewrite_to_bits_primops() {
+        const IR: &str = r#"
+val zz8operatorz0zI_uz9 : (%bv, %bv) -> %bool
+fn zz8operatorz0zI_uz9(zx, zy) {
+  return = true;
+  end;
+}
+
+val zcaller : (%bv, %bv) -> %bool
+fn zcaller(za, zb) {
+  zz1 : %bool `1 1:1-1:9;
+  zz1 = zz8operatorz0zI_uz9(za, zb) `1 1:1-1:9;
+  return = zz1;
+  end;
+}
+"#;
+        let (symtab, mut defs) = parse_ir_string(IR);
+        crate::ir::insert_primops(&mut defs, &symtab, crate::ir::AssertionMode::Optimistic, &empty_isa_config());
+
+        let caller = symtab.lookup("zcaller");
+        let mut rewritten = 0;
+        for def in defs.iter() {
+            if let crate::ir::Def::Fn(f, _, body) = def {
+                if *f == caller {
+                    for instr in body {
+                        assert!(!matches!(instr, crate::ir::Instr::Call(..)), "算子调用点不应保留为 Call");
+                        if let crate::ir::Instr::PrimopBinary(..) = instr {
+                            rewritten += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(rewritten, 1, "期望 `<_u` 调用点被改写为一个 PrimopBinary");
+    }
+
     fn empty_tool() -> Tool {
         Tool { executable: PathBuf::new(), options: Vec::new() }
     }
@@ -3748,7 +3789,7 @@ fn zspike_match(zaddr, zwidth) {
         ir: &'static str,
     ) -> (SharedState<'static, B64>, RegisterBindings<'static, B64>, Bindings<'static, B64>) {
         let (symtab, mut defs) = parse_ir_string(ir);
-        crate::ir::insert_primops(&mut defs, crate::ir::AssertionMode::Optimistic, &empty_isa_config());
+        crate::ir::insert_primops(&mut defs, &symtab, crate::ir::AssertionMode::Optimistic, &empty_isa_config());
         let defs: &'static [crate::ir::Def<Name, B64>] = Box::leak(defs.into_boxed_slice());
         let type_info = IRTypeInfo::new(defs);
         let shared_state = SharedState::new(
