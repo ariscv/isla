@@ -1059,20 +1059,19 @@ mod tests {
         assert_eq!(target.xlen(), "64");
         assert_eq!(target.xlen_name(), "rv64");
         assert_eq!(target.vector_context_registers(), ["vl", "vstart", "vtype", "vcsr"]);
-        // registers_of_interest 是 pre-state 与 post-state 的统一来源（全量并集）
+        // fd92696 起 reg_list 即 setup_pre_state 的待符号化集合：
+        // x0（恒零）与 PC（取指驱动）不符号化，排除逻辑在数据源完成
         let regs = target.reg_list();
-        assert!(regs.contains(&"x0".to_string()));
-        assert!(regs.contains(&"PC".to_string()));
+        assert!(!regs.contains(&"x0".to_string()));
+        assert!(!regs.contains(&"PC".to_string()));
         assert!(regs.contains(&"vr0".to_string()));
         assert!(regs.contains(&"mstatus".to_string()));
         assert!(regs.contains(&"vtype".to_string()));
         assert!(regs.contains(&"vl".to_string()));
         assert!(regs.contains(&"vstart".to_string()));
         assert!(regs.contains(&"vcsr".to_string()));
-        // pre-state 派生（setup_pre_state 内部）：排除 x0 和 PC（不做主动符号化）
-        let pre_state: Vec<String> = regs.into_iter().filter(|r| r != "x0" && r != "PC").collect();
-        assert!(!pre_state.contains(&"x0".to_string()));
-        assert!(!pre_state.contains(&"PC".to_string()));
+        // setup_pre_state 现对 reg_list 全量符号化，pre_state 与 reg_list 一致
+        let pre_state: Vec<String> = regs;
         assert!(pre_state.contains(&"vr0".to_string()));
         assert!(pre_state.contains(&"mstatus".to_string()));
         assert!(pre_state.contains(&"vtype".to_string()));
