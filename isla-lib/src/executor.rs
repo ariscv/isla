@@ -3384,6 +3384,108 @@ fn zrX(z3zE1756) {
 }
 "#;
 
+    /// W17（S2 spike）：复刻 rv64d.ir 的 PMA 匹配链最小形状——
+    /// `register zpma_regions : %list(%struct)` + `@is_empty/@hd/@tl` 遍历 +
+    /// 字段访问 + `zrange_subset`（bv 加减 + 无符号比较）逐字复制自
+    /// rv64d.ir:9997（zrange_subset）与 rv64d.ir:7988（`<=u`），用于验证
+    /// "含 Symbolic 字段的 Struct 装进 List 写入寄存器（defaults 路径
+    /// UVal::Init）后，执行链完整消费并触发求解分叉"。
+    const SYMBOLIC_PMA_REGIONS_IR: &str = r#"
+val zadd_bits = "add_bits" : (%bv, %bv) ->  %bv
+
+val zsub_vec = "sub_bits" : (%bv, %bv) ->  %bv
+
+val zlteq_int = "lteq" : (%i, %i) ->  %bool
+
+val zunsigned = "sail_unsigned" : (%bv) ->  %i
+
+val zconsz3z5structz0zzSpike_Region = "cons" : (%struct zSpike_Region, %list(%struct zSpike_Region)) ->  %list(%struct zSpike_Region)
+
+struct zSpike_Region {
+  zbase: %bv64,
+  zsizze: %bv64
+}
+
+register zpma_regions : %list(%struct zSpike_Region) {
+  zz40 : %list(%struct zSpike_Region);
+  zz40 = zconsz3z5structz0zzSpike_Region(struct zSpike_Region {zbase = 0x0000000080000000, zsizze = 0x0000000000001000}, zz40);
+  zpma_regions = zz40;
+}
+
+val zz8operatorz0zIzJ_uz9 : (%bv, %bv) ->  %bool
+
+fn zz8operatorz0zIzJ_uz9(zx, zy) {
+  zz40 : %i;
+  zz40 = zunsigned(zx);
+  zz41 : %i;
+  zz41 = zunsigned(zy);
+  return = zlteq_int(zz40, zz41);
+  end;
+}
+
+val zrange_subset : (%bv, %bv, %bv, %bv) ->  %bool
+
+fn zrange_subset(za_begin, za_sizze, zb_begin, zb_sizze) {
+  zz40 : %bv;
+  zz41 : %bv;
+  zz41 = zadd_bits(za_begin, za_sizze);
+  zz40 = zsub_vec(zz41, zb_begin);
+  zz42 : %bv;
+  zz43 : %bv;
+  zz43 = zadd_bits(zb_begin, zb_sizze);
+  zz42 = zsub_vec(zz43, zb_begin);
+  zz44 : %bv;
+  zz44 = zsub_vec(za_begin, zb_begin);
+  zz45 : %bool;
+  zz45 = zz8operatorz0zIzJ_uz9(zz44, zz42);
+  zz46 : %bool;
+  jump zz45 goto 16;
+  zz46 = false;
+  goto 24;
+  zz47 : %bool;
+  zz47 = zz8operatorz0zIzJ_uz9(zz40, zz42);
+  zz48 : %bool;
+  jump zz47 goto 22;
+  zz48 = false;
+  goto 23;
+  zz48 = zz8operatorz0zIzJ_uz9(zz44, zz40);
+  zz46 = zz48;
+  return = zz46;
+  end;
+}
+
+val zspike_match_range : (%list(%struct zSpike_Region), %bv64, %bv64) ->  %bool
+
+fn zspike_match_range(zpmas, zaddr, zwidth) {
+  zz40 : %bool;
+  jump @not(@is_empty(zpmas)) goto 4;
+  zz40 = false;
+  goto 15;
+  zz41 : %struct zSpike_Region;
+  zz41 = @hd(zpmas);
+  zz42 : %list(%struct zSpike_Region);
+  zz42 = @tl(zpmas);
+  zz43 : %bv64;
+  zz43 = zz41.zbase;
+  zz44 : %bv64;
+  zz44 = zz41.zsizze;
+  zz45 : %bool;
+  zz45 = zrange_subset(zaddr, zwidth, zz43, zz44);
+  zz40 = zz45;
+  return = zz40;
+  end;
+}
+
+val zspike_match : (%bv64, %bv64) ->  %bool
+
+fn zspike_match(zaddr, zwidth) {
+  zz40 : %bool;
+  zz40 = zspike_match_range(zpma_regions, zaddr, zwidth);
+  return = zz40;
+  end;
+}
+"#;
+
     fn info() -> SourceLoc {
         SourceLoc::unknown()
     }
@@ -4439,6 +4541,110 @@ fn zrX(z3zE1756) {
 
         assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bits(_))))));
         assert!(results.iter().all(Result::is_ok));
+    }
+
+    /// W17（S2 spike）：含 Symbolic 字段（zsizze）的 Struct 装进 List 写入
+    /// 寄存器 zpma_regions（defaults 路径，与 initialize_register 相同的
+    /// UVal::Init 注入），执行 zspike_match 验证三点：
+    /// 1. plausible 放行（形状检查不拒嵌套 Symbolic）；
+    /// 2. 执行链完整消费（@is_empty/@hd/@tl + 字段访问 + bv 加减 + 无符号比较，
+    ///    无 panic / 静默丢弃），符号 size 进入 SMT；
+    /// 3. zrange_subset 的符号比较触发分叉，两条路径各自 Sat 且模型 size 与
+    ///    界内/界外一致（访问 [0x80001000, +8)，region base=0x80000000，
+    ///    界内 ⟺ size >= 0x1008）。
+    #[test]
+    fn symbolic_pma_region_size_forks_matching_range() {
+        let (shared_state, mut regs, lets) = shared_state_and_bindings_from_ir(SYMBOLIC_PMA_REGIONS_IR);
+        let symtab = &shared_state.symtab;
+        let zpma = symtab.get(&zencode::encode("pma_regions")).expect("夹具缺 zpma_regions 寄存器");
+        let zbase = symtab.get("zbase").expect("夹具缺字段 zbase");
+        let zsizze = symtab.get("zsizze").expect("夹具缺字段 zsizze");
+
+        // 构造与 apply_pma_regions_to_config 同形状的值，仅 zsizze 换成符号常量。
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::new(&ctx);
+        let size_sym = solver.declare_const(smtlib::Ty::BitVec(64), info());
+        let mut fields: ahash::HashMap<Name, Val<B64>> = ahash::HashMap::default();
+        fields.insert(zbase, Val::Bits(B64::new(0x8000_0000, 64)));
+        fields.insert(zsizze, Val::Symbolic(size_sym));
+        let list = Val::List(vec![Val::Struct(fields)]);
+
+        // spike 点 1：plausible 放行
+        let register_ty = shared_state.registers.get(&zpma).expect("zpma_regions 必须在寄存器类型表中");
+        list.plausible(register_ty, &shared_state).expect("plausible 应放行含符号字段的 List(Struct)");
+
+        // spike 点 2：defaults 路径——与 initialize_register 命中 default_registers 时
+        // 相同的 UVal::Init 注入（不发 reset 事件、不走 AssumeReg）。
+        regs.insert(zpma, false, UVal::Init(list));
+
+        // 主 solver 声明符号 size 后取 checkpoint，各路径从 checkpoint 派生 solver。
+        let cp = checkpoint(&mut solver);
+
+        let func = symtab.lookup("zspike_match");
+        let (func_args, ret_ty, func_instrs) = shared_state.functions.get(&func).expect("夹具缺 zspike_match");
+        let mut frame = LocalFrame::new(
+            func,
+            func_args,
+            ret_ty,
+            Some(&[Val::Bits(B64::new(0x8000_1000, 64)), Val::Bits(B64::new(8, 64))]),
+            func_instrs,
+        );
+        frame.add_regs(&regs).add_lets(&lets);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        queue.push(frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, cp));
+
+        let mut finished: Vec<(bool, u64)> = Vec::new();
+        while let Some(mut task) = queue.pop() {
+            let mut cfg = Config::new();
+            cfg.set_param_value("model", "true");
+            let ctx = Context::new(cfg);
+            let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+            if let Some((def, event)) = task.fork_cond {
+                solver.add_event(event);
+                solver.add(def);
+            }
+            let mut task_frame = unfreeze_frame(&task.frame);
+            let result = run_loop(
+                0,
+                task.id,
+                &mut task.fraction,
+                PathTimeout::unlimited(),
+                task.stop_conditions,
+                &SingleForkSink { queue: &queue },
+                &mut task_frame,
+                task.state,
+                &shared_state,
+                &mut solver,
+            )
+            .expect("spike 执行不应报错");
+            let Run::Finished(ret) = result else {
+                panic!("spike 路径应正常结束（Finished），实际非 Finished 结果")
+            };
+            let Val::Bool(matched) = ret else { panic!("zspike_match 返回值必须是 bool，实际 {:?}", ret) };
+
+            // spike 点 3：路径可满足且模型给出 size 具体值，界内/界外与 matched 一致。
+            assert_eq!(solver.check_sat(info()), SmtResult::Sat, "分叉后每条路径都应 Sat");
+            let mut model = Model::new(&solver);
+            let size = match model.get_var(size_sym).expect("模型必须给出 size 值") {
+                ModelVal::Exp(crate::smt::smtlib::Exp::Bits64(bv)) => bv.lower_u64(),
+                other => panic!("size 模型值必须是 64 位位向量，实际 {:?}", other),
+            };
+            if matched {
+                assert!(size >= 0x1008, "界内路径模型 size={:#x} 应 >= 0x1008", size);
+            } else {
+                assert!(size < 0x1008, "界外路径模型 size={:#x} 应 < 0x1008", size);
+            }
+            finished.push((matched, size));
+        }
+
+        // zrange_subset 内有两次符号 jump（offset ≤u size、offset+width ≤u size），
+        // 偏移 0x1000 固定可过第一关，故分叉成三条路径：第一关假（size<0x1000）、
+        // 第一关真第二关假（0x1000≤size<0x1008）、两关全真（size≥0x1008）。
+        assert_eq!(finished.len(), 3, "符号 size 应让 zrange_subset 的两次符号比较各分叉一次");
+        assert!(finished.iter().any(|(matched, _)| *matched), "必须有界内（匹配）路径");
+        assert_eq!(finished.iter().filter(|(matched, _)| !*matched).count(), 2, "必须有两条界外（不匹配）路径");
     }
 
     // 测试 A（red->green）：验证 execute_ir_function_with_checkpoint_multi_thread

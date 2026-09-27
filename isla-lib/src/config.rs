@@ -295,9 +295,35 @@ impl PmaAttributes {
 pub struct PmaRegionConfig {
     pub name: String,
     pub base: u64,
-    pub size: u64,
+    pub size: PmaSize,
     pub attributes: PmaAttributes,
 }
+
+/// S2（W17）：[[pma_regions]] 的 size 字段。`Concrete` 为固定值（W10 行为）；
+/// `Symbolic` 把 IR 字段 zsizze 声明为 64 位符号常量，并在注入时附加闭区间
+/// 取值域约束 [min, max]（bvule）——默认域防全 64 位空间稀释求解。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmaSize {
+    Concrete(u64),
+    Symbolic { min: u64, max: u64 },
+}
+
+impl PmaSize {
+    /// 取值域上界（具体 size 即自身）：重叠自校验用符号域上界做保守检查，
+    /// 保证任意模型取值下相邻 region 都不重叠。
+    fn upper_bound(&self) -> u64 {
+        match self {
+            PmaSize::Concrete(size) => *size,
+            PmaSize::Symbolic { max, .. } => *max,
+        }
+    }
+}
+
+/// 符号 size 未声明 size_bounds 时的默认取值域：[4KiB, 2^43)。
+/// 上界 2^43 锚定 W13 实测的 emu RAM 顶界（SimMemSize 8190GiB），下界 4KiB
+/// 是最小页粒度（size=0 的 region 无意义，与具体路径的 size>0 校验一致）。
+const SYMBOLIC_SIZE_DEFAULT_MIN: u64 = 0x1000;
+const SYMBOLIC_SIZE_DEFAULT_MAX: u64 = 0x80000000000;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,6 +521,7 @@ fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, Strin
                 "name",
                 "base",
                 "size",
+                "size_bounds",
                 "attr",
                 "readable",
                 "writable",
@@ -517,16 +544,50 @@ fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, Strin
             .get("base")
             .ok_or_else(|| format!("No {}.base found", context))
             .and_then(|value| parse_u64_value(value, &format!("{}.base", context)))?;
-        let size = region
-            .get("size")
-            .ok_or_else(|| format!("No {}.size found", context))
-            .and_then(|value| parse_u64_value(value, &format!("{}.size", context)))?;
-        if size == 0 {
-            return Err(format!("{}.size must be greater than 0", context));
-        }
-        if base.checked_add(size).is_none() {
-            return Err(format!("{}.base + size overflows 64-bit address space", context));
-        }
+        // S2（W17）：size = "symbolic" 声明符号边界（可选 size_bounds = [下界, 上界]
+        // 闭区间），其余写法仍是 W10 的具体十六进制。
+        let size = match region.get("size") {
+            Some(Value::String(text)) if text == "symbolic" => {
+                let (min, max) = match region.get("size_bounds") {
+                    None => (SYMBOLIC_SIZE_DEFAULT_MIN, SYMBOLIC_SIZE_DEFAULT_MAX),
+                    Some(Value::Array(bounds)) if bounds.len() == 2 => {
+                        let min = parse_u64_value(&bounds[0], &format!("{}.size_bounds[0]", context))?;
+                        let max = parse_u64_value(&bounds[1], &format!("{}.size_bounds[1]", context))?;
+                        (min, max)
+                    }
+                    Some(_) => {
+                        return Err(format!("{}.size_bounds should be an array of two integers", context));
+                    }
+                };
+                if min == 0 {
+                    return Err(format!("{}.size_bounds lower bound must be greater than 0", context));
+                }
+                if min > max {
+                    return Err(format!(
+                        "{}.size_bounds lower bound 0x{:x} exceeds upper bound 0x{:x}",
+                        context, min, max
+                    ));
+                }
+                if base.checked_add(max).is_none() {
+                    return Err(format!("{}.base + size_bounds upper bound overflows 64-bit address space", context));
+                }
+                PmaSize::Symbolic { min, max }
+            }
+            Some(value) => {
+                if region.contains_key("size_bounds") {
+                    return Err(format!("{}.size_bounds 只能与 size = \"symbolic\" 搭配", context));
+                }
+                let size = parse_u64_value(value, &format!("{}.size", context))?;
+                if size == 0 {
+                    return Err(format!("{}.size must be greater than 0", context));
+                }
+                if base.checked_add(size).is_none() {
+                    return Err(format!("{}.base + size overflows 64-bit address space", context));
+                }
+                PmaSize::Concrete(size)
+            }
+            None => return Err(format!("No {}.size found", context)),
+        };
 
         // attr 别名给底座（无 attr 用明细模式基线），明细字段逐项覆盖
         let mut attributes = match region.get("attr") {
@@ -583,17 +644,18 @@ fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, Strin
     }
 
     // 按 base 降序（IR 固化 zpma_regions 的列表次序），再做相邻重叠检查。
-    // 区间按起点排序后，任意重叠必然产生一对相邻重叠。
+    // 区间按起点排序后，任意重叠必然产生一对相邻重叠。符号 size 用取值域上界
+    // 参与检查（保守：任意模型取值下都不重叠）。
     regions.sort_by(|a, b| b.base.cmp(&a.base));
     for pair in regions.windows(2) {
         let (upper, lower) = (&pair[0], &pair[1]);
-        let lower_end = lower.base.checked_add(lower.size).expect("已校验 base+size 不溢出");
+        let lower_end = lower.base.checked_add(lower.size.upper_bound()).expect("已校验 base+size 上界不溢出");
         if lower_end > upper.base {
             return Err(format!(
                 "pma_regions.{} [0x{:x},0x{:x}) 与 pma_regions.{} [0x{:x},0x{:x}) 重叠",
                 upper.name,
                 upper.base,
-                upper.base + upper.size,
+                upper.base + upper.size.upper_bound(),
                 lower.name,
                 lower.base,
                 lower_end
@@ -2156,7 +2218,8 @@ mod tests {
         assert_eq!(regions.len(), 4);
 
         let ram = &regions[0];
-        assert_eq!((ram.base, ram.size), (0x8000_0000, 0x1000_0000));
+        assert_eq!(ram.base, 0x8000_0000);
+        assert_eq!(ram.size, PmaSize::Concrete(0x1000_0000));
         let a = &ram.attributes;
         assert!(a.readable && a.writable && a.executable && a.cacheable && a.coherent);
         assert!(a.read_idempotent && a.write_idempotent && a.supports_cbo_zzero);
@@ -2322,5 +2385,130 @@ mod tests {
         .unwrap();
         let regions = get_pma_regions(&value).unwrap().unwrap();
         assert!(regions[0].base > regions[1].base, "输出应按 base 降序");
+    }
+
+    /// S2（W17）：size = "symbolic" 声明符号边界。显式 size_bounds 取闭区间
+    /// [下界, 上界]；未声明时用默认域 [4KiB, 2^43)（emu RAM 顶界锚点）。
+    /// 具体与符号 region 可混排（重叠检查按符号域上界保守处理）。
+    #[test]
+    fn pma_regions_symbolic_size_parsing() {
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "symbolic"
+            size_bounds = ["0x800", "0x1000000000"]
+            attr = "ram"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].size, PmaSize::Symbolic { min: 0x800, max: 0x10_0000_0000 });
+
+        // 未声明 size_bounds：默认域
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "symbolic"
+            attr = "ram"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        assert_eq!(regions[0].size, PmaSize::Symbolic { min: 0x1000, max: 0x80000000000 });
+
+        // 具体与符号混排合法：重叠检查用符号域上界（0x80000000+0x2000 <= 0x90000000 不重叠）
+        let value = r#"
+            [[pma_regions]]
+            base = "0x80000000"
+            size = "symbolic"
+            size_bounds = ["0x1000", "0x2000"]
+            attr = "ram"
+
+            [[pma_regions]]
+            base = "0x90000000"
+            size = "0x1000"
+            attr = "ram"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let regions = get_pma_regions(&value).unwrap().unwrap();
+        assert_eq!(regions.len(), 2, "符号域上界不与具体 region 重叠时应放行");
+    }
+
+    /// S2（W17）：符号边界自校验硬失败——size_bounds 元数错误/下界为 0/下界超
+    /// 上界/base+上界溢出/具体 size 搭配 size_bounds/符号域上界与邻居重叠。
+    #[test]
+    fn pma_regions_symbolic_bounds_hard_fails() {
+        let cases = [
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "symbolic"
+                size_bounds = ["0x1000"]
+                attr = "ram"
+                "#,
+                "size_bounds 元数不是 2",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "symbolic"
+                size_bounds = ["0x0", "0x1000"]
+                attr = "ram"
+                "#,
+                "下界为 0",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "symbolic"
+                size_bounds = ["0x2000", "0x1000"]
+                attr = "ram"
+                "#,
+                "下界超上界",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0xffffffffffffffff"
+                size = "symbolic"
+                attr = "ram"
+                "#,
+                "base + 默认域上界溢出",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "0x1000"
+                size_bounds = ["0x1000", "0x2000"]
+                attr = "ram"
+                "#,
+                "具体 size 搭配 size_bounds",
+            ),
+            (
+                r#"
+                [[pma_regions]]
+                base = "0x80000000"
+                size = "symbolic"
+                size_bounds = ["0x1000", "0x20000000"]
+                attr = "ram"
+
+                [[pma_regions]]
+                base = "0x90000000"
+                size = "0x1000"
+                attr = "ram"
+                "#,
+                "符号域上界与相邻 region 重叠",
+            ),
+        ];
+        for (toml, why) in cases {
+            let value = toml.parse::<Value>().unwrap();
+            assert!(get_pma_regions(&value).is_err(), "{} 应报错", why);
+        }
     }
 }

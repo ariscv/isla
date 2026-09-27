@@ -477,15 +477,23 @@ fn isla_main() -> i32 {
 
     // W10（S1）：[[pma_regions]] 配置化 PMA 地图。构造 list-of-records 值写入
     // zpma_regions 寄存器默认值，替代 IR 固化地图；未配置时不注入，沿用 IR 默认。
+    // S2（W17）：含符号边界（size = "symbolic"）时符号常量必须活在本次求解的
+    // solver 里（config 期没有 solver 上下文），跳过配置期注入，改由 solve-state
+    // 启动时 apply_symbolic_pma_regions_to_registers 执行期注入。
+    let pma_size_symbolic = isa_config.pma_regions.as_ref().is_some_and(|regions| {
+        regions.iter().any(|region| matches!(region.size, isla_lib::config::PmaSize::Symbolic { .. }))
+    });
     if let Some(pma_regions) = &isa_config.pma_regions {
-        if let Err(error) = isarch::target::apply_pma_regions_to_config(
-            pma_regions,
-            &symtab,
-            &type_info,
-            &mut isa_config.default_registers,
-        ) {
-            eprintln!("{}", error);
-            return 1;
+        if !pma_size_symbolic {
+            if let Err(error) = isarch::target::apply_pma_regions_to_config(
+                pma_regions,
+                &symtab,
+                &type_info,
+                &mut isa_config.default_registers,
+            ) {
+                eprintln!("{}", error);
+                return 1;
+            }
         }
     }
 
@@ -547,6 +555,10 @@ fn isla_main() -> i32 {
                     panic!("RV32 solve-state 暂不支持");
                     let mut target = RV32::default();
                     target.pmp_symbolic = pmp_symbolic;
+                    if pma_size_symbolic {
+                        target.symbolic_pma_regions =
+                            isa_config.pma_regions.clone().expect("pma_size_symbolic 为真时 pma_regions 必已配置");
+                    }
                     let initial_memory = Some(
                         isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                             .and_then(|builder| builder.build())
@@ -574,6 +586,10 @@ fn isla_main() -> i32 {
                 64 => {
                     let mut target = RV64::default();
                     target.pmp_symbolic = pmp_symbolic;
+                    if pma_size_symbolic {
+                        target.symbolic_pma_regions =
+                            isa_config.pma_regions.clone().expect("pma_size_symbolic 为真时 pma_regions 必已配置");
+                    }
                     let initial_memory = Some(
                         isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                             .and_then(|builder| builder.build())

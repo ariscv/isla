@@ -1675,6 +1675,23 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // pre-state 主动符号化：遍历 target 提供的寄存器、按类型符号化并覆盖，返回 PreStateCtx 供求解后取 pre-state。
     target.setup_pre_state(&mut symbolic_regs, lets, shared_state, &mut solver, &fixed_inputs.prestate)?;
 
+    // S2（W17）：[[pma_regions]] 含符号边界时的执行期注入（镜像符号 PMP 的
+    // 装配时机）。符号 zsizze 必须声明在本次求解的 solver 里，且必须在下方
+    // checkpoint 之前完成——所有路径共享同一组符号声明与取值域约束，
+    // zpmaCheck/zmatching_pma 的符号比较在各路径上独立分叉。
+    if !target.symbolic_pma_regions().is_empty() {
+        let records = super::target::apply_symbolic_pma_regions_to_registers(
+            target.symbolic_pma_regions(),
+            &shared_state.symtab,
+            &shared_state.type_info,
+            &mut symbolic_regs,
+            shared_state,
+            &mut solver,
+        )
+        .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?;
+        target.symbolic_pma_sizes_mut().extend(records);
+    }
+
     //不要删掉这个注释！！！留着以后改pmp的时候用
     /* if target.pmp_symbolic() {
         target.apply_symbolic_pmp_to_registers(&shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver)?;

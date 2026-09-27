@@ -272,6 +272,41 @@ attr = "ram"
 配置后地图外的访存按 `zpmaCheck` 走 access-fault 路径而非成功路径；
 写事件地址全部落入配置区域，成功与 fault 两类路径仍并存输出。
 
+### PMA 边界符号化：`size = "symbolic"`（W17/S2）
+
+把单个 region 的 `size` 声明为符号边界：注入时对 IR 字段 `zsizze` 声明
+64 位符号常量，`zrange_subset` 的无符号比较随边界取值分叉——同一钉址
+访存可同时产出"界内→Retire_Success+写事件"与"界外→AccessFault"两类
+路径，各路径 JSON 的 pre-state 以 `pma_regions.<name>.size` 键输出该路径
+模型下的边界具体值（未约束该符号的路径不输出，与 pre-state 过滤规则一致）。
+
+```toml
+[[pma_regions]]
+name = "ram"
+base = "0x80000000"          # base 保持具体（地图列表按 base 降序遍历）
+size = "symbolic"            # 或具体十六进制（W10 行为不变）
+size_bounds = ["0x1000", "0x80000000000"]   # 可选：闭区间取值域
+attr = "ram"
+```
+
+- `size_bounds` 可省略，默认闭区间 `[0x1000, 0x80000000000)`（4KiB..
+  2^43，上界锚定 W13 实测的 emu RAM 顶界），防全 64 位空间稀释求解。
+- 自校验：`size_bounds` 必须二元/下界>0/下界≤上界/base+上界不溢出；
+  具体尺寸搭配 `size_bounds` 报错。属性字段（attr 等）本期不做符号化。
+- 重叠检查按符号域上界保守处理：任意模型取值下相邻 region 都不重叠。
+- 注入时机与具体路径不同：符号常量必须活在本次求解的 solver 里（配置
+  期无 solver），故不走 `default_registers`，而是在 solve-state 启动、
+  checkpoint 之前把整张地图赋给执行帧的 `zpma_regions`（镜像符号 PMP
+  的装配方式），取值域约束（bvule）对全部路径生效。
+- 全具体配置（不含 `size = "symbolic"`）时走 W10 配置期注入，行为与
+  既有版本逐项一致。
+
+示例配置：`configs/riscv64_difftest_mem_excluded_pma_sym.toml`。
+
+> **Oracle 提醒（S4 未来职责）**：符号边界路径输出的"地图假设"（某地址
+> 在该模型的边界取值下界内/界外）与固定平台（emu 实际 RAM）重放的匹配，
+> 属 pipeline 预分类/重放阶段的职责，本仓库当前不处理。
+
 ### 钉死 PMP 寄存器：`[registers.defaults]`（W14）
 
 solve-state 中未给默认值的寄存器初值为符号变量。PMP 族寄存器
