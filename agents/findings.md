@@ -312,3 +312,10 @@
   耗时约 12 分钟；`-o` 换名可避免覆盖 `build/model/rv64d.ir`。原始命令行可用 `grep isla-sail build/model/CMakeFiles/generated_isla_rv64d.dir/build.make` 取得。
 - **构建是确定性的**：用上述命令重新生成的 IR 与 `isla/ir/rv64d_v128_e64.ir` **逐字节一致**（`7c626989…`），与 `configs/workarounds/vvtype.toml` 的 `ir_sha256` 相符。校验 IR 版本时可直接对比 SHA-256，不必重新生成。
 - IR 里判断 VLEN/ELEN 的位置：`let (zvlen_exp: %i64)` 与 `let (zelen_exp: %i64)` 中的 `zz5i64zDzKz5i(N)`，VLEN=2^N。
+
+## 配置化 PMA 地图的 size 十六进制位数陷阱（2026-09-27，W15）
+
+- `[[pma_regions]]` 的 size 是 64 位十六进制字符串，位数即语义：8TB 顶界 `0x80000000000`（11 位）减 base `0x80000000` 得 `0x7FF80000000`（11 位）。W13/W14 误写 12 位的 `0x7FFF80000000`（多一个 F），base+size=2^47，实际地图成 [0x80000000, 2^47)（128TB），与注释声称的 8TB 不符。已修正为 `0x7FF80000000`（configs/riscv64_difftest_mem_excluded_pma.toml、README 同步）。
+- 判定依据：Sail `range_subset`（model/core/range_util.sail，IR `zrange_subset`）环绕三点比较；对任一 size 值，`x = A − base mod 2^64 ≤ b_end = size` 且 `a_end = x + 访宽 ≤ b_end` 决定 PMA 匹配。W14 全部 22 个钉址探针实测与"[2^31, 2^47)"手算 100% 吻合，Isla 求值无 bug；W14 报告的"高址非单调 fault"是探针误读——`top_exact`/`top_p100`/`tr_top` 钉的 `0x0000_8000_0000_0000` 是 2^47（16 位十六进制写法），不是 2^43。
+- 复验（W15，`sb x0,0(x31)` 钉址 13 探针）：修正后 [2^31,2^43) 内（0x90000000、2^43−1、2^43−0x100）放行，2^43、2^43+1、2^43+0x100、1.5×2^43、2^44、2^46、2^47−1、2^47、2^63、图下界外全部 AccessFault，与手算一致（红 7 败→绿 13/13）。
+- zSTORE 全量 solve-state 基线 24 OK/104 FAULT 在修正后计数不变，且 24 条写事件全部落入 8TB 内（修正前 20 条在"8TB 外"）；fault32 重放集无 ≥2^43 事件，零影响。

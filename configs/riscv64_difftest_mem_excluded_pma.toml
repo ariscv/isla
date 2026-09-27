@@ -202,6 +202,12 @@ region_type = "excluded"
 # (0x80000000,0x80000000000)"，探针实测 0x90000000..0x1000000000 放行、
 # 0x80000000000 顶界 fault。"DRAM 256MB"结论对该 emu 不适用，地图以
 # SimMemSize/实测为准。W14 起 size 对齐 8TB 顶界。
+# W15 勘误：W13/W14 写的 size=0x7FFF80000000（12 位十六进制）多了一个 F，
+# base+size=0x800000000000=2^47，实际地图成了 [0x80000000,2^47) 128TB；
+# 顶界 0x80000000000=2^43（8TB）对应的 size 是 11 位的 0x7FF80000000
+# （=SimMemSize 8190GiB=2^43-2^31）。W14 观察到的"2^47 fault 而 2^43+
+# 任意偏移放行"非单调异常即此因（当时 top_exact 等探针钉的是 2^47，被
+# 误读为 2^43），模型 range_subset 求值本身无误（W15 全探针手算对表吻合）。
 # 注意：pma_regions 是属性层（"哪里可访问"），与上面 [[memory_regions]]
 # 内容层（"存什么、哪些不关心"）正交；sym_ram 仍保持小窗口（difftest 重放
 # 只需覆盖快照地址段），地图外（含 sym_ram 外但 <8TB 的段）在属性层放行、
@@ -209,5 +215,5 @@ region_type = "excluded"
 [[pma_regions]]
 name = "ram"
 base = "0x80000000"
-size = "0x7FFF80000000"
+size = "0x7FF80000000"
 attr = "ram"
