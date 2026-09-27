@@ -307,6 +307,64 @@ attr = "ram"
 > 在该模型的边界取值下界内/界外）与固定平台（emu 实际 RAM）重放的匹配，
 > 属 pipeline 预分类/重放阶段的职责，本仓库当前不处理。
 
+### CSR 符号化：`[symbolic_registers]`（W21）
+
+原则：**所有 CSR 原则上都应符号化，只有无探索意义的 bitfield 可钉死**。
+`[registers.defaults]` 的具体值对 CSR 的效果是双重的：执行帧初值被钉死，
+且 encdec/assembly 物化门（`try_get_assembly_*` 用独立 solver + 原始
+寄存器表执行 `zencdec/zassembly`）读到的是这个具体值——这正是 G8 判定
+的 FD 物化全灭根因（`mstatus=0x600` 令 `currentlyEnabled(Ext_Zcd)` 的
+`mstatus[FS]≠0` 守卫具体假，C_FLD/C_FSD/C_FLDSP/C_FSDSP 已执行完的路径
+被 encdec=None 整批丢弃）。
+
+`[symbolic_registers]` 把 CSR 从 defaults 摘除、改挂符号声明，注入时机
+镜像 W17 符号 PMA：solve-state 启动、`setup_pre_state` 之后、checkpoint
+之前，对每个声明的 CSR 按其 IR 类型（`bits(w)` 或单 `bits(w)` 字段的
+struct，如 mstatus `struct zMstatus { zbits: %bv64 }`，w≤64）声明 solver
+符号常量，附加位级钉死与位组域约束断言，覆盖执行帧并同步 pre_state
+记录（输出走 pre_state 主通道，模型值直接出现在 isa-state）。物化门则
+按当前路径模型把符号 CSR 具象化后评估（`concretize_symbolic_csrs`），
+守卫的真实性由路径模型承载。
+
+```toml
+[symbolic_registers]
+satp = "symbolic"              # 字符串形式：整寄存器符号化，无位约束
+
+[symbolic_registers.mstatus]   # 表形式：可选位级钉死 + 位组域约束
+pin_mask  = "0x8000003000000000"   # SD(63)|MBE(37)|SBE(36)
+pin_value = "0x0"                  # 钉死为小端 + 初始非脏
+nonzero_groups = [[13, 14]]        # FS[14:13] != Off
+```
+
+- `pin_mask/pin_value`：注入后断言 `(sym & mask) == value`，钉死位不产生
+  探索分支。选择"符号后 Assert"而非"构造期混具体段（MixedBits）"的理由：
+  `Val::Symbolic` 是执行器最普适的值形状（执行期 CSR 写回、subrange、
+  比较路径零风险；MixedBits 在部分 primop 无显式臂且 primop 层本轮禁改），
+  且与 W17（符号声明 + bvule 断言）机制同构。
+- `nonzero_groups`：每组断言"组内位按位或 ≠ 0"。用于表达"该位组有探索
+  意义的取值域"——solve-state 绕过 decode，clause execute 本体不读 FS，
+  纯符号时模型任意值取 0 会让 encdec 守卫恒假；FS≠0 域约束是 decode
+  守卫语义的最小复刻（FS=Off 的路径本就会被 encdec 物化门丢弃，合法）。
+- 钉死位选择（mstatus/RV64）：SD=只读状态镜像（dirty 投影）、MBE/SBE=
+  大小端必须小端（模型与 emu 重放均 LE）；FS/VS/MPP/SPP/MPIE/MIE/SPIE/
+  SIE/TVM/MXR/SUM/MPRV/TSR/TW/UXL/SXL 等保持符号。
+- 冲突硬失败（防歧义）：与 `[registers.defaults]` 同名（解析期）、与
+  `[pmp]` 规则注入的 pmpcfg/pmpaddr（isarch_main 复查）、与 CLI
+  `--prestate` 同名（启动期）；未知寄存器名（不在 symtab）解析期报错。
+- 未声明任何符号 CSR 时全链路零开销（门直接用原寄存器表）。
+
+验收（FD 恢复）：`configs/riscv64_difftest_mem_excluded_pma_csr_sym.toml`
+下 C_FLD/C_FLDSP 各 gen=32（24 AccessFault+8 Retire_Success）、
+C_FSD/C_FSDSP 各 gen=24（16+8），与 G8 日志"已执行但被物化丢弃"的分布
+逐项一致；isa-state 的 mstatus 模型值全部 FS≠0 且钉死位全 0。对照观察：
+zSTORE（非 FD clause）新旧配置 gen=128（104 AF+24 RS）、fork 数 514、
+耗时 6s 逐项一致——符号化声明对不读 FS 门的 clause 无分布影响。
+
+全 CSR 逐项审计（misa/satp/mcountinhibit/mcyclecfg/minstretcfg/
+mtimecmp/stimecmp/PMP 族：符号化/部分钉死/保持钉死三档建议 + PMP 与
+satp 两个两难）见 W21 验收产物目录中的 `csr-audit.md`（路径登记于
+议题状态文档，见上仓 `agents/` 对应议题）。
+
 ### 钉死 PMP 寄存器：`[registers.defaults]`（W14）
 
 solve-state 中未给默认值的寄存器初值为符号变量。PMP 族寄存器

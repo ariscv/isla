@@ -497,6 +497,20 @@ fn isla_main() -> i32 {
         }
     }
 
+    // W21：符号化 CSR 与具体默认值的冲突兜底。[registers.defaults] 的同名
+    // 冲突在配置解析期已硬失败；PMP 规则在上面才注入 default_registers，
+    // 这里对注入后的全集复查一次。
+    if !isa_config.symbolic_registers.is_empty() {
+        let conflict = isa_config.symbolic_registers.iter().find_map(|csr| {
+            let name = symtab.get(&isla_lib::zencode::encode(&csr.name))?;
+            isa_config.default_registers.contains_key(&name).then_some(csr.name.clone())
+        });
+        if let Some(name) = conflict {
+            eprintln!("错误: symbolic_registers.{} 与具体默认值（registers.defaults 或 [pmp] 注入）同名冲突", name);
+            return 1;
+        }
+    }
+
     let iarch = initialize_architecture(&mut arch, symtab, type_info, &isa_config, assertion_mode, use_model_reg_init);
     let iarch_config = InitArchWithConfig::from_initialized(&iarch, &isa_config);
     let regs = &iarch.regs;
@@ -546,6 +560,17 @@ fn isla_main() -> i32 {
                     return 1;
                 }
             };
+            // W21：--prestate 与 [symbolic_registers] 同名冲突（防歧义，硬失败）
+            if !isa_config.symbolic_registers.is_empty() {
+                let conflict = isa_config.symbolic_registers.iter().find_map(|csr| {
+                    let name = shared_state.symtab.get(&isla_lib::zencode::encode(&csr.name))?;
+                    prestate.contains_key(&name).then_some(csr.name.clone())
+                });
+                if let Some(name) = conflict {
+                    eprintln!("错误: --prestate {} 与 [symbolic_registers] 同名冲突：符号化 CSR 不能再钉具体值", name);
+                    return 1;
+                }
+            }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
             let timeout_report_config =
                 isarch::exec::TimeoutReportConfig { output: timeout_smt_output, directory: timeout_smt_dir };
@@ -559,6 +584,7 @@ fn isla_main() -> i32 {
                         target.symbolic_pma_regions =
                             isa_config.pma_regions.clone().expect("pma_size_symbolic 为真时 pma_regions 必已配置");
                     }
+                    target.symbolic_csrs = isa_config.symbolic_registers.clone();
                     let initial_memory = Some(
                         isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                             .and_then(|builder| builder.build())
@@ -590,6 +616,7 @@ fn isla_main() -> i32 {
                         target.symbolic_pma_regions =
                             isa_config.pma_regions.clone().expect("pma_size_symbolic 为真时 pma_regions 必已配置");
                     }
+                    target.symbolic_csrs = isa_config.symbolic_registers.clone();
                     let initial_memory = Some(
                         isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                             .and_then(|builder| builder.build())

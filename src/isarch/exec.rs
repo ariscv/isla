@@ -1323,21 +1323,51 @@ fn solve_collect_path<'ir, B: BV>(
                     let test = Sym::from_u32(6);
                     // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                     // dlog!("ctx.fun_args={:#?}", model.get_val(&ctx.fun_args[0]));
+                    // W21：encdec/assembly 门（下方 try_get_assembly_*）以独立 solver +
+                    // ctx.regs 执行 zencdec/zassembly，读 CSR 时按具体值评估守卫
+                    //（如 currentlyEnabled(Ext_Zcd) 的 mstatus[FS]）。声明了符号 CSR
+                    // 时必须换成按当前路径模型具象化的克隆——否则门一直看到 defaults
+                    // 的旧具体值（FS=Off 令 Zcd 物化全灭，即 G8 根因）。具象化失败
+                    // 的路径按"查不到不编造"丢弃，不落假用例。
+                    let concretized_gate_regs;
+                    let gate_regs = if ctx.target.symbolic_csrs().is_empty() {
+                        ctx.regs
+                    } else {
+                        match ctx.target.concretize_symbolic_csrs(ctx.regs, &mut model, shared_state) {
+                            Ok(regs) => {
+                                concretized_gate_regs = regs;
+                                &concretized_gate_regs
+                            }
+                            Err(error) => {
+                                itrace_diagnostics =
+                                    error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                log!(
+                                    log::PATH_RESULT,
+                                    &format!("警告: clause{} 符号 CSR 门具象化失败 {:?}", ctx.instruction_name, error)
+                                );
+                                submit_itrace(frame, &mut itrace_diagnostics);
+                                return;
+                            }
+                        }
+                    };
                     match model.get_val(&ctx.fun_args[0]) {
                         Ok(arg_val) => {
-                            let asm_opt = match try_get_assembly_name(arg_val.clone(), shared_state, ctx.regs, ctx.lets)
-                            {
-                                Ok(assembly) => assembly,
-                                Err(error) => {
-                                    itrace_diagnostics = error_recorder.record_configured_error_diagnostic(&error);
-                                    log!(
-                                        log::PATH_RESULT,
-                                        &format!("警告: clause{} 汇编名称求解失败 {:?}", ctx.instruction_name, error)
-                                    );
-                                    submit_itrace(frame, &mut itrace_diagnostics);
-                                    return;
-                                }
-                            };
+                            let asm_opt =
+                                match try_get_assembly_name(arg_val.clone(), shared_state, gate_regs, ctx.lets) {
+                                    Ok(assembly) => assembly,
+                                    Err(error) => {
+                                        itrace_diagnostics = error_recorder.record_configured_error_diagnostic(&error);
+                                        log!(
+                                            log::PATH_RESULT,
+                                            &format!(
+                                                "警告: clause{} 汇编名称求解失败 {:?}",
+                                                ctx.instruction_name, error
+                                            )
+                                        );
+                                        submit_itrace(frame, &mut itrace_diagnostics);
+                                        return;
+                                    }
+                                };
                             log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
                             match asm_opt {
                                 Some(asm) => test_ins = asm,
@@ -1347,7 +1377,7 @@ fn solve_collect_path<'ir, B: BV>(
                                 }
                             }
                             let asm_encdec_opt =
-                                match try_get_assembly_encdec(arg_val.clone(), shared_state, ctx.regs, ctx.lets) {
+                                match try_get_assembly_encdec(arg_val.clone(), shared_state, gate_regs, ctx.lets) {
                                     Ok(encoded) => match encoded {
                                         Some(val) => match FmtVal::from_val(&val, &mut model) {
                                             Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
@@ -1674,6 +1704,23 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     // pre-state 主动符号化：遍历 target 提供的寄存器、按类型符号化并覆盖，返回 PreStateCtx 供求解后取 pre-state。
     target.setup_pre_state(&mut symbolic_regs, lets, shared_state, &mut solver, &fixed_inputs.prestate)?;
+
+    // W21：[symbolic_registers] 声明的 CSR 在这里注入——必须在 setup_pre_state
+    // 之后（覆盖 reg_list 全量符号化产生的"整寄存器一个符号"，换成带位约束的
+    // 声明并同步 pre_state 记录）、checkpoint 之前（所有路径共享同一组符号
+    // 声明与位约束断言）。CLI --prestate 与符号化声明同名是配置矛盾
+    // （isarch_main 已给出用户友好报错，此处是防御兜底）。
+    if !target.symbolic_csrs().is_empty() {
+        for csr in target.symbolic_csrs() {
+            let Some(name) = shared_state.symtab.get(&zencode::encode(&csr.name)) else {
+                panic!("防御性编程：符号化 CSR {} 不在当前 IR symtab", csr.name);
+            };
+            if fixed_inputs.prestate.contains_key(&name) {
+                panic!("防御性编程：--prestate {} 与 [symbolic_registers] 同名冲突", csr.name);
+            }
+        }
+        target.apply_symbolic_csrs_to_registers(&mut symbolic_regs, shared_state, &mut solver)?;
+    }
 
     // S2（W17）：[[pma_regions]] 含符号边界时的执行期注入（镜像符号 PMP 的
     // 装配时机）。符号 zsizze 必须声明在本次求解的 solver 里，且必须在下方

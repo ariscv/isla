@@ -421,6 +421,27 @@ pub struct PmpConfig {
     pub symbolic: bool,
 }
 
+/// W21：`[symbolic_registers]` 声明的 CSR 符号化条目。寄存器不再从
+/// `[registers.defaults]` 取具体值（那里同名即冲突硬失败），改在 solve-state
+/// 启动、checkpoint 之前注入 solver 期符号常量（见 target.rs
+/// `apply_symbolic_csrs_to_registers`）。
+///
+/// - `pin_mask`/`pin_value`：位级钉死。注入后附加 `(sym & mask) == value` 断言，
+///   钉死位不产生探索分支（如 mstatus 的 MBE/SBE 必须小端、SD 只读镜像）。
+/// - `nonzero_groups`：位组非全零域约束。每组断言"组内位按位或 != 0"——用于
+///   表达"该位组有探索意义的取值域"（如 mstatus[FS]≠Off：solve-state 绕过
+///   decode，执行本体不读 FS，纯符号时模型任意值取 0 会令 encdec 守卫
+///   `currentlyEnabled` 恒假；把 FS≠0 声明为取值域是对 decode 守卫语义的
+///   最小复刻）。组内位不得与 pin_mask 重叠（钉死位的组约束是恒真或恒假，
+///   配置歧义，硬失败）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolicRegisterConfig {
+    pub name: String,
+    pub pin_mask: u64,
+    pub pin_value: u64,
+    pub nonzero_groups: Vec<Vec<u32>>,
+}
+
 fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
     match config.get(tool) {
         Some(Value::String(tool)) => {
@@ -855,6 +876,128 @@ fn get_clint_enabled(config: &Value) -> Result<Option<bool>, String> {
         Some(value) => value.as_bool().map(Some).ok_or_else(|| "clint_enabled should be a boolean".to_string()),
         None => Ok(None),
     }
+}
+
+/// 解析 `[symbolic_registers]`（W21）。每个键是寄存器名（须存在于 symtab，
+/// 否则硬失败——静默跳过会让用户误以为已符号化）；值二选一：
+///
+/// ```toml
+/// [symbolic_registers]
+/// mstatus = "symbolic"                    # 整寄存器符号化，无位约束
+///
+/// [symbolic_registers.mstatus]            # 表形式：可选位级钉死 + 位组非零域
+/// pin_mask  = "0x8000003000000000"        # SD(63)|MBE(37)|SBE(36)
+/// pin_value = "0x0"
+/// nonzero_groups = [[13, 14]]             # FS != Off
+/// ```
+///
+/// 与 `[registers.defaults]` 同名冲突（含 PMP 规则注入的 pmpcfg/pmpaddr，
+/// 那部分由 isarch_main 在注入后复查）在本函数按解析期已知的 defaults
+/// 硬失败；PMP 注入晚于解析，其冲突由调用方兜底。
+fn get_symbolic_registers<B: BV>(
+    config: &Value,
+    symtab: &Symtab,
+    default_registers: &HashMap<Name, Val<B>>,
+) -> Result<Vec<SymbolicRegisterConfig>, String> {
+    let Some(section) = config.get("symbolic_registers") else { return Ok(Vec::new()) };
+    let Some(table) = section.as_table() else {
+        return Err("symbolic_registers should be a table of <register> = \"symbolic\" or sub-tables".to_string());
+    };
+
+    let mut registers = Vec::new();
+    for (name, entry) in table {
+        let Some(register) = symtab.get(&zencode::encode(name)) else {
+            return Err(format!("symbolic_registers.{}：当前 IR 不存在该寄存器", name));
+        };
+        if default_registers.contains_key(&register) {
+            return Err(format!(
+                "symbolic_registers.{} 与 registers.defaults 同名冲突：符号化寄存器不得同时配置具体默认值",
+                name
+            ));
+        }
+
+        let mut pin_mask = 0;
+        let mut pin_value = 0;
+        let mut nonzero_groups = Vec::new();
+        match entry {
+            Value::String(text) if text == "symbolic" => (),
+            Value::String(other) => {
+                return Err(format!(
+                    "symbolic_registers.{} 只接受 \"symbolic\" 字符串或子表，实际 \"{}\"",
+                    name, other
+                ));
+            }
+            Value::Table(sub) => {
+                allowed_table_keys(
+                    sub,
+                    &format!("symbolic_registers.{}", name),
+                    &["pin_mask", "pin_value", "nonzero_groups"],
+                )?;
+                if let Some(value) = sub.get("pin_mask") {
+                    pin_mask = parse_u64_value(value, &format!("symbolic_registers.{}.pin_mask", name))?;
+                    pin_value = match sub.get("pin_value") {
+                        Some(value) => parse_u64_value(value, &format!("symbolic_registers.{}.pin_value", name))?,
+                        None => return Err(format!("symbolic_registers.{}.pin_value 与 pin_mask 必须同时配置", name)),
+                    };
+                    if pin_value & !pin_mask != 0 {
+                        return Err(format!(
+                            "symbolic_registers.{}.pin_value 0x{:x} 含 pin_mask 0x{:x} 之外的位",
+                            name, pin_value, pin_mask
+                        ));
+                    }
+                } else if sub.contains_key("pin_value") {
+                    return Err(format!("symbolic_registers.{}.pin_value 与 pin_mask 必须同时配置", name));
+                }
+                if let Some(value) = sub.get("nonzero_groups") {
+                    let Some(groups) = value.as_array() else {
+                        return Err(format!("symbolic_registers.{}.nonzero_groups 应为位数组的数组", name));
+                    };
+                    for group in groups {
+                        let Some(bits) = group.as_array() else {
+                            return Err(format!("symbolic_registers.{}.nonzero_groups 的每个组应为位数组", name));
+                        };
+                        if bits.is_empty() {
+                            return Err(format!("symbolic_registers.{}.nonzero_groups 不接受空组", name));
+                        }
+                        let mut parsed_group = Vec::with_capacity(bits.len());
+                        for bit in bits {
+                            let Some(index) = bit.as_integer() else {
+                                return Err(format!("symbolic_registers.{}.nonzero_groups 的位应为非负整数", name));
+                            };
+                            let Ok(index) = u32::try_from(index) else {
+                                return Err(format!("symbolic_registers.{}.nonzero_groups 位号超出 u32", name));
+                            };
+                            if index >= 64 {
+                                return Err(format!(
+                                    "symbolic_registers.{}.nonzero_groups 位号 {} 超出 64 位 CSR 宽度",
+                                    name, index
+                                ));
+                            }
+                            if pin_mask >> index & 1 == 1 {
+                                return Err(format!(
+                                    "symbolic_registers.{}.nonzero_groups 位 {} 与 pin_mask 钉死位重叠",
+                                    name, index
+                                ));
+                            }
+                            parsed_group.push(index);
+                        }
+                        nonzero_groups.push(parsed_group);
+                    }
+                }
+            }
+            _ => {
+                return Err(format!("symbolic_registers.{} 只接受 \"symbolic\" 字符串或子表，实际 {}", name, entry));
+            }
+        }
+
+        if registers.iter().any(|existing: &SymbolicRegisterConfig| &existing.name == name) {
+            return Err(format!("symbolic_registers.{} 重复声明", name));
+        }
+        registers.push(SymbolicRegisterConfig { name: name.to_string(), pin_mask, pin_value, nonzero_groups });
+    }
+    // toml 表迭代按字典序：显式排序保证注入次序与输出确定性
+    registers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(registers)
 }
 
 struct Toolchain {
@@ -1752,6 +1895,8 @@ pub struct ISAConfig<B> {
     pub page_table_config: Option<PageTableConfig>,
     /// Optional PMP configuration
     pub pmp: Option<PmpConfig>,
+    /// W21：`[symbolic_registers]` 声明的 CSR 符号化条目（solver 期注入）
+    pub symbolic_registers: Vec<SymbolicRegisterConfig>,
     /// Optional CLINT enable flag
     pub clint_enabled: Option<bool>,
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
@@ -1781,6 +1926,7 @@ impl<B: BV> ISAConfig<B> {
         let toolchain = get_toolchain(&config, toolchain_name)?;
 
         let mut default_registers = get_default_registers(&config, symtab, type_info)?;
+        let symbolic_registers = get_symbolic_registers(&config, symtab, &default_registers)?;
         let pmp = get_pmp_config(&config)?;
 
         Ok(ISAConfig {
@@ -1821,6 +1967,7 @@ impl<B: BV> ISAConfig<B> {
             pma_regions: get_pma_regions(&config)?,
             page_table_config: get_page_table_config(&config)?,
             pmp,
+            symbolic_registers,
             clint_enabled: get_clint_enabled(&config)?,
             execution_limits: get_execution_limits_config(&config)?,
         })
@@ -1882,6 +2029,7 @@ impl<B: BV> ISAConfig<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bitvector::b64::B64;
 
     #[test]
     fn execution_limits_config_parses_source_regions_and_overrides() {
@@ -2510,5 +2658,140 @@ mod tests {
             let value = toml.parse::<Value>().unwrap();
             assert!(get_pma_regions(&value).is_err(), "{} 应报错", why);
         }
+    }
+
+    /// W21：[symbolic_registers] 最小夹具——只 intern zmstatus/zsatp 的 symtab
+    /// 与空/含默认值的 default_registers。
+    fn symbolic_registers_fixture(register_names: &[&str]) -> (Symtab<'static>, HashMap<Name, Val<B64>>) {
+        let mut symtab = Symtab::new();
+        for name in register_names {
+            let encoded: &'static str = Box::leak(zencode::encode(name).into_boxed_str());
+            symtab.intern(encoded);
+        }
+        (symtab, HashMap::new())
+    }
+
+    #[test]
+    fn symbolic_registers_absent_returns_empty() {
+        let (symtab, defaults) = symbolic_registers_fixture(&["mstatus"]);
+        let value = "[registers]\n".parse::<Value>().unwrap();
+        assert!(get_symbolic_registers(&value, &symtab, &defaults).unwrap().is_empty());
+    }
+
+    #[test]
+    fn symbolic_registers_parses_string_and_table_forms() {
+        let (mut symtab, defaults) = symbolic_registers_fixture(&["mstatus", "satp"]);
+        let satp = symtab.get(&zencode::encode("satp")).unwrap();
+        let value = r#"
+            [symbolic_registers]
+            satp = "symbolic"
+
+            [symbolic_registers.mstatus]
+            pin_mask = "0x8000003000000000"
+            pin_value = "0x0"
+            nonzero_groups = [[13, 14]]
+        "#
+        .parse::<Value>()
+        .unwrap();
+        assert_eq!(
+            get_symbolic_registers(&value, &symtab, &defaults).unwrap(),
+            vec![
+                SymbolicRegisterConfig {
+                    name: "mstatus".to_string(),
+                    pin_mask: 0x8000_0030_0000_0000,
+                    pin_value: 0,
+                    nonzero_groups: vec![vec![13, 14]],
+                },
+                SymbolicRegisterConfig { name: "satp".to_string(), pin_mask: 0, pin_value: 0, nonzero_groups: vec![] },
+            ]
+        );
+        let _ = satp;
+    }
+
+    #[test]
+    fn symbolic_registers_hard_fails() {
+        let cases = [
+            (
+                r#"[symbolic_registers]
+                mstatus = "symbolic""#,
+                None,
+                "IR 缺该寄存器",
+            ),
+            (
+                r#"[symbolic_registers]
+                mstatus = "concrete""#,
+                Some(&["mstatus"]),
+                "字符串取值不是 symbolic",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                pin_value = "0x1""#,
+                Some(&["mstatus"]),
+                "pin_value 缺 pin_mask",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                pin_mask = "0x1""#,
+                Some(&["mstatus"]),
+                "pin_mask 缺 pin_value",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                pin_mask = "0x1"
+                pin_value = "0x2""#,
+                Some(&["mstatus"]),
+                "pin_value 含 mask 外位",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                nonzero_groups = [[]]"#,
+                Some(&["mstatus"]),
+                "空组",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                nonzero_groups = [[64]]"#,
+                Some(&["mstatus"]),
+                "位号超出 64 位",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                pin_mask = "0x2000"
+                pin_value = "0x2000"
+                nonzero_groups = [[13]]"#,
+                Some(&["mstatus"]),
+                "组位与钉死位重叠",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                unknown_key = 1"#,
+                Some(&["mstatus"]),
+                "未知子键",
+            ),
+        ];
+        for (toml, fixture_names, why) in cases {
+            let names: &[&str] = match fixture_names {
+                Some(names) => names,
+                None => &[],
+            };
+            let (symtab, defaults) = symbolic_registers_fixture(names);
+            let value = toml.parse::<Value>().unwrap();
+            assert!(get_symbolic_registers(&value, &symtab, &defaults).is_err(), "{} 应报错", why);
+        }
+    }
+
+    #[test]
+    fn symbolic_registers_conflicts_with_defaults() {
+        let (symtab, mut defaults) = symbolic_registers_fixture(&["mstatus"]);
+        let mstatus = symtab.get(&zencode::encode("mstatus")).unwrap();
+        defaults.insert(mstatus, Val::Bool(true));
+        let value = r#"
+            [symbolic_registers]
+            mstatus = "symbolic"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let error = get_symbolic_registers(&value, &symtab, &defaults).unwrap_err();
+        assert!(error.contains("冲突"), "{}", error);
     }
 }

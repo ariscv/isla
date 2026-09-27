@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use isla_lib::bitvector::BV;
 use isla_lib::config::{
     PmaAttributes, PmaMisalignedFault, PmaRegionConfig, PmaReservability, PmaSize, PmpConfig, PmpMode,
+    SymbolicRegisterConfig,
 };
 use isla_lib::error::ExecError;
 use isla_lib::fmtval::FmtVal;
@@ -85,6 +86,136 @@ where
     /// 这里是调用方 bug，直接 panic。
     fn symbolic_pma_sizes_mut(&mut self) -> &mut Vec<(String, Sym)> {
         panic!("防御性编程：该目标不支持符号 PMA 边界注入")
+    }
+
+    /// W21：`[symbolic_registers]` 声明的 CSR 符号化条目。配置期无 solver，
+    /// 注入推迟到 solve-state 启动（apply_symbolic_csrs_to_registers）。
+    fn symbolic_csrs(&self) -> &[SymbolicRegisterConfig] {
+        &[]
+    }
+
+    /// W21：CSR 符号化注入（setup_pre_state 之后、checkpoint 之前）。对每个
+    /// 声明的 CSR 按其 IR 类型声明 solver 符号常量、附加位级钉死断言
+    /// `(sym & pin_mask) == pin_value` 与位组非零域断言（组内按位或 != 0），
+    /// 然后覆盖执行帧寄存器并同步 pre_state 记录（沿用 setup_pre_state 的
+    /// "执行与输出同一变量"约定）。只支持底层 64 位以内位向量的
+    /// 平铺形状：`Ty::Bits(w)` 或单 `bits(w)` 字段的 struct（mstatus
+    /// `struct zMstatus { zbits: %bv64 }` 即后者）；其余形状硬 panic。
+    fn apply_symbolic_csrs_to_registers<'ir>(
+        &mut self,
+        regs: &mut RegisterBindings<'ir, B>,
+        shared_state: &SharedState<'ir, B>,
+        solver: &mut Solver<B>,
+    ) -> Result<(), ExecError> {
+        let csrs: Vec<SymbolicRegisterConfig> = self.symbolic_csrs().to_vec();
+        for csr in &csrs {
+            let symtab = &shared_state.symtab;
+            let name = symtab
+                .get(&zencode::encode(&csr.name))
+                .unwrap_or_else(|| panic!("防御性编程：符号化 CSR {} 不在当前 IR symtab", csr.name));
+            let ty = shared_state
+                .registers
+                .get(&name)
+                .unwrap_or_else(|| panic!("防御性编程：符号化 CSR {} 不是寄存器", csr.name));
+            // 平铺形状解包：struct{bits(w)} 与 bits(w) 统一到 (宽度, 包装字段名)
+            let (width, wrap_field) = match ty {
+                Ty::Bits(width) => (*width, None),
+                Ty::Struct(struct_id) => {
+                    let struct_def = shared_state.type_info.structs.get(struct_id).unwrap_or_else(|| {
+                        panic!("防御性编程：符号化 CSR {} 的 struct {:?} 缺类型定义", csr.name, struct_id)
+                    });
+                    if struct_def.len() != 1 {
+                        panic!(
+                            "防御性编程：符号化 CSR {} 的 struct 有 {} 个字段，只支持单 bits 字段平铺形状",
+                            csr.name,
+                            struct_def.len()
+                        );
+                    }
+                    let (field_name, field_ty) = struct_def.iter().next().expect("防御性编程：非空 struct 缺首字段");
+                    match field_ty {
+                        Ty::Bits(width) => (*width, Some(*field_name)),
+                        other => panic!("防御性编程：符号化 CSR {} 的唯一字段类型 {:?} 不是位向量", csr.name, other),
+                    }
+                }
+                other => panic!(
+                    "防御性编程：符号化 CSR {} 的类型 {:?} 不支持（只支持 bits(w) 或单 bits 字段 struct）",
+                    csr.name, other
+                ),
+            };
+            if width == 0 || width > 64 {
+                panic!("防御性编程：符号化 CSR {} 宽度 {} 超出 (0, 64] 支持范围", csr.name, width);
+            }
+            if width < 64 && csr.pin_mask >> width != 0 {
+                panic!(
+                    "防御性编程：符号化 CSR {} 的 pin_mask 0x{:x} 含超出 {} 位宽的钉死位",
+                    csr.name, csr.pin_mask, width
+                );
+            }
+            let sym = solver.declare_const(smtlib::Ty::BitVec(width), SourceLoc::unknown());
+            if csr.pin_mask != 0 {
+                solver.assert(smtlib::Exp::Eq(
+                    Box::new(smtlib::Exp::Bvand(
+                        Box::new(smtlib::Exp::Var(sym)),
+                        Box::new(smtlib::bits64(csr.pin_mask, width)),
+                    )),
+                    Box::new(smtlib::bits64(csr.pin_value, width)),
+                ));
+            }
+            for group in &csr.nonzero_groups {
+                for &bit in group {
+                    if bit >= width {
+                        panic!("防御性编程：符号化 CSR {} 的 nonzero 组位 {} 超出 {} 位宽", csr.name, bit, width);
+                    }
+                }
+                let or_exp = group
+                    .iter()
+                    .map(|&bit| smtlib::Exp::Extract(bit, bit, Box::new(smtlib::Exp::Var(sym))))
+                    .reduce(|lhs, rhs| smtlib::Exp::Bvor(Box::new(lhs), Box::new(rhs)))
+                    .expect("防御性编程：配置解析已拒绝空 nonzero 组");
+                solver.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Eq(
+                    Box::new(or_exp),
+                    Box::new(smtlib::bits64(0, 1)),
+                ))));
+            }
+            let value = match wrap_field {
+                Some(field_name) => {
+                    let mut fields: ahash::HashMap<Name, Val<B>> =
+                        HashMap::with_capacity_and_hasher(1, ahash::RandomState::new());
+                    fields.insert(field_name, Val::Symbolic(sym));
+                    Val::Struct(fields)
+                }
+                None => Val::Symbolic(sym),
+            };
+            regs.assign(name, value.clone(), shared_state);
+            self.pre_state_mut().insert(name, value);
+        }
+        Ok(())
+    }
+
+    /// W21：物化阶段的 encdec/assembly 门按具体 CSR 值评估（try_get_assembly_*
+    /// 用独立 solver 执行 zencdec/zassembly，符号 CSR 必须先按当前路径模型
+    /// 具体化，否则门会一直读到 defaults 的旧具体值或让守卫在门外 fork）。
+    /// 克隆寄存器表并把每个符号 CSR 替换为其模型值。
+    fn concretize_symbolic_csrs<'ir>(
+        &self,
+        regs: &RegisterBindings<'ir, B>,
+        model: &mut Model<'_, B>,
+        shared_state: &SharedState<'ir, B>,
+    ) -> Result<RegisterBindings<'ir, B>, ExecError> {
+        let mut cloned = regs.clone();
+        for csr in self.symbolic_csrs() {
+            let symtab = &shared_state.symtab;
+            let name = symtab
+                .get(&zencode::encode(&csr.name))
+                .unwrap_or_else(|| panic!("防御性编程：符号化 CSR {} 不在当前 IR symtab", csr.name));
+            let value = self
+                .pre_state()
+                .get(&name)
+                .unwrap_or_else(|| panic!("防御性编程：符号化 CSR {} 缺少注入期 pre_state 记录", csr.name));
+            let concrete = model.get_val(value)?;
+            cloned.assign(name, concrete, shared_state);
+        }
+        Ok(cloned)
     }
 
     fn vector_context_registers(&self) -> &'static [&'static str] {
@@ -507,6 +638,7 @@ pub struct RV32<B: BV> {
     pub pmp_symbolic: bool,
     pub symbolic_pma_regions: Vec<PmaRegionConfig>,
     pub symbolic_pma_sizes: Vec<(String, Sym)>,
+    pub symbolic_csrs: Vec<SymbolicRegisterConfig>,
     pub pre_state: PreStateCtx<B>,
 }
 
@@ -516,6 +648,7 @@ impl<B: BV> Default for RV32<B> {
             pmp_symbolic: false,
             symbolic_pma_regions: Vec::new(),
             symbolic_pma_sizes: Vec::new(),
+            symbolic_csrs: Vec::new(),
             pre_state: PreStateCtx::new(),
         }
     }
@@ -539,6 +672,9 @@ impl<B: BV> Target<B> for RV32<B> {
     }
     fn symbolic_pma_sizes_mut(&mut self) -> &mut Vec<(String, Sym)> {
         &mut self.symbolic_pma_sizes
+    }
+    fn symbolic_csrs(&self) -> &[SymbolicRegisterConfig] {
+        &self.symbolic_csrs
     }
     fn reg_list(&self) -> Vec<String> {
         let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
@@ -571,6 +707,7 @@ pub struct RV64<B: BV> {
     pub pmp_symbolic: bool,
     pub symbolic_pma_regions: Vec<PmaRegionConfig>,
     pub symbolic_pma_sizes: Vec<(String, Sym)>,
+    pub symbolic_csrs: Vec<SymbolicRegisterConfig>,
     pub pre_state: PreStateCtx<B>,
 }
 
@@ -580,6 +717,7 @@ impl<B: BV> Default for RV64<B> {
             pmp_symbolic: false,
             symbolic_pma_regions: Vec::new(),
             symbolic_pma_sizes: Vec::new(),
+            symbolic_csrs: Vec::new(),
             pre_state: PreStateCtx::new(),
         }
     }
@@ -603,6 +741,9 @@ impl<B: BV> Target<B> for RV64<B> {
     }
     fn symbolic_pma_sizes_mut(&mut self) -> &mut Vec<(String, Sym)> {
         &mut self.symbolic_pma_sizes
+    }
+    fn symbolic_csrs(&self) -> &[SymbolicRegisterConfig] {
+        &self.symbolic_csrs
     }
     fn reg_list(&self) -> Vec<String> {
         let mut regs: Vec<String> = (1..32).map(|r| format!("x{}", r)).collect();
@@ -1701,5 +1842,250 @@ mod tests {
             }
             other => panic!("size 模型值必须是 64 位位向量，实际 {:?}", other),
         }
+    }
+
+    /// W21：mstatus 形状（struct zMstatus { zbits: bits(64) }）的最小夹具——
+    /// symtab/type_info/registers 建出与 rv64d.ir 同形的平铺 CSR。
+    struct SymbolicCsrFixture {
+        shared_state: SharedState<'static, B64>,
+        mstatus_name: Name,
+        satp_name: Name,
+    }
+
+    fn intern_static(text: &str) -> &'static str {
+        Box::leak(text.to_string().into_boxed_str())
+    }
+
+    fn symbolic_csr_fixture() -> SymbolicCsrFixture {
+        let mut symtab = Symtab::new();
+        let mstatus_name = symtab.intern(intern_static(&zencode::encode("mstatus")));
+        let satp_name = symtab.intern(intern_static(&zencode::encode("satp")));
+        let zbits_field = symtab.intern(intern_static(&zencode::encode("bits")));
+        let mstatus_struct = symtab.intern(intern_static("zMstatus"));
+
+        let mut structs = HashMap::new();
+        let mut mstatus_fields = BTreeMap::new();
+        mstatus_fields.insert(zbits_field, Ty::Bits(64));
+        structs.insert(mstatus_struct, mstatus_fields);
+        let type_info = IRTypeInfo {
+            structs,
+            enums: HashMap::new(),
+            enum_members: HashMap::new(),
+            unions: HashMap::new(),
+            union_ctors: HashSet::new(),
+        };
+
+        let arch: &'static [isla_lib::ir::Def<Name, B64>] = Box::leak(Vec::new().into_boxed_slice());
+        let mut shared_state = SharedState::new(
+            symtab,
+            arch,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        shared_state.registers.insert(mstatus_name, Ty::Struct(mstatus_struct));
+        shared_state.registers.insert(satp_name, Ty::Bits(64));
+        SymbolicCsrFixture { shared_state, mstatus_name, satp_name }
+    }
+
+    fn symbolic_csr(name: &str, pin_mask: u64, pin_value: u64, groups: Vec<Vec<u32>>) -> SymbolicRegisterConfig {
+        SymbolicRegisterConfig { name: name.to_string(), pin_mask, pin_value, nonzero_groups: groups }
+    }
+
+    fn mstatus_symbolic_val(target: &RV64<B64>, name: &Name) -> Sym {
+        match target.pre_state().get(name).expect("mstatus 应有 pre_state 记录") {
+            Val::Struct(fields) => match fields.values().next().expect("单字段 struct") {
+                Val::Symbolic(sym) => *sym,
+                other => panic!("mstatus.bits 应是 Symbolic，实际 {:?}", other),
+            },
+            other => panic!("mstatus 应包装为 Struct，实际 {:?}", other),
+        }
+    }
+
+    /// 注入：struct 包装形状正确、执行帧与 pre_state 同一符号、satp 平铺形状
+    /// 直接 Symbolic；pin 与 nonzero 断言都真实进入 solver（违反即 Unsat）。
+    #[test]
+    fn symbolic_csrs_injection_shapes_and_constraints() {
+        let fixture = symbolic_csr_fixture();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut regs = RegisterBindings::new();
+        let mstatus_ty = Ty::Struct(Name::from_u32(u32::MAX));
+        regs.insert(fixture.mstatus_name, false, UVal::Uninit(&mstatus_ty));
+        regs.insert(fixture.satp_name, false, UVal::Uninit(&Ty::Bits(64)));
+        let mut target = rv64();
+        target.symbolic_csrs = vec![
+            symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]]),
+            symbolic_csr("satp", 0, 0, vec![]),
+        ];
+
+        target.apply_symbolic_csrs_to_registers(&mut regs, &fixture.shared_state, &mut solver).unwrap();
+
+        let mstatus_sym = mstatus_symbolic_val(&target, &fixture.mstatus_name);
+        // 执行帧与 pre_state 共用同一符号
+        match regs.get_last_if_initialized(fixture.mstatus_name).unwrap() {
+            Val::Struct(fields) => match fields.values().next().unwrap() {
+                Val::Symbolic(sym) => assert_eq!(*sym, mstatus_sym),
+                other => panic!("执行帧 mstatus.bits 应是 Symbolic，实际 {:?}", other),
+            },
+            other => panic!("执行帧 mstatus 应是 Struct，实际 {:?}", other),
+        }
+        let satp_sym = match target.pre_state().get(&fixture.satp_name).unwrap() {
+            Val::Symbolic(sym) => *sym,
+            other => panic!("satp 平铺形状应直接 Symbolic，实际 {:?}", other),
+        };
+        assert_ne!(mstatus_sym, satp_sym, "两个 CSR 的符号常量必须独立");
+
+        // pin 断言：SD(63)|MBE(37)|SBE(36) 钉 0，置任一位即 Unsat
+        for violating_bit in [63, 37, 36] {
+            let c2 = Context::new(Config::new());
+            let mut s2 = Solver::<B64>::new(&c2);
+            let sym = s2.declare_const(smtlib::Ty::BitVec(64), SourceLoc::unknown());
+            let mask = 0x8000_0030_0000_0000u64;
+            s2.assert(smtlib::Exp::Eq(
+                Box::new(smtlib::Exp::Bvand(Box::new(smtlib::Exp::Var(sym)), Box::new(smtlib::bits64(mask, 64)))),
+                Box::new(smtlib::bits64(0, 64)),
+            ));
+            s2.assert_eq(smtlib::Exp::Var(sym), smtlib::bits64(1 << violating_bit, 64));
+            assert_eq!(s2.check_sat(SourceLoc::unknown()), SmtResult::Unsat, "钉死位 {} 不应可置 1", violating_bit);
+        }
+
+        // nonzero 断言：FS(13,14) 组非零，FS=00 即 Unsat
+        let c3 = Context::new(Config::new());
+        let mut s3 = Solver::<B64>::new(&c3);
+        let sym = s3.declare_const(smtlib::Ty::BitVec(64), SourceLoc::unknown());
+        s3.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Eq(
+            Box::new(smtlib::Exp::Bvor(
+                Box::new(smtlib::Exp::Extract(14, 14, Box::new(smtlib::Exp::Var(sym)))),
+                Box::new(smtlib::Exp::Extract(13, 13, Box::new(smtlib::Exp::Var(sym)))),
+            )),
+            Box::new(smtlib::bits64(0, 1)),
+        ))));
+        s3.assert_eq(smtlib::Exp::Var(sym), smtlib::bits64(0, 64));
+        assert_eq!(s3.check_sat(SourceLoc::unknown()), SmtResult::Unsat, "FS=00 应被 nonzero 组断言排除");
+
+        // 注入后的主 solver 仍 Sat（合法域非空）
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+    }
+
+    /// 具象化：concretize_symbolic_csrs 按模型把符号 CSR 换成具体值，供 encdec
+    /// 门使用；未注入记录（空 pre_state）是调用序错误，硬 panic。
+    #[test]
+    fn symbolic_csrs_concretize_for_gate() {
+        let fixture = symbolic_csr_fixture();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut regs = RegisterBindings::new();
+        let mstatus_ty = Ty::Struct(Name::from_u32(u32::MAX));
+        regs.insert(fixture.mstatus_name, false, UVal::Uninit(&mstatus_ty));
+        let mut target = rv64();
+        target.symbolic_csrs = vec![symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]])];
+        target.apply_symbolic_csrs_to_registers(&mut regs, &fixture.shared_state, &mut solver).unwrap();
+        let sym = mstatus_symbolic_val(&target, &fixture.mstatus_name);
+
+        // 钉一个合法模型值：FS=01（Initial），钉死位全 0
+        let model_value = 1_u64 << 13;
+        solver.assert_eq(smtlib::Exp::Var(sym), smtlib::bits64(model_value, 64));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+
+        let gate_regs = target.concretize_symbolic_csrs(&regs, &mut model, &fixture.shared_state).unwrap();
+        match gate_regs.get_last_if_initialized(fixture.mstatus_name).unwrap() {
+            Val::Struct(fields) => match fields.values().next().unwrap() {
+                Val::Bits(bv) => assert_eq!(bv.lower_u64(), model_value, "门的 mstatus 应是模型值"),
+                other => panic!("具象化后 mstatus.bits 应是 Bits，实际 {:?}", other),
+            },
+            other => panic!("具象化后 mstatus 应保持 Struct 形状，实际 {:?}", other),
+        }
+        // 原表不被污染（门只读克隆）
+        assert!(matches!(regs.get_last_if_initialized(fixture.mstatus_name).unwrap(), Val::Struct(_)));
+    }
+
+    /// 不支持形状（两字段 struct）与超宽 pin_mask 均硬 panic（防御式）。
+    #[test]
+    fn symbolic_csrs_rejects_unsupported_shapes() {
+        let mut symtab = Symtab::new();
+        let wide_name = symtab.intern(intern_static(&zencode::encode("wide_csr")));
+        let two_field_name = symtab.intern(intern_static(&zencode::encode("two_field_csr")));
+        let struct_id = symtab.intern(intern_static("zTwoField"));
+        let f0 = symtab.intern(intern_static(&zencode::encode("a")));
+        let f1 = symtab.intern(intern_static(&zencode::encode("b")));
+        let mut structs = HashMap::new();
+        let mut fields = BTreeMap::new();
+        fields.insert(f0, Ty::Bits(32));
+        fields.insert(f1, Ty::Bits(32));
+        structs.insert(struct_id, fields);
+        let type_info = IRTypeInfo {
+            structs,
+            enums: HashMap::new(),
+            enum_members: HashMap::new(),
+            unions: HashMap::new(),
+            union_ctors: HashSet::new(),
+        };
+        let arch: &'static [isla_lib::ir::Def<Name, B64>] = Box::leak(Vec::new().into_boxed_slice());
+        let mut shared_state = SharedState::new(
+            symtab,
+            arch,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        shared_state.registers.insert(wide_name, Ty::Bits(32));
+        shared_state.registers.insert(two_field_name, Ty::Struct(struct_id));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut target = rv64();
+            target.symbolic_csrs = vec![symbolic_csr("wide_csr", 1 << 40, 0, vec![])];
+            let mut regs = RegisterBindings::new();
+            regs.insert(wide_name, false, UVal::Uninit(&Ty::Bits(32)));
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
+        }));
+        assert!(result.is_err(), "pin_mask 超宽应 panic");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut target = rv64();
+            target.symbolic_csrs = vec![symbolic_csr("two_field_csr", 0, 0, vec![])];
+            let mut regs = RegisterBindings::new();
+            let two_field_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Struct(struct_id)));
+            regs.insert(two_field_name, false, UVal::Uninit(two_field_ty));
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
+        }));
+        assert!(result.is_err(), "两字段 struct 应 panic");
+    }
+
+    /// 端到端输出：注入后 pre_state 的符号 CSR 在模型下求解，solve_pre_state
+    /// 输出含具体模型值（FS≠0 可见），与 W17 符号 PMA size 的侧通道输出互补
+    /// （CSR 走 pre_state 主通道，无需额外记录）。
+    #[test]
+    fn solve_pre_state_outputs_symbolic_csr_model_value() {
+        let fixture = symbolic_csr_fixture();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut target = rv64();
+        target.symbolic_csrs = vec![symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]])];
+        let mut regs = RegisterBindings::new();
+        let mstatus_ty = Ty::Struct(Name::from_u32(u32::MAX));
+        regs.insert(fixture.mstatus_name, false, UVal::Uninit(&mstatus_ty));
+        target.apply_symbolic_csrs_to_registers(&mut regs, &fixture.shared_state, &mut solver).unwrap();
+        let sym = mstatus_symbolic_val(&target, &fixture.mstatus_name);
+        solver.assert_eq(smtlib::Exp::Var(sym), smtlib::bits64(1 << 14, 64));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+
+        let mut model = Model::new(&solver);
+        let state = target.solve_pre_state(&mut model, &fixture.shared_state).unwrap();
+        let mstatus = state.get("mstatus").expect("mstatus 模型值应输出");
+        assert!(mstatus.contains("4000"), "FS=10 应体现在输出中：{}", mstatus);
     }
 }
