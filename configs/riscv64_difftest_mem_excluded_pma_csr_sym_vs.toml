@@ -1,0 +1,197 @@
+# This is a config for Sail RISC-V in 64-bit mode
+# 【向量 clause 专用】在 riscv64_difftest_mem_excluded_pma_csr_sym.toml（W21/W22
+# mstatus 符号化）基础上，仅给 mstatus 声明追加 VS[10:9] 的 nonzero_groups 域
+# 约束（VS≠Off，写法对齐既有 FS 组 [[13,14]]）；其余与 _csr_sym 逐字一致。
+#
+# 动机（campaign24 结论）：mstatus 符号化后 VS 位自由浮动，82% 路径模型取
+# VS=Off(00)，向量指令（含 vsetvli）在 VS=Off 下全部 Illegal_Instruction——
+# 向量 clause 的求解预算浪费在 Illegal 短路上，产率缩到旧 survey 的 1/8~1/10
+# （VLRETYPE 198→20 且 Retire 归零、VLSEGFF 443→57、VSSEG 462→51）。本配置把
+# VS≠0 声明为取值域：与 W21 对 FS 的处理同型（decode 守卫 currentlyEnabled
+# (Ext_Zvext) 语义的最小复刻——solve-state 绕过 decode，纯符号时模型任意值取 0
+# 会让 encdec 物化门恒假；VS=00 本就会被 decode 丢弃，合法路径不丢）。
+#
+# 语义代价（已知、有意承受）：牺牲 VS=Off 分支——本配置下的向量 clause 不再
+# 产出"VS=Off 时向量指令 Illegal"用例；该分支若需覆盖应走独立 clause/配置。
+# 重放侧收益：VS≠Off 全部成立 → 管线前导 vsetvli 不再 illegal（campaign24 F6a
+# 剥离规避的根因消除）。
+
+pc = "PC"
+
+zero_announce_exit = true
+
+default_sizeof = 4
+
+in_program_order = ["sail_barrier"]
+
+# CLINT [0x02000000,0x020c0000) 落在下方 mmio_hole 判死段内，区域不允许
+# 重叠，必须关闭（顶层键须写在任何 [table]/[[array]] 表头之前）
+clint_enabled = false
+
+# 执行限制不再放在通用 ISA 配置中。需要时由命令行
+# --execution-limits-config 加载 configs/workarounds/ 下的独立 TOML。
+
+[[toolchain]]
+name = "macos-riscv64"
+os = "macos"
+arch = "aarch64"
+assembler = "riscv64-elf-as"
+objdump = "riscv64-elf-objdump"
+nm = "riscv64-elf-nm"
+linker = "riscv64-elf-ld"
+
+[[toolchain]]
+name = "default"
+assembler = "riscv64-linux-gnu-as -march=rv64imac"
+objdump = "riscv64-linux-gnu-objdump"
+linker = "riscv64-linux-gnu-ld"
+nm = "riscv64-linux-gnu-nm"
+
+# Currently not used for RISC-V
+[mmu]
+page_table_base = "0x300000"
+page_size = "4096"
+s2_page_table_base = "0x300000"
+s2_page_size = "4096"
+
+[threads]
+base = "0x80100000"
+top = "0x80300000"
+stride = "0x10000"
+
+[symbolic_addrs]
+base = "0x80310000"
+top = "0x80410000"
+stride = "0x10"
+
+[registers]
+
+# W21：mstatus 已从 defaults 摘除，改挂 [symbolic_registers.mstatus]。
+[registers.defaults]
+"__isla_vector_gpr" = true
+"__isla_vector_vpr" = true
+"__isla_vector_fpr" = true
+"__isla_use_extra_ops" = true
+satp = "0x0000000000000000"
+misa = "{ bits = 0x800000000034112f }"
+mcountinhibit = " { bits = 0x00000000 }"
+mcyclecfg = "{ bits = 0x0000000000000000 }"
+minstretcfg = "{ bits = 0x0000000000000000 }"
+mtimecmp = "0x0000000000000000"
+stimecmp = "0x0000000000000000"
+__isla_always_aligned = "true"
+# W14（②）：PMP 关闭态钉死。IR 中 PMP 是族寄存器（rv64d.ir）：
+#   register zpmpcfg_n  : %fvec(64, %struct zPmpcfg_ent)   （zbits: %bv8）
+#   register zpmpaddr_n : %fvec(64, %bv64)
+# 未给默认值时二者在 solve-state 初始状态为符号变量，pmpCheck 可走"PMP 拒绝"
+# 分支产出图内假 AccessFault（W13 c015/c030，green 全量 107/2479 同因）。
+# 注意：不能全部钉 A=OFF——IR 里 let sys_pmp_count = 16（config_primop 的
+# sys_pmp_count=0 是死配置，它是 let 不是 primop），pmpControl 循环结构性
+# 生效，全 OFF 空匹配后 U/S 态 fallthrough 必产 AccessFault（pmp_control.sail
+# 循环尾部 priv == Machine ? None : Some(AccessFault)）。故钉 NAPOT-全1-RWX
+# （cfg 字节 0x1f = L0|A=11|RWX，addr 全 1 → entry0 匹配全地址空间），与 emu
+# 重放侧（pmpaddr0=-1/pmpcfg0=0x1f）语义一致，pmpCheck 恒 None。
+"pmpcfg_n" = "[ { bits = 0x1f } ; 64 ]"
+"pmpaddr_n" = "[ 0xffffffffffffffff ; 64 ]"
+
+# === W21/W22：CSR 符号化声明 ===
+# mstatus 结构为 struct zMstatus { zbits: %bv64 }（rv64d.ir:3310），注入按
+# 64 位平铺位向量处理。用户原则：无探索意义的位钉死，其余符号。
+#   - pin_mask/pin_value（位级钉死，注入后断言 (sym & mask) == value）：
+#     * MBE(bit37)=0 / SBE(bit36)=0：大小端必须小端——模型与 emu 重放均 LE，
+#       符号化只开 BE 分支噪声，重放不可比。
+#     * UXL[44:43]=10 / SXL[35:34]=10（W22）：模型 XLEN 固定 64。编码同
+#       misa.MXL（types.sail：RV64<->0b10、RV128<->0b11），RV32(01)/保留(00)/
+#       RV128(11) 对固定 64 位模型都是矛盾状态，与 MBE/SBE 同类。
+#   - nonzero_groups（位组非全零域约束）：FS[14:13]≠Off 且 VS[10:9]≠Off（本配置
+#     新增 VS 组，向量 clause 专用）。solve-state 绕过 decode，clause execute
+#     本体不读 FS/VS，纯符号时模型任意值取 0 会让 encdec 守卫
+#     currentlyEnabled(Ext_Zcd/Zvext) 恒假；把 FS/VS≠0 声明为取值域是 decode
+#     守卫语义的最小复刻，=00 本就会被 encdec 物化门丢弃（合法路径不丢）。
+#   - derive_bit（W22 派生位等价约束，双向）：SD(bit63) ⇔ FS[14:13]=11 ∨
+#     VS[10:9]=11 ∨ XS[16:15]=11。W21 曾钉 SD=0，与 FS/VS/XS 可自由取 Dirty
+#     矛盾（架构上 SD 是 dirty 投影只读镜像）；重放侧 CSR 写经 WARL 合法化
+#     （zlegalizze_mstatus）按同一投影重算 SD，前态不自洽的模型值会被 emu
+#     改写、重放不可比。等价断言保证生成的 mstatus 模型值架构自洽。
+#   - 其余位（MIE/MPIE/SIE/SPIE/MPP/SPP/MPRV/MXR/SUM/TVM/TSR/TW/XS/
+#     WPRI…）保持符号：MPP 影响特权态迁移、MPRV 开 M 态翻译语义，均有探索
+#     价值（分布影响见 W21 对照记录）。VS 在本配置限取值域 {01,10,11}（≠Off），
+#     Initial/Clean/Dirty 三态仍自由探索。
+[symbolic_registers.mstatus]
+pin_mask = "0x0000183C00000000"
+pin_value = "0x0000100800000000"
+nonzero_groups = [[13, 14], [10, 9]]
+derive_bit = { bit = 63, groups = [[14, 13], [10, 9], [16, 15]] }
+
+[const_primops]
+get_config_print_reg = false
+get_config_print_instr = false
+get_config_print_platform = false
+get_config_print_mem = false
+sys_enable_fdext = false
+sys_enable_zfinx = false
+sys_enable_rvc = true
+sys_enable_next = false
+sys_enable_vext = true
+sys_enable_writable_fiom = true
+sys_enable_writable_misa = true
+sys_enable_bext = false
+sys_enable_experimental_extensions = false
+sys_pmp_count = "0 : %i64"
+plat_enable_pmp = false
+plat_enable_dirty_update = false
+plat_enable_misaligned_access = false
+plat_mtval_has_illegal_inst_bits = false
+plat_insns_per_tick = 10
+plat_ram_base = "0x0000000080000000"
+plat_ram_size = "0x0000000004000000"
+plat_rom_base = "0x0000000000001000"
+plat_rom_size = "0x0000000000000100"
+plat_clint_base = "0x0000000002000000"
+plat_clint_size = "0x00000000000c0000"
+plat_htif_tohost = "0x0000000040001000"
+plat_get_16_random_bits = "undefined : %bv16"
+plat_term_write = "()"
+print_reg = "()"
+print_platform = "()"
+print_instr = "()"
+print_mem_access = "()"
+speculate_conditional = "undefined : %bool"
+match_reservation = "true"
+cancel_reservation = "()"
+load_reservation = "()"
+csr_full_write_callback = "()"
+mem_read_callback = "()"
+xreg_full_write_callback = "()"
+mem_write_callback = "()"
+mem_exception_callback = "()"
+pc_write_callback = "()"
+get_config_rvfi = "false"
+plat_enable_htif = "false"
+get_config_use_abi_names = "false"
+
+# === Memory Symbolization Configuration（同 _excluded_pma） ===
+[[memory_regions]]
+name = "code"
+base = "0x0"
+size = "0x1000"
+region_type = "concrete"
+
+[[memory_regions]]
+name = "sym_ram"
+base = "0x80000000"
+size = "0x10000000"
+region_type = "symbolic"
+
+[[memory_regions]]
+name = "mmio_hole"
+base = "0x02000000"
+size = "0x02000000"
+region_type = "excluded"
+
+# === W10（S1）：配置化 PMA 地图（同 _excluded_pma，RAM 8TB 顶界） ===
+[[pma_regions]]
+name = "ram"
+base = "0x80000000"
+size = "0x7FF80000000"
+attr = "ram"
