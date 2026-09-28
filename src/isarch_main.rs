@@ -358,14 +358,26 @@ fn parse_timeout_smt_output(
     Ok(isarch::exec::TimeoutSmtOutput::new(file, stdout, itrace))
 }
 
-fn validate_execution_limits_ir(config: &ExecutionLimitsConfig, arch_path: &Path) -> Result<(), String> {
-    if !config.strict {
-        return Ok(());
-    }
+fn validate_execution_limits_ir(config: &ExecutionLimitsConfig, arch_path: &Path) -> Result<Option<String>, String> {
+    let Some(expected) = config.ir_sha256.as_deref() else {
+        return Ok(None);
+    };
     let contents =
         std::fs::read(arch_path).map_err(|error| format!("无法读取 IR {}：{}", arch_path.display(), error))?;
     let actual = format!("{:x}", Sha256::digest(&contents));
-    config.validate_ir_sha256(&actual).map_err(|error| format!("{}（IR 文件：{}）", error, arch_path.display()))
+    if config.strict {
+        config.validate_ir_sha256(&actual).map_err(|error| format!("{}（IR 文件：{}）", error, arch_path.display()))?;
+        Ok(None)
+    } else if expected.eq_ignore_ascii_case(&actual) {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "IR SHA-256 不匹配：期望 {}，实际 {}（IR 文件：{}）；继续执行",
+            expected,
+            actual,
+            arch_path.display()
+        )))
+    }
 }
 
 fn isla_main() -> i32 {
@@ -454,9 +466,13 @@ fn isla_main() -> i32 {
 
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
     if let Some(config) = isa_config.execution_limits.as_ref() {
-        if let Err(error) = validate_execution_limits_ir(config, configured_arch_path) {
-            eprintln!("{}", error);
-            return 1;
+        match validate_execution_limits_ir(config, configured_arch_path) {
+            Ok(Some(warning)) => eprintln!("警告：{}", warning),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("{}", error);
+                return 1;
+            }
         }
     }
 
@@ -604,6 +620,27 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(error.contains("IR SHA-256 不匹配"));
+    }
+
+    #[test]
+    fn non_strict_execution_limits_warns_changed_ir() {
+        let path = std::env::temp_dir().join(format!(
+            "isarch-warning-limits-{}-{}.ir",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, "changed IR").unwrap();
+        let config = ExecutionLimitsConfig {
+            strict: false,
+            ir_sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            ..ExecutionLimitsConfig::default()
+        };
+
+        let warning = validate_execution_limits_ir(&config, &path).unwrap().expect("IR 哈希不匹配应当告警");
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(warning.contains("IR SHA-256 不匹配"));
+        assert!(warning.contains("继续执行"));
     }
 
     #[test]

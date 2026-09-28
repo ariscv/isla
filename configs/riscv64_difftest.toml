@@ -9,7 +9,7 @@ default_sizeof = 4
 in_program_order = ["sail_barrier"]
 
 # 执行限制不再放在通用 ISA 配置中。需要时由命令行
-# --execution-limits-config 加载 configs/workarounds/ 下的独立 TOML。
+# --execution-limits-config 加载 ../sail-riscv/configs/isla/workarounds/ 下的独立 TOML。
 
 [[toolchain]]
 name = "macos-riscv64"
