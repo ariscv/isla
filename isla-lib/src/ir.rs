@@ -267,9 +267,8 @@ pub enum BitsSegment<B> {
 /// or one of the concrete values in this enum.
 ///
 /// An additional `MixedBits` constructor provides bitvectors made out
-/// of symbolic and concrete parts to make traces of instructions with
-/// symbolic operands more pleasant.  At the time of writing they are
-/// not introduced internally.
+/// of symbolic and concrete parts. Bitvector append may preserve these
+/// segments so slices of known fields remain concrete.
 ///
 /// Note that the equality trait implements a literal equality, see
 /// [crate::primop] for a semantic comparison.

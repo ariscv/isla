@@ -295,6 +295,18 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         &self.backtrace
     }
 
+    pub fn function_name(&self) -> Name {
+        self.function_name
+    }
+
+    pub fn pc(&self) -> usize {
+        self.pc
+    }
+
+    pub fn has_sampled_branch(&self) -> bool {
+        self.execution_limit_state.has_sampled_branch()
+    }
+
     pub fn forks(&self) -> u32 {
         self.execution_limit_state.total_forks()
     }
@@ -578,10 +590,14 @@ mod tests {
 
         local.itrace_path.record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
         local.itrace_path.record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
-        assert_eq!(local.itrace_path.records().len(), 2);
+        assert_eq!(local.itrace_path.record_count(), 2);
 
         let frozen = freeze_frame(&local);
-        assert_eq!(frozen.itrace_path.records().len(), 2);
+        assert_eq!(frozen.itrace_path.record_count(), 2);
+        assert!(
+            std::ptr::eq(local.itrace_path.records().next().unwrap(), frozen.itrace_path.records().next().unwrap()),
+            "真实 freeze 必须共享 itrace payload"
+        );
 
         let mut fork_a = unfreeze_frame(&frozen);
         let mut fork_b = unfreeze_frame(&frozen);
@@ -590,24 +606,79 @@ mod tests {
         fork_b.itrace_path.record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
         fork_b.itrace_path.record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
 
-        assert_eq!(fork_a.itrace_path.records().len(), 3);
-        assert_eq!(fork_b.itrace_path.records().len(), 4);
-        assert_eq!(local.itrace_path.records().len(), 2);
+        assert_eq!(fork_a.itrace_path.record_count(), 3);
+        assert_eq!(fork_b.itrace_path.record_count(), 4);
+        assert_eq!(local.itrace_path.record_count(), 2);
 
-        assert_eq!(fork_a.itrace_path.records()[2].function_name, Name::from_u32(3));
-        assert_eq!(fork_a.itrace_path.records()[2].pc, 30);
-        assert_eq!(fork_a.itrace_path.records()[2].backtrace, vec![(Name::from_u32(30), 3)]);
-        assert!(fork_a.itrace_path.records()[2].summary.is_none());
+        assert_eq!(fork_a.itrace_path.records().nth(2).unwrap().function_name, Name::from_u32(3));
+        assert_eq!(fork_a.itrace_path.records().nth(2).unwrap().pc, 30);
+        assert_eq!(fork_a.itrace_path.records().nth(2).unwrap().backtrace, vec![(Name::from_u32(30), 3)]);
+        assert!(fork_a.itrace_path.records().nth(2).unwrap().summary.is_none());
 
-        assert_eq!(fork_b.itrace_path.records()[2].function_name, Name::from_u32(4));
-        assert_eq!(fork_b.itrace_path.records()[2].pc, 40);
-        assert_eq!(fork_b.itrace_path.records()[2].backtrace, vec![(Name::from_u32(40), 4)]);
-        assert!(fork_b.itrace_path.records()[2].summary.is_none());
+        assert_eq!(fork_b.itrace_path.records().nth(2).unwrap().function_name, Name::from_u32(4));
+        assert_eq!(fork_b.itrace_path.records().nth(2).unwrap().pc, 40);
+        assert_eq!(fork_b.itrace_path.records().nth(2).unwrap().backtrace, vec![(Name::from_u32(40), 4)]);
+        assert!(fork_b.itrace_path.records().nth(2).unwrap().summary.is_none());
 
-        assert_eq!(fork_b.itrace_path.records()[3].function_name, Name::from_u32(5));
-        assert_eq!(fork_b.itrace_path.records()[3].pc, 50);
-        assert_eq!(fork_b.itrace_path.records()[3].backtrace, vec![(Name::from_u32(50), 5)]);
-        assert!(fork_b.itrace_path.records()[3].summary.is_none());
+        assert_eq!(fork_b.itrace_path.records().nth(3).unwrap().function_name, Name::from_u32(5));
+        assert_eq!(fork_b.itrace_path.records().nth(3).unwrap().pc, 50);
+        assert_eq!(fork_b.itrace_path.records().nth(3).unwrap().backtrace, vec![(Name::from_u32(50), 5)]);
+        assert!(fork_b.itrace_path.records().nth(3).unwrap().summary.is_none());
+    }
+
+    #[test]
+    fn itrace_sharing_real_frame_fork_and_submission() {
+        use crate::smt::smtlib;
+        use crate::tracetool::itrace::ItraceHandler;
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zsharing_frame");
+        let caller = symtab.intern("zsharing_caller");
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let mut parent = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
+        parent.itrace_path.record_summary(function, vec![(caller, 8)], 0, "parent-summary");
+        parent.itrace_path.push_branch_condition(smtlib::Exp::Bool(true));
+        parent.itrace_path.record_branch_edge(function, vec![(caller, 8)], 0, 7, true);
+        let identity = parent.itrace_path.prefix_identity_for_test();
+        assert!(identity.iter().all(|pointer| !pointer.is_null()));
+        let frozen = freeze_frame(&parent);
+        let mut left = unfreeze_frame(&frozen);
+        let mut right = unfreeze_frame(&frozen);
+        for path in [&*frozen.itrace_path, &left.itrace_path, &right.itrace_path] {
+            assert_eq!(path.prefix_identity_for_test(), identity);
+        }
+        left.itrace_path.record_summary(function, vec![(caller, 9)], 7, "left-summary");
+        left.itrace_path.push_branch_condition(smtlib::Exp::Bool(false));
+        left.itrace_path.record_branch_edge(function, vec![(caller, 9)], 7, 8, false);
+        right.itrace_path.record_summary(function, vec![(caller, 10)], 7, "right-summary");
+        right.itrace_path.push_branch_condition(smtlib::Exp::Bool(true));
+        right.itrace_path.record_branch_edge(function, vec![(caller, 10)], 7, 12, true);
+        let filename = std::env::temp_dir().join(format!("itrace_shared_frame_{}.txt", std::process::id()));
+        let handler = ItraceHandler::default();
+        handler.set_path(Some(filename.clone()));
+        handler.submit_path(&parent.itrace_path, &symtab);
+        handler.submit_path(&left.itrace_path, &symtab);
+        handler.submit_path(&right.itrace_path, &symtab);
+        handler.dump();
+        let text = std::fs::read_to_string(&filename).unwrap();
+        assert_eq!(text.matches("parent-summary").count(), 3);
+        assert_eq!(text.matches("left-summary").count(), 1);
+        assert_eq!(text.matches("right-summary").count(), 1);
+        assert!(text.contains("branch_true_false):"));
+        assert!(text.contains("branch_true_true):"));
+        assert_eq!(text.matches("context=[zsharing_caller:8]").count(), 3);
+        assert_eq!(text.matches("context=[zsharing_caller:9]").count(), 1);
+        assert_eq!(text.matches("context=[zsharing_caller:10]").count(), 1);
+        assert_eq!(parent.itrace_path.record_count(), 1);
+        assert_eq!(frozen.itrace_path.record_count(), 1);
+        assert_eq!(left.itrace_path.record_count(), 2);
+        assert_eq!(right.itrace_path.record_count(), 2);
+        for path in [&parent.itrace_path, &*frozen.itrace_path, &left.itrace_path, &right.itrace_path] {
+            assert_eq!(path.prefix_identity_for_test(), identity, "追加及提交后共享前缀身份不变");
+        }
+        if let Ok(out) = std::env::var("ITRACE_SHARING_EVIDENCE") {
+            std::fs::write(std::path::PathBuf::from(out).join("frame-submission.txt"), text).unwrap();
+        }
+        std::fs::remove_file(filename).unwrap();
     }
 
     #[test]
@@ -619,7 +690,7 @@ mod tests {
     fn new_frame_has_default_itrace_path() {
         let instrs: Vec<Instr<Name, B64>> = vec![];
         let local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
-        assert!(local.itrace_path.records().is_empty());
+        assert!(local.itrace_path.record_count() == 0);
     }
 
     #[test]
@@ -629,7 +700,7 @@ mod tests {
         local.itrace_path.record(Name::from_u32(1), vec![], 10);
 
         let callee = local.new_call(Name::from_u32(99), &[], &Ty::Unit, None, &instrs);
-        assert_eq!(callee.itrace_path.records().len(), 1);
-        assert_eq!(callee.itrace_path.records()[0].pc, 10);
+        assert_eq!(callee.itrace_path.record_count(), 1);
+        assert_eq!(callee.itrace_path.records().nth(0).unwrap().pc, 10);
     }
 }

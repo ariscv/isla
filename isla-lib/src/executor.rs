@@ -1193,40 +1193,6 @@ fn run_special_primop<'ir, B: BV>(
         let arg = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
         assign(tid, loc, Val::Ctor(f, Box::new(arg)), &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
-    } else if let Some(op) = primop::float::softfloat_dispatch(&zencode::decode(shared_state.symtab.to_str(f))) {
-        let args = args
-            .iter()
-            .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, info).map(Cow::into_owned))
-            .collect::<Result<Vec<Val<B>>, _>>()?;
-        let struct_name = primop::float::softfloat_result_struct(op);
-        let struct_id = shared_state
-            .symtab
-            .get(&struct_name)
-            .unwrap_or_else(|| panic!("softfloat: IR 中缺少返回结构体 {} 的定义", struct_name));
-        let struct_fields = shared_state
-            .typedefs()
-            .structs
-            .get(&struct_id)
-            .unwrap_or_else(|| panic!("softfloat: IR 中缺少返回结构体 {} 的字段", struct_name));
-        assert!(struct_fields.len() == 2, "softfloat: 返回结构体 {} 应恰有两个字段", struct_name);
-        let mut flags_field = None;
-        let mut result_field = None;
-        for (field, ty) in struct_fields.iter() {
-            match ty {
-                Ty::Bits(5) => flags_field = Some(*field),
-                _ => result_field = Some(*field),
-            }
-        }
-        let value = primop::float::softfloat_call(
-            op,
-            args,
-            flags_field.expect("softfloat: 返回结构体缺少 bv5 flags 字段"),
-            result_field.expect("softfloat: 返回结构体缺少结果字段"),
-            solver,
-            info,
-        )?;
-        assign(tid, loc, value, &mut frame.local_state, shared_state, solver, info)?;
-        frame.pc += 1
     } else {
         let symbol = zencode::decode(shared_state.symtab.to_str(f));
         return Err(ExecError::NoFunction(symbol, info));
@@ -1351,6 +1317,21 @@ macro_rules! itrace_fork_frame_with_branch_condition {
             let _ = &$condition;
             Frame { pc: $pc, ..freeze_frame($frame) }
         }
+    }};
+}
+
+macro_rules! itrace_record_jump_edge {
+    ($frame:expr, $pc:expr, $taken:expr) => {{
+        #[cfg(feature = "tracetool")]
+        $frame.itrace_path.record_branch_edge(
+            $frame.function_name,
+            $frame.backtrace.clone(),
+            $pc as u64,
+            $frame.pc as u64,
+            $taken,
+        );
+        #[cfg(not(feature = "tracetool"))]
+        let _ = ($pc, $taken);
     }};
 }
 
@@ -1518,6 +1499,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             }
 
             Instr::Jump(exp, target, info) => {
+                let jump_pc = frame.pc;
                 let decision = match limit_handler.as_ref() {
                     Some(handler) => handler.on_conditional_jump(
                         &mut frame.execution_limit_state,
@@ -1570,6 +1552,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     itrace_push_branch_condition!(frame, Not(Box::new(Var(v))));
                                     frame.pc += 1;
                                 }
+                                itrace_record_jump_edge!(frame, jump_pc, concrete_bool);
                                 continue 'main_loop;
                             }
                             Val::Bool(jump) => {
@@ -1582,6 +1565,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 } else {
                                     frame.pc += 1;
                                 }
+                                itrace_record_jump_edge!(frame, jump_pc, jump);
                                 continue 'main_loop;
                             }
                             _ => return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info)),
@@ -1636,6 +1620,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                         itrace_push_branch_condition!(frame, test_false);
                                         frame.pc += 1;
                                     }
+                                    itrace_record_jump_edge!(frame, jump_pc, concrete_bool);
                                     continue 'main_loop;
                                 }
                                 ExecutionLimitDecision::Continue | ExecutionLimitDecision::KeepCurrentModel { .. } => {
@@ -1652,6 +1637,14 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             frame.capture_path_smt_stats();
                             let mut frozen =
                                 itrace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
+                            #[cfg(feature = "tracetool")]
+                            Arc::make_mut(&mut frozen.itrace_path).record_branch_edge(
+                                frozen.function_name,
+                                (*frozen.backtrace).clone(),
+                                jump_pc as u64,
+                                frozen.pc as u64,
+                                false,
+                            );
                             // 父子路径的采样签名从这次 fork 起分叉，受限分支的具体化抽样
                             // 才会在不同路径上抽到不同方向。
                             Arc::make_mut(&mut frozen.execution_limit_state).advance_path_signature(false);
@@ -1673,12 +1666,15 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             solver.add(Assert(test_true.clone()));
                             itrace_push_branch_condition!(frame, test_true);
                             frame.pc = *target;
+                            itrace_record_jump_edge!(frame, jump_pc, true);
                         } else if can_be_true {
                             solver.add(Assert(test_true));
                             frame.pc = *target;
+                            itrace_record_jump_edge!(frame, jump_pc, true);
                         } else if can_be_false {
                             solver.add(Assert(test_false));
                             frame.pc += 1;
+                            itrace_record_jump_edge!(frame, jump_pc, false);
                         } else {
                             return Ok(Run::Dead);
                         }
@@ -1689,6 +1685,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         } else {
                             frame.pc += 1;
                         }
+                        itrace_record_jump_edge!(frame, jump_pc, jump);
                     }
                     _ => {
                         return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info));
@@ -2059,6 +2056,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         let fork_id = match decision {
                             ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
                             ExecutionLimitDecision::KeepCurrentModel { reason } => {
+                                frame.execution_limit_state.record_kept_current_model();
                                 record_execution_limit(frame, reason, "keep_current_model");
                                 None
                             }
@@ -2166,6 +2164,24 @@ pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
     shared_state: &SharedState<'ir, B>,
     diagnostics: Vec<(crate::timeout::TimeoutDiagnostic, bool)>,
 ) {
+    submit_itrace_for_local_frame_internal(frame, shared_state, diagnostics, None);
+}
+
+pub fn submit_itrace_for_local_frame_with_metadata<'ir, B: BV>(
+    frame: &LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    diagnostics: Vec<(crate::timeout::TimeoutDiagnostic, bool)>,
+    metadata: crate::tracetool::ItraceTerminalMetadata,
+) {
+    submit_itrace_for_local_frame_internal(frame, shared_state, diagnostics, Some(metadata));
+}
+
+fn submit_itrace_for_local_frame_internal<'ir, B: BV>(
+    frame: &LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    diagnostics: Vec<(crate::timeout::TimeoutDiagnostic, bool)>,
+    metadata: Option<crate::tracetool::ItraceTerminalMetadata>,
+) {
     let smtperf_summary = crate::smt::take_smtperf_report();
     if let Some(summary) = &smtperf_summary {
         eprint!("{}", summary);
@@ -2183,12 +2199,15 @@ pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
         for (diagnostic, include_smt_dump) in diagnostics {
             completed.push_diagnostic_with_dump(diagnostic, include_smt_dump);
         }
+        if let Some(metadata) = metadata {
+            completed.set_terminal_metadata(metadata);
+        }
         completed.set_timing(frame.path_time_snapshot());
         completed.set_smtperf_summary(smtperf_summary);
         shared_state.itrace.submit_completed_path(&completed, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
-    let _ = (frame, shared_state, diagnostics, smtperf_summary);
+    let _ = (frame, shared_state, diagnostics, metadata, smtperf_summary);
 }
 
 pub fn submit_itrace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {
@@ -3517,6 +3536,203 @@ fn zrX(z3zE1756) {
 
     #[cfg(feature = "tracetool")]
     #[test]
+    fn itrace_records_concrete_jump_direction_even_when_successors_match() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        for taken in [true, false] {
+            let shared_state = empty_shared_state();
+            let mut frame = make_frame(vec![Instr::Jump(Exp::Bool(taken), 1, info()), Instr::End]);
+            let task_state = TaskState::new();
+            let queue = Worker::new_lifo();
+            let mut task_fraction = Fraction::one();
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::new(&ctx);
+            let result = run_loop(
+                0,
+                TaskId::from_usize(0),
+                &mut task_fraction,
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &task_state,
+                &shared_state,
+                &mut solver,
+            );
+            assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+            assert_eq!(frame.itrace_path.branch_edges_for_test(), vec![(test_name(25), 0, 1, taken)]);
+        }
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_submits_executed_jump_with_runtime_catalog_and_terminal_key() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut shared_state = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::Jump(Exp::Bool(true), 2, info()), Instr::End, Instr::End]);
+        let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Unit));
+        shared_state.functions.insert(test_name(25), (Vec::new(), ret_ty, frame.instrs));
+        let output_path = std::env::temp_dir().join(format!("itrace_runtime_jump_{}.txt", std::process::id()));
+        shared_state.itrace.set_path(Some(output_path.clone()));
+        shared_state.itrace.set_runtime_catalog(&shared_state);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        submit_itrace_for_local_frame_with_metadata(
+            &frame,
+            &shared_state,
+            Vec::new(),
+            crate::tracetool::ItraceTerminalMetadata {
+                scope: "runtime-jump".to_string(),
+                case_id: 5,
+                status: "retire".to_string(),
+                phase: "execute".to_string(),
+                path_signature: frame.path_signature(),
+            },
+        );
+        shared_state.itrace.dump();
+        let content = std::fs::read_to_string(&output_path).expect("read runtime jump itrace");
+        assert!(content.contains("---- runtime branch catalog ----"));
+        assert!(content.contains("\"target\":2"));
+        assert!(content.contains("case_id: 5"));
+        assert!(content.contains("branch_edge function="));
+        assert!(content.contains("successor=2 taken=true"));
+        if std::env::var_os("ITRACE_KEEP_TEST_OUTPUT").is_none() {
+            let _ = std::fs::remove_file(output_path);
+        }
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_records_both_sides_of_symbolic_fork_before_completion() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let var = test_name(100);
+        let mut frame = make_frame(vec![
+            Instr::Decl(var, Ty::Bool, info()),
+            Instr::Jump(Exp::Id(var), 3, info()),
+            Instr::End,
+            Instr::End,
+        ]);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        assert_eq!(frame.itrace_path.branch_edges_for_test(), vec![(test_name(25), 1, 3, true)]);
+        let child = queue.pop().expect("false path should be queued");
+        assert_eq!(child.frame.itrace_path.branch_edges_for_test(), vec![(test_name(25), 1, 2, false)]);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_records_only_satisfiable_jump_direction() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let var = test_name(100);
+        let mut frame = make_frame(vec![Instr::Jump(Exp::Id(var), 2, info()), Instr::End, Instr::End]);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        solver.add(smtlib::Def::Assert(smtlib::Exp::Var(symbol)));
+        frame.vars_mut().insert(var, UVal::Init(Val::Symbolic(symbol)));
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        assert_eq!(frame.itrace_path.branch_edges_for_test(), vec![(test_name(25), 0, 2, true)]);
+        assert!(queue.pop().is_none(), "unsatisfiable side must not be queued");
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_reaching_a_failed_jump_does_not_claim_an_edge() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::Jump(Exp::I64(1), 1, info()), Instr::End]);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Err(ExecError::Type(_, _))));
+        assert_eq!(frame.itrace_path.record_count(), 1);
+        assert!(frame.itrace_path.branch_edges_for_test().is_empty());
+        let output_path = std::env::temp_dir().join(format!("itrace_failed_jump_{}.txt", std::process::id()));
+        shared_state.itrace.set_path(Some(output_path.clone()));
+        submit_itrace_for_local_frame_with_metadata(
+            &frame,
+            &shared_state,
+            Vec::new(),
+            crate::tracetool::ItraceTerminalMetadata {
+                scope: "failed-jump".to_string(),
+                case_id: 17,
+                status: "error".to_string(),
+                phase: "execute".to_string(),
+                path_signature: frame.path_signature(),
+            },
+        );
+        shared_state.itrace.dump();
+        let content = std::fs::read_to_string(&output_path).expect("read failed jump itrace");
+        assert!(content.contains("case_id: 17"));
+        assert!(content.contains("status: error"));
+        assert!(!content.contains("branch_edge"));
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
     fn itrace_branch_condition_macros_record_current_and_forked_paths() {
         let shared_state = itrace_fixture_shared_state();
         let temp_dir = std::env::temp_dir();
@@ -3977,6 +4193,7 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
+        assert!(!frame.has_sampled_branch(), "unlimited symbolic fork must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
@@ -4049,6 +4266,7 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
+        assert!(!frame.has_sampled_branch(), "unlimited monomorphize must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
@@ -4087,6 +4305,11 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 0);
+        assert!(frame.has_sampled_branch(), "kept current model drops a satisfiable remainder");
+        assert!(
+            unfreeze_frame(&freeze_frame(&frame)).has_sampled_branch(),
+            "scheduler snapshots must retain incomplete sampling"
+        );
         assert!(child_fork_counts.lock().unwrap().is_empty());
     }
 
@@ -4296,7 +4519,7 @@ fn zrX(z3zE1756) {
         );
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
-        assert!(frame.itrace_path.records().iter().any(|record| {
+        assert!(frame.itrace_path.records().any(|record| {
             record.summary.as_deref().map_or(false, |summary| {
                 summary.contains("execution limit: max_path_depth exceeded")
                     && summary.contains("action=sample_branch_condition")
@@ -4330,7 +4553,7 @@ fn zrX(z3zE1756) {
         );
 
         assert!(matches!(result, Err(ExecError::DepthLimitReached)));
-        assert!(frame.itrace_path.records().iter().any(|record| {
+        assert!(frame.itrace_path.records().any(|record| {
             record.summary.as_deref().map_or(false, |summary| {
                 summary.contains("execution limit: max_path_depth exceeded") && summary.contains("action=truncate")
             })
