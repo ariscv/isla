@@ -76,6 +76,7 @@ VMTYPE VSRETYPE VSSEGTYPE VSSSEGTYPE VSXSEGTYPE ZICBOM ZICBOP ZICBOZ \
 FENCE FENCEI FENCE_TSO SFENCE_INVAL_IR SFENCE_VMA SFENCE_W_INVAL SINVAL_VMA
 
 ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
+FD_NONMEM_RV64 = $(filter-out $(MEMORY) FMVH_X_D FMVP_D_X,$(FD_FLOAT))
 
 # 进度计数器：make solve 开始时重置为 0，每个 solve-% 启动时用 flock 原子自增取号，
 # 配合下面的 TOTAL 打印形如 [3/243] solve-REM 的进度（类似 ninja/cmake 的 [n/total]）。
@@ -173,9 +174,7 @@ solve-ZVABDTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/zvabdtype.toml
 solve-ZVABDTYPE: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
 solve-ZVWABDATYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/zvwabdatatype.toml
 solve-ZVWABDATYPE: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
-solve-VFMERGE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vfmerge.toml
 solve-VFMERGE: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
-solve-VFMV: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vfmv.toml
 solve-VFMV: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
 solve-VFMVFS: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
 solve-VFMVSF: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
@@ -209,6 +208,7 @@ TIMEOUT_SMT_OUTPUT ?=
 TIMEOUT_SMT_DIR ?=
 TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
 TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
+TOTAL_FD_NONMEM_RV64=$(words $(FD_NONMEM_RV64))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
@@ -220,31 +220,22 @@ build-isarch:
 # 通过 make 变量 SOLVE_TOTAL 透传进来；首行打印 [n/TOTAL] solve-$*。
 solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
-	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
+	@n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
-	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
+	RUST_BACKTRACE=1 exec /usr/bin/python3 scripts/solve_process.py run --clause "$*" -- timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
 		-A $(IR_FILE) -C $(ISA_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
-		> output/log/$*.log 2>&1; \
-	status=$$?; \
-	if [ $$status -eq 124 ]; then \
-		echo "$* timeout" >> output/status.timeout.log; \
-	elif [ $$status -eq 0 ]; then \
-		echo "$* intime" >> output/status.intime.log; \
-	else \
-		echo "$* failed ($$status)" >> output/status.failed.log; \
-	fi; \
-	exit $$status
+		> output/log/$*.log 2>&1
 
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
+FD_NONMEM_SOLVE_TARGETS = $(addprefix solve-,$(FD_NONMEM_RV64))
 MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
 
 # FD/浮点 clause 需要启用 F/D 扩展的专用配置（sys_enable_fdext + mstatus FS=Dirty）。
 $(FD_FLOAT_SOLVE_TARGETS): ISA_CONFIG := ./configs/riscv64_difftest_fd.toml
 
-.PHONY: build-isarch solve solve-fd-float solve-memory
-# Ctrl-C 清理是【可选插件】：scripts/run_ctrl_c.mk 若存在，会给 solve-% 注入 Ctrl-C 清理逻辑
-# （pkill 掉后台 isarch）；缺失则不影响。-include 保证缺失不报错。
+.PHONY: build-isarch solve solve-fd-float solve-fd-nonmem solve-memory
+# 自动清理由每条 recipe 的 solve_process.py 负责；可选文件仅提供显式 PID 手动入口。
 -include scripts/run_ctrl_c.mk
 
 # solve-pre 作为所有 solve-XXX 的【真前置依赖】：make 的拓扑顺序保证它先跑完（重置进度
@@ -254,12 +245,14 @@ solve-pre:
 	@mkdir -p output/log output/trace outputs && echo 0 > $(COUNTER)
 .PHONY: solve-pre
 
-# 三个入口各自把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
+# 各入口把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
 # 然后【直接依赖】目标——单 make 进程并行跑（-j 正常生效、jobserver 不丢），无需递归 make。
 # （此前用“递归 make 注入 SOLVE_TOTAL”的写法会断 jobserver、降级串行，故弃用。）
 solve: SOLVE_TOTAL := $(TOTAL_ACTIVE_ALL)
 solve: $(SOLVE_TARGETS)
 solve-fd-float: SOLVE_TOTAL := $(TOTAL_FD_FLOAT)
 solve-fd-float: $(FD_FLOAT_SOLVE_TARGETS)
+solve-fd-nonmem: SOLVE_TOTAL := $(TOTAL_FD_NONMEM_RV64)
+solve-fd-nonmem: $(FD_NONMEM_SOLVE_TARGETS)
 solve-memory: SOLVE_TOTAL := $(TOTAL_MEMORY)
 solve-memory: $(MEMORY_SOLVE_TARGETS)
