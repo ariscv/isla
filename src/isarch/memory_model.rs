@@ -168,11 +168,18 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
         }
         // Sail 并发接口的 Bool 仅表示 exclusive/CAS 的成败；普通写的 Bool
         // 可以被调用方忽略，事件一旦发出就提交 Store 链。
-        let next_exp = if opts.is_exclusive() {
-            Exp::Ite(Box::new(Exp::Var(value)), Box::new(mem_exp), Box::new(Exp::Var(self.memory_var)))
-        } else {
-            mem_exp
-        };
+        // 独占写同理必已提交（F3，campaign24 七例 AMO 非 aqrl post==pre 的根因）：
+        // 模型的 write_ram 把并发接口的返回值丢弃（`Ok(_) => true`，
+        // phys_mem_interface.sail:109-115），AMO/SC 拿到的提交判定恒为具体 true，
+        // "未提交"分支在模型控制流里不可达——独占写事件一旦发出即已提交。
+        // 此前 Bool 保持自由，Z3 可任取 false：数组 Ite 选旧值、exec.rs 终值重放
+        // 按 write_success=Some(false) 跳过物化。SC 失败在模型里发生于写之前
+        // （vmem_write_addr 的 match_reservation 检查不满足时直接跳过写），
+        // 不经过本回调，故此处钉死 Bool=true 不吞掉任何合法路径。
+        if opts.is_exclusive() {
+            solver.add(Def::Assert(Exp::Var(value)));
+        }
+        let next_exp = mem_exp;
         self.memory_var = solver.fresh();
         solver.add(Def::DefineConst(self.memory_var, next_exp));
 
@@ -338,28 +345,45 @@ mod tests {
     }
 
     #[test]
-    fn 独占失败写不改变先前读出的字节() {
+    fn 独占写事件按模型语义必已提交_bool钉为真() {
+        // F3（campaign24，7 例 AMO 非 aqrl post==pre）：Sail 模型的 write_ram 对
+        // 并发接口返回值 `Ok(_) => true`（phys_mem_interface.sail:109-115，IR
+        // zwrite_ram 中 zz410 = true），独占写 Bool 被调用方丢弃、永不约束——
+        // Z3 可任取 false，使数组 Ite 选旧值、终值重放按 write_success=Some(false)
+        // 跳过物化。模型语义上独占写事件一旦发出即已提交（SC 失败发生在写之前，
+        // 不经过本回调），注入期必须把 Bool 钉为真。
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
         install_seq_memory(&mut memory, 64, &mut solver);
         let address = Val::Bits(B64::new(0x1000, 64));
-        let before = read_bytes(&memory, &mut solver, address.clone(), 1);
         let write_result = write_bytes_exclusive(&mut memory, &mut solver, address.clone(), B64::new(0xA5, 8));
-        solver.add(Def::Assert(Exp::Not(Box::new(Exp::Var(write_sym(&write_result))))));
-        let after = read_bytes(&memory, &mut solver, address, 1);
-
-        assert!(matches!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat));
+        // 调用方不追加任何方向断言：Bool 本身必须已被钉为真
         expect_unsat(
             &mut solver,
-            Exp::Neq(Box::new(Exp::Var(read_sym(&before))), Box::new(Exp::Var(read_sym(&after)))),
-            "失败写前后读值不变",
+            Exp::Not(Box::new(Exp::Var(write_sym(&write_result)))),
+            "独占写 Bool 必须为真（模型语义必已提交）",
         );
-        expect_sat_with(
+        let after = read_bytes(&memory, &mut solver, address, 1);
+        expect_unsat(
             &mut solver,
             Exp::Neq(Box::new(Exp::Var(read_sym(&after))), Box::new(bits64(0xA5, 8))),
-            "失败写没有钉住写数据",
+            "独占写后读值必须等于写数据",
         );
+    }
+
+    #[test]
+    fn 独占写失败分支在注入后不可表达() {
+        // 原"独占失败写"场景（调用方事后断言 Bool=false）在钉真后必须整体 Unsat：
+        // 这不是合法路径，而是模型不变量违反，防御式地让断言方直接看到矛盾。
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let mut memory = Memory::<B64>::new();
+        install_seq_memory(&mut memory, 64, &mut solver);
+        let address = Val::Bits(B64::new(0x1000, 64));
+        let write_result = write_bytes_exclusive(&mut memory, &mut solver, address, B64::new(0xA5, 8));
+        solver.add(Def::Assert(Exp::Not(Box::new(Exp::Var(write_sym(&write_result))))));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Unsat, "独占写 Bool=false 分支必须不可满足");
     }
 
     #[test]
@@ -382,34 +406,23 @@ mod tests {
     }
 
     #[test]
-    fn 独占符号写结果的真假两臂均可满足且各自一致() {
+    fn 独占符号写提交后读值与先前读取解耦() {
+        // 钉真后不存在"真假两臂"：独占写无条件提交，写后读值恒等于写数据，
+        // 与写前读值是否一致无关（写数据可以覆盖任意先前内容）。
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
         install_seq_memory(&mut memory, 64, &mut solver);
         let address = Val::Bits(B64::new(0x1000, 64));
-        let before = read_bytes(&memory, &mut solver, address.clone(), 1);
+        let _before = read_bytes(&memory, &mut solver, address.clone(), 1);
         let write_result = write_bytes_exclusive(&mut memory, &mut solver, address.clone(), B64::new(0xA5, 8));
         let after = read_bytes(&memory, &mut solver, address, 1);
-        let write_bool = Exp::Var(write_sym(&write_result));
 
-        expect_sat_with(&mut solver, write_bool.clone(), "成功写分支");
-        expect_sat_with(&mut solver, Exp::Not(Box::new(write_bool.clone())), "失败写分支");
+        expect_sat_with(&mut solver, Exp::Var(write_sym(&write_result)), "独占写 Bool 恒真");
         expect_unsat(
             &mut solver,
-            Exp::And(
-                Box::new(write_bool.clone()),
-                Box::new(Exp::Neq(Box::new(Exp::Var(read_sym(&after))), Box::new(bits64(0xA5, 8)))),
-            ),
-            "成功写后值等于写数据",
-        );
-        expect_unsat(
-            &mut solver,
-            Exp::And(
-                Box::new(Exp::Not(Box::new(write_bool))),
-                Box::new(Exp::Neq(Box::new(Exp::Var(read_sym(&before))), Box::new(Exp::Var(read_sym(&after))))),
-            ),
-            "失败写前后值相等",
+            Exp::Neq(Box::new(Exp::Var(read_sym(&after))), Box::new(bits64(0xA5, 8))),
+            "独占写后读值必须等于写数据",
         );
     }
 

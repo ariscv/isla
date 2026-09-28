@@ -250,8 +250,18 @@ where
         Ok(cloned)
     }
 
-    fn vector_context_registers(&self) -> &'static [&'static str] {
-        &[]
+    /// 必输出寄存器判定：即使当前路径未约束（模型取 Arbitrary），也必须以
+    /// complete model 补齐具体值写入 isa-state 的寄存器。默认无必输出寄存器。
+    ///
+    /// 原 `vector_context_registers`（RV64 覆写 vl/vstart/vtype/vcsr）的扩展
+    /// （F4，campaign24 30 例 ok 路径 post-mismatch）：f0-f31/vr0-vr31 与 V 上
+    /// 下文同因——访存路径只把寄存器值织进 DefineConst 链、不产生断言，最终
+    /// 模型不解释即被 arbitrary 过滤丢弃；而 JSON 的 post-memory 写数据又经
+    /// complete model 补全输出具体值，重放侧没有 isa-state 初值可编程
+    /// FPR/VPR，只能用 emu 自身复位值，post 期望不可比。寄存器值必须与 post
+    /// 数据同源输出。
+    fn must_output_register(&self, reg_name: &str) -> bool {
+        false
     }
 
     fn setup_pre_state<'ir>(
@@ -335,9 +345,8 @@ where
     ) -> Result<BTreeMap<String, String>, ExecError> {
         let pre_state = self.pre_state();
         let symtab = &shared_state.symtab;
-        let vector_context_registers = self.vector_context_registers();
         let mut result = BTreeMap::new();
-        let mut arbitrary_vector_context_registers = Vec::new();
+        let mut arbitrary_must_output_registers = Vec::new();
         for (name, val) in pre_state.iter() {
             let reg_name = zencode::decode(symtab.to_str(*name));
             // 将 pre_state 中的符号表达式用最终 SMT model 求值并转换为 ISA 状态字符串。
@@ -348,9 +357,12 @@ where
                     //（complete_model=false 下，z3 对从未出现在断言中的声明常量返回 Arbitrary）。
                     // 这类寄存器对当前指令路径没有实际约束，跳过不输出，避免 isa-state 被全 0
                     // 的 arbitrary 值淹没，只保留真正被符号执行约束过的 pre-state。
+                    // 例外（must_output_register）：V 上下文与 f/v 寄存器堆（F4）即使
+                    // 未约束也必须输出——重放侧需要用与 post-memory 同源的模型值编程
+                    // FPR/VPR 初值，缺失会让 emu 退回自身复位值、post 期望不可比。
                     if fmt_val.is_arbitrary() {
-                        if vector_context_registers.contains(&reg_name.as_str()) {
-                            arbitrary_vector_context_registers.push((*name, val));
+                        if self.must_output_register(&reg_name) {
+                            arbitrary_must_output_registers.push((*name, val));
                         }
                         continue;
                     }
@@ -367,14 +379,14 @@ where
             }
         }
 
-        if !arbitrary_vector_context_registers.is_empty() {
-            // 向量上下文即使未影响当前路径也必须输出，因此开启 complete model 补齐其具体值。
+        if !arbitrary_must_output_registers.is_empty() {
+            // 必输出寄存器即使未影响当前路径也必须输出，因此开启 complete model 补齐其具体值。
             model.set_complete_model(true);
-            for (name, val) in arbitrary_vector_context_registers {
+            for (name, val) in arbitrary_must_output_registers {
                 let reg_name = zencode::decode(symtab.to_str(name));
                 let fmt_val = FmtVal::from_val(val, model)?;
                 if fmt_val.is_arbitrary() {
-                    panic!("防御性编程：complete model 未能具化 V 上下文寄存器 {}", reg_name);
+                    panic!("防御性编程：complete model 未能具化必输出寄存器 {}", reg_name);
                 }
                 result.insert(reg_name, fmt_val.to_str(shared_state));
             }
@@ -790,8 +802,17 @@ impl<B: BV> Target<B> for RV64<B> {
         regs.push("vcsr".to_string());
         regs
     }
-    fn vector_context_registers(&self) -> &'static [&'static str] {
-        &["vl", "vstart", "vtype", "vcsr"]
+    fn must_output_register(&self, reg_name: &str) -> bool {
+        // V 上下文寄存器沿用原必输出集合；f0-f31/vr0-vr31 为 F4 扩展（见 trait
+        // 默认实现的注释），复用 is_vector_register_name 的 vr 判定形态。
+        if matches!(reg_name, "vl" | "vstart" | "vtype" | "vcsr") {
+            return true;
+        }
+        let digits = reg_name.strip_prefix("vr").or_else(|| reg_name.strip_prefix('f')).unwrap_or("");
+        !digits.is_empty()
+            && digits.len() <= 2
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && digits.parse::<u32>().map(|index| index < 32).unwrap_or(false)
     }
     fn constrain_pre_state<'ir>(
         &self,
@@ -1361,7 +1382,18 @@ mod tests {
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "64");
         assert_eq!(target.xlen_name(), "rv64");
-        assert_eq!(target.vector_context_registers(), ["vl", "vstart", "vtype", "vcsr"]);
+        for register_name in ["vl", "vstart", "vtype", "vcsr"] {
+            assert!(target.must_output_register(register_name));
+        }
+        // F4：f/v 寄存器堆同样必输出
+        for index in [0, 9, 31] {
+            assert!(target.must_output_register(&format!("f{index}")));
+            assert!(target.must_output_register(&format!("vr{index}")));
+        }
+        // 边界负例：x 寄存器、越界编号、非寄存器名不在此列
+        for register_name in ["x1", "f32", "f100", "vr32", "fx", "fr", "fcsr", "vlx"] {
+            assert!(!target.must_output_register(register_name), "{} 不应是必输出寄存器", register_name);
+        }
         // fd92696 起 reg_list 即 setup_pre_state 的待符号化集合：
         // x0（恒零）与 PC（取指驱动）不符号化，排除逻辑在数据源完成
         let regs = target.reg_list();
@@ -1389,7 +1421,8 @@ mod tests {
         assert_eq!(target.arch_name(), "riscv");
         assert_eq!(target.xlen(), "32");
         assert_eq!(target.xlen_name(), "rv32");
-        assert!(target.vector_context_registers().is_empty());
+        assert!(!target.must_output_register("vl"));
+        assert!(!target.must_output_register("f0"));
         assert!(target.reg_list().contains(&"vtype".to_string()));
         assert!(target.reg_list().contains(&"vl".to_string()));
         assert!(target.reg_list().contains(&"vstart".to_string()));
@@ -1554,6 +1587,48 @@ mod tests {
         assert_eq!(state.len(), vector_context_registers.len());
         for register_name in vector_context_registers {
             assert!(state.contains_key(register_name), "{} 必须被写入 isa-state", register_name);
+        }
+    }
+
+    #[test]
+    fn solve_pre_state_serializes_arbitrary_fpr_and_vpr_registers() {
+        // F4（campaign24，30 例 ok 路径 post-mismatch）：f/v 寄存器在 pre_state
+        // 有符号，但访存路径只把它们的值织进 DefineConst 链、不产生断言，最终
+        // 模型不解释 → arbitrary 过滤把它们从 isa-state 丢弃 → 重放无法编程
+        // FPR/VPR，emu 用自身复位值与 JSON post（经 complete model 补全的值）
+        // 不可比。f0-f31 / vr0-vr31 必须与 V 上下文寄存器同机制必输出。
+        let float_registers: Vec<String> = (0..32).map(|index| format!("f{index}")).collect();
+        let vector_registers: Vec<String> = (0..32).map(|index| format!("vr{index}")).collect();
+        let expected_registers: Vec<String> =
+            float_registers.iter().cloned().chain(vector_registers.iter().cloned()).collect();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let mut target = rv64();
+
+        let encoded_register_names: Vec<String> =
+            expected_registers.iter().map(|register_name| zencode::encode(register_name)).collect();
+        for (register_name, encoded_register_name) in expected_registers.iter().zip(encoded_register_names.iter()) {
+            let register = symtab.intern(encoded_register_name);
+            let width = if register_name.starts_with("f") { 64 } else { 128 };
+            let value = Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(width), SourceLoc::unknown()));
+            target.pre_state.insert(register, value);
+        }
+
+        let shared_state = SharedState::empty(symtab);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        let state = target.solve_pre_state(&mut model, &shared_state).unwrap();
+
+        for register_name in &expected_registers {
+            assert!(state.contains_key(register_name), "{} 必须被写入 isa-state", register_name);
+            let expected_prefix = if register_name.starts_with('f') { "64'h" } else { "128'h" };
+            assert!(
+                state[register_name].starts_with(expected_prefix),
+                "{} 必须是具体位向量值，实际 {}",
+                register_name,
+                state[register_name]
+            );
         }
     }
 
