@@ -330,10 +330,11 @@ struct，如 mstatus `struct zMstatus { zbits: %bv64 }`，w≤64）声明 solver
 [symbolic_registers]
 satp = "symbolic"              # 字符串形式：整寄存器符号化，无位约束
 
-[symbolic_registers.mstatus]   # 表形式：可选位级钉死 + 位组域约束
-pin_mask  = "0x8000003000000000"   # SD(63)|MBE(37)|SBE(36)
-pin_value = "0x0"                  # 钉死为小端 + 初始非脏
+[symbolic_registers.mstatus]   # 表形式：位级钉死 + 位组域 + 派生位等价
+pin_mask  = "0x0000183C00000000"   # MBE(37)|SBE(36)|UXL(44:43)|SXL(35:34)
+pin_value = "0x0000100800000000"   # 小端 + XLEN=64（UXL/SXL=0b10）
 nonzero_groups = [[13, 14]]        # FS[14:13] != Off
+derive_bit = { bit = 63, groups = [[14, 13], [10, 9], [16, 15]] }  # SD 派生
 ```
 
 - `pin_mask/pin_value`：注入后断言 `(sym & mask) == value`，钉死位不产生
@@ -345,20 +346,34 @@ nonzero_groups = [[13, 14]]        # FS[14:13] != Off
   意义的取值域"——solve-state 绕过 decode，clause execute 本体不读 FS，
   纯符号时模型任意值取 0 会让 encdec 守卫恒假；FS≠0 域约束是 decode
   守卫语义的最小复刻（FS=Off 的路径本就会被 encdec 物化门丢弃，合法）。
-- 钉死位选择（mstatus/RV64）：SD=只读状态镜像（dirty 投影）、MBE/SBE=
-  大小端必须小端（模型与 emu 重放均 LE）；FS/VS/MPP/SPP/MPIE/MIE/SPIE/
-  SIE/TVM/MXR/SUM/MPRV/TSR/TW/UXL/SXL 等保持符号。
+- `derive_bit`（W22）：派生位等价约束，**双向**断言
+  `target 位 == OR(每组组内全 1)`——任一组全 1 则 target 必 1，target 为 1
+  则必有某组全 1。用于只读镜像位：mstatus.SD ⇔ FS=Dirty ∨ VS=Dirty ∨
+  XS=Dirty。W21 曾钉 SD=0，与 FS/VS/XS 可取 Dirty 矛盾；且重放侧 CSR 写
+  经 WARL（IR `zlegalizze_mstatus`）按同一投影重算 SD，前态不自洽的模型值
+  会被 emu 改写、重放不可比——派生等价保证模型值架构自洽。派生位与组内
+  位不得与 pin_mask 重叠，派生位不得出现在组内（自引用退化）。
+- 钉死位选择（mstatus/RV64）：MBE/SBE=大小端必须小端（模型与 emu 重放均
+  LE）、UXL/SXL=64 位（W22：模型 XLEN 固定 64，其他取值是矛盾状态；编码同 misa.MXL，64 位=0b10）；SD 由
+  derive_bit 派生（W22，原 W21 钉 0）；FS/VS/MPP/SPP/MPIE/MIE/SPIE/
+  SIE/TVM/MXR/SUM/MPRV/TSR/TW/XS 等保持符号。
 - 冲突硬失败（防歧义）：与 `[registers.defaults]` 同名（解析期）、与
   `[pmp]` 规则注入的 pmpcfg/pmpaddr（isarch_main 复查）、与 CLI
   `--prestate` 同名（启动期）；未知寄存器名（不在 symtab）解析期报错。
 - 未声明任何符号 CSR 时全链路零开销（门直接用原寄存器表）。
 
-验收（FD 恢复）：`configs/riscv64_difftest_mem_excluded_pma_csr_sym.toml`
+验收（FD 恢复，W21）：`configs/riscv64_difftest_mem_excluded_pma_csr_sym.toml`
 下 C_FLD/C_FLDSP 各 gen=32（24 AccessFault+8 Retire_Success）、
 C_FSD/C_FSDSP 各 gen=24（16+8），与 G8 日志"已执行但被物化丢弃"的分布
 逐项一致；isa-state 的 mstatus 模型值全部 FS≠0 且钉死位全 0。对照观察：
 zSTORE（非 FD clause）新旧配置 gen=128（104 AF+24 RS）、fork 数 514、
 耗时 6s 逐项一致——符号化声明对不读 FS 门的 clause 无分布影响。
+
+W22 修订复验（SD 派生 + UXL/SXL=0b10）：FD 四 clause gen=20/20/15/15、
+zSTORE gen=80，ME:RS 比例逐项保持（3:1/2:1/13:3）；隔离实验证明 SD 派生
+对分布零影响（仅加派生时与 W21 逐项一致），缩量全部来自 UXL/SXL 钉死
+折叠矛盾 XLEN 态（W21 样本 24 例中 15 例 SXL∈{00,01}）；全部模型值
+SD/FS/UXL/SXL/MBE/SBE 自洽违例 0、物化 100%。见 W22 验收产物 RESULT.txt。
 
 全 CSR 逐项审计（misa/satp/mcountinhibit/mcyclecfg/minstretcfg/
 mtimecmp/stimecmp/PMP 族：符号化/部分钉死/保持钉死三档建议 + PMP 与

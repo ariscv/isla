@@ -421,25 +421,40 @@ pub struct PmpConfig {
     pub symbolic: bool,
 }
 
+/// W22：`derive_bit` 派生位约束。声明"target 位 ⇔ OR(每组组内全 1)"的
+/// **双向等价**（不是单向蕴含）：任一组全 1 则 target 位必为 1；target 位为 1
+/// 则必有某组全 1。用于架构只读镜像位——如 mstatus.SD ⇔ FS=Dirty(11) ∨
+/// VS=Dirty(11) ∨ XS=Dirty(11)。钉 0 会与位组自由取值矛盾（组可取 Dirty），
+/// 派生等价保持模型值架构自洽（重放侧 CSR 写经 WARL 合法化会按同一投影重算
+/// SD，前态不自洽的值在 emu 内被改写、重放不可比）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedBitConfig {
+    pub bit: u32,
+    pub groups: Vec<Vec<u32>>,
+}
+
 /// W21：`[symbolic_registers]` 声明的 CSR 符号化条目。寄存器不再从
 /// `[registers.defaults]` 取具体值（那里同名即冲突硬失败），改在 solve-state
 /// 启动、checkpoint 之前注入 solver 期符号常量（见 target.rs
 /// `apply_symbolic_csrs_to_registers`）。
 ///
 /// - `pin_mask`/`pin_value`：位级钉死。注入后附加 `(sym & mask) == value` 断言，
-///   钉死位不产生探索分支（如 mstatus 的 MBE/SBE 必须小端、SD 只读镜像）。
+///   钉死位不产生探索分支（如 mstatus 的 MBE/SBE 必须小端、UXL/SXL 固定 64 位）。
 /// - `nonzero_groups`：位组非全零域约束。每组断言"组内位按位或 != 0"——用于
 ///   表达"该位组有探索意义的取值域"（如 mstatus[FS]≠Off：solve-state 绕过
 ///   decode，执行本体不读 FS，纯符号时模型任意值取 0 会令 encdec 守卫
 ///   `currentlyEnabled` 恒假；把 FS≠0 声明为取值域是对 decode 守卫语义的
 ///   最小复刻）。组内位不得与 pin_mask 重叠（钉死位的组约束是恒真或恒假，
 ///   配置歧义，硬失败）。
+/// - `derive_bit`（W22）：派生位等价约束，见 [DerivedBitConfig]。派生位与
+///   组内位都不得与 pin_mask 重叠，派生位不得出现在任何组内（自引用退化）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolicRegisterConfig {
     pub name: String,
     pub pin_mask: u64,
     pub pin_value: u64,
     pub nonzero_groups: Vec<Vec<u32>>,
+    pub derive_bit: Option<DerivedBitConfig>,
 }
 
 fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
@@ -885,10 +900,11 @@ fn get_clint_enabled(config: &Value) -> Result<Option<bool>, String> {
 /// [symbolic_registers]
 /// mstatus = "symbolic"                    # 整寄存器符号化，无位约束
 ///
-/// [symbolic_registers.mstatus]            # 表形式：可选位级钉死 + 位组非零域
-/// pin_mask  = "0x8000003000000000"        # SD(63)|MBE(37)|SBE(36)
-/// pin_value = "0x0"
+/// [symbolic_registers.mstatus]            # 表形式：位级钉死 + 位组域 + 派生位
+/// pin_mask  = "0x0000183C00000000"        # MBE(37)|SBE(36)|UXL(44:43)|SXL(35:34)
+/// pin_value = "0x0000100800000000"        # 小端 + XLEN=64
 /// nonzero_groups = [[13, 14]]             # FS != Off
+/// derive_bit = { bit = 63, groups = [[14, 13], [10, 9], [16, 15]] }  # SD 派生
 /// ```
 ///
 /// 与 `[registers.defaults]` 同名冲突（含 PMP 规则注入的 pmpcfg/pmpaddr，
@@ -919,6 +935,7 @@ fn get_symbolic_registers<B: BV>(
         let mut pin_mask = 0;
         let mut pin_value = 0;
         let mut nonzero_groups = Vec::new();
+        let mut derive_bit = None;
         match entry {
             Value::String(text) if text == "symbolic" => (),
             Value::String(other) => {
@@ -931,7 +948,7 @@ fn get_symbolic_registers<B: BV>(
                 allowed_table_keys(
                     sub,
                     &format!("symbolic_registers.{}", name),
-                    &["pin_mask", "pin_value", "nonzero_groups"],
+                    &["pin_mask", "pin_value", "nonzero_groups", "derive_bit"],
                 )?;
                 if let Some(value) = sub.get("pin_mask") {
                     pin_mask = parse_u64_value(value, &format!("symbolic_registers.{}.pin_mask", name))?;
@@ -984,6 +1001,7 @@ fn get_symbolic_registers<B: BV>(
                         nonzero_groups.push(parsed_group);
                     }
                 }
+                derive_bit = parse_derive_bit(sub, &format!("symbolic_registers.{}", name), pin_mask)?;
             }
             _ => {
                 return Err(format!("symbolic_registers.{} 只接受 \"symbolic\" 字符串或子表，实际 {}", name, entry));
@@ -993,11 +1011,74 @@ fn get_symbolic_registers<B: BV>(
         if registers.iter().any(|existing: &SymbolicRegisterConfig| &existing.name == name) {
             return Err(format!("symbolic_registers.{} 重复声明", name));
         }
-        registers.push(SymbolicRegisterConfig { name: name.to_string(), pin_mask, pin_value, nonzero_groups });
+        registers.push(SymbolicRegisterConfig {
+            name: name.to_string(),
+            pin_mask,
+            pin_value,
+            nonzero_groups,
+            derive_bit,
+        });
     }
     // toml 表迭代按字典序：显式排序保证注入次序与输出确定性
     registers.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(registers)
+}
+
+/// 解析 `derive_bit = { bit, groups }`（W22）。位号/组形状/与 pin_mask 的
+/// 冲突/自引用都在这里硬失败；与实际寄存器位宽的比较在注入期（配置期不知宽）。
+fn parse_derive_bit(sub: &toml::value::Table, root: &str, pin_mask: u64) -> Result<Option<DerivedBitConfig>, String> {
+    let Some(value) = sub.get("derive_bit") else { return Ok(None) };
+    let table = value.as_table().ok_or_else(|| format!("{}.derive_bit 应为 {{ bit, groups }} 表", root))?;
+    allowed_table_keys(table, &format!("{}.derive_bit", root), &["bit", "groups"])?;
+
+    let bit =
+        table.get("bit").and_then(Value::as_integer).ok_or_else(|| format!("{}.derive_bit.bit 应为非负整数", root))?;
+    let Ok(bit) = u32::try_from(bit) else {
+        return Err(format!("{}.derive_bit.bit 位号超出 u32", root));
+    };
+    if bit >= 64 {
+        return Err(format!("{}.derive_bit.bit 位号 {} 超出 64 位 CSR 宽度", root, bit));
+    }
+    if pin_mask >> bit & 1 == 1 {
+        return Err(format!("{}.derive_bit.bit 位 {} 与 pin_mask 钉死位重叠：派生位不得再钉死", root, bit));
+    }
+
+    let groups_value = table.get("groups").ok_or_else(|| format!("{}.derive_bit.groups 是必填项", root))?;
+    let groups_raw = groups_value.as_array().ok_or_else(|| format!("{}.derive_bit.groups 应为位数组的数组", root))?;
+    if groups_raw.is_empty() {
+        return Err(format!(
+            "{}.derive_bit.groups 不接受空数组：无组的派生等价于把派生位钉 0，请直接用 pin_mask",
+            root
+        ));
+    }
+
+    let mut groups = Vec::with_capacity(groups_raw.len());
+    for group in groups_raw {
+        let bits = group.as_array().ok_or_else(|| format!("{}.derive_bit.groups 的每个组应为位数组", root))?;
+        if bits.is_empty() {
+            return Err(format!("{}.derive_bit.groups 不接受空组", root));
+        }
+        let mut parsed_group = Vec::with_capacity(bits.len());
+        for bit_value in bits {
+            let index = bit_value.as_integer().ok_or_else(|| format!("{}.derive_bit.groups 的位应为非负整数", root))?;
+            let Ok(index) = u32::try_from(index) else {
+                return Err(format!("{}.derive_bit.groups 位号超出 u32", root));
+            };
+            if index >= 64 {
+                return Err(format!("{}.derive_bit.groups 位号 {} 超出 64 位 CSR 宽度", root, index));
+            }
+            if pin_mask >> index & 1 == 1 {
+                return Err(format!("{}.derive_bit.groups 位 {} 与 pin_mask 钉死位重叠", root, index));
+            }
+            if index == bit {
+                return Err(format!("{}.derive_bit 派生位 {} 出现在组内：自引用等价无法表达镜像语义", root, bit));
+            }
+            parsed_group.push(index);
+        }
+        groups.push(parsed_group);
+    }
+
+    Ok(Some(DerivedBitConfig { bit, groups }))
 }
 
 struct Toolchain {
@@ -2701,11 +2782,114 @@ mod tests {
                     pin_mask: 0x8000_0030_0000_0000,
                     pin_value: 0,
                     nonzero_groups: vec![vec![13, 14]],
+                    derive_bit: None,
                 },
-                SymbolicRegisterConfig { name: "satp".to_string(), pin_mask: 0, pin_value: 0, nonzero_groups: vec![] },
+                SymbolicRegisterConfig {
+                    name: "satp".to_string(),
+                    pin_mask: 0,
+                    pin_value: 0,
+                    nonzero_groups: vec![],
+                    derive_bit: None,
+                },
             ]
         );
         let _ = satp;
+    }
+
+    /// W22：derive_bit 派生位约束解析（mstatus.SD 形状：位 63 ⇔ 三组全 1 的或）。
+    #[test]
+    fn symbolic_registers_parses_derive_bit() {
+        let (symtab, defaults) = symbolic_registers_fixture(&["mstatus"]);
+        let value = r#"
+            [symbolic_registers.mstatus]
+            pin_mask = "0x0000183C00000000"
+            pin_value = "0x0000100800000000"
+            nonzero_groups = [[13, 14]]
+            derive_bit = { bit = 63, groups = [[14, 13], [10, 9], [16, 15]] }
+        "#
+        .parse::<Value>()
+        .unwrap();
+        assert_eq!(
+            get_symbolic_registers(&value, &symtab, &defaults).unwrap(),
+            vec![SymbolicRegisterConfig {
+                name: "mstatus".to_string(),
+                pin_mask: 0x0000_183C_0000_0000,
+                pin_value: 0x0000_1008_0000_0000,
+                nonzero_groups: vec![vec![13, 14]],
+                derive_bit: Some(DerivedBitConfig { bit: 63, groups: vec![vec![14, 13], vec![10, 9], vec![16, 15]] }),
+            }]
+        );
+    }
+
+    /// W22：derive_bit 非法配置全部硬失败（钉死冲突、自引用、空组、形状错误）。
+    #[test]
+    fn symbolic_registers_derive_bit_hard_fails() {
+        let cases = [
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 64, groups = [[14, 13]] }"#,
+                "派生位号超出 64 位",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { groups = [[14, 13]] }"#,
+                "缺 bit",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 63 }"#,
+                "缺 groups",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 63, groups = [] }"#,
+                "空 groups",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 63, groups = [[]] }"#,
+                "空组",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 63, groups = [[64]] }"#,
+                "组内位号超出 64 位",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                pin_mask = "0x8000000000000000"
+                pin_value = "0x0"
+                derive_bit = { bit = 63, groups = [[14, 13]] }"#,
+                "派生位与钉死位重叠",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                pin_mask = "0x2000"
+                pin_value = "0x0"
+                derive_bit = { bit = 63, groups = [[14, 13]] }"#,
+                "组内位与钉死位重叠",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 13, groups = [[14, 13]] }"#,
+                "派生位出现在组内（自引用）",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = { bit = 63, groups = [[14, 13]], extra = 1 }"#,
+                "未知子键",
+            ),
+            (
+                r#"[symbolic_registers.mstatus]
+                derive_bit = 63"#,
+                "derive_bit 不是表",
+            ),
+        ];
+        for (toml, why) in cases {
+            let (symtab, defaults) = symbolic_registers_fixture(&["mstatus"]);
+            let value = toml.parse::<Value>().unwrap();
+            assert!(get_symbolic_registers(&value, &symtab, &defaults).is_err(), "{} 应报错", why);
+        }
     }
 
     #[test]

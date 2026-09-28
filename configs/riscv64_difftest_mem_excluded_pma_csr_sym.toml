@@ -1,7 +1,9 @@
 # This is a config for Sail RISC-V in 64-bit mode
-# 在 riscv64_difftest_mem_excluded_pma.toml 基础上演示 W21 CSR 符号化：
+# 在 riscv64_difftest_mem_excluded_pma.toml 基础上演示 W21 CSR 符号化
+# （W22 修订：SD 改派生等价、UXL/SXL 钉 64 位）：
 #   - mstatus 从 [registers.defaults] 摘除（0x600=VS Dirty/FS Off），改挂
-#     [symbolic_registers.mstatus]：solver 期符号注入 + 位级钉死 + 位组域约束；
+#     [symbolic_registers.mstatus]：solver 期符号注入 + 位级钉死 + 位组域约束
+#     + 派生位等价约束；
 #   - 其余与 _excluded_pma 逐字一致（memory_regions / pma_regions / PMP 钉死）。
 # 效果（G8 根因的修复）：encdec/assembly 物化门按当前路径模型的 mstatus 评估
 # currentlyEnabled(Ext_Zcd)，FS≠0 路径可物化 C_FLD/C_FSD/C_FLDSP/C_FSDSP。
@@ -84,26 +86,33 @@ __isla_always_aligned = "true"
 "pmpcfg_n" = "[ { bits = 0x1f } ; 64 ]"
 "pmpaddr_n" = "[ 0xffffffffffffffff ; 64 ]"
 
-# === W21：CSR 符号化声明 ===
+# === W21/W22：CSR 符号化声明 ===
 # mstatus 结构为 struct zMstatus { zbits: %bv64 }（rv64d.ir:3310），注入按
 # 64 位平铺位向量处理。用户原则：无探索意义的位钉死，其余符号。
 #   - pin_mask/pin_value（位级钉死，注入后断言 (sym & mask) == value）：
-#     * SD(bit63)=0：只读状态镜像（SD = FS|XS|VS dirty 投影），pre-state 钉
-#       "初始非脏"与执行期 dirty 更新语义一致，符号化无探索意义；
 #     * MBE(bit37)=0 / SBE(bit36)=0：大小端必须小端——模型与 emu 重放均 LE，
 #       符号化只开 BE 分支噪声，重放不可比。
+#     * UXL[44:43]=10 / SXL[35:34]=10（W22）：模型 XLEN 固定 64。编码同
+#       misa.MXL（types.sail：RV64<->0b10、RV128<->0b11），RV32(01)/保留(00)/
+#       RV128(11) 对固定 64 位模型都是矛盾状态，与 MBE/SBE 同类。
 #   - nonzero_groups（位组非全零域约束）：FS[14:13]≠Off。solve-state 绕过
 #     decode，clause execute 本体不读 FS（G8：路径 24 AF+8 成功与整数同型），
 #     纯符号时模型任意值取 0 会让 encdec 守卫 currentlyEnabled(Ext_Zcd) 恒假；
 #     把 FS≠0 声明为取值域是 decode 守卫语义的最小复刻，FS=00 本就会被
 #     encdec 物化门丢弃（合法路径不丢）。
-#   - 其余位（MIE/MPIE/SIE/SPIE/MPP/SPP/MPRV/MXR/SUM/TVM/TSR/TW/UXL/SXL/
-#     VS/XS/WPRI…）保持符号：MPP 影响特权态迁移、MPRV 开 M 态翻译语义、
+#   - derive_bit（W22 派生位等价约束，双向）：SD(bit63) ⇔ FS[14:13]=11 ∨
+#     VS[10:9]=11 ∨ XS[16:15]=11。W21 曾钉 SD=0，与 FS/VS/XS 可自由取 Dirty
+#     矛盾（架构上 SD 是 dirty 投影只读镜像）；重放侧 CSR 写经 WARL 合法化
+#     （zlegalizze_mstatus）按同一投影重算 SD，前态不自洽的模型值会被 emu
+#     改写、重放不可比。等价断言保证生成的 mstatus 模型值架构自洽。
+#   - 其余位（MIE/MPIE/SIE/SPIE/MPP/SPP/MPRV/MXR/SUM/TVM/TSR/TW/VS/XS/
+#     WPRI…）保持符号：MPP 影响特权态迁移、MPRV 开 M 态翻译语义、
 #     VS 开 V 上下文分支，均有探索价值（分布影响见 W21 对照记录）。
 [symbolic_registers.mstatus]
-pin_mask = "0x8000003000000000"
-pin_value = "0x0"
+pin_mask = "0x0000183C00000000"
+pin_value = "0x0000100800000000"
 nonzero_groups = [[13, 14]]
+derive_bit = { bit = 63, groups = [[14, 13], [10, 9], [16, 15]] }
 
 [const_primops]
 get_config_print_reg = false

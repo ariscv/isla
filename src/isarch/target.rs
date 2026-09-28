@@ -96,7 +96,8 @@ where
 
     /// W21：CSR 符号化注入（setup_pre_state 之后、checkpoint 之前）。对每个
     /// 声明的 CSR 按其 IR 类型声明 solver 符号常量、附加位级钉死断言
-    /// `(sym & pin_mask) == pin_value` 与位组非零域断言（组内按位或 != 0），
+    /// `(sym & pin_mask) == pin_value`、位组非零域断言（组内按位或 != 0）与
+    /// 派生位等价断言（W22：target 位 ⇔ OR(每组组内全 1)，双向），
     /// 然后覆盖执行帧寄存器并同步 pre_state 记录（沿用 setup_pre_state 的
     /// "执行与输出同一变量"约定）。只支持底层 64 位以内位向量的
     /// 平铺形状：`Ty::Bits(w)` 或单 `bits(w)` 字段的 struct（mstatus
@@ -176,6 +177,37 @@ where
                     Box::new(or_exp),
                     Box::new(smtlib::bits64(0, 1)),
                 ))));
+            }
+            // W22：派生位等价约束（双向，非单向蕴含）：
+            //   target 位 == OR(每组组内 AND 全 1)
+            // 任一组全 1 则 target 必 1，target 为 1 则必有某组全 1。用于只读
+            // 镜像位（mstatus.SD ⇔ FS=11 ∨ VS=11 ∨ XS=11）：钉 0 与位组自由
+            // 取值矛盾，等价约束保持模型值架构自洽（重放侧 WARL 同一投影）。
+            if let Some(derive) = &csr.derive_bit {
+                if derive.bit >= width {
+                    panic!("防御性编程：符号化 CSR {} 的派生位 {} 超出 {} 位宽", csr.name, derive.bit, width);
+                }
+                for group in &derive.groups {
+                    for &bit in group {
+                        if bit >= width {
+                            panic!("防御性编程：符号化 CSR {} 的派生组位 {} 超出 {} 位宽", csr.name, bit, width);
+                        }
+                    }
+                }
+                let target_exp = smtlib::Exp::Extract(derive.bit, derive.bit, Box::new(smtlib::Exp::Var(sym)));
+                let or_exp = derive
+                    .groups
+                    .iter()
+                    .map(|group| {
+                        group
+                            .iter()
+                            .map(|&bit| smtlib::Exp::Extract(bit, bit, Box::new(smtlib::Exp::Var(sym))))
+                            .reduce(|lhs, rhs| smtlib::Exp::Bvand(Box::new(lhs), Box::new(rhs)))
+                            .expect("防御性编程：配置解析已拒绝空派生组")
+                    })
+                    .reduce(|lhs, rhs| smtlib::Exp::Bvor(Box::new(lhs), Box::new(rhs)))
+                    .expect("防御性编程：配置解析已拒绝空派生 groups");
+                solver.assert(smtlib::Exp::Eq(Box::new(target_exp), Box::new(or_exp)));
             }
             let value = match wrap_field {
                 Some(field_name) => {
@@ -1892,8 +1924,32 @@ mod tests {
         SymbolicCsrFixture { shared_state, mstatus_name, satp_name }
     }
 
-    fn symbolic_csr(name: &str, pin_mask: u64, pin_value: u64, groups: Vec<Vec<u32>>) -> SymbolicRegisterConfig {
-        SymbolicRegisterConfig { name: name.to_string(), pin_mask, pin_value, nonzero_groups: groups }
+    fn symbolic_csr(
+        name: &str,
+        pin_mask: u64,
+        pin_value: u64,
+        groups: Vec<Vec<u32>>,
+        derive: Option<isla_lib::config::DerivedBitConfig>,
+    ) -> SymbolicRegisterConfig {
+        SymbolicRegisterConfig {
+            name: name.to_string(),
+            pin_mask,
+            pin_value,
+            nonzero_groups: groups,
+            derive_bit: derive,
+        }
+    }
+
+    /// mstatus.SD 派生形状（W22）：SD(63) ⇔ FS[14:13]=11 ∨ VS[10:9]=11 ∨ XS[16:15]=11。
+    fn sd_derive() -> isla_lib::config::DerivedBitConfig {
+        isla_lib::config::DerivedBitConfig { bit: 63, groups: vec![vec![14, 13], vec![10, 9], vec![16, 15]] }
+    }
+
+    /// FS/VS/XS 三个位组是否全非 11（Dirty）——派生等价测试的"干净态"判定。
+    fn all_groups_clean(value: u64) -> bool {
+        ![(13, 14), (9, 10), (15, 16)]
+            .iter()
+            .any(|&(lo, hi)| value >> lo & ((1 << (hi - lo + 1)) - 1) == (1 << (hi - lo + 1)) - 1)
     }
 
     fn mstatus_symbolic_val(target: &RV64<B64>, name: &Name) -> Sym {
@@ -1919,8 +1975,8 @@ mod tests {
         regs.insert(fixture.satp_name, false, UVal::Uninit(&Ty::Bits(64)));
         let mut target = rv64();
         target.symbolic_csrs = vec![
-            symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]]),
-            symbolic_csr("satp", 0, 0, vec![]),
+            symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]], None),
+            symbolic_csr("satp", 0, 0, vec![], None),
         ];
 
         target.apply_symbolic_csrs_to_registers(&mut regs, &fixture.shared_state, &mut solver).unwrap();
@@ -1972,6 +2028,141 @@ mod tests {
         assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
     }
 
+    /// W22：SD 派生等价（双向）。构造与 csr_sym 配置同形的注入（pin 掉
+    /// MBE/SBE/UXL/SXL、FS≠0 域、SD 派生），验证四个方向：
+    /// ① FS=11 且组外位非 11 → SD 必须 1（等值 Sat + 模型位核对）；
+    /// ② FS=11 ∧ SD=0 → Unsat（正向蕴含）；
+    /// ③ FS/VS/XS 全非 11 ∧ SD=1 → Unsat（反向蕴含：SD=1 推某组=11）；
+    /// ④ 全组干净 ∧ SD=0 → Sat（合法域非空）。
+    #[test]
+    fn symbolic_csrs_derive_bit_equivalence_is_bidirectional() {
+        let pin_mask = 0x0000_183C_0000_0000u64;
+        let pin_value = 0x0000_1008_0000_0000u64;
+        let fixture = symbolic_csr_fixture();
+        // Solver 借用局部 Context，不能跨闭包返回，改回调式：装配 + 可选整值
+        // 强制 + 断言回调在 Context 存活期内执行。
+        let inject = |forced: Option<u64>, check: &dyn Fn(&mut Solver<B64>, Sym)| {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let mut regs = RegisterBindings::new();
+            let mstatus_ty = Ty::Struct(Name::from_u32(u32::MAX));
+            regs.insert(fixture.mstatus_name, false, UVal::Uninit(&mstatus_ty));
+            let mut target = rv64();
+            target.symbolic_csrs =
+                vec![symbolic_csr("mstatus", pin_mask, pin_value, vec![vec![13, 14]], Some(sd_derive()))];
+            target.apply_symbolic_csrs_to_registers(&mut regs, &fixture.shared_state, &mut solver).unwrap();
+            let sym = mstatus_symbolic_val(&target, &fixture.mstatus_name);
+            if let Some(value) = forced {
+                solver.assert_eq(smtlib::Exp::Var(sym), smtlib::bits64(value, 64));
+            }
+            check(&mut solver, sym);
+        };
+
+        // FS=11（Dirty）、VS/XS 非 11、SD=1、钉死位=11 的合法值
+        let fs_dirty_sd1 = 1 << 63 | 0x6000 | pin_value;
+        assert_eq!(fs_dirty_sd1 >> 13 & 0b11, 0b11, "前置：FS=11");
+
+        // ① 正向：FS=11 的合法值应 Sat，且模型 SD 位 = 1
+        inject(Some(fs_dirty_sd1), &|solver, sym| {
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat, "FS=11 且 SD=1 应满足派生等价");
+            let mut model = Model::new(solver);
+            match model.get_var(sym).unwrap() {
+                isla_lib::smt::ModelVal::Exp(smtlib::Exp::Bits64(bv)) => {
+                    assert_eq!(bv.lower_u64() >> 63 & 1, 1, "FS=11 时模型 SD 必 1");
+                }
+                other => panic!("模型值应为 64 位位向量，实际 {:?}", other),
+            }
+        });
+
+        // ② 正向违反：FS=11 ∧ SD=0 → Unsat
+        inject(Some(fs_dirty_sd1 & !(1 << 63)), &|solver, _sym| {
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Unsat, "FS=11 时 SD=0 应 Unsat");
+        });
+
+        // ③ 反向违反：全组干净（FS/VS/XS 均 ≠11）∧ SD=1 → Unsat
+        let clean_sd1 = 1 << 63 | (1 << 13) | pin_value; // FS=01（非 0 域）其余组非 11
+        assert!(all_groups_clean(clean_sd1), "前置：三组均非 11");
+        inject(Some(clean_sd1), &|solver, _sym| {
+            assert_eq!(
+                solver.check_sat(SourceLoc::unknown()),
+                SmtResult::Unsat,
+                "全组非 11 时 SD=1 应 Unsat（反向蕴含）"
+            );
+        });
+
+        // ④ 全组干净 ∧ SD=0 → Sat
+        let clean_sd0 = (1 << 13) | pin_value;
+        inject(Some(clean_sd0), &|solver, _sym| {
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat, "全组非 11 且 SD=0 应满足派生等价");
+        });
+
+        // ⑤ 仅约束 SD=1（不固定具体值）：模型必须自选某组 = 11
+        inject(None, &|solver, sym| {
+            solver.assert_eq(smtlib::Exp::Extract(63, 63, Box::new(smtlib::Exp::Var(sym))), smtlib::bits64(1, 1));
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+            let mut model = Model::new(solver);
+            match model.get_var(sym).unwrap() {
+                isla_lib::smt::ModelVal::Exp(smtlib::Exp::Bits64(bv)) => {
+                    let value = bv.lower_u64();
+                    assert!(!all_groups_clean(value), "SD=1 的模型必须有某位组全 1：{:#x}", value);
+                }
+                other => panic!("模型值应为 64 位位向量，实际 {:?}", other),
+            }
+        });
+    }
+
+    /// W22：派生位/组位超出实际寄存器位宽是配置与 IR 的矛盾，注入期硬 panic。
+    #[test]
+    fn symbolic_csrs_derive_bit_rejects_out_of_width_bits() {
+        let fixture = symbolic_csr_fixture();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut symtab = Symtab::new();
+            let narrow_name = symtab.intern(intern_static(&zencode::encode("narrow_csr")));
+            let mut structs = HashMap::new();
+            let zbits_field = symtab.intern(intern_static(&zencode::encode("bits")));
+            let struct_id = symtab.intern(intern_static("zNarrow"));
+            let mut fields = BTreeMap::new();
+            fields.insert(zbits_field, Ty::Bits(32));
+            structs.insert(struct_id, fields);
+            let type_info = IRTypeInfo {
+                structs,
+                enums: HashMap::new(),
+                enum_members: HashMap::new(),
+                unions: HashMap::new(),
+                union_ctors: HashSet::new(),
+            };
+            let arch: &'static [isla_lib::ir::Def<Name, B64>] = Box::leak(Vec::new().into_boxed_slice());
+            let mut shared_state = SharedState::new(
+                symtab,
+                arch,
+                type_info,
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            shared_state.registers.insert(narrow_name, Ty::Bits(32));
+            let mut target = rv64();
+            // 派生位 40 在 32 位寄存器外
+            target.symbolic_csrs = vec![symbolic_csr(
+                "narrow_csr",
+                0,
+                0,
+                vec![],
+                Some(isla_lib::config::DerivedBitConfig { bit: 40, groups: vec![vec![1, 0]] }),
+            )];
+            let mut regs = RegisterBindings::new();
+            regs.insert(narrow_name, false, UVal::Uninit(&Ty::Bits(32)));
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
+        }));
+        assert!(result.is_err(), "派生位超出位宽应 panic");
+        let _ = fixture;
+    }
+
     /// 具象化：concretize_symbolic_csrs 按模型把符号 CSR 换成具体值，供 encdec
     /// 门使用；未注入记录（空 pre_state）是调用序错误，硬 panic。
     #[test]
@@ -1983,7 +2174,7 @@ mod tests {
         let mstatus_ty = Ty::Struct(Name::from_u32(u32::MAX));
         regs.insert(fixture.mstatus_name, false, UVal::Uninit(&mstatus_ty));
         let mut target = rv64();
-        target.symbolic_csrs = vec![symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]])];
+        target.symbolic_csrs = vec![symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]], None)];
         target.apply_symbolic_csrs_to_registers(&mut regs, &fixture.shared_state, &mut solver).unwrap();
         let sym = mstatus_symbolic_val(&target, &fixture.mstatus_name);
 
@@ -2043,7 +2234,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut target = rv64();
-            target.symbolic_csrs = vec![symbolic_csr("wide_csr", 1 << 40, 0, vec![])];
+            target.symbolic_csrs = vec![symbolic_csr("wide_csr", 1 << 40, 0, vec![], None)];
             let mut regs = RegisterBindings::new();
             regs.insert(wide_name, false, UVal::Uninit(&Ty::Bits(32)));
             let context = Context::new(Config::new());
@@ -2054,7 +2245,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut target = rv64();
-            target.symbolic_csrs = vec![symbolic_csr("two_field_csr", 0, 0, vec![])];
+            target.symbolic_csrs = vec![symbolic_csr("two_field_csr", 0, 0, vec![], None)];
             let mut regs = RegisterBindings::new();
             let two_field_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Struct(struct_id)));
             regs.insert(two_field_name, false, UVal::Uninit(two_field_ty));
@@ -2074,7 +2265,7 @@ mod tests {
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let mut target = rv64();
-        target.symbolic_csrs = vec![symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]])];
+        target.symbolic_csrs = vec![symbolic_csr("mstatus", 0x8000_0030_0000_0000, 0, vec![vec![13, 14]], None)];
         let mut regs = RegisterBindings::new();
         let mstatus_ty = Ty::Struct(Name::from_u32(u32::MAX));
         regs.insert(fixture.mstatus_name, false, UVal::Uninit(&mstatus_ty));
