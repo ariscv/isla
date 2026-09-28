@@ -12,9 +12,9 @@ use isla_lib::executor::{ExecutionLimits, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
 use isla_lib::log;
-use isla_lib::primop_util::symbolic;
+use isla_lib::primop_util::{smt_value, symbolic};
 use isla_lib::register::RegisterBindings;
-use isla_lib::smt::{Config, Context, Model};
+use isla_lib::smt::{smtlib, Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
@@ -31,7 +31,6 @@ const SOLVE_DECODED: &str = "zisarch_decoded";
 const WRAPPER_ENCODE_PC: usize = 1;
 const WRAPPER_DECODE_PC: usize = 4;
 const WRAPPER_EXECUTE_PC: usize = 6;
-const OFFICIAL_FLOAT_77: &str = include_str!("official_float77.txt");
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SolveEntryMode {
@@ -39,16 +38,9 @@ enum SolveEntryMode {
     ConstructorDiagnostic,
 }
 
-impl SolveEntryMode {
-    fn for_clause(clause: &str) -> Self {
-        let name = clause.strip_prefix('z').unwrap_or(clause);
-        if OFFICIAL_FLOAT_77.lines().any(|entry| entry == name) {
-            Self::FullEncoded32
-        } else {
-            Self::ConstructorDiagnostic
-        }
-    }
+const SOLVE_ENTRY_MODE: SolveEntryMode = SolveEntryMode::ConstructorDiagnostic;
 
+impl SolveEntryMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::FullEncoded32 => "full-encoded-32",
@@ -848,7 +840,9 @@ fn encoder_rejection_pc<B: BV>(shared_state: &SharedState<B>, ctor: Name) -> Opt
 }
 
 fn phase_from_frame<B: BV>(frame: &LocalFrame<B>, shared_state: &SharedState<B>) -> &'static str {
-    let wrapper = shared_state.symtab.lookup(SOLVE_WRAPPER);
+    let Some(wrapper) = shared_state.symtab.get(SOLVE_WRAPPER) else {
+        return "execute";
+    };
     let call_pc = if frame.function_name() == wrapper {
         Some(frame.pc())
     } else {
@@ -947,6 +941,22 @@ fn nonencodable_witness<B: BV>(
     Ok((instruction, state))
 }
 
+fn constrain_enabled_fp_vector_witness<B: BV>(mstatus: &Val<B>, solver: &mut Solver<B>) -> Result<(), ExecError> {
+    let mut bits = mstatus;
+    let mstatus_exp = loop {
+        match bits {
+            Val::Struct(fields) if fields.len() == 1 => bits = fields.values().next().unwrap(),
+            Val::Struct(_) => panic!("mstatus 必须是单字段 bitfield 结构"),
+            _ => break smt_value(bits, SourceLoc::unknown())?,
+        }
+    };
+    // 仅在执行结束后选择可译码的具体见证，不收窄 execute 的符号输入域。
+    for (high, low) in [(14, 13), (10, 9)] {
+        solver.assert_eq(smtlib::Exp::Extract(high, low, Box::new(mstatus_exp.clone())), smtlib::bits64(3, 2));
+    }
+    Ok(())
+}
+
 fn materialize_finished_case<'ir, B: BV>(
     target: &dyn RISCV<B>,
     frame: &LocalFrame<'ir, B>,
@@ -981,6 +991,13 @@ fn materialize_finished_case<'ir, B: BV>(
         if !decode_rejected {
             verify_decoded_instruction(requested.clone(), decoded.clone(), &mut solver)?;
         }
+    }
+    if mode == SolveEntryMode::ConstructorDiagnostic {
+        let mstatus = target
+            .pre_state()
+            .get_from_str("mstatus", &shared_state.symtab)
+            .expect("直接求解必须记录 mstatus pre-state");
+        constrain_enabled_fp_vector_witness(mstatus, &mut solver)?;
     }
     if matches!(ret_val, Val::Ctor(ctor, _) if zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "Illegal_Instruction")
     {
@@ -1058,7 +1075,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
-    let mode = SolveEntryMode::for_clause(instruction_name);
+    let mode = SOLVE_ENTRY_MODE;
 
     let state_regs = target.reg_list();
 
@@ -1452,12 +1469,41 @@ mod tests {
     }
 
     #[test]
-    fn official_float_list_is_the_only_full_encoded_domain() {
-        let entries: Vec<_> = OFFICIAL_FLOAT_77.lines().collect();
+    fn official_float_list_uses_direct_execute_entry() {
+        let entries: Vec<_> = include_str!("official_float77.txt").lines().collect();
         assert_eq!(entries.len(), 77);
         assert_eq!(entries.iter().collect::<HashSet<_>>().len(), 77);
-        assert_eq!(SolveEntryMode::for_clause("zFLI_S"), SolveEntryMode::FullEncoded32);
-        assert_eq!(SolveEntryMode::for_clause("zMRET"), SolveEntryMode::ConstructorDiagnostic);
+        assert_eq!(SOLVE_ENTRY_MODE, SolveEntryMode::ConstructorDiagnostic);
+    }
+
+    #[test]
+    fn direct_execute_phase_does_not_require_solve_wrapper() {
+        let mut symtab = Symtab::new();
+        let execute = symtab.intern("zexecute");
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+        let instructions: Vec<Instr<Name, B64>> = Vec::new();
+        let frame = LocalFrame::new(execute, &[], &Ty::Unit, None, &instructions);
+        assert_eq!(phase_from_frame(&frame, &shared_state), "execute");
+    }
+
+    #[test]
+    fn direct_retire_witness_enables_fp_and_vector_context() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let bits = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(64), SourceLoc::unknown());
+        let mut symtab = Symtab::new();
+        let mut fields = ahash::HashMap::default();
+        fields.insert(symtab.intern("zbits"), Val::Symbolic(bits));
+        let mstatus = Val::Struct(fields);
+        constrain_enabled_fp_vector_witness(&mstatus, &mut solver).unwrap();
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        let actual = model.get_val(&mstatus).unwrap();
+        let Val::Struct(fields) = actual else { panic!("mstatus 不是结构") };
+        let Val::Bits(value) = fields[&symtab.lookup("zbits")] else { panic!("mstatus.bits 不是位向量") };
+        assert_eq!((value.lower_u64() >> 13) & 3, 3);
+        assert_eq!((value.lower_u64() >> 9) & 3, 3);
     }
 
     #[test]

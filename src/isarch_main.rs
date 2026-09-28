@@ -445,7 +445,7 @@ fn isla_main() -> i32 {
 
     isla_lib::smt::configure_z3_timeout(smt_timeout);
 
-    let CommonOpts { num_threads, mut arch, mut symtab, type_info, mut isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     if matches!(subcommand, Subcommand::SolveState { .. }) {
@@ -453,7 +453,6 @@ fn isla_main() -> i32 {
         if !matches.opt_present("fork-assertions") {
             isla_lib::ir::assertions_to_jumps(&mut arch);
         }
-        isarch::exec::install_solve_wrapper(&mut arch, &mut symtab);
     }
 
     if let Some(config) = execution_limits_override {
