@@ -187,6 +187,7 @@ mod dump;
 pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
+pub mod witness;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
@@ -591,7 +592,9 @@ impl Config {
     }
 }
 
-fn fresh_random_seed() -> u32 {
+/// 从系统时间取一个相位 seed。除喂给 Z3 的 `random_seed` 参数外，witness 随机化的
+/// 自动 seed（CLI 无值形态 / TOML `true`）也复用同一时间源抽象。
+pub fn fresh_random_seed() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.subsec_nanos())

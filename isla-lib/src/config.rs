@@ -509,6 +509,26 @@ fn get_clint_enabled(config: &Value) -> Result<Option<bool>, String> {
     }
 }
 
+/// solve-state 的 witness 随机化开关（顶层键 `witness_randomization`）：
+/// `true` 自动 seed、整数固定 seed、`false`/缺省关闭。CLI `--witness-randomization`
+/// 优先于此配置（合并逻辑在 isarch 侧）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitnessRandomizationSetting {
+    Enabled(bool),
+    Seed(u64),
+}
+
+fn get_witness_randomization(config: &Value) -> Result<Option<WitnessRandomizationSetting>, String> {
+    match config.get("witness_randomization") {
+        Some(Value::Boolean(enabled)) => Ok(Some(WitnessRandomizationSetting::Enabled(*enabled))),
+        Some(Value::Integer(seed)) => u64::try_from(*seed)
+            .map(|seed| Some(WitnessRandomizationSetting::Seed(seed)))
+            .map_err(|_| format!("witness_randomization 的固定 seed 超出 u64 范围：{seed}")),
+        Some(_) => Err("witness_randomization should be a boolean or an integer seed".to_string()),
+        None => Ok(None),
+    }
+}
+
 struct Toolchain {
     assembler: Tool,
     objdump: Tool,
@@ -1404,6 +1424,9 @@ pub struct ISAConfig<B> {
     pub pmp: Option<PmpConfig>,
     /// Optional CLINT enable flag
     pub clint_enabled: Option<bool>,
+    /// solve-state 的 witness 随机化开关（顶层键 `witness_randomization`：true 自动
+    /// seed / 整数固定 seed）；未配置即关闭。
+    pub witness_randomization: Option<WitnessRandomizationSetting>,
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
     pub execution_limits: Option<ExecutionLimitsConfig>,
 }
@@ -1471,6 +1494,7 @@ impl<B: BV> ISAConfig<B> {
             page_table_config: get_page_table_config(&config)?,
             pmp,
             clint_enabled: get_clint_enabled(&config)?,
+            witness_randomization: get_witness_randomization(&config)?,
             execution_limits: get_execution_limits_config(&config)?,
         })
     }
@@ -1774,5 +1798,32 @@ mod tests {
         let error = get_execution_limits_config(&value).unwrap_err();
 
         assert!(error.contains("max_global_forks"));
+    }
+
+    #[test]
+    fn witness_randomization_reads_true_false_integer_and_missing() {
+        // true → 自动 seed；42 → 固定 seed；false/缺省 → 关闭。
+        let enabled = "witness_randomization = true".parse::<Value>().unwrap();
+        assert_eq!(get_witness_randomization(&enabled).unwrap(), Some(WitnessRandomizationSetting::Enabled(true)));
+        let disabled = "witness_randomization = false".parse::<Value>().unwrap();
+        assert_eq!(get_witness_randomization(&disabled).unwrap(), Some(WitnessRandomizationSetting::Enabled(false)));
+        let seeded = "witness_randomization = 42".parse::<Value>().unwrap();
+        assert_eq!(get_witness_randomization(&seeded).unwrap(), Some(WitnessRandomizationSetting::Seed(42)));
+        // 不写键时解析结果为 None：既有配置语义零变化。
+        let absent = "clint_enabled = false".parse::<Value>().unwrap();
+        assert_eq!(get_witness_randomization(&absent).unwrap(), None);
+    }
+
+    #[test]
+    fn witness_randomization_rejects_malformed_values() {
+        for contents in [
+            "witness_randomization = \"42\"",
+            "witness_randomization = 4.5",
+            "witness_randomization = [true]",
+            "witness_randomization = -7",
+        ] {
+            let value = contents.parse::<Value>().unwrap();
+            assert!(get_witness_randomization(&value).is_err(), "{contents:?} 必须被拒绝");
+        }
     }
 }

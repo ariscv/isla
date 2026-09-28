@@ -2,6 +2,7 @@ use super::clause::{get_extension_clauses, normalize_clause_name};
 use super::target::{Target, RISCV};
 use super::timeout_report::TimeoutReporter;
 pub use super::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
+use super::witness_randomization::randomize_pre_state_witness;
 use super::{get_all_clause_names, list_instructions, try_get_assembly_encdec, try_get_assembly_name};
 use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
@@ -14,6 +15,7 @@ use isla_lib::ir::*;
 use isla_lib::log;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
+use isla_lib::smt::witness::{SummaryWitnessRandomization, WitnessRandomization};
 use isla_lib::smt::{Config, Context, Model};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
@@ -35,6 +37,9 @@ struct AssemGenJsonItem {
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
     ret_val: String,
+    /// witness 随机化注入记录；默认关闭时不序列化该字段，输出字节级不变。
+    #[serde(rename = "witness-randomization", skip_serializing_if = "Option::is_none")]
+    witness_randomization: Option<WitnessRandomization>,
 }
 impl AssemGenJsonItem {
     pub fn new<B: BV>(
@@ -43,13 +48,14 @@ impl AssemGenJsonItem {
         test_ins_encdec: String,
         isa_state: BTreeMap<String, String>,
         ret_val: String,
+        witness_randomization: Option<WitnessRandomization>,
     ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val }
+        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, witness_randomization }
     }
 }
 trait ToJSON: Serialize {
@@ -76,12 +82,30 @@ trait ToJSON: Serialize {
 #[derive(Serialize, Deserialize)]
 struct AssemGenJson {
     gen: Vec<AssemGenJsonItem>,
+    /// witness 随机化注入汇总；默认关闭时不序列化该字段，输出字节级不变。
+    #[serde(rename = "witness-randomization", skip_serializing_if = "Option::is_none")]
+    witness_randomization: Option<SummaryWitnessRandomization>,
 }
 impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
     fn new(gen: Vec<AssemGenJsonItem>) -> Self {
-        AssemGenJson { gen }
+        // 汇总的 seed 取自首个记录；一次 run 只有一个 seed，出现多个属于内部错误。
+        let witness_randomization = gen
+            .iter()
+            .find_map(|item| item.witness_randomization.as_ref().map(|record| record.seed))
+            .map(|seed| {
+                assert!(
+                    gen.iter().all(|item| item.witness_randomization.as_ref().is_none_or(|record| record.seed == seed)),
+                    "同一次 solve run 的随机化 seed 必须一致"
+                );
+                SummaryWitnessRandomization::from_terminals(
+                    seed,
+                    &gen.iter().map(|item| item.witness_randomization.clone()).collect::<Vec<_>>(),
+                )
+            })
+            .flatten();
+        AssemGenJson { gen, witness_randomization }
     }
 }
 
@@ -459,6 +483,7 @@ pub fn solve_state_main<'ir, B: BV>(
     timeout: Option<u64>,
     execution_limits_config: Option<&ExecutionLimitsConfig>,
     timeout_report_config: TimeoutReportConfig,
+    witness_randomization_seed: Option<u64>,
 ) -> bool {
     let case_quota = execution_limits_config.and_then(|cfg| cfg.case_quota.as_ref().map(CaseQuota::from_config));
     let mut clause_set: HashSet<String> = HashSet::new();
@@ -543,6 +568,7 @@ pub fn solve_state_main<'ir, B: BV>(
             &execution_limits,
             &timeout_reporter,
             case_quota.clone(),
+            witness_randomization_seed,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -603,6 +629,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     execution_limits: &ExecutionLimits,
     timeout_reporter: &TimeoutReporter,
     case_quota: Option<CaseQuota>,
+    witness_randomization_seed: Option<u64>,
 ) -> Result<Option<String>, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -716,6 +743,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         let mut test_ins = String::new();
                         let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
+                        let mut witness_randomization: Option<WitnessRandomization> = None;
                         if matches!(
                             ret_val,
                             Val::Ctor(ctor, _)
@@ -755,6 +783,32 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             return;
                         }
                         if smt_result == isla_lib::smt::SmtResult::Sat {
+                            // witness 随机化：plain check SAT 之后、读取模型之前，把 wrapper 初始
+                            // 状态的全部符号交给 isla-lib smt 封装层按 sort 采样随机值并一次性
+                            // check-sat-assuming 注入。本层不感知维度/分布；UNSAT 由封装层二分
+                            // 丢弃重试，仍不 SAT 回退 plain 模型；assumption 不入增量栈，不影响
+                            // 上面的可满足性判定与后续物化。
+                            if let Some(seed) = witness_randomization_seed {
+                                match randomize_pre_state_witness(
+                                    target.pre_state(),
+                                    &shared_state.symtab,
+                                    &mut solver,
+                                    seed,
+                                    frame.path_signature(),
+                                ) {
+                                    Ok(record) => witness_randomization = Some(record),
+                                    Err(error) => {
+                                        itrace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        log!(
+                                            log::SYM_EXEC,
+                                            &format!("警告: clause{} witness 随机化失败 {:?}", instruction_name, error)
+                                        );
+                                        submit_itrace(frame, &mut itrace_diagnostics);
+                                        return;
+                                    }
+                                }
+                            }
                             if let Ok(mut model) =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
                             {
@@ -937,8 +991,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 log!(log::PATH_RESULT, "3. ==============================");
                             }
                         }
-                        let single_instruction_json =
-                            AssemGenJsonItem::new(target, test_ins, test_ins_encdec, isa_state, ret_val_str);
+                        let single_instruction_json = AssemGenJsonItem::new(
+                            target,
+                            test_ins,
+                            test_ins_encdec,
+                            isa_state,
+                            ret_val_str,
+                            witness_randomization,
+                        );
                         collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                             path_signature: frame.path_signature(),
                             item: single_instruction_json,
@@ -1417,8 +1477,61 @@ mod tests {
                 test_ins_encdec: "32'h0000_0000".to_string(),
                 isa_state: BTreeMap::new(),
                 ret_val: ret_val.to_string(),
+                witness_randomization: None,
             },
         }
+    }
+
+    #[test]
+    fn witness_randomization_records_flow_into_items_and_summary() {
+        use isla_lib::smt::witness::WitnessRandomization;
+        use std::collections::BTreeMap;
+        let record = |samples: BTreeMap<String, String>, accepted: bool, unknown: bool| WitnessRandomization {
+            seed: 9,
+            accepted,
+            unknown,
+            bisection_rounds: if accepted { 0 } else { 2 },
+            attempted: samples.len(),
+            injected: if accepted { samples.len() } else { 0 },
+            skipped: 0,
+            samples,
+        };
+        let with_record = |rec: Option<WitnessRandomization>| AssemGenJsonItem {
+            arch: BTreeMap::new(),
+            test_ins: "vadd.vv v0, v1, v2".to_string(),
+            test_ins_encdec: "32'h0000_0000".to_string(),
+            isa_state: BTreeMap::new(),
+            ret_val: "Retire_Success(())".to_string(),
+            witness_randomization: rec,
+        };
+        let accepted = record(
+            BTreeMap::from([("vl".to_string(), "3".to_string()), ("vtype".to_string(), "17".to_string())]),
+            true,
+            false,
+        );
+        let rejected = record(
+            BTreeMap::from([("vl".to_string(), "0".to_string()), ("vtype".to_string(), "68".to_string())]),
+            false,
+            true,
+        );
+
+        let json = AssemGenJson::new(vec![with_record(Some(accepted.clone())), with_record(Some(rejected.clone()))]);
+        let summary = json.witness_randomization.clone().expect("有随机化记录时必须汇总");
+        assert_eq!(
+            (summary.seed, summary.attempted, summary.accepted, summary.fallback, summary.unknown),
+            (9, 2, 1, 1, 1)
+        );
+        let value = serde_json::to_value(&json).unwrap();
+        assert_eq!(value["witness-randomization"]["accepted"], 1);
+        assert_eq!(value["gen"][0]["witness-randomization"]["samples"]["vl"], accepted.samples["vl"]);
+        assert_eq!(value["gen"][1]["witness-randomization"]["bisection-rounds"], 2);
+
+        // 默认关闭时不输出任何新字段：与既有 schema 逐键一致。
+        let plain = AssemGenJson::new(vec![with_record(None)]);
+        assert!(plain.witness_randomization.is_none());
+        let plain_value = serde_json::to_value(&plain).unwrap();
+        assert!(plain_value.get("witness-randomization").is_none());
+        assert!(plain_value["gen"][0].get("witness-randomization").is_none());
     }
 
     #[test]

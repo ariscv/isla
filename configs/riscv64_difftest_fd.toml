@@ -6,6 +6,13 @@ zero_announce_exit = true
 
 default_sizeof = 4
 
+# witness 随机化（默认关闭）：物化 witness 时对初始状态符号按 sort 采样随机值注入，
+# 只影响 witness 取值分布，不改变 case/verdict 集合；seed 会写入输出元数据。
+# 两种写法：true = 自动 seed（时间源生成，启动时打印一行），整数 = 固定 seed。
+# CLI --witness-randomization 优先于此配置；取消注释即启用。
+# witness_randomization = true
+# witness_randomization = 42
+
 in_program_order = ["sail_barrier"]
 
 [[toolchain]]

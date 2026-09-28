@@ -163,8 +163,12 @@ pub struct CommonOpts<'ir, B> {
 }
 
 pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architecture<B>) {
-    let args: Vec<String> = std::env::args().collect();
+    parse_with_args(hasher, opts, std::env::args().collect())
+}
 
+/// 与 [`parse`] 相同，但参数由调用方提供。isarch 用它在解析前重写
+/// `--witness-randomization` 的无值形态（见 isarch::witness_randomization）。
+pub fn parse_with_args<B: BV>(hasher: &mut Sha256, opts: &Options, args: Vec<String>) -> (Matches, Architecture<B>) {
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => {

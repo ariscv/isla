@@ -5,6 +5,7 @@ pub mod exec;
 pub mod memory_builder;
 pub mod target;
 mod timeout_report;
+pub mod witness_randomization;
 
 use crate::isarch::args::{ArgStruct, InstructionMap};
 use isla_lib::bitvector::BV;

@@ -382,9 +382,21 @@ fn isla_main() -> i32 {
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
     opts.optflag("", "all", "执行所有clause");
     opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
+    opts.optopt(
+        "",
+        "witness-randomization",
+        "物化 witness 时对初始状态符号按 sort 采样随机值注入（默认关闭；无值=自动 seed，<seed>=固定 seed；也可在 -C 配置里写 witness_randomization）",
+        "<seed>",
+    );
 
     let mut hasher = Sha256::new();
-    let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
+    // --witness-randomization 的无值形态（自动 seed）需要先把裸 token 重写为 =auto，
+    // 再交给 getopts；空格取值（固定 seed）行为不变。
+    let (matches, arch) = opts::parse_with_args::<B129>(
+        &mut hasher,
+        &opts,
+        isarch::witness_randomization::rewrite_bare_witness_randomization(std::env::args().collect()),
+    );
     let itrace_path = matches.opt_str("itrace").map(std::path::PathBuf::from);
     let arch_path = matches.opt_str("arch").map(std::path::PathBuf::from);
     let timeout_arg = matches.opt_str("timeout");
@@ -418,7 +430,6 @@ fn isla_main() -> i32 {
         .opt_str("timeout-smt-dir")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("output/timeout-smt"));
-
     if matches.free.is_empty() {
         print_usage(&opts);
     }
@@ -451,6 +462,19 @@ fn isla_main() -> i32 {
     if let Some(config) = execution_limits_override {
         isa_config.execution_limits = Some(config);
     }
+
+    // witness 随机化开关合并：CLI（含无值 auto 形态）> TOML witness_randomization > 关闭。
+    // 自动 seed 在此打印一行 stderr 并随后写入输出元数据；固定 seed 直接来自参数/配置。
+    let witness_randomization_seed = match isarch::witness_randomization::resolve_witness_randomization_seed(
+        matches.opt_str("witness-randomization").as_deref(),
+        isa_config.witness_randomization,
+    ) {
+        Ok(seed) => seed,
+        Err(error) => {
+            eprintln!("{}", error);
+            return 1;
+        }
+    };
 
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
     if let Some(config) = isa_config.execution_limits.as_ref() {
@@ -527,6 +551,7 @@ fn isla_main() -> i32 {
                         timeout,
                         isa_config.execution_limits.as_ref(),
                         timeout_report_config.clone(),
+                        witness_randomization_seed,
                     )
                 }
                 64 => {
@@ -552,6 +577,7 @@ fn isla_main() -> i32 {
                         timeout,
                         isa_config.execution_limits.as_ref(),
                         timeout_report_config.clone(),
+                        witness_randomization_seed,
                     )
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),

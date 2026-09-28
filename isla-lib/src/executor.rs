@@ -3488,6 +3488,7 @@ fn zrX(z3zE1756) {
             page_table_config: None,
             pmp: None,
             clint_enabled: None,
+            witness_randomization: None,
             execution_limits: None,
         }
     }
