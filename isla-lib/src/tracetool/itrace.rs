@@ -1,9 +1,11 @@
+use crate::bitvector::BV;
 use crate::executor::Backtrace;
-use crate::ir::{Name, Symtab};
+use crate::ir::{Instr, Name, SharedState, Symtab};
 use crate::smt::{smtlib, Sym};
 use crate::timeout::{PathTimeSnapshot, TimeoutDiagnostic};
+pub use crate::tracetool::ItraceTerminalMetadata;
 use crossbeam::queue::SegQueue;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -17,6 +19,102 @@ use std::thread::{self, JoinHandle};
  * 运行时热路径只记录必要状态并提交已完成 path，优先考虑存储效率和提交速度。
  */
 
+const ITRACE_CHUNK_CAPACITY: usize = 256;
+
+// 沿用 SMT Trace 的不可变 Arc 前缀机制；三种 itrace 观察序列共用这一局部表示。
+// head 共享或填满时封入前缀，禁止 make_mut 克隆 payload。
+struct SharedSequence<T> {
+    len: usize,
+    head: Arc<Vec<T>>,
+    prefix: Option<Arc<ItraceChunk<T>>>,
+}
+
+struct ItraceChunk<T> {
+    items: Arc<Vec<T>>,
+    previous: Option<Arc<ItraceChunk<T>>>,
+}
+
+impl<T> Drop for ItraceChunk<T> {
+    fn drop(&mut self) {
+        let mut previous = self.previous.take();
+        while let Some(chunk) = previous {
+            // into_inner 对并发丢弃最后两个 Arc 也保证恰好一方取得所有权。
+            match Arc::into_inner(chunk) {
+                Some(mut chunk) => previous = chunk.previous.take(),
+                None => break,
+            }
+        }
+    }
+}
+
+impl<T> Default for SharedSequence<T> {
+    fn default() -> Self {
+        Self { len: 0, head: Arc::new(Vec::new()), prefix: None }
+    }
+}
+
+impl<T> Clone for SharedSequence<T> {
+    fn clone(&self) -> Self {
+        Self { len: self.len, head: self.head.clone(), prefix: self.prefix.clone() }
+    }
+}
+
+impl<T> SharedSequence<T> {
+    fn push(&mut self, item: T) {
+        if self.head.len() == ITRACE_CHUNK_CAPACITY || Arc::get_mut(&mut self.head).is_none() {
+            let old_head = std::mem::replace(&mut self.head, Arc::new(Vec::new()));
+            if !old_head.is_empty() {
+                self.prefix = Some(Arc::new(ItraceChunk { items: old_head, previous: self.prefix.take() }));
+            }
+        }
+        Arc::get_mut(&mut self.head).expect("itrace 新后缀必须独占").push(item);
+        self.len += 1;
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn iter(&self) -> SharedSequenceIter<'_, T> {
+        let mut chunks = vec![self.head.as_slice()];
+        let mut prefix = self.prefix.as_deref();
+        while let Some(chunk) = prefix {
+            chunks.push(chunk.items.as_slice());
+            prefix = chunk.previous.as_deref();
+        }
+        SharedSequenceIter { chunks, current: [].iter(), remaining: self.len }
+    }
+}
+
+struct SharedSequenceIter<'a, T> {
+    chunks: Vec<&'a [T]>,
+    current: std::slice::Iter<'a, T>,
+    remaining: usize,
+}
+
+impl<'a, T> Iterator for SharedSequenceIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.current.next() {
+                self.remaining -= 1;
+                return Some(item);
+            }
+            self.current = self.chunks.pop()?.iter();
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for SharedSequenceIter<'_, T> {}
+
 #[derive(Clone)]
 pub struct ItracePerInstr {
     pub function_name: Name,
@@ -25,10 +123,27 @@ pub struct ItracePerInstr {
     pub summary: Option<String>,
 }
 
+#[derive(Clone)]
+struct ItraceBranchEdge {
+    function_name: Name,
+    backtrace: Backtrace,
+    pc: u64,
+    successor_pc: u64,
+    taken: bool,
+}
+
+#[derive(Clone)]
+struct RuntimeCatalogEntry {
+    instruction: String,
+    source_loc: Option<String>,
+    jump_target: Option<u64>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ItracePerPath {
-    records: Vec<ItracePerInstr>,
-    branch_conditions: Vec<smtlib::Exp<Sym>>,
+    records: SharedSequence<ItracePerInstr>,
+    branch_conditions: SharedSequence<smtlib::Exp<Sym>>,
+    branch_edges: SharedSequence<ItraceBranchEdge>,
 }
 
 #[derive(Clone)]
@@ -37,6 +152,7 @@ pub(crate) struct ItraceCompletedPath {
     completion_diagnostics: Vec<ItraceCompletionDiagnostic>,
     path_timing: PathTimeSnapshot,
     smtperf_summary: Option<String>,
+    terminal_metadata: Option<ItraceTerminalMetadata>,
 }
 
 #[derive(Clone)]
@@ -55,6 +171,7 @@ impl ItraceCompletedPath {
                 .collect(),
             path_timing: PathTimeSnapshot::default(),
             smtperf_summary: None,
+            terminal_metadata: None,
         }
     }
 
@@ -71,6 +188,7 @@ impl ItraceCompletedPath {
                 .collect(),
             path_timing,
             smtperf_summary: None,
+            terminal_metadata: None,
         }
     }
 
@@ -89,6 +207,10 @@ impl ItraceCompletedPath {
     pub(crate) fn set_smtperf_summary(&mut self, summary: Option<String>) {
         self.smtperf_summary = summary;
     }
+
+    pub(crate) fn set_terminal_metadata(&mut self, metadata: ItraceTerminalMetadata) {
+        self.terminal_metadata = Some(metadata);
+    }
 }
 
 impl ItracePerPath {
@@ -100,12 +222,41 @@ impl ItracePerPath {
         self.records.push(ItracePerInstr { function_name, backtrace, pc, summary: Some(summary.into()) });
     }
 
-    pub fn records(&self) -> &[ItracePerInstr] {
-        self.records.as_slice()
+    pub fn records(&self) -> impl ExactSizeIterator<Item = &ItracePerInstr> {
+        self.records.iter()
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.records.len()
     }
 
     pub fn push_branch_condition(&mut self, condition: smtlib::Exp<Sym>) {
         self.branch_conditions.push(condition);
+    }
+
+    pub fn record_branch_edge(
+        &mut self,
+        function_name: Name,
+        backtrace: Backtrace,
+        pc: u64,
+        successor_pc: u64,
+        taken: bool,
+    ) {
+        self.branch_edges.push(ItraceBranchEdge { function_name, backtrace, pc, successor_pc, taken });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn branch_edges_for_test(&self) -> Vec<(Name, u64, u64, bool)> {
+        self.branch_edges.iter().map(|edge| (edge.function_name, edge.pc, edge.successor_pc, edge.taken)).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prefix_identity_for_test(&self) -> [*const (); 3] {
+        [
+            self.records.iter().next().map_or(std::ptr::null(), |item| item as *const _ as *const ()),
+            self.branch_conditions.iter().next().map_or(std::ptr::null(), |item| item as *const _ as *const ()),
+            self.branch_edges.iter().next().map_or(std::ptr::null(), |item| item as *const _ as *const ()),
+        ]
     }
 }
 
@@ -625,6 +776,8 @@ impl Drop for ItraceWriter {
 pub struct ItraceHandler {
     title: Mutex<String>,
     ir_cache: Mutex<IrFileCache>,
+    runtime_catalog: Mutex<HashMap<(Name, u64), RuntimeCatalogEntry>>,
+    runtime_catalog_ready: AtomicBool,
     writer: ItraceWriter,
 }
 
@@ -633,6 +786,8 @@ impl Default for ItraceHandler {
         Self {
             title: Mutex::new(String::new()),
             ir_cache: Mutex::new(IrFileCache::default()),
+            runtime_catalog: Mutex::new(HashMap::new()),
+            runtime_catalog_ready: AtomicBool::new(false),
             writer: ItraceWriter::default(),
         }
     }
@@ -645,6 +800,8 @@ impl ItraceHandler {
         Self {
             title: Mutex::new(title.to_string()),
             ir_cache: Mutex::new(ir_cache),
+            runtime_catalog: Mutex::new(HashMap::new()),
+            runtime_catalog_ready: AtomicBool::new(false),
             writer: ItraceWriter::with_output_path(output_path),
         }
     }
@@ -660,6 +817,8 @@ impl ItraceHandler {
         if let Ok(mut cache_lock) = self.ir_cache.lock() {
             *cache_lock = ir_cache;
         }
+        self.runtime_catalog.lock().expect("itrace runtime catalog mutex poisoned").clear();
+        self.runtime_catalog_ready.store(false, Ordering::Release);
 
         self.writer.configure_path(output_path);
     }
@@ -669,12 +828,74 @@ impl ItraceHandler {
         self.writer.set_path(output_path);
     }
 
+    /// Bind the trace to the executable IR after all runtime rewrites, including
+    /// assertions_to_jumps. The source file cache cannot describe appended PCs.
+    pub fn set_runtime_catalog<B: BV>(&self, shared_state: &SharedState<'_, B>) {
+        let mut catalog = HashMap::new();
+        let mut branches = Vec::new();
+        for (function, (_, _, body)) in &shared_state.functions {
+            for (pc, instruction) in body.iter().enumerate() {
+                let source = match instruction {
+                    Instr::Decl(_, _, info)
+                    | Instr::Init(_, _, _, info)
+                    | Instr::Jump(_, _, info)
+                    | Instr::Copy(_, _, info)
+                    | Instr::Monomorphize(_, _, info)
+                    | Instr::Call(_, _, _, _, info)
+                    | Instr::PrimopUnary(_, _, _, info)
+                    | Instr::PrimopBinary(_, _, _, _, info)
+                    | Instr::PrimopVariadic(_, _, _, info)
+                    | Instr::PrimopReset(_, _, info)
+                    | Instr::Exit(_, info) => Some(info.location_string(shared_state.symtab.files())),
+                    Instr::Goto(_) | Instr::Arbitrary | Instr::End => None,
+                };
+                let jump_target = match instruction {
+                    Instr::Jump(_, target, _) => Some(*target as u64),
+                    _ => None,
+                };
+                let entry =
+                    RuntimeCatalogEntry { instruction: format!("{:?}", instruction), source_loc: source, jump_target };
+                if let Some(target) = jump_target {
+                    branches.push(serde_json::json!({
+                        "function": shared_state.symtab.to_str(*function),
+                        "pc": pc,
+                        "instruction": entry.instruction,
+                        "source_loc": entry.source_loc,
+                        "target": target,
+                        "fallthrough": pc + 1,
+                    }));
+                }
+                catalog.insert((*function, pc as u64), entry);
+            }
+        }
+        *self.runtime_catalog.lock().expect("itrace runtime catalog mutex poisoned") = catalog;
+        self.runtime_catalog_ready.store(true, Ordering::Release);
+        branches.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+        if self.writer.output_path().is_some() {
+            let mut lines = Vec::with_capacity(branches.len() + 2);
+            lines.push("---- runtime branch catalog ----".to_string());
+            lines.extend(branches.into_iter().map(|branch| branch.to_string()));
+            lines.push("---- end runtime branch catalog ----".to_string());
+            self.writer.submit_text(lines.join("\n"));
+        }
+    }
+
+    fn runtime_catalog_entry(&self, function_name: Name, pc: u64) -> Option<RuntimeCatalogEntry> {
+        self.runtime_catalog.lock().expect("itrace runtime catalog mutex poisoned").get(&(function_name, pc)).cloned()
+    }
+
     fn title(&self) -> String {
         self.title.lock().map(|title| title.clone()).unwrap_or_default()
     }
 
     fn lookup_ir_line(&self, function_name: Name, pc: u64, symtab: &Symtab) -> Option<String> {
         let _ = symtab;
+        if let Some(entry) = self.runtime_catalog_entry(function_name, pc) {
+            return Some(entry.instruction);
+        }
+        if self.runtime_catalog_ready.load(Ordering::Acquire) {
+            return None;
+        }
         let Ok(cache) = self.ir_cache.lock() else {
             return None;
         };
@@ -720,9 +941,28 @@ impl ItracePerPath {
         let mut lines = Vec::new();
         lines.push(self.render_title(&handler.title(), symtab));
 
+        let compact = handler.runtime_catalog_ready.load(Ordering::Acquire);
+        if compact {
+            let mut instruction_count = 0usize;
+            let mut functions = BTreeSet::new();
+            for record in self.records().filter(|record| record.summary.is_none()) {
+                instruction_count += 1;
+                functions.insert(symtab.to_str(record.function_name));
+            }
+            lines.push("trace-mode: branch-compact".to_string());
+            lines.push(format!("instruction_count: {}", instruction_count));
+            lines.push(format!(
+                "executed_functions: {}",
+                serde_json::to_string(&functions).expect("executed function names must serialize")
+            ));
+        }
+
         for record in self.records() {
             if let Some(summary) = &record.summary {
                 lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, summary));
+                continue;
+            }
+            if compact {
                 continue;
             }
             let ir_line = handler.lookup_ir_line(record.function_name, record.pc, symtab).unwrap_or_else(|| {
@@ -773,6 +1013,47 @@ fn render_timeout_diagnostic(lines: &mut Vec<String>, diagnostic: &ItraceComplet
 impl ItraceCompletedPath {
     fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
         let mut lines = self.execution_trace.render_lines(handler, symtab)?;
+        if let Some(metadata) = &self.terminal_metadata {
+            lines.push(String::new());
+            lines.push("---- terminal metadata ----".to_string());
+            lines.push(format!("scope: {}", metadata.scope));
+            lines.push(format!("case_id: {}", metadata.case_id));
+            lines.push(format!("status: {}", metadata.status));
+            lines.push(format!("phase: {}", metadata.phase));
+            lines.push(format!("path_signature: {}", metadata.path_signature));
+        }
+        if !self.execution_trace.branch_edges.is_empty() {
+            lines.push(String::new());
+            lines.push("---- branch edges ----".to_string());
+            for edge in self.execution_trace.branch_edges.iter() {
+                let catalog_entry = handler.runtime_catalog_entry(edge.function_name, edge.pc);
+                if handler.runtime_catalog_ready.load(Ordering::Acquire) {
+                    let entry = catalog_entry.as_ref().expect("recorded branch missing from runtime catalog");
+                    let target = entry.jump_target.expect("recorded branch is not a runtime Jump");
+                    assert_eq!(
+                        edge.successor_pc,
+                        if edge.taken { target } else { edge.pc + 1 },
+                        "recorded Jump successor does not match runtime catalog"
+                    );
+                }
+                let source = catalog_entry.and_then(|entry| entry.source_loc).unwrap_or_else(|| "unknown".to_string());
+                let context = edge
+                    .backtrace
+                    .iter()
+                    .map(|(function, pc)| format!("{}:{}", symtab.to_str(*function), pc))
+                    .collect::<Vec<_>>()
+                    .join(" > ");
+                lines.push(format!(
+                    "branch_edge function={} pc={} successor={} taken={} source={} context=[{}]",
+                    symtab.to_str(edge.function_name),
+                    edge.pc,
+                    edge.successor_pc,
+                    edge.taken,
+                    source,
+                    context
+                ));
+            }
+        }
         lines.push(String::new());
         lines.push("---- path timing ----".to_string());
         render_path_timing(&mut lines, self.path_timing);
@@ -814,6 +1095,613 @@ mod tests {
     use std::collections::HashSet;
     use std::panic::{self, AssertUnwindSafe};
     use std::time::Duration;
+
+    // 冻结的旧 Vec renderer；只供字节对照，禁止接入运行时。
+    #[derive(Clone)]
+    struct VecReferencePath {
+        records: Vec<ItracePerInstr>,
+        branch_conditions: Vec<smtlib::Exp<Sym>>,
+        branch_edges: Vec<ItraceBranchEdge>,
+    }
+    impl VecReferencePath {
+        fn records(&self) -> &[ItracePerInstr] {
+            &self.records
+        }
+    }
+    struct VecReferenceCompleted {
+        execution_trace: VecReferencePath,
+        completion_diagnostics: Vec<ItraceCompletionDiagnostic>,
+        path_timing: PathTimeSnapshot,
+        smtperf_summary: Option<String>,
+        terminal_metadata: Option<ItraceTerminalMetadata>,
+    }
+    impl VecReferencePath {
+        fn render_title(&self, title: &str, symtab: &Symtab) -> String {
+            if self.branch_conditions.is_empty() {
+                format!("<{}> path({}):", title, title)
+            } else {
+                let branches = self
+                    .branch_conditions
+                    .iter()
+                    .map(|condition| condition.to_itrace_string(symtab))
+                    .collect::<Vec<_>>()
+                    .join("_");
+                format!("<{}> path({}_branch_{}):", title, title, branches)
+            }
+        }
+
+        fn render_lines(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<Vec<String>> {
+            handler.writer.output_path()?;
+
+            let mut lines = Vec::new();
+            lines.push(self.render_title(&handler.title(), symtab));
+
+            let compact = handler.runtime_catalog_ready.load(Ordering::Acquire);
+            if compact {
+                let executed = self.records().iter().filter(|record| record.summary.is_none()).collect::<Vec<_>>();
+                let functions =
+                    executed.iter().map(|record| symtab.to_str(record.function_name)).collect::<BTreeSet<_>>();
+                lines.push("trace-mode: branch-compact".to_string());
+                lines.push(format!("instruction_count: {}", executed.len()));
+                lines.push(format!(
+                    "executed_functions: {}",
+                    serde_json::to_string(&functions).expect("executed function names must serialize")
+                ));
+            }
+
+            for record in self.records() {
+                if let Some(summary) = &record.summary {
+                    lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, summary));
+                    continue;
+                }
+                if compact {
+                    continue;
+                }
+                let ir_line = handler.lookup_ir_line(record.function_name, record.pc, symtab).unwrap_or_else(|| {
+                let fallback = format!("{}:{} not found", symtab.to_str(record.function_name), record.pc);
+                eprintln!(
+                    "warning: {}, downgrade to fallback itrace text; this path can still be written, but the original IR line is unavailable",
+                    fallback
+                );
+                fallback
+            });
+                lines.push(format!("[{} {}]: {}", symtab.to_str(record.function_name), record.pc, ir_line));
+            }
+
+            Some(lines)
+        }
+
+        fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
+            let mut lines = self.render_lines(handler, symtab)?;
+            lines.push(String::new());
+            lines.push("====".to_string());
+            Some(lines.join("\n"))
+        }
+    }
+    impl VecReferenceCompleted {
+        fn render_text(&self, handler: &ItraceHandler, symtab: &Symtab) -> Option<String> {
+            let mut lines = self.execution_trace.render_lines(handler, symtab)?;
+            if let Some(metadata) = &self.terminal_metadata {
+                lines.push(String::new());
+                lines.push("---- terminal metadata ----".to_string());
+                lines.push(format!("scope: {}", metadata.scope));
+                lines.push(format!("case_id: {}", metadata.case_id));
+                lines.push(format!("status: {}", metadata.status));
+                lines.push(format!("phase: {}", metadata.phase));
+                lines.push(format!("path_signature: {}", metadata.path_signature));
+            }
+            if !self.execution_trace.branch_edges.is_empty() {
+                lines.push(String::new());
+                lines.push("---- branch edges ----".to_string());
+                for edge in &self.execution_trace.branch_edges {
+                    let catalog_entry = handler.runtime_catalog_entry(edge.function_name, edge.pc);
+                    if handler.runtime_catalog_ready.load(Ordering::Acquire) {
+                        let entry = catalog_entry.as_ref().expect("recorded branch missing from runtime catalog");
+                        let target = entry.jump_target.expect("recorded branch is not a runtime Jump");
+                        assert_eq!(
+                            edge.successor_pc,
+                            if edge.taken { target } else { edge.pc + 1 },
+                            "recorded Jump successor does not match runtime catalog"
+                        );
+                    }
+                    let source =
+                        catalog_entry.and_then(|entry| entry.source_loc).unwrap_or_else(|| "unknown".to_string());
+                    let context = edge
+                        .backtrace
+                        .iter()
+                        .map(|(function, pc)| format!("{}:{}", symtab.to_str(*function), pc))
+                        .collect::<Vec<_>>()
+                        .join(" > ");
+                    lines.push(format!(
+                        "branch_edge function={} pc={} successor={} taken={} source={} context=[{}]",
+                        symtab.to_str(edge.function_name),
+                        edge.pc,
+                        edge.successor_pc,
+                        edge.taken,
+                        source,
+                        context
+                    ));
+                }
+            }
+            lines.push(String::new());
+            lines.push("---- path timing ----".to_string());
+            render_path_timing(&mut lines, self.path_timing);
+            if let Some(summary) = &self.smtperf_summary {
+                lines.push(String::new());
+                lines.push("---- smt performance ----".to_string());
+                lines.extend(summary.lines().map(str::to_string));
+            }
+            for diagnostic in &self.completion_diagnostics {
+                render_timeout_diagnostic(&mut lines, diagnostic);
+            }
+            lines.push(String::new());
+            lines.push("====".to_string());
+            Some(lines.join("\n"))
+        }
+    }
+
+    // 实际生产序列，计数测试不复制另一套实现。
+    type SharingSequence<T> = SharedSequence<T>;
+
+    struct CountedPayload {
+        value: usize,
+        backtrace: Vec<usize>,
+        clones: Arc<std::sync::atomic::AtomicUsize>,
+        backtrace_clones: Arc<std::sync::atomic::AtomicUsize>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Clone for CountedPayload {
+        fn clone(&self) -> Self {
+            self.clones.fetch_add(1, Ordering::Relaxed);
+            self.backtrace_clones.fetch_add(self.backtrace.len(), Ordering::Relaxed);
+            Self {
+                value: self.value,
+                backtrace: self.backtrace.clone(),
+                clones: self.clones.clone(),
+                backtrace_clones: self.backtrace_clones.clone(),
+                drops: self.drops.clone(),
+            }
+        }
+    }
+
+    impl Drop for CountedPayload {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn itrace_sharing_snapshot_and_first_append_copy_no_payload() {
+        use std::sync::atomic::AtomicUsize;
+        let clones = Arc::new(AtomicUsize::new(0));
+        let backtrace_clones = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let item = |value| CountedPayload {
+            value,
+            backtrace: vec![value; 8],
+            clones: clones.clone(),
+            backtrace_clones: backtrace_clones.clone(),
+            drops: drops.clone(),
+        };
+        let mut prefix = SharingSequence::default();
+        for i in 0..4096 {
+            prefix.push(item(i));
+        }
+        let mut branches = (0..64).map(|_| prefix.clone()).collect::<Vec<_>>();
+        let snapshot_clones = clones.load(Ordering::Relaxed);
+        for branch in &mut branches {
+            for i in 4096..4099 {
+                branch.push(item(i));
+            }
+        }
+        let append_clones = clones.load(Ordering::Relaxed) - snapshot_clones;
+        eprintln!(
+            "ITRACE_COPY_COUNT n=4096 k=64 snapshot={} append={} backtrace={}",
+            snapshot_clones,
+            append_clones,
+            backtrace_clones.load(Ordering::Relaxed)
+        );
+        assert_eq!(snapshot_clones, 0, "快照不可复制 payload");
+        assert_eq!(append_clones, 0, "共享后首次追加不可复制 payload");
+        for branch in &branches {
+            assert!(std::ptr::eq(prefix.iter().next().unwrap(), branch.iter().next().unwrap()));
+            assert_eq!(branch.iter().map(|p| p.value).collect::<Vec<_>>(), (0..4099).collect::<Vec<_>>());
+        }
+        drop(prefix);
+        drop(branches);
+        assert_eq!(drops.load(Ordering::Relaxed), 4096 + 64 * 3);
+    }
+
+    #[test]
+    fn itrace_sharing_chunks_and_multiple_forks_match_vec() {
+        let mut sequence = SharedSequence::default();
+        let mut reference = Vec::new();
+        assert_eq!(sequence.iter().len(), 0);
+        assert!(sequence.iter().next().is_none());
+        for i in 0..(ITRACE_CHUNK_CAPACITY * 5 + 3) {
+            sequence.push(i);
+            reference.push(i);
+            if i % 71 == 0 {
+                let mut child = sequence.clone();
+                let mut expected_child = reference.clone();
+                child.push(usize::MAX);
+                expected_child.push(usize::MAX);
+                let mut grandchild = child.clone();
+                grandchild.push(17);
+                assert_eq!(child.iter().copied().collect::<Vec<_>>(), expected_child);
+                expected_child.push(17);
+                assert_eq!(grandchild.iter().copied().collect::<Vec<_>>(), expected_child);
+                assert_eq!(sequence.iter().copied().collect::<Vec<_>>(), reference);
+            }
+        }
+        let mut iter = sequence.iter();
+        for (index, value) in reference.iter().enumerate() {
+            assert_eq!(iter.len(), reference.len() - index);
+            assert_eq!(iter.next(), Some(value));
+        }
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn itrace_sharing_deep_chain_drop_is_iterative_and_exact() {
+        use std::sync::atomic::AtomicUsize;
+        // 小栈上释放长链；每次共享后追加强制形成一个新的不可变 chunk。
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                struct Payload(Arc<AtomicUsize>);
+                impl Drop for Payload {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                let drops = Arc::new(AtomicUsize::new(0));
+                let mut sequence = SharedSequence::default();
+                for _ in 0..100_000 {
+                    let previous = sequence.clone();
+                    sequence.push(Payload(drops.clone()));
+                    drop(previous);
+                }
+                let sibling = sequence.clone();
+                drop(sequence);
+                assert_eq!(drops.load(Ordering::Relaxed), 0);
+                assert_eq!(sibling.iter().count(), 100_000);
+                drop(sibling);
+                assert_eq!(drops.load(Ordering::Relaxed), 100_000);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn itrace_sharing_parallel_read_and_drop_keep_all_payloads() {
+        let mut sequence = SharedSequence::default();
+        for i in 0..2049 {
+            sequence.push(i);
+        }
+        let tasks = (0..8)
+            .map(|index| {
+                let mut sibling = sequence.clone();
+                std::thread::spawn(move || {
+                    sibling.push(index);
+                    assert_eq!(sibling.iter().take(2049).copied().collect::<Vec<_>>(), (0..2049).collect::<Vec<_>>());
+                    assert_eq!(sibling.iter().last(), Some(&index));
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(sequence);
+        for task in tasks {
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn itrace_sharing_full_and_compact_output_match_frozen_vec_renderer() {
+        let state = parse_shared_state();
+        let function = state.symtab.lookup("zcache_ok");
+        let caller = state.symtab.lookup("zpc_lookup");
+        let filename = std::env::temp_dir().join(format!("itrace_sharing_vec_{}.txt", std::process::id()));
+        let handler = ItraceHandler::init("shared-reference", fixture_ir_path(), Some(filename.clone()), &state.symtab);
+        handler.runtime_catalog.lock().unwrap().insert(
+            (function, 0),
+            RuntimeCatalogEntry {
+                instruction: "jump true goto 3".into(),
+                source_loc: Some("7 12:3-12:8".into()),
+                jump_target: Some(3),
+            },
+        );
+        let mut path = ItracePerPath::default();
+        let mut reference =
+            VecReferencePath { records: Vec::new(), branch_conditions: Vec::new(), branch_edges: Vec::new() };
+        for i in 0..777 {
+            let context = vec![(caller, i % 2), (function, i % 5)];
+            let summary = if i % 7 == 0 { Some(format!("summary-{i}\nsecond line")) } else { None };
+            reference.records.push(ItracePerInstr {
+                function_name: function,
+                backtrace: context.clone(),
+                pc: (i % 5) as u64,
+                summary: summary.clone(),
+            });
+            if let Some(text) = summary {
+                path.record_summary(function, context.clone(), (i % 5) as u64, text);
+            } else {
+                path.record(function, context.clone(), (i % 5) as u64);
+            }
+            let condition = smtlib::Exp::Not(Box::new(smtlib::Exp::Bool(i % 3 == 0)));
+            path.push_branch_condition(condition.clone());
+            reference.branch_conditions.push(condition);
+            let taken = i % 2 == 0;
+            // 相同边连续记录两次，重复不能在存储或渲染时去重。
+            for _ in 0..2 {
+                path.record_branch_edge(function, context.clone(), 0, if taken { 3 } else { 1 }, taken);
+                reference.branch_edges.push(ItraceBranchEdge {
+                    function_name: function,
+                    backtrace: context.clone(),
+                    pc: 0,
+                    successor_pc: if taken { 3 } else { 1 },
+                    taken,
+                });
+            }
+            if i % 29 == 0 {
+                let sibling = path.clone();
+                path.record_summary(function, context.clone(), 0, "fork-continuation");
+                reference.records.push(ItracePerInstr {
+                    function_name: function,
+                    backtrace: context,
+                    pc: 0,
+                    summary: Some("fork-continuation".into()),
+                });
+                assert_eq!(sibling.record_count() + 1, path.record_count());
+            }
+        }
+        let mut completed = ItraceCompletedPath::without_diagnostics(path);
+        completed.set_terminal_metadata(ItraceTerminalMetadata {
+            scope: "unchanged-scope".into(),
+            case_id: 42,
+            status: "retire".into(),
+            phase: "execute".into(),
+            path_signature: 987654,
+        });
+        completed.set_smtperf_summary(Some("fixed-smt-summary".into()));
+        let mut legacy = VecReferenceCompleted {
+            execution_trace: reference,
+            completion_diagnostics: completed.completion_diagnostics.clone(),
+            path_timing: completed.path_timing,
+            smtperf_summary: completed.smtperf_summary.clone(),
+            terminal_metadata: completed.terminal_metadata.clone(),
+        };
+        for compact in [false, true] {
+            handler.runtime_catalog_ready.store(compact, Ordering::Release);
+            let actual = completed.render_text(&handler, &state.symtab).unwrap();
+            let expected = legacy.render_text(&handler, &state.symtab).unwrap();
+            assert_eq!(actual.as_bytes(), expected.as_bytes());
+            assert_eq!(actual.matches("branch_edge function=").count(), 777 * 2);
+            // 负控分别遗漏重复边、换上下文和交换条件，必须逐字不等。
+            let removed = legacy.execution_trace.branch_edges.pop().unwrap();
+            assert_ne!(actual, legacy.render_text(&handler, &state.symtab).unwrap());
+            legacy.execution_trace.branch_edges.push(removed);
+            legacy.execution_trace.branch_edges[0].backtrace[0].1 += 100;
+            assert_ne!(actual, legacy.render_text(&handler, &state.symtab).unwrap());
+            legacy.execution_trace.branch_edges[0].backtrace[0].1 -= 100;
+            legacy.execution_trace.branch_conditions.swap(0, 1);
+            assert_ne!(actual, legacy.render_text(&handler, &state.symtab).unwrap());
+            legacy.execution_trace.branch_conditions.swap(0, 1);
+            if let Ok(out) = std::env::var("ITRACE_SHARING_EVIDENCE") {
+                let mode = if compact { "compact" } else { "full" };
+                std::fs::write(PathBuf::from(&out).join(format!("new-{mode}.txt")), actual).unwrap();
+                std::fs::write(PathBuf::from(out).join(format!("vec-{mode}.txt")), expected).unwrap();
+            }
+        }
+        drop(handler);
+        std::fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn runtime_catalog_uses_executed_function_bodies() {
+        let shared_state = parse_shared_state();
+        let handler = ItraceHandler::default();
+        handler.set_runtime_catalog(&shared_state);
+        let function = shared_state.symtab.lookup("zcache_ok");
+        let body = shared_state.functions.get(&function).expect("fixture function").2;
+        for (pc, instruction) in body.iter().enumerate() {
+            let entry = handler.runtime_catalog_entry(function, pc as u64).expect("runtime catalog entry");
+            assert_eq!(entry.instruction, format!("{:?}", instruction));
+        }
+    }
+
+    #[test]
+    fn runtime_catalog_includes_assertion_handler_pc_after_rewrite() {
+        use crate::ir::{Def, ExitCause, Exp, IRTypeInfo, Loc, Ty, SAIL_ASSERT};
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zassert_catalog");
+        let result = symtab.intern("zassert_result");
+        let mut defs: Vec<Def<Name, B64>> = vec![
+            Def::Val(function, Vec::new(), Ty::Unit),
+            Def::Fn(
+                function,
+                Vec::new(),
+                vec![
+                    Instr::Call(
+                        Loc::Id(result),
+                        false,
+                        SAIL_ASSERT,
+                        vec![Exp::Bool(false)],
+                        crate::source_loc::SourceLoc::unknown(),
+                    ),
+                    Instr::End,
+                ],
+            ),
+        ];
+        ir::assertions_to_jumps(&mut defs);
+        let defs: &'static [Def<Name, B64>] = Box::leak(defs.into_boxed_slice());
+        let type_info = IRTypeInfo::new(defs);
+        let state = SharedState::new(
+            symtab,
+            defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let handler = ItraceHandler::default();
+        handler.set_runtime_catalog(&state);
+        let body = state.functions.get(&function).expect("rewritten function").2;
+        assert!(matches!(body[2], Instr::Jump(_, 4, _)));
+        assert!(matches!(body[3], Instr::Exit(ExitCause::AssertionFailure, _)));
+        let entry = handler.runtime_catalog_entry(function, 2).expect("handler jump in catalog");
+        assert_eq!(entry.jump_target, Some(4));
+        assert!(entry.instruction.starts_with("jump "));
+    }
+
+    #[test]
+    fn completed_path_keeps_terminal_and_only_taken_branch_edges() {
+        let shared_state = parse_shared_state();
+        let output_path = std::env::temp_dir().join(format!("itrace_edge_metadata_{}.txt", std::process::id()));
+        let handler = ItraceHandler::init("branch", fixture_ir_path(), Some(output_path.clone()), &shared_state.symtab);
+        let function = shared_state.symtab.lookup("zcache_ok");
+        let mut path = ItracePerPath::default();
+        path.record(function, Vec::new(), 0);
+        path.record_branch_edge(function, Vec::new(), 0, 3, true);
+        let mut completed = ItraceCompletedPath::without_diagnostics(path);
+        completed.set_terminal_metadata(ItraceTerminalMetadata {
+            scope: "branch".to_string(),
+            case_id: 7,
+            status: "retire".to_string(),
+            phase: "execute".to_string(),
+            path_signature: 19,
+        });
+        let text = completed.render_text(&handler, &shared_state.symtab).expect("itrace text");
+        assert!(text.contains("case_id: 7"));
+        assert!(text.contains("path_signature: 19"));
+        assert!(text.contains("branch_edge"));
+        assert!(text.contains("taken=true"));
+        assert_eq!(text.matches("branch_edge").count(), 1);
+        drop(handler);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn branch_edges_keep_reentrant_call_contexts_separate() {
+        let shared_state = parse_shared_state();
+        let function = shared_state.symtab.lookup("zcache_ok");
+        let caller = shared_state.symtab.lookup("zpc_lookup");
+        let mut path = ItracePerPath::default();
+        path.record_branch_edge(function, vec![(caller, 1)], 4, 9, true);
+        path.record_branch_edge(function, vec![(caller, 2)], 4, 5, false);
+        let first = path.branch_edges.iter().next().unwrap();
+        let second = path.branch_edges.iter().nth(1).unwrap();
+        assert_eq!(first.pc, second.pc);
+        assert_ne!(first.backtrace, second.backtrace);
+        assert_eq!(first.successor_pc, 9);
+        assert_eq!(second.successor_pc, 5);
+    }
+
+    #[test]
+    fn runtime_catalog_compacts_only_ordinary_lines_and_keeps_evidence_identical() {
+        use crate::ir::{Def, Exp, IRTypeInfo, Ty};
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zcompact");
+        let defs: &'static [Def<Name, B64>] = Box::leak(
+            vec![
+                Def::Val(function, Vec::new(), Ty::Unit),
+                Def::Fn(
+                    function,
+                    Vec::new(),
+                    vec![
+                        Instr::Jump(Exp::Bool(true), 2, crate::source_loc::SourceLoc::unknown()),
+                        Instr::End,
+                        Instr::End,
+                    ],
+                ),
+            ]
+            .into_boxed_slice(),
+        );
+        let state = SharedState::new(
+            symtab,
+            defs,
+            IRTypeInfo::new(defs),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let temp_dir = std::env::temp_dir();
+        let legacy_path = temp_dir.join(format!("itrace_legacy_mode_{}.txt", std::process::id()));
+        let compact_path = temp_dir.join(format!("itrace_compact_mode_{}.txt", std::process::id()));
+        let legacy = ItraceHandler::init("compact test", fixture_ir_path(), Some(legacy_path.clone()), &state.symtab);
+        let compact = ItraceHandler::init("compact test", fixture_ir_path(), Some(compact_path.clone()), &state.symtab);
+        compact.set_runtime_catalog(&state);
+        let mut path = ItracePerPath::default();
+        path.push_branch_condition(smtlib::Exp::<Sym>::Bool(true));
+        path.record(function, Vec::new(), 0);
+        path.record_branch_edge(function, Vec::new(), 0, 2, true);
+        path.record(function, Vec::new(), 2);
+        path.record_summary(function, Vec::new(), 2, "execution limit: action=sample_branch_condition");
+        let mut completed = ItraceCompletedPath::without_diagnostics(path);
+        completed.set_terminal_metadata(ItraceTerminalMetadata {
+            scope: "zcompact".to_string(),
+            case_id: 9,
+            status: "retire".to_string(),
+            phase: "execute".to_string(),
+            path_signature: 42,
+        });
+        completed.set_smtperf_summary(Some("smt summary retained".to_string()));
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: crate::source_loc::SourceLoc::unknown(),
+            operation: SmtOperation::ModelEval,
+            limit: Duration::from_secs(2),
+            operation_wall: Duration::from_secs(2),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
+        });
+        completed.push_diagnostic_with_dump(TimeoutDiagnostic::Smt(timeout), true);
+        let old = completed.render_text(&legacy, &state.symtab).expect("old trace");
+        let new = completed.render_text(&compact, &state.symtab).expect("compact trace");
+        compact.runtime_catalog_ready.store(false, Ordering::Release);
+        let expanded = completed.render_text(&compact, &state.symtab).expect("expanded runtime trace");
+        compact.runtime_catalog_ready.store(true, Ordering::Release);
+        assert!(old.contains("[zcompact 0]:"));
+        assert!(expanded.contains("[zcompact 0]:"));
+        assert!(!new.contains("[zcompact 0]:"));
+        assert!(new.contains("trace-mode: branch-compact"));
+        assert!(new.contains("instruction_count: 2"));
+        assert!(new.contains("executed_functions: [\"zcompact\"]"));
+        for expected in [
+            "<compact test> path(compact test_branch_true):",
+            "[zcompact 2]: execution limit: action=sample_branch_condition",
+            "scope: zcompact",
+            "case_id: 9",
+            "status: retire",
+            "phase: execute",
+            "path_signature: 42",
+            "---- path timing ----",
+            "smt summary retained",
+            "---- completion diagnostic ----",
+            "---- timeout smt2 begin ----",
+            "(check-sat)",
+        ] {
+            assert!(old.contains(expected), "legacy missing: {}", expected);
+            assert!(new.contains(expected), "compact missing: {}", expected);
+        }
+        let edges = |text: &str| {
+            text.lines().filter(|line| line.starts_with("branch_edge ")).map(str::to_string).collect::<Vec<_>>()
+        };
+        assert_eq!(edges(&expanded), edges(&new));
+        assert_eq!(edges(&new).len(), 1);
+        assert!(new.contains("branch_edge function=zcompact pc=0 successor=2 taken=true source=0:0 - 0:0 context=[]"));
+        drop(legacy);
+        drop(compact);
+        let _ = std::fs::remove_file(legacy_path);
+        let _ = std::fs::remove_file(compact_path);
+    }
 
     struct FixedDump;
 
@@ -980,7 +1868,7 @@ mod tests {
 
         path.record(function_name, backtrace.clone(), 42);
 
-        let records = path.records();
+        let records = path.records().collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].function_name, function_name);
         assert_eq!(records[0].backtrace, backtrace);
@@ -996,7 +1884,7 @@ mod tests {
 
         path.record_summary(function_name, backtrace.clone(), 42, "timeout: path exceeded 2000ms");
 
-        let records = path.records();
+        let records = path.records().collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].function_name, function_name);
         assert_eq!(records[0].backtrace, backtrace);
