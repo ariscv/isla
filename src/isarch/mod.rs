@@ -9,7 +9,7 @@ mod timeout_report;
 use crate::isarch::args::{ArgStruct, InstructionMap};
 use isla_lib::bitvector::BV;
 use isla_lib::dprint::colors;
-use isla_lib::error::ExecError;
+use isla_lib::error::{ExecError, IslaError};
 use isla_lib::executor::{backtrace_string, execute_ir_function, LocalFrame, Run};
 use isla_lib::ir::UVal;
 use isla_lib::register::RegisterBindings;
@@ -42,61 +42,145 @@ pub fn get_assembly_name<B: BV>(
         .unwrap_or_else(|error| panic!("get_assembly_name failed: {}", error))
 }
 
+struct MappingCollector<B: BV> {
+    values: Vec<Val<B>>,
+    first_error: Option<ExecError>,
+    rejected: usize,
+}
+
+impl<B: BV> MappingCollector<B> {
+    fn new() -> Self {
+        Self { values: Vec::new(), first_error: None, rejected: 0 }
+    }
+
+    fn record_error(&mut self, error: ExecError) {
+        if self.first_error.is_none() {
+            self.first_error = Some(error);
+        }
+    }
+
+    fn finish(mut self) -> Result<Option<Val<B>>, ExecError> {
+        if let Some(error) = self.first_error {
+            return Err(error);
+        }
+        if self.values.len() > 1 || (self.values.len() == 1 && self.rejected != 0) {
+            return Err(ExecError::Unreachable("mapping 有多个互斥结果，不能任取一个".to_string()));
+        }
+        Ok(self.values.pop())
+    }
+}
+
+fn mapping_top_level_rejection<B: BV>(
+    function_name: &str,
+    error: &ExecError,
+    frame: &LocalFrame<B>,
+    shared_state: &SharedState<B>,
+) -> bool {
+    if !matches!(error, ExecError::MatchFailure(_))
+        || frame.function_name() != shared_state.symtab.lookup(function_name)
+    {
+        return false;
+    }
+    let (_, _, body) = shared_state.functions.get(&frame.function_name()).expect("mapping 函数必须存在");
+    let exits: Vec<_> =
+        body.iter().enumerate().filter(|(_, instr)| matches!(instr, Instr::Exit(ExitCause::MatchFailure, _))).collect();
+    if exits.len() != 1 || exits[0].0 != frame.pc() {
+        return false;
+    }
+    let suffix = &body[frame.pc()..];
+    matches!(suffix,
+        [Instr::Exit(ExitCause::MatchFailure, source), Instr::Copy(Loc::Id(RETURN), _, _), Instr::End]
+        | [Instr::Exit(ExitCause::MatchFailure, source), Instr::Copy(Loc::Id(RETURN), _, _), Instr::End, Instr::Arbitrary]
+        if *source == error.source_loc())
+}
+
+fn run_mapping<B: BV>(
+    function_name: &'static str,
+    arg: Val<B>,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Result<Option<Val<B>>, ExecError> {
+    let collected = Arc::new(Mutex::new(MappingCollector::new()));
+    execute_ir_function(
+        function_name,
+        &[arg],
+        shared_state,
+        regs,
+        lets,
+        &collected,
+        &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+            let frame = match &exec_result {
+                Ok((_, frame)) | Err((_, frame)) => frame,
+            };
+            if frame.has_sampled_branch() {
+                collected.lock().expect("mapping collector mutex poisoned").record_error(ExecError::Unreachable(
+                    format!("{} mapping sampled a symbolic branch", function_name),
+                ));
+                return;
+            }
+            let outcome = match exec_result {
+                Ok((Run::Finished(Val::Poison), _)) => {
+                    Err(ExecError::Unreachable(format!("{} returned Poison", function_name)))
+                }
+                Ok((Run::Finished(ret_val), frame)) => {
+                    let concrete = match solver.check_sat(SourceLoc::unknown()) {
+                        isla_lib::smt::SmtResult::Sat => Model::new(&solver).get_val(&ret_val),
+                        isla_lib::smt::SmtResult::Unsat => Err(ExecError::NoModel),
+                        isla_lib::smt::SmtResult::Unknown => Err(ExecError::Z3Unknown),
+                        isla_lib::smt::SmtResult::Error(error) => Err(ExecError::Smt(error)),
+                    };
+                    concrete.and_then(|value| {
+                        print_frame_args(function_name, &frame, shared_state, solver).map(|()| Some(value))
+                    })
+                }
+                Ok((Run::Dead, _)) => Err(ExecError::NoModel),
+                Ok((Run::Exit, _)) => Err(ExecError::Unreachable(format!("{} exited", function_name))),
+                Ok((Run::Suspended, _)) => Err(ExecError::Unreachable(format!("{} suspended", function_name))),
+                Err((error, frame)) if mapping_top_level_rejection(function_name, &error, &frame, shared_state) => {
+                    collected.lock().expect("mapping collector mutex poisoned").rejected += 1;
+                    return;
+                }
+                Err((error, frame)) => {
+                    configure_nested_timeout_smt_dump(&error, &frame, shared_state);
+                    log!(
+                        log::SYM_EXEC,
+                        &format!(
+                            "{} mapping error: {:?}; backtrace: {}",
+                            function_name,
+                            error,
+                            backtrace_string(frame.backtrace(), &shared_state.symtab)
+                        )
+                    );
+                    Err(error)
+                }
+            };
+            let mut collected = collected.lock().expect("mapping collector mutex poisoned");
+            match outcome {
+                Ok(Some(value)) => collected.values.push(value),
+                Ok(None) => (),
+                Err(error) => collected.record_error(error),
+            }
+        },
+    );
+    let state = Arc::try_unwrap(collected)
+        .unwrap_or_else(|_| panic!("mapping collector 仍被共享"))
+        .into_inner()
+        .expect("mapping collector mutex poisoned");
+    state.finish()
+}
+
 pub fn try_get_assembly_name<B: BV>(
     arg: Val<B>,
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Result<Option<String>, ExecError> {
-    // 根据构造函数的参数类型生成默认值
-    let arg_value = arg;
-
-    // 执行 zassembly_forwards 函数
-    // MatchFailure 错误会被 execute_ir_function 静默处理
-    let collected: Arc<Mutex<Option<Result<Val<B>, ExecError>>>> = Arc::new(Mutex::new(None));
-    execute_ir_function(
-        "zassembly_forwards",
-        &[arg_value],
-        shared_state,
-        regs,
-        lets,
-        &collected,
-        &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
-            Ok((run, frame)) => {
-                if let Run::Finished(ret_val) = run {
-                    match print_frame_args("zassembly_forwards", &frame, shared_state, solver) {
-                        Ok(()) => *collected.lock().unwrap() = Some(Ok(ret_val)),
-                        Err(error) => {
-                            configure_nested_timeout_smt_dump(&error, &frame, shared_state);
-                            *collected.lock().unwrap() = Some(Err(error));
-                        }
-                    }
-                }
-            }
-            Err((error, frame)) => match error {
-                ExecError::MatchFailure(_) => {}
-                error @ (ExecError::Timeout | ExecError::Smt(_)) => {
-                    configure_nested_timeout_smt_dump(&error, &frame, shared_state);
-                    *collected.lock().unwrap() = Some(Err(error));
-                }
-                error => {
-                    log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
-                    log!(
-                        log::SYM_EXEC,
-                        &format!("调用栈: {:?}", backtrace_string(frame.backtrace(), &shared_state.symtab))
-                    );
-                }
-            },
-        },
-    );
-    let ret_val = collected.lock().unwrap().take().transpose()?;
-    Ok(ret_val.and_then(|val| match val {
-        Val::String(s) => Some(s),
-        _ => {
-            eprint!("Warning: get_assembly_name中，zassembly_forwards返回值非字符串");
-            None
-        }
-    }))
+    match run_mapping("zassembly_forwards", arg, shared_state, regs, lets)? {
+        Some(Val::String(value)) => Ok(Some(value)),
+        Some(other) => Err(ExecError::Type(format!("assembly printer returned {other:?}"), SourceLoc::unknown())),
+        None => Ok(None),
+    }
 }
 
 fn get_assembly_encdec_forwards<B: BV>(
@@ -106,44 +190,7 @@ fn get_assembly_encdec_forwards<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
 ) -> Result<Option<Val<B>>, ExecError> {
-    let collected: Arc<Mutex<Option<Result<Val<B>, ExecError>>>> = Arc::new(Mutex::new(None));
-    execute_ir_function(
-        function_name,
-        &[arg],
-        shared_state,
-        regs,
-        lets,
-        &collected,
-        &|_thread, _task_id, exec_result, shared_state, solver, collected| match exec_result {
-            Ok((run, frame)) => {
-                if let Run::Finished(ret_val) = run {
-                    match print_frame_args(function_name, &frame, shared_state, solver) {
-                        Ok(()) => *collected.lock().unwrap() = Some(Ok(ret_val)),
-                        Err(error) => {
-                            configure_nested_timeout_smt_dump(&error, &frame, shared_state);
-                            *collected.lock().unwrap() = Some(Err(error));
-                        }
-                    }
-                }
-            }
-            Err((error, frame)) => match error {
-                ExecError::MatchFailure(_) => {}
-                error @ (ExecError::Timeout | ExecError::Smt(_)) => {
-                    configure_nested_timeout_smt_dump(&error, &frame, shared_state);
-                    *collected.lock().unwrap() = Some(Err(error));
-                }
-                error => {
-                    log!(log::SYM_EXEC, &format!("执行错误: {:?}", error));
-                    log!(
-                        log::SYM_EXEC,
-                        &format!("调用栈: {:?}", backtrace_string(frame.backtrace(), &shared_state.symtab))
-                    );
-                }
-            },
-        },
-    );
-    let result = collected.lock().unwrap().take().transpose();
-    result
+    run_mapping(function_name, arg, shared_state, regs, lets)
 }
 
 pub fn get_assembly_encdec<B: BV>(
@@ -248,10 +295,8 @@ fn print_frame_args<B: BV>(
         isla_lib::smt::SmtResult::Error(error) => {
             return Err(ExecError::Smt(error));
         }
-        isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => {
-            dlog!("  符号求解失败: UNSAT 或 UNKNOWN");
-            return Ok(());
-        }
+        isla_lib::smt::SmtResult::Unsat => return Err(ExecError::NoModel),
+        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
     }
 
     let mut model = Model::new(&solver);
@@ -284,10 +329,7 @@ fn print_frame_args<B: BV>(
                                     dlog!("    Sym({:?}) = Arbitrary ({:?})", sym, ty);
                                 }
                             },
-                            Err(e @ ExecError::Smt(_)) => return Err(e),
-                            Err(e) => {
-                                dlog!("    Sym({:?}) = Error: {:?}", sym, e);
-                            }
+                            Err(e) => return Err(e),
                         }
                     }
                 }
@@ -1087,5 +1129,127 @@ mod tests {
 
         let dump = timeout.dump.materialize().unwrap();
         assert!(dump.contains("isla_nested_argument__s23"));
+    }
+
+    #[test]
+    fn assembly_mapping_success_cannot_hide_an_error_branch() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zassembly_forwards");
+        let argument = symtab.intern("zargument");
+        let condition = symtab.intern("zcondition");
+        let source = SourceLoc::unknown();
+        let defs: Vec<Def<Name, B64>> = vec![
+            Def::Val(function, vec![Ty::Unit], Ty::String),
+            Def::Fn(
+                function,
+                vec![argument],
+                vec![
+                    Instr::Init(condition, Ty::Bool, Exp::Undefined(Ty::Bool), source),
+                    Instr::Jump(Exp::Id(condition), 3, source),
+                    Instr::Exit(ExitCause::AssertionFailure, source),
+                    Instr::Copy(Loc::Id(RETURN), Exp::String("ok".to_string()), source),
+                    Instr::End,
+                ],
+            ),
+        ];
+        let type_info = IRTypeInfo::new(&defs);
+        let shared_state = SharedState::new(
+            symtab,
+            &defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let result = try_get_assembly_name(Val::Unit, &shared_state, &RegisterBindings::new(), &Bindings::default());
+        assert!(matches!(result, Err(ExecError::AssertionFailure(_, _))));
+    }
+
+    #[test]
+    fn nested_mapping_match_failure_is_not_a_top_level_rejection() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zassembly_forwards");
+        let helper = symtab.intern("zhelper_mapping");
+        let argument = symtab.intern("zargument");
+        let condition = symtab.intern("zcondition");
+        let source = SourceLoc::unknown();
+        let defs: Vec<Def<Name, B64>> = vec![
+            Def::Val(helper, vec![], Ty::String),
+            Def::Fn(helper, vec![], vec![Instr::Exit(ExitCause::MatchFailure, source)]),
+            Def::Val(function, vec![Ty::Unit], Ty::String),
+            Def::Fn(
+                function,
+                vec![argument],
+                vec![
+                    Instr::Init(condition, Ty::Bool, Exp::Undefined(Ty::Bool), source),
+                    Instr::Jump(Exp::Id(condition), 4, source),
+                    Instr::Call(Loc::Id(RETURN), false, helper, vec![], source),
+                    Instr::Goto(5),
+                    Instr::Copy(Loc::Id(RETURN), Exp::String("ok".to_string()), source),
+                    Instr::End,
+                ],
+            ),
+        ];
+        let type_info = IRTypeInfo::new(&defs);
+        let shared_state = SharedState::new(
+            symtab,
+            &defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let result = try_get_assembly_name(Val::Unit, &shared_state, &RegisterBindings::new(), &Bindings::default());
+        assert!(matches!(result, Err(ExecError::MatchFailure(_))));
+    }
+
+    #[test]
+    fn inline_mapping_match_failure_is_not_default_rejection() {
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zassembly_forwards");
+        let argument = symtab.intern("zargument");
+        let source = SourceLoc::unknown();
+        let defs: Vec<Def<Name, B64>> = vec![
+            Def::Val(function, vec![Ty::Unit], Ty::String),
+            Def::Fn(
+                function,
+                vec![argument],
+                vec![
+                    Instr::Exit(ExitCause::MatchFailure, source),
+                    Instr::Copy(Loc::Id(RETURN), Exp::String("ok".to_string()), source),
+                    Instr::End,
+                    Instr::Arbitrary,
+                    Instr::Arbitrary,
+                ],
+            ),
+        ];
+        let type_info = IRTypeInfo::new(&defs);
+        let shared_state = SharedState::new(
+            symtab,
+            &defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let (_, ret_ty, body) = shared_state.functions.get(&function).unwrap();
+        let frame = LocalFrame::new(function, &[], ret_ty, None, body);
+        assert!(!mapping_top_level_rejection(
+            "zassembly_forwards",
+            &ExecError::MatchFailure(source),
+            &frame,
+            &shared_state,
+        ));
     }
 }
