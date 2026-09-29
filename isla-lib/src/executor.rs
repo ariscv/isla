@@ -3586,6 +3586,7 @@ fn zcaller(za, zb) {
             default_registers: HashMap::new(),
             symbolic_registers: Vec::new(),
             value_hints: Vec::new(),
+            encoding_slices: Vec::new(),
             reset_registers: Vec::new(),
             reset_constraints: Vec::new(),
             const_primops: HashMap::new(),

@@ -102,7 +102,7 @@ fn fixed_value_is_concrete<B: BV>(value: &Val<B>) -> bool {
     }
 }
 
-fn concrete_function_result<'ir, B: BV + Send + Sync>(
+pub(crate) fn concrete_function_result<'ir, B: BV + Send + Sync>(
     function: &str,
     arg: Val<B>,
     shared_state: &'ir SharedState<'ir, B>,
@@ -152,6 +152,29 @@ fn concrete_function_result<'ir, B: BV + Send + Sync>(
         return Err(format!("{} 的多个可满足路径返回不同值", function));
     }
     Ok(values.remove(0))
+}
+
+/// `--instruction-bits` 译码（concrete_function_result → zext_decode）使用的
+/// 寄存器环境：初始具体寄存器表 + `--prestate`/分片钉值覆盖。
+///
+/// 根因修复（G6/E/P1 三次撞到的 smt.rs:2168 "Could not get Z3 func_decl" 启动期
+/// panic）：译码在独立 solver 中执行，而 setup_pre_state 之后的 symbolic_regs
+/// 携带的是主 solver 声明的符号值；向量 clause 的译码守卫
+/// （zencdec_backwards 分支经 zcurrentlyEnabled 读 zmstatus/zmisa）对这些符号
+/// 做 neq 时，符号从未在译码 solver 里声明，translate_exp 直接 panic。译码
+/// 语义只依赖固定编码位与用户钉定的架构状态，因此改用初始具体表加钉值：
+/// 未钉值寄存器取 IR/config 初始化的具体默认值（如 mstatus.VS=Off，向量
+/// 编码需按 E 线先例用 --prestate 钉 mstatus/cur_privilege 打开扩展域）。
+pub(crate) fn decode_register_bindings<'ir, B: BV>(
+    regs: &RegisterBindings<'ir, B>,
+    prestate: &HashMap<Name, Val<B>>,
+    shared_state: &SharedState<'ir, B>,
+) -> RegisterBindings<'ir, B> {
+    let mut decode_regs = regs.clone();
+    for (&name, value) in prestate {
+        decode_regs.assign(name, value.clone(), shared_state);
+    }
+    decode_regs
 }
 
 fn decode_fixed_instruction<'ir, B: BV + Send + Sync>(
@@ -467,6 +490,10 @@ struct AssemGenJsonItem {
     /// 保证无 hints 配置的 JSON 输出与既有逐项一致）
     #[serde(rename = "value-hint", skip_serializing_if = "Option::is_none")]
     value_hint: Option<String>,
+    /// P2 编码维度预分片：产出该用例的分片标签（自由批为 None，不序列化，
+    /// 保证无分片配置的 JSON 输出与既有逐项一致）
+    #[serde(rename = "encoding-slice", skip_serializing_if = "Option::is_none")]
+    encoding_slice: Option<String>,
 }
 impl AssemGenJsonItem {
     pub fn new<B: BV>(
@@ -494,12 +521,19 @@ impl AssemGenJsonItem {
             pre_memory,
             post_memory,
             value_hint: None,
+            encoding_slice: None,
         }
     }
 
     /// P1 值域 signposting：批调度层为 hint 批的产出打上批标签。
     fn with_hint_label(mut self, label: Option<&str>) -> Self {
         self.value_hint = label.map(str::to_string);
+        self
+    }
+
+    /// P2 编码维度预分片：批调度层为分片批的产出打上批标签。
+    fn with_slice_label(mut self, label: Option<&str>) -> Self {
+        self.encoding_slice = label.map(str::to_string);
         self
     }
 }
@@ -954,6 +988,7 @@ pub fn solve_state_main<'ir, B: BV>(
     fixed_inputs: &FixedSolveInputs<B>,
     value_hints: &[isla_lib::config::ValueHintConfig],
     region_configs: super::value_hints::RegionConfigInput<'_>,
+    encoding_slices: &[isla_lib::config::EncodingSliceConfig],
 ) -> bool {
     let case_quota = execution_limits_config.and_then(|cfg| cfg.case_quota.as_ref().map(CaseQuota::from_config));
     let mut clause_set: HashSet<String> = HashSet::new();
@@ -1026,31 +1061,87 @@ pub fn solve_state_main<'ir, B: BV>(
             }
         }
 
-        // P1 值域 signposting：批调度——首批恒为自由批（无提示档对照，保证
-        // signposting 不压缩纯符号路径），其后为作用域内 hint 候选批。批间不
-        // 共享假设：每批独立重置 checkpoint 求解，产出合并写入同一 JSON。
-        let batches = match super::value_hints::plan_solve_batches(
-            value_hints,
+        // P2 编码维度预分片：配置声明了该 clause 的分片时接管批计划（自由
+        // 对照批 + 每片钉死编码的求解批）。两套钉值通道（编码分片 × 值域
+        // hint）组合是配置级爆炸面，分片激活时该 clause 的 value_hints 批
+        // 让位并记日志；无分片声明时维持 P1 的 hint 批计划。
+        let slice_batches = match super::encoding_slices::plan_slice_batches(
+            encoding_slices,
             &clause,
-            region_configs,
             shared_state,
             regs,
             lets,
             &fixed_inputs.prestate,
+            fixed_inputs.instruction,
         ) {
             Ok(batches) => batches,
             Err(error) => {
-                eprintln!("错误: clause '{}' 值域 hint 批计划失败: {}", clause, error);
-                log!(log::SYM_EXEC, &format!("solve_state: {} hint 计划错误 {}", clause, error));
+                eprintln!("错误: clause '{}' 编码分片批计划失败: {}", clause, error);
+                log!(log::SYM_EXEC, &format!("solve_state: {} 编码分片批计划错误 {}", clause, error));
                 success = false;
                 continue;
             }
+        };
+        if slice_batches.is_some() {
+            // W21 同名冲突在计划期拦下（分片 prestate 与 [symbolic_registers] 的
+            // 矛盾不该等到执行期防御 panic）
+            let csr_conflict = target.symbolic_csrs().iter().find_map(|csr| {
+                let conflict = encoding_slices
+                    .iter()
+                    .filter(|slice| normalize_clause_name(&slice.clause) == clause)
+                    .any(|slice| slice.prestate.contains_key(&csr.name));
+                conflict.then(|| {
+                    format!(
+                        "编码分片 prestate 钉值 {} 与 [symbolic_registers] 同名冲突（符号化 CSR 不能再钉具体值）",
+                        csr.name
+                    )
+                })
+            });
+            if let Some(error) = csr_conflict {
+                eprintln!("错误: clause '{}' {}", clause, error);
+                log!(log::SYM_EXEC, &format!("solve_state: {} {}", clause, error));
+                success = false;
+                continue;
+            }
+            let has_hints = value_hints.iter().any(|hint| super::value_hints::hint_matches_clause(hint, &clause));
+            if has_hints {
+                log!(
+                    log::SYM_EXEC,
+                    &format!(
+                        "solve_state: {} 编码分片激活，value_hints 批让位（分片批已钉编码，避免两套钉值笛卡尔积）",
+                        clause
+                    )
+                );
+            }
+        }
+        // P1 值域 signposting：批调度——首批恒为自由批（无提示档对照，保证
+        // signposting 不压缩纯符号路径），其后为作用域内 hint 候选批。批间不
+        // 共享假设：每批独立重置 checkpoint 求解，产出合并写入同一 JSON。
+        let batches = match slice_batches {
+            Some(batches) => batches,
+            None => match super::value_hints::plan_solve_batches(
+                value_hints,
+                &clause,
+                region_configs,
+                shared_state,
+                regs,
+                lets,
+                &fixed_inputs.prestate,
+            ) {
+                Ok(batches) => batches,
+                Err(error) => {
+                    eprintln!("错误: clause '{}' 值域 hint 批计划失败: {}", clause, error);
+                    log!(log::SYM_EXEC, &format!("solve_state: {} hint 计划错误 {}", clause, error));
+                    success = false;
+                    continue;
+                }
+            },
         };
         if batches.len() > 1 {
             log!(
                 log::SYM_EXEC,
                 &format!(
-                    "solve_state: {} 共 {} 个求解批（1 自由批 + {} 个 hint 批）",
+                    "solve_state: {} 共 {} 个求解批（1 自由批 + {} 个钉值批）",
                     clause,
                     batches.len(),
                     batches.len() - 1
@@ -1071,8 +1162,15 @@ pub fn solve_state_main<'ir, B: BV>(
                     batch_label.unwrap_or("自由批（无 hint）")
                 )
             );
-            let batch_inputs =
-                FixedSolveInputs { instruction: fixed_inputs.instruction, prestate: batch.prestate.clone() };
+            let batch_inputs = FixedSolveInputs {
+                instruction: batch.instruction.or(fixed_inputs.instruction),
+                prestate: batch.prestate.clone(),
+            };
+            // P2 分片预算：时间盒取分片覆写与全局 --timeout 的较小值
+            let batch_timeout = match batch.timeout {
+                Some(timebox) => Some(timeout.map(|global| global.min(timebox)).unwrap_or(timebox)),
+                None => timeout,
+            };
             match run_symbolic_execute_with_target(
                 target,
                 &clause,
@@ -1081,12 +1179,14 @@ pub fn solve_state_main<'ir, B: BV>(
                 lets,
                 initial_memory.clone(),
                 num_threads,
-                timeout,
+                batch_timeout,
                 &execution_limits,
                 &timeout_reporter,
                 case_quota.clone(),
                 &batch_inputs,
                 batch_label,
+                batch.label.as_deref().filter(|label| label.starts_with("enc-slice:")),
+                batch.case_limit,
             ) {
                 Ok(outcome) => {
                     log!(
@@ -1216,6 +1316,9 @@ struct SolvePathCtx<'a, 'ir, B: BV> {
     /// P1 值域 signposting：当前批的 hint 标签（自由批为 None），随每条产出
     /// 用例写入 JSON 的 value-hint 字段
     hint_label: Option<&'a str>,
+    /// P2 编码维度预分片：当前批的分片标签（自由批为 None），随每条产出
+    /// 用例写入 JSON 的 encoding-slice 字段
+    slice_label: Option<&'a str>,
 }
 
 /// solve-state 单条完成路径的收集逻辑（自 collector 闭包迁出）：Sat 路径物化 JSON 项；
@@ -1732,7 +1835,8 @@ fn solve_collect_path<'ir, B: BV>(
                     pre_memory,
                     post_memory,
                 )
-                .with_hint_label(ctx.hint_label);
+                .with_hint_label(ctx.hint_label)
+                .with_slice_label(ctx.slice_label);
                 collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                     path_signature: frame.path_signature(),
                     item: single_instruction_json,
@@ -1803,6 +1907,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     case_quota: Option<CaseQuota>,
     fixed_inputs: &FixedSolveInputs<B>,
     hint_label: Option<&str>,
+    slice_label: Option<&str>,
+    case_limit: Option<u32>,
 ) -> Result<BatchOutcome, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -1881,8 +1987,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     } */
 
     let instruction = if let Some(fixed) = fixed_inputs.instruction {
-        decode_fixed_instruction(fixed, instruction_name, shared_state, &symbolic_regs, lets)
-            .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?
+        decode_fixed_instruction(
+            fixed,
+            instruction_name,
+            shared_state,
+            // 译码环境用初始具体表 + 钉值（见 decode_register_bindings 的根因说明），
+            // 不传主求解的 symbolic_regs——其中的符号声明只存在于主 solver。
+            &decode_register_bindings(regs, &fixed_inputs.prestate, shared_state),
+            lets,
+        )
+        .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?
     } else {
         let ctor_name = shared_state.symtab.lookup(instruction_name);
         Val::<B>::Ctor(
@@ -1926,6 +2040,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         task_state: &task_state,
         continuations: &continuations,
         hint_label,
+        slice_label,
     };
 
     //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
@@ -2001,7 +2116,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             )
         );
     }
-    let items = finalize_cases(state.cases, &quota);
+    let mut items = finalize_cases(state.cases, &quota);
+    // P2 分片预算：case_limit 是每片产出条数硬上限（在确定性归并之后截断，
+    // 保证截断结果与配额取样后的排序一致）
+    if let Some(limit) = case_limit {
+        items.truncate(limit as usize);
+    }
     Ok(BatchOutcome { items, error: state.first_error })
 }
 
@@ -2027,6 +2147,104 @@ mod tests {
         assert!(parse_fixed_instruction_bits("0x6").is_err());
         assert!(parse_fixed_instruction_bits("0x00006008").is_err());
         assert!(parse_fixed_instruction_bits("6008").is_err());
+    }
+
+    /// 译码守卫读寄存器的最小 IR 函数：`return = (mstatus != 0x600)`。
+    /// 模拟真实 rv64d IR 中 zencdec_backwards 向量分支经 zcurrentlyEnabled
+    /// 读取 zmstatus 的形态（Exp::Id 直接引用寄存器名 + neq primop）。
+    /// 返回（shared_state，mstatus 寄存器名），并把函数注册进 shared_state。
+    fn decode_probe_shared_state() -> (SharedState<'static, B64>, Name) {
+        use isla_lib::ir::Exp as IrExp;
+        let mut symtab = Symtab::new();
+        let mstatus_text: &'static str = Box::leak(zencode::encode("mstatus").into_boxed_str());
+        // 函数名用 IR 原文（z 前缀形式），symtab.lookup 按原文匹配
+        let probe_text: &'static str = "zdecode_probe";
+        let mstatus_name = symtab.intern(mstatus_text);
+        let probe_name = symtab.intern(probe_text);
+        let mut shared_state: SharedState<B64> = SharedState::empty(symtab);
+        shared_state.registers.insert(mstatus_name, Ty::Bits(64));
+        let result_text: &'static str = Box::leak(zencode::encode("zz_result").into_boxed_str());
+        let result = shared_state.symtab.intern(result_text);
+        let instrs: &'static [Instr<Name, B64>] = Box::leak(
+            vec![
+                Instr::Decl(result, Ty::Bool, SourceLoc::unknown()),
+                Instr::Copy(
+                    Loc::Id(result),
+                    IrExp::Call(Op::Neq, vec![IrExp::Id(mstatus_name), IrExp::Bits(B64::new(0x600, 64))]),
+                    SourceLoc::unknown(),
+                ),
+                Instr::Copy(Loc::Id(RETURN), IrExp::Id(result), SourceLoc::unknown()),
+                Instr::End,
+            ]
+            .into_boxed_slice(),
+        );
+        let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Bool));
+        shared_state.functions.insert(probe_name, (Vec::new(), ret_ty, instrs));
+        (shared_state, mstatus_name)
+    }
+
+    /// 根因回归（G6/E/P1 三次撞到的 smt.rs:2168 "Could not get Z3 func_decl"
+    /// 启动期 panic）：concrete_function_result 在独立 solver 中执行译码函数，
+    /// 寄存器表若携带主 solver 声明的符号值（setup_pre_state 之后的
+    /// symbolic_regs），译码守卫的 neq 把该符号送进从未声明它的 solver，
+    /// translate_exp 直接 panic。这是不变量违反，必须硬失败而非静默绕过；
+    /// 调用侧（decode_fixed_instruction）必须传 decode_register_bindings
+    /// 产出的全具体环境。
+    #[test]
+    #[should_panic(expected = "Could not get Z3 func_decl")]
+    fn concrete_function_result外部solver符号寄存器硬失败() {
+        let (shared_state, mstatus_name) = decode_probe_shared_state();
+        let context = Context::new(Config::new());
+        let mut main_solver = Solver::<B64>::new(&context);
+        // 模拟 setup_pre_state：在主 solver 里符号化 mstatus
+        let symbolic_mstatus = symbolic(&Ty::Bits(64), &shared_state, &mut main_solver, SourceLoc::unknown()).unwrap();
+        let mut symbolic_regs = RegisterBindings::new();
+        let ty = Ty::<Name>::Bits(64);
+        symbolic_regs.insert(mstatus_name, false, UVal::Init(symbolic_mstatus));
+
+        // 在 fresh solver（concrete_function_result 内部自建）里执行：符号未声明 → panic
+        let outcome =
+            concrete_function_result("zdecode_probe", Val::Unit, &shared_state, &symbolic_regs, &Bindings::default());
+        panic!("防御性编程：外部 solver 符号应在上游 panic，不应返回 {:?}", outcome);
+    }
+
+    /// 具体寄存器环境下译码函数正常返回具体值——decode_register_bindings 的
+    /// 语义约束：初始具体值 + --prestate 钉值即可安全跨 solver 复用。
+    #[test]
+    fn concrete_function_result具体寄存器环境成功() {
+        let (shared_state, mstatus_name) = decode_probe_shared_state();
+        let mut regs = RegisterBindings::new();
+        let ty = Ty::<Name>::Bits(64);
+        regs.insert(mstatus_name, false, UVal::Init(Val::Bits(B64::new(0x600, 64))));
+        let outcome =
+            concrete_function_result("zdecode_probe", Val::Unit, &shared_state, &regs, &Bindings::default()).unwrap();
+        assert_eq!(outcome, Val::Bool(false), "0x600 != 0x600 为假");
+    }
+
+    /// --instruction-bits 的译码环境构造：初始寄存器表 + --prestate 钉值覆盖。
+    /// 未钉值寄存器保留初始具体值（不被主求解的符号化污染），钉值寄存器按
+    /// CLI/分片注入的具体值覆盖。
+    #[test]
+    fn decode_register_bindings初始值加钉值() {
+        let (mut shared_state, mstatus_name) = decode_probe_shared_state();
+        let x6_text = zencode::encode("x6");
+        let x6_name = shared_state.symtab.intern(&x6_text);
+        let mut regs = RegisterBindings::new();
+        let ty = Ty::<Name>::Bits(64);
+        regs.insert(mstatus_name, false, UVal::Init(Val::Bits(B64::new(0x600, 64))));
+        regs.insert(x6_name, false, UVal::Uninit(&ty));
+
+        let pinned = Val::Bits(B64::new(0x8000_1000, 64));
+        let prestate = HashMap::from([(x6_name, pinned.clone())]);
+        let decode_regs = decode_register_bindings(&regs, &prestate, &shared_state);
+        assert_eq!(decode_regs.get_last_if_initialized(x6_name), Some(&pinned), "钉值寄存器被覆盖");
+        assert_eq!(
+            decode_regs.get_last_if_initialized(mstatus_name),
+            Some(&Val::Bits(B64::new(0x600, 64))),
+            "未钉值寄存器保留初始具体值"
+        );
+        // 原表不被修改（批间复用同一初始表）
+        assert_eq!(regs.get_last_if_initialized(x6_name), None, "原表保持 Uninit");
     }
 
     /// 构造一个内联的 `ExecutionLimitsConfig`，用来测 `solve_execution_limits` 这个函数本身的
@@ -2733,6 +2951,7 @@ mod tests {
                 pre_memory: Vec::new(),
                 post_memory: Vec::new(),
                 value_hint: None,
+                encoding_slice: None,
             },
         }
     }

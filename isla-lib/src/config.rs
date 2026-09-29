@@ -592,6 +592,162 @@ fn get_value_hints(config: &Value) -> Result<Option<Vec<ValueHintConfig>>, Strin
     Ok(Some(hints))
 }
 
+/// P2（plan-bughunt 编码维度预分片）：`[[encoding_slices]]` 单条声明。
+/// 整片自由求解从未选中具体编码（51 例 VSSEG 无 vsseg3e32、VLX/VSX 整片超时），
+/// 编码维度（nf×eew×mop…）按维度表预分片枚举——每片钉死编码字段独立求解，
+/// 替代自由求解撞运气。维度值域推导与编码构造见 isarch 侧 `encoding_slices`
+/// 模块；配置层只负责名字与形态的合法性。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodingSliceConfig {
+    /// 作用 clause（按 isarch 的 normalize_clause_name 归一匹配）
+    pub clause: String,
+    /// 全枚举维度字段名：值域由维度表从 IR 类型（枚举成员、位宽）或内置域
+    /// （nf=2..=8）推导。
+    pub enumerate: Vec<String>,
+    /// 显式钉值维度：字段名 → 语义值候选（如 eew 用 8/16/32/64、mop 用 0/1）。
+    pub dimensions: BTreeMap<String, Vec<u64>>,
+    /// 非维度操作数字段的具体选择（缺省沿用维度表内置默认 rs1/vs2/vs3=6、vm=1）。
+    pub operand_defaults: BTreeMap<String, u64>,
+    /// 每片附加寄存器钉值：寄存器名 → 值文本（--prestate 语法）。向量编码的
+    /// 译码守卫需要具体 mstatus/cur_privilege 打开扩展域（E 线 T1 先例）。
+    pub prestate: BTreeMap<String, String>,
+    /// 每片用例数上限（None 沿用全局配额）。
+    pub case_limit: Option<u32>,
+    /// 每片求解时间盒秒数（None 沿用全局 --timeout）。
+    pub timebox_s: Option<u64>,
+}
+
+pub fn get_encoding_slices(config: &Value) -> Result<Option<Vec<EncodingSliceConfig>>, String> {
+    let Some(slices) = config.get("encoding_slices") else { return Ok(None) };
+    let Some(slices) = slices.as_array() else {
+        return Err("encoding_slices should be an array of tables".to_string());
+    };
+
+    let mut parsed = Vec::with_capacity(slices.len());
+    for (index, slice) in slices.iter().enumerate() {
+        let Some(slice) = slice.as_table() else {
+            return Err("encoding_slices should be an array of tables".to_string());
+        };
+        allowed_table_keys(
+            slice,
+            "[[encoding_slices]]",
+            &["clause", "enumerate", "dimensions", "operand_defaults", "prestate", "case_limit", "timebox_s"],
+        )?;
+
+        let context = format!("encoding_slices[{}]", index);
+        let clause = match slice.get("clause") {
+            Some(Value::String(name)) => name.clone(),
+            Some(_) => return Err(format!("{}.clause should be a string", context)),
+            None => return Err(format!("No {}.clause found", context)),
+        };
+
+        let mut enumerate = Vec::new();
+        match slice.get("enumerate") {
+            Some(Value::Array(entries)) => {
+                for entry in entries {
+                    match entry {
+                        Value::String(name) => enumerate.push(name.clone()),
+                        _ => return Err(format!("{}.enumerate should be an array of strings", context)),
+                    }
+                }
+            }
+            Some(_) => return Err(format!("{}.enumerate should be an array of strings", context)),
+            None => (),
+        }
+
+        let mut dimensions = BTreeMap::new();
+        match slice.get("dimensions") {
+            Some(Value::Table(table)) => {
+                for (field, values) in table {
+                    let Some(values) = values.as_array() else {
+                        return Err(format!("{}.dimensions.{} should be an array of integers", context, field));
+                    };
+                    let mut candidates = Vec::with_capacity(values.len());
+                    if candidates.is_empty() && values.is_empty() {
+                        return Err(format!("{}.dimensions.{} 候选列表为空", context, field));
+                    }
+                    for value in values {
+                        candidates.push(parse_u64_value(value, &format!("{}.dimensions.{}", context, field))?);
+                    }
+                    dimensions.insert(field.clone(), candidates);
+                }
+            }
+            Some(_) => return Err(format!("{}.dimensions should be a table", context)),
+            None => (),
+        }
+
+        // 同一字段既声明全枚举又声明显式钉值是歧义配置，硬失败
+        for field in &enumerate {
+            if dimensions.contains_key(field) {
+                return Err(format!("{} 字段 {} 同时出现在 enumerate 与 dimensions", context, field));
+            }
+        }
+
+        let mut operand_defaults = BTreeMap::new();
+        match slice.get("operand_defaults") {
+            Some(Value::Table(table)) => {
+                for (field, value) in table {
+                    operand_defaults.insert(
+                        field.clone(),
+                        parse_u64_value(value, &format!("{}.operand_defaults.{}", context, field))?,
+                    );
+                }
+            }
+            Some(_) => return Err(format!("{}.operand_defaults should be a table", context)),
+            None => (),
+        }
+
+        let mut prestate = BTreeMap::new();
+        match slice.get("prestate") {
+            Some(Value::Table(table)) => {
+                for (register, value) in table {
+                    let Some(value) = value.as_str() else {
+                        return Err(format!("{}.prestate.{} should be a string", context, register));
+                    };
+                    prestate.insert(register.clone(), value.to_string());
+                }
+            }
+            Some(_) => return Err(format!("{}.prestate should be a table", context)),
+            None => (),
+        }
+
+        let case_limit = match slice.get("case_limit") {
+            Some(value) => {
+                let limit = parse_u64_value(value, &format!("{}.case_limit", context))?;
+                let limit = u32::try_from(limit).map_err(|_| format!("{}.case_limit 应为正 u32", context))?;
+                if limit == 0 {
+                    return Err(format!("{}.case_limit 应为正 u32", context));
+                }
+                Some(limit)
+            }
+            None => None,
+        };
+
+        let timebox_s = match slice.get("timebox_s") {
+            Some(value) => {
+                let seconds = parse_u64_value(value, &format!("{}.timebox_s", context))?;
+                if seconds == 0 {
+                    return Err(format!("{}.timebox_s 应为正数秒", context));
+                }
+                Some(seconds)
+            }
+            None => None,
+        };
+
+        parsed.push(EncodingSliceConfig {
+            clause,
+            enumerate,
+            dimensions,
+            operand_defaults,
+            prestate,
+            case_limit,
+            timebox_s,
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
 fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
     match config.get(tool) {
         Some(Value::String(tool)) => {
@@ -2115,6 +2271,8 @@ pub struct ISAConfig<B> {
     pub symbolic_registers: Vec<SymbolicRegisterConfig>,
     /// P1：`[[value_hints]]` 声明的值域 signposting 条目（solve-state 批调度）
     pub value_hints: Vec<ValueHintConfig>,
+    /// P2 编码维度预分片：`[[encoding_slices]]` 声明（见 EncodingSliceConfig）
+    pub encoding_slices: Vec<EncodingSliceConfig>,
     /// Optional CLINT enable flag
     pub clint_enabled: Option<bool>,
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
@@ -2146,6 +2304,7 @@ impl<B: BV> ISAConfig<B> {
         let mut default_registers = get_default_registers(&config, symtab, type_info)?;
         let symbolic_registers = get_symbolic_registers(&config, symtab, &default_registers)?;
         let value_hints = get_value_hints(&config)?.unwrap_or_default();
+        let encoding_slices = get_encoding_slices(&config)?.unwrap_or_default();
         let pmp = get_pmp_config(&config)?;
 
         Ok(ISAConfig {
@@ -2188,6 +2347,7 @@ impl<B: BV> ISAConfig<B> {
             pmp,
             symbolic_registers,
             value_hints,
+            encoding_slices,
             clint_enabled: get_clint_enabled(&config)?,
             execution_limits: get_execution_limits_config(&config)?,
         })
@@ -3221,6 +3381,111 @@ mod tests {
         for (toml, why) in cases {
             let value = toml.parse::<Value>().unwrap();
             assert!(get_value_hints(&value).is_err(), "{} 应报错", why);
+        }
+    }
+
+    /// P2 编码分片：合法声明解析——全枚举维度、显式钉值维度、操作数默认、
+    /// 每片寄存器钉值与预算覆写。
+    #[test]
+    fn encoding_slices_parses() {
+        let value = r#"
+            [[encoding_slices]]
+            clause = "VSSEGTYPE"
+            enumerate = ["nf", "eew"]
+
+            [[encoding_slices]]
+            clause = "zVSXSEGTYPE"
+            dimensions = { nf = [2, 3], mop = [0, 1] }
+            operand_defaults = { rs1 = 6, vs2 = 7, vs3 = 8, vm = 1 }
+            case_limit = 2
+            timebox_s = 30
+            [encoding_slices.prestate]
+            mstatus = "{ bits = 0x8000100800007E00 }"
+            cur_privilege = "Machine"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let slices = get_encoding_slices(&value).unwrap().unwrap();
+        assert_eq!(slices.len(), 2);
+
+        assert_eq!(slices[0].clause, "VSSEGTYPE");
+        assert_eq!(slices[0].enumerate, vec!["nf", "eew"]);
+        assert!(slices[0].dimensions.is_empty());
+        assert_eq!(slices[0].case_limit, None);
+
+        assert_eq!(slices[1].clause, "zVSXSEGTYPE");
+        assert!(slices[1].enumerate.is_empty());
+        assert_eq!(slices[1].dimensions.get("nf"), Some(&vec![2, 3]));
+        assert_eq!(slices[1].dimensions.get("mop"), Some(&vec![0, 1]));
+        assert_eq!(slices[1].operand_defaults.get("rs1"), Some(&6));
+        assert_eq!(slices[1].prestate.get("cur_privilege").map(String::as_str), Some("Machine"));
+        assert_eq!(slices[1].case_limit, Some(2));
+        assert_eq!(slices[1].timebox_s, Some(30));
+    }
+
+    /// P2 编码分片解析硬失败：缺 clause、同字段既枚举又显式钉值、类型不符、
+    /// 非法顶层数组形态。
+    #[test]
+    fn encoding_slices_hard_fails() {
+        let cases = [
+            (
+                r#"
+                [[encoding_slices]]
+                enumerate = ["nf"]
+                "#,
+                "缺 clause",
+            ),
+            (
+                r#"
+                [[encoding_slices]]
+                clause = "VSSEGTYPE"
+                enumerate = ["nf"]
+                dimensions = { nf = [2, 3] }
+                "#,
+                "同字段既枚举又显式钉值",
+            ),
+            (
+                r#"
+                [[encoding_slices]]
+                clause = "VSSEGTYPE"
+                dimensions = "nf"
+                "#,
+                "dimensions 不是表",
+            ),
+            (
+                r#"
+                [[encoding_slices]]
+                clause = "VSSEGTYPE"
+                dimensions = { nf = [2, -3] }
+                "#,
+                "负维度值",
+            ),
+            (
+                r#"
+                [[encoding_slices]]
+                clause = "VSSEGTYPE"
+                case_limit = 0
+                "#,
+                "case_limit 非正",
+            ),
+            (
+                r#"
+                [[encoding_slices]]
+                clause = "VSSEGTYPE"
+                prestate = ["x6 = 1"]
+                "#,
+                "prestate 不是表",
+            ),
+            (
+                r#"
+                encoding_slices = { clause = "VSSEGTYPE" }
+                "#,
+                "encoding_slices 不是 array-of-tables",
+            ),
+        ];
+        for (toml, why) in cases {
+            let value = toml.parse::<Value>().unwrap();
+            assert!(get_encoding_slices(&value).is_err(), "{} 应报错", why);
         }
     }
 }

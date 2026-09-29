@@ -265,9 +265,15 @@ pub fn detect_prestate_conflicts<B: BV>(
 /// 求解批：自由批（label 为 None，prestate 即 CLI 固定初态）或值域 hint 批
 /// （label 携带维度/模式/候选值，prestate 为 CLI 固定初态 + 候选钉值的并集）。
 /// 批间不共享假设——每批独立重置 checkpoint 后求解（机制 (b) 的批化形态）。
+///
+/// P2 编码维度预分片扩展：`instruction` 钉死本批的指令编码（None = 自由
+/// 求解指令），`case_limit`/`timeout` 为分片批的预算覆写（None 沿用全局）。
 pub struct SolveBatch<B: BV> {
     pub label: Option<String>,
     pub prestate: HashMap<Name, Val<B>>,
+    pub instruction: Option<super::exec::FixedInstruction>,
+    pub case_limit: Option<u32>,
+    pub timeout: Option<u64>,
 }
 
 /// 区域配置输入（isarch_main 从 ISAConfig 装配传入，避免 exec 依赖整个 ISAConfig）。
@@ -289,7 +295,13 @@ pub fn plan_solve_batches<'ir, B: BV>(
     lets: &Bindings<'ir, B>,
     cli_prestate: &HashMap<Name, Val<B>>,
 ) -> Result<Vec<SolveBatch<B>>, String> {
-    let mut batches = vec![SolveBatch { label: None, prestate: cli_prestate.clone() }];
+    let mut batches = vec![SolveBatch {
+        label: None,
+        prestate: cli_prestate.clone(),
+        instruction: None,
+        case_limit: None,
+        timeout: None,
+    }];
 
     let matching: Vec<&ValueHintConfig> = value_hints.iter().filter(|hint| hint_matches_clause(hint, clause)).collect();
     if matching.is_empty() {
@@ -307,7 +319,13 @@ pub fn plan_solve_batches<'ir, B: BV>(
             detect_prestate_conflicts(&pin_set.pins, cli_prestate, &shared_state.symtab)?;
             let mut prestate = cli_prestate.clone();
             prestate.extend(materialize_pins(&pin_set.pins, shared_state, lets, regs)?);
-            batches.push(SolveBatch { label: Some(pin_set.label), prestate });
+            batches.push(SolveBatch {
+                label: Some(pin_set.label),
+                prestate,
+                instruction: None,
+                case_limit: None,
+                timeout: None,
+            });
         }
     }
     Ok(batches)

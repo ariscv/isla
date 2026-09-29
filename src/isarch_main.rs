@@ -35,6 +35,7 @@
 //! - `solve-state [--clause|--extension|--instruction-name|--all]`: Solve for concrete ISA state values
 
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::Path;
 use std::process::exit;
 use std::time::Duration;
@@ -382,6 +383,7 @@ fn isla_main() -> i32 {
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
     opts.optopt("", "instruction-bits", "定向执行真实16/32位编码（需单一--clause）", "<0xNNNN|0xNNNNNNNN>");
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
+    opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
     opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
 
@@ -537,6 +539,22 @@ fn isla_main() -> i32 {
         }
         Subcommand::Tree { .. } => cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path),
         Subcommand::SolveState { clauses, extensions, instruction_names, run_all } => {
+            // P2 编码分片：独立 TOML 叠加（[[encoding_slices]] 可与主配置分离维护）
+            let mut encoding_slices = isa_config.encoding_slices.clone();
+            if let Some(slices_file) = matches.opt_str("encoding-slices-config") {
+                let contents = fs::read_to_string(&slices_file)
+                    .unwrap_or_else(|error| panic!("读取编码分片配置 {} 失败: {}", slices_file, error));
+                let value: toml::Value =
+                    contents.parse().unwrap_or_else(|error| panic!("解析编码分片配置 {} 失败: {}", slices_file, error));
+                match isla_lib::config::get_encoding_slices(&value) {
+                    Ok(Some(slices)) => encoding_slices.extend(slices),
+                    Ok(None) => eprintln!("警告: 编码分片配置 {} 不含 [[encoding_slices]] 声明", slices_file),
+                    Err(error) => {
+                        eprintln!("错误: 编码分片配置 {} 解析失败: {}", slices_file, error);
+                        return 1;
+                    }
+                }
+            }
             let instruction_bits = matches.opt_str("instruction-bits");
             let prestate_args = matches.opt_strs("prestate");
             if (instruction_bits.is_some() || !prestate_args.is_empty())
@@ -616,6 +634,7 @@ fn isla_main() -> i32 {
                         &fixed_inputs,
                         &value_hints,
                         region_configs,
+                        &encoding_slices,
                     )
                 }
                 64 => {
@@ -650,6 +669,7 @@ fn isla_main() -> i32 {
                         &fixed_inputs,
                         &value_hints,
                         region_configs,
+                        &encoding_slices,
                     )
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),
