@@ -6,6 +6,7 @@ pub mod memory_builder;
 pub mod memory_model;
 pub mod target;
 mod timeout_report;
+pub mod value_hints;
 
 use crate::isarch::args::{ArgStruct, InstructionMap};
 use isla_lib::bitvector::BV;

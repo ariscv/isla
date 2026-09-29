@@ -380,6 +380,52 @@ mtimecmp/stimecmp/PMP 族：符号化/部分钉死/保持钉死三档建议 + PM
 satp 两个两难）见 W21 验收产物目录中的 `csr-audit.md`（路径登记于
 议题状态文档，见上仓 `agents/` 对应议题）。
 
+### 值域 signposting：`[[value_hints]]`（P1）
+
+solve-state 自由求解存在系统性**取值退化**（W24 campaign + B2/B3 归因）：
+成功路径地址恒对齐（45/45）、基址退化 x0/低位、源数据初值全零/任意——
+错位/边界类 bug（如 XiangShan #1574 错位 SC、#6486 发错数据）在生成层
+不可见。`[[value_hints]]` 把"哪一类寄存器的取值域需要定向探索"声明为
+配置，求解时按候选值分批钉值（机制 (b)：复用 fixed_prestate 注入通道，
+E 线已证定向钉值有效），批间不共享假设、每批独立求解。
+
+```toml
+[[value_hints]]
+target = "base"                          # 维度：base/data/vector_ctx
+patterns = ["misaligned", "pma_boundary_pm1"]
+clauses = ["zSTORE"]                     # 作用域，缺省全局
+
+[[value_hints]]
+target = "data"
+patterns = ["nonzero_pattern"]
+values = ["0x1234"]                      # 模式与显式数值可并存（并集）
+```
+
+- 维度类别（默认寄存器集合）：`base` → x1..x31（访存基址）；`data` →
+  vr0..vr31 + f0..f31（向量/浮点源数据；标量源数据与基址同属 GPR，机制
+  (b) 无法分开钉，钉 base 已顺带给标量源数据非零非恒等值）；`vector_ctx`
+  → vl/vstart。
+- 内置模式名（锚点从 concrete `[[pma_regions]]` 或 `[[memory_regions]]`
+  非判死区域推导）：`pma_boundary_pm1`（各边界±1）、`misaligned`（锚定
+  最低区域基址的奇偏移，对 2/4/8/16B 访问宽度全部错位）、`low_hole`
+  （区域地图之下低位）、`aligned`（基址/+8/+16/+4KiB）、
+  `nonzero_pattern`（0xA5 步进 / 0x00FF 掩码 / 全 1 极值三选，批内按
+  寄存器序号 XOR 步进保持源间可区分——错源类 bug 签名依赖可区分源）、
+  `vector_bounds`（vl ∈ {0,1,8,16,128} + vstart ∈ {0,1}；只支持
+  vector_ctx 维度。VLMAX 相对值依赖 vtype，钉值机制只能钉常量，典型
+  VLMAX 锚点 8/16/128 与边界 0/1 是其常量近似）。
+- 调度：每个 clause 首批恒为**自由批**（保留无提示档对照，signposting
+  不压缩纯符号路径），其后为作用域内全部候选批（按标签去重），批计数
+  进日志（`solve_state: <clause> 求解批 i/n: <label>`）；产出合并写入
+  同一 `output/<arch>_<clause>.json`，hint 批用例带 `value-hint` 标签
+  字段（自由批不写该字段，无 hints 配置的 JSON 与既有逐项一致）。
+- 硬失败（对齐 `[[pma_regions]]` 风格）：未知维度/模式名、空候选
+  （patterns 与 values 全缺）、候选值超出寄存器宽度、hint 与
+  `--prestate` 重复钉值寄存器、需要锚点的模式找不到任何具体区域。
+- 已知局限（机制 (b) 固有，演进方向为 (a) 求解调度层按批追加
+  `== 候选值` 约束）：基址与标量源数据同属 GPR 无法分开钉；
+  VLMAX/VLMAX±1 这类依赖 vtype 的相对界值只能取常量近似。
+
 ### 钉死 PMP 寄存器：`[registers.defaults]`（W14）
 
 solve-state 中未给默认值的寄存器初值为符号变量。PMP 族寄存器

@@ -457,6 +457,141 @@ pub struct SymbolicRegisterConfig {
     pub derive_bit: Option<DerivedBitConfig>,
 }
 
+/// P1（plan-bughunt 值域 signposting）：`[[value_hints]]` 声明的维度类别。
+/// solve-state 自由求解存在系统性取值退化（成功路径地址恒对齐、基址退化 x0/
+/// 低位、源数据初值全零/任意——W24 campaign + B2/B3 归因），错位/边界类 bug
+/// 在生成层不可见。维度类别把"哪一类寄存器的取值域需要定向探索"声明为配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueHintTarget {
+    /// 访存基址寄存器（GPR：x1..x31）——错位、边界±1、低位洞、对齐锚点。
+    Base,
+    /// 源数据寄存器（向量 vr0..vr31 与浮点 f0..f31）——非零非恒等模式。
+    Data,
+    /// 向量上下文（vl/vstart）——0/1/典型 VLMAX 界值。
+    VectorCtx,
+}
+
+/// 内置候选值模式名。展开为具体候选值列表的锚点（PMA/内存区域配置）与展开
+/// 规则见 isarch 侧 `value_hints` 模块；配置层只负责名字的合法性。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValuePattern {
+    /// PMA 各边界±1（从已注入 [[pma_regions]] 或 [[memory_regions]] 推导）。
+    PmaBoundaryPm1,
+    /// 按访存宽度（2/4/8/16B）的错位偏移，锚定首个具体区域基址。
+    Misaligned,
+    /// 低位洞（区域地图之下的低位地址）。
+    LowHole,
+    /// 区域内对齐锚点（基址、+8、+16、+4KiB）。
+    Aligned,
+    /// 非零非恒等模式：0xA5 步进 / 0x00FF 掩码 / 全 1 极值三选（跨寄存器
+    /// XOR 步进保持源寄存器间可区分——错源类 bug 如 #6486 需要可区分源）。
+    NonzeroPattern,
+    /// 向量界值：vl ∈ {0,1,8,16,128}、vstart ∈ {0,1}（VLMAX 相对值依赖 vtype，
+    /// 钉值机制只能钉常量，见机制说明）。
+    VectorBounds,
+}
+
+impl ValuePattern {
+    fn from_str_name(name: &str) -> Result<Self, String> {
+        match name {
+            "pma_boundary_pm1" => Ok(ValuePattern::PmaBoundaryPm1),
+            "misaligned" => Ok(ValuePattern::Misaligned),
+            "low_hole" => Ok(ValuePattern::LowHole),
+            "aligned" => Ok(ValuePattern::Aligned),
+            "nonzero_pattern" => Ok(ValuePattern::NonzeroPattern),
+            "vector_bounds" => Ok(ValuePattern::VectorBounds),
+            _ => Err(format!("Unknown value hint pattern {}", name)),
+        }
+    }
+}
+
+/// `[[value_hints]]` 单条声明：一个维度类别 + 候选值来源（内置模式名集合与
+/// 显式数值列表的并集）+ 作用域（`clauses` 缺省为全局，条目名按 isarch 的
+/// normalize_clause_name 归一后匹配）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueHintConfig {
+    pub target: ValueHintTarget,
+    pub patterns: Vec<ValuePattern>,
+    pub values: Vec<u64>,
+    pub clauses: Option<Vec<String>>,
+}
+
+fn get_value_hints(config: &Value) -> Result<Option<Vec<ValueHintConfig>>, String> {
+    let Some(value_hints) = config.get("value_hints") else { return Ok(None) };
+    let Some(value_hints) = value_hints.as_array() else {
+        return Err("value_hints should be an array of tables".to_string());
+    };
+
+    let mut hints = Vec::with_capacity(value_hints.len());
+    for (index, hint) in value_hints.iter().enumerate() {
+        let Some(hint) = hint.as_table() else {
+            return Err("value_hints should be an array of tables".to_string());
+        };
+
+        allowed_table_keys(hint, "[[value_hints]]", &["target", "patterns", "values", "clauses"])?;
+
+        let context = format!("value_hints[{}]", index);
+        let target = match hint.get("target") {
+            Some(Value::String(name)) => match name.as_str() {
+                "base" => ValueHintTarget::Base,
+                "data" => ValueHintTarget::Data,
+                "vector_ctx" => ValueHintTarget::VectorCtx,
+                _ => return Err(format!("Unknown value hint target {} in {}", name, context)),
+            },
+            Some(_) => return Err(format!("{}.target should be a string", context)),
+            None => return Err(format!("No {}.target found", context)),
+        };
+
+        let mut patterns = Vec::new();
+        match hint.get("patterns") {
+            Some(Value::Array(entries)) => {
+                for entry in entries {
+                    match entry {
+                        Value::String(name) => patterns.push(ValuePattern::from_str_name(name)?),
+                        _ => return Err(format!("{}.patterns should be an array of strings", context)),
+                    }
+                }
+            }
+            Some(_) => return Err(format!("{}.patterns should be an array of strings", context)),
+            None => (),
+        }
+
+        let mut values = Vec::new();
+        match hint.get("values") {
+            Some(Value::Array(entries)) => {
+                for entry in entries {
+                    values.push(parse_u64_value(entry, &format!("{}.values", context))?);
+                }
+            }
+            Some(_) => return Err(format!("{}.values should be an array of integers", context)),
+            None => (),
+        }
+
+        if patterns.is_empty() && values.is_empty() {
+            return Err(format!("{} 需要 patterns 或 values 至少一项", context));
+        }
+
+        let clauses = match hint.get("clauses") {
+            Some(Value::Array(entries)) => {
+                let mut names = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    match entry {
+                        Value::String(name) => names.push(name.clone()),
+                        _ => return Err(format!("{}.clauses should be an array of strings", context)),
+                    }
+                }
+                Some(names)
+            }
+            Some(_) => return Err(format!("{}.clauses should be an array of strings", context)),
+            None => None,
+        };
+
+        hints.push(ValueHintConfig { target, patterns, values, clauses });
+    }
+
+    Ok(Some(hints))
+}
+
 fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
     match config.get(tool) {
         Some(Value::String(tool)) => {
@@ -1978,6 +2113,8 @@ pub struct ISAConfig<B> {
     pub pmp: Option<PmpConfig>,
     /// W21：`[symbolic_registers]` 声明的 CSR 符号化条目（solver 期注入）
     pub symbolic_registers: Vec<SymbolicRegisterConfig>,
+    /// P1：`[[value_hints]]` 声明的值域 signposting 条目（solve-state 批调度）
+    pub value_hints: Vec<ValueHintConfig>,
     /// Optional CLINT enable flag
     pub clint_enabled: Option<bool>,
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
@@ -2008,6 +2145,7 @@ impl<B: BV> ISAConfig<B> {
 
         let mut default_registers = get_default_registers(&config, symtab, type_info)?;
         let symbolic_registers = get_symbolic_registers(&config, symtab, &default_registers)?;
+        let value_hints = get_value_hints(&config)?.unwrap_or_default();
         let pmp = get_pmp_config(&config)?;
 
         Ok(ISAConfig {
@@ -2049,6 +2187,7 @@ impl<B: BV> ISAConfig<B> {
             page_table_config: get_page_table_config(&config)?,
             pmp,
             symbolic_registers,
+            value_hints,
             clint_enabled: get_clint_enabled(&config)?,
             execution_limits: get_execution_limits_config(&config)?,
         })
@@ -2977,5 +3116,111 @@ mod tests {
         .unwrap();
         let error = get_symbolic_registers(&value, &symtab, &defaults).unwrap_err();
         assert!(error.contains("冲突"), "{}", error);
+    }
+
+    /// P1（plan-bughunt 值域 signposting）：[[value_hints]] 合法解析——维度类别、
+    /// 内置模式名集合、显式数值列表、per-clause 作用域与全局作用域（缺省）。
+    #[test]
+    fn value_hints_parsing_dimensions_patterns_scope() {
+        let value = r#"
+            [[value_hints]]
+            target = "base"
+            patterns = ["misaligned", "pma_boundary_pm1"]
+            clauses = ["zSTORE", "STORECON"]
+
+            [[value_hints]]
+            target = "data"
+            patterns = ["nonzero_pattern"]
+
+            [[value_hints]]
+            target = "vector_ctx"
+            patterns = ["vector_bounds"]
+            values = ["0x40", 7]
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let hints = get_value_hints(&value).unwrap().unwrap();
+        assert_eq!(hints.len(), 3);
+
+        assert_eq!(hints[0].target, ValueHintTarget::Base);
+        assert_eq!(hints[0].patterns, vec![ValuePattern::Misaligned, ValuePattern::PmaBoundaryPm1]);
+        assert!(hints[0].values.is_empty());
+        assert_eq!(hints[0].clauses.as_deref(), Some(&["zSTORE".to_string(), "STORECON".to_string()][..]));
+
+        assert_eq!(hints[1].target, ValueHintTarget::Data);
+        assert_eq!(hints[1].patterns, vec![ValuePattern::NonzeroPattern]);
+        // 缺省 clauses 即全局作用域
+        assert_eq!(hints[1].clauses, None);
+
+        assert_eq!(hints[2].target, ValueHintTarget::VectorCtx);
+        assert_eq!(hints[2].patterns, vec![ValuePattern::VectorBounds]);
+        // 模式与显式数值可并存（候选并集）
+        assert_eq!(hints[2].values, vec![0x40, 7]);
+    }
+
+    /// 解析硬失败（对齐 [[pma_regions]]/[[memory_regions]] 风格）：未知维度类别、
+    /// 未知模式名、空候选（patterns 与 values 全缺）、字段类型不符都必须报错。
+    #[test]
+    fn value_hints_hard_fails() {
+        let cases = [
+            (
+                r#"
+                [[value_hints]]
+                target = "stack"
+                patterns = ["misaligned"]
+                "#,
+                "未知维度类别",
+            ),
+            (
+                r#"
+                [[value_hints]]
+                target = "base"
+                patterns = ["misalignd"]
+                "#,
+                "未知模式名",
+            ),
+            (
+                r#"
+                [[value_hints]]
+                target = "base"
+                "#,
+                "空候选（patterns 与 values 全缺）",
+            ),
+            (
+                r#"
+                [[value_hints]]
+                target = "base"
+                patterns = "misaligned"
+                "#,
+                "patterns 不是数组",
+            ),
+            (
+                r#"
+                [[value_hints]]
+                target = "base"
+                values = [-1]
+                "#,
+                "负数值候选",
+            ),
+            (
+                r#"
+                [[value_hints]]
+                target = "data"
+                patterns = ["nonzero_pattern"]
+                clauses = "zSTORE"
+                "#,
+                "clauses 不是数组",
+            ),
+            (
+                r#"
+                value_hints = { target = "base" }
+                "#,
+                "value_hints 不是 array-of-tables",
+            ),
+        ];
+        for (toml, why) in cases {
+            let value = toml.parse::<Value>().unwrap();
+            assert!(get_value_hints(&value).is_err(), "{} 应报错", why);
+        }
     }
 }

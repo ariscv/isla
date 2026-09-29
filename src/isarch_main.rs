@@ -572,6 +572,13 @@ fn isla_main() -> i32 {
                 }
             }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
+            // P1 值域 signposting：[[value_hints]] 批调度输入（区域锚点从
+            // [[pma_regions]]/[[memory_regions]] 推导）
+            let value_hints = isa_config.value_hints.clone();
+            let region_configs = isla::isarch::value_hints::RegionConfigInput {
+                pma_regions: isa_config.pma_regions.as_deref(),
+                memory_regions: isa_config.memory_regions.as_deref(),
+            };
             let timeout_report_config =
                 isarch::exec::TimeoutReportConfig { output: timeout_smt_output, directory: timeout_smt_dir };
             let xlen = detect_xlen(*shared_state, lets);
@@ -607,6 +614,8 @@ fn isla_main() -> i32 {
                         isa_config.execution_limits.as_ref(),
                         timeout_report_config.clone(),
                         &fixed_inputs,
+                        &value_hints,
+                        region_configs,
                     )
                 }
                 64 => {
@@ -639,6 +648,8 @@ fn isla_main() -> i32 {
                         isa_config.execution_limits.as_ref(),
                         timeout_report_config.clone(),
                         &fixed_inputs,
+                        &value_hints,
+                        region_configs,
                     )
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),

@@ -463,6 +463,10 @@ struct AssemGenJsonItem {
     /// 指令执行后每个被触碰字节的最终内容（稀疏连续段；只读未写的字节取最后一次读值）
     #[serde(rename = "post-memory")]
     post_memory: Vec<MemorySpanJson>,
+    /// P1 值域 signposting：产出该用例的 hint 批标签（自由批为 None，不序列化，
+    /// 保证无 hints 配置的 JSON 输出与既有逐项一致）
+    #[serde(rename = "value-hint", skip_serializing_if = "Option::is_none")]
+    value_hint: Option<String>,
 }
 impl AssemGenJsonItem {
     pub fn new<B: BV>(
@@ -480,7 +484,23 @@ impl AssemGenJsonItem {
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, memory_events, pre_memory, post_memory }
+        AssemGenJsonItem {
+            arch,
+            test_ins,
+            test_ins_encdec,
+            isa_state,
+            ret_val,
+            memory_events,
+            pre_memory,
+            post_memory,
+            value_hint: None,
+        }
+    }
+
+    /// P1 值域 signposting：批调度层为 hint 批的产出打上批标签。
+    fn with_hint_label(mut self, label: Option<&str>) -> Self {
+        self.value_hint = label.map(str::to_string);
+        self
     }
 }
 trait ToJSON: Serialize {
@@ -932,6 +952,8 @@ pub fn solve_state_main<'ir, B: BV>(
     execution_limits_config: Option<&ExecutionLimitsConfig>,
     timeout_report_config: TimeoutReportConfig,
     fixed_inputs: &FixedSolveInputs<B>,
+    value_hints: &[isla_lib::config::ValueHintConfig],
+    region_configs: super::value_hints::RegionConfigInput<'_>,
 ) -> bool {
     let case_quota = execution_limits_config.and_then(|cfg| cfg.case_quota.as_ref().map(CaseQuota::from_config));
     let mut clause_set: HashSet<String> = HashSet::new();
@@ -1004,26 +1026,128 @@ pub fn solve_state_main<'ir, B: BV>(
             }
         }
 
-        match run_symbolic_execute_with_target(
-            target,
+        // P1 值域 signposting：批调度——首批恒为自由批（无提示档对照，保证
+        // signposting 不压缩纯符号路径），其后为作用域内 hint 候选批。批间不
+        // 共享假设：每批独立重置 checkpoint 求解，产出合并写入同一 JSON。
+        let batches = match super::value_hints::plan_solve_batches(
+            value_hints,
             &clause,
+            region_configs,
             shared_state,
             regs,
             lets,
-            initial_memory.clone(),
-            num_threads,
-            timeout,
-            &execution_limits,
-            &timeout_reporter,
-            case_quota.clone(),
-            fixed_inputs,
+            &fixed_inputs.prestate,
         ) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("错误: clause '{}' 符号执行失败: {}", clause, e);
-                log!(log::SYM_EXEC, &format!("solve_state: {}运行错误 {}", clause, e));
+            Ok(batches) => batches,
+            Err(error) => {
+                eprintln!("错误: clause '{}' 值域 hint 批计划失败: {}", clause, error);
+                log!(log::SYM_EXEC, &format!("solve_state: {} hint 计划错误 {}", clause, error));
                 success = false;
+                continue;
             }
+        };
+        if batches.len() > 1 {
+            log!(
+                log::SYM_EXEC,
+                &format!(
+                    "solve_state: {} 共 {} 个求解批（1 自由批 + {} 个 hint 批）",
+                    clause,
+                    batches.len(),
+                    batches.len() - 1
+                )
+            );
+        }
+
+        let mut merged_items: Vec<AssemGenJsonItem> = Vec::new();
+        for (batch_index, batch) in batches.iter().enumerate() {
+            let batch_label = batch.label.as_deref();
+            log!(
+                log::SYM_EXEC,
+                &format!(
+                    "solve_state: {} 求解批 {}/{}: {}",
+                    clause,
+                    batch_index + 1,
+                    batches.len(),
+                    batch_label.unwrap_or("自由批（无 hint）")
+                )
+            );
+            let batch_inputs =
+                FixedSolveInputs { instruction: fixed_inputs.instruction, prestate: batch.prestate.clone() };
+            match run_symbolic_execute_with_target(
+                target,
+                &clause,
+                shared_state,
+                regs,
+                lets,
+                initial_memory.clone(),
+                num_threads,
+                timeout,
+                &execution_limits,
+                &timeout_reporter,
+                case_quota.clone(),
+                &batch_inputs,
+                batch_label,
+            ) {
+                Ok(outcome) => {
+                    log!(
+                        log::SYM_EXEC,
+                        &format!(
+                            "solve_state: {} 批 {}/{} 完成，产出 {} 条用例{}",
+                            clause,
+                            batch_index + 1,
+                            batches.len(),
+                            outcome.items.len(),
+                            if outcome.error.is_some() { "（含执行错误，已保留部分产出）" } else { "" }
+                        )
+                    );
+                    // 出错批已物化的部分用例仍保留（与既有"错误路径也落盘"语义
+                    // 一致）；执行期错误只终止本批，继续跑剩余批——单批超时不
+                    // 应吞掉其他批的产出
+                    if let Some(error) = outcome.error {
+                        eprintln!(
+                            "错误: clause '{}' 符号执行失败（批 {}/{} {}）: {}",
+                            clause,
+                            batch_index + 1,
+                            batches.len(),
+                            batch_label.unwrap_or("自由批"),
+                            error
+                        );
+                        log!(
+                            log::SYM_EXEC,
+                            &format!(
+                                "solve_state: {}运行错误 {} (批 {})",
+                                clause,
+                                error,
+                                batch_label.unwrap_or("自由批")
+                            )
+                        );
+                        success = false;
+                    }
+                    merged_items.extend(outcome.items);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "错误: clause '{}' 符号执行启动失败（批 {}/{} {}）: {}",
+                        clause,
+                        batch_index + 1,
+                        batches.len(),
+                        batch_label.unwrap_or("自由批"),
+                        error
+                    );
+                    log!(
+                        log::SYM_EXEC,
+                        &format!("solve_state: {}启动错误 {} (批 {})", clause, error, batch_label.unwrap_or("自由批"))
+                    );
+                    success = false;
+                }
+            }
+            // 每批后增量落盘（覆写为已合并全集）：外层时间盒硬杀时，已完成批的
+            // 产出不随进程丢失
+            AssemGenJson::new(merged_items.clone()).to_json(Some(format!(
+                "output/{}_{}.json",
+                target.arch_pretty_name(),
+                clause
+            )));
         }
 
         #[cfg(feature = "itrace")]
@@ -1089,6 +1213,9 @@ struct SolvePathCtx<'a, 'ir, B: BV> {
     timeout_reporter: &'a TimeoutReporter,
     task_state: &'a TaskState<B>,
     continuations: &'a Mutex<Vec<ExecuteAsContinuation<B>>>,
+    /// P1 值域 signposting：当前批的 hint 标签（自由批为 None），随每条产出
+    /// 用例写入 JSON 的 value-hint 字段
+    hint_label: Option<&'a str>,
 }
 
 /// solve-state 单条完成路径的收集逻辑（自 collector 闭包迁出）：Sat 路径物化 JSON 项；
@@ -1604,7 +1731,8 @@ fn solve_collect_path<'ir, B: BV>(
                     memory_events,
                     pre_memory,
                     post_memory,
-                );
+                )
+                .with_hint_label(ctx.hint_label);
                 collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                     path_signature: frame.path_signature(),
                     item: single_instruction_json,
@@ -1654,6 +1782,13 @@ fn solve_collect_path<'ir, B: BV>(
     }
 }
 
+/// 单批求解结果：已物化用例 + 可选的首个错误（错误批的已物化部分仍随
+/// items 保留——与既有"错误路径也落盘"语义一致，由批调度层合并）。
+struct BatchOutcome {
+    items: Vec<AssemGenJsonItem>,
+    error: Option<ExecError>,
+}
+
 fn run_symbolic_execute_with_target<'ir, B: BV>(
     target: &mut dyn RISCV<B>,
     instruction_name: &str,
@@ -1667,7 +1802,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     timeout_reporter: &TimeoutReporter,
     case_quota: Option<CaseQuota>,
     fixed_inputs: &FixedSolveInputs<B>,
-) -> Result<Option<String>, ExecError> {
+    hint_label: Option<&str>,
+) -> Result<BatchOutcome, ExecError> {
     use isla_lib::smt::checkpoint;
 
     let state_regs = target.reg_list();
@@ -1789,6 +1925,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         timeout_reporter: &timeout_reporter,
         task_state: &task_state,
         continuations: &continuations,
+        hint_label,
     };
 
     //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
@@ -1853,7 +1990,6 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         Ok(result_mutex) => result_mutex,
         Err(_) => panic!("{} 执行结束后 result 收集器仍有共享引用", instruction_name),
     };
-    let xlen_name_str = target.arch_pretty_name().to_string();
     let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
     let quota = state.case_quota;
     if state.model_query_timeouts > 0 {
@@ -1866,12 +2002,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         );
     }
     let items = finalize_cases(state.cases, &quota);
-    let json = AssemGenJson::new(items);
-    json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
-    match state.first_error {
-        Some(error) => Err(error),
-        None => Ok(None),
-    }
+    Ok(BatchOutcome { items, error: state.first_error })
 }
 
 #[cfg(test)]
@@ -2601,6 +2732,7 @@ mod tests {
                 memory_events: Vec::new(),
                 pre_memory: Vec::new(),
                 post_memory: Vec::new(),
+                value_hint: None,
             },
         }
     }
