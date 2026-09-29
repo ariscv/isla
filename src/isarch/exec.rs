@@ -216,6 +216,92 @@ fn decode_fixed_instruction<'ir, B: BV + Send + Sync>(
     Ok(decoded)
 }
 
+/// P3（plan-bughunt）encdec 守卫过滤：`zencdec_forwards` 产出的编码用
+/// `zext_decode`（encdec 映射的 backwards 方向——`when` 守卫在译码侧
+/// 生效）译回，构造子与原指令一致才放行。
+///
+/// 根因（B2 的 ldu 变体）：solve-state 对 union 载荷的自由求解选中了
+/// execute 域内合法但 encdec 域外的参数组合（`LOAD(is_unsigned=true,
+/// width=8)`，RV64 无 ldu，`valid_load_encdec` 对其返回 false）。物化门
+/// 信任的 `zencdec_forwards` 在真实物化环境（载荷的 %i64 字段以 64 位
+/// Bits 形态从 model 取回，实跑观察值为 0x8000_0000_0000_0009 一类的
+/// 未约束垃圾值）下越过 when 守卫产出了 funct3=111 的编码；而
+/// `zencdec_backwards` 对同一编码正确译出 ILLEGAL。encdec 守卫一致性
+/// 因此以"译码回环"为准——这也是 DUT 侧的真实接受度。
+///
+/// 返回 `Ok(false)` 表示编码被守卫拒绝（调用方丢弃该路径并计数
+/// `encdec-guard-reject`）；`Err` 表示译码器本身执行出错（内部错误按
+/// "查不到不编造"丢弃路径并记诊断，不静默放行）。
+pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
+    instruction_ctor: Name,
+    encdec_bits: &Val<B>,
+    shared_state: &SharedState<B>,
+    regs: &RegisterBindings<B>,
+    lets: &Bindings<B>,
+) -> Result<bool, String> {
+    let bits_len = match encdec_bits {
+        Val::Bits(bits) => bits.len(),
+        other => return Err(format!("zencdec_forwards 返回非位向量编码: {:?}", other)),
+    };
+    let function = match bits_len {
+        16 => "zext_decode_compressed",
+        32 => "zext_decode",
+        other => return Err(format!("zencdec_forwards 产出 {} 位编码，只支持 16/32 位译码回环", other)),
+    };
+    let collected: Arc<Mutex<Option<Result<Val<B>, ExecError>>>> = Arc::new(Mutex::new(None));
+    {
+        let sink = Arc::clone(&collected);
+        execute_ir_function(
+            function,
+            &[encdec_bits.clone()],
+            shared_state,
+            regs,
+            lets,
+            &sink,
+            &move |_, _, exec_result, _, _, sink| match exec_result {
+                // MatchFailure 是"该编码在译码器里无可走分支"（守卫拒绝的
+                // 正常形态），静默保持 None——与 try_get_assembly_* 的处理
+                // 一致。
+                Err((ExecError::MatchFailure(_), _)) => (),
+                Err((error, _)) => {
+                    *sink.lock().expect("回环译码收集器 mutex poisoned") = Some(Err(error));
+                }
+                Ok((Run::Finished(ret), _)) => {
+                    *sink.lock().expect("回环译码收集器 mutex poisoned") = Some(Ok(ret));
+                }
+                Ok((_, _)) => (),
+            },
+        );
+    }
+    let outcome = collected.lock().expect("回环译码收集器 mutex poisoned").take();
+    match outcome {
+        // 无 Finished 路径：编码不可译（含守卫拒绝）。
+        None => Ok(false),
+        Some(Err(error)) => Err(format!("{} 译码回环执行失败: {}", function, error)),
+        Some(Ok(Val::Ctor(decoded_ctor, _))) => Ok(decoded_ctor == instruction_ctor),
+        Some(Ok(other)) => Err(format!("{} 译码结果不是指令构造子: {:?}", function, other)),
+    }
+}
+
+/// P3：是否保留 encdec 守卫外的编码变体（默认过滤）。故意测试保留编码
+/// 的场景（非法编码的译码/trap 行为）设 `ISLA_RISCV_ALLOW_RESERVED_ENCODINGS=1`。
+pub(crate) fn parse_allow_reserved_encodings(raw: Option<&str>) -> bool {
+    match raw {
+        None => false,
+        Some("1") => true,
+        Some("0") => false,
+        Some(other) => panic!("ISLA_RISCV_ALLOW_RESERVED_ENCODINGS 仅支持 0 或 1，实际为 '{}'", other),
+    }
+}
+
+fn allow_reserved_encodings() -> bool {
+    match std::env::var("ISLA_RISCV_ALLOW_RESERVED_ENCODINGS") {
+        Ok(value) => parse_allow_reserved_encodings(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_allow_reserved_encodings(None),
+        Err(err) => panic!("读取环境变量 ISLA_RISCV_ALLOW_RESERVED_ENCODINGS 失败: {}", err),
+    }
+}
+
 /// 执行轨迹中访存事件（Event::ReadMem/WriteMem）的物化结果。
 /// value/data 等 model 中查不到取值的分量序列化为 null（外部数据边界，不编造也不 panic）。
 /// 同一事件可能跨路径重复，按 trace 顺序原样输出，不去重。
@@ -561,12 +647,16 @@ trait ToJSON: Serialize {
 #[derive(Serialize, Deserialize)]
 struct AssemGenJson {
     gen: Vec<AssemGenJsonItem>,
+    /// P3 encdec 守卫过滤：被丢弃的非法编码变体计数（reason → 条数）。
+    /// 为空时不序列化，保证零拒绝时 JSON 输出与既有逐字节一致。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    skip: BTreeMap<String, u64>,
 }
 impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
     fn new(gen: Vec<AssemGenJsonItem>) -> Self {
-        AssemGenJson { gen }
+        AssemGenJson { gen, skip: BTreeMap::new() }
     }
 }
 
@@ -587,6 +677,9 @@ struct SolveCollectorState {
     first_error: Option<ExecError>,
     /// 终值查询（最终 check_sat + 取模型）超过时间盒而降级输出的路径数。
     model_query_timeouts: usize,
+    /// P3 encdec 守卫过滤：编码未被译码器认回（execute 域越过 encdec 守卫
+    /// 的非法变体，如 RV64 的 ldu）而被丢弃的路径数。
+    encdec_guard_rejects: usize,
 }
 
 impl SolveCollectorState {
@@ -595,7 +688,13 @@ impl SolveCollectorState {
     }
 
     fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
-        SolveCollectorState { first_error: None, cases: Vec::new(), case_quota, model_query_timeouts: 0 }
+        SolveCollectorState {
+            first_error: None,
+            cases: Vec::new(),
+            case_quota,
+            model_query_timeouts: 0,
+            encdec_guard_rejects: 0,
+        }
     }
 
     fn record_error(&mut self, error: &ExecError) -> bool {
@@ -613,6 +712,11 @@ impl SolveCollectorState {
 
     fn record_model_query_timeout(&mut self) {
         self.model_query_timeouts += 1;
+    }
+
+    /// P3：encdec 守卫回环拒绝一条非法编码变体路径。
+    fn record_encdec_guard_reject(&mut self) {
+        self.encdec_guard_rejects += 1;
     }
 }
 
@@ -1150,6 +1254,9 @@ pub fn solve_state_main<'ir, B: BV>(
         }
 
         let mut merged_items: Vec<AssemGenJsonItem> = Vec::new();
+        // P3 encdec 守卫过滤：跨批累计被拒条数，随 JSON 落盘（reason 固定
+        // encdec-guard-reject），下游 build/summary 与重放侧可见。
+        let mut merged_encdec_guard_rejects: u64 = 0;
         for (batch_index, batch) in batches.iter().enumerate() {
             let batch_label = batch.label.as_deref();
             log!(
@@ -1224,6 +1331,7 @@ pub fn solve_state_main<'ir, B: BV>(
                         success = false;
                     }
                     merged_items.extend(outcome.items);
+                    merged_encdec_guard_rejects += outcome.encdec_guard_rejects as u64;
                 }
                 Err(error) => {
                     eprintln!(
@@ -1243,11 +1351,11 @@ pub fn solve_state_main<'ir, B: BV>(
             }
             // 每批后增量落盘（覆写为已合并全集）：外层时间盒硬杀时，已完成批的
             // 产出不随进程丢失
-            AssemGenJson::new(merged_items.clone()).to_json(Some(format!(
-                "output/{}_{}.json",
-                target.arch_pretty_name(),
-                clause
-            )));
+            let mut json = AssemGenJson::new(merged_items.clone());
+            if merged_encdec_guard_rejects > 0 {
+                json.skip.insert("encdec-guard-reject".to_string(), merged_encdec_guard_rejects);
+            }
+            json.to_json(Some(format!("output/{}_{}.json", target.arch_pretty_name(), clause)));
         }
 
         #[cfg(feature = "itrace")]
@@ -1609,21 +1717,72 @@ fn solve_collect_path<'ir, B: BV>(
                             let asm_encdec_opt =
                                 match try_get_assembly_encdec(arg_val.clone(), shared_state, gate_regs, ctx.lets) {
                                     Ok(encoded) => match encoded {
-                                        Some(val) => match FmtVal::from_val(&val, &mut model) {
-                                            Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
-                                            Err(err) => {
-                                                itrace_diagnostics =
-                                                    error_recorder.record_error_diagnostic(&err, frame, shared_state);
-                                                log!(
-                                                    log::PATH_RESULT,
-                                                    &format!(
-                                                        "警告: {}汇编编码不可格式化 {:?}",
-                                                        ctx.instruction_name, err
-                                                    )
-                                                );
-                                                None
+                                        Some(val) => {
+                                            // P3 encdec 守卫过滤：forwards 产出的编码必须能被
+                                            // 译码器认回同一构造子（when 守卫在 backwards 方向
+                                            // 生效），否则丢弃并计数 encdec-guard-reject。
+                                            // ISLA_RISCV_ALLOW_RESERVED_ENCODINGS=1 显式保留
+                                            // （故意测试保留编码的场景）。
+                                            if !allow_reserved_encodings() {
+                                                let expected_ctor = match &arg_val {
+                                                    Val::Ctor(ctor, _) => *ctor,
+                                                    other => panic!("指令参数应是构造子值，实际 {:?}", other),
+                                                };
+                                                match encdec_guard_roundtrip_ok(
+                                                    expected_ctor,
+                                                    &val,
+                                                    shared_state,
+                                                    gate_regs,
+                                                    ctx.lets,
+                                                ) {
+                                                    Ok(true) => (),
+                                                    Ok(false) => {
+                                                        collected
+                                                            .lock()
+                                                            .expect("solve collector mutex poisoned")
+                                                            .record_encdec_guard_reject();
+                                                        log!(
+                                                            log::PATH_RESULT,
+                                                            &format!(
+                                                                "clause{} encdec 守卫拒绝非法编码变体（test-ins={}）",
+                                                                ctx.instruction_name, test_ins
+                                                            )
+                                                        );
+                                                        submit_itrace(frame, &mut itrace_diagnostics);
+                                                        return;
+                                                    }
+                                                    Err(error) => {
+                                                        log!(
+                                                            log::PATH_RESULT,
+                                                            &format!(
+                                                                "警告: clause{} encdec 守卫回环译码失败，丢弃路径: {}",
+                                                                ctx.instruction_name, error
+                                                            )
+                                                        );
+                                                        submit_itrace(frame, &mut itrace_diagnostics);
+                                                        return;
+                                                    }
+                                                }
                                             }
-                                        },
+                                            match FmtVal::from_val(&val, &mut model) {
+                                                Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
+                                                Err(err) => {
+                                                    itrace_diagnostics = error_recorder.record_error_diagnostic(
+                                                        &err,
+                                                        frame,
+                                                        shared_state,
+                                                    );
+                                                    log!(
+                                                        log::PATH_RESULT,
+                                                        &format!(
+                                                            "警告: {}汇编编码不可格式化 {:?}",
+                                                            ctx.instruction_name, err
+                                                        )
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        }
                                         None => None,
                                     },
                                     Err(error) => {
@@ -1891,6 +2050,8 @@ fn solve_collect_path<'ir, B: BV>(
 struct BatchOutcome {
     items: Vec<AssemGenJsonItem>,
     error: Option<ExecError>,
+    /// P3 encdec 守卫过滤：本批被拒绝的非法编码变体路径数。
+    encdec_guard_rejects: usize,
 }
 
 fn run_symbolic_execute_with_target<'ir, B: BV>(
@@ -2122,7 +2283,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     if let Some(limit) = case_limit {
         items.truncate(limit as usize);
     }
-    Ok(BatchOutcome { items, error: state.first_error })
+    if state.encdec_guard_rejects > 0 {
+        log!(
+            log::SYM_EXEC,
+            &format!(
+                "{} encdec 守卫过滤拒绝 {} 条非法编码变体（execute 域越过 encdec 守卫，ISLA_RISCV_ALLOW_RESERVED_ENCODINGS=1 可保留）",
+                instruction_name, state.encdec_guard_rejects
+            )
+        );
+    }
+    Ok(BatchOutcome { items, error: state.first_error, encdec_guard_rejects: state.encdec_guard_rejects })
 }
 
 #[cfg(test)]
@@ -3043,5 +3213,153 @@ mod tests {
         let base = PathBuf::from("output/itrace");
         let result = clause_itrace_output_path(&base, "zsub");
         assert_eq!(result, PathBuf::from("output/itrace_zsub.txt"));
+    }
+
+    /// 真 rv64d.ir 的初始化环境（P3 集成测试共用）：加载 IR + difftest pma
+    /// 配置，返回 (shared_state, regs, lets)。加载约 4-5 秒，两个用例各自
+    /// 重建，避免测试间共享可变状态。
+    fn real_ir_env() -> (SharedState<'static, B129>, RegisterBindings<'static, B129>, Bindings<'static, B129>) {
+        let contents: &'static str = Box::leak(
+            std::fs::read_to_string("rv64d.ir").expect("测试需要从仓库根目录运行，读 rv64d.ir").into_boxed_str(),
+        );
+        let mut symtab = Symtab::new();
+        let mut arch: &'static mut [Def<Name, B129>] = Box::leak(
+            isla_lib::ir_parser::IrParser::new()
+                .parse(&mut symtab, isla_lib::ir_lexer::new_ir_lexer(contents))
+                .expect("解析 rv64d.ir 失败")
+                .into_boxed_slice(),
+        );
+        let type_info = IRTypeInfo::new(&arch);
+        let config_contents = std::fs::read_to_string("configs/riscv64_difftest_mem_excluded_pma.toml")
+            .expect("测试需要从仓库根目录运行，读 configs/riscv64_difftest_mem_excluded_pma.toml");
+        let isa_config =
+            isla_lib::config::ISAConfig::parse(&config_contents, None, &symtab, &type_info).expect("ISA 配置解析失败");
+        let isla_lib::init::Initialized { regs, lets, shared_state } = isla_lib::init::initialize_architecture(
+            arch,
+            symtab,
+            type_info,
+            &isa_config,
+            isla_lib::ir::AssertionMode::Pessimistic,
+            false,
+        );
+        (shared_state, regs, lets)
+    }
+
+    /// P3 集成：ldu 编码（funct3=111，RV64 非法变体——zencdec_forwards 在
+    /// 物化环境越过 valid_load_encdec 守卫产出的形态）必须被译码回环拒绝：
+    /// zext_decode 对它译出 ILLEGAL，与 zLOAD 构造子不一致。
+    #[test]
+    fn encdec_guard_回环拒绝ldu非法编码() {
+        let (shared_state, regs, lets) = real_ir_env();
+        let load_ctor = shared_state.symtab.lookup("zLOAD");
+        // 32'h7e8e_7003：imm=0x7e8, rs1=x28, funct3=111, rd=x0, opcode=0000011
+        let ldu_bits = Val::Bits(B129::new(0x7e8e_7003, 32));
+        assert_eq!(
+            encdec_guard_roundtrip_ok(load_ctor, &ldu_bits, &shared_state, &regs, &lets),
+            Ok(false),
+            "ldu 编码（funct3=111）应被 encdec 守卫回环拒绝"
+        );
+    }
+
+    /// P3 集成：AMO 的非法 op×width 组合（amoswap.q——RVA/Zabha 无 16 字节
+    /// swap，decode 译出 ILLEGAL）也必须被回环拒绝。
+    #[test]
+    fn encdec_guard_回环拒绝amoswapq非法编码() {
+        let (shared_state, regs, lets) = real_ir_env();
+        let amo_ctor = shared_state.symtab.lookup("zAMO");
+        // 32'h0900_402f：funct5=amoswap, funct3=100（16 字节 q），实跑产物形态
+        let swap_q = Val::Bits(B129::new(0x0900_402f, 32));
+        assert_eq!(
+            encdec_guard_roundtrip_ok(amo_ctor, &swap_q, &shared_state, &regs, &lets),
+            Ok(false),
+            "amoswap.q 编码（无 16 字节 swap）应被回环拒绝"
+        );
+        // amoswap.h（Zabha）译回 zAMO，放行
+        let swap_h = Val::Bits(B129::new(0x09ff_902f, 32));
+        assert_eq!(
+            encdec_guard_roundtrip_ok(amo_ctor, &swap_h, &shared_state, &regs, &lets),
+            Ok(true),
+            "Zabha amoswap.h 编码应译回 zAMO 并通过回环"
+        );
+    }
+
+    /// P3 集成：向量段 store 构造子（zVSSEGTYPE）的合法编码（vse8.v，
+    /// P2 验收产物 32'h0000_0027）译回同构造子放行；跨构造子（拿 zLOAD
+    /// 校验）拒绝。VSSEG 全量求解超出本测时间盒，产物级扫描由验收战役
+    /// 覆盖（见议题状态文档）。
+    #[test]
+    fn encdec_guard_向量段store编码回环() {
+        let (shared_state, regs, lets) = real_ir_env();
+        let vsseg_ctor = shared_state.symtab.lookup("zVSSEGTYPE");
+        let vse8 = Val::Bits(B129::new(0x0000_0027, 32));
+        assert_eq!(
+            encdec_guard_roundtrip_ok(vsseg_ctor, &vse8, &shared_state, &regs, &lets),
+            Ok(true),
+            "vse8.v 编码应译回 zVSSEGTYPE 并通过回环"
+        );
+        let load_ctor = shared_state.symtab.lookup("zLOAD");
+        assert_eq!(
+            encdec_guard_roundtrip_ok(load_ctor, &vse8, &shared_state, &regs, &lets),
+            Ok(false),
+            "向量 store 编码对 zLOAD 构造子应拒绝"
+        );
+    }
+
+    /// P3 集成：合法 load 编码（lb，funct3=000）译回仍是 zLOAD，回环放行。
+    #[test]
+    fn encdec_guard_回环放行合法load编码() {
+        let (shared_state, regs, lets) = real_ir_env();
+        let load_ctor = shared_state.symtab.lookup("zLOAD");
+        // 32'h4000_0003：imm=0x400, rs1=x0, funct3=000, rd=x0, opcode=0000011（lb）
+        let lb_bits = Val::Bits(B129::new(0x4000_0003, 32));
+        assert_eq!(
+            encdec_guard_roundtrip_ok(load_ctor, &lb_bits, &shared_state, &regs, &lets),
+            Ok(true),
+            "合法 lb 编码应通过 encdec 守卫回环"
+        );
+    }
+
+    /// P3 集成：16 位压缩编码走 zext_decode_compressed 回环；c.nop（0x0001）
+    /// 译回 zC_NOP。构造子不一致（拿 zLOAD 对 0x0001 校验）时拒绝。
+    #[test]
+    fn encdec_guard_压缩编码回环与构造子校验() {
+        let (shared_state, regs, lets) = real_ir_env();
+        let nop_bits = Val::Bits(B129::new(0x0001, 16));
+        let c_nop_ctor = shared_state.symtab.lookup("zC_NOP");
+        assert_eq!(
+            encdec_guard_roundtrip_ok(c_nop_ctor, &nop_bits, &shared_state, &regs, &lets),
+            Ok(true),
+            "c.nop 编码应译回 zC_NOP 并通过回环"
+        );
+        let load_ctor = shared_state.symtab.lookup("zLOAD");
+        assert_eq!(
+            encdec_guard_roundtrip_ok(load_ctor, &nop_bits, &shared_state, &regs, &lets),
+            Ok(false),
+            "编码译回的构造子与原指令不一致时应拒绝"
+        );
+    }
+
+    /// P3：非位向量编码是内部不变量违反（防御式，不允许静默放行）。
+    #[test]
+    fn encdec_guard_非位向量编码报错() {
+        let (shared_state, regs, lets) = real_ir_env();
+        let load_ctor = shared_state.symtab.lookup("zLOAD");
+        let err = encdec_guard_roundtrip_ok(load_ctor, &Val::Bool(true), &shared_state, &regs, &lets)
+            .expect_err("非位向量编码必须报错");
+        assert!(err.contains("非位向量"), "实际: {}", err);
+    }
+
+    /// P3：保留编码开关默认关（过滤启用），"1" 开，"0" 关，非法值硬失败。
+    #[test]
+    fn parse_allow_reserved_encodings_三态解析() {
+        assert!(!parse_allow_reserved_encodings(None));
+        assert!(!parse_allow_reserved_encodings(Some("0")));
+        assert!(parse_allow_reserved_encodings(Some("1")));
+    }
+
+    #[test]
+    #[should_panic(expected = "仅支持 0 或 1")]
+    fn parse_allow_reserved_encodings_非法值硬失败() {
+        parse_allow_reserved_encodings(Some("yes"));
     }
 }

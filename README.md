@@ -426,6 +426,36 @@ values = ["0x1234"]                      # 模式与显式数值可并存（并�
   `== 候选值` 约束）：基址与标量源数据同属 GPR 无法分开钉；
   VLMAX/VLMAX±1 这类依赖 vtype 的相对界值只能取常量近似。
 
+### encdec 守卫过滤（P3）
+
+solve-state 的求解域是模型的 `execute` 函数，而指令合法性由 encdec
+映射的 `when` 守卫（如 `valid_load_encdec`）约束——两者域不一致时，
+自由求解会选中 execute 域内合法但 encdec 域外的参数组合（B2 实证：
+RV64 不存在的 `ldu` = `LOAD(is_unsigned=true, width=8)`，生成 16 条、
+重放全死循环）。物化门已有的 `zencdec_forwards` 单查挡不住它：真实
+物化环境中载荷的 `%i64` 字段以 64 位 Bits 形态从 model 取回（实测
+`0x8000_0000_0000_0009` 一类未约束垃圾值），`when` 守卫对这种形态的
+求值会放行；而 `zext_decode`（encdec 映射的 backwards 方向，守卫在
+此方向正常生效）对同一编码正确译出 ILLEGAL。
+
+因此物化门对 asm/encdec 之外加**第三查——译码回环**：`zencdec_forwards`
+产出的编码经 `zext_decode`（16 位走 `zext_decode_compressed`）译回，
+构造子与原指令一致才落盘；不一致（编码被守卫拒绝）丢弃该路径并计数
+`encdec-guard-reject`（JSON 顶层 `skip` 字段 + SYM_EXEC 日志，零拒绝时
+`skip` 不序列化、输出与既有逐字节一致）。回环译码自身执行出错按
+"查不到不编造"丢弃路径并记诊断，不静默放行。
+
+环境变量 `ISLA_RISCV_ALLOW_RESERVED_ENCODINGS`：
+
+* `0` 或未设（默认）：过滤启用——非法编码变体（ldu 类）不进产物；
+* `1`：跳过回环校验，保留编码照常产出——用于故意测试保留编码的场景
+  （如非法编码的译码/trap 行为对照）；
+* 其他值硬失败（panic，与 `ISLA_RISCV_MEMORY_MODEL` 同风格）。
+
+验收（zLOAD，pma 配置 600s 时间盒）：过滤开启 ldu 0 条（基线 16）、
+`skip: {"encdec-guard-reject": 16}`，其余助记符分布与 (test-ins,
+encdec) 逐项集合与无过滤基线完全一致；开关打开时 ldu 恢复产出。
+
 ### 钉死 PMP 寄存器：`[registers.defaults]`（W14）
 
 solve-state 中未给默认值的寄存器初值为符号变量。PMP 族寄存器
