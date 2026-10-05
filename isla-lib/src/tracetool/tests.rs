@@ -989,6 +989,51 @@ fn itrace_handler_submit_path_without_output_path_does_not_render_or_queue() {
 }
 
 #[test]
+fn writer_wakes_for_batches_drains_on_shutdown_and_restarts() {
+    let output = std::env::temp_dir().join(format!("writer_wakeup_{}.txt", std::process::id()));
+    let writer = Arc::new(TraceWriter::with_output_path(Some(output.clone())));
+    for round in 0..3 {
+        if round != 0 {
+            writer.set_path(Some(output.clone()));
+        }
+        // 队列为空时也必须能收到下一批，不能只靠退出时排空。
+        writer.submit_text(format!("round-{round}"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if std::fs::read_to_string(&output).unwrap_or_default().contains(&format!("round-{round}")) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "writer 未响应入队唤醒");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let workers = (0..4)
+            .map(|worker| {
+                let writer = Arc::clone(&writer);
+                std::thread::spawn(move || {
+                    for item in 0..100 {
+                        writer.submit_text(format!("{round}-{worker}-{item}"));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        writer.dump();
+        let text = std::fs::read_to_string(&output).unwrap();
+        for worker in 0..4 {
+            for item in 0..100 {
+                assert_eq!(text.lines().filter(|line| *line == format!("{round}-{worker}-{item}")).count(), 1);
+            }
+        }
+    }
+    writer.set_path(Some(output.clone()));
+    writer.dump(); // 空队列退出也必须唤醒等待线程。
+    drop(writer);
+    std::fs::remove_file(output).unwrap();
+}
+
+#[test]
 fn itrace_write_thread_writes_to_file() {
     let temp_dir = std::env::temp_dir();
     let output_path = temp_dir.join("itrace_test_write.txt");

@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 pub(super) fn clear_output_file(output_path: &Option<PathBuf>) {
@@ -28,6 +28,7 @@ pub(super) struct TraceWriter {
     pub(super) output_path: Mutex<Option<PathBuf>>,
     pub(super) completed_queue: Arc<SegQueue<String>>,
     pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) wake: Arc<(Mutex<()>, Condvar)>,
     pub(super) write_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -37,6 +38,7 @@ impl Default for TraceWriter {
             output_path: Mutex::new(None),
             completed_queue: Arc::new(SegQueue::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new((Mutex::new(()), Condvar::new())),
             write_thread: Mutex::new(None),
         }
     }
@@ -66,6 +68,7 @@ impl TraceWriter {
 
         let queue = Arc::clone(&self.completed_queue);
         let shutdown = Arc::clone(&self.shutdown);
+        let wake = Arc::clone(&self.wake);
         let path_for_error = path.clone();
 
         let handle = thread::Builder::new()
@@ -85,10 +88,13 @@ impl TraceWriter {
                             });
                         }
                         None => {
+                            let mut guard = wake.0.lock().expect("trace wake mutex poisoned");
+                            while queue.is_empty() && !shutdown.load(Ordering::Acquire) {
+                                guard = wake.1.wait(guard).expect("trace wake mutex poisoned");
+                            }
                             if shutdown.load(Ordering::Acquire) {
                                 break;
                             }
-                            thread::yield_now();
                         }
                     }
                 }
@@ -111,7 +117,12 @@ impl TraceWriter {
     }
 
     pub(super) fn stop_write_thread(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        {
+            let guard = self.wake.0.lock().expect("trace wake mutex poisoned");
+            self.shutdown.store(true, Ordering::Release);
+            self.wake.1.notify_all();
+            drop(guard);
+        }
         if let Ok(mut thread_handle) = self.write_thread.lock() {
             if let Some(handle) = thread_handle.take() {
                 match handle.join() {
@@ -158,7 +169,10 @@ impl TraceWriter {
     }
 
     pub(super) fn submit_text(&self, text: String) {
+        let guard = self.wake.0.lock().expect("trace wake mutex poisoned");
         self.completed_queue.push(text);
+        self.wake.1.notify_one();
+        drop(guard);
     }
 
     pub(super) fn dump(&self) {
