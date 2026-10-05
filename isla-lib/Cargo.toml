@@ -16,6 +16,8 @@ execution engine as a library.
 
 [features]
 itrace = ["tracetool"]
+ftrace = ["tracetool"]
+btrace = ["tracetool"]
 smtperf = []
 tracetool = []
 smt-thread-interrupt = []

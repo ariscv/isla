@@ -47,7 +47,7 @@ use crate::register::RegisterBindings;
 use crate::smt::{Checkpoint, Solver, Sym};
 use crate::timeout::{SmtCallStats, SmtDumpNames};
 #[cfg(feature = "tracetool")]
-use crate::tracetool::itrace::ItracePerPath;
+use crate::tracetool::TracePerPath;
 
 #[derive(Clone)]
 pub struct LocalDebugProbes {
@@ -132,13 +132,13 @@ pub struct Frame<'ir, B> {
      * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
      * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
      * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
-     * 分支条件是 itrace/path 级别的观测元数据，必须保存在 itrace_path 内部。
+     * 分支条件是 itrace/path 级别的观测元数据，必须保存在 trace_path 内部。
      * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
      * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
      */
-    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
+    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use trace_path
     #[cfg(feature = "tracetool")]
-    pub(super) itrace_path: Arc<ItracePerPath>,
+    pub(super) trace_path: Arc<TracePerPath>,
 }
 
 pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
@@ -158,7 +158,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc_counts: (*frame.pc_counts).clone(),
         taken_interrupts: (*frame.taken_interrupts).clone(),
         #[cfg(feature = "tracetool")]
-        itrace_path: (*frame.itrace_path).clone(),
+        trace_path: (*frame.trace_path).clone(),
     }
 }
 
@@ -192,9 +192,9 @@ pub struct LocalFrame<'ir, B> {
      * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
      * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
      */
-    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
+    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use trace_path
     #[cfg(feature = "tracetool")]
-    pub(super) itrace_path: ItracePerPath,
+    pub(super) trace_path: TracePerPath,
 }
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
@@ -218,7 +218,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         pc_counts: Arc::new(frame.pc_counts.clone()),
         taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
         #[cfg(feature = "tracetool")]
-        itrace_path: Arc::new(frame.itrace_path.clone()),
+        trace_path: Arc::new(frame.trace_path.clone()),
     }
 }
 
@@ -415,7 +415,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc_counts: HashMap::new(),
             taken_interrupts: Vec::new(),
             #[cfg(feature = "tracetool")]
-            itrace_path: ItracePerPath::default(),
+            trace_path: TracePerPath::default(),
         }
     }
 
@@ -436,7 +436,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.memory = self.memory.clone();
         #[cfg(feature = "tracetool")]
         {
-            new_frame.itrace_path = self.itrace_path.clone();
+            new_frame.trace_path = self.trace_path.clone();
         }
         new_frame
     }
@@ -576,38 +576,97 @@ mod tests {
 
         let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, instrs_ref);
 
-        local.itrace_path.record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
-        local.itrace_path.record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
-        assert_eq!(local.itrace_path.records().len(), 2);
+        local.trace_path.record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
+        local.trace_path.record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
+        assert_eq!(local.trace_path.record_count(), 2);
 
         let frozen = freeze_frame(&local);
-        assert_eq!(frozen.itrace_path.records().len(), 2);
+        assert_eq!(frozen.trace_path.record_count(), 2);
+        assert!(
+            std::ptr::eq(local.trace_path.records().next().unwrap(), frozen.trace_path.records().next().unwrap()),
+            "真实 freeze 必须共享 itrace payload"
+        );
 
         let mut fork_a = unfreeze_frame(&frozen);
         let mut fork_b = unfreeze_frame(&frozen);
 
-        fork_a.itrace_path.record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
-        fork_b.itrace_path.record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
-        fork_b.itrace_path.record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
+        fork_a.trace_path.record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
+        fork_b.trace_path.record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
+        fork_b.trace_path.record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
 
-        assert_eq!(fork_a.itrace_path.records().len(), 3);
-        assert_eq!(fork_b.itrace_path.records().len(), 4);
-        assert_eq!(local.itrace_path.records().len(), 2);
+        assert_eq!(fork_a.trace_path.record_count(), 3);
+        assert_eq!(fork_b.trace_path.record_count(), 4);
+        assert_eq!(local.trace_path.record_count(), 2);
 
-        assert_eq!(fork_a.itrace_path.records()[2].function_name, Name::from_u32(3));
-        assert_eq!(fork_a.itrace_path.records()[2].pc, 30);
-        assert_eq!(fork_a.itrace_path.records()[2].backtrace, vec![(Name::from_u32(30), 3)]);
-        assert!(fork_a.itrace_path.records()[2].summary.is_none());
+        assert_eq!(fork_a.trace_path.records().nth(2).unwrap().function_name, Name::from_u32(3));
+        assert_eq!(fork_a.trace_path.records().nth(2).unwrap().pc, 30);
+        assert_eq!(fork_a.trace_path.records().nth(2).unwrap().backtrace, vec![(Name::from_u32(30), 3)]);
+        assert!(fork_a.trace_path.records().nth(2).unwrap().summary.is_none());
 
-        assert_eq!(fork_b.itrace_path.records()[2].function_name, Name::from_u32(4));
-        assert_eq!(fork_b.itrace_path.records()[2].pc, 40);
-        assert_eq!(fork_b.itrace_path.records()[2].backtrace, vec![(Name::from_u32(40), 4)]);
-        assert!(fork_b.itrace_path.records()[2].summary.is_none());
+        assert_eq!(fork_b.trace_path.records().nth(2).unwrap().function_name, Name::from_u32(4));
+        assert_eq!(fork_b.trace_path.records().nth(2).unwrap().pc, 40);
+        assert_eq!(fork_b.trace_path.records().nth(2).unwrap().backtrace, vec![(Name::from_u32(40), 4)]);
+        assert!(fork_b.trace_path.records().nth(2).unwrap().summary.is_none());
 
-        assert_eq!(fork_b.itrace_path.records()[3].function_name, Name::from_u32(5));
-        assert_eq!(fork_b.itrace_path.records()[3].pc, 50);
-        assert_eq!(fork_b.itrace_path.records()[3].backtrace, vec![(Name::from_u32(50), 5)]);
-        assert!(fork_b.itrace_path.records()[3].summary.is_none());
+        assert_eq!(fork_b.trace_path.records().nth(3).unwrap().function_name, Name::from_u32(5));
+        assert_eq!(fork_b.trace_path.records().nth(3).unwrap().pc, 50);
+        assert_eq!(fork_b.trace_path.records().nth(3).unwrap().backtrace, vec![(Name::from_u32(50), 5)]);
+        assert!(fork_b.trace_path.records().nth(3).unwrap().summary.is_none());
+    }
+
+    #[test]
+    fn itrace_sharing_real_frame_fork_and_submission() {
+        use crate::smt::smtlib;
+        use crate::tracetool::TraceHandler;
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zsharing_frame");
+        let caller = symtab.intern("zsharing_caller");
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let mut parent = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
+        parent.trace_path.record_summary(function, vec![(caller, 8)], 0, "parent-summary");
+        parent.trace_path.push_branch_condition(smtlib::Exp::Bool(true));
+        parent.trace_path.record_branch_edge(function, vec![(caller, 8)], 0, 7, true);
+        let identity = parent.trace_path.prefix_identity_for_test();
+        assert!(identity.iter().all(|pointer| !pointer.is_null()));
+        let frozen = freeze_frame(&parent);
+        let mut left = unfreeze_frame(&frozen);
+        let mut right = unfreeze_frame(&frozen);
+        for path in [&*frozen.trace_path, &left.trace_path, &right.trace_path] {
+            assert_eq!(path.prefix_identity_for_test(), identity);
+        }
+        left.trace_path.record_summary(function, vec![(caller, 9)], 7, "left-summary");
+        left.trace_path.push_branch_condition(smtlib::Exp::Bool(false));
+        left.trace_path.record_branch_edge(function, vec![(caller, 9)], 7, 8, false);
+        right.trace_path.record_summary(function, vec![(caller, 10)], 7, "right-summary");
+        right.trace_path.push_branch_condition(smtlib::Exp::Bool(true));
+        right.trace_path.record_branch_edge(function, vec![(caller, 10)], 7, 12, true);
+        let filename = std::env::temp_dir().join(format!("itrace_shared_frame_{}.txt", std::process::id()));
+        let handler = TraceHandler::default();
+        handler.set_path(Some(filename.clone()));
+        handler.submit_path(&parent.trace_path, &symtab);
+        handler.submit_path(&left.trace_path, &symtab);
+        handler.submit_path(&right.trace_path, &symtab);
+        handler.dump();
+        let text = std::fs::read_to_string(&filename).unwrap();
+        assert_eq!(text.matches("parent-summary").count(), 3);
+        assert_eq!(text.matches("left-summary").count(), 1);
+        assert_eq!(text.matches("right-summary").count(), 1);
+        assert!(text.contains("branch_true_false):"));
+        assert!(text.contains("branch_true_true):"));
+        assert_eq!(text.matches("context=[zsharing_caller:8]").count(), 3);
+        assert_eq!(text.matches("context=[zsharing_caller:9]").count(), 1);
+        assert_eq!(text.matches("context=[zsharing_caller:10]").count(), 1);
+        assert_eq!(parent.trace_path.record_count(), 1);
+        assert_eq!(frozen.trace_path.record_count(), 1);
+        assert_eq!(left.trace_path.record_count(), 2);
+        assert_eq!(right.trace_path.record_count(), 2);
+        for path in [&parent.trace_path, &*frozen.trace_path, &left.trace_path, &right.trace_path] {
+            assert_eq!(path.prefix_identity_for_test(), identity, "追加及提交后共享前缀身份不变");
+        }
+        if let Ok(out) = std::env::var("ITRACE_SHARING_EVIDENCE") {
+            std::fs::write(std::path::PathBuf::from(out).join("frame-submission.txt"), text).unwrap();
+        }
+        std::fs::remove_file(filename).unwrap();
     }
 
     #[test]
@@ -616,20 +675,20 @@ mod tests {
     }
 
     #[test]
-    fn new_frame_has_default_itrace_path() {
+    fn new_frame_has_default_trace_path() {
         let instrs: Vec<Instr<Name, B64>> = vec![];
         let local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
-        assert!(local.itrace_path.records().is_empty());
+        assert!(local.trace_path.record_count() == 0);
     }
 
     #[test]
-    fn new_call_carries_itrace_path() {
+    fn new_call_carries_trace_path() {
         let instrs: Vec<Instr<Name, B64>> = vec![];
         let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
-        local.itrace_path.record(Name::from_u32(1), vec![], 10);
+        local.trace_path.record(Name::from_u32(1), vec![], 10);
 
         let callee = local.new_call(Name::from_u32(99), &[], &Ty::Unit, None, &instrs);
-        assert_eq!(callee.itrace_path.records().len(), 1);
-        assert_eq!(callee.itrace_path.records()[0].pc, 10);
+        assert_eq!(callee.trace_path.record_count(), 1);
+        assert_eq!(callee.trace_path.records().nth(0).unwrap().pc, 10);
     }
 }

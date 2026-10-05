@@ -176,3 +176,20 @@ Digital Security by Design (DSbD) Programme, to deliver a DSbDtech
 enabled digital platform (grant 105694), in part funded by an Arm
 iCASE doctoral studentship (18000005, Simner), and in part funded by
 Google.
+
+### 组合执行轨迹
+
+`isarch solve-state` 支持三类可组合轨迹（构建时启用 `itrace`、`ftrace` 或 `btrace` feature）：
+
+- `--itrace=FILE`：逐指令轨迹，指令来自实际执行的 IR。
+- `--ftrace --trace-output=FILE`：函数调用和返回，复用 SMT Function 事件。
+- `--btrace --trace-output=FILE`：全部静态条件分支清单，以及各路径实际经过的条件分支；包括没有产生新任务的确定分支。
+- `--ftrace --btrace --trace-output=FILE`：只输出函数和分支，不保存普通逐指令记录。还需要指令时，使用 `--itrace=FILE --ftrace --btrace`。
+
+组合共用同一个文件；同时指定 `--itrace` 与 `--trace-output` 时路径必须一致。多 clause 自动附加 clause 文件名后缀。路径签名、指令数量、执行函数集合、耗时和诊断是公共路径信息。`branch sites` 是包括未执行分支的静态清单；`branch_edge` 才表示实际经过的边，两者都使用运行时 IR 的函数/PC 坐标。路径签名不保证全局唯一，不能单凭它证明覆盖完整。
+
+Make 入口默认关闭轨迹。例如 `make solve ALL=MRET THREADS=1 FTRACE=1 BTRACE=1`，追加 `ITRACE=1` 可同时输出逐指令记录。
+
+三种工具在代码中平级隶属 `isla-lib/src/tracetool/`：`itrace.rs` 处理逐指令记录，`ftrace.rs` 投影函数事件，`btrace.rs` 处理静态分支清单和实际边。公共 `TraceOptions`、`TraceHandler`、`TracePerPath`、`TraceCompletedPath` 通过 `tracetool` 入口提供；路径组合、writer 和共享序列分别位于 `common.rs`、`writer.rs`、`sequence.rs`。执行器共用 `trace_path`，三种工具不各建一套 writer。
+
+逐指令记录及摘要仍归 itrace 所有（`itrace::ItracePerInstr`、`itrace_records`），其他工具可以复用这些数据。公共 `TracePerPath` 组合各工具的记录，`TraceHandler` 统一提交和输出；复用不改变数据归属，各工具保留自己的采集入口。
