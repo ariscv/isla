@@ -91,7 +91,9 @@ IR_FILE ?= ./rv64d.ir
 ISA_CONFIG ?= ./configs/riscv64_difftest.toml
 # itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
 ITRACE ?= 0
-CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
+FTRACE ?= 0
+BTRACE ?= 0
+CARGO_TRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE) $(FTRACE) $(BTRACE)),--features tracetool,)
 # solve 使用 Homebrew 的 Z3。z3-sys 直接以 -lz3 链接，故必须同时提供链接搜索路径
 # 与运行时 rpath；否则系统 libz3 会在 `make` 重建 isarch 时覆盖手工验证的 Brew Z3。
 Z3_PREFIX ?= /home/linuxbrew/.linuxbrew/opt/z3
@@ -210,7 +212,7 @@ TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
-	RUSTFLAGS="$(RUSTFLAGS) $(Z3_RUSTFLAGS)" cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE) $(CARGO_SMT_FEATURE)
+	RUSTFLAGS="$(RUSTFLAGS) $(Z3_RUSTFLAGS)" cargo build --release --bin isarch $(CARGO_TRACE_FEATURE) $(CARGO_SMT_FEATURE)
 
 # 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
 #
@@ -221,7 +223,7 @@ solve-%: build-isarch
 	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
 	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
-		-A $(IR_FILE) -C $(ISA_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
+		-A $(IR_FILE) -C $(ISA_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) $(if $(filter 1 yes true on,$(FTRACE)),--ftrace,) $(if $(filter 1 yes true on,$(BTRACE)),--btrace,) $(if $(filter 1 yes true on,$(FTRACE) $(BTRACE)),--trace-output=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
 		> output/log/$*.log 2>&1; \
 	status=$$?; \
 	if [ $$status -eq 124 ]; then \
