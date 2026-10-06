@@ -389,7 +389,9 @@ mod smtperf_tests {
 
     #[test]
     fn smtperf_generic_wrapper_records_operation() {
-        let result = interruptible_z3_call!(SmtOperation::ModelEval, std::ptr::null_mut(), true);
+        let context = Context::new(Config::new());
+        assert!(!context.z3_ctx.is_null());
+        let result = interruptible_z3_call!(SmtOperation::ModelEval, SourceLoc::unknown(), context.z3_ctx, true);
 
         assert_eq!(result, Ok(true));
         let report = take_smtperf_report();
