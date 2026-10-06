@@ -918,7 +918,15 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     {
         let tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
         let runtime = Arc::clone(self);
-        scope.spawn(move || runtime.execute_task(scope, tid, task));
+        scope.spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Arc::clone(&runtime).execute_task(scope, tid, task);
+            }));
+            runtime.on_task_finished(scope);
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        });
     }
 
     fn execute_task<'scope, 'env>(
@@ -952,7 +960,6 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
             &mut solver,
         );
         (self.collector)(tid, task.id, result, self.shared_state, solver, self.collected.as_ref());
-        self.on_task_finished(scope);
     }
 
     fn on_task_finished<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>)
@@ -4906,6 +4913,22 @@ fn zsteptest(zu) {
         let child = queue.pop().expect("forked task was not submitted");
 
         assert_eq!(child.id, TaskId::from_usize(0));
+    }
+
+    #[test]
+    fn multi_runtime_propagates_collector_panic() {
+        let shared_state = empty_shared_state();
+        let instrs = vec![Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()), Instr::End];
+        let ret_ty = Ty::Bool;
+        let frame = LocalFrame::new(test_name(25), &[], &ret_ty, None, &instrs);
+        let task_state = TaskState::new();
+        let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            start_multi(1, None, vec![task], &shared_state, Arc::new(()), &|_, _, _, _, _, _| {
+                panic!("collector regression panic");
+            });
+        }));
+        assert!(result.is_err());
     }
 
     fn worker_invariant_branch_prefix() -> (Vec<Instr<Name, B64>>, Name, Name) {
