@@ -220,20 +220,11 @@ build-isarch:
 # 通过 make 变量 SOLVE_TOTAL 透传进来；首行打印 [n/TOTAL] solve-$*。
 solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
-	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
+	@n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
-	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
+	RUST_BACKTRACE=1 exec /usr/bin/python3 scripts/solve_process.py run --clause "$*" -- timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
 		-A $(IR_FILE) -C $(ISA_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) $(if $(filter 1 yes true on,$(FTRACE)),--ftrace,) $(if $(filter 1 yes true on,$(BTRACE)),--btrace,) $(if $(filter 1 yes true on,$(FTRACE) $(BTRACE)),--trace-output=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
-		> output/log/$*.log 2>&1; \
-	status=$$?; \
-	if [ $$status -eq 124 ]; then \
-		echo "$* timeout" >> output/status.timeout.log; \
-	elif [ $$status -eq 0 ]; then \
-		echo "$* intime" >> output/status.intime.log; \
-	else \
-		echo "$* failed ($$status)" >> output/status.failed.log; \
-	fi; \
-	exit $$status
+		> output/log/$*.log 2>&1
 
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
@@ -243,8 +234,7 @@ MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
 $(FD_FLOAT_SOLVE_TARGETS): ISA_CONFIG := ./configs/riscv64_difftest_fd.toml
 
 .PHONY: build-isarch solve solve-fd-float solve-memory
-# Ctrl-C 清理是【可选插件】：scripts/run_ctrl_c.mk 若存在，会给 solve-% 注入 Ctrl-C 清理逻辑
-# （pkill 掉后台 isarch）；缺失则不影响。-include 保证缺失不报错。
+# 自动清理由每条 recipe 的 solve_process.py 负责；可选文件仅提供显式 PID 手动入口。
 -include scripts/run_ctrl_c.mk
 
 # solve-pre 作为所有 solve-XXX 的【真前置依赖】：make 的拓扑顺序保证它先跑完（重置进度
