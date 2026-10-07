@@ -13,7 +13,13 @@ LOC = re.compile(r' `\d+(?: \d+:\d+-\d+:\d+)?')
 
 
 def normalized(text):
-    return re.sub(r'z3zE\d+', 'z3zEN', LOC.sub('', text)).strip()
+    names = {}
+    def renamed(match):
+        name = match[0]
+        if name not in names:
+            names[name] = f'z3zEN{len(names)}'
+        return names[name]
+    return re.sub(r'z3zE\d+', renamed, LOC.sub('', text)).strip()
 
 
 def definitions(text):
@@ -58,7 +64,7 @@ def definitions(text):
 
 def assemble(source, target, replace):
     src, owners, source_files, pragmas = definitions(source)
-    dst, _, target_files, _ = definitions(target)
+    dst, _, target_files, target_pragmas = definitions(target)
     if replace:
         roots = replace
         assert all(('fn', name) in src and ('fn', name) in dst for name in roots), '替换函数必须已存在'
@@ -79,6 +85,8 @@ def assemble(source, target, replace):
             if key[0] != 'fn' or not replace:
                 assert normalized(block) == normalized(dst[key]), f'同名定义冲突: {key}'
             reused.add(key)
+            if key[0] == 'struct':
+                assert normalized(pragmas.get(key[1], '')) == normalized(target_pragmas.get(key[1], '')), f'元组字段顺序冲突: {key}'
             # 状态组件调用目标的架构专属函数，绝不导入提供方的SD位实现。
             if replace and key[0] in ('fn', 'let', 'register'):
                 continue

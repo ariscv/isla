@@ -33,6 +33,7 @@ def run(label, command):
 
 
 assert run('build', ['cargo', 'build', '--offline', '-q', '--manifest-path', ROOT / 'test/float_ir/runner/Cargo.toml']) == 0
+assert run('migration-conflicts', ['python3', ROOT / 'test/float_ir/test_migration.py']) == 0
 for name in ['rv64d.ir', 'rv32d.ir', 'ir/rv64d_v128_e64.ir', 'ir/rv64d_v256_e64.ir', 'ir/rv64d_v512_e64.ir']:
     ir = ROOT / name
     label = ir.stem
@@ -50,6 +51,7 @@ for name in ['rv64d.ir', 'rv32d.ir', 'ir/rv64d_v128_e64.ir', 'ir/rv64d_v256_e64.
         if rc == 0:
             run(label + '-helpers', [target / 'debug/float-ir-helpers', wrapped, fixture])
     if args.mode in ('state', 'all'):
+        config = ROOT / ('test/float_ir/rv32_fd.toml' if name == 'rv32d.ir' else 'configs/riscv64_difftest_fd.toml')
         for mode in ['state', 'guard']:
-            run(label + '-' + mode, [target / 'debug/float-ir-state', ir, mode, ROOT / 'configs/riscv64_difftest_fd.toml'])
+            run(label + '-' + mode, [target / 'debug/float-ir-state', ir, mode, config])
 raise SystemExit(0 if all(check['exit'] == 0 for check in checks) else 1)
