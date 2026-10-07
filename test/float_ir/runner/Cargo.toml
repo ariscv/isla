@@ -1,0 +1,13 @@
+[package]
+name = "isla-float-ir-regression"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[[bin]]
+name = "float-ir-state"
+path = "src/state.rs"
+[[bin]]
+name = "float-ir-helpers"
+path = "../../softfloat_legacy/runner/src/main.rs"
+[dependencies]
+isla-lib = { path = "../../../isla-lib", features = ["smt-thread-interrupt"] }
