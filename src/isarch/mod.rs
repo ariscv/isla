@@ -1,6 +1,7 @@
 pub mod args;
 pub mod args_yaml;
 pub mod clause;
+mod encoding;
 pub mod exec;
 pub mod memory_builder;
 pub mod target;
