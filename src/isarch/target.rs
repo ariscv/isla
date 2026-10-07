@@ -5,7 +5,6 @@ use isla_lib::config::{PmpConfig, PmpMode};
 use isla_lib::error::ExecError;
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::{Bindings, IRTypeInfo, Name, SharedState, Symtab, Ty, UVal, Val};
-use isla_lib::log;
 use isla_lib::primop_util::{smt_value, symbolic};
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::Model;
@@ -160,11 +159,8 @@ where
                     result.insert(reg_name, fmt_val.to_str(shared_state));
                 }
                 Err(e) => {
-                    // SMT 错误需要向上传播；其他格式化失败只记录诊断并继续处理其他寄存器。
-                    if matches!(e, ExecError::Smt(_)) {
-                        return Err(e);
-                    }
-                    log!(log::PATH_RESULT, &format!("警告: pre-state 寄存器 {} 无法求解: {:?}", reg_name, e));
+                    // 状态字段失败时不能返回一个看似成功的部分 witness。
+                    return Err(e);
                 }
             }
         }
@@ -182,6 +178,46 @@ where
             }
         }
 
+        Ok(result)
+    }
+
+    fn solve_pre_state_complete<'state>(
+        &self,
+        model: &mut Model<'_, B>,
+        shared_state: &SharedState<'state, B>,
+    ) -> Result<BTreeMap<String, String>, ExecError> {
+        model.set_complete_model(true);
+        let mut result = BTreeMap::new();
+        for (name, value) in self.pre_state().iter() {
+            let register_name = zencode::decode(shared_state.symtab.to_str(*name));
+            let formatted = FmtVal::from_val(value, model)?;
+            if formatted.is_arbitrary() {
+                panic!("防御性编程：complete model 未能具化 pre-state 寄存器 {}", register_name);
+            }
+            result.insert(register_name, formatted.to_str(shared_state));
+        }
+        Ok(result)
+    }
+
+    fn solve_post_state<'state>(
+        &self,
+        regs: &RegisterBindings<'state, B>,
+        model: &mut Model<'_, B>,
+        shared_state: &SharedState<'state, B>,
+    ) -> Result<BTreeMap<String, String>, ExecError> {
+        model.set_complete_model(true);
+        let mut result = BTreeMap::new();
+        for (name, _) in self.pre_state().iter() {
+            let register_name = zencode::decode(shared_state.symtab.to_str(*name));
+            let value = regs
+                .get_last_if_initialized(*name)
+                .unwrap_or_else(|| panic!("防御性编程：post-state 缺少已初始化的目标寄存器 {}", register_name));
+            let formatted = FmtVal::from_val(value, model)?;
+            if formatted.is_arbitrary() {
+                panic!("防御性编程：complete model 未能具化 post-state 寄存器 {}", register_name);
+            }
+            result.insert(register_name, formatted.to_str(shared_state));
+        }
         Ok(result)
     }
 
@@ -687,6 +723,7 @@ mod tests {
     fn rv32() -> RV32<B64> {
         RV32::default()
     }
+
     #[test]
     fn pte_new_and_extract() {
         let pte = RiscvPte::new(0x1234, 0xF);
@@ -810,17 +847,17 @@ mod tests {
         assert_eq!(target.xlen(), "64");
         assert_eq!(target.xlen_name(), "rv64");
         assert_eq!(target.vector_context_registers(), ["vl", "vstart", "vtype", "vcsr"]);
-        // registers_of_interest 是 pre-state 与 post-state 的统一来源（全量并集）
+        // reg_list 是主动符号化的状态清单；固定的 x0 与入口 PC 不在其中。
         let regs = target.reg_list();
-        assert!(regs.contains(&"x0".to_string()));
-        assert!(regs.contains(&"PC".to_string()));
+        assert!(!regs.contains(&"x0".to_string()));
+        assert!(!regs.contains(&"PC".to_string()));
         assert!(regs.contains(&"vr0".to_string()));
         assert!(regs.contains(&"mstatus".to_string()));
         assert!(regs.contains(&"vtype".to_string()));
         assert!(regs.contains(&"vl".to_string()));
         assert!(regs.contains(&"vstart".to_string()));
         assert!(regs.contains(&"vcsr".to_string()));
-        // pre-state 派生（setup_pre_state 内部）：排除 x0 和 PC（不做主动符号化）
+        // pre-state 仅由清单中实际存在的寄存器构成。
         let pre_state: Vec<String> = regs.into_iter().filter(|r| r != "x0" && r != "PC").collect();
         assert!(!pre_state.contains(&"x0".to_string()));
         assert!(!pre_state.contains(&"PC".to_string()));
@@ -843,6 +880,123 @@ mod tests {
         assert!(target.reg_list().contains(&"vl".to_string()));
         assert!(target.reg_list().contains(&"vstart".to_string()));
         assert!(target.reg_list().contains(&"vcsr".to_string()));
+    }
+
+    #[test]
+    fn complete_pre_state_keeps_arbitrary_fcsr_and_mstatus() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let mut target = rv64();
+        let register_names: Vec<String> = ["fcsr", "mstatus"].iter().map(|name| zencode::encode(name)).collect();
+        for register_name in &register_names {
+            let name = symtab.intern(register_name);
+            let value = Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(64), SourceLoc::unknown()));
+            target.pre_state.insert(name, value);
+        }
+        let shared_state = SharedState::empty(symtab);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+
+        let legacy = target.solve_pre_state(&mut model, &shared_state).unwrap();
+        assert!(!legacy.contains_key("fcsr"));
+        assert!(!legacy.contains_key("mstatus"));
+        let complete = target.solve_pre_state_complete(&mut model, &shared_state).unwrap();
+        assert!(complete.contains_key("fcsr"));
+        assert!(complete.contains_key("mstatus"));
+    }
+
+    #[test]
+    fn complete_pre_and_post_state_share_one_model() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let fcsr_name = zencode::encode("fcsr");
+        let name = symtab.intern(&fcsr_name);
+        let before = Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(64), SourceLoc::unknown()));
+        let mut target = rv64();
+        target.pre_state.insert(name, before.clone());
+        let mut regs = RegisterBindings::new();
+        regs.insert(name, false, UVal::Init(before));
+        let shared_state = SharedState::empty(symtab);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        let pre = target.solve_pre_state_complete(&mut model, &shared_state).unwrap();
+        let unchanged = target.solve_post_state(&regs, &mut model, &shared_state).unwrap();
+        assert_eq!(pre["fcsr"], unchanged["fcsr"]);
+
+        regs.assign(name, Val::Bits(B64::new(0x1f, 64)), &shared_state);
+        let changed = target.solve_post_state(&regs, &mut model, &shared_state).unwrap();
+        assert_ne!(pre["fcsr"], changed["fcsr"]);
+    }
+
+    #[test]
+    fn complete_state_formats_sail_bitfield_structs() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let fcsr_name_text = zencode::encode("fcsr");
+        let mstatus_name_text = zencode::encode("mstatus");
+        let bits_name_text = zencode::encode("bits");
+        let fcsr_name = symtab.intern(&fcsr_name_text);
+        let mstatus_name = symtab.intern(&mstatus_name_text);
+        let bits_name = symtab.intern(&bits_name_text);
+        let mut target = rv64();
+        let mut regs = RegisterBindings::new();
+        for (name, width) in [(fcsr_name, 32), (mstatus_name, 64)] {
+            let bits = Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(width), SourceLoc::unknown()));
+            let mut fields = ahash::HashMap::default();
+            fields.insert(bits_name, bits);
+            let value = Val::Struct(fields);
+            target.pre_state.insert(name, value.clone());
+            regs.insert(name, false, UVal::Init(value));
+        }
+        let shared_state = SharedState::empty(symtab);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+
+        let pre = target.solve_pre_state_complete(&mut model, &shared_state).unwrap();
+        let post = target.solve_post_state(&regs, &mut model, &shared_state).unwrap();
+        assert_eq!(pre, post);
+        assert!(pre.contains_key("fcsr"));
+        assert!(pre.contains_key("mstatus"));
+    }
+
+    #[test]
+    #[should_panic(expected = "post-state 缺少已初始化的目标寄存器 fcsr")]
+    fn post_state_requires_initialized_target_register() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let fcsr_name_text = zencode::encode("fcsr");
+        let fcsr_name = symtab.intern(&fcsr_name_text);
+        let mut target = rv64();
+        target.pre_state.insert(fcsr_name, Val::Bits(B64::new(0, 32)));
+        let shared_state = SharedState::empty(symtab);
+        let regs = RegisterBindings::new();
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        target.solve_post_state(&regs, &mut model, &shared_state).unwrap();
+    }
+
+    #[test]
+    fn complete_state_rejects_unformattable_register() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let fcsr_name_text = zencode::encode("fcsr");
+        let fcsr_name = symtab.intern(&fcsr_name_text);
+        let mut target = rv64();
+        target.pre_state.insert(fcsr_name, Val::I64(1));
+        let shared_state = SharedState::empty(symtab);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        assert!(target.solve_pre_state_complete(&mut model, &shared_state).is_err());
     }
 
     #[test]
