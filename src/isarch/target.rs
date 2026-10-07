@@ -439,6 +439,16 @@ struct Rv64Domain {
 }
 
 impl Rv64Domain {
+    fn mpp_values(&self) -> Vec<u64> {
+        // 现行 Sail 的 reset 将 MPP 初始化为 0，即使 U 未实现也不能删去该模型状态。
+        let mut allowed = vec![0];
+        if self.supports_s {
+            allowed.push(1);
+        }
+        allowed.push(3);
+        allowed
+    }
+
     fn probe_hart_support<'ir, B: BV>(
         extension: &str,
         lets: &Bindings<'ir, B>,
@@ -590,11 +600,15 @@ impl<B: BV> Target<B> for RV64<B> {
                         smtlib::bits64(if enabled { 2 } else { 0 }, 2),
                     );
                 }
-                // MPP=10 在 privLevel_bits 映射中保留；legalize_mstatus 永远不会保留该编码。
-                solver.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Eq(
-                    Box::new(smtlib::Exp::Extract(12, 11, Box::new(mstatus_exp))),
-                    Box::new(smtlib::bits64(2, 2)),
-                ))));
+                // 排除保留编码与未实现的 S 模式，同时保留现行 Sail 的 MPP=0 reset 初态。
+                let mpp_exp = smtlib::Exp::Extract(12, 11, Box::new(mstatus_exp));
+                let allowed_mpp = domain
+                    .mpp_values()
+                    .into_iter()
+                    .map(|value| smtlib::Exp::Eq(Box::new(mpp_exp.clone()), Box::new(smtlib::bits64(value, 2))))
+                    .reduce(|lhs, rhs| smtlib::Exp::Or(Box::new(lhs), Box::new(rhs)))
+                    .unwrap();
+                solver.assert(allowed_mpp);
             }
             (None, None) => self.domain = None,
             _ => panic!("防御性编程：RV64 cur_privilege 与 mstatus 必须同时存在于 pre-state"),
@@ -719,7 +733,8 @@ impl<B: BV> Target<B> for RV64<B> {
             ("allowed-privileges".to_string(), allowed.join(",")),
             ("mstatus-sxl".to_string(), if domain.supports_s { "2" } else { "0" }.to_string()),
             ("mstatus-uxl".to_string(), if domain.supports_u { "2" } else { "0" }.to_string()),
-            ("mstatus-mpp".to_string(), "0,1,3".to_string()),
+            ("mstatus-mpp".to_string(), domain.mpp_values().iter().map(u64::to_string).collect::<Vec<_>>().join(",")),
+            ("mstatus-mpp-reset-exception".to_string(), if domain.supports_u { "none" } else { "0" }.to_string()),
             ("reserved-mpp".to_string(), "2-excluded".to_string()),
             ("capability-source".to_string(), "zhartSupports".to_string()),
             ("rule-source".to_string(), "sail-riscv/model/core/sys_regs.sail reset/legalize".to_string()),
@@ -1062,15 +1077,51 @@ mod tests {
     }
 
     #[test]
+    fn rv64_mpp_domain_matches_hart_capabilities_and_manifest() {
+        for supports_s in [false, true] {
+            for supports_u in [false, true] {
+                let xlen_fields =
+                    (if supports_s { 2_u64 << 34 } else { 0 }) | (if supports_u { 2_u64 << 32 } else { 0 });
+                let expected_mpp: Vec<u64> = [0, 1, 3]
+                    .into_iter()
+                    .filter(|mpp| match mpp {
+                        0 => true,
+                        1 => supports_s,
+                        3 => true,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                let expected_manifest = expected_mpp.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+                for mpp in 0..4 {
+                    let (actual, manifest) =
+                        rv64_domain_smt_result(supports_s, supports_u, false, "zMachine", xlen_fields | (mpp << 11));
+                    assert_eq!(
+                        actual,
+                        if expected_mpp.contains(&mpp) { SmtResult::Sat } else { SmtResult::Unsat },
+                        "S={supports_s}, U={supports_u}, MPP={mpp}"
+                    );
+                    assert_eq!(manifest["mstatus-mpp"], expected_manifest);
+                    assert_eq!(manifest["mstatus-mpp-reset-exception"], if supports_u { "none" } else { "0" });
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rv64_domain_respects_absent_s_and_u_capabilities() {
-        let (result, manifest) = rv64_domain_smt_result(false, false, false, "zMachine", 0);
+        // 现行 Sail 从零初始化 mstatus，无 U 时仍存在 MPP=0 的 reset 初态。
+        let machine_mpp = 0;
+        let (result, manifest) = rv64_domain_smt_result(false, false, false, "zMachine", machine_mpp);
         assert_eq!(result, SmtResult::Sat);
         assert_eq!(manifest["hart-supports-S"], "false");
         assert_eq!(manifest["hart-supports-U"], "false");
         assert_eq!(manifest["allowed-privileges"], "Machine");
-        assert_eq!(rv64_domain_smt_result(false, false, false, "zSupervisor", 0).0, SmtResult::Unsat);
-        assert_eq!(rv64_domain_smt_result(false, false, false, "zUser", 0).0, SmtResult::Unsat);
-        assert_eq!(rv64_domain_smt_result(false, false, false, "zMachine", 2_u64 << 34).0, SmtResult::Unsat);
+        assert_eq!(rv64_domain_smt_result(false, false, false, "zSupervisor", machine_mpp).0, SmtResult::Unsat);
+        assert_eq!(rv64_domain_smt_result(false, false, false, "zUser", machine_mpp).0, SmtResult::Unsat);
+        assert_eq!(
+            rv64_domain_smt_result(false, false, false, "zMachine", (2_u64 << 34) | machine_mpp).0,
+            SmtResult::Unsat
+        );
     }
 
     #[test]
