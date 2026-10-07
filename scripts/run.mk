@@ -76,6 +76,7 @@ VMTYPE VSRETYPE VSSEGTYPE VSSSEGTYPE VSXSEGTYPE ZICBOM ZICBOP ZICBOZ \
 FENCE FENCEI FENCE_TSO SFENCE_INVAL_IR SFENCE_VMA SFENCE_W_INVAL SINVAL_VMA
 
 ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
+FD_NONMEM_RV64 = $(filter-out $(MEMORY) FMVH_X_D FMVP_D_X,$(FD_FLOAT))
 
 # 进度计数器：make solve 开始时重置为 0，每个 solve-% 启动时用 flock 原子自增取号，
 # 配合下面的 TOTAL 打印形如 [3/243] solve-REM 的进度（类似 ninja/cmake 的 [n/total]）。
@@ -209,6 +210,7 @@ TIMEOUT_SMT_OUTPUT ?=
 TIMEOUT_SMT_DIR ?=
 TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
 TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
+TOTAL_FD_NONMEM_RV64=$(words $(FD_NONMEM_RV64))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
@@ -228,12 +230,13 @@ solve-%: build-isarch
 
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
+FD_NONMEM_SOLVE_TARGETS = $(addprefix solve-,$(FD_NONMEM_RV64))
 MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
 
 # FD/浮点 clause 需要启用 F/D 扩展的专用配置（sys_enable_fdext + mstatus FS=Dirty）。
 $(FD_FLOAT_SOLVE_TARGETS): ISA_CONFIG := ./configs/riscv64_difftest_fd.toml
 
-.PHONY: build-isarch solve solve-fd-float solve-memory
+.PHONY: build-isarch solve solve-fd-float solve-fd-nonmem solve-memory
 # 自动清理由每条 recipe 的 solve_process.py 负责；可选文件仅提供显式 PID 手动入口。
 -include scripts/run_ctrl_c.mk
 
@@ -244,12 +247,14 @@ solve-pre:
 	@mkdir -p output/log output/trace outputs && echo 0 > $(COUNTER)
 .PHONY: solve-pre
 
-# 三个入口各自把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
+# 各入口把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
 # 然后【直接依赖】目标——单 make 进程并行跑（-j 正常生效、jobserver 不丢），无需递归 make。
 # （此前用“递归 make 注入 SOLVE_TOTAL”的写法会断 jobserver、降级串行，故弃用。）
 solve: SOLVE_TOTAL := $(TOTAL_ACTIVE_ALL)
 solve: $(SOLVE_TARGETS)
 solve-fd-float: SOLVE_TOTAL := $(TOTAL_FD_FLOAT)
 solve-fd-float: $(FD_FLOAT_SOLVE_TARGETS)
+solve-fd-nonmem: SOLVE_TOTAL := $(TOTAL_FD_NONMEM_RV64)
+solve-fd-nonmem: $(FD_NONMEM_SOLVE_TARGETS)
 solve-memory: SOLVE_TOTAL := $(TOTAL_MEMORY)
 solve-memory: $(MEMORY_SOLVE_TARGETS)
