@@ -42,6 +42,54 @@ pub fn get_assembly_name<B: BV>(
         .unwrap_or_else(|error| panic!("get_assembly_name failed: {}", error))
 }
 
+/// 默认 mapping 拒绝允许带有 assertions_to_jumps 追加的处理块，且必须核对回跳关系。
+fn is_mapping_rejection<B: BV>(
+    function_name: &str,
+    error: &ExecError,
+    frame: &LocalFrame<B>,
+    shared_state: &SharedState<B>,
+) -> bool {
+    if !matches!(error, ExecError::MatchFailure(_))
+        || frame.function_name() != shared_state.symtab.lookup(function_name)
+    {
+        return false;
+    }
+    let (_, _, body) = shared_state.functions.get(&frame.function_name()).expect("mapping 函数必须存在");
+    let exits: Vec<_> =
+        body.iter().enumerate().filter(|(_, instr)| matches!(instr, Instr::Exit(ExitCause::MatchFailure, _))).collect();
+    if exits.len() != 1 || exits[0].0 != frame.pc() {
+        return false;
+    }
+    if !matches!(body.get(frame.pc()..frame.pc()+3),
+        Some([Instr::Exit(ExitCause::MatchFailure, source), Instr::Copy(Loc::Id(RETURN), _, _), Instr::End])
+        if *source == error.source_loc())
+    {
+        return false;
+    }
+    let mut start = frame.pc() + 3;
+    if matches!(body.get(start), Some(Instr::Arbitrary)) {
+        start += 1;
+    }
+    let handlers = body[start..].chunks_exact(4);
+    if !handlers.remainder().is_empty() {
+        return false;
+    }
+    handlers.enumerate().all(|(index, handler)| {
+        let handler_pc = start + index * 4;
+        match handler {
+            [Instr::Jump(_, success, source), Instr::Exit(ExitCause::AssertionFailure, failure_source),
+             Instr::Copy(_, Exp::Unit, copy_source), Instr::Goto(resume)] => {
+                *success == handler_pc + 2 && source == failure_source && source == copy_source
+                    && resume.checked_sub(1).is_some_and(|origin| {
+                        origin < frame.pc()
+                            && matches!(body.get(origin), Some(Instr::Goto(target)) if *target == handler_pc)
+                    })
+            }
+            _ => false,
+        }
+    })
+}
+
 struct MappingCollector<B: BV> {
     values: Vec<Val<B>>,
     first_error: Option<ExecError>,
@@ -100,27 +148,9 @@ fn run_mapping<B: BV>(
                 Ok((Run::Exit, _)) => Err(ExecError::Unreachable(format!("{} exited", function_name))),
                 Ok((Run::Suspended, _)) => Err(ExecError::Unreachable(format!("{} suspended", function_name))),
                 Err((error, frame)) => {
-                    if matches!(error, ExecError::MatchFailure(_))
-                        && frame.function_name() == shared_state.symtab.lookup(function_name)
-                    {
-                        let (_, _, body) =
-                            shared_state.functions.get(&frame.function_name()).expect("mapping 函数必须存在");
-                        let exits: Vec<_> = body
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, instr)| matches!(instr, Instr::Exit(ExitCause::MatchFailure, _)))
-                            .collect();
-                        if exits.len() == 1 && exits[0].0 == frame.pc() {
-                            let suffix = &body[frame.pc()..];
-                            if matches!(suffix,
-                                [Instr::Exit(ExitCause::MatchFailure, source), Instr::Copy(Loc::Id(RETURN), _, _), Instr::End]
-                                | [Instr::Exit(ExitCause::MatchFailure, source), Instr::Copy(Loc::Id(RETURN), _, _), Instr::End, Instr::Arbitrary]
-                                if *source == error.source_loc())
-                            {
-                                collected.lock().expect("mapping collector mutex poisoned").rejected += 1;
-                                return;
-                            }
-                        }
+                    if is_mapping_rejection(function_name, &error, &frame, shared_state) {
+                        collected.lock().expect("mapping collector mutex poisoned").rejected += 1;
+                        return;
                     }
                     configure_nested_timeout_smt_dump(&error, &frame, shared_state);
                     log!(
@@ -1221,5 +1251,108 @@ mod tests {
         );
         let result = try_get_assembly_name(Val::Unit, &shared_state, &RegisterBindings::new(), &Bindings::default());
         assert!(matches!(result, Err(ExecError::MatchFailure(_))));
+    }
+    #[test]
+    fn asserted_default_encoder_reaches_compressed_encoder() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let normal = symtab.intern("zencdec_forwards");
+        let compressed = symtab.intern("zencdec_compressed_forwards");
+        let argument = symtab.intern("zargument");
+        let source = SourceLoc::unknown();
+        let mut defs: Vec<Def<Name, B64>> = vec![
+            Def::Val(normal, vec![Ty::Unit], Ty::Bits(32)),
+            Def::Fn(
+                normal,
+                vec![argument],
+                vec![
+                    Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        SAIL_ASSERT,
+                        vec![Exp::Bool(true), Exp::String("合法断言".to_string())],
+                        source,
+                    ),
+                    Instr::Exit(ExitCause::MatchFailure, source),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 32)), source),
+                    Instr::End,
+                ],
+            ),
+            Def::Val(compressed, vec![Ty::Unit], Ty::Bits(16)),
+            Def::Fn(
+                compressed,
+                vec![argument],
+                vec![Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(1, 16)), source), Instr::End],
+            ),
+        ];
+        isla_lib::ir::assertions_to_jumps(&mut defs);
+        let type_info = IRTypeInfo::new(&defs);
+        let shared_state = SharedState::new(
+            symtab,
+            &defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let result = try_get_assembly_encdec(Val::Unit, &shared_state, &RegisterBindings::new(), &Bindings::default());
+        println!("带断言的编码拒绝: {result:?}");
+        assert!(
+            matches!(result, Ok(Some(Val::Bits(bits))) if bits == B64::new(1,16)),
+            "普通编码拒绝后必须进入压缩编码: {result:?}"
+        );
+    }
+    #[test]
+    fn failed_encoder_assertion_is_not_default_rejection() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let normal = symtab.intern("zencdec_forwards");
+        let compressed = symtab.intern("zencdec_compressed_forwards");
+        let argument = symtab.intern("zargument");
+        let source = SourceLoc::unknown();
+        let mut defs: Vec<Def<Name, B64>> = vec![
+            Def::Val(normal, vec![Ty::Unit], Ty::Bits(32)),
+            Def::Fn(
+                normal,
+                vec![argument],
+                vec![
+                    Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        SAIL_ASSERT,
+                        vec![Exp::Bool(false), Exp::String("合法断言".to_string())],
+                        source,
+                    ),
+                    Instr::Exit(ExitCause::MatchFailure, source),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 32)), source),
+                    Instr::End,
+                ],
+            ),
+            Def::Val(compressed, vec![Ty::Unit], Ty::Bits(16)),
+            Def::Fn(
+                compressed,
+                vec![argument],
+                vec![Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(1, 16)), source), Instr::End],
+            ),
+        ];
+        isla_lib::ir::assertions_to_jumps(&mut defs);
+        let type_info = IRTypeInfo::new(&defs);
+        let shared_state = SharedState::new(
+            symtab,
+            &defs,
+            type_info,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let result = try_get_assembly_encdec(Val::Unit, &shared_state, &RegisterBindings::new(), &Bindings::default());
+        println!("带断言的编码拒绝: {result:?}");
+        assert!(matches!(result, Err(ExecError::AssertionFailure(_, _))), "失败的编码断言必须传播: {result:?}");
     }
 }
