@@ -91,7 +91,6 @@ impl AssemGenJsonItem {
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
-        arch.insert("ext".to_string(), "IMACFD".to_string());
         AssemGenJsonItem {
             arch,
             test_ins,
@@ -129,12 +128,14 @@ trait ToJSON: Serialize {
 #[derive(Serialize, Deserialize)]
 struct AssemGenJson {
     gen: Vec<AssemGenJsonItem>,
+    #[serde(rename = "state-domain")]
+    state_domain: BTreeMap<String, String>,
 }
 impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
-    fn new(gen: Vec<AssemGenJsonItem>) -> Self {
-        AssemGenJson { gen }
+    fn new(gen: Vec<AssemGenJsonItem>, state_domain: BTreeMap<String, String>) -> Self {
+        AssemGenJson { gen, state_domain }
     }
 }
 
@@ -1142,7 +1143,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
     let quota = state.case_quota;
     let items = finalize_cases(state.cases, &quota);
-    let json = AssemGenJson::new(items);
+    let json = AssemGenJson::new(items, target.domain_manifest());
     json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
     match state.first_error {
         Some(error) => Err(error),
@@ -1277,7 +1278,7 @@ mod tests {
                 &mut self.pre_state
             }
             fn constrain_pre_state<'ir>(
-                &self,
+                &mut self,
                 lets: &Bindings<'ir, B64>,
                 shared_state: &SharedState<'ir, B64>,
                 solver: &mut Solver<B64>,
