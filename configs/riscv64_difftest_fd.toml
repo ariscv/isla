@@ -56,14 +56,13 @@ mcyclecfg = "{ bits = 0x0000000000000000 }"
 minstretcfg = "{ bits = 0x0000000000000000 }"
 mtimecmp = "0x0000000000000000"
 stimecmp = "0x0000000000000000"
-__isla_always_aligned = "true"
 
 [const_primops]
 get_config_print_reg = false
 get_config_print_instr = false
 get_config_print_platform = false
 get_config_print_mem = false
-# 与通用 difftest 配置的唯一运行态差异：启用 F/D 扩展。
+# 与通用 difftest 配置相比，此处静态启用 F/D；运行态 FS=Dirty 由上方 mstatus 设置。
 sys_enable_fdext = true
 sys_enable_zfinx = false
 sys_enable_rvc = true
