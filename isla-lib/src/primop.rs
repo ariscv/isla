@@ -682,6 +682,7 @@ binary_primop_copy!(add_bits, "add_bits".to_string(), Val::Bits, Val::Bits, B::a
 binary_primop_copy!(sub_bits, "sub_bits".to_string(), Val::Bits, Val::Bits, B::sub, Exp::Bvsub, smt_sbits);
 
 fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let bits = replace_mixed_bits(bits, solver, info)?;
     match (bits, n) {
         (Val::Bits(bits), Val::I128(n)) => Ok(Val::Bits(bits.add_i128(n))),
         (Val::Symbolic(bits), Val::I128(n)) => {
@@ -734,6 +735,7 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
 }
 
 fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let bits = replace_mixed_bits(bits, solver, info)?;
     match (bits, n) {
         (Val::Bits(bits), Val::I128(n)) => Ok(Val::Bits(bits.sub_i128(n))),
         (Val::Symbolic(bits), Val::I128(n)) => {
