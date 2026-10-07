@@ -1250,6 +1250,139 @@ mod tests {
     }
 
     #[test]
+    fn collector_materializes_wide_vector_pre_and_post_state() {
+        use super::super::target::{PreStateCtx, Target};
+        use isla_lib::bitvector::bit_vector_from_str;
+
+        struct VectorTarget {
+            pre_state: PreStateCtx<B129>,
+        }
+        impl Target<B129> for VectorTarget {
+            fn arch_name(&self) -> &'static str {
+                "riscv"
+            }
+            fn xlen_name(&self) -> &'static str {
+                "rv64"
+            }
+            fn xlen(&self) -> &'static str {
+                "64"
+            }
+            fn reg_list(&self) -> Vec<String> {
+                vec!["vr0".to_string()]
+            }
+            fn pre_state(&self) -> &PreStateCtx<B129> {
+                &self.pre_state
+            }
+            fn pre_state_mut(&mut self) -> &mut PreStateCtx<B129> {
+                &mut self.pre_state
+            }
+        }
+        impl RISCV<B129> for VectorTarget {
+            fn pmp_symbolic(&self) -> bool {
+                false
+            }
+        }
+
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for width in [128_u32, 129, 256, 512] {
+            let mut symtab = Symtab::new();
+            let instruction = symtab.intern("zinstruction");
+            let result = symtab.intern("zExecutionResult");
+            let clause = format!("zWIDE_STATE_{}_{}", std::process::id(), width);
+            let requested = symtab.intern(&clause);
+            let retire = symtab.intern("zRetire_Success");
+            let assembly = symtab.intern("zassembly_forwards");
+            let encoder = symtab.intern("zencdec_forwards");
+            let execute = symtab.intern("zexecute");
+            let argument = symtab.intern("zargument");
+            let vr0 = symtab.intern("zvr0");
+            let vlen = symtab.intern("zvlen");
+            let info = SourceLoc::unknown();
+            let defs = vec![
+                Def::Register(vr0, Ty::AnyBits, vec![]),
+                Def::Union(instruction, vec![(requested, Ty::Unit)]),
+                Def::Union(result, vec![(retire, Ty::Unit)]),
+                Def::Val(execute, vec![Ty::Union(instruction)], Ty::Union(result)),
+                Def::Fn(
+                    execute,
+                    vec![argument],
+                    vec![
+                        Instr::PrimopUnary(
+                            Loc::Id(vr0),
+                            isla_lib::primop::unary_primops::<B129>()["not_bits"],
+                            Exp::Id(vr0),
+                            info,
+                        ),
+                        Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Unit], info),
+                        Instr::End,
+                    ],
+                ),
+                Def::Val(assembly, vec![Ty::Union(instruction)], Ty::String),
+                Def::Fn(
+                    assembly,
+                    vec![argument],
+                    vec![Instr::Copy(Loc::Id(RETURN), Exp::String("wide".to_string()), info), Instr::End],
+                ),
+                Def::Val(encoder, vec![Ty::Union(instruction)], Ty::Bits(32)),
+                Def::Fn(
+                    encoder,
+                    vec![argument],
+                    vec![Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), info), Instr::End],
+                ),
+            ];
+            let shared_state = SharedState::new(
+                symtab,
+                &defs,
+                IRTypeInfo::new(&defs),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                vec![],
+                vec![],
+                vec![],
+            );
+            let reporter = TimeoutReporter::new(TimeoutReportConfig {
+                output: TimeoutSmtOutput::new(false, false, true),
+                directory: PathBuf::new(),
+            });
+            let mut regs = RegisterBindings::new();
+            regs.insert(vr0, false, UVal::Uninit(&Ty::AnyBits));
+            let mut lets = Bindings::default();
+            lets.insert(vlen, UVal::Init(Val::I64(i64::from(width))));
+            let mut target = VectorTarget { pre_state: PreStateCtx::new() };
+            run_symbolic_execute_with_target(
+                &mut target,
+                &clause,
+                &shared_state,
+                &regs,
+                &lets,
+                None,
+                1,
+                None,
+                &ExecutionLimits::default(),
+                &reporter,
+                None,
+            )
+            .unwrap();
+            let json_path = format!("output/rv64_{clause}.json");
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+            assert_eq!(json["gen"].as_array().unwrap().len(), 1, "宽度{width}不能静默丢掉完成路径");
+            let state_bits = |field: &str| {
+                let text = json["gen"][0][field]["vr0"].as_str().unwrap();
+                let (size, hex) = text.split_once("'h").unwrap();
+                assert_eq!(size, width.to_string());
+                let bits = bit_vector_from_str(&format!("0x{}", hex.replace('_', ""))).unwrap();
+                bits[..width as usize].to_vec()
+            };
+            let pre = state_bits("isa-state-complete");
+            let post = state_bits("isa-state-post");
+            assert_eq!(post, pre.into_iter().map(|bit| !bit).collect::<Vec<_>>());
+            assert_eq!(json["gen"][0]["test-ins-encdec"], "32'h0000_0013");
+            std::fs::remove_file(json_path).unwrap();
+        }
+    }
+
+    #[test]
     fn collector_preserves_constrained_fs_vs_and_encoding_output() {
         use super::super::target::{PreStateCtx, Target};
 
