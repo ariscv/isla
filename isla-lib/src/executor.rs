@@ -2118,6 +2118,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         let fork_id = match decision {
                             ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
                             ExecutionLimitDecision::KeepCurrentModel { reason } => {
+                                frame.execution_limit_state.record_kept_current_model();
                                 record_execution_limit(frame, reason, "keep_current_model");
                                 None
                             }
@@ -4247,7 +4248,7 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
-
+        assert!(!frame.has_sampled_branch(), "unlimited symbolic fork must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
@@ -4320,7 +4321,7 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
-
+        assert!(!frame.has_sampled_branch(), "unlimited monomorphize must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
@@ -4359,7 +4360,11 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 0);
-
+        assert!(frame.has_sampled_branch(), "kept current model drops a satisfiable remainder");
+        assert!(
+            unfreeze_frame(&freeze_frame(&frame)).has_sampled_branch(),
+            "scheduler snapshots must retain incomplete sampling"
+        );
         assert!(child_fork_counts.lock().unwrap().is_empty());
     }
 
