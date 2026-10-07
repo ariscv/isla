@@ -12,7 +12,7 @@ python3 test/float_ir/run.py --mode state --output /tmp/float-ir-state
 
 runner复用`test/softfloat_legacy`的普通调用包装器与数值检查，每个实际声明接口都要求普通函数体、单条SAT完成路径，以及完整结果/五flags差异UNSAT。默认及三个RV64产物各327例，RV32按实际63个接口筛选为307例；不因RV64清单给RV32添加原来没有的接口。
 
-状态探针直接运行真实IR的getter、setter和FADD.S，覆盖快速/普通路径、FS Initial/Clean/Dirty、同值/异值写，核对目标值、其余31个FPR哨兵、完整fcsr/mstatus，读取IR实际xlen决定SD31或SD63。getter必须无写回副作用。
+RV32使用`rv32_fd.toml`，其CLINT地址/大小按该IR的34位物理地址类型给定；运行器仍从实际IR读取xlen核对SD位。状态探针直接运行真实IR的getter、setter和FADD.S，覆盖快速/普通路径、FS Initial/Clean/Dirty、同值/异值写，核对目标值、其余31个FPR哨兵、完整fcsr/mstatus，读取IR实际xlen决定SD31或SD63。getter必须无写回副作用。
 
 `guard`是隔离断言域测试：F能力在这些生成IR中已经折叠为true，只在测试副本将`hartSupports(Ext_F)`的静态常量臂改为false，检查四个快速/普通getter/setter均AssertionFailure。它不伪称运行态TOML关闭了静态F能力，也不代表完整无F架构的指令验收。
 

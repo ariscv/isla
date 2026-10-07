@@ -28851,21 +28851,27 @@ val zrF_from_vector = "read_register_from_vector" : (%i64, %fvec(32, &(%bv64))) 
 
 val zget_F_bits : (%bv5) ->  %bv64
 
-fn zget_F_bits(z3zE3043) {
+fn zget_F_bits(z3zE3080) {
   zz40 : %bv5 `48 253:28-253:29;
-  zz40 = z3zE3043 `48 253:28-253:29;
-  jump z__isla_vector_fpr goto 7 `48 253:44-253:128;
-  zz41 : %bv5 `48 253:109-253:128;
-  zz41 = zz40 `48 253:117-253:127;
-  return = zrF_bits(zz41) `48 253:109-253:128;
-  goto 14;
-  zz42 : %i64 `48 253:70-253:103;
-  zz43 : %bv `48 253:85-253:96;
-  zz43 = zz40 `48 253:85-253:96;
-  zz44 : %i `48 253:85-253:96;
-  zz44 = zunsigned(zz43) `48 253:85-253:96;
-  zz42 = zz5izDzKz5i64(zz44) `48 253:85-253:96;
-  return = zrF_from_vector(zz42, zFPRs) `48 253:70-253:103;
+  zz40 = z3zE3080 `48 253:28-253:29;
+  jump z__isla_vector_fpr goto 7 `48 254:2-257:28;
+  zz41 : %bv5 `48 257:9-257:28;
+  zz41 = zz40 `48 257:17-257:27;
+  return = zrF_bits(zz41) `48 257:9-257:28;
+  goto 20;
+  zz42 : %bool `48 255:4-255:31;
+  zz42 = zhartSupports(zExt_F) `48 255:11-255:30;
+  zz43 : %unit `48 255:4-255:31;
+  zz43 = $zsail_assert(zz42, "extensions/FD/fdext_regs.sail:255.30-255.31") `48 255:4-255:31;
+  zz44 : %bv64 `48 256:4-256:56;
+  zz45 : %i64 `48 256:22-256:55;
+  zz46 : %bv `48 256:37-256:48;
+  zz46 = zz40 `48 256:37-256:48;
+  zz47 : %i `48 256:37-256:48;
+  zz47 = zunsigned(zz46) `48 256:37-256:48;
+  zz45 = zz5izDzKz5i64(zz47) `48 256:37-256:48;
+  zz44 = zrF_from_vector(zz45, zFPRs) `48 256:22-256:55;
+  return = zfregval_from_freg(zz44) `48 256:4-256:56;
   end;
 }
 
@@ -28873,21 +28879,33 @@ val zwF_from_vector = "write_register_from_vector" : (%i64, %bv64, %fvec(32, &(%
 
 val zset_F_bits : (%bv5, %bv64) ->  %unit
 
-fn zset_F_bits(z3zE3044, zdata) {
-  zz40 : %bv5 `48 263:28-263:29;
-  zz40 = z3zE3044 `48 263:28-263:29;
-  jump z__isla_vector_fpr goto 7 `48 264:4-264:100;
-  zz41 : %bv5 `48 264:75-264:100;
-  zz41 = zz40 `48 264:83-264:93;
-  return = zwF_bits(zz41, zdata) `48 264:75-264:100;
-  goto 14;
-  zz42 : %i64 `48 264:30-264:69;
-  zz43 : %bv `48 264:45-264:56;
-  zz43 = zz40 `48 264:45-264:56;
-  zz44 : %i `48 264:45-264:56;
-  zz44 = zunsigned(zz43) `48 264:45-264:56;
-  zz42 = zz5izDzKz5i64(zz44) `48 264:45-264:56;
-  return = zwF_from_vector(zz42, zdata, zFPRs) `48 264:30-264:69;
+fn zset_F_bits(z3zE3084, zdata) {
+  zz40 : %bv5 `48 273:28-273:29;
+  zz40 = z3zE3084 `48 273:28-273:29;
+  jump z__isla_vector_fpr goto 7 `48 274:4-279:36;
+  zz41 : %bv5 `48 279:11-279:36;
+  zz41 = zz40 `48 279:19-279:29;
+  return = zwF_bits(zz41, zdata) `48 279:11-279:36;
+  goto 26;
+  zz42 : %bool `48 275:6-275:33;
+  zz42 = zhartSupports(zExt_F) `48 275:13-275:32;
+  zz43 : %unit `48 275:6-275:33;
+  zz43 = $zsail_assert(zz42, "extensions/FD/fdext_regs.sail:275.32-275.33") `48 275:6-275:33;
+  zz44 : %i64 `48 276:6-276:64;
+  zz45 : %bv `48 276:21-276:32;
+  zz45 = zz40 `48 276:21-276:32;
+  zz46 : %i `48 276:21-276:32;
+  zz46 = zunsigned(zz45) `48 276:21-276:32;
+  zz44 = zz5izDzKz5i64(zz46) `48 276:21-276:32;
+  zz47 : %bv64 `48 276:6-276:64;
+  zz47 = zfregval_into_freg(zdata) `48 276:34-276:57;
+  zz48 : %unit `48 276:6-276:64;
+  zz48 = zwF_from_vector(zz44, zz47, zFPRs) `48 276:6-276:64;
+  zz49 : %bv5 `48 277:6-277:43;
+  zz49 = zz40 `48 277:26-277:36;
+  zz410 : %unit `48 277:6-277:43;
+  zz410 = zfreg_write_callback(zz49, zdata) `48 277:6-277:43;
+  return = zdirty_fd_context(()) `48 278:6-278:24;
   end;
 }
 

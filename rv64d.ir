@@ -32613,21 +32613,27 @@ val zrF_from_vector = "read_register_from_vector" : (%i64, %fvec(32, &(%bv64))) 
 
 val zget_F_bits : (%bv5) ->  %bv64
 
-fn zget_F_bits(z3zE3087) {
+fn zget_F_bits(z3zE3080) {
   zz40 : %bv5 `49 253:28-253:29;
-  zz40 = z3zE3087 `49 253:28-253:29;
-  jump z__isla_vector_fpr goto 7 `49 253:44-253:128;
-  zz41 : %bv5 `49 253:109-253:128;
-  zz41 = zz40 `49 253:117-253:127;
-  return = zrF_bits(zz41) `49 253:109-253:128;
-  goto 14;
-  zz42 : %i64 `49 253:70-253:103;
-  zz43 : %bv `49 253:85-253:96;
-  zz43 = zz40 `49 253:85-253:96;
-  zz44 : %i `49 253:85-253:96;
-  zz44 = zunsigned(zz43) `49 253:85-253:96;
-  zz42 = zz5izDzKz5i64(zz44) `49 253:85-253:96;
-  return = zrF_from_vector(zz42, zFPRs) `49 253:70-253:103;
+  zz40 = z3zE3080 `49 253:28-253:29;
+  jump z__isla_vector_fpr goto 7 `49 254:2-257:28;
+  zz41 : %bv5 `49 257:9-257:28;
+  zz41 = zz40 `49 257:17-257:27;
+  return = zrF_bits(zz41) `49 257:9-257:28;
+  goto 20;
+  zz42 : %bool `49 255:4-255:31;
+  zz42 = zhartSupports(zExt_F) `49 255:11-255:30;
+  zz43 : %unit `49 255:4-255:31;
+  zz43 = $zsail_assert(zz42, "extensions/FD/fdext_regs.sail:255.30-255.31") `49 255:4-255:31;
+  zz44 : %bv64 `49 256:4-256:56;
+  zz45 : %i64 `49 256:22-256:55;
+  zz46 : %bv `49 256:37-256:48;
+  zz46 = zz40 `49 256:37-256:48;
+  zz47 : %i `49 256:37-256:48;
+  zz47 = zunsigned(zz46) `49 256:37-256:48;
+  zz45 = zz5izDzKz5i64(zz47) `49 256:37-256:48;
+  zz44 = zrF_from_vector(zz45, zFPRs) `49 256:22-256:55;
+  return = zfregval_from_freg(zz44) `49 256:4-256:56;
   end;
 }
 
@@ -32635,21 +32641,33 @@ val zwF_from_vector = "write_register_from_vector" : (%i64, %bv64, %fvec(32, &(%
 
 val zset_F_bits : (%bv5, %bv64) ->  %unit
 
-fn zset_F_bits(z3zE3088, zdata) {
-  zz40 : %bv5 `49 263:28-263:29;
-  zz40 = z3zE3088 `49 263:28-263:29;
-  jump z__isla_vector_fpr goto 7 `49 264:4-264:100;
-  zz41 : %bv5 `49 264:75-264:100;
-  zz41 = zz40 `49 264:83-264:93;
-  return = zwF_bits(zz41, zdata) `49 264:75-264:100;
-  goto 14;
-  zz42 : %i64 `49 264:30-264:69;
-  zz43 : %bv `49 264:45-264:56;
-  zz43 = zz40 `49 264:45-264:56;
-  zz44 : %i `49 264:45-264:56;
-  zz44 = zunsigned(zz43) `49 264:45-264:56;
-  zz42 = zz5izDzKz5i64(zz44) `49 264:45-264:56;
-  return = zwF_from_vector(zz42, zdata, zFPRs) `49 264:30-264:69;
+fn zset_F_bits(z3zE3084, zdata) {
+  zz40 : %bv5 `49 273:28-273:29;
+  zz40 = z3zE3084 `49 273:28-273:29;
+  jump z__isla_vector_fpr goto 7 `49 274:4-279:36;
+  zz41 : %bv5 `49 279:11-279:36;
+  zz41 = zz40 `49 279:19-279:29;
+  return = zwF_bits(zz41, zdata) `49 279:11-279:36;
+  goto 26;
+  zz42 : %bool `49 275:6-275:33;
+  zz42 = zhartSupports(zExt_F) `49 275:13-275:32;
+  zz43 : %unit `49 275:6-275:33;
+  zz43 = $zsail_assert(zz42, "extensions/FD/fdext_regs.sail:275.32-275.33") `49 275:6-275:33;
+  zz44 : %i64 `49 276:6-276:64;
+  zz45 : %bv `49 276:21-276:32;
+  zz45 = zz40 `49 276:21-276:32;
+  zz46 : %i `49 276:21-276:32;
+  zz46 = zunsigned(zz45) `49 276:21-276:32;
+  zz44 = zz5izDzKz5i64(zz46) `49 276:21-276:32;
+  zz47 : %bv64 `49 276:6-276:64;
+  zz47 = zfregval_into_freg(zdata) `49 276:34-276:57;
+  zz48 : %unit `49 276:6-276:64;
+  zz48 = zwF_from_vector(zz44, zz47, zFPRs) `49 276:6-276:64;
+  zz49 : %bv5 `49 277:6-277:43;
+  zz49 = zz40 `49 277:26-277:36;
+  zz410 : %unit `49 277:6-277:43;
+  zz410 = zfreg_write_callback(zz49, zdata) `49 277:6-277:43;
+  return = zdirty_fd_context(()) `49 278:6-278:24;
   end;
 }
 
@@ -394443,4 +394461,3 @@ fn zinitializze_registers(z3zE42303) {
 }
 
 files "/home/baiyifan/.opam/default/bin/../share/sail/lib/flow.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/mapping.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/vector.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/generic_equality.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/hex_bits.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/hex_bits_signed.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/dec_bits.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/common.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/nan.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/inf.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/sign.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/zero.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/normal.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/float/classify.sail" "prelude/prelude.sail" "prelude/errors.sail" "extensions/A/aext_types.sail" "core/xlen.sail" "core/flen.sail" "core/vlen.sail" "core/mem_addrtype.sail" "core/mem_metadata.sail" "/home/baiyifan/.opam/default/bin/../share/sail/lib/concurrency_interface/read_write_v1.sail" "core/phys_mem_interface.sail" "core/arithmetic.sail" "core/range_util.sail" "core/float_classify.sail" "core/platform_config.sail" "core/extensions.sail" "core/types_ext.sail" "core/types.sail" "core/vmem_types.sail" "core/mem_type_utils.sail" "core/callbacks.sail" "core/reg_type.sail" "core/regs.sail" "core/pc_access.sail" "" "core/sys_regs.sail" "core/ext_regs.sail" "core/interrupt_regs.sail" "core/addr_checks.sail" "core/misa_ext.sail" "core/ieee_fp_exceptions.sail" "exceptions/sys_exceptions.sail" "pmp/pmp_regs.sail" "pmp/pmp_control.sail" "extensions/Stateen/stateen_regs.sail" "extensions/FD/freg_type.sail" "extensions/FD/fdext_regs.sail" "extensions/FD/softfloat_symbolic.sail" "extensions/FD/softfloat_symbolic_f16.sail" "extensions/FD/softfloat_symbolic_f32.sail" "extensions/FD/softfloat_symbolic_f64.sail" "extensions/V/vext_types.sail" "extensions/V/vext_regs.sail" "extensions/V/vext_control.sail" "extensions/K/types_kext.sail" "extensions/vector_crypto/zvk_utils.sail" "extensions/Smcntrpmf/smcntrpmf.sail" "extensions/Zihintntl/zihintntl_types.sail" "extensions/cfi/cfi_types.sail" "extensions/cfi/zicfilp_regs.sail" "extensions/Stateen/stateen_access_checks.sail" "sys/sys_control.sail" "sys/platform.sail" "sys/pma.sail" "sys/mem.sail" "sys/vmem_pte.sail" "sys/vmem_ptw.sail" "sys/callbacks.sail" "sys/vmem_tlb.sail" "sys/vmem.sail" "sys/insts_begin.sail" "sys/vmem_utils.sail" "extensions/Zicbop/zicbop_insts.sail" "extensions/cfi/zicfilp_insts.sail" "extensions/I/base_insts.sail" "extensions/A/zaamo_insts.sail" "extensions/A/zalrsc_insts.sail" "extensions/M/mext_insts.sail" "extensions/B/zba_insts.sail" "extensions/B/zbb_insts.sail" "extensions/B/zbs_insts.sail" "extensions/FD/fext_insts.sail" "extensions/FD/dext_insts.sail" "extensions/FD/zfh_insts.sail" "extensions/FD/zfa_insts.sail" "extensions/V/vext_utils_insts.sail" "extensions/V/vext_fp_utils_insts.sail" "extensions/V/vext_vset_insts.sail" "extensions/V/vext_arith_insts.sail" "extensions/V/vext_fp_insts.sail" "extensions/V/vext_mem_insts.sail" "extensions/V/vext_mask_insts.sail" "extensions/V/vext_vm_insts.sail" "extensions/V/vext_fp_vm_insts.sail" "extensions/V/vext_red_insts.sail" "extensions/V/vext_fp_red_insts.sail" "extensions/K/zkr_control.sail" "extensions/K/zbkb_insts.sail" "extensions/vector_crypto/zvkned_insts.sail" "extensions/vector_crypto/zvksed_insts.sail" "extensions/vector_crypto/zvknhab_insts.sail" "extensions/Zvabd/zvabd_insts.sail" "extensions/Zicsr/zicsr_insts.sail" "extensions/Zihpm/zihpm.sail" "extensions/Sscofpmf/sscofpmf.sail" "extensions/Sstc/sstc.sail" "extensions/Zawrs/zawrs_insts.sail" "extensions/Zicond/zicond_insts.sail" "extensions/Zicbom/zicbom_insts.sail" "extensions/Zibi/zibi_insts.sail" "extensions/Zicboz/zicboz_insts.sail" "extensions/Ssqosid/ssqosid.sail" "extensions/bfloat16/zfbfmin_utils.sail" "extensions/FD/fdext_control.sail" "extensions/Zihintntl/zihintntl_insts.sail" "extensions/Zihintpause/zihintpause_insts.sail" "extensions/B/zbc_insts.sail" "extensions/C/zcb_insts.sail" "extensions/H/hext_insts.sail" "extensions/FD/zcf_insts.sail" "extensions/FD/zcd_insts.sail" "extensions/K/zkn_insts.sail" "extensions/K/zks_insts.sail" "extensions/K/zbkx_insts.sail" "extensions/vector_crypto/zvbb_insts.sail" "extensions/vector_crypto/zvbc_insts.sail" "extensions/vector_crypto/zvkg_insts.sail" "extensions/vector_crypto/zvksh_insts.sail" "extensions/Svinval/svinval_insts.sail" "extensions/Zicntr/zicntr_control.sail" "extensions/Zifencei/zifencei_insts.sail" "extensions/bfloat16/zfbfmin_insts.sail" "extensions/bfloat16/zvfbfmin_insts.sail" "extensions/bfloat16/zvfbfwma_insts.sail" "mops/Zimop/zimop_insts.sail" "mops/Zcmop/zcmop_insts.sail" "postlude/insts_end.sail" "extensions/C/zca_insts.sail" "extensions/I/jalr_seq.sail" "extensions/Stateen/stateen_csrs.sail" "postlude/csr_end.sail" "postlude/step_common.sail" "postlude/step_ext.sail" "postlude/decode_ext.sail" "postlude/fetch_rvfi.sail" "postlude/fetch.sail" "postlude/step.sail" "postlude/validate_config.sail" "postlude/model.sail" "unit_tests/test_mstatus.sail" "main/main.sail"
-
