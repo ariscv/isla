@@ -1623,24 +1623,6 @@ impl ModelVal {
     }
 }
 
-fn model_bits_to_bv<B: BV>(bits: &[bool]) -> Result<B, ExecError> {
-    let width: u32 = bits.len().try_into().expect("模型位向量长度超出 u32");
-    if width > B::MAX_WIDTH {
-        return Err(ExecError::Type(
-            format!("Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH={})", width, B::MAX_WIDTH),
-            SourceLoc::unknown(),
-        ));
-    }
-
-    let mut bitvector = B::zeros(width);
-    for (index, bit) in bits.iter().enumerate() {
-        if *bit {
-            bitvector = bitvector.set_slice(index.try_into().expect("模型位序超出 u32"), B::BIT_ONE);
-        }
-    }
-    Ok(bitvector)
-}
-
 /// thread-interrupt wrapper 在 ModelEval 超时时构造最终 `SmtError::Timeout`
 /// 所需的调用边界信息。它不是另一套错误类型。
 struct ModelEvalTimeoutContext {
@@ -1770,7 +1752,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                     ModelVal::Exp(Exp::Bits64(bv)) => Ok(Val::Bits(B::new(bv.lower_u64(), bv.len()))),
                     ModelVal::Exp(Exp::Bool(b)) => Ok(Val::Bool(b)),
                     ModelVal::Exp(Exp::Enum(m)) => Ok(Val::Enum(m)),
-                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::Bits(model_bits_to_bv(&bv)?)),
+                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::from_bits_slice(&bv)),
                     ModelVal::Exp(exp) => {
                         // 对于其他复杂的表达式，返回错误
                         Err(ExecError::Type(
@@ -1779,7 +1761,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                         ))
                     }
                     ModelVal::Arbitrary(ty) => match ty {
-                        smtlib::Ty::BitVec(len) => Ok(Val::Bits(B::new(0, len))),
+                        smtlib::Ty::BitVec(len) => Ok(Val::from_bits_slice(&vec![false; len as usize])),
                         smtlib::Ty::Bool => Ok(Val::Bool(false)),
                         smtlib::Ty::Enum(_) => Err(ExecError::Type(
                             format!("Cannot create default enum value for {:?}", ty),
@@ -1832,30 +1814,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             MixedBits(segments) => {
                 let mut new_segments = Vec::with_capacity(segments.len());
                 for segment in segments {
-                    match segment {
-                        crate::ir::BitsSegment::Symbolic(sym) => {
-                            let model_val = self.get_var(*sym)?;
-                            match model_val {
-                                ModelVal::Exp(Exp::Bits64(bv)) => {
-                                    new_segments
-                                        .push(crate::ir::BitsSegment::Concrete(B::new(bv.lower_u64(), bv.len())));
-                                }
-                                ModelVal::Exp(Exp::Bits(bv)) => {
-                                    new_segments.push(crate::ir::BitsSegment::Concrete(model_bits_to_bv(&bv)?));
-                                }
-                                ModelVal::Arbitrary(smtlib::Ty::BitVec(len)) => {
-                                    new_segments.push(crate::ir::BitsSegment::Concrete(B::new(0, len)));
-                                }
-                                _ => {
-                                    return Err(ExecError::Type(
-                                        format!("Unsupported model value for BitsSegment: {:?}", model_val),
-                                        SourceLoc::unknown(),
-                                    ));
-                                }
-                            }
-                        }
-                        crate::ir::BitsSegment::Concrete(bv) => {
-                            new_segments.push(crate::ir::BitsSegment::Concrete(*bv));
+                    match self.get_val(&Val::from(segment))? {
+                        Bits(bv) => new_segments.push(crate::ir::BitsSegment::Concrete(bv)),
+                        MixedBits(mut concrete) => new_segments.append(&mut concrete),
+                        value => {
+                            return Err(ExecError::Type(
+                                format!("Unsupported value for BitsSegment: {:?}", value),
+                                SourceLoc::unknown(),
+                            ));
                         }
                     }
                 }
