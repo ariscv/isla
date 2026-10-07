@@ -295,6 +295,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         &self.backtrace
     }
 
+    pub fn has_sampled_branch(&self) -> bool {
+        self.execution_limit_state.has_sampled_branch()
+    }
+
     pub fn forks(&self) -> u32 {
         self.execution_limit_state.total_forks()
     }
