@@ -37,8 +37,45 @@ struct AssemGenJsonItem {
     ret_val: String,
     #[serde(rename = "path-signature")]
     path_signature: u64,
+    #[serde(rename = "requested-instruction")]
+    requested_instruction: String,
+    #[serde(rename = "isa-state-complete")]
+    isa_state_complete: BTreeMap<String, String>,
+    #[serde(rename = "isa-state-post")]
+    isa_state_post: BTreeMap<String, String>,
 }
 impl AssemGenJsonItem {
+    fn instruction_text<B: BV>(value: &Val<B>, shared_state: &SharedState<B>) -> String {
+        match value {
+            Val::Ctor(ctor, inner) => format!(
+                "{}({})",
+                zencode::decode(shared_state.symtab.to_str_demangled(*ctor)),
+                Self::instruction_text(inner, shared_state)
+            ),
+            Val::Struct(fields) => {
+                let mut fields: Vec<_> = fields.iter().collect();
+                fields.sort_by_key(|(name, _)| shared_state.symtab.to_str(**name));
+                let fields = fields
+                    .into_iter()
+                    .map(|(name, value)| {
+                        format!(
+                            "{}:{}",
+                            zencode::decode(shared_state.symtab.to_str_demangled(*name)),
+                            Self::instruction_text(value, shared_state)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{{{fields}}}")
+            }
+            Val::Vector(values) | Val::List(values) => {
+                let values = values.iter().map(|value| Self::instruction_text(value, shared_state)).collect::<Vec<_>>();
+                format!("[{}]", values.join(","))
+            }
+            _ => value.to_str(shared_state),
+        }
+    }
+
     pub fn new<B: BV>(
         target: &dyn Target<B>,
         test_ins: String,
@@ -46,13 +83,26 @@ impl AssemGenJsonItem {
         isa_state: BTreeMap<String, String>,
         ret_val: String,
         path_signature: u64,
+        requested_instruction: String,
+        isa_state_complete: BTreeMap<String, String>,
+        isa_state_post: BTreeMap<String, String>,
     ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, path_signature }
+        AssemGenJsonItem {
+            arch,
+            test_ins,
+            test_ins_encdec,
+            isa_state,
+            ret_val,
+            path_signature,
+            requested_instruction,
+            isa_state_complete,
+            isa_state_post,
+        }
     }
 }
 trait ToJSON: Serialize {
@@ -603,6 +653,7 @@ fn symbolic_args_from_types<B: BV>(
 
     symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())
 }
+
 fn run_symbolic_execute_with_target<'ir, B: BV>(
     target: &mut dyn RISCV<B>,
     instruction_name: &str,
@@ -725,6 +776,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         println!("assembly:{:#?}", assembly); */
                         // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, regs, lets);
 
+                        let mut requested_instruction = String::new();
+                        let mut isa_state_complete = BTreeMap::new();
+                        let mut isa_state_post = BTreeMap::new();
                         let mut test_ins = String::new();
                         let mut test_ins_encdec = String::new();
                         let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
@@ -773,29 +827,66 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
                                 // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
                                 // model.set_complete_model(true);
+                                // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
+                                match target.solve_pre_state(&mut model, shared_state) {
+                                    Ok(state) => isa_state.extend(state),
+                                    Err(error) => {
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        log!(
+                                            log::PATH_RESULT,
+                                            &format!("警告: clause{} pre-state求解失败 {:?}", instruction_name, error)
+                                        );
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                }
+                                model.set_complete_model(true);
                                 log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
                                 let test = Sym::from_u32(6);
                                 // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                 // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                 match model.get_val(&fun_args[0]) {
                                     Ok(arg_val) => {
-                                        let asm_opt =
-                                            match try_get_assembly_name(arg_val.clone(), shared_state, regs, lets) {
-                                                Ok(assembly) => assembly,
+                                        requested_instruction =
+                                            AssemGenJsonItem::instruction_text(&arg_val, shared_state);
+                                        let mut concrete_regs = symbolic_regs.clone();
+                                        for (name, value) in target.pre_state().iter() {
+                                            let concrete = match model.get_val(value) {
+                                                Ok(value) => value,
                                                 Err(error) => {
-                                                    trace_diagnostics =
-                                                        error_recorder.record_configured_error_diagnostic(&error);
-                                                    log!(
-                                                        log::PATH_RESULT,
-                                                        &format!(
-                                                            "警告: clause{} 汇编名称求解失败 {:?}",
-                                                            instruction_name, error
-                                                        )
+                                                    trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                        &error,
+                                                        frame,
+                                                        shared_state,
                                                     );
                                                     submit_trace(frame, &mut trace_diagnostics);
                                                     return;
                                                 }
                                             };
+                                            concrete_regs.assign(*name, concrete, shared_state);
+                                        }
+                                        let asm_opt = match try_get_assembly_name(
+                                            arg_val.clone(),
+                                            shared_state,
+                                            &concrete_regs,
+                                            lets,
+                                        ) {
+                                            Ok(assembly) => assembly,
+                                            Err(error) => {
+                                                trace_diagnostics =
+                                                    error_recorder.record_configured_error_diagnostic(&error);
+                                                log!(
+                                                    log::PATH_RESULT,
+                                                    &format!(
+                                                        "警告: clause{} 汇编名称求解失败 {:?}",
+                                                        instruction_name, error
+                                                    )
+                                                );
+                                                submit_trace(frame, &mut trace_diagnostics);
+                                                return;
+                                            }
+                                        };
                                         log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
                                         match asm_opt {
                                             Some(asm) => test_ins = asm,
@@ -805,8 +896,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                             }
                                         }
                                         let asm_encdec_opt =
-                                            match try_get_assembly_encdec(arg_val.clone(), shared_state, regs, lets) {
+                                            match try_get_assembly_encdec(
+                                                arg_val.clone(),
+                                                shared_state,
+                                                &concrete_regs,
+                                                lets,
+                                            ) {
                                                 Ok(encoded) => {
+                                                    // mapping 成功后，分别处理无编码和编码格式化失败。
                                                     match encoded {
                                                         Some(val) => match FmtVal::from_val(&val, &mut model) {
                                                             Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
@@ -844,7 +941,24 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         match asm_encdec_opt {
                                             Some(encdec) => test_ins_encdec = encdec,
                                             None => {
-                                                submit_trace(frame, &mut trace_diagnostics);
+                                                if matches!(
+                                                    ret_val,
+                                                    Val::Ctor(ctor, _)
+                                                        if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
+                                                            == "Illegal_Instruction"
+                                                ) {
+                                                    submit_trace(frame, &mut trace_diagnostics);
+                                                } else {
+                                                    let error = ExecError::Unreachable(
+                                                        "成功执行路径没有合法机器编码".to_string(),
+                                                    );
+                                                    trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                        &error,
+                                                        frame,
+                                                        shared_state,
+                                                    );
+                                                    submit_trace(frame, &mut trace_diagnostics);
+                                                }
                                                 return;
                                             }
                                         }
@@ -855,21 +969,6 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         log!(
                                             log::PATH_RESULT,
                                             &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
-                                        );
-                                        submit_trace(frame, &mut trace_diagnostics);
-                                        return;
-                                    }
-                                }
-
-                                // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
-                                match target.solve_pre_state(&mut model, shared_state) {
-                                    Ok(state) => isa_state.extend(state),
-                                    Err(error) => {
-                                        trace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                                        log!(
-                                            log::PATH_RESULT,
-                                            &format!("警告: clause{} pre-state求解失败 {:?}", instruction_name, error)
                                         );
                                         submit_trace(frame, &mut trace_diagnostics);
                                         return;
@@ -948,6 +1047,24 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         _ => println!(" [event] {:?}", event),
                                     }
                                 } */
+                                isa_state_complete = match target.solve_pre_state_complete(&mut model, shared_state) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                };
+                                isa_state_post = match target.solve_post_state(frame.regs(), &mut model, shared_state) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                };
                                 log!(log::PATH_RESULT, "3. ==============================");
                             }
                         }
@@ -958,6 +1075,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             isa_state,
                             ret_val_str,
                             frame.path_signature(),
+                            requested_instruction,
+                            isa_state_complete,
+                            isa_state_post,
                         );
                         collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                             path_signature: frame.path_signature(),
@@ -1260,6 +1380,8 @@ mod tests {
                 assert_eq!(json["gen"][0]["test-ins-encdec"], "32'h0000_0053");
                 assert!(json["gen"][0].get("case-id").is_none());
                 assert!(json["gen"][0]["path-signature"].is_u64());
+                assert_eq!(json["gen"][0]["isa-state-complete"]["mstatus"], json["gen"][0]["isa-state"]["mstatus"]);
+                assert_eq!(json["gen"][0]["isa-state-post"], json["gen"][0]["isa-state-complete"]);
             }
         }
         std::fs::remove_file(json_path).unwrap();
@@ -1728,6 +1850,9 @@ mod tests {
                 isa_state: BTreeMap::new(),
                 ret_val: ret_val.to_string(),
                 path_signature: signature,
+                requested_instruction: String::new(),
+                isa_state_complete: BTreeMap::new(),
+                isa_state_post: BTreeMap::new(),
             },
         }
     }
