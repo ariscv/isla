@@ -497,6 +497,13 @@ fn isla_main() -> i32 {
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
+    if matches!(subcommand, Subcommand::SolveState { .. }) {
+        // solve-state 必须同时保留符号 assert 的 true/false 两臂。
+        if !matches.opt_present("fork-assertions") {
+            isla_lib::ir::assertions_to_jumps(&mut arch);
+        }
+    }
+
     if trace_options.functions {
         // 复用已有 --trace-all 的函数事件采集，无第二套调用跟踪器。
         isa_config.trace_functions.extend(symtab.all_names());
