@@ -2365,6 +2365,22 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
+    /// Return the SMT sort of a symbolic value used as a floating-point primop argument.
+    pub(crate) fn scalar_sort(&self, v: Sym) -> Option<Ty> {
+        let ast = self.decls.get(&v)?;
+        unsafe {
+            let ctx = self.ctx.z3_ctx;
+            let sort = Z3_get_sort(ctx, ast.z3_ast);
+            match Z3_get_sort_kind(ctx, sort) {
+                SortKind::Bool => Some(Ty::Bool),
+                SortKind::BV => Some(Ty::BitVec(Z3_get_bv_sort_size(ctx, sort))),
+                SortKind::FloatingPoint => Some(Ty::Float(Z3_fpa_get_ebits(ctx, sort), Z3_fpa_get_sbits(ctx, sort))),
+                SortKind::RoundingMode => Some(Ty::RoundingMode),
+                _ => None,
+            }
+        }
+    }
+
     pub fn is_bitvector(&mut self, v: Sym) -> bool {
         match self.decls.get(&v) {
             Some(ast) => unsafe {

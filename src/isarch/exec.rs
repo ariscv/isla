@@ -815,6 +815,50 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             cfg.set_param_value("model", "true");
                             let ctx = Context::new(cfg);
                             let mut solver = Solver::from_checkpoint(&ctx, encoding_checkpoint);
+                            if instruction_name.strip_prefix('z').is_some_and(|name| {
+                                include_str!("official_float77.txt").lines().any(|entry| entry == name)
+                            }) {
+                                use isla_lib::smt::smtlib::{self, Exp};
+
+                                // 执行结束后优先选择可编码见证；若路径要求 FS/VS 关闭，保留原可满足路径。
+                                let mut bits = target
+                                    .pre_state()
+                                    .get_from_str("mstatus", &shared_state.symtab)
+                                    .expect("浮点求解必须记录 mstatus 初态");
+                                while let Val::Struct(fields) = bits {
+                                    assert_eq!(fields.len(), 1, "mstatus 必须是单字段 bitfield");
+                                    bits = fields.values().next().unwrap();
+                                }
+                                let mstatus_exp = match isla_lib::primop_util::smt_value(bits, SourceLoc::unknown()) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                };
+                                let fs_enabled = Exp::Eq(
+                                    Box::new(Exp::Extract(14, 13, Box::new(mstatus_exp.clone()))),
+                                    Box::new(smtlib::bits64(3, 2)),
+                                );
+                                let vs_enabled = Exp::Eq(
+                                    Box::new(Exp::Extract(10, 9, Box::new(mstatus_exp))),
+                                    Box::new(smtlib::bits64(3, 2)),
+                                );
+                                let preferred = Exp::And(Box::new(fs_enabled), Box::new(vs_enabled));
+                                match solver.check_sat_with(&preferred, SourceLoc::unknown()) {
+                                    isla_lib::smt::SmtResult::Sat => solver.assert(preferred),
+                                    isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
+                                    isla_lib::smt::SmtResult::Error(error) => {
+                                        let error = ExecError::Smt(error);
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                }
+                            }
                             let mut requested_instruction = String::new();
                             let mut isa_state_complete = BTreeMap::new();
                             let mut isa_state_post = BTreeMap::new();
@@ -1735,13 +1779,20 @@ mod tests {
     }
 
     #[test]
+    fn official_float_list_has_77_unique_clauses() {
+        let entries: Vec<_> = include_str!("official_float77.txt").lines().collect();
+        assert_eq!(entries.len(), 77);
+        assert_eq!(entries.iter().collect::<HashSet<_>>().len(), 77);
+    }
+
+    #[test]
     fn collector_preserves_constrained_fs_vs_and_encoding_output() {
         use super::super::target::{PreStateCtx, Target};
 
         // 仅用于测试的目标：在真实 setup_pre_state 中约束 mstatus，走完整 collector。
         struct ConstrainedTarget {
             pre_state: PreStateCtx<B64>,
-            expected: B64,
+            expected: Option<B64>,
         }
         impl Target<B64> for ConstrainedTarget {
             fn arch_name(&self) -> &'static str {
@@ -1772,7 +1823,9 @@ mod tests {
                 let Some(Val::Symbolic(bits)) = self.pre_state.get_from_str("mstatus", &shared_state.symtab) else {
                     panic!("测试初态必须是符号值");
                 };
-                solver.assert_eq(smtlib::Exp::Var(*bits), smtlib::Exp::Bits64(self.expected));
+                if let Some(expected) = self.expected {
+                    solver.assert_eq(smtlib::Exp::Var(*bits), smtlib::Exp::Bits64(expected));
+                }
                 Ok(())
             }
         }
@@ -1786,7 +1839,8 @@ mod tests {
         let mut symtab = Symtab::new();
         let instruction = symtab.intern("zinstruction");
         let result = symtab.intern("zExecutionResult");
-        let clause = format!("zCATALOG_FS_VS_{}", std::process::id());
+        // 官方浮点clause触发真实collector中的见证偏好，不直接调用生产helper。
+        let clause = "zF_BIN_RM_TYPE_S".to_string();
         let requested = symtab.intern(&clause);
         let retire = symtab.intern("zRetire_Success");
         let assembly = symtab.intern("zassembly_forwards");
@@ -1836,39 +1890,45 @@ mod tests {
         let json_path = format!("output/rv64_{clause}.json");
         let mut regs = RegisterBindings::new();
         regs.insert(mstatus, false, UVal::Init(Val::Bits(B64::zeros(64))));
-        for fs in 0..4_u64 {
-            for vs in 0..4_u64 {
-                let expected = B64::new((fs << 13) | (vs << 9) | 0x80, 64);
-                let mut target = ConstrainedTarget { pre_state: PreStateCtx::new(), expected };
-                run_symbolic_execute_with_target(
-                    &mut target,
-                    &clause,
-                    &shared_state,
-                    &regs,
-                    &Bindings::default(),
-                    None,
-                    1,
-                    None,
-                    &ExecutionLimits::default(),
-                    &reporter,
-                    None,
-                )
-                .unwrap_or_else(|error| panic!("FS={fs}, VS={vs} 的已满足路径不能被具体化改坏: {error}"));
-                let json: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-                assert!(json.get("summary").is_none());
-                assert!(json.get("terminals").is_none());
-                assert_eq!(json["gen"].as_array().unwrap().len(), 1);
+        let cases = (0..4_u64)
+            .flat_map(|fs| (0..4_u64).map(move |vs| Some(B64::new((fs << 13) | (vs << 9) | 0x80, 64))))
+            .chain(std::iter::once(None));
+        for expected in cases {
+            let mut target = ConstrainedTarget { pre_state: PreStateCtx::new(), expected };
+            run_symbolic_execute_with_target(
+                &mut target,
+                &clause,
+                &shared_state,
+                &regs,
+                &Bindings::default(),
+                None,
+                1,
+                None,
+                &ExecutionLimits::default(),
+                &reporter,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("mstatus={expected:?} 的已满足路径不能被具体化改坏: {error}"));
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+            assert!(json.get("summary").is_none());
+            assert!(json.get("terminals").is_none());
+            assert_eq!(json["gen"].as_array().unwrap().len(), 1);
+            if let Some(expected) = expected {
                 assert_eq!(
                     json["gen"][0]["isa-state"]["mstatus"],
                     format!("64'h0000_0000_0000_{:04x}", expected.lower_u64())
                 );
-                assert_eq!(json["gen"][0]["test-ins-encdec"], "32'h0000_0053");
-                assert!(json["gen"][0].get("case-id").is_none());
-                assert!(json["gen"][0]["path-signature"].is_u64());
-                assert_eq!(json["gen"][0]["isa-state-complete"]["mstatus"], json["gen"][0]["isa-state"]["mstatus"]);
-                assert_eq!(json["gen"][0]["isa-state-post"], json["gen"][0]["isa-state-complete"]);
+            } else {
+                let value = json["gen"][0]["isa-state"]["mstatus"].as_str().unwrap();
+                let bits = u64::from_str_radix(&value.split("'h").nth(1).unwrap().replace('_', ""), 16).unwrap();
+                assert_eq!((bits >> 13) & 3, 3);
+                assert_eq!((bits >> 9) & 3, 3);
             }
+            assert_eq!(json["gen"][0]["test-ins-encdec"], "32'h0000_0053");
+            assert!(json["gen"][0].get("case-id").is_none());
+            assert!(json["gen"][0]["path-signature"].is_u64());
+            assert_eq!(json["gen"][0]["isa-state-complete"]["mstatus"], json["gen"][0]["isa-state"]["mstatus"]);
+            assert_eq!(json["gen"][0]["isa-state-post"], json["gen"][0]["isa-state-complete"]);
         }
         std::fs::remove_file(json_path).unwrap();
     }
