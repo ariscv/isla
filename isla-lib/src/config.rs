@@ -255,7 +255,7 @@ fn parse_u64_value(value: &Value, context: &str) -> Result<u64, String> {
     match value {
         Value::Integer(i) => u64::try_from(*i).map_err(|e| format!("failed to parse integer in {}: {}", context, e)),
         Value::String(s) => {
-            if s.len() >= 2 && &s[0..2] == "0x" { u64::from_str_radix(&s[2..], 16) } else { u64::from_str_radix(s, 10) }
+            if let Some(hex) = s.strip_prefix("0x") { u64::from_str_radix(hex, 16) } else { u64::from_str_radix(s, 10) }
                 .map_err(|e| format!("Could not parse {} as a 64-bit unsigned integer in {}: {}", s, context, e))
         }
         _ => Err(format!("{} should be an integer or string", context)),
@@ -1880,6 +1880,7 @@ fcsr = "0b010_?????"
             "[initial_state]\nx1 = -1",
             "[initial_state]\nx1 = true",
             "[initial_state]\nx1 = \"unknown\"",
+            "[initial_state]\nx1 = \"中\"",
             "[initial_state]\nx1 = \"0b\"",
             "[initial_state]\nx1 = \"0b__\"",
             "[initial_state]\nx1 = \"0b?2\"",

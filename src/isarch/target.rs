@@ -89,8 +89,30 @@ where
             let name = shared_state.symtab.get(&zencode::encode(&entry.name)).ok_or_else(|| {
                 ExecError::Type(format!("initial_state.{} 不存在于 IR", entry.name), SourceLoc::unknown())
             })?;
-            if !shared_state.registers.contains_key(&name) {
-                return Err(ExecError::Type(format!("initial_state.{} 不是寄存器", entry.name), SourceLoc::unknown()));
+            let mut ty = shared_state.registers.get(&name).ok_or_else(|| {
+                ExecError::Type(format!("initial_state.{} 不是寄存器", entry.name), SourceLoc::unknown())
+            })?;
+            // 用户配置的类型错误必须在符号化和修改寄存器之前报告；Poison 断言仍用于内部不变量。
+            while let Ty::Struct(id) = ty {
+                let fields = shared_state.type_info.structs.get(id).expect("防御性编程：寄存器结构缺少类型定义");
+                if fields.len() != 1 {
+                    return Err(ExecError::Type(
+                        format!("initial_state.{} 需要单字段位向量结构", entry.name),
+                        SourceLoc::unknown(),
+                    ));
+                }
+                ty = fields.values().next().unwrap();
+            }
+            match ty {
+                Ty::Bits(width) if *width > 0 => (),
+                Ty::Bit | Ty::I64 | Ty::I128 => (),
+                Ty::AnyBits if is_vector_register_name(&entry.name) => (),
+                _ => {
+                    return Err(ExecError::Type(
+                        format!("initial_state.{} 仅支持非零宽度位向量寄存器", entry.name),
+                        SourceLoc::unknown(),
+                    ))
+                }
             }
             if !reg_names.contains(&entry.name) {
                 reg_names.push(entry.name.clone());
@@ -1729,5 +1751,34 @@ mod initial_state_tests {
         assert!(target
             .setup_pre_state(&mut RegisterBindings::new(), &Bindings::default(), &shared, &mut solver)
             .is_err());
+    }
+    #[test]
+    fn initial_state_rejects_unsupported_types_before_symbolization() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for ty in
+            [Ty::List(Box::new(Ty::Bits(64))), Ty::AnyBits, Ty::Bool, Ty::Bits(0), Ty::Struct(Name::from_u32(999))]
+        {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut symtab = Symtab::new();
+            let name = symtab.intern("ztest_register");
+            let wrapper = symtab.intern("zWrapper");
+            let a = symtab.intern("za");
+            let b = symtab.intern("zb");
+            let mut shared = SharedState::empty(symtab);
+            let ty = if matches!(ty, Ty::Struct(_)) { Ty::Struct(wrapper) } else { ty };
+            shared.type_info.structs.insert(wrapper, BTreeMap::from([(a, Ty::Bits(32)), (b, Ty::Bits(32))]));
+            shared.registers.insert(name, ty);
+            let mut target = RV64::<B64>::default();
+            target.initial_state =
+                vec![InitialRegisterConfig { name: "test_register".into(), fields: vec![(None, None)] }];
+            let mut regs = RegisterBindings::new();
+            let error = target.setup_pre_state(&mut regs, &Bindings::default(), &shared, &mut solver).unwrap_err();
+            assert!(
+                matches!(error, ExecError::Type(ref message, _) if message.contains("initial_state.test_register"))
+            );
+            assert_eq!(target.pre_state.len(), 0);
+            assert!(regs.get_last_if_initialized(name).is_none());
+        }
     }
 }
