@@ -327,3 +327,8 @@
 - `difftest-xiangshan` 批量 DiffTest 以 `-j48` 满载 + `timeout 30s` 运行时,单条 emu 的初始化+执行会被 CPU 争抢拖慢:461 条 timeout 中 **399 条是满载假超时**(空载 `--diff` 复测全部 GOODTRAP),只有 62 条空载 `--no-diff`/`--diff` 双重仍挂才是真挂死。
 - 因此 **timeout 类 failure 判定必须先空载复证再定案**;ABORT(returncode≠0)与"payload 已 commit 后哨兵暴露"类判定不受负载影响。
 - 本次还确认 XiangShan 译码层存在 `vstartIllegal = isVArith && vstart≠0` 检查(`VecExceptionGen.scala:279`),但 `FuType.vecArith = vecOPI++vecOPF` 不含 vshf/vppu/vfix 等族:检查覆盖内的族超界 vstart 正常 EX_II,未覆盖的族会真正执行并因 vstart 重启机制挂死。
+
+
+## 2026-10-30 JSON范围与IR同步修订
+
+旧版本关于同名IR和本地workaround哈希的结论仅适用于其记录的提交。本轮IR从模型议题分支完整生成，来源见`ir/provenance/manifest.json`；运行JSON含执行范围摘要和输入哈希，正常结束不等于源码控制流覆盖。现行结果合同见`docs/json-results.md`。memory的终值查询超时只作为diagnostics，不进入可重放gen；其VVTYPE配置现由模型仓唯一维护，移除了旧本地副本。

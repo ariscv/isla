@@ -4,6 +4,7 @@ pub mod clause;
 mod encoding;
 pub mod exec;
 pub mod memory_builder;
+mod solve_summary;
 pub mod target;
 mod timeout_report;
 

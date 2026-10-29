@@ -1,5 +1,6 @@
 use super::clause::{get_extension_clauses, normalize_clause_name};
 use super::encoding::encoding_paths;
+use super::solve_summary::SolveSummary;
 use super::target::{Target, RISCV};
 use super::timeout_report::TimeoutReporter;
 pub use super::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
@@ -111,7 +112,11 @@ trait ToJSON: Serialize {
         serde_json::to_string_pretty(self).unwrap()
     }
     fn to_json(&self, file_path: Option<String>) {
-        let json = serde_json::to_string_pretty(self).unwrap();
+        let mut value = serde_json::to_value(self).unwrap();
+        if value.get("gen").is_some() {
+            value["provenance"] = super::solve_summary::input_manifest();
+        }
+        let json = serde_json::to_string_pretty(&value).unwrap();
         // 若未指定输出路径，则默认写到当前目录下的 assem_gen.json
         let path = file_path.unwrap_or_else(|| "assem_gen.json".to_string());
         // 支持类似 "output/a/b.json" 的路径：先提取父目录并递归创建（等价 mkdir -p）
@@ -128,6 +133,7 @@ trait ToJSON: Serialize {
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
 struct AssemGenJson {
+    summary: serde_json::Value,
     gen: Vec<AssemGenJsonItem>,
     #[serde(rename = "state-domain")]
     state_domain: BTreeMap<String, String>,
@@ -136,7 +142,7 @@ impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
     fn new(gen: Vec<AssemGenJsonItem>, state_domain: BTreeMap<String, String>) -> Self {
-        AssemGenJson { gen, state_domain }
+        AssemGenJson { gen, state_domain, summary: SolveSummary::default().json() }
     }
 }
 
@@ -149,6 +155,7 @@ struct CollectedCase {
 }
 
 struct SolveCollectorState {
+    summary: SolveSummary,
     cases: Vec<CollectedCase>,
     case_quota: Option<CaseQuota>,
     first_error: Option<ExecError>,
@@ -160,10 +167,13 @@ impl SolveCollectorState {
     }
 
     fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
-        SolveCollectorState { first_error: None, cases: Vec::new(), case_quota }
+        SolveCollectorState { first_error: None, cases: Vec::new(), case_quota, summary: SolveSummary::default() }
     }
 
     fn record_error(&mut self, error: &ExecError) {
+        self.summary.errors += 1;
+        self.summary.execution_timeouts += usize::from(matches!(error, ExecError::Timeout));
+        self.summary.smt_timeouts += usize::from(matches!(error, ExecError::Smt(SmtError::Timeout(_))));
         if self.first_error.is_none() {
             self.first_error = Some(error.clone());
         }
@@ -711,6 +721,21 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         lets,
         &result,
         &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
+            {
+                let frame = match &exec_result {
+                    Ok((_, frame)) | Err((_, frame)) => frame,
+                };
+                let mut state = collected.lock().expect("solve collector mutex poisoned");
+                state.summary.sampled_paths += usize::from(frame.has_sampled_branch());
+                match &exec_result {
+                    Ok((Run::Finished(Val::Poison) | Run::Exit | Run::Suspended, _)) => {
+                        state.summary.unfinished_paths += 1
+                    }
+                    Err((ExecError::AssertionFailure(_, _), _)) => state.summary.assertion_filtered_paths += 1,
+                    Err((ExecError::MatchFailure(_), _)) => state.summary.errors += 1,
+                    _ => (),
+                }
+            }
             let mut trace_diagnostics = Vec::new();
             let submit_trace = |frame, diagnostics: &mut Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)>| {
                 isla_lib::executor::submit_trace_for_local_frame_with_diagnostics(
@@ -1262,10 +1287,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         Err(_) => panic!("{} 执行结束后 result 收集器仍有共享引用", instruction_name),
     };
     let xlen_name_str = target.arch_pretty_name().to_string();
-    let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
+    let mut state = result_mutex.into_inner().expect("solve collector mutex poisoned");
     let quota = state.case_quota;
+    let collected_count = state.cases.len();
     let items = finalize_cases(state.cases, &quota);
-    let json = AssemGenJson::new(items, target.domain_manifest());
+    state.summary.omitted_cases = collected_count - items.len();
+    let mut json = AssemGenJson::new(items, target.domain_manifest());
+    json.summary = state.summary.json();
+    json.summary["target-clause"] = serde_json::json!(instruction_name);
     json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
     match state.first_error {
         Some(error) => Err(error),
@@ -1922,7 +1951,7 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("mstatus={expected:?} 的已满足路径不能被具体化改坏: {error}"));
             let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-            assert!(json.get("summary").is_none());
+            assert!(json["summary"]["model-coverage"] == "not-measured");
             assert!(json.get("terminals").is_none());
             assert_eq!(json["gen"].as_array().unwrap().len(), 1);
             if let Some(expected) = expected {
@@ -2061,7 +2090,10 @@ mod tests {
                 assert!(outcome.is_ok(), "{result_name}/{mode}: {outcome:?}");
             }
             let total = if mode == "sampled" { 1 } else { 2 };
-            assert!(json.get("summary").is_none());
+            if mode == "sampled" || suppress || fail_assembly {
+                assert_eq!(json["summary"]["status"], "partial", "{result_name}/{mode}");
+            }
+            assert!(json["summary"]["model-coverage"] == "not-measured");
             assert!(json.get("terminals").is_none());
             let emitted = !fail_assembly && !suppress && matches!(mode, "finished" | "sampled");
             assert_eq!(json["gen"].as_array().unwrap().len(), total * usize::from(emitted));
@@ -2400,6 +2432,20 @@ mod tests {
         assert!(!should_collect_unfinished_path::<B64>(&Run::Dead));
         assert!(should_collect_unfinished_path::<B64>(&Run::Exit));
         assert!(should_collect_unfinished_path::<B64>(&Run::Suspended));
+    }
+
+    #[test]
+    fn json_summary_marks_sampling_and_quota_as_partial() {
+        let mut summary = SolveSummary::default();
+        assert_eq!(summary.status(), "finished");
+        summary.sampled_paths = 1;
+        assert_eq!(summary.status(), "partial");
+        let json = summary.json();
+        assert_eq!(json["sampled-paths"], 1);
+        assert_eq!(json["model-coverage"], "not-measured");
+        summary.sampled_paths = 0;
+        summary.omitted_cases = 1;
+        assert_eq!(summary.status(), "partial");
     }
 
     fn collected_case(signature: u64, test_ins: &str, ret_val: &str) -> CollectedCase {
