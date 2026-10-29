@@ -50,7 +50,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
 use crate::primop;
-use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_value, symbolic};
+use crate::primop_util::{build_ite, i128_from_bits, ite_phi, replace_mixed_bits, smt_value, symbolic};
 use crate::probe;
 use crate::smt::smtlib::Def;
 use crate::smt::*;
@@ -222,6 +222,7 @@ fn read_register_from_vector<'ir, B: BV>(
     let rib = required_index_bits(regs.len());
 
     let invalid_index_argument = "read_register_from_vector invalid index";
+    let n = replace_mixed_bits(n, solver, info)?;
     let index = match n {
         Val::Bits(bv) => ConcreteIndex(bv.lower_u64() as usize),
         Val::I64(n) => {
@@ -306,6 +307,7 @@ fn write_register_from_vector<'ir, B: BV>(
     let rib = required_index_bits(regs.len());
 
     let invalid_index_argument = "write_register_from_vector invalid index";
+    let n = replace_mixed_bits(n, solver, info)?;
     let index = match n {
         Val::Bits(bv) => ConcreteIndex(bv.lower_u64() as usize),
         Val::I64(n) => {
@@ -2025,7 +2027,24 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     *info,
                     false,
                 )?;
-                if let Val::Symbolic(v) = *val.as_ref() {
+                let val = match val.as_ref() {
+                    Val::MixedBits(_) => {
+                        let normalized = replace_mixed_bits(val.as_ref().clone(), solver, *info)?;
+                        // 分叉快照必须引用规范化后的同一符号，重入时继续枚举其剩余取值。
+                        assign(
+                            tid,
+                            &Loc::Id(*id),
+                            normalized.clone(),
+                            &mut frame.local_state,
+                            shared_state,
+                            solver,
+                            *info,
+                        )?;
+                        normalized
+                    }
+                    value => value.clone(),
+                };
+                if let Val::Symbolic(v) = val {
                     use smtlib::bits64;
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
@@ -2118,6 +2137,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         let fork_id = match decision {
                             ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
                             ExecutionLimitDecision::KeepCurrentModel { reason } => {
+                                frame.execution_limit_state.record_kept_current_model();
                                 record_execution_limit(frame, reason, "keep_current_model");
                                 None
                             }
@@ -3548,6 +3568,8 @@ fn zrX(z3zE1756) {
             pmp: None,
             clint_enabled: None,
             execution_limits: None,
+            initial_state: Vec::new(),
+            initial_state_rv64_domain: false,
         }
     }
 
@@ -4066,6 +4088,96 @@ fn zrX(z3zE1756) {
         results
     }
 
+    #[test]
+    fn append_monomorphize_enumerates_both_models() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let x = test_name(100);
+        let y = test_name(101);
+        let results = run_all_with_shared_state(
+            vec![
+                Instr::Decl(x, Ty::Bits(1), info()),
+                Instr::Decl(y, Ty::Bits(2), info()),
+                Instr::PrimopBinary(
+                    Loc::Id(y),
+                    crate::primop::binary_primops::<B64>()["append"],
+                    Exp::Id(x),
+                    Exp::Bits(B64::BIT_ZERO),
+                    info(),
+                ),
+                Instr::Monomorphize(y, Ty::Bits(2), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(y), info()),
+                Instr::End,
+            ],
+            ExecutionLimits::default(),
+            empty_shared_state(),
+        );
+        println!("append monomorphize 终态数: {}", results.len());
+        assert_eq!(results.len(), 2, "一位符号高位必须产生两个具体终态");
+        let mut values: Vec<u64> = results
+            .into_iter()
+            .map(|result| match result.unwrap() {
+                Run::Finished(Val::Bits(value)) => value.lower_u64(),
+                _ => panic!("monomorphize 未返回具体位向量"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec![0, 2]);
+    }
+
+    fn appended_register_index(write: bool) {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::End]);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let high = solver.declare_const(smtlib::Ty::BitVec(1), info());
+        solver.assert_eq(smtlib::Exp::Var(high), smtlib::Exp::Bits64(B64::BIT_ONE));
+        let n = crate::primop::binary_primops::<B64>()["append"](
+            Val::Symbolic(high),
+            Val::Bits(B64::BIT_ZERO),
+            &mut solver,
+            info(),
+        )
+        .unwrap();
+        let names: Vec<Name> = (100..104).map(test_name).collect();
+        for (i, name) in names.iter().enumerate() {
+            frame.local_state.regs.insert(*name, false, UVal::Init(Val::Bits(B64::new(i as u64, 8))));
+        }
+        let refs = Val::Vector(names.iter().map(|name| Val::Ref(*name)).collect());
+        if write {
+            write_register_from_vector(
+                n,
+                Val::Bits(B64::new(99, 8)),
+                refs,
+                &mut frame.local_state,
+                &shared,
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            let mut model = Model::new(&solver);
+            for (i, name) in names.iter().enumerate() {
+                let actual = model.get_val(frame.local_state.regs.get_last_if_initialized(*name).unwrap()).unwrap();
+                assert_eq!(actual, Val::Bits(B64::new(if i == 2 { 99 } else { i as u64 }, 8)));
+            }
+        } else {
+            let actual =
+                read_register_from_vector(n, refs, &mut frame.local_state, &shared, &mut solver, info()).unwrap();
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            assert_eq!(Model::new(&solver).get_val(&actual).unwrap(), Val::Bits(B64::new(2, 8)));
+        }
+    }
+
+    #[test]
+    fn append_read_register_index() {
+        appended_register_index(false);
+    }
+    #[test]
+    fn append_write_register_index() {
+        appended_register_index(true);
+    }
+
     fn empty_shared_state<'ir>() -> SharedState<'ir, B64> {
         shared_state_from_defs(Vec::new())
     }
@@ -4247,7 +4359,7 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
-
+        assert!(!frame.has_sampled_branch(), "unlimited symbolic fork must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
@@ -4320,7 +4432,7 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
-
+        assert!(!frame.has_sampled_branch(), "unlimited monomorphize must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
@@ -4359,7 +4471,11 @@ fn zrX(z3zE1756) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 0);
-
+        assert!(frame.has_sampled_branch(), "kept current model drops a satisfiable remainder");
+        assert!(
+            unfreeze_frame(&freeze_frame(&frame)).has_sampled_branch(),
+            "scheduler snapshots must retain incomplete sampling"
+        );
         assert!(child_fork_counts.lock().unwrap().is_empty());
     }
 

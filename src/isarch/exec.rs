@@ -1,4 +1,5 @@
 use super::clause::{get_extension_clauses, normalize_clause_name};
+use super::encoding::encoding_paths;
 use super::target::{Target, RISCV};
 use super::timeout_report::TimeoutReporter;
 pub use super::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
@@ -37,8 +38,45 @@ struct AssemGenJsonItem {
     ret_val: String,
     #[serde(rename = "path-signature")]
     path_signature: u64,
+    #[serde(rename = "requested-instruction")]
+    requested_instruction: String,
+    #[serde(rename = "isa-state-complete")]
+    isa_state_complete: BTreeMap<String, String>,
+    #[serde(rename = "isa-state-post")]
+    isa_state_post: BTreeMap<String, String>,
 }
 impl AssemGenJsonItem {
+    fn instruction_text<B: BV>(value: &Val<B>, shared_state: &SharedState<B>) -> String {
+        match value {
+            Val::Ctor(ctor, inner) => format!(
+                "{}({})",
+                zencode::decode(shared_state.symtab.to_str_demangled(*ctor)),
+                Self::instruction_text(inner, shared_state)
+            ),
+            Val::Struct(fields) => {
+                let mut fields: Vec<_> = fields.iter().collect();
+                fields.sort_by_key(|(name, _)| shared_state.symtab.to_str(**name));
+                let fields = fields
+                    .into_iter()
+                    .map(|(name, value)| {
+                        format!(
+                            "{}:{}",
+                            zencode::decode(shared_state.symtab.to_str_demangled(*name)),
+                            Self::instruction_text(value, shared_state)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{{{fields}}}")
+            }
+            Val::Vector(values) | Val::List(values) => {
+                let values = values.iter().map(|value| Self::instruction_text(value, shared_state)).collect::<Vec<_>>();
+                format!("[{}]", values.join(","))
+            }
+            _ => value.to_str(shared_state),
+        }
+    }
+
     pub fn new<B: BV>(
         target: &dyn Target<B>,
         test_ins: String,
@@ -46,13 +84,25 @@ impl AssemGenJsonItem {
         isa_state: BTreeMap<String, String>,
         ret_val: String,
         path_signature: u64,
+        requested_instruction: String,
+        isa_state_complete: BTreeMap<String, String>,
+        isa_state_post: BTreeMap<String, String>,
     ) -> Self {
         let mut arch = BTreeMap::new();
         arch.insert("pretty-name".to_string(), target.arch_pretty_name().to_string());
         arch.insert("name".to_string(), target.arch_name().to_string());
         arch.insert("xlen".to_string(), target.xlen().to_string());
-        arch.insert("ext".to_string(), "IMACFD".to_string());
-        AssemGenJsonItem { arch, test_ins, test_ins_encdec, isa_state, ret_val, path_signature }
+        AssemGenJsonItem {
+            arch,
+            test_ins,
+            test_ins_encdec,
+            isa_state,
+            ret_val,
+            path_signature,
+            requested_instruction,
+            isa_state_complete,
+            isa_state_post,
+        }
     }
 }
 trait ToJSON: Serialize {
@@ -79,12 +129,14 @@ trait ToJSON: Serialize {
 #[derive(Serialize, Deserialize)]
 struct AssemGenJson {
     gen: Vec<AssemGenJsonItem>,
+    #[serde(rename = "state-domain")]
+    state_domain: BTreeMap<String, String>,
 }
 impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
-    fn new(gen: Vec<AssemGenJsonItem>) -> Self {
-        AssemGenJson { gen }
+    fn new(gen: Vec<AssemGenJsonItem>, state_domain: BTreeMap<String, String>) -> Self {
+        AssemGenJson { gen, state_domain }
     }
 }
 
@@ -111,16 +163,10 @@ impl SolveCollectorState {
         SolveCollectorState { first_error: None, cases: Vec::new(), case_quota }
     }
 
-    fn record_error(&mut self, error: &ExecError) -> bool {
-        let error = match error {
-            ExecError::Timeout => ExecError::Timeout,
-            ExecError::Smt(error) => ExecError::Smt(error.clone()),
-            _ => return false,
-        };
+    fn record_error(&mut self, error: &ExecError) {
         if self.first_error.is_none() {
-            self.first_error = Some(error);
+            self.first_error = Some(error.clone());
         }
-        true
     }
 }
 
@@ -145,9 +191,7 @@ impl ErrorRecorder<'_> {
         &self,
         error: &ExecError,
     ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
-        if !self.collected.lock().expect("solve collector mutex poisoned").record_error(error) {
-            return Vec::new();
-        }
+        self.collected.lock().expect("solve collector mutex poisoned").record_error(error);
         let diagnostics = match error {
             ExecError::Smt(SmtError::Timeout(timeout)) => {
                 let diagnostic = isla_lib::timeout::TimeoutDiagnostic::Smt(timeout.clone());
@@ -603,6 +647,7 @@ fn symbolic_args_from_types<B: BV>(
 
     symbolic(ctor_ty, shared_state, solver, SourceLoc::unknown())
 }
+
 fn run_symbolic_execute_with_target<'ir, B: BV>(
     target: &mut dyn RISCV<B>,
     instruction_name: &str,
@@ -679,6 +724,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                 Ok((Run::Finished(_), _)) => true,
                 Ok((run, _)) => should_collect_unfinished_path(run),
                 Err((ExecError::AssertionFailure(_, _), _)) => false,
+                Err((ExecError::MatchFailure(_), _)) => true,
                 Err((error, frame)) => {
                     trace_diagnostics = error_recorder.record_error_diagnostic(error, frame, shared_state);
                     true
@@ -725,62 +771,161 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         println!("assembly:{:#?}", assembly); */
                         // isarch::get_assembly_name(Val::Unit /* ??? */, &shared_state, regs, lets);
 
-                        let mut test_ins = String::new();
-                        let mut test_ins_encdec = String::new();
-                        let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
-                        if matches!(
-                            ret_val,
-                            Val::Ctor(ctor, _)
-                                if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
-                                    == "Illegal_Instruction"
-                        ) {
-                            // 未被这条非法路径约束的有限域字段（典型是提前返回 Illegal 的路径上的
-                            // funct6）先按路径签名挑一个代表值钉住，否则所有这类用例都会被标注
-                            // 成同一条子指令，寄存器号等位向量字段也会反复取 Z3 默认值。
-                            match diversify_unconstrained_finite_domains(
-                                &fun_args,
-                                frame.path_signature(),
-                                shared_state,
-                                &mut solver,
-                            ) {
-                                Ok(()) => (),
-                                Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
-                                    trace_diagnostics =
-                                        error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                                    log!(log::SYM_EXEC, &format!("finite-domain diversification failed: {}", error));
-                                    submit_trace(frame, &mut trace_diagnostics);
-                                    return;
-                                }
-                                Err(error) => {
-                                    panic!("finite-domain diversification invariant violated: {}", error)
-                                }
+                        match solver.check_sat(SourceLoc::unknown()) {
+                            isla_lib::smt::SmtResult::Sat => (),
+                            isla_lib::smt::SmtResult::Unsat => return,
+                            other => {
+                                let error = match other {
+                                    isla_lib::smt::SmtResult::Unknown => ExecError::Z3Unknown,
+                                    isla_lib::smt::SmtResult::Error(error) => ExecError::Smt(error),
+                                    _ => unreachable!(),
+                                };
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                submit_trace(frame, &mut trace_diagnostics);
+                                return;
                             }
                         }
-                        // 获取ISA状态（寄存器、lets变量等）
-                        // 首先检查solver是否可满足
-                        let smt_result = solver.check_sat(SourceLoc::unknown());
-                        if let isla_lib::smt::SmtResult::Error(error) = &smt_result {
-                            let error = ExecError::Smt(error.clone());
+                        let encodings = match encoding_paths(
+                            &fun_args[0],
+                            shared_state,
+                            &symbolic_regs,
+                            lets,
+                            checkpoint(&mut solver),
+                        ) {
+                            Ok(paths) => paths,
+                            Err(error) => {
+                                trace_diagnostics = error_recorder.record_configured_error_diagnostic(&error);
+                                log!(log::PATH_RESULT, &format!("clause{} 符号编码失败: {}", instruction_name, error));
+                                submit_trace(frame, &mut trace_diagnostics);
+                                return;
+                            }
+                        };
+                        if encodings.is_empty()
+                            && !matches!(ret_val, Val::Ctor(ctor, _) if
+                            zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "Illegal_Instruction")
+                        {
+                            let error = ExecError::Unreachable("当前执行路径不存在合法机器编码".to_string());
                             trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                            log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
+                            log!(log::PATH_RESULT, &format!("clause{} {}", instruction_name, error));
                             submit_trace(frame, &mut trace_diagnostics);
                             return;
                         }
-                        if smt_result == isla_lib::smt::SmtResult::Sat {
-                            if let Ok(mut model) =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Model::new(&solver)))
-                            {
-                                // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
-                                // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
-                                // model.set_complete_model(true);
-                                log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
-                                let test = Sym::from_u32(6);
-                                // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
-                                // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
-                                match model.get_val(&fun_args[0]) {
-                                    Ok(arg_val) => {
-                                        let asm_opt =
-                                            match try_get_assembly_name(arg_val.clone(), shared_state, regs, lets) {
+                        for (symbolic_encoding, encoding_checkpoint) in encodings {
+                            let mut cfg = Config::new();
+                            cfg.set_param_value("model", "true");
+                            let ctx = Context::new(cfg);
+                            let mut solver = Solver::from_checkpoint(&ctx, encoding_checkpoint);
+                            let mut requested_instruction = String::new();
+                            let mut isa_state_complete = BTreeMap::new();
+                            let mut isa_state_post = BTreeMap::new();
+                            let mut test_ins = String::new();
+                            let mut test_ins_encdec = String::new();
+                            let mut isa_state: BTreeMap<String, String> = BTreeMap::new();
+                            if matches!(
+                                ret_val,
+                                Val::Ctor(ctor, _)
+                                    if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
+                                        == "Illegal_Instruction"
+                            ) {
+                                // 未被这条非法路径约束的有限域字段（典型是提前返回 Illegal 的路径上的
+                                // funct6）先按路径签名挑一个代表值钉住，否则所有这类用例都会被标注
+                                // 成同一条子指令，寄存器号等位向量字段也会反复取 Z3 默认值。
+                                match diversify_unconstrained_finite_domains(
+                                    &fun_args,
+                                    frame.path_signature(),
+                                    shared_state,
+                                    &mut solver,
+                                ) {
+                                    Ok(()) => (),
+                                    Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        log!(
+                                            log::SYM_EXEC,
+                                            &format!("finite-domain diversification failed: {}", error)
+                                        );
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                    Err(error) => {
+                                        panic!("finite-domain diversification invariant violated: {}", error)
+                                    }
+                                }
+                            }
+                            // 获取ISA状态（寄存器、lets变量等）
+                            // 首先检查solver是否可满足
+                            let smt_result = solver.check_sat(SourceLoc::unknown());
+                            if let isla_lib::smt::SmtResult::Error(error) = &smt_result {
+                                let error = ExecError::Smt(error.clone());
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
+                                submit_trace(frame, &mut trace_diagnostics);
+                                return;
+                            }
+                            if smt_result != isla_lib::smt::SmtResult::Sat {
+                                let error = match smt_result {
+                                    isla_lib::smt::SmtResult::Unknown => ExecError::Z3Unknown,
+                                    isla_lib::smt::SmtResult::Unsat => ExecError::NoModel,
+                                    _ => unreachable!(),
+                                };
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                submit_trace(frame, &mut trace_diagnostics);
+                                return;
+                            }
+                            if smt_result == isla_lib::smt::SmtResult::Sat {
+                                {
+                                    let mut model = Model::new(&solver);
+                                    // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
+                                    // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
+                                    // model.set_complete_model(true);
+                                    // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
+                                    match target.solve_pre_state(&mut model, shared_state) {
+                                        Ok(state) => isa_state.extend(state),
+                                        Err(error) => {
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            log!(
+                                                log::PATH_RESULT,
+                                                &format!(
+                                                    "警告: clause{} pre-state求解失败 {:?}",
+                                                    instruction_name, error
+                                                )
+                                            );
+                                            submit_trace(frame, &mut trace_diagnostics);
+                                            return;
+                                        }
+                                    }
+                                    model.set_complete_model(true);
+                                    log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
+                                    let test = Sym::from_u32(6);
+                                    // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
+                                    // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
+                                    match model.get_val(&fun_args[0]) {
+                                        Ok(arg_val) => {
+                                            requested_instruction =
+                                                AssemGenJsonItem::instruction_text(&arg_val, shared_state);
+                                            let mut concrete_regs = symbolic_regs.clone();
+                                            for (name, value) in target.pre_state().iter() {
+                                                let concrete = match model.get_val(value) {
+                                                    Ok(value) => value,
+                                                    Err(error) => {
+                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                            &error,
+                                                            frame,
+                                                            shared_state,
+                                                        );
+                                                        submit_trace(frame, &mut trace_diagnostics);
+                                                        return;
+                                                    }
+                                                };
+                                                concrete_regs.assign(*name, concrete, shared_state);
+                                            }
+                                            let asm_opt = match try_get_assembly_name(
+                                                arg_val.clone(),
+                                                shared_state,
+                                                &concrete_regs,
+                                                lets,
+                                            ) {
                                                 Ok(assembly) => assembly,
                                                 Err(error) => {
                                                     trace_diagnostics =
@@ -796,17 +941,19 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                     return;
                                                 }
                                             };
-                                        log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
-                                        match asm_opt {
-                                            Some(asm) => test_ins = asm,
-                                            None => {
-                                                submit_trace(frame, &mut trace_diagnostics);
-                                                return;
+                                            log!(log::PATH_RESULT, &format!("当前汇编：{:?}", asm_opt));
+                                            match asm_opt {
+                                                Some(asm) => test_ins = asm,
+                                                None => continue,
                                             }
-                                        }
-                                        let asm_encdec_opt =
-                                            match try_get_assembly_encdec(arg_val.clone(), shared_state, regs, lets) {
+                                            let asm_encdec_opt = match try_get_assembly_encdec(
+                                                arg_val.clone(),
+                                                shared_state,
+                                                &concrete_regs,
+                                                lets,
+                                            ) {
                                                 Ok(encoded) => {
+                                                    // mapping 成功后，分别处理无编码和编码格式化失败。
                                                     match encoded {
                                                         Some(val) => match FmtVal::from_val(&val, &mut model) {
                                                             Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
@@ -840,129 +987,171 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                     return;
                                                 }
                                             };
-                                        log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
-                                        match asm_encdec_opt {
-                                            Some(encdec) => test_ins_encdec = encdec,
-                                            None => {
+                                            let expected_encoding =
+                                                match FmtVal::from_val(&symbolic_encoding, &mut model) {
+                                                    Ok(value) => value.to_str(shared_state),
+                                                    Err(error) => {
+                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                            &error,
+                                                            frame,
+                                                            shared_state,
+                                                        );
+                                                        submit_trace(frame, &mut trace_diagnostics);
+                                                        return;
+                                                    }
+                                                };
+                                            if asm_encdec_opt.as_deref() != Some(expected_encoding.as_str()) {
+                                                panic!("符号编码与同一模型的具体前态编码不一致");
+                                            }
+                                            log!(log::PATH_RESULT, &format!("当前汇编encdec：{:?}", asm_encdec_opt));
+                                            match asm_encdec_opt {
+                                                Some(encdec) => test_ins_encdec = encdec,
+                                                None => {
+                                                    if matches!(
+                                                        ret_val,
+                                                        Val::Ctor(ctor, _)
+                                                            if zencode::decode(shared_state.symtab.to_str_demangled(*ctor))
+                                                                == "Illegal_Instruction"
+                                                    ) {
+                                                        submit_trace(frame, &mut trace_diagnostics);
+                                                    } else {
+                                                        let error = ExecError::Unreachable(
+                                                            "成功执行路径没有合法机器编码".to_string(),
+                                                        );
+                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                            &error,
+                                                            frame,
+                                                            shared_state,
+                                                        );
+                                                        submit_trace(frame, &mut trace_diagnostics);
+                                                    }
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&e, frame, shared_state);
+                                            log!(
+                                                log::PATH_RESULT,
+                                                &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
+                                            );
+                                            submit_trace(frame, &mut trace_diagnostics);
+                                            return;
+                                        }
+                                    }
+
+                                    log!(
+                                        log::PATH_RESULT,
+                                        &format!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap())
+                                    );
+                                    // 遍历lets中的特殊变量（如current_privilege等）
+                                    /* for (let_name, let_val) in frame.lets().iter() {
+                                        let let_name_str = shared_state.symtab.to_str(*let_name);
+                                        // 过滤掉一些内部变量
+                                        if !let_name_str.starts_with("__") && let_name_str != "NULL" {
+                                            match let_val {
+                                                UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
+                                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits64(bv))) => {
+                                                        println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
+                                                    }
+                                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits(bv))) => {
+                                                        let hex_str: String = bv
+                                                            .chunks(4)
+                                                            .rev()
+                                                            .map(|chunk: &[bool]| {
+                                                                let mut n = 0u8;
+                                                                for (i, bit) in chunk.iter().enumerate() {
+                                                                    if *bit {
+                                                                        n |= 1 << i;
+                                                                    }
+                                                                }
+                                                                format!("{:x}", n)
+                                                            })
+                                                            .collect();
+                                                        println!("  let {} = 0b{}", let_name_str, hex_str);
+                                                    }
+                                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bool(b))) => {
+                                                        println!("  let {} = {}", let_name_str, b);
+                                                    }
+                                                    Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(
+                                                        member,
+                                                    ))) => {
+                                                        let name = member.to_name(shared_state);
+                                                        println!(
+                                                            "  let {} = {}",
+                                                            let_name_str,
+                                                            shared_state.symtab.to_str(name)
+                                                        );
+                                                    }
+                                                    _ => {}
+                                                },
+                                                UVal::Init(Val::Bits(bv)) => {
+                                                    println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
+                                                }
+                                                UVal::Init(Val::Bool(b)) => {
+                                                    println!("  let {} = {}", let_name_str, b);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    } */
+
+                                    // events
+                                    /* let mut events_vec = solver.trace().to_vec();
+                                    let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
+                                    for event in events {
+                                        match event {
+                                            Event::Fork(fork_id, sym, branch_number, _) => {
+                                                println!(
+                                                    " [event] Fork({}, {:?}, {}, _ )",
+                                                    fork_id,
+                                                    model.get_var(sym).unwrap(),
+                                                    branch_number
+                                                )
+                                            }
+                                            _ => println!(" [event] {:?}", event),
+                                        }
+                                    } */
+                                    isa_state_complete = match target.solve_pre_state_complete(&mut model, shared_state)
+                                    {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            submit_trace(frame, &mut trace_diagnostics);
+                                            return;
+                                        }
+                                    };
+                                    isa_state_post =
+                                        match target.solve_post_state(frame.regs(), &mut model, shared_state) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                trace_diagnostics =
+                                                    error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                                 submit_trace(frame, &mut trace_diagnostics);
                                                 return;
                                             }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        trace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&e, frame, shared_state);
-                                        log!(
-                                            log::PATH_RESULT,
-                                            &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
-                                        );
-                                        submit_trace(frame, &mut trace_diagnostics);
-                                        return;
-                                    }
+                                        };
+                                    log!(log::PATH_RESULT, "3. ==============================");
                                 }
-
-                                // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
-                                match target.solve_pre_state(&mut model, shared_state) {
-                                    Ok(state) => isa_state.extend(state),
-                                    Err(error) => {
-                                        trace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
-                                        log!(
-                                            log::PATH_RESULT,
-                                            &format!("警告: clause{} pre-state求解失败 {:?}", instruction_name, error)
-                                        );
-                                        submit_trace(frame, &mut trace_diagnostics);
-                                        return;
-                                    }
-                                }
-
-                                log!(
-                                    log::PATH_RESULT,
-                                    &format!("isa_state={}", serde_json::to_string_pretty(&isa_state).unwrap())
-                                );
-                                // 遍历lets中的特殊变量（如current_privilege等）
-                                /* for (let_name, let_val) in frame.lets().iter() {
-                                    let let_name_str = shared_state.symtab.to_str(*let_name);
-                                    // 过滤掉一些内部变量
-                                    if !let_name_str.starts_with("__") && let_name_str != "NULL" {
-                                        match let_val {
-                                            UVal::Init(Val::Symbolic(sym)) => match model.get_var(*sym) {
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits64(bv))) => {
-                                                    println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
-                                                }
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bits(bv))) => {
-                                                    let hex_str: String = bv
-                                                        .chunks(4)
-                                                        .rev()
-                                                        .map(|chunk: &[bool]| {
-                                                            let mut n = 0u8;
-                                                            for (i, bit) in chunk.iter().enumerate() {
-                                                                if *bit {
-                                                                    n |= 1 << i;
-                                                                }
-                                                            }
-                                                            format!("{:x}", n)
-                                                        })
-                                                        .collect();
-                                                    println!("  let {} = 0b{}", let_name_str, hex_str);
-                                                }
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Bool(b))) => {
-                                                    println!("  let {} = {}", let_name_str, b);
-                                                }
-                                                Ok(isla_lib::smt::ModelVal::Exp(isla_lib::smt::smtlib::Exp::Enum(
-                                                    member,
-                                                ))) => {
-                                                    let name = member.to_name(shared_state);
-                                                    println!(
-                                                        "  let {} = {}",
-                                                        let_name_str,
-                                                        shared_state.symtab.to_str(name)
-                                                    );
-                                                }
-                                                _ => {}
-                                            },
-                                            UVal::Init(Val::Bits(bv)) => {
-                                                println!("  let {} = 0x{:x}", let_name_str, bv.lower_u64());
-                                            }
-                                            UVal::Init(Val::Bool(b)) => {
-                                                println!("  let {} = {}", let_name_str, b);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                } */
-
-                                // events
-                                /* let mut events_vec = solver.trace().to_vec();
-                                let events: Vec<Event<B>> = events_vec.drain(..).cloned().collect();
-                                for event in events {
-                                    match event {
-                                        Event::Fork(fork_id, sym, branch_number, _) => {
-                                            println!(
-                                                " [event] Fork({}, {:?}, {}, _ )",
-                                                fork_id,
-                                                model.get_var(sym).unwrap(),
-                                                branch_number
-                                            )
-                                        }
-                                        _ => println!(" [event] {:?}", event),
-                                    }
-                                } */
-                                log!(log::PATH_RESULT, "3. ==============================");
                             }
+                            let single_instruction_json = AssemGenJsonItem::new(
+                                target,
+                                test_ins,
+                                test_ins_encdec,
+                                isa_state,
+                                ret_val_str.clone(),
+                                frame.path_signature(),
+                                requested_instruction,
+                                isa_state_complete,
+                                isa_state_post,
+                            );
+                            collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
+                                path_signature: frame.path_signature(),
+                                item: single_instruction_json,
+                            });
                         }
-                        let single_instruction_json = AssemGenJsonItem::new(
-                            target,
-                            test_ins,
-                            test_ins_encdec,
-                            isa_state,
-                            ret_val_str,
-                            frame.path_signature(),
-                        );
-                        collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
-                            path_signature: frame.path_signature(),
-                            item: single_instruction_json,
-                        });
                     }
                     Run::Exit => {
                         log!(log::PATH_RESULT, &format!("tid:{} 执行好一条路径(Exit)，fork={}", thread, frame.forks()))
@@ -1022,7 +1211,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
     let quota = state.case_quota;
     let items = finalize_cases(state.cases, &quota);
-    let json = AssemGenJson::new(items);
+    let json = AssemGenJson::new(items, target.domain_manifest());
     json.to_json(Some(format!("output/{}_{}.json", xlen_name_str, instruction_name)));
     match state.first_error {
         Some(error) => Err(error),
@@ -1119,13 +1308,430 @@ mod tests {
     }
 
     #[test]
-    fn collector_preserves_timeout_only_exit_policy() {
+    fn collector_preserves_first_error_including_non_smt() {
         let mut state = SolveCollectorState::new();
         state.record_error(&ExecError::AssertionFailure(None, SourceLoc::unknown()));
         state.record_error(&ExecError::Z3Unknown);
-        assert!(state.first_error.is_none());
+        assert!(matches!(state.first_error, Some(ExecError::AssertionFailure(_, _))));
         state.record_error(&ExecError::Timeout);
-        assert!(matches!(state.first_error, Some(ExecError::Timeout)));
+        assert!(matches!(state.first_error, Some(ExecError::AssertionFailure(_, _))));
+    }
+
+    #[derive(Clone, Copy)]
+    enum EncodingFixture {
+        Guard,
+        Split,
+        Compressed,
+        Impossible,
+        Assertion,
+        PartialAssembly,
+    }
+
+    fn check_encoding_fixture(mode: EncodingFixture) {
+        use super::super::target::PreStateCtx;
+        struct EncodingTarget {
+            pre_state: PreStateCtx<B64>,
+            impossible: bool,
+        }
+        impl Target<B64> for EncodingTarget {
+            fn arch_name(&self) -> &'static str {
+                "riscv"
+            }
+            fn xlen_name(&self) -> &'static str {
+                "rv64"
+            }
+            fn xlen(&self) -> &'static str {
+                "64"
+            }
+            fn reg_list(&self) -> Vec<String> {
+                vec!["mstatus".to_string()]
+            }
+            fn pre_state(&self) -> &PreStateCtx<B64> {
+                &self.pre_state
+            }
+            fn pre_state_mut(&mut self) -> &mut PreStateCtx<B64> {
+                &mut self.pre_state
+            }
+            fn constrain_pre_state<'ir>(
+                &mut self,
+                _: &Bindings<'ir, B64>,
+                shared: &SharedState<'ir, B64>,
+                solver: &mut Solver<B64>,
+            ) -> Result<(), ExecError> {
+                if self.impossible {
+                    let value = self.pre_state.get_from_str("mstatus", &shared.symtab).unwrap();
+                    solver.assert_eq(
+                        isla_lib::primop_util::smt_value(value, SourceLoc::unknown())?,
+                        smtlib::bits64(0, 64),
+                    );
+                }
+                Ok(())
+            }
+        }
+        impl RISCV<B64> for EncodingTarget {
+            fn pmp_symbolic(&self) -> bool {
+                false
+            }
+        }
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let instruction = symtab.intern("zinstruction");
+        let result_type = symtab.intern("zExecutionResult");
+        let clause = format!("zENCODING_GUARD_{}_{}", std::process::id(), mode as u8);
+        let requested = symtab.intern(&clause);
+        let retire = symtab.intern("zRetire_Success");
+        let execute = symtab.intern("zexecute");
+        let assembly = symtab.intern("zassembly_forwards");
+        let normal = symtab.intern("zencdec_forwards");
+        let compressed = symtab.intern("zencdec_compressed_forwards");
+        let argument = symtab.intern("zargument");
+        let mstatus = symtab.intern("zmstatus");
+        let bit = symtab.intern("zbit");
+        let condition = symtab.intern("zcondition");
+        let source = SourceLoc::unknown();
+        let bit_guard = |position| {
+            vec![
+                Instr::PrimopBinary(
+                    Loc::Id(bit),
+                    isla_lib::primop::binary_primops::<B64>()["vector_access"],
+                    Exp::Id(mstatus),
+                    Exp::I128(position),
+                    source,
+                ),
+                Instr::PrimopUnary(
+                    Loc::Id(condition),
+                    isla_lib::primop::unary_primops::<B64>()["bit_to_bool"],
+                    Exp::Id(bit),
+                    source,
+                ),
+            ]
+        };
+        let mut normal_body = bit_guard(9);
+        normal_body.extend([
+            Instr::Jump(Exp::Id(condition), 5, source),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), source),
+            Instr::End,
+        ]);
+        if matches!(mode, EncodingFixture::Split | EncodingFixture::PartialAssembly) {
+            normal_body.extend(bit_guard(10));
+            normal_body.extend([
+                Instr::Jump(Exp::Id(condition), 10, source),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), source),
+                Instr::End,
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x93, 32)), source),
+                Instr::End,
+            ]);
+        } else {
+            normal_body.extend([Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), source), Instr::End]);
+        }
+        // guard 为假跳到唯一默认拒绝；Split 的第二个分叉只属于 guard 为真的域。
+        normal_body[2] = Instr::Jump(Exp::Id(condition), 5, source);
+        normal_body[3] = Instr::Goto(normal_body.len());
+        normal_body.push(Instr::Exit(ExitCause::MatchFailure, source));
+        normal_body.push(Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 32)), source));
+        normal_body.push(Instr::End);
+        if matches!(mode, EncodingFixture::Assertion) {
+            normal_body = vec![Instr::Exit(ExitCause::AssertionFailure, source)];
+        }
+        let mut compressed_body = Vec::new();
+        if matches!(mode, EncodingFixture::Compressed) {
+            compressed_body.extend(bit_guard(10));
+            compressed_body.extend([
+                Instr::Jump(Exp::Id(condition), 5, source),
+                Instr::Goto(7),
+                Instr::End,
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(1, 16)), source),
+                Instr::End,
+            ]);
+        }
+        compressed_body.extend([
+            Instr::Exit(ExitCause::MatchFailure, source),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 16)), source),
+            Instr::End,
+        ]);
+        for body in [&mut normal_body, &mut compressed_body] {
+            for instruction in body.iter_mut() {
+                match instruction {
+                    Instr::Jump(_, target, _) | Instr::Goto(target) => *target += 2,
+                    _ => (),
+                }
+            }
+            body.splice(0..0, [Instr::Decl(bit, Ty::Bits(1), source), Instr::Decl(condition, Ty::Bool, source)]);
+        }
+        let assembly_body = if matches!(mode, EncodingFixture::PartialAssembly) {
+            let mut body = bit_guard(10);
+            body.extend([
+                Instr::Jump(Exp::Id(condition), 5, source),
+                Instr::Copy(Loc::Id(RETURN), Exp::String("guarded".to_string()), source),
+                Instr::End,
+                Instr::Exit(ExitCause::MatchFailure, source),
+                Instr::Copy(Loc::Id(RETURN), Exp::String(String::new()), source),
+                Instr::End,
+            ]);
+            for instruction in &mut body {
+                match instruction {
+                    Instr::Jump(_, target, _) | Instr::Goto(target) => *target += 2,
+                    _ => (),
+                }
+            }
+            body.splice(0..0, [Instr::Decl(bit, Ty::Bits(1), source), Instr::Decl(condition, Ty::Bool, source)]);
+            body
+        } else {
+            vec![Instr::Copy(Loc::Id(RETURN), Exp::String("guarded".to_string()), source), Instr::End]
+        };
+        let defs = vec![
+            Def::Register(mstatus, Ty::Bits(64), vec![]),
+            Def::Union(instruction, vec![(requested, Ty::Unit)]),
+            Def::Union(result_type, vec![(retire, Ty::Unit)]),
+            Def::Val(execute, vec![Ty::Union(instruction)], Ty::Union(result_type)),
+            Def::Fn(
+                execute,
+                vec![argument],
+                vec![
+                    Instr::PrimopBinary(
+                        Loc::Id(mstatus),
+                        isla_lib::primop::binary_primops::<B64>()["xor_bits"],
+                        Exp::Id(mstatus),
+                        Exp::Bits(B64::new(1 << 63, 64)),
+                        source,
+                    ),
+                    Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Unit], source),
+                    Instr::End,
+                ],
+            ),
+            Def::Val(assembly, vec![Ty::Union(instruction)], Ty::String),
+            Def::Fn(assembly, vec![argument], assembly_body),
+            Def::Val(normal, vec![Ty::Union(instruction)], Ty::Bits(32)),
+            Def::Fn(normal, vec![argument], normal_body),
+            Def::Val(compressed, vec![Ty::Union(instruction)], Ty::Bits(16)),
+            Def::Fn(compressed, vec![argument], compressed_body),
+        ];
+        let shared = SharedState::new(
+            symtab,
+            &defs,
+            IRTypeInfo::new(&defs),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut regs = RegisterBindings::new();
+        regs.insert(mstatus, false, UVal::Init(Val::Bits(B64::zeros(64))));
+        let mut target =
+            EncodingTarget { pre_state: PreStateCtx::new(), impossible: matches!(mode, EncodingFixture::Impossible) };
+        let reporter = TimeoutReporter::new(TimeoutReportConfig {
+            output: TimeoutSmtOutput::new(false, false, true),
+            directory: PathBuf::new(),
+        });
+        let execution = run_symbolic_execute_with_target(
+            &mut target,
+            &clause,
+            &shared,
+            &regs,
+            &Bindings::default(),
+            None,
+            1,
+            None,
+            &ExecutionLimits::default(),
+            &reporter,
+            None,
+        );
+        let path = format!("output/rv64_{clause}.json");
+        let data: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        if matches!(mode, EncodingFixture::Impossible | EncodingFixture::Assertion) {
+            assert!(execution.is_err(), "编码失败必须成为求解失败");
+            assert_eq!(data["gen"].as_array().unwrap().len(), 0);
+            if matches!(mode, EncodingFixture::Assertion) {
+                assert!(matches!(execution, Err(ExecError::AssertionFailure(_, _))));
+            }
+            return;
+        }
+        execution.unwrap();
+        let cases = data["gen"].as_array().unwrap();
+        assert_eq!(
+            cases.len(),
+            if matches!(mode, EncodingFixture::Guard | EncodingFixture::PartialAssembly) { 1 } else { 2 }
+        );
+        let mut encodings = std::collections::BTreeSet::new();
+        for case in cases {
+            let bits = |field| {
+                let text = case[field]["mstatus"].as_str().unwrap();
+                u64::from_str_radix(&text.split_once("'h").unwrap().1.replace('_', ""), 16).unwrap()
+            };
+            let pre = bits("isa-state-complete");
+            let post = bits("isa-state-post");
+            assert_eq!(post, pre ^ (1 << 63), "前后态必须由同一编码可行模型具体化");
+            let encoding = case["test-ins-encdec"].as_str().unwrap();
+            if encoding.starts_with("16'") {
+                assert_eq!(pre & 0x600, 0x400);
+            } else {
+                assert_ne!(pre & 0x200, 0);
+            }
+            encodings.insert(encoding.to_string());
+        }
+        assert_eq!(encodings.len(), cases.len());
+    }
+
+    #[test]
+    fn collector_finds_encodable_alternative_pre_state() {
+        check_encoding_fixture(EncodingFixture::Guard);
+    }
+    #[test]
+    fn collector_preserves_multiple_symbolic_encodings() {
+        check_encoding_fixture(EncodingFixture::Split);
+    }
+    #[test]
+    fn collector_uses_compressed_only_in_normal_rejection_domain() {
+        check_encoding_fixture(EncodingFixture::Compressed);
+    }
+    #[test]
+    fn collector_keeps_other_encodings_after_assembly_rejection() {
+        check_encoding_fixture(EncodingFixture::PartialAssembly);
+    }
+
+    #[test]
+    fn collector_reports_fully_unencodable_retire_path() {
+        check_encoding_fixture(EncodingFixture::Impossible);
+    }
+    #[test]
+    fn collector_propagates_encoder_assertion_failure() {
+        check_encoding_fixture(EncodingFixture::Assertion);
+    }
+
+    #[test]
+    fn collector_concretizes_wide_vector_pre_and_post_state() {
+        use super::super::target::{PreStateCtx, Target};
+        use isla_lib::bitvector::bit_vector_from_str;
+
+        struct VectorTarget {
+            pre_state: PreStateCtx<B129>,
+        }
+        impl Target<B129> for VectorTarget {
+            fn arch_name(&self) -> &'static str {
+                "riscv"
+            }
+            fn xlen_name(&self) -> &'static str {
+                "rv64"
+            }
+            fn xlen(&self) -> &'static str {
+                "64"
+            }
+            fn reg_list(&self) -> Vec<String> {
+                vec!["vr0".to_string()]
+            }
+            fn pre_state(&self) -> &PreStateCtx<B129> {
+                &self.pre_state
+            }
+            fn pre_state_mut(&mut self) -> &mut PreStateCtx<B129> {
+                &mut self.pre_state
+            }
+        }
+        impl RISCV<B129> for VectorTarget {
+            fn pmp_symbolic(&self) -> bool {
+                false
+            }
+        }
+
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for width in [128_u32, 129, 256, 512] {
+            let mut symtab = Symtab::new();
+            let instruction = symtab.intern("zinstruction");
+            let result = symtab.intern("zExecutionResult");
+            let clause = format!("zWIDE_STATE_{}_{}", std::process::id(), width);
+            let requested = symtab.intern(&clause);
+            let retire = symtab.intern("zRetire_Success");
+            let assembly = symtab.intern("zassembly_forwards");
+            let encoder = symtab.intern("zencdec_forwards");
+            let execute = symtab.intern("zexecute");
+            let argument = symtab.intern("zargument");
+            let vr0 = symtab.intern("zvr0");
+            let vlen = symtab.intern("zvlen");
+            let info = SourceLoc::unknown();
+            let defs = vec![
+                Def::Register(vr0, Ty::AnyBits, vec![]),
+                Def::Union(instruction, vec![(requested, Ty::Unit)]),
+                Def::Union(result, vec![(retire, Ty::Unit)]),
+                Def::Val(execute, vec![Ty::Union(instruction)], Ty::Union(result)),
+                Def::Fn(
+                    execute,
+                    vec![argument],
+                    vec![
+                        Instr::PrimopUnary(
+                            Loc::Id(vr0),
+                            isla_lib::primop::unary_primops::<B129>()["not_bits"],
+                            Exp::Id(vr0),
+                            info,
+                        ),
+                        Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Unit], info),
+                        Instr::End,
+                    ],
+                ),
+                Def::Val(assembly, vec![Ty::Union(instruction)], Ty::String),
+                Def::Fn(
+                    assembly,
+                    vec![argument],
+                    vec![Instr::Copy(Loc::Id(RETURN), Exp::String("wide".to_string()), info), Instr::End],
+                ),
+                Def::Val(encoder, vec![Ty::Union(instruction)], Ty::Bits(32)),
+                Def::Fn(
+                    encoder,
+                    vec![argument],
+                    vec![Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), info), Instr::End],
+                ),
+            ];
+            let shared_state = SharedState::new(
+                symtab,
+                &defs,
+                IRTypeInfo::new(&defs),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                vec![],
+                vec![],
+                vec![],
+            );
+            let reporter = TimeoutReporter::new(TimeoutReportConfig {
+                output: TimeoutSmtOutput::new(false, false, true),
+                directory: PathBuf::new(),
+            });
+            let mut regs = RegisterBindings::new();
+            regs.insert(vr0, false, UVal::Uninit(&Ty::AnyBits));
+            let mut lets = Bindings::default();
+            lets.insert(vlen, UVal::Init(Val::I64(i64::from(width))));
+            let mut target = VectorTarget { pre_state: PreStateCtx::new() };
+            run_symbolic_execute_with_target(
+                &mut target,
+                &clause,
+                &shared_state,
+                &regs,
+                &lets,
+                None,
+                1,
+                None,
+                &ExecutionLimits::default(),
+                &reporter,
+                None,
+            )
+            .unwrap();
+            let json_path = format!("output/rv64_{clause}.json");
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+            assert_eq!(json["gen"].as_array().unwrap().len(), 1, "宽度{width}不能静默丢掉完成路径");
+            let state_bits = |field: &str| {
+                let text = json["gen"][0][field]["vr0"].as_str().unwrap();
+                let (size, hex) = text.split_once("'h").unwrap();
+                assert_eq!(size, width.to_string());
+                let bits = bit_vector_from_str(&format!("0x{}", hex.replace('_', ""))).unwrap();
+                bits[..width as usize].to_vec()
+            };
+            let pre = state_bits("isa-state-complete");
+            let post = state_bits("isa-state-post");
+            assert_eq!(post, pre.into_iter().map(|bit| !bit).collect::<Vec<_>>());
+            assert_eq!(json["gen"][0]["test-ins-encdec"], "32'h0000_0013");
+            std::fs::remove_file(json_path).unwrap();
+        }
     }
 
     #[test]
@@ -1157,7 +1763,7 @@ mod tests {
                 &mut self.pre_state
             }
             fn constrain_pre_state<'ir>(
-                &self,
+                &mut self,
                 lets: &Bindings<'ir, B64>,
                 shared_state: &SharedState<'ir, B64>,
                 solver: &mut Solver<B64>,
@@ -1247,7 +1853,7 @@ mod tests {
                     &reporter,
                     None,
                 )
-                .unwrap_or_else(|error| panic!("FS={fs}, VS={vs} 的已满足路径不能被物化改坏: {error}"));
+                .unwrap_or_else(|error| panic!("FS={fs}, VS={vs} 的已满足路径不能被具体化改坏: {error}"));
                 let json: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
                 assert!(json.get("summary").is_none());
@@ -1260,15 +1866,17 @@ mod tests {
                 assert_eq!(json["gen"][0]["test-ins-encdec"], "32'h0000_0053");
                 assert!(json["gen"][0].get("case-id").is_none());
                 assert!(json["gen"][0]["path-signature"].is_u64());
+                assert_eq!(json["gen"][0]["isa-state-complete"]["mstatus"], json["gen"][0]["isa-state"]["mstatus"]);
+                assert_eq!(json["gen"][0]["isa-state-post"], json["gen"][0]["isa-state-complete"]);
             }
         }
         std::fs::remove_file(json_path).unwrap();
     }
 
     #[test]
-    fn collector_preserves_finished_results_and_materialization_failures() {
+    fn collector_preserves_finished_results_and_concretization_failures() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
-        // 用最小 IR 经过真实 collector、物化、JSON 和 trace；结果名称不能成为输入筛选条件。
+        // 用最小 IR 经过真实 collector、具体化、JSON 和 trace；结果名称不能成为输入筛选条件。
         for (index, (result_name, fail_assembly, suppress, mode)) in [
             ("Retire_Success", false, false, "finished"),
             ("Illegal_Instruction", false, false, "finished"),
@@ -1374,8 +1982,12 @@ mod tests {
             );
             let json_path = format!("output/rv64_{clause}.json");
             let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-            // 轨迹只报告：普通路径失败/物化无结果/抽样不完整不改变原命令退出策略。
-            assert!(outcome.is_ok(), "{result_name}/{mode}: {outcome:?}");
+            // 执行阶段的断言过滤和采样保持；mapping 错误必须成为求解失败。
+            if fail_assembly {
+                assert!(matches!(outcome, Err(ExecError::AssertionFailure(_, _))), "{result_name}/{mode}: {outcome:?}");
+            } else {
+                assert!(outcome.is_ok(), "{result_name}/{mode}: {outcome:?}");
+            }
             let total = if mode == "sampled" { 1 } else { 2 };
             assert!(json.get("summary").is_none());
             assert!(json.get("terminals").is_none());
@@ -1477,7 +2089,7 @@ mod tests {
             }
         }
         assert_eq!(
-            model.get_val(&args[0]).expect("可由 B129 表示的宽位候选必须能物化为 Val::Bits"),
+            model.get_val(&args[0]).expect("可由 B129 表示的宽位候选必须能具体化为 Val::Bits"),
             Val::Bits(expected)
         );
     }
@@ -1728,6 +2340,9 @@ mod tests {
                 isa_state: BTreeMap::new(),
                 ret_val: ret_val.to_string(),
                 path_signature: signature,
+                requested_instruction: String::new(),
+                isa_state_complete: BTreeMap::new(),
+                isa_state_post: BTreeMap::new(),
             },
         }
     }

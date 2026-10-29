@@ -42,9 +42,7 @@ impl BitVal {
     }
 
     fn from_bv<B: BV>(bv: B) -> Self {
-        let len = bv.len() as usize;
-        let bits = (0..len).map(|i| ((bv.lower_u64() >> i) & 1) == 1).collect();
-        Self::concrete(bits)
+        Self::concrete(bv.to_vec())
     }
 
     fn concat(high: Self, low: Self) -> Self {
@@ -237,5 +235,97 @@ impl ModelVal {
 impl<'ctx, B: BV> Model<'ctx, B> {
     pub fn get_fmtval(&mut self, val: &Val<B>) -> Result<FmtVal, ExecError> {
         FmtVal::from_val(val, self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b129::B129;
+    use crate::bitvector::b64::B64;
+    use crate::smt::smtlib::Ty;
+    use crate::smt::{Config, Context, SmtResult, Solver};
+
+    #[test]
+    fn concrete_bitvectors_keep_every_bit_and_mask() {
+        for width in [0, 1, 63, 64] {
+            let value = if width == 0 { B64::zeros(0) } else { B64::zeros(width).set_slice(width - 1, B64::BIT_ONE) };
+            let formatted = BitVal::from_bv(value);
+            assert_eq!(formatted.len, width as usize);
+            assert_eq!(formatted.mask, vec![true; width as usize]);
+            for index in 0..width as usize {
+                assert_eq!(formatted.bits[index], index == width as usize - 1);
+            }
+        }
+        assert_eq!(BitVal::from_bv(B64::new(0x1234_5678_9abc_def0, 64)).to_str(), "64'h1234_5678_9abc_def0");
+
+        let high = B129::from_str("0x123456789abcdef0fedcba9876543210").unwrap();
+        for (width, value) in
+            [(65, B129::zeros(65).set_slice(64, B129::BIT_ONE)), (128, high), (129, high.zero_extend(129))]
+        {
+            let formatted = BitVal::from_bv(value);
+            assert_eq!(formatted.len, width as usize);
+            assert_eq!(formatted.mask, vec![true; width as usize]);
+            assert_eq!(formatted.bits[64], width == 65);
+            if width >= 128 {
+                assert!(formatted.bits[124]);
+            }
+        }
+        assert_eq!(BitVal::from_bv(high).to_str(), "128'h1234_5678_9abc_def0_fedc_ba98_7654_3210");
+        let tagged = B129::zeros(129).set_slice(128, B129::BIT_ONE);
+        let formatted = BitVal::from_bv(tagged);
+        assert_eq!(formatted.len, 129);
+        assert!(formatted.bits[128]);
+        assert!(formatted.bits[..128].iter().all(|bit| !bit));
+        assert_eq!(formatted.mask, vec![true; 129]);
+        assert_eq!(formatted.to_str(), "129'h1_0000_0000_0000_0000_0000_0000_0000_0000");
+    }
+
+    #[test]
+    fn mixed_segments_keep_order_and_arbitrary_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let whole = B129::from_str("0x123456789abcdef0fedcba9876543210").unwrap();
+        let high64 = B129::from_str("0x123456789abcdef0").unwrap();
+        let low64 = B129::from_str("0xfedcba9876543210").unwrap();
+        let high80 = B129::from_str("0x123456789abcdef0fedc").unwrap();
+        let low48 = B129::from_str("0xba9876543210").unwrap();
+        let arbitrary = solver.declare_const(Ty::BitVec(8), info);
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        for value in [
+            Val::Bits(whole),
+            Val::MixedBits(vec![BitsSegment::Concrete(whole)]),
+            Val::MixedBits(vec![BitsSegment::Concrete(high64), BitsSegment::Concrete(low64)]),
+            Val::MixedBits(vec![BitsSegment::Concrete(high80), BitsSegment::Concrete(low48)]),
+        ] {
+            let FmtVal::Bits(formatted) = FmtVal::from_val(&value, &mut model)? else { panic!("expected bits") };
+            assert_eq!(formatted.to_str(), "128'h1234_5678_9abc_def0_fedc_ba98_7654_3210");
+            assert_eq!(formatted.mask, vec![true; 128]);
+        }
+        let mut fields = ahash::HashMap::default();
+        fields.insert(Name::from_u32(0), Val::Bits(whole));
+        let FmtVal::Bits(formatted) = FmtVal::from_val(&Val::Struct(fields), &mut model)? else {
+            panic!("expected bits")
+        };
+        assert_eq!(formatted.to_str(), "128'h1234_5678_9abc_def0_fedc_ba98_7654_3210");
+        let reversed = Val::MixedBits(vec![BitsSegment::Concrete(low64), BitsSegment::Concrete(high64)]);
+        let FmtVal::Bits(formatted) = FmtVal::from_val(&reversed, &mut model)? else { panic!("expected bits") };
+        assert_eq!(formatted.to_str(), "128'hfedc_ba98_7654_3210_1234_5678_9abc_def0");
+        let mixed = Val::MixedBits(vec![
+            BitsSegment::Concrete(high80),
+            BitsSegment::Symbolic(arbitrary),
+            BitsSegment::Concrete(low48),
+        ]);
+        let FmtVal::Bits(formatted) = FmtVal::from_val(&mixed, &mut model)? else { panic!("expected bits") };
+        assert_eq!(formatted.len, 136);
+        assert_eq!(formatted.mask[..48], [true; 48]);
+        assert_eq!(formatted.mask[48..56], [false; 8]);
+        assert_eq!(formatted.mask[56..], [true; 80]);
+        let rendered = formatted.to_str();
+        assert_eq!(rendered, "{136'h12_3456_789a_bcde_f0fe_dc00_ba98_7654_3210, 136'b1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_0000_0000_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111}");
+        Ok(())
     }
 }

@@ -267,9 +267,8 @@ pub enum BitsSegment<B> {
 /// or one of the concrete values in this enum.
 ///
 /// An additional `MixedBits` constructor provides bitvectors made out
-/// of symbolic and concrete parts to make traces of instructions with
-/// symbolic operands more pleasant.  At the time of writing they are
-/// not introduced internally.
+/// of symbolic and concrete parts. Bitvector append may preserve these
+/// segments so slices of known fields remain concrete.
 ///
 /// Note that the equality trait implements a literal equality, see
 /// [crate::primop] for a semantic comparison.
@@ -306,24 +305,29 @@ impl<B: BV> Val<B> {
     pub fn parse_bits_literal(bits: String) -> Self {
         match B::from_str_long(&bits) {
             Some(ParsedBits::Short(bv)) => Val::Bits(bv),
-            Some(ParsedBits::Long(bits)) => {
-                let mut segments = Vec::new();
-                let mut end = bits.len();
-                while end > 0 {
-                    let start = end.saturating_sub(B::MAX_WIDTH as usize);
-                    let mut chunk = String::with_capacity(end - start + 2);
-                    chunk.push_str("0b");
-                    for bit in bits[start..end].iter().rev() {
-                        chunk.push(if *bit { '1' } else { '0' });
-                    }
-                    segments.push(BitsSegment::Concrete(
-                        B::from_str(&chunk).unwrap_or_else(|| panic!("Unable to parse bitvector literal {}", chunk)),
-                    ));
-                    end = start;
-                }
-                Val::MixedBits(segments)
-            }
+            Some(ParsedBits::Long(bits)) => Self::from_bits_slice(&bits),
             None => panic!("Unable to parse bitvector literal {}", bits),
+        }
+    }
+
+    /// 从低位在前的位数组构建具体值，超过宿主位宽时按高位在前的分段表示。
+    pub fn from_bits_slice(bits: &[bool]) -> Self {
+        let width: u32 = bits.len().try_into().expect("位向量长度超出 u32");
+        let chunk_value = |chunk: &[bool]| {
+            let mut value = B::zeros(chunk.len().try_into().expect("位向量分段长度超出 u32"));
+            for (index, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    value = value.set_slice(index.try_into().expect("位序超出 u32"), B::BIT_ONE);
+                }
+            }
+            value
+        };
+        if width <= B::MAX_WIDTH {
+            Self::Bits(chunk_value(bits))
+        } else {
+            Self::MixedBits(
+                bits.rchunks(B::MAX_WIDTH as usize).map(|chunk| BitsSegment::Concrete(chunk_value(chunk))).collect(),
+            )
         }
     }
 
