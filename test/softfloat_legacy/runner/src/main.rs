@@ -127,7 +127,7 @@ fn main() {
                     "{index} {name}: missing ordinary body call event"
                 );
                 assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat, "{index} {name}: UNSAT");
-                let concrete = Model::new(&solver).get_val(&value).expect("materialize result");
+                let concrete = Model::new(&solver).get_val(&value).expect("具体化返回值");
                 let Val::Struct(symbolic_fields) = &value else { panic!("{index} {name}: expected symbolic tuple") };
                 let mut ordered: Vec<_> = symbolic_fields.iter().collect();
                 ordered.sort_by_key(|(field, _)| shared.symtab.to_str(**field));
