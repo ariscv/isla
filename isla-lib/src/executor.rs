@@ -3568,6 +3568,8 @@ fn zrX(z3zE1756) {
             pmp: None,
             clint_enabled: None,
             execution_limits: None,
+            initial_state: Vec::new(),
+            initial_state_rv64_domain: false,
         }
     }
 

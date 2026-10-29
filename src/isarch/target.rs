@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use isla_lib::bitvector::BV;
-use isla_lib::config::{PmpConfig, PmpMode};
+use isla_lib::config::{InitialRegisterConfig, PmpConfig, PmpMode};
 use isla_lib::error::ExecError;
 use isla_lib::executor::{execute_ir_function, Run};
 use isla_lib::fmtval::FmtVal;
@@ -71,6 +71,10 @@ where
         &[]
     }
 
+    fn initial_state(&self) -> &[InitialRegisterConfig] {
+        &[]
+    }
+
     fn setup_pre_state<'ir>(
         &mut self,
         regs: &mut RegisterBindings<'ir, B>,
@@ -79,7 +83,19 @@ where
         solver: &mut Solver<B>,
     ) -> Result<(), ExecError> {
         // reg_list 是本次求解关注的寄存器集合；这里对集合中的每个寄存器建立独立的 pre-state 符号值。
-        let reg_names = self.reg_list();
+        let mut reg_names = self.reg_list();
+        let initial_state = self.initial_state().to_vec();
+        for entry in &initial_state {
+            let name = shared_state.symtab.get(&zencode::encode(&entry.name)).ok_or_else(|| {
+                ExecError::Type(format!("initial_state.{} 不存在于 IR", entry.name), SourceLoc::unknown())
+            })?;
+            if !shared_state.registers.contains_key(&name) {
+                return Err(ExecError::Type(format!("initial_state.{} 不是寄存器", entry.name), SourceLoc::unknown()));
+            }
+            if !reg_names.contains(&entry.name) {
+                reg_names.push(entry.name.clone());
+            }
+        }
         // pre_state 保存这些符号值，供执行路径结束后的 solve_pre_state 从模型中取回。
         let pre_state = self.pre_state_mut();
         let symtab = &shared_state.symtab;
@@ -115,6 +131,55 @@ where
             // 同一个符号值既覆盖执行帧中的寄存器，也记录到 pre_state，保证执行和输出使用同一变量。
             regs.assign(name, recorded.clone(), shared_state);
             pre_state.insert(name, recorded);
+        }
+
+        for entry in &initial_state {
+            let mut value = pre_state.get_from_str(&entry.name, symtab).unwrap();
+            while let Val::Struct(fields) = value {
+                if fields.len() != 1 {
+                    return Err(ExecError::Type(
+                        format!("initial_state.{} 需要单字段位向量结构", entry.name),
+                        SourceLoc::unknown(),
+                    ));
+                }
+                value = fields.values().next().unwrap();
+            }
+            let width = match value {
+                Val::Symbolic(sym) => solver.length(*sym),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                ExecError::Type(format!("initial_state.{} 仅支持位向量寄存器", entry.name), SourceLoc::unknown())
+            })?;
+            if width == 0 {
+                return Err(ExecError::Type(
+                    format!("initial_state.{} 不支持零位宽", entry.name),
+                    SourceLoc::unknown(),
+                ));
+            }
+            let exp = smt_value(value, SourceLoc::unknown())?;
+            for (range, concrete) in &entry.fields {
+                let (high, low) = range.unwrap_or((width - 1, 0));
+                if high >= width {
+                    return Err(ExecError::Type(
+                        format!("initial_state.{} 字段超出 {} 位寄存器", entry.name, width),
+                        SourceLoc::unknown(),
+                    ));
+                }
+                if let Some(n) = concrete {
+                    let field_width = high - low + 1;
+                    if field_width < 64 && n >> field_width != 0 {
+                        return Err(ExecError::Type(
+                            format!("initial_state.{} 具体值超出寄存器宽度", entry.name),
+                            SourceLoc::unknown(),
+                        ));
+                    }
+                    solver.assert_eq(
+                        smtlib::Exp::Extract(high, low, Box::new(exp.clone())),
+                        smtlib::bits64(*n, field_width),
+                    );
+                }
+            }
         }
 
         // 通用符号化完成后，再由具体 Target 为 pre-state 补充架构特有的合法性约束，例如向量 vtype/vl 配对。
@@ -504,15 +569,27 @@ pub struct RV64<B: BV> {
     pub pmp_symbolic: bool,
     pub pre_state: PreStateCtx<B>,
     domain: Option<Rv64Domain>,
+    pub initial_state: Vec<InitialRegisterConfig>,
+    pub initial_state_rv64_domain: bool,
 }
 
 impl<B: BV> Default for RV64<B> {
     fn default() -> Self {
-        RV64 { pmp_symbolic: false, pre_state: PreStateCtx::new(), domain: None }
+        RV64 {
+            pmp_symbolic: false,
+            pre_state: PreStateCtx::new(),
+            domain: None,
+            initial_state: Vec::new(),
+            initial_state_rv64_domain: false,
+        }
     }
 }
 
 impl<B: BV> Target<B> for RV64<B> {
+    fn initial_state(&self) -> &[InitialRegisterConfig] {
+        &self.initial_state
+    }
+
     fn arch_name(&self) -> &'static str {
         "riscv"
     }
@@ -548,6 +625,7 @@ impl<B: BV> Target<B> for RV64<B> {
         let privilege = self.pre_state.get_from_str("cur_privilege", symtab);
         let mstatus = self.pre_state.get_from_str("mstatus", symtab);
         match (privilege, mstatus) {
+            _ if !self.initial_state_rv64_domain => self.domain = None,
             (Some(_), Some(_)) => {
                 if integer_let_from_lets(lets, symtab, "xlen") != 64 {
                     panic!("防御性编程：RV64 pre-state 的 let xlen 不是 64");
@@ -1015,6 +1093,7 @@ mod tests {
         let mut lets = Bindings::default();
         lets.insert(name("zxlen"), UVal::Init(Val::I64(64)));
         let mut target = rv64();
+        target.initial_state_rv64_domain = true;
 
         target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver).unwrap();
         let privilege = match target.pre_state().get(&name("zcur_privilege")).unwrap() {
@@ -1560,5 +1639,95 @@ mod tests {
         assert_eq!(r.pte_r(), 2);
         assert_eq!(r.pte_w(), 4);
         assert_eq!(r.pte_x(), 8);
+    }
+}
+
+#[cfg(test)]
+mod initial_state_tests {
+    use super::*;
+    use isla_lib::bitvector::b64::B64;
+    use isla_lib::smt::{Config, Context};
+
+    #[test]
+    fn initial_state_pins_only_selected_bits() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for fs in 0..4 {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut symtab = Symtab::new();
+            let name = symtab.intern("zmstatus");
+            let wrapper = symtab.intern("zMstatus");
+            let bits = symtab.intern("zbits");
+            let mut shared = SharedState::empty(symtab);
+            shared.registers.insert(name, Ty::Struct(wrapper));
+            shared.type_info.structs.insert(wrapper, BTreeMap::from([(bits, Ty::Bits(64))]));
+            let mut target = RV64::<B64>::default();
+            target.initial_state = vec![InitialRegisterConfig {
+                name: "mstatus".into(),
+                fields: vec![(Some((10, 9)), Some(3)), (Some((14, 13)), None), (Some((12, 11)), None)],
+            }];
+            let mut regs = RegisterBindings::new();
+            regs.insert(name, false, UVal::Init(Val::Poison));
+            target.setup_pre_state(&mut regs, &Bindings::default(), &shared, &mut solver).unwrap();
+            let Val::Struct(fields) = target.pre_state.get(&name).unwrap() else { panic!() };
+            let exp = smt_value(fields.get(&bits).unwrap(), SourceLoc::unknown()).unwrap();
+            solver.assert_eq(smtlib::Exp::Extract(14, 13, Box::new(exp.clone())), smtlib::bits64(fs, 2));
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+            solver.assert_eq(smtlib::Exp::Extract(10, 9, Box::new(exp)), smtlib::bits64(0, 2));
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Unsat);
+        }
+    }
+    #[test]
+    fn initial_state_whole_register_and_validation() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for (width, range, concrete, valid) in [
+            (8, None, Some(42), true),
+            (64, None, Some(u64::MAX), true),
+            (8, None, Some(256), false),
+            (8, Some((8, 7)), None, false),
+            (8, Some((7, 5)), Some(7), true),
+            (8, None, None, true),
+        ] {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut symtab = Symtab::new();
+            let name = symtab.intern("zfcsr");
+            let mut shared = SharedState::empty(symtab);
+            shared.registers.insert(name, Ty::Bits(width));
+            let mut regs = RegisterBindings::new();
+            regs.insert(name, false, UVal::Init(Val::Bits(B64::new(0, width))));
+            let mut target = RV64::<B64>::default();
+            target.initial_state = vec![InitialRegisterConfig { name: "fcsr".into(), fields: vec![(range, concrete)] }];
+            let result = target.setup_pre_state(&mut regs, &Bindings::default(), &shared, &mut solver);
+            assert_eq!(result.is_ok(), valid);
+            if !valid {
+                continue;
+            }
+            let Val::Symbolic(symbol) = target.pre_state.get(&name).unwrap() else { panic!() };
+            assert!(matches!(regs.get_last_if_initialized(name), Some(Val::Symbolic(read)) if read == symbol));
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+            let (high, low) = range.unwrap_or((width - 1, 0));
+            let check = smtlib::Exp::Extract(high, low, Box::new(smtlib::Exp::Var(*symbol)));
+            if let Some(n) = concrete {
+                solver.assert_eq(check, smtlib::bits64(n ^ 1, high - low + 1));
+                assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Unsat);
+            } else {
+                solver.assert_eq(check, smtlib::bits64(255, width));
+                assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+            }
+        }
+    }
+
+    #[test]
+    fn initial_state_rejects_missing_register() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let shared = SharedState::empty(Symtab::new());
+        let mut target = RV64::<B64>::default();
+        target.initial_state = vec![InitialRegisterConfig { name: "missing".into(), fields: vec![(None, None)] }];
+        assert!(target
+            .setup_pre_state(&mut RegisterBindings::new(), &Bindings::default(), &shared, &mut solver)
+            .is_err());
     }
 }
