@@ -1,6 +1,7 @@
 use super::clause::{get_extension_clauses, normalize_clause_name};
 use super::memory_builder;
 use super::memory_model;
+use super::solve_summary::SolveSummary;
 use super::target::{validate_fixed_prestate_value, Target, RISCV};
 use super::timeout_report::TimeoutReporter;
 pub use super::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
@@ -555,6 +556,8 @@ fn execute_as_instruction<'a, B: BV>(ret_val: &'a Val<B>, shared_state: &SharedS
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize, Clone)]
 struct AssemGenJsonItem {
+    #[serde(rename = "path-signature")]
+    path_signature: u64,
     arch: BTreeMap<String, String>,
     #[serde(rename = "test-ins")]
     test_ins: String,
@@ -598,6 +601,7 @@ impl AssemGenJsonItem {
         arch.insert("xlen".to_string(), target.xlen().to_string());
         arch.insert("ext".to_string(), "IMACFD".to_string());
         AssemGenJsonItem {
+            path_signature: 0,
             arch,
             test_ins,
             test_ins_encdec,
@@ -629,7 +633,11 @@ trait ToJSON: Serialize {
         serde_json::to_string_pretty(self).unwrap()
     }
     fn to_json(&self, file_path: Option<String>) {
-        let json = serde_json::to_string_pretty(self).unwrap();
+        let mut value = serde_json::to_value(self).unwrap();
+        if value.get("gen").is_some() {
+            value["provenance"] = super::solve_summary::input_manifest();
+        }
+        let json = serde_json::to_string_pretty(&value).unwrap();
         // 若未指定输出路径，则默认写到当前目录下的 assem_gen.json
         let path = file_path.unwrap_or_else(|| "assem_gen.json".to_string());
         // 支持类似 "output/a/b.json" 的路径：先提取父目录并递归创建（等价 mkdir -p）
@@ -646,6 +654,8 @@ trait ToJSON: Serialize {
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize)]
 struct AssemGenJson {
+    summary: serde_json::Value,
+    diagnostics: Vec<serde_json::Value>,
     gen: Vec<AssemGenJsonItem>,
     /// P3 encdec 守卫过滤：被丢弃的非法编码变体计数（reason → 条数）。
     /// 为空时不序列化，保证零拒绝时 JSON 输出与既有逐字节一致。
@@ -656,7 +666,7 @@ impl ToJSON for AssemGenJson {}
 impl ToJSON for AssemGenJsonItem {}
 impl AssemGenJson {
     fn new(gen: Vec<AssemGenJsonItem>) -> Self {
-        AssemGenJson { gen, skip: BTreeMap::new() }
+        AssemGenJson { gen, skip: BTreeMap::new(), summary: SolveSummary::default().json(), diagnostics: Vec::new() }
     }
 }
 
@@ -666,12 +676,12 @@ impl AssemGenJson {
 struct CollectedCase {
     path_signature: u64,
     item: AssemGenJsonItem,
-    /// 终值查询超时的降级路径：test-ins/isa-state/访存分量均未物化（置空），
-    /// 但 ret_val 真实可用，finalize 阶段不按"空壳"丢弃。
+    /// 终值查询超时的路径仅供diagnostics使用，不进入gen。
     materialization_timed_out: bool,
 }
 
 struct SolveCollectorState {
+    summary: SolveSummary,
     cases: Vec<CollectedCase>,
     case_quota: Option<CaseQuota>,
     first_error: Option<ExecError>,
@@ -689,6 +699,7 @@ impl SolveCollectorState {
 
     fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
         SolveCollectorState {
+            summary: SolveSummary::default(),
             first_error: None,
             cases: Vec::new(),
             case_quota,
@@ -698,6 +709,9 @@ impl SolveCollectorState {
     }
 
     fn record_error(&mut self, error: &ExecError) -> bool {
+        self.summary.errors += 1;
+        self.summary.execution_timeouts += usize::from(matches!(error, ExecError::Timeout));
+        self.summary.smt_timeouts += usize::from(matches!(error, ExecError::Smt(SmtError::Timeout(_))));
         let error = match error {
             ExecError::Timeout => ExecError::Timeout,
             ExecError::Smt(error) => ExecError::Smt(error.clone()),
@@ -1001,10 +1015,9 @@ impl CaseQuota {
 /// 顺序由 `path_signature` + 序列化文本（tie-breaker）决定，与 worker 调度无关，
 /// 因此 THREADS=1/4/64 跑出来的 JSON 逐字节一致。
 fn finalize_cases(mut cases: Vec<CollectedCase>, quota: &Option<CaseQuota>) -> Vec<AssemGenJsonItem> {
-    // 只有已物化出指令与编码的用例能作为路径结果落盘；终值查询超时的降级
-    // 路径（materialization_timed_out）保留 ret_val 与空分量，不按空壳丢弃。
+    // gen只保留已具体化的可重放见证，超时终态由批次层单独写入diagnostics。
     cases.retain(|case| {
-        case.materialization_timed_out || (!case.item.test_ins.is_empty() && !case.item.test_ins_encdec.is_empty())
+        !case.materialization_timed_out && !case.item.test_ins.is_empty() && !case.item.test_ins_encdec.is_empty()
     });
     // 1. 组内配额：按 (助记符, 完整 test-ins, ret_val 类别) 分桶，每组按签名均匀取样。
     if let Some(quota) = quota {
@@ -1016,7 +1029,13 @@ fn finalize_cases(mut cases: Vec<CollectedCase>, quota: &Option<CaseQuota>) -> V
         let b_text = serde_json::to_string(&b.item).expect("AssemGenJsonItem 序列化失败");
         a.path_signature.cmp(&b.path_signature).then_with(|| a_text.cmp(&b_text))
     });
-    cases.into_iter().map(|case| case.item).collect()
+    cases
+        .into_iter()
+        .map(|mut case| {
+            case.item.path_signature = case.path_signature;
+            case.item
+        })
+        .collect()
 }
 
 fn apply_case_quota(cases: Vec<CollectedCase>, quota: &CaseQuota) -> Vec<CollectedCase> {
@@ -1253,6 +1272,8 @@ pub fn solve_state_main<'ir, B: BV>(
             );
         }
 
+        let mut merged_summary = SolveSummary::default();
+        let mut merged_diagnostics = Vec::new();
         let mut merged_items: Vec<AssemGenJsonItem> = Vec::new();
         // P3 encdec 守卫过滤：跨批累计被拒条数，随 JSON 落盘（reason 固定
         // encdec-guard-reject），下游 build/summary 与重放侧可见。
@@ -1330,6 +1351,8 @@ pub fn solve_state_main<'ir, B: BV>(
                         );
                         success = false;
                     }
+                    merged_summary.merge(&outcome.summary);
+                    merged_diagnostics.extend(outcome.diagnostics);
                     merged_items.extend(outcome.items);
                     merged_encdec_guard_rejects += outcome.encdec_guard_rejects as u64;
                 }
@@ -1347,11 +1370,16 @@ pub fn solve_state_main<'ir, B: BV>(
                         &format!("solve_state: {}启动错误 {} (批 {})", clause, error, batch_label.unwrap_or("自由批"))
                     );
                     success = false;
+                    merged_summary.errors += 1;
                 }
             }
             // 每批后增量落盘（覆写为已合并全集）：外层时间盒硬杀时，已完成批的
             // 产出不随进程丢失
             let mut json = AssemGenJson::new(merged_items.clone());
+            merged_summary.pending_batches = batches.len() - batch_index - 1;
+            json.summary = merged_summary.json();
+            json.summary["target-clause"] = serde_json::json!(clause);
+            json.diagnostics = merged_diagnostics.clone();
             if merged_encdec_guard_rejects > 0 {
                 json.skip.insert("encdec-guard-reject".to_string(), merged_encdec_guard_rejects);
             }
@@ -1440,6 +1468,18 @@ fn solve_collect_path<'ir, B: BV>(
     mut solver: Solver<B>,
     collected: &Mutex<SolveCollectorState>,
 ) {
+    {
+        let frame = match &exec_result {
+            Ok((_, frame)) | Err((_, frame)) => frame,
+        };
+        let mut state = collected.lock().expect("solve collector mutex poisoned");
+        state.summary.sampled_paths += usize::from(frame.has_sampled_branch());
+        match &exec_result {
+            Ok((Run::Finished(Val::Poison) | Run::Exit | Run::Suspended, _)) => state.summary.unfinished_paths += 1,
+            Err((ExecError::AssertionFailure(_, _), _)) => state.summary.assertion_filtered_paths += 1,
+            _ => (),
+        }
+    }
     let mut itrace_diagnostics = Vec::new();
     let submit_itrace = |frame, diagnostics: &mut Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)>| {
         isla_lib::executor::submit_itrace_for_local_frame_with_diagnostics(
@@ -2049,6 +2089,8 @@ fn solve_collect_path<'ir, B: BV>(
 /// items 保留——与既有"错误路径也落盘"语义一致，由批调度层合并）。
 struct BatchOutcome {
     items: Vec<AssemGenJsonItem>,
+    summary: SolveSummary,
+    diagnostics: Vec<serde_json::Value>,
     error: Option<ExecError>,
     /// P3 encdec 守卫过滤：本批被拒绝的非法编码变体路径数。
     encdec_guard_rejects: usize,
@@ -2266,17 +2308,28 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         Ok(result_mutex) => result_mutex,
         Err(_) => panic!("{} 执行结束后 result 收集器仍有共享引用", instruction_name),
     };
-    let state = result_mutex.into_inner().expect("solve collector mutex poisoned");
+    let mut state = result_mutex.into_inner().expect("solve collector mutex poisoned");
     let quota = state.case_quota;
     if state.model_query_timeouts > 0 {
         log!(
             log::SYM_EXEC,
             &format!(
-                "{} 有 {} 条完成路径的终值查询超过时间盒，已降级输出（访存与 pre-state 分量置空）",
+                "{} 有 {} 条完成路径的终值查询超过时间盒，已写入不完整诊断，不进入gen",
                 instruction_name, state.model_query_timeouts
             )
         );
     }
+    let mut diagnostics: Vec<serde_json::Value> = state
+        .cases
+        .iter()
+        .filter(|case| case.materialization_timed_out)
+        .map(|case| {
+            serde_json::json!({"status":"incomplete", "reason":"final-model-query-timeout",
+            "path-signature":case.path_signature, "symbolic-return-value":case.item.ret_val})
+        })
+        .collect();
+    diagnostics.sort_by_cached_key(|diagnostic| serde_json::to_string(diagnostic).unwrap());
+    let collected_count = state.cases.iter().filter(|case| !case.materialization_timed_out).count();
     let mut items = finalize_cases(state.cases, &quota);
     // P2 分片预算：case_limit 是每片产出条数硬上限（在确定性归并之后截断，
     // 保证截断结果与配额取样后的排序一致）
@@ -2292,7 +2345,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             )
         );
     }
-    Ok(BatchOutcome { items, error: state.first_error, encdec_guard_rejects: state.encdec_guard_rejects })
+    state.summary.omitted_cases = collected_count - items.len();
+    state.summary.model_query_timeouts = state.model_query_timeouts;
+    state.summary.encoding_filtered_paths = state.encdec_guard_rejects;
+    Ok(BatchOutcome {
+        items,
+        summary: state.summary,
+        diagnostics,
+        error: state.first_error,
+        encdec_guard_rejects: state.encdec_guard_rejects,
+    })
 }
 
 #[cfg(test)]
@@ -3107,11 +3169,26 @@ mod tests {
         let _ = execute_as_instruction(&Val::Ctor(execute_as, Box::new(Val::Unit)), &shared_state);
     }
 
+    #[test]
+    fn json_summary_marks_sampling_and_quota_as_partial() {
+        let mut summary = SolveSummary::default();
+        assert_eq!(summary.status(), "finished");
+        summary.sampled_paths = 1;
+        assert_eq!(summary.status(), "partial");
+        let json = summary.json();
+        assert_eq!(json["sampled-paths"], 1);
+        assert_eq!(json["model-coverage"], "not-measured");
+        summary.sampled_paths = 0;
+        summary.omitted_cases = 1;
+        assert_eq!(summary.status(), "partial");
+    }
+
     fn collected_case(signature: u64, test_ins: &str, ret_val: &str) -> CollectedCase {
         CollectedCase {
             path_signature: signature,
             materialization_timed_out: false,
             item: AssemGenJsonItem {
+                path_signature: signature,
                 arch: BTreeMap::new(),
                 test_ins: test_ins.to_string(),
                 test_ins_encdec: "32'h0000_0000".to_string(),
@@ -3135,17 +3212,15 @@ mod tests {
         assert_eq!(finalized[0].test_ins, "sd x1, 0(x2)");
     }
 
-    /// 终值查询超时的降级路径不按"空壳"丢弃：ret_val 真实可用，其余模型物化
-    /// 字段置空（W3"查不到输出 null 不编造"规则扩展到整路径超时，W6）。
+    /// 终值查询超时只保留诊断，不能当作已具体化的见证。
     #[test]
-    fn finalize_cases_保留终值超时的降级路径() {
+    fn finalize_cases_终值超时不能进入可重放gen() {
         let mut degraded = collected_case(1, "", "Retire_Success(())");
         degraded.materialization_timed_out = true;
         let cases = vec![degraded, collected_case(2, "sd x1, 0(x2)", "Retire_Success(())")];
         let finalized = finalize_cases(cases, &None);
-        assert_eq!(finalized.len(), 2, "降级路径应保留在输出中");
-        assert_eq!(finalized[0].ret_val, "Retire_Success(())");
-        assert!(finalized[0].test_ins.is_empty(), "降级路径的 test-ins 未物化，输出为空");
+        assert_eq!(finalized.len(), 1, "超时路径不能冒充可重放见证");
+        assert_eq!(finalized[0].test_ins, "sd x1, 0(x2)");
     }
 
     #[test]

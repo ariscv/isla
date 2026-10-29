@@ -353,10 +353,19 @@ pub(super) struct ExecutionLimitPathState {
     branch_forks: HashMap<ControlFlowScope, u32>,
     region_forks: HashMap<usize, u32>,
     sample_ordinals: HashMap<ControlFlowScope, u32>,
+    sampled_execution_domain: bool,
     path_signature: u64,
 }
 
 impl ExecutionLimitPathState {
+    pub(super) fn has_sampled_branch(&self) -> bool {
+        self.sampled_execution_domain
+    }
+
+    pub(super) fn record_kept_current_model(&mut self) {
+        self.sampled_execution_domain = true;
+    }
+
     pub(super) fn total_forks(&self) -> u32 {
         self.total_forks
     }
@@ -409,6 +418,7 @@ impl ExecutionLimitPathState {
         let ordinal = self.sample_ordinals.entry(sample.scope.clone()).or_insert(0);
         assert_eq!(*ordinal, sample.ordinal, "branch sample ordinal changed before commit");
         *ordinal = ordinal.checked_add(1).expect("branch sample ordinal overflow");
+        self.sampled_execution_domain = true;
     }
 }
 
@@ -957,7 +967,11 @@ mod tests {
         };
         assert_eq!(first, uncommitted);
 
+        assert!(!first_path.has_sampled_branch());
         handler.commit_sample(&mut first_path, &first);
+        assert!(first_path.has_sampled_branch());
+        assert!(!second_path.has_sampled_branch());
+        assert!(first_path.clone().has_sampled_branch());
         let next = match branch(&handler, &mut first_path) {
             ExecutionLimitDecision::ConcretizeBranch { sample, .. } => sample,
             decision => panic!("unexpected decision: {:?}", decision),

@@ -83,7 +83,7 @@ COUNTER=output/.solve_progress_counter
 # isarch 多线程执行的工作线程数（-T），默认 64；单测可 `make solve-X THREADS=110` 覆盖
 THREADS ?= 64
 # solve 使用的 IR；默认的 ./rv64d.ir 已是 VLEN=128、ELEN=64，其 SHA-256 与
-# configs/workarounds/vvtype.toml 的 ir_sha256 对应，换 IR 时两者必须同步更新。
+# 对应生成来源见 ir/provenance/manifest.json；源码预算配置由模型仓统一维护。
 IR_FILE ?= ./rv64d.ir
 # solve 使用的 ISA 配置；默认与既有行为一致。内存符号化验收用：
 # `make solve-C_LD SOLVE_CONFIG=./configs/riscv64_difftest_mem.toml`
@@ -95,7 +95,7 @@ CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,
 TASTIC ?=
 # 可选的独立 execution-limit TOML；VVTYPE 默认加载专用 workaround，其它 clause 不加载。
 EXECUTION_LIMITS_CONFIG ?=
-solve-VVTYPE: EXECUTION_LIMITS_CONFIG = ./configs/workarounds/vvtype.toml
+solve-VVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvtype.toml
 # Z3 timeout wrapper 的实现由构建 feature 选择。
 Z3_TIMEOUT_IMPL ?= thread_interrupt
 ifeq ($(Z3_TIMEOUT_IMPL),direct)

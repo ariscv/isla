@@ -2025,6 +2025,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         let fork_id = match decision {
                             ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
                             ExecutionLimitDecision::KeepCurrentModel { reason } => {
+                                frame.execution_limit_state.record_kept_current_model();
                                 record_execution_limit(frame, reason, "keep_current_model");
                                 None
                             }

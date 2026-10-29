@@ -327,3 +327,8 @@
 - **配套**：`BV` trait 新增 `unsigned_cmp`（B64 按 u64、B129 按 `(tag,bits)` 字典序，tag 是第 129 位 MSB）；具体有符号比较走既有 `signed()`（B129 已正确处理 128/129）。`sail_signed` 放宽 length==128 为恒等返回（符号化 %i 本就是 128 位 BV，`SignExtend(0)`≡恒等）；`sail_unsigned` 保留 panic（无符号 128 位确无 %i 表示，诚实暴露），其余调用方（zrem 等）不受影响。
 - **zAMO 端到端**（riscv64_difftest_mem_excluded_pma.toml + limits_b12 + 600s 盒 + -T 24）：rc=0、23s、670 gen JSON 落盘（修复前 rc=134、0 产物）。`amominu.q.aq x31,x31,(x15)` → Retire_Success + 16B 独占读写事件 + 2×8B post-memory，原 panic 形态复现通过。宽度 {b,h,w,d,q}、aq/rl/aqrl 变体、Addr_Align×4、Access_Fault×408、Retire_Success×258；min/max 家族 9 条（含 minu.q）。AMOCAS 0 条（预算内未探索到，非缺陷）。
 - **环境坑**：/tmp 用户配额满时 `println` 写失败 panic→`panic="abort"`（release profile）→ SIGABRT 且 panic 信息也写不出（空 stderr），现象酷似引擎 abort；跑批产物目录放 /data1 下。产物：`/data1/baiyifan/tmp/isla-memimpl-w20-20260928/`。
+
+
+## 2026-10-30 JSON范围与IR同步修订
+
+旧版本关于同名IR和本地workaround哈希的结论仅适用于其记录的提交。本轮IR从模型议题分支完整生成，来源见`ir/provenance/manifest.json`；运行JSON含执行范围摘要和输入哈希，正常结束不等于源码控制流覆盖。现行结果合同见`docs/json-results.md`。memory的终值查询超时只作为diagnostics，不进入可重放gen；其VVTYPE配置现由模型仓唯一维护，移除了旧本地副本。

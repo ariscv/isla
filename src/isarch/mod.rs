@@ -5,6 +5,7 @@ pub mod encoding_slices;
 pub mod exec;
 pub mod memory_builder;
 pub mod memory_model;
+mod solve_summary;
 pub mod target;
 mod timeout_report;
 pub mod value_hints;
