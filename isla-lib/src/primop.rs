@@ -6171,9 +6171,9 @@ mod tests {
         {
             assert_eq!(solver.check_sat(info), SmtResult::Sat);
             let mut model = Model::new(&solver);
-            let materialized = model.get_val(&new)?;
-            assert!(materialized.is_concrete());
-            assert!(matches!(materialized, Val::MixedBits(_)));
+            let concrete = model.get_val(&new)?;
+            assert!(concrete.is_concrete());
+            assert!(matches!(concrete, Val::MixedBits(_)));
             assert!(matches!(model.get_fmtval(&new)?, crate::fmtval::FmtVal::Bits(_)));
         }
         let sym2 = solver.declare_const(Ty::BitVec(9), info);

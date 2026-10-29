@@ -1563,7 +1563,7 @@ mod tests {
             };
             let pre = bits("isa-state-complete");
             let post = bits("isa-state-post");
-            assert_eq!(post, pre ^ (1 << 63), "前后态必须由同一编码可行模型物化");
+            assert_eq!(post, pre ^ (1 << 63), "前后态必须由同一编码可行模型具体化");
             let encoding = case["test-ins-encdec"].as_str().unwrap();
             if encoding.starts_with("16'") {
                 assert_eq!(pre & 0x600, 0x400);
@@ -1602,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn collector_materializes_wide_vector_pre_and_post_state() {
+    fn collector_concretizes_wide_vector_pre_and_post_state() {
         use super::super::target::{PreStateCtx, Target};
         use isla_lib::bitvector::bit_vector_from_str;
 
@@ -1853,7 +1853,7 @@ mod tests {
                     &reporter,
                     None,
                 )
-                .unwrap_or_else(|error| panic!("FS={fs}, VS={vs} 的已满足路径不能被物化改坏: {error}"));
+                .unwrap_or_else(|error| panic!("FS={fs}, VS={vs} 的已满足路径不能被具体化改坏: {error}"));
                 let json: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
                 assert!(json.get("summary").is_none());
@@ -1874,9 +1874,9 @@ mod tests {
     }
 
     #[test]
-    fn collector_preserves_finished_results_and_materialization_failures() {
+    fn collector_preserves_finished_results_and_concretization_failures() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
-        // 用最小 IR 经过真实 collector、物化、JSON 和 trace；结果名称不能成为输入筛选条件。
+        // 用最小 IR 经过真实 collector、具体化、JSON 和 trace；结果名称不能成为输入筛选条件。
         for (index, (result_name, fail_assembly, suppress, mode)) in [
             ("Retire_Success", false, false, "finished"),
             ("Illegal_Instruction", false, false, "finished"),
@@ -2089,7 +2089,7 @@ mod tests {
             }
         }
         assert_eq!(
-            model.get_val(&args[0]).expect("可由 B129 表示的宽位候选必须能物化为 Val::Bits"),
+            model.get_val(&args[0]).expect("可由 B129 表示的宽位候选必须能具体化为 Val::Bits"),
             Val::Bits(expected)
         );
     }
