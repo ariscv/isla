@@ -193,3 +193,24 @@ Make 入口默认关闭轨迹。例如 `make solve ALL=MRET THREADS=1 FTRACE=1 B
 三种工具在代码中平级隶属 `isla-lib/src/tracetool/`：`itrace.rs` 处理逐指令记录，`ftrace.rs` 投影函数事件，`btrace.rs` 处理静态分支清单和实际边。公共 `TraceOptions`、`TraceHandler`、`TracePerPath`、`TraceCompletedPath` 通过 `tracetool` 入口提供；路径组合、writer 和共享序列分别位于 `common.rs`、`writer.rs`、`sequence.rs`。执行器共用 `trace_path`，三种工具不各建一套 writer。
 
 逐指令记录及摘要仍归 itrace 所有（`itrace::ItracePerInstr`、`itrace_records`），其他工具可以复用这些数据。公共 `TracePerPath` 组合各工具的记录，`TraceHandler` 统一提交和输出；复用不改变数据归属，各工具保留自己的采集入口。
+
+### solve-state 的部分符号化初态
+
+在 `-C` 指定的 ISA TOML 末尾添加，例如：
+
+```toml
+[initial_state]
+x1 = 42
+x2 = "?"
+x3 = "x"
+mstatus = "0b11_?????????"
+fcsr = "0b000_?????"
+```
+
+`0b` 位模式从右向左对应 bit 0、bit 1……；`0/1` 固定对应位，`?` 和 `x` 都保留为稳定的符号位，`_` 仅用于分隔。模式可以短于寄存器宽度，未写出的高位继续符号化；超过寄存器宽度报错。上述 `mstatus` 只固定 bit 10:9，不解释这些位的架构含义。具体值支持非负整数和十进制／`0x` 字符串，例如 `"0xffffffffffffffff"`。整寄存器具体值将高位补零。
+
+当前支持位向量寄存器及 Sail 的单字段位向量结构，向量寄存器按已有 `vlen` 定宽。配置中的寄存器会加入本次初态符号化和见证输出；不在 `[initial_state]` 中的寄存器继续沿用原流程。`registers.defaults` 仍用于初始化，但本配置在 solve-state 重新符号化之后施加约束。禁止配置 `x0` 或 `PC`。
+
+`?` 和 `x` 目前求解语义相同，不增加关注度或输出过滤机制；同一位多次读取保持一致。执行语义仍可以约束这些符号位，完整见证输出仍会从最终模型取得具体值。
+
+本分支默认关闭额外的 RV64 privilege/SXL/UXL/MPP 初态域限制。需要旧限制时，在 TOML **顶层**（任何表之前）添加 `initial_state_rv64_domain = true`；它与本配置共同生效，冲突时无可满足结果。已有 RVV `vtype/vl` 约束继续保留。

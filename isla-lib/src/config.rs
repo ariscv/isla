@@ -1330,6 +1330,51 @@ fn case_quota_table(table: &toml::value::Table) -> Result<Option<BTreeMap<String
     Ok(Some(map))
 }
 
+/// solve-state 的位向量初态；None 值表示稳定的符号值（`?` 或 `x`）。
+#[derive(Clone, Debug)]
+pub struct InitialRegisterConfig {
+    pub name: String,
+    /// (高位, 低位)；None 范围表示整个寄存器。
+    pub fields: Vec<(Option<(u32, u32)>, Option<u64>)>,
+}
+
+fn get_initial_state(config: &Value) -> Result<Vec<InitialRegisterConfig>, String> {
+    let Some(section) = config.get("initial_state") else { return Ok(Vec::new()) };
+    let table = section.as_table().ok_or("initial_state 必须是表")?;
+    let mut entries = Vec::new();
+    for (name, entry) in table {
+        if name == "x0" || name == "PC" {
+            return Err(format!("initial_state.{} 不支持覆盖恒零寄存器或执行入口 PC", name));
+        }
+        let mut parsed = Vec::new();
+        if let Some(pattern) = entry.as_str().and_then(|text| text.strip_prefix("0b")) {
+            // 位模式从右向左对应 bit 0、bit 1……；未写出的高位继续符号化。
+            let pattern = pattern.replace('_', "");
+            if pattern.is_empty() {
+                return Err(format!("initial_state.{}：位模式不能为空", name));
+            }
+            for (bit, value) in pattern.chars().rev().enumerate() {
+                let bit = u32::try_from(bit).map_err(|_| "位模式过长")?;
+                let value = match value {
+                    '0' => Some(0),
+                    '1' => Some(1),
+                    '?' | 'x' => None,
+                    _ => return Err(format!("initial_state.{}：位模式只接受 0、1、?、x 和分隔符 _", name)),
+                };
+                parsed.push((Some((bit, bit)), value));
+            }
+        } else {
+            let concrete = match entry {
+                Value::String(text) if text == "?" || text == "x" => None,
+                _ => Some(parse_u64_value(entry, &format!("initial_state.{}", name))?),
+            };
+            parsed.push((None, concrete));
+        }
+        entries.push(InitialRegisterConfig { name: name.clone(), fields: parsed });
+    }
+    Ok(entries)
+}
+
 pub struct ISAConfig<B> {
     /// The identifier for the program counter register
     pub pc: Name,
@@ -1406,6 +1451,9 @@ pub struct ISAConfig<B> {
     pub clint_enabled: Option<bool>,
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
     pub execution_limits: Option<ExecutionLimitsConfig>,
+    pub initial_state: Vec<InitialRegisterConfig>,
+    /// 显式开启旧 RV64 特权域限制；默认不限制。
+    pub initial_state_rv64_domain: bool,
 }
 
 impl<B: BV> ISAConfig<B> {
@@ -1472,6 +1520,11 @@ impl<B: BV> ISAConfig<B> {
             pmp,
             clint_enabled: get_clint_enabled(&config)?,
             execution_limits: get_execution_limits_config(&config)?,
+            initial_state: get_initial_state(&config)?,
+            initial_state_rv64_domain: match config.get("initial_state_rv64_domain") {
+                None => false,
+                Some(value) => value.as_bool().ok_or("initial_state_rv64_domain 必须是布尔值")?,
+            },
         })
     }
 
@@ -1774,5 +1827,65 @@ mod tests {
         let error = get_execution_limits_config(&value).unwrap_err();
 
         assert!(error.contains("max_global_forks"));
+    }
+}
+
+#[cfg(test)]
+mod initial_state_tests {
+    use super::*;
+
+    #[test]
+    fn initial_state_mixed_bits() {
+        let config: Value = r#"[initial_state]
+mstatus = "0b?x11_?0x1"
+"#
+        .parse()
+        .unwrap();
+        let entries = get_initial_state(&config).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "mstatus");
+        assert_eq!(
+            entries[0].fields,
+            vec![
+                (Some((0, 0)), Some(1)),
+                (Some((1, 1)), None),
+                (Some((2, 2)), Some(0)),
+                (Some((3, 3)), None),
+                (Some((4, 4)), Some(1)),
+                (Some((5, 5)), Some(1)),
+                (Some((6, 6)), None),
+                (Some((7, 7)), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_state_whole_registers() {
+        let config: Value = r#"[initial_state]
+x1 = 42
+x2 = "?"
+x3 = "x"
+x4 = "0xffffffffffffffff"
+fcsr = "0b010_?????"
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(get_initial_state(&config).unwrap().len(), 5);
+        assert!(get_initial_state(&"".parse().unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn initial_state_rejects_invalid_fields() {
+        for text in [
+            "[initial_state]\nx1 = -1",
+            "[initial_state]\nx1 = true",
+            "[initial_state]\nx1 = \"unknown\"",
+            "[initial_state]\nx1 = \"0b\"",
+            "[initial_state]\nx1 = \"0b__\"",
+            "[initial_state]\nx1 = \"0b?2\"",
+            "[initial_state.mstatus]\nVS = 3",
+        ] {
+            assert!(get_initial_state(&text.parse().unwrap()).is_err(), "{}", text);
+        }
     }
 }

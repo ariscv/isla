@@ -596,6 +596,8 @@ fn isla_main() -> i32 {
                 }
                 64 => {
                     let mut target = RV64::default();
+                    target.initial_state = isa_config.initial_state.clone();
+                    target.initial_state_rv64_domain = isa_config.initial_state_rv64_domain;
                     target.pmp_symbolic = pmp_symbolic;
                     let initial_memory = isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
                         .and_then(|builder| builder.build())
