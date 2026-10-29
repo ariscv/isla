@@ -16,7 +16,7 @@ fn concrete_bits<B: BV>(value: &Val<B>) -> Vec<bool> {
             .rev()
             .flat_map(|segment| match segment {
                 BitsSegment::Concrete(bits) => bits.to_vec(),
-                BitsSegment::Symbolic(_) => panic!("物化后不能残留符号段"),
+                BitsSegment::Symbolic(_) => panic!("具体化后不能残留符号段"),
             })
             .collect(),
         _ => panic!("必须是具体位向量"),
@@ -76,11 +76,11 @@ fn check_widths<B: BV>() {
 }
 
 #[test]
-fn model_materializes_wide_values_with_b64() {
+fn model_concretizes_wide_values_with_b64() {
     check_widths::<B64>();
 }
 #[test]
-fn model_materializes_wide_values_with_b129() {
+fn model_concretizes_wide_values_with_b129() {
     check_widths::<B129>();
 }
 

@@ -1369,11 +1369,11 @@ mod softfloat_tests {
         assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
         let mut model = Model::new(&solver);
         let mut read = |val: Val<B64>| -> u64 {
-            let materialized = model.get_val(&val).unwrap();
-            match materialized {
+            let concrete = model.get_val(&val).unwrap();
+            match concrete {
                 Val::Bits(bv) => bv.lower_u64(),
                 Val::Bool(b) => b as u64,
-                v => panic!("无法物化 {:?}", v),
+                v => panic!("无法具体化 {:?}", v),
             }
         };
         (read(flags), read(result))
