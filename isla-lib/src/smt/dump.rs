@@ -1,4 +1,4 @@
-//! SMT timeout 诊断 dump 的构造与 SMT-LIB2 物化。
+//! SMT timeout 诊断 dump 的构造与 SMT-LIB2 文本生成。
 
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};

@@ -355,6 +355,7 @@ pub(super) struct ExecutionLimitPathState {
     branch_forks: HashMap<ControlFlowScope, u32>,
     region_forks: HashMap<(usize, ControlFlowScope), u32>,
     sample_ordinals: HashMap<ControlFlowScope, u32>,
+    sampled_execution_domain: bool,
     path_signature: u64,
 }
 
@@ -365,6 +366,14 @@ impl ExecutionLimitPathState {
 
     pub(super) fn path_signature(&self) -> u64 {
         self.path_signature
+    }
+
+    pub(super) fn has_sampled_branch(&self) -> bool {
+        self.sampled_execution_domain
+    }
+
+    pub(super) fn record_kept_current_model(&mut self) {
+        self.sampled_execution_domain = true;
     }
 
     /// fork 时推进路径签名：父路径记 `true` 方向、子路径记 `false` 方向，两条路径的签名
@@ -411,6 +420,7 @@ impl ExecutionLimitPathState {
         let ordinal = self.sample_ordinals.entry(sample.scope.clone()).or_insert(0);
         assert_eq!(*ordinal, sample.ordinal, "branch sample ordinal changed before commit");
         *ordinal = ordinal.checked_add(1).expect("branch sample ordinal overflow");
+        self.sampled_execution_domain = true;
     }
 }
 
@@ -959,8 +969,13 @@ mod tests {
             decision => panic!("unexpected decision: {:?}", decision),
         };
         assert_eq!(first, uncommitted);
+        assert!(!first_path.has_sampled_branch(), "admission alone is not a committed sample");
+        assert!(!second_path.has_sampled_branch());
 
         handler.commit_sample(&mut first_path, &first);
+        assert!(first_path.has_sampled_branch());
+        assert!(!second_path.has_sampled_branch(), "sampling must remain path local");
+        assert!(first_path.clone().has_sampled_branch(), "fork snapshot must inherit committed sampling");
         let next = match branch(&handler, &mut first_path) {
             ExecutionLimitDecision::ConcretizeBranch { sample, .. } => sample,
             decision => panic!("unexpected decision: {:?}", decision),

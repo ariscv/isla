@@ -50,6 +50,7 @@ use crate::bitvector::BV;
 use crate::error::ExecError;
 use crate::executor::LocalFrame;
 use crate::ir::{FPTy, Val};
+use crate::primop_util::replace_mixed_bits;
 use crate::smt::smtlib::*;
 use crate::smt::*;
 use crate::source_loc::SourceLoc;
@@ -127,8 +128,10 @@ fp_constant_primop!(fp_negative_zero, FPConstant::Zero { negative: true });
 macro_rules! fp_unary_primop {
     ($f:ident, $op:expr) => {
         pub fn $f<B: BV>(v: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+            let op = $op;
+            let v = if matches!(op, FPUnary::FromIEEE(..)) { replace_mixed_bits(v, solver, info)? } else { v };
             match v {
-                Val::Symbolic(v) => solver.define_const(Exp::FPUnary($op, Box::new(Exp::Var(v))), info).into(),
+                Val::Symbolic(v) => solver.define_const(Exp::FPUnary(op, Box::new(Exp::Var(v))), info).into(),
                 _ => Err(ExecError::Type(stringify!($f).to_string(), info)),
             }
         }
@@ -165,9 +168,15 @@ fp_unary_primop!(fp128_from_ieee, {
 macro_rules! fp_rounding_unary_primop {
     ($f:ident, $op:expr) => {
         pub fn $f<B: BV>(rm: Val<B>, v: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+            let op = $op;
+            let v = if matches!(op, FPRoundingUnary::FromSigned(..) | FPRoundingUnary::FromUnsigned(..)) {
+                replace_mixed_bits(v, solver, info)?
+            } else {
+                v
+            };
             match (rm, v) {
                 (Val::Symbolic(rm), Val::Symbolic(v)) => solver
-                    .define_const(Exp::FPRoundingUnary($op, Box::new(Exp::Var(rm)), Box::new(Exp::Var(v))), info)
+                    .define_const(Exp::FPRoundingUnary(op, Box::new(Exp::Var(rm)), Box::new(Exp::Var(v))), info)
                     .into(),
                 _ => Err(ExecError::Type(stringify!($f).to_string(), info)),
             }
@@ -1035,6 +1044,7 @@ pub fn softfloat_call<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    let args = args.into_iter().map(|arg| replace_mixed_bits(arg, solver, info)).collect::<Result<Vec<_>, _>>()?;
     let expect_args = |n: usize, name: &str| -> Result<(), ExecError> {
         if args.len() != n {
             Err(ExecError::Type(format!("softfloat {}: 期望 {} 个参数，实得 {}", name, n, args.len()), info))
@@ -1359,11 +1369,11 @@ mod softfloat_tests {
         assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
         let mut model = Model::new(&solver);
         let mut read = |val: Val<B64>| -> u64 {
-            let materialized = model.get_val(&val).unwrap();
-            match materialized {
+            let concrete = model.get_val(&val).unwrap();
+            match concrete {
                 Val::Bits(bv) => bv.lower_u64(),
                 Val::Bool(b) => b as u64,
-                v => panic!("无法物化 {:?}", v),
+                v => panic!("无法具体化 {:?}", v),
             }
         };
         (read(flags), read(result))
@@ -1584,5 +1594,44 @@ mod softfloat_tests {
         ));
         assert_eq!(softfloat_result_struct(softfloat_dispatch("riscv_f32Add").unwrap()), "ztuplez3z5bv5_z5bv32");
         assert_eq!(softfloat_result_struct(softfloat_dispatch("riscv_f32Lt").unwrap()), "ztuplez3z5bv5_z5bool");
+    }
+}
+
+#[cfg(test)]
+mod mixed_bits_tests {
+    use super::*;
+    use crate::bitvector::b129::B129;
+    use crate::ir::Name;
+    use crate::primop::binary_primops;
+    #[test]
+    fn appended_bits_work_as_legacy_helper_operands_and_rounding_mode() {
+        crate::smt::configure_tastic(Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let primops = binary_primops::<B129>();
+        let sym = solver.declare_const(Ty::BitVec(31), info);
+        let one = primops["append"](Val::Symbolic(sym), Val::Bits(B129::new(0, 1)), &mut solver, info).unwrap();
+        let rm_sym = solver.declare_const(Ty::BitVec(1), info);
+        let rm = primops["append"](Val::Bits(B129::new(0, 2)), Val::Symbolic(rm_sym), &mut solver, info).unwrap();
+        let flags_name = Name::from_u32(50);
+        let result_name = Name::from_u32(51);
+        let result = softfloat_call(
+            SfOp::Bin { fmt: SfFmt::F32, op: FPRoundingBinary::Add },
+            vec![rm, one.clone(), one],
+            flags_name,
+            result_name,
+            &mut solver,
+            info,
+        )
+        .unwrap();
+        solver.assert_eq(Exp::Var(sym), Exp::Bits(B129::new((1_f32.to_bits() >> 1) as u64, 31).to_vec()));
+        solver.assert_eq(Exp::Var(rm_sym), Exp::Bits64(B64::new(0, 1)));
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        let Val::Struct(fields) = Model::new(&solver).get_val(&result).unwrap() else {
+            panic!("helper应返回结构体")
+        };
+        assert_eq!(fields[&flags_name], Val::Bits(B129::new(0, 5)));
+        assert_eq!(fields[&result_name], Val::Bits(B129::new(2_f32.to_bits() as u64, 32)));
     }
 }

@@ -1582,6 +1582,7 @@ pub struct Model<'ctx, B> {
     solver: &'ctx Solver<'ctx, B>,
     ctx: &'ctx Context,
     complete_model: bool,
+    concrete_cache: HashMap<Sym, ModelVal>,
 }
 
 impl<B> Drop for Model<'_, B> {
@@ -1622,24 +1623,6 @@ impl ModelVal {
     }
 }
 
-fn model_bits_to_bv<B: BV>(bits: &[bool]) -> Result<B, ExecError> {
-    let width: u32 = bits.len().try_into().expect("模型位向量长度超出 u32");
-    if width > B::MAX_WIDTH {
-        return Err(ExecError::Type(
-            format!("Cannot convert Bits with len={} to Val::Bits (exceeds MAX_WIDTH={})", width, B::MAX_WIDTH),
-            SourceLoc::unknown(),
-        ));
-    }
-
-    let mut bitvector = B::zeros(width);
-    for (index, bit) in bits.iter().enumerate() {
-        if *bit {
-            bitvector = bitvector.set_slice(index.try_into().expect("模型位序超出 u32"), B::BIT_ONE);
-        }
-    }
-    Ok(bitvector)
-}
-
 /// thread-interrupt wrapper 在 ModelEval 超时时构造最终 `SmtError::Timeout`
 /// 所需的调用边界信息。它不是另一套错误类型。
 struct ModelEvalTimeoutContext {
@@ -1652,11 +1635,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         unsafe {
             let z3_model = Z3_solver_get_model(solver.ctx.z3_ctx, solver.z3_solver);
             Z3_model_inc_ref(solver.ctx.z3_ctx, z3_model);
-            Model { z3_model, solver, ctx: solver.ctx, complete_model: false }
+            Model { z3_model, solver, ctx: solver.ctx, complete_model: false, concrete_cache: HashMap::new() }
         }
     }
 
     pub fn set_complete_model(&mut self, b: bool) {
+        if self.complete_model != b {
+            self.concrete_cache.clear();
+        }
         self.complete_model = b;
     }
 
@@ -1715,11 +1701,18 @@ impl<'ctx, B: BV> Model<'ctx, B> {
     }
 
     pub fn get_var(&mut self, var: Sym) -> Result<ModelVal, ExecError> {
+        if let Some(value) = self.concrete_cache.get(&var) {
+            return Ok(value.clone());
+        }
         let var_ast = match self.solver.decls.get(&var) {
             None => return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown())),
             Some(ast) => ast.clone(),
         };
-        self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })
+        let value = self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })?;
+        if matches!(&value, ModelVal::Exp(Exp::Bits(_) | Exp::Bits64(_) | Exp::Bool(_) | Exp::Enum(_))) {
+            self.concrete_cache.insert(var, value.clone());
+        }
+        Ok(value)
     }
 
     /// 只读取输出多样化支持的 enum、bool 和 bitvector；其它合法 SMT sort 不参与取值选择。
@@ -1759,7 +1752,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                     ModelVal::Exp(Exp::Bits64(bv)) => Ok(Val::Bits(B::new(bv.lower_u64(), bv.len()))),
                     ModelVal::Exp(Exp::Bool(b)) => Ok(Val::Bool(b)),
                     ModelVal::Exp(Exp::Enum(m)) => Ok(Val::Enum(m)),
-                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::Bits(model_bits_to_bv(&bv)?)),
+                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::from_bits_slice(&bv)),
                     ModelVal::Exp(exp) => {
                         // 对于其他复杂的表达式，返回错误
                         Err(ExecError::Type(
@@ -1768,7 +1761,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                         ))
                     }
                     ModelVal::Arbitrary(ty) => match ty {
-                        smtlib::Ty::BitVec(len) => Ok(Val::Bits(B::new(0, len))),
+                        smtlib::Ty::BitVec(len) => Ok(Val::from_bits_slice(&vec![false; len as usize])),
                         smtlib::Ty::Bool => Ok(Val::Bool(false)),
                         smtlib::Ty::Enum(_) => Err(ExecError::Type(
                             format!("Cannot create default enum value for {:?}", ty),
@@ -1821,30 +1814,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             MixedBits(segments) => {
                 let mut new_segments = Vec::with_capacity(segments.len());
                 for segment in segments {
-                    match segment {
-                        crate::ir::BitsSegment::Symbolic(sym) => {
-                            let model_val = self.get_var(*sym)?;
-                            match model_val {
-                                ModelVal::Exp(Exp::Bits64(bv)) => {
-                                    new_segments
-                                        .push(crate::ir::BitsSegment::Concrete(B::new(bv.lower_u64(), bv.len())));
-                                }
-                                ModelVal::Exp(Exp::Bits(bv)) => {
-                                    new_segments.push(crate::ir::BitsSegment::Concrete(model_bits_to_bv(&bv)?));
-                                }
-                                ModelVal::Arbitrary(smtlib::Ty::BitVec(len)) => {
-                                    new_segments.push(crate::ir::BitsSegment::Concrete(B::new(0, len)));
-                                }
-                                _ => {
-                                    return Err(ExecError::Type(
-                                        format!("Unsupported model value for BitsSegment: {:?}", model_val),
-                                        SourceLoc::unknown(),
-                                    ));
-                                }
-                            }
-                        }
-                        crate::ir::BitsSegment::Concrete(bv) => {
-                            new_segments.push(crate::ir::BitsSegment::Concrete(*bv));
+                    match self.get_val(&Val::from(segment))? {
+                        Bits(bv) => new_segments.push(crate::ir::BitsSegment::Concrete(bv)),
+                        MixedBits(mut concrete) => new_segments.append(&mut concrete),
+                        value => {
+                            return Err(ExecError::Type(
+                                format!("Unsupported value for BitsSegment: {:?}", value),
+                                SourceLoc::unknown(),
+                            ));
                         }
                     }
                 }
@@ -2872,6 +2849,129 @@ mod tests {
             Sat => (),
             _ => panic!("Round-trip failed, trace {:?}", solver.trace()),
         }
+    }
+
+    #[test]
+    fn model_get_var_reuses_concrete_typed_values_and_mixed_segments() {
+        use crate::bitvector::b129::B129;
+        use crate::ir::BitsSegment;
+
+        configure_tastic(Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B129>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let bits64 = solver.declare_const(Ty::BitVec(64), loc);
+        let bits129 = solver.declare_const(Ty::BitVec(129), loc);
+        let boolean = solver.declare_const(Ty::Bool, loc);
+        let enum_id = solver.get_enum(Name::from_u32(777), 3);
+        let enumeration = solver.declare_const(Ty::Enum(enum_id), loc);
+        let member = EnumMember { enum_id, member: 2 };
+        let wide_bits: Vec<bool> = (0..129).map(|i| i == 0 || i == 64 || i == 128).collect();
+        solver.assert_eq(Var(bits64), Bits64(B64::new(0x1234_5678_9abc_def0, 64)));
+        solver.assert_eq(Var(bits129), Bits(wide_bits.clone()));
+        solver.assert_eq(Var(boolean), Bool(true));
+        solver.assert_eq(Var(enumeration), Enum(member));
+        assert_eq!(solver.check_sat(loc), Sat);
+
+        let mut model = Model::new(&solver);
+        for (sym, expected) in [
+            (bits64, Bits64(B64::new(0x1234_5678_9abc_def0, 64))),
+            (bits129, Bits(wide_bits)),
+            (boolean, Bool(true)),
+            (enumeration, Enum(member)),
+        ] {
+            assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), expected);
+            reset_path_smt_stats();
+            assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), expected);
+            assert_eq!(path_smt_stats().calls, 0, "相同 Model 内的具体 get_var 不应再次调用 Z3");
+        }
+
+        let wide =
+            B129::zeros(129).set_slice(0, B129::BIT_ONE).set_slice(64, B129::BIT_ONE).set_slice(128, B129::BIT_ONE);
+        let value = Val::MixedBits(vec![BitsSegment::Symbolic(bits129), BitsSegment::Concrete(B129::new(5, 3))]);
+        reset_path_smt_stats();
+        assert_eq!(
+            model.get_val(&value).unwrap(),
+            Val::MixedBits(vec![BitsSegment::Concrete(wide), BitsSegment::Concrete(B129::new(5, 3))])
+        );
+        assert_eq!(path_smt_stats().calls, 0, "MixedBits 应复用同一个符号的具体值");
+
+        reset_path_smt_stats();
+        assert_eq!(model.get_exp(&Var(bits129)).unwrap().unwrap_exp(), Bits(wide.to_vec()));
+        assert!(path_smt_stats().calls > 0, "get_exp 应保留原有求值路径");
+    }
+
+    #[test]
+    fn model_get_var_cache_is_local_and_cleared_on_completion_switch() {
+        configure_tastic(Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(8), loc);
+        solver.assert_eq(Var(sym), Bits64(B64::new(0xa5, 8)));
+        assert_eq!(solver.check_sat(loc), Sat);
+
+        let mut model = Model::new(&solver);
+        assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        reset_path_smt_stats();
+        model.get_var(sym).unwrap();
+        assert_eq!(path_smt_stats().calls, 0);
+
+        model.set_complete_model(true);
+        reset_path_smt_stats();
+        assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        assert!(path_smt_stats().calls > 0, "切换到 completion 后须重新求值");
+
+        model.set_complete_model(false);
+        reset_path_smt_stats();
+        assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        assert!(path_smt_stats().calls > 0, "切换回非 completion 后须重新求值");
+
+        let mut fresh = Model::new(&solver);
+        reset_path_smt_stats();
+        assert_eq!(fresh.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        assert!(path_smt_stats().calls > 0, "新 Model 不应继承另一实例的缓存");
+    }
+
+    #[test]
+    fn model_get_var_does_not_cache_arbitrary_or_errors() {
+        configure_tastic(Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let arbitrary = solver.declare_const(Ty::BitVec(8), loc);
+        let unsupported = solver.declare_const(Ty::Array(Box::new(Ty::BitVec(8)), Box::new(Ty::BitVec(8))), loc);
+        assert_eq!(solver.check_sat(loc), Sat);
+
+        let mut model = Model::new(&solver);
+        assert!(model.get_var(arbitrary).unwrap().is_arbitrary());
+        assert!(model.concrete_cache.is_empty());
+        reset_path_smt_stats();
+        assert!(model.get_var(arbitrary).unwrap().is_arbitrary());
+        assert!(path_smt_stats().calls > 0, "Arbitrary 不应跳过再次求值");
+        assert!(model.concrete_cache.is_empty());
+
+        model.set_complete_model(true);
+        assert_eq!(model.get_exp(&Var(arbitrary)).unwrap().unwrap_exp(), Bits64(B64::new(0, 8)));
+        model.set_complete_model(false);
+        assert_eq!(model.get_var(arbitrary).unwrap().unwrap_exp(), Bits64(B64::new(0, 8)));
+        reset_path_smt_stats();
+        model.get_var(arbitrary).unwrap();
+        assert_eq!(path_smt_stats().calls, 0, "completion 后得到的具体值可在当前模式下复用");
+
+        let invalid = Sym::from_u32(9999);
+        assert!(matches!(model.get_var(invalid), Err(ExecError::Type(_, _))));
+        assert!(matches!(model.get_var(invalid), Err(ExecError::Type(_, _))));
+        assert!(!model.concrete_cache.contains_key(&invalid));
+        assert!(matches!(model.get_var(unsupported), Err(ExecError::Type(_, _))));
+        assert!(matches!(model.get_var(unsupported), Err(ExecError::Type(_, _))));
+        assert!(!model.concrete_cache.contains_key(&unsupported));
     }
 
     #[test]
