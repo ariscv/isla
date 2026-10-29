@@ -498,6 +498,7 @@ impl<B: BV> Target<B> for RV32<B> {
         regs.push("PC".to_string());
         regs.push("cur_privilege".to_string());
         regs.push("mstatus".to_string());
+        regs.push("fcsr".to_string());
         regs.push("vl".to_string());
         regs.push("vstart".to_string());
         regs.push("vtype".to_string());
@@ -628,6 +629,7 @@ impl<B: BV> Target<B> for RV64<B> {
         // regs.push("PC".to_string());
         regs.push("cur_privilege".to_string());
         regs.push("mstatus".to_string());
+        regs.push("fcsr".to_string());
         regs.push("vl".to_string());
         regs.push("vstart".to_string());
         regs.push("vtype".to_string());
@@ -1379,6 +1381,86 @@ mod tests {
         assert!(pre_state.contains(&"vl".to_string()));
         assert!(pre_state.contains(&"vstart".to_string()));
         assert!(pre_state.contains(&"vcsr".to_string()));
+    }
+
+    #[test]
+    fn riscv_state_registers_include_fcsr() {
+        assert!(rv64().reg_list().contains(&"fcsr".to_string()));
+        assert!(rv32().reg_list().contains(&"fcsr".to_string()));
+    }
+
+    #[test]
+    fn struct_setup_and_symbolic_post_write_preserve_pre_state() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut symtab = Symtab::new();
+        let fcsr_text = zencode::encode("fcsr");
+        let fcsr_ty_text = zencode::encode("Fcsr");
+        let bits_text = zencode::encode("bits");
+        let fcsr_name = symtab.intern(&fcsr_text);
+        let fcsr_ty_name = symtab.intern(&fcsr_ty_text);
+        let bits_name = symtab.intern(&bits_text);
+        let mut shared_state = SharedState::empty(symtab);
+        shared_state.registers.insert(fcsr_name, Ty::Struct(fcsr_ty_name));
+        shared_state.type_info.structs.insert(fcsr_ty_name, BTreeMap::from([(bits_name, Ty::Bits(32))]));
+        let mut regs = RegisterBindings::new();
+        let mut original_fields = ahash::HashMap::default();
+        original_fields.insert(bits_name, Val::Bits(B64::new(0, 32)));
+        regs.insert(fcsr_name, false, UVal::Init(Val::Struct(original_fields)));
+        let mut target = rv64();
+
+        target.setup_pre_state(&mut regs, &Bindings::default(), &shared_state, &mut solver).unwrap();
+        let before = target.pre_state().get(&fcsr_name).unwrap();
+        let pre_bits = match before {
+            Val::Struct(fields) => match fields.get(&bits_name).unwrap() {
+                Val::Symbolic(symbol) => *symbol,
+                value => panic!("防御性编程：Fcsr.bits 未符号化: {:?}", value),
+            },
+            value => panic!("防御性编程：fcsr 未保留 Sail struct: {:?}", value),
+        };
+        // 表达写回：原有 flags 与新 flags 取并，再写入同一目标寄存器。
+        let post_bits = solver.define_const(
+            smtlib::Exp::Bvor(Box::new(smtlib::Exp::Var(pre_bits)), Box::new(smtlib::bits64(0x01, 32))),
+            SourceLoc::unknown(),
+        );
+        let mut post_fields = ahash::HashMap::default();
+        post_fields.insert(bits_name, Val::Symbolic(post_bits));
+        regs.assign(fcsr_name, Val::Struct(post_fields), &shared_state);
+        solver.assert_eq(smtlib::Exp::Var(pre_bits), smtlib::bits64(0x20, 32));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        let mut model = Model::new(&solver);
+
+        let pre = FmtVal::from_val(target.pre_state().get(&fcsr_name).unwrap(), &mut model).unwrap();
+        let post = FmtVal::from_val(regs.get_last_if_initialized(fcsr_name).unwrap(), &mut model).unwrap();
+        assert_eq!(pre.to_str(&shared_state), "32'h0000_0020");
+        assert_eq!(post.to_str(&shared_state), "32'h0000_0021");
+    }
+
+    #[test]
+    fn fcsr_rounding_mode_and_flags_are_not_fixed_by_setup() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for fcsr_bits in [0x00_u64, 0x9f_u64] {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let mut symtab = Symtab::new();
+            let fcsr_name_text = zencode::encode("fcsr");
+            let fcsr_name = symtab.intern(&fcsr_name_text);
+            let mut shared_state = SharedState::empty(symtab);
+            shared_state.registers.insert(fcsr_name, Ty::Bits(32));
+            let mut regs = RegisterBindings::new();
+            regs.insert(fcsr_name, false, UVal::Init(Val::Bits(B64::new(0, 32))));
+            let mut target = rv64();
+
+            target.setup_pre_state(&mut regs, &Bindings::default(), &shared_state, &mut solver).unwrap();
+
+            let fcsr = match target.pre_state().get(&fcsr_name).unwrap() {
+                Val::Symbolic(symbol) => *symbol,
+                value => panic!("防御性编程：fcsr 未保持符号性: {:?}", value),
+            };
+            solver.assert_eq(smtlib::Exp::Var(fcsr), smtlib::bits64(fcsr_bits, 32));
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        }
     }
 
     #[test]
