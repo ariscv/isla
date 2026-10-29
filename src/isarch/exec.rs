@@ -859,6 +859,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     }
                                 }
                             }
+                            let concrete_ret_val_str;
                             let mut requested_instruction = String::new();
                             let mut isa_state_complete = BTreeMap::new();
                             let mut isa_state_post = BTreeMap::new();
@@ -916,7 +917,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
-                            if smt_result == isla_lib::smt::SmtResult::Sat {
+                            {
                                 {
                                     let mut model = Model::new(&solver);
                                     // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
@@ -1177,6 +1178,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 return;
                                             }
                                         };
+                                    concrete_ret_val_str = match model.get_val(ret_val) {
+                                        Ok(value) => value.to_str(shared_state),
+                                        Err(error) => {
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            submit_trace(frame, &mut trace_diagnostics);
+                                            return;
+                                        }
+                                    };
                                     log!(log::PATH_RESULT, "3. ==============================");
                                 }
                             }
@@ -1185,7 +1195,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 test_ins,
                                 test_ins_encdec,
                                 isa_state,
-                                ret_val_str.clone(),
+                                concrete_ret_val_str,
                                 frame.path_signature(),
                                 requested_instruction,
                                 isa_state_complete,
@@ -1526,7 +1536,7 @@ mod tests {
         let defs = vec![
             Def::Register(mstatus, Ty::Bits(64), vec![]),
             Def::Union(instruction, vec![(requested, Ty::Unit)]),
-            Def::Union(result_type, vec![(retire, Ty::Unit)]),
+            Def::Union(result_type, vec![(retire, Ty::Bits(64))]),
             Def::Val(execute, vec![Ty::Union(instruction)], Ty::Union(result_type)),
             Def::Fn(
                 execute,
@@ -1539,7 +1549,7 @@ mod tests {
                         Exp::Bits(B64::new(1 << 63, 64)),
                         source,
                     ),
-                    Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Unit], source),
+                    Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Id(mstatus)], source),
                     Instr::End,
                 ],
             ),
@@ -1608,6 +1618,8 @@ mod tests {
             let pre = bits("isa-state-complete");
             let post = bits("isa-state-post");
             assert_eq!(post, pre ^ (1 << 63), "前后态必须由同一编码可行模型具体化");
+            let expected_return = Val::<B64>::Ctor(retire, Box::new(Val::Bits(B64::new(post, 64))));
+            assert_eq!(case["ret_val"], expected_return.to_str(&shared), "返回值必须与编码分支的后态使用同一模型");
             let encoding = case["test-ins-encdec"].as_str().unwrap();
             if encoding.starts_with("16'") {
                 assert_eq!(pre & 0x600, 0x400);
