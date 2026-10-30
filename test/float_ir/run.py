@@ -34,6 +34,7 @@ def run(label, command):
 
 assert run('build', ['cargo', 'build', '--offline', '-q', '--manifest-path', ROOT / 'test/float_ir/runner/Cargo.toml']) == 0
 assert run('migration-conflicts', ['python3', ROOT / 'test/float_ir/test_migration.py']) == 0
+assert run('nan-unbox-branches', ['python3', ROOT / 'test/float_ir/check_nan_unbox_branches.py']) == 0
 for name in ['rv64d.ir', 'rv32d.ir', 'ir/rv64d_v128_e64.ir', 'ir/rv64d_v256_e64.ir', 'ir/rv64d_v512_e64.ir']:
     ir = ROOT / name
     label = ir.stem

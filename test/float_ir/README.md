@@ -18,6 +18,14 @@ RV32使用`rv32_fd.toml`，其CLINT地址/大小按该IR的34位物理地址类�
 
 输出目录保存命令、退出码、fixture和原始日志；任一失败使脚本非零退出。RV32通过的是helper和直接FADD执行，不代表公共RV32 solve-state入口已经支持。
 
-IR修复采用冻结生成组件装配：`scripts/migrate_float_ir.py`补齐缺体接口，检查同名类型/extern/复用函数并重映射`files`与SourceLoc；状态模式仅允许替换`get_F_bits/set_F_bits`，调用目标原有架构专属Dirty函数，保留其余定义。输入已经完成相同装配时显式拒绝重复。具体提供方来源、生成配置及哈希在根工作区修复记录，不把组件装配称为全模型重生。
+历史兼容性修复曾采用冻结生成组件装配：`scripts/migrate_float_ir.py`补齐缺体接口，检查同名类型/extern/复用函数并重映射`files`与SourceLoc；状态模式仅允许替换`get_F_bits/set_F_bits`，调用目标原有架构专属Dirty函数，保留其余定义。输入已经完成相同装配时显式拒绝重复。具体提供方来源、生成配置及哈希在根工作区修复记录，不把组件装配称为全模型重生。
 
-`ir/rv64d_v512_e64.ir`历史文件名对应的实际VLEN仍为256；本修复保留原宽度与初始化。其他旧IR的BF16 execute历史语义未在此次兼容性修复中迁移。
+上述装配说明适用于旧兼容性修复版本。当前全部IR由固定模型完整重生，生成入口为`scripts/regenerate_ir.py`，配置和来源见`ir/provenance/manifest.json`。当前V128/V256/V512分别使用对应配置，不再沿用旧V512文件实际VLEN=256的历史情况。
+
+`check_nan_unbox_branches.py`检查全部IR保留等宽判断及boxing有效/无效的显式分支，已接入`run.py`。另可传入实际FLEQ.S的JSON核对两侧见证：
+
+```sh
+python3 test/float_ir/check_nan_unbox_branches.py --fleq-json output/rv64_zFLEQ_S.json
+```
+
+恢复该判断不能代表其余浮点数据条件已全部覆盖；本回归不以路径数量或执行耗时下降作为通过条件。

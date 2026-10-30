@@ -27,3 +27,9 @@ python3 scripts/regenerate_ir.py --model ../sail-riscv --sail SAIL --plugin PLUG
 ```
 
 按`manifest.json`的哈希与配置分别生成RV32、RV64/V128/V256/V512。默认`rv64d.ir`与`ir/rv64d_v128_e64.ir`内容相同。生成脚本保留必要F/V寄存器接口、转换helper及压缩编码接口，不手工修改生成IR。源码位置预算由模型仓`configs/isla/workarounds/`统一维护；代码变化时迁移坐标，IR哈希变化本身不要求改源码坐标。
+
+## NaN-boxing控制流（2026-10-31）
+
+`nan_unbox`恢复原Sail显式if，保留boxing高位检查的两个分支。该处不再以未经整Clause性能对照证实的收益合并为ITE。`test/float_ir/check_nan_unbox_branches.py`检查全部受支持IR；可用`--fleq-json`额外核对实际两侧见证。
+
+这只恢复boxing有效/无效判断；有效boxing的低位仍可能是普通数、NaN、无穷等。其余ITE及数值分类条件、非法布局双工具链表示、ExecuteAs等独立review项不能据此算作已修复。恢复分支后需重新验证产物，历史样本数与性能记录仅适用于原版本。
