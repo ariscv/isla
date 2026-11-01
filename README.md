@@ -214,3 +214,37 @@ fcsr = "0b000_?????"
 `?` 和 `x` 目前求解语义相同，不增加关注度或输出过滤机制；同一位多次读取保持一致。执行语义仍可以约束这些符号位，完整见证输出仍会从最终模型取得具体值。
 
 本分支默认关闭额外的 RV64 privilege/SXL/UXL/MPP 初态域限制。需要旧限制时，在 TOML **顶层**（任何表之前）添加 `initial_state_rv64_domain = true`；它与本配置共同生效，冲突时无可满足结果。已有 RVV `vtype/vl` 约束继续保留。
+
+### 求解策略
+
+直接运行 `isarch` 时，不传 `--tastic` 使用 Z3 的 `default` 策略；也可显式选择
+`--tastic qffp`、`--tastic qfaufbv` 或 `--tastic smt`。策略仍需通过当前 Z3 的随机种子参数能力检查。
+本工作区链接的官方 Z3 已包含浮点与枚举组合的策略修复，`default` 和显式 `qffp` 均可使用；
+仅更换 PATH 中的 `z3` 不会更换 Isla 实际链接的共享库。
+
+`scripts/run.mk` 为 `ALL` 中各 Clause 写明策略：非访存浮点 Clause 使用 `qffp`，其余使用 `qfaufbv`。
+`make solve-FLEQ_S` 会显式传 `--tastic qffp`，`make solve-MRET`、`make solve-LOAD` 传 `--tastic qfaufbv`。
+可用 `make solve-FLEQ_S TASTIC=smt` 临时覆盖，未新增缺少策略的报错规则。
+
+### 本工作区的官方 Z3 链接版本
+
+`make build-isarch` 和 `make solve-*` 默认使用用户前缀
+`~/.local/opt/z3-official-1fd1d3613` 中的官方 Z3，源码提交为
+`1fd1d3613c1f34c4dff36cba3209b2234f6c6d2b`。需先将该官方构建安装到此前缀，
+或用 `make build-isarch Z3_PREFIX=/path/to/installed/z3` 指定实际安装位置。
+Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/release/isarch --version`
+可确认实际加载版本。CLI 的默认策略和 Make 的各 Clause 策略保持独立。
+
+### 指令 JSON 的三种表示
+
+`solve-state` 每条记录保留 `test-ins`（助记符）和 `test-ins-encdec`（原定宽编码），
+并增加 `instruction-representations`：`mnemonic`、`encoding.bits`（精确二进制位串）、
+`encoding.hex`、`encoding.bytes-le`（按内存顺序的小端字节）及 `insn.text`（精确 `.insn`）。
+例如编码 `32'hee1750d7` 对应 `.insn 4, 0xee1750d7`、字节 `d75017ee`。
+16/32位完整编码的 `status` 为 `complete`；缺失、含未具体化位或未支持位宽明确标为 `incomplete`。
+
+助记符保留模型给出的文本。非法 BF16 寄存器布局可能被 Clang 拒绝，
+此时可用精确 `.insn` 或 `encoding.bytes-le` 生成的 `.byte` 保留原指令；
+机器码能汇编并不代表它在模型中合法退休，仍须检查 `ret_val`。
+`ExecuteAs` 是中间执行结果；生成器继续执行其载荷后才输出最终返回值和寄存器后态，
+记录中的编码和助记符仍属于原请求指令。

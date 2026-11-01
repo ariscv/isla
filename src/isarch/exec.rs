@@ -10,7 +10,7 @@ use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
 use isla_lib::error::{ExecError, SmtError};
 use isla_lib::executor::{backtrace_string, LocalFrame, Run};
-use isla_lib::executor::{ExecutionLimits, TaskState};
+use isla_lib::executor::{ExecutionLimits, ScopedCollector, TaskId, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
 use isla_lib::log;
@@ -34,6 +34,8 @@ struct AssemGenJsonItem {
     test_ins: String,
     #[serde(rename = "test-ins-encdec")]
     test_ins_encdec: String,
+    #[serde(rename = "instruction-representations", default)]
+    instruction_representations: serde_json::Value,
     #[serde(rename = "isa-state")]
     isa_state: BTreeMap<String, String>,
     ret_val: String,
@@ -95,6 +97,10 @@ impl AssemGenJsonItem {
         arch.insert("xlen".to_string(), target.xlen().to_string());
         AssemGenJsonItem {
             arch,
+            instruction_representations: super::representation::instruction_representations(
+                &test_ins,
+                &test_ins_encdec,
+            ),
             test_ins,
             test_ins_encdec,
             isa_state,
@@ -712,15 +718,27 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
 
-    //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(
-    isla_lib::executor::execute_ir_function_with_checkpoint_multi_thread(
-        "zexecute",
-        &fun_args,
-        shared_state,
-        &symbolic_regs,
-        lets,
-        &result,
-        &|thread, _task_id, exec_result, shared_state, mut solver, collected| {
+    // ExecuteAs 是同一机器指令的中间返回。new_call 保留该路径的寄存器、内存、
+    // 路径身份、累计执行时间及分支预算；checkpoint 保留前段约束。
+    let continuations = Arc::new(Mutex::new(Vec::new()));
+    let queued_continuations = continuations.clone();
+    let target = &*target;
+    let collector: &ScopedCollector<'ir, '_, B, Mutex<SolveCollectorState>> =
+        &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+            if let Ok((Run::Finished(Val::Ctor(ctor, payload)), frame)) = &exec_result {
+                if zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "ExecuteAs" {
+                    assert!(matches!(payload.as_ref(), Val::Ctor(_, _)), "ExecuteAs 载荷必须是指令构造子");
+                    let function = shared_state.symtab.lookup("zexecute");
+                    let (args, ret_ty, instrs) = shared_state.functions.get(&function).unwrap();
+                    let next_frame = frame.new_call(function, args, ret_ty, Some(&[payload.as_ref().clone()]), instrs);
+                    queued_continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned").push((
+                        task_id,
+                        next_frame,
+                        checkpoint(&mut solver),
+                    ));
+                    return;
+                }
+            }
             {
                 let frame = match &exec_result {
                     Ok((_, frame)) | Err((_, frame)) => frame,
@@ -1237,10 +1255,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                     }
                     Run::Dead => {}
 
-                    Run::Suspended => log!(
-                        log::PATH_RESULT,
-                        &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks())
-                    ),
+                    Run::Suspended => {
+                        log!(
+                            log::PATH_RESULT,
+                            &format!("tid:{} 执行好一条路径(Suspended)，fork={}", thread, frame.forks())
+                        )
+                    }
                 },
                 Err((error, frame)) => {
                     match error {
@@ -1274,12 +1294,29 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                 };
                 submit_trace(frame, &mut trace_diagnostics);
             }
-        },
-        cp,
-        num_threads,
-        timeout,
-        &task_state,
-    );
+        };
+
+    let function = shared_state.symtab.lookup("zexecute");
+    let (args, ret_ty, instrs) = shared_state.functions.get(&function).unwrap();
+    let mut initial_frame = LocalFrame::new(function, args, ret_ty, Some(&fun_args), instrs);
+    initial_frame.add_regs(&symbolic_regs);
+    initial_frame.add_lets(lets);
+    if let Some(memory) = initial_memory {
+        initial_frame.set_memory(memory);
+    }
+    let mut tasks = vec![initial_frame.task_with_checkpoint(TaskId::fresh(), &task_state, cp)];
+    loop {
+        isla_lib::executor::start_multi(num_threads, timeout, tasks, shared_state, result.clone(), collector);
+        let next = std::mem::take(&mut *continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned"));
+        if next.is_empty() {
+            break;
+        }
+        tasks = next
+            .into_iter()
+            .map(|(task_id, frame, checkpoint)| frame.task_with_checkpoint(task_id, &task_state, checkpoint))
+            .collect();
+    }
+    // collector 的引用不再使用后释放，随后才能取得 result 的唯一所有权。
 
     // 提取字符串结果
     let result_mutex = match Arc::try_unwrap(result) {
@@ -1408,6 +1445,7 @@ mod tests {
         Impossible,
         Assertion,
         PartialAssembly,
+        ExecuteAs,
     }
 
     fn check_encoding_fixture(mode: EncodingFixture) {
@@ -1463,6 +1501,8 @@ mod tests {
         let clause = format!("zENCODING_GUARD_{}_{}", std::process::id(), mode as u8);
         let requested = symtab.intern(&clause);
         let retire = symtab.intern("zRetire_Success");
+        let execute_as = symtab.intern("zExecuteAs");
+        let payload = symtab.intern("zENCODING_PAYLOAD");
         let execute = symtab.intern("zexecute");
         let assembly = symtab.intern("zassembly_forwards");
         let normal = symtab.intern("zencdec_forwards");
@@ -1562,26 +1602,43 @@ mod tests {
         } else {
             vec![Instr::Copy(Loc::Id(RETURN), Exp::String("guarded".to_string()), source), Instr::End]
         };
+        let mut execute_body = vec![
+            Instr::PrimopBinary(
+                Loc::Id(mstatus),
+                isla_lib::primop::binary_primops::<B64>()["xor_bits"],
+                Exp::Id(mstatus),
+                Exp::Bits(B64::new(1 << 63, 64)),
+                source,
+            ),
+            Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Id(mstatus)], source),
+            Instr::End,
+        ];
+        if matches!(mode, EncodingFixture::ExecuteAs) {
+            // 原请求先写 bit63，再交给载荷写 bit62。若从初态重启，第一笔写会丢失。
+            execute_body = vec![
+                Instr::Jump(Exp::Kind(requested, Box::new(Exp::Id(argument))), 6, source),
+                execute_body[0].clone(),
+                Instr::Decl(bit, Ty::Union(instruction), source),
+                Instr::Call(Loc::Id(bit), false, payload, vec![Exp::Unit], source),
+                Instr::Call(Loc::Id(RETURN), false, execute_as, vec![Exp::Id(bit)], source),
+                Instr::End,
+                Instr::PrimopBinary(
+                    Loc::Id(mstatus),
+                    isla_lib::primop::binary_primops::<B64>()["xor_bits"],
+                    Exp::Id(mstatus),
+                    Exp::Bits(B64::new(1 << 62, 64)),
+                    source,
+                ),
+                Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Id(mstatus)], source),
+                Instr::End,
+            ];
+        }
         let defs = vec![
             Def::Register(mstatus, Ty::Bits(64), vec![]),
-            Def::Union(instruction, vec![(requested, Ty::Unit)]),
-            Def::Union(result_type, vec![(retire, Ty::Bits(64))]),
+            Def::Union(instruction, vec![(requested, Ty::Unit), (payload, Ty::Unit)]),
+            Def::Union(result_type, vec![(retire, Ty::Bits(64)), (execute_as, Ty::Union(instruction))]),
             Def::Val(execute, vec![Ty::Union(instruction)], Ty::Union(result_type)),
-            Def::Fn(
-                execute,
-                vec![argument],
-                vec![
-                    Instr::PrimopBinary(
-                        Loc::Id(mstatus),
-                        isla_lib::primop::binary_primops::<B64>()["xor_bits"],
-                        Exp::Id(mstatus),
-                        Exp::Bits(B64::new(1 << 63, 64)),
-                        source,
-                    ),
-                    Instr::Call(Loc::Id(RETURN), false, retire, vec![Exp::Id(mstatus)], source),
-                    Instr::End,
-                ],
-            ),
+            Def::Fn(execute, vec![argument], execute_body),
             Def::Val(assembly, vec![Ty::Union(instruction)], Ty::String),
             Def::Fn(assembly, vec![argument], assembly_body),
             Def::Val(normal, vec![Ty::Union(instruction)], Ty::Bits(32)),
@@ -1636,7 +1693,11 @@ mod tests {
         let cases = data["gen"].as_array().unwrap();
         assert_eq!(
             cases.len(),
-            if matches!(mode, EncodingFixture::Guard | EncodingFixture::PartialAssembly) { 1 } else { 2 }
+            if matches!(mode, EncodingFixture::Guard | EncodingFixture::PartialAssembly | EncodingFixture::ExecuteAs) {
+                1
+            } else {
+                2
+            }
         );
         let mut encodings = std::collections::BTreeSet::new();
         for case in cases {
@@ -1646,7 +1707,8 @@ mod tests {
             };
             let pre = bits("isa-state-complete");
             let post = bits("isa-state-post");
-            assert_eq!(post, pre ^ (1 << 63), "前后态必须由同一编码可行模型具体化");
+            let written_bits = (1 << 63) | if matches!(mode, EncodingFixture::ExecuteAs) { 1 << 62 } else { 0 };
+            assert_eq!(post, pre ^ written_bits, "前后态必须包含全部 ExecuteAs 阶段的状态修改");
             let expected_return = Val::<B64>::Ctor(retire, Box::new(Val::Bits(B64::new(post, 64))));
             assert_eq!(case["ret_val"], expected_return.to_str(&shared), "返回值必须与编码分支的后态使用同一模型");
             let encoding = case["test-ins-encdec"].as_str().unwrap();
@@ -1658,6 +1720,11 @@ mod tests {
             encodings.insert(encoding.to_string());
         }
         assert_eq!(encodings.len(), cases.len());
+    }
+
+    #[test]
+    fn collector_executes_execute_as_payload_without_resetting_state() {
+        check_encoding_fixture(EncodingFixture::ExecuteAs);
     }
 
     #[test]
@@ -2453,6 +2520,7 @@ mod tests {
             path_signature: signature,
             item: AssemGenJsonItem {
                 arch: BTreeMap::new(),
+                instruction_representations: serde_json::Value::Null,
                 test_ins: test_ins.to_string(),
                 test_ins_encdec: "32'h0000_0000".to_string(),
                 isa_state: BTreeMap::new(),

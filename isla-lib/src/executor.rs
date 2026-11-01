@@ -818,6 +818,8 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
         solver,
     );
     frame.path_timing.pause_active();
+    // collector 可能用完成帧继续执行，必须连同最后一次 fork 之后的 SMT 调用一起保留。
+    frame.capture_path_smt_stats();
     #[cfg(feature = "tracetool")]
     if shared_state.trace.ftrace_enabled() {
         frame.trace_path.capture_function_trace(solver.trace());
@@ -852,23 +854,24 @@ impl<'a, 'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for SingleForkSink<'a, 'ir, 
     }
 }
 
-struct MultiForkSink<'scope, 'env, 'ir, 'task, B: BV, R> {
-    runtime: Arc<MultiRuntime<'ir, 'task, B, R>>,
+struct MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B: BV, R> {
+    runtime: Arc<MultiRuntime<'ir, 'task, 'collector, B, R>>,
     scope: &'scope thread::Scope<'scope, 'env>,
 }
 
-impl<'scope, 'env, 'ir, 'task, B: BV + Send + Sync, R: Send + Sync> ForkSink<'ir, 'task, B>
-    for MultiForkSink<'scope, 'env, 'ir, 'task, B, R>
+impl<'scope, 'env, 'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> ForkSink<'ir, 'task, B>
+    for MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B, R>
 where
     'ir: 'scope,
     'task: 'scope,
+    'collector: 'scope,
 {
     fn submit(&self, task: Task<'ir, 'task, B>) {
         self.runtime.submit(self.scope, task);
     }
 }
 
-struct MultiRuntime<'ir, 'task, B: BV, R> {
+struct MultiRuntime<'ir, 'task, 'collector, B: BV, R> {
     limit: usize,
     timeout: PathTimeout,
     active_threads: AtomicUsize,
@@ -878,16 +881,17 @@ struct MultiRuntime<'ir, 'task, B: BV, R> {
     queued_tasks: Mutex<VecDeque<Task<'ir, 'task, B>>>,
     finished_mu: Mutex<()>,
     finished_cv: Condvar,
-    shared_state: &'ir SharedState<'ir, B>,
+    shared_state: &'collector SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &'ir Collector<'ir, B, R>,
+    collector: &'collector ScopedCollector<'ir, 'collector, B, R>,
 }
 
-impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B, R> {
+impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, 'collector, B, R> {
     fn submit<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>, task: Task<'ir, 'task, B>)
     where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         self.pending_tasks.fetch_add(1, Ordering::AcqRel);
         if self.try_reserve_thread() {
@@ -917,6 +921,7 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     ) where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         let tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
         let runtime = Arc::clone(self);
@@ -939,6 +944,7 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     ) where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
@@ -968,6 +974,7 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
         self.active_threads.fetch_sub(1, Ordering::AcqRel);
@@ -985,6 +992,7 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         if self.refill_owner.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
@@ -2191,7 +2199,10 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 /// state at the end of the execution or an error, as well as the shared state and the SMT solver
 /// state associated with that execution. It build a final result for all the executions by
 /// collecting the results into a type R.
-pub type Collector<'ir, B, R> = dyn 'ir
+// 保留既有公开别名；作用域调用可独立缩短 collector 捕获值的借用期。
+pub type Collector<'ir, B, R> = ScopedCollector<'ir, 'ir, B, R>;
+
+pub type ScopedCollector<'ir, 'collector, B, R> = dyn 'collector
     + Sync
     + Fn(
         usize,
@@ -2266,7 +2277,7 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     timeout: PathTimeout,
     shared_state: &SharedState<'ir, B>,
     collected: &R,
-    collector: &Collector<'ir, B, R>,
+    collector: &ScopedCollector<'ir, '_, B, R>,
 ) {
     let queue = Worker::new_lifo();
     queue.push(task);
@@ -2353,13 +2364,13 @@ enum Progress {
 
 /// Start symbolically executing a Task across `num_threads` new threads, collecting the results
 /// using the given collector.
-pub fn start_multi<'ir, B: BV, R>(
+pub fn start_multi<'ir, 'collector, B: BV, R>(
     num_threads: usize,
     timeout: Option<u64>,
     tasks: Vec<Task<'ir, '_, B>>,
-    shared_state: &'ir SharedState<'ir, B>,
+    shared_state: &'collector SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &'ir Collector<'ir, B, R>,
+    collector: &'collector ScopedCollector<'ir, 'collector, B, R>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -4982,6 +4993,63 @@ fn zsteptest(zu) {
         );
 
         assert!(*completed.lock().unwrap());
+    }
+
+    #[test]
+    fn completed_frame_retains_final_smt_statistics_for_continuation() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let task_state = TaskState::new();
+        let completed = Mutex::new(false);
+        // 最后一次分叉以后仍可能求解，完成帧不能只保留上次fork时的统计。
+        let query: crate::primop::Unary<B64> = |value, solver, source| {
+            assert!(matches!(solver.check_sat(source), SmtResult::Sat));
+            Ok(value)
+        };
+        let frame = make_frame(vec![Instr::PrimopUnary(Loc::Id(RETURN), query, Exp::Unit, info()), Instr::End]);
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &task_state, Checkpoint::new()),
+            &shared_state,
+            &completed,
+            &|_, _, result, _, _, completed| {
+                let Ok((Run::Finished(Val::Unit), frame)) = result else { panic!("测试路径应正常完成") };
+                assert!(frame.path_smt_stats.calls > 0, "完成帧遗漏了最后一次SMT求解");
+                assert_eq!(frame.path_smt_stats, crate::smt::path_smt_stats());
+                *completed.lock().unwrap() = true;
+            },
+        );
+        assert!(*completed.lock().unwrap());
+    }
+
+    #[test]
+    fn multi_collector_can_queue_ir_frames_and_borrow_local_configuration() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let task_state = TaskState::new();
+        // frame 固定借用静态 IR，collector 仍应能只在本次调用中借用局部配置。
+        let queued: Mutex<Vec<LocalFrame<'static, B64>>> = Mutex::new(Vec::new());
+        let local_configuration = String::from("本次续执行");
+        let collector =
+            |_: usize,
+             _: TaskId,
+             result: Result<(Run<B64>, LocalFrame<'static, B64>), (ExecError, LocalFrame<'static, B64>)>,
+             _: &SharedState<'static, B64>,
+             _: Solver<B64>,
+             _: &()| {
+                assert_eq!(local_configuration, "本次续执行");
+                let Ok((Run::Finished(Val::Unit), frame)) = result else { panic!("测试路径应正常完成") };
+                queued.lock().unwrap().push(frame);
+            };
+        let frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()), Instr::End]);
+        start_multi(
+            2,
+            None,
+            vec![frame.task_with_checkpoint(TaskId::fresh(), &task_state, Checkpoint::new())],
+            &shared_state,
+            Arc::new(()),
+            &collector,
+        );
+        assert_eq!(queued.lock().unwrap().len(), 1);
     }
 
     #[test]
