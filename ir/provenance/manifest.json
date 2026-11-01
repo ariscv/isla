@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "model_commit": "fd71c9ab58fe6f41b97c976a5f7e470318c708a8",
+  "model_commit": "a9fd9476fc1bf471070a38e01ee9233d10d742d3",
   "model_dirty": false,
   "sail_version": "Sail 0.20.1 (feat/float-support @ f4f8e4584a70588c66c9e7a6286cc20211618f18)",
   "sail_binary_sha256": "373a37c268779bad65381b98c3dc13d56c3db9db90102d28d6f410278b23d45a",
@@ -58,7 +58,7 @@
         "rv64d.ir",
         "ir/rv64d_v128_e64.ir"
       ],
-      "sha256": "0e7a9bfd9bb0655e48fbb02097c31a83f97b59d0eb3fbbf4b048c606eee7a85f",
+      "sha256": "23e37501a6036ba92e0b043c261fc8efa91feb3e3b5d77698f14d9a0c1cd6048",
       "config": "rv64d.json",
       "config_sha256": "89923ebff21718bb382df38bf246207cbb1eb5ae0cd314d078d87c0ab2b9f625",
       "model_files": {
@@ -99,7 +99,7 @@
           "sha256": "0331aaccb2003c810a1d2786bd00a6c6d89ca9b5a04dc6d7d0534a413d2fb3b0"
         },
         "core/ieee_fp_exceptions.sail": {
-          "sha256": "2fb810384cd5f099b234e92391f769ddfbbd02258e06906e78bd13c37d4e0bb4"
+          "sha256": "fdb105f1bf911b5d13fef2bfa2ee1f46b66a4ccca3c6d878bc31063937cedbc6"
         },
         "core/interrupt_regs.sail": {
           "sha256": "e00d1e2d4d58216a86d46b14aafaf3cb8c50103857e4be962fcfe8d690a5c4fc"
@@ -315,10 +315,10 @@
           "sha256": "7122df6d3dd4ee6f28e9d061ff94bc109d22ae5892846d45c04a447ef4825ff4"
         },
         "extensions/FD/softfloat_symbolic_f16.sail": {
-          "sha256": "eb403faadd2881a90e59d2bf7ed23c517a9aa35ab62391b92daaa7cc29a30e4e"
+          "sha256": "715795790c0efb100806c0a82195e137c4de66c4a9614baac9ee2b0b333a0646"
         },
         "extensions/FD/softfloat_symbolic_f64.sail": {
-          "sha256": "3d1877bea02bf4a1988b30deb89229eba4c41a5fd9c6cfb74608413a39b0c404"
+          "sha256": "eeb3de73c0bc6de5f07e582db5390b673e28c7c0f3d04a077a85e279695c30b5"
         },
         "extensions/FD/zcd_insts.sail": {
           "sha256": "3a198e8543451ff81e2ffdee7c20d11cb666d4fd3d34705d0f5ca29356749519"
@@ -339,7 +339,7 @@
           "sha256": "1901242ab35381cce48614b408547a0ff84514999bf0342686c5a6f13ce3138c"
         },
         "extensions/FD/softfloat_symbolic_f32.sail": {
-          "sha256": "7eff7bac6bf57a577db6528351e241ce34196a41a24348a4ab12cff56558b79a"
+          "sha256": "ce65c868e34c3e5a1d9b1806bef3f48d7bba7b5ff18cd7cfdfe584975b716b65"
         },
         "extensions/H/hext_insts.sail": {
           "sha256": "36d4f527b0a178796c71beccecbcc2ae0d8c83e6a9856f184aa595fb8c8716ab"
@@ -411,7 +411,7 @@
           "sha256": "e44e35062374bc718228c4f93f59959dd52a010b9b3810e986b63a8ee0a2ac75"
         },
         "extensions/V/vext_fp_vm_insts.sail": {
-          "sha256": "0985a5962a2c1c5a0abcf40bded21c89fcd92ff13c0a782d1433157f6eb8cc9c"
+          "sha256": "cd2826b60aae53c59ba6d7edfb91baebaad6159dcee2b2e6e3cbc7a33989f4f8"
         },
         "extensions/V/vext_mask_insts.sail": {
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
@@ -441,10 +441,10 @@
           "sha256": "02cbb5f4f5b053875c91b137f8e86481db4f7249b467021321e9efc350815c1f"
         },
         "extensions/V/vext_fp_insts.sail": {
-          "sha256": "dd72ff849f928aab8e1eb2780d9e1e0bb40c0d868ccfbdeda2162f628989bcfc"
+          "sha256": "5e70bb12875e9001e0539341e6ad4c2532b8f41e381a759e5c45b3e99789f55f"
         },
         "extensions/V/vext_fp_red_insts.sail": {
-          "sha256": "91e8ef18a1a82c3f35721b1159f9666e08b25090247e399a68631bcfec130214"
+          "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
           "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
@@ -513,13 +513,13 @@
           "sha256": "e21a239245a9c39b351ec8ec34ad425a51464e0e8eca648a213dd3e5c795b96c"
         },
         "extensions/bfloat16/zfbfmin_utils.sail": {
-          "sha256": "2c0693f4c578e6b237cc5de39d4a0014b6e46580cc69f66efdeb00f1785c6f07"
+          "sha256": "e2cd0888969fce2d1249a472715e2ead5e41d7168ede0530bce80f8af12f7681"
         },
         "extensions/bfloat16/zvfbfmin_insts.sail": {
-          "sha256": "423cdaefa37ae4b6ccc227b70ecf45d6380f099a8c88d18ad436fcc8ccb729b6"
+          "sha256": "c86b03c77d672ada95b29a41623172704696fa772219c109fc54945a9947929c"
         },
         "extensions/bfloat16/zvfbfwma_insts.sail": {
-          "sha256": "d60ea577c6b042b118e565174f5d06b53f98645be2e48c0e3c7e97b8030a91d5"
+          "sha256": "3e04faa8a349a9db90a03ec10b5e75da00fc3b12735fbdb23ca8239789a443f3"
         },
         "extensions/bfloat16/zfbfmin_insts.sail": {
           "sha256": "f402b41a2b553fe2a28d697b9afc78d981de813013d5f1aa4bef724c831418eb"
@@ -561,13 +561,13 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1189.5089713669731
+      "generation_seconds": 1065.2106903900276
     },
     {
       "paths": [
         "rv32d.ir"
       ],
-      "sha256": "65a11d9900d695500f85cf64a1ddc032ff85eb39aa6e94fa0bb9cdfdabfbb520",
+      "sha256": "4b28eca3954490e08eebd9c0974a8101f3fc34bb93174133ce776bc2e7d472c8",
       "config": "rv32d.json",
       "config_sha256": "bf36f1d84bc96d1229d546eefe3cae0b7282a03cea5064ade904eb1d90a23b30",
       "model_files": {
@@ -608,7 +608,7 @@
           "sha256": "0331aaccb2003c810a1d2786bd00a6c6d89ca9b5a04dc6d7d0534a413d2fb3b0"
         },
         "core/ieee_fp_exceptions.sail": {
-          "sha256": "2fb810384cd5f099b234e92391f769ddfbbd02258e06906e78bd13c37d4e0bb4"
+          "sha256": "fdb105f1bf911b5d13fef2bfa2ee1f46b66a4ccca3c6d878bc31063937cedbc6"
         },
         "core/interrupt_regs.sail": {
           "sha256": "e00d1e2d4d58216a86d46b14aafaf3cb8c50103857e4be962fcfe8d690a5c4fc"
@@ -824,10 +824,10 @@
           "sha256": "7122df6d3dd4ee6f28e9d061ff94bc109d22ae5892846d45c04a447ef4825ff4"
         },
         "extensions/FD/softfloat_symbolic_f16.sail": {
-          "sha256": "eb403faadd2881a90e59d2bf7ed23c517a9aa35ab62391b92daaa7cc29a30e4e"
+          "sha256": "715795790c0efb100806c0a82195e137c4de66c4a9614baac9ee2b0b333a0646"
         },
         "extensions/FD/softfloat_symbolic_f64.sail": {
-          "sha256": "3d1877bea02bf4a1988b30deb89229eba4c41a5fd9c6cfb74608413a39b0c404"
+          "sha256": "eeb3de73c0bc6de5f07e582db5390b673e28c7c0f3d04a077a85e279695c30b5"
         },
         "extensions/FD/zcd_insts.sail": {
           "sha256": "3a198e8543451ff81e2ffdee7c20d11cb666d4fd3d34705d0f5ca29356749519"
@@ -848,7 +848,7 @@
           "sha256": "1901242ab35381cce48614b408547a0ff84514999bf0342686c5a6f13ce3138c"
         },
         "extensions/FD/softfloat_symbolic_f32.sail": {
-          "sha256": "7eff7bac6bf57a577db6528351e241ce34196a41a24348a4ab12cff56558b79a"
+          "sha256": "ce65c868e34c3e5a1d9b1806bef3f48d7bba7b5ff18cd7cfdfe584975b716b65"
         },
         "extensions/H/hext_insts.sail": {
           "sha256": "36d4f527b0a178796c71beccecbcc2ae0d8c83e6a9856f184aa595fb8c8716ab"
@@ -920,7 +920,7 @@
           "sha256": "e44e35062374bc718228c4f93f59959dd52a010b9b3810e986b63a8ee0a2ac75"
         },
         "extensions/V/vext_fp_vm_insts.sail": {
-          "sha256": "0985a5962a2c1c5a0abcf40bded21c89fcd92ff13c0a782d1433157f6eb8cc9c"
+          "sha256": "cd2826b60aae53c59ba6d7edfb91baebaad6159dcee2b2e6e3cbc7a33989f4f8"
         },
         "extensions/V/vext_mask_insts.sail": {
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
@@ -950,10 +950,10 @@
           "sha256": "02cbb5f4f5b053875c91b137f8e86481db4f7249b467021321e9efc350815c1f"
         },
         "extensions/V/vext_fp_insts.sail": {
-          "sha256": "dd72ff849f928aab8e1eb2780d9e1e0bb40c0d868ccfbdeda2162f628989bcfc"
+          "sha256": "5e70bb12875e9001e0539341e6ad4c2532b8f41e381a759e5c45b3e99789f55f"
         },
         "extensions/V/vext_fp_red_insts.sail": {
-          "sha256": "91e8ef18a1a82c3f35721b1159f9666e08b25090247e399a68631bcfec130214"
+          "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
           "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
@@ -1022,13 +1022,13 @@
           "sha256": "e21a239245a9c39b351ec8ec34ad425a51464e0e8eca648a213dd3e5c795b96c"
         },
         "extensions/bfloat16/zfbfmin_utils.sail": {
-          "sha256": "2c0693f4c578e6b237cc5de39d4a0014b6e46580cc69f66efdeb00f1785c6f07"
+          "sha256": "e2cd0888969fce2d1249a472715e2ead5e41d7168ede0530bce80f8af12f7681"
         },
         "extensions/bfloat16/zvfbfmin_insts.sail": {
-          "sha256": "423cdaefa37ae4b6ccc227b70ecf45d6380f099a8c88d18ad436fcc8ccb729b6"
+          "sha256": "c86b03c77d672ada95b29a41623172704696fa772219c109fc54945a9947929c"
         },
         "extensions/bfloat16/zvfbfwma_insts.sail": {
-          "sha256": "d60ea577c6b042b118e565174f5d06b53f98645be2e48c0e3c7e97b8030a91d5"
+          "sha256": "3e04faa8a349a9db90a03ec10b5e75da00fc3b12735fbdb23ca8239789a443f3"
         },
         "extensions/bfloat16/zfbfmin_insts.sail": {
           "sha256": "f402b41a2b553fe2a28d697b9afc78d981de813013d5f1aa4bef724c831418eb"
@@ -1070,13 +1070,13 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1222.5494145610137
+      "generation_seconds": 1066.3772057970054
     },
     {
       "paths": [
         "ir/rv64d_v256_e64.ir"
       ],
-      "sha256": "946d28643cf4566fb64ef41212ddef757d62a8b592207756572252865a740bb6",
+      "sha256": "95223fc356812c60ce87b67f2aa0c40154152f32a127cba3d7ee6386e8b23eb4",
       "config": "rv64d_v256_e64.json",
       "config_sha256": "e28ac77273be6a31c544db6b196914dfb55b3b9fb72295ae7ef6cfc7b99dfc47",
       "model_files": {
@@ -1117,7 +1117,7 @@
           "sha256": "0331aaccb2003c810a1d2786bd00a6c6d89ca9b5a04dc6d7d0534a413d2fb3b0"
         },
         "core/ieee_fp_exceptions.sail": {
-          "sha256": "2fb810384cd5f099b234e92391f769ddfbbd02258e06906e78bd13c37d4e0bb4"
+          "sha256": "fdb105f1bf911b5d13fef2bfa2ee1f46b66a4ccca3c6d878bc31063937cedbc6"
         },
         "core/interrupt_regs.sail": {
           "sha256": "e00d1e2d4d58216a86d46b14aafaf3cb8c50103857e4be962fcfe8d690a5c4fc"
@@ -1333,10 +1333,10 @@
           "sha256": "7122df6d3dd4ee6f28e9d061ff94bc109d22ae5892846d45c04a447ef4825ff4"
         },
         "extensions/FD/softfloat_symbolic_f16.sail": {
-          "sha256": "eb403faadd2881a90e59d2bf7ed23c517a9aa35ab62391b92daaa7cc29a30e4e"
+          "sha256": "715795790c0efb100806c0a82195e137c4de66c4a9614baac9ee2b0b333a0646"
         },
         "extensions/FD/softfloat_symbolic_f64.sail": {
-          "sha256": "3d1877bea02bf4a1988b30deb89229eba4c41a5fd9c6cfb74608413a39b0c404"
+          "sha256": "eeb3de73c0bc6de5f07e582db5390b673e28c7c0f3d04a077a85e279695c30b5"
         },
         "extensions/FD/zcd_insts.sail": {
           "sha256": "3a198e8543451ff81e2ffdee7c20d11cb666d4fd3d34705d0f5ca29356749519"
@@ -1357,7 +1357,7 @@
           "sha256": "1901242ab35381cce48614b408547a0ff84514999bf0342686c5a6f13ce3138c"
         },
         "extensions/FD/softfloat_symbolic_f32.sail": {
-          "sha256": "7eff7bac6bf57a577db6528351e241ce34196a41a24348a4ab12cff56558b79a"
+          "sha256": "ce65c868e34c3e5a1d9b1806bef3f48d7bba7b5ff18cd7cfdfe584975b716b65"
         },
         "extensions/H/hext_insts.sail": {
           "sha256": "36d4f527b0a178796c71beccecbcc2ae0d8c83e6a9856f184aa595fb8c8716ab"
@@ -1429,7 +1429,7 @@
           "sha256": "e44e35062374bc718228c4f93f59959dd52a010b9b3810e986b63a8ee0a2ac75"
         },
         "extensions/V/vext_fp_vm_insts.sail": {
-          "sha256": "0985a5962a2c1c5a0abcf40bded21c89fcd92ff13c0a782d1433157f6eb8cc9c"
+          "sha256": "cd2826b60aae53c59ba6d7edfb91baebaad6159dcee2b2e6e3cbc7a33989f4f8"
         },
         "extensions/V/vext_mask_insts.sail": {
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
@@ -1459,10 +1459,10 @@
           "sha256": "02cbb5f4f5b053875c91b137f8e86481db4f7249b467021321e9efc350815c1f"
         },
         "extensions/V/vext_fp_insts.sail": {
-          "sha256": "dd72ff849f928aab8e1eb2780d9e1e0bb40c0d868ccfbdeda2162f628989bcfc"
+          "sha256": "5e70bb12875e9001e0539341e6ad4c2532b8f41e381a759e5c45b3e99789f55f"
         },
         "extensions/V/vext_fp_red_insts.sail": {
-          "sha256": "91e8ef18a1a82c3f35721b1159f9666e08b25090247e399a68631bcfec130214"
+          "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
           "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
@@ -1531,13 +1531,13 @@
           "sha256": "e21a239245a9c39b351ec8ec34ad425a51464e0e8eca648a213dd3e5c795b96c"
         },
         "extensions/bfloat16/zfbfmin_utils.sail": {
-          "sha256": "2c0693f4c578e6b237cc5de39d4a0014b6e46580cc69f66efdeb00f1785c6f07"
+          "sha256": "e2cd0888969fce2d1249a472715e2ead5e41d7168ede0530bce80f8af12f7681"
         },
         "extensions/bfloat16/zvfbfmin_insts.sail": {
-          "sha256": "423cdaefa37ae4b6ccc227b70ecf45d6380f099a8c88d18ad436fcc8ccb729b6"
+          "sha256": "c86b03c77d672ada95b29a41623172704696fa772219c109fc54945a9947929c"
         },
         "extensions/bfloat16/zvfbfwma_insts.sail": {
-          "sha256": "d60ea577c6b042b118e565174f5d06b53f98645be2e48c0e3c7e97b8030a91d5"
+          "sha256": "3e04faa8a349a9db90a03ec10b5e75da00fc3b12735fbdb23ca8239789a443f3"
         },
         "extensions/bfloat16/zfbfmin_insts.sail": {
           "sha256": "f402b41a2b553fe2a28d697b9afc78d981de813013d5f1aa4bef724c831418eb"
@@ -1579,13 +1579,13 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1210.1763299200102
+      "generation_seconds": 1104.0339804019895
     },
     {
       "paths": [
         "ir/rv64d_v512_e64.ir"
       ],
-      "sha256": "03ba34ebb2b7cd2782f68a9754fee1cd464ca17ce3487f3f529b96390e6637d6",
+      "sha256": "b81b8a83f3758b7ef4e7d9e99ce37122a1207986e13c4913f172c201fbab6963",
       "config": "rv64d_v512_e64.json",
       "config_sha256": "9b32561d0d880d01732da669769237d8fc881e5de3e4b6384073c928ef3c3ff1",
       "model_files": {
@@ -1626,7 +1626,7 @@
           "sha256": "0331aaccb2003c810a1d2786bd00a6c6d89ca9b5a04dc6d7d0534a413d2fb3b0"
         },
         "core/ieee_fp_exceptions.sail": {
-          "sha256": "2fb810384cd5f099b234e92391f769ddfbbd02258e06906e78bd13c37d4e0bb4"
+          "sha256": "fdb105f1bf911b5d13fef2bfa2ee1f46b66a4ccca3c6d878bc31063937cedbc6"
         },
         "core/interrupt_regs.sail": {
           "sha256": "e00d1e2d4d58216a86d46b14aafaf3cb8c50103857e4be962fcfe8d690a5c4fc"
@@ -1842,10 +1842,10 @@
           "sha256": "7122df6d3dd4ee6f28e9d061ff94bc109d22ae5892846d45c04a447ef4825ff4"
         },
         "extensions/FD/softfloat_symbolic_f16.sail": {
-          "sha256": "eb403faadd2881a90e59d2bf7ed23c517a9aa35ab62391b92daaa7cc29a30e4e"
+          "sha256": "715795790c0efb100806c0a82195e137c4de66c4a9614baac9ee2b0b333a0646"
         },
         "extensions/FD/softfloat_symbolic_f64.sail": {
-          "sha256": "3d1877bea02bf4a1988b30deb89229eba4c41a5fd9c6cfb74608413a39b0c404"
+          "sha256": "eeb3de73c0bc6de5f07e582db5390b673e28c7c0f3d04a077a85e279695c30b5"
         },
         "extensions/FD/zcd_insts.sail": {
           "sha256": "3a198e8543451ff81e2ffdee7c20d11cb666d4fd3d34705d0f5ca29356749519"
@@ -1866,7 +1866,7 @@
           "sha256": "1901242ab35381cce48614b408547a0ff84514999bf0342686c5a6f13ce3138c"
         },
         "extensions/FD/softfloat_symbolic_f32.sail": {
-          "sha256": "7eff7bac6bf57a577db6528351e241ce34196a41a24348a4ab12cff56558b79a"
+          "sha256": "ce65c868e34c3e5a1d9b1806bef3f48d7bba7b5ff18cd7cfdfe584975b716b65"
         },
         "extensions/H/hext_insts.sail": {
           "sha256": "36d4f527b0a178796c71beccecbcc2ae0d8c83e6a9856f184aa595fb8c8716ab"
@@ -1938,7 +1938,7 @@
           "sha256": "e44e35062374bc718228c4f93f59959dd52a010b9b3810e986b63a8ee0a2ac75"
         },
         "extensions/V/vext_fp_vm_insts.sail": {
-          "sha256": "0985a5962a2c1c5a0abcf40bded21c89fcd92ff13c0a782d1433157f6eb8cc9c"
+          "sha256": "cd2826b60aae53c59ba6d7edfb91baebaad6159dcee2b2e6e3cbc7a33989f4f8"
         },
         "extensions/V/vext_mask_insts.sail": {
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
@@ -1968,10 +1968,10 @@
           "sha256": "02cbb5f4f5b053875c91b137f8e86481db4f7249b467021321e9efc350815c1f"
         },
         "extensions/V/vext_fp_insts.sail": {
-          "sha256": "dd72ff849f928aab8e1eb2780d9e1e0bb40c0d868ccfbdeda2162f628989bcfc"
+          "sha256": "5e70bb12875e9001e0539341e6ad4c2532b8f41e381a759e5c45b3e99789f55f"
         },
         "extensions/V/vext_fp_red_insts.sail": {
-          "sha256": "91e8ef18a1a82c3f35721b1159f9666e08b25090247e399a68631bcfec130214"
+          "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
           "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
@@ -2040,13 +2040,13 @@
           "sha256": "e21a239245a9c39b351ec8ec34ad425a51464e0e8eca648a213dd3e5c795b96c"
         },
         "extensions/bfloat16/zfbfmin_utils.sail": {
-          "sha256": "2c0693f4c578e6b237cc5de39d4a0014b6e46580cc69f66efdeb00f1785c6f07"
+          "sha256": "e2cd0888969fce2d1249a472715e2ead5e41d7168ede0530bce80f8af12f7681"
         },
         "extensions/bfloat16/zvfbfmin_insts.sail": {
-          "sha256": "423cdaefa37ae4b6ccc227b70ecf45d6380f099a8c88d18ad436fcc8ccb729b6"
+          "sha256": "c86b03c77d672ada95b29a41623172704696fa772219c109fc54945a9947929c"
         },
         "extensions/bfloat16/zvfbfwma_insts.sail": {
-          "sha256": "d60ea577c6b042b118e565174f5d06b53f98645be2e48c0e3c7e97b8030a91d5"
+          "sha256": "3e04faa8a349a9db90a03ec10b5e75da00fc3b12735fbdb23ca8239789a443f3"
         },
         "extensions/bfloat16/zfbfmin_insts.sail": {
           "sha256": "f402b41a2b553fe2a28d697b9afc78d981de813013d5f1aa4bef724c831418eb"
@@ -2088,9 +2088,9 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1196.85367420502
+      "generation_seconds": 1038.4182790680206
     }
   ],
   "sail_reported_commit": "f4f8e4584a70588c66c9e7a6286cc20211618f18",
-  "change": "恢复预算内的特殊值、十分类、合法性及两个活动lane循环的显式控制流；未恢复flags和饱和待测项"
+  "change": "恢复各源独立NaN分类、其他格式NaN出口与剩余20个真实活动lane运算门控；保留已知超时的flags changed及窄饱和选择"
 }
