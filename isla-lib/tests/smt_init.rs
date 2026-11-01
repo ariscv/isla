@@ -72,3 +72,12 @@ fn smt_initialization() {
         }
     }
 }
+
+#[test]
+fn default_and_explicit_tactics() {
+    assert_eq!(smt::Tactic::default(), smt::Tactic::Default);
+    assert_eq!("default".parse::<smt::Tactic>().unwrap(), smt::Tactic::Default);
+    assert_eq!("qffp".parse::<smt::Tactic>().unwrap(), smt::Tactic::Qffp);
+    assert_eq!("qfaufbv".parse::<smt::Tactic>().unwrap(), smt::Tactic::Qfaufbv);
+    assert_eq!("smt".parse::<smt::Tactic>().unwrap(), smt::Tactic::Smt);
+}

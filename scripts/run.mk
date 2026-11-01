@@ -95,12 +95,15 @@ ITRACE ?= 0
 FTRACE ?= 0
 BTRACE ?= 0
 CARGO_TRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE) $(FTRACE) $(BTRACE)),--features tracetool,)
-# solve 使用 Homebrew 的 Z3。z3-sys 直接以 -lz3 链接，故必须同时提供链接搜索路径
-# 与运行时 rpath；否则系统 libz3 会在 `make` 重建 isarch 时覆盖手工验证的 Brew Z3。
-Z3_PREFIX ?= /home/linuxbrew/.linuxbrew/opt/z3
+# 使用官方已修复枚举/浮点 default 分发的 Z3（提交 1fd1d3613）。
+# z3-sys 通过 -lz3 链接，构建时与运行时都固定到同一版本化前缀；可用 Z3_PREFIX 覆盖。
+Z3_PREFIX ?= $(HOME)/.local/opt/z3-official-1fd1d3613
 Z3_RUSTFLAGS = -L native=$(Z3_PREFIX)/lib -C link-arg=-Wl,-rpath,$(Z3_PREFIX)/lib
-# 可选 Z3 tactic；例如 `make solve-VVTYPE TASTIC=qfaufbv`。
+# 命令行不传 --tastic 时由 Isla 使用 default；make 为已有 Clause 写明具体策略。
+# 浮点计算使用 qffp；其余（含浮点访存）保留 qfaufbv。命令行 TASTIC=... 可覆盖。
 TASTIC ?=
+$(addprefix solve-,$(ALL)): TASTIC = qfaufbv
+$(addprefix solve-,$(filter-out $(MEMORY),$(FD_FLOAT))): TASTIC = qffp
 # 可选的独立 execution-limit TOML；下方从 Sail-RISC-V 加载各 clause 的 workaround。
 EXECUTION_LIMITS_CONFIG ?=
 solve-VVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvtype.toml

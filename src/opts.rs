@@ -105,7 +105,7 @@ pub fn common_opts() -> Options {
     opts.optflag("", "fork-assertions", "change assertions into explicit control flow");
     opts.optmulti("", "fun-assumption", "add an assumption about the behaviour of a Sail function", "<assumption>");
     opts.optflag("", "no-model-reg-init", "don't use register initializers from the model");
-    opts.optopt("", "tastic", "指定 Z3 tactic：default、qfaufbv、smt（默认 qfaufbv）", "<name>");
+    opts.optopt("", "tastic", "指定 Z3 tactic：default、qfaufbv、qffp、smt（默认 default）", "<name>");
     opts.optflag("", "version", "print out version and stop.");
     opts
 }
