@@ -91,6 +91,49 @@ def check(text, path):
     assert not re.search(r'= zfp32_(?:add|mul)\(', functions['zriscv_f32MulAdd']), \
         f'{path}: f32融合运算被拆成乘加'
 
+    narrow = functions['zriscv_f16ToI16_pure']
+    conditions = re.findall(r'^\s*jump (\w+) goto \d+', narrow, re.M)
+    assert len(conditions) == 1, f'{path}: f16转i16缺少唯一溢出控制分支'
+    definitions = dict(re.findall(r'^\s*(\w+) = (.*?) `', narrow, re.M))
+    inverted = re.fullmatch(r'znot_bool\((\w+)\)', definitions.get(conditions[0], ''))
+    assert inverted, f'{path}: 饱和分支未判断转换值能否由低16位符号扩展恢复'
+    comparison = re.fullmatch(r'zeq_anythingzIB32zK\((\w+), (\w+)\)',
+                              definitions.get(inverted[1], ''))
+
+    def resolve_narrow(value):
+        seen = set()
+        while value in definitions and value not in seen:
+            seen.add(value)
+            value = definitions[value]
+        return value
+
+    assert comparison and any(resolve_narrow(value).startswith('zsign_extend(')
+                              for value in comparison.groups()), f'{path}: 溢出分支条件变化'
+    assert not re.search(r'= zitezIB5zK\(', narrow), f'{path}: 饱和异常仍使用ITE合并'
+    assert len(re.findall(r'= znvFlag\(', narrow)) == 1, f'{path}: 饱和NV出口变化'
+    narrow_instructions = [line.strip() for line in narrow.splitlines() if line.strip()]
+    branch = next(pc for pc, instruction in enumerate(narrow_instructions) if instruction.startswith('jump '))
+    active = int(re.search(r'goto (\d+)', narrow_instructions[branch])[1])
+
+    def narrow_reachable(start):
+        visited, pending = set(), [start]
+        while pending:
+            pc = pending.pop()
+            if pc in visited:
+                continue
+            visited.add(pc)
+            instruction = narrow_instructions[pc]
+            if instruction.startswith('goto '):
+                pending.append(int(re.search(r'goto (\d+)', instruction)[1]))
+            elif instruction != 'end;':
+                pending.append(pc + 1)
+        return visited
+
+    nv = next(pc for pc, instruction in enumerate(narrow_instructions) if '= znvFlag(' in instruction)
+    assert nv in narrow_reachable(active) and nv not in narrow_reachable(branch + 1), \
+        f'{path}: NV计算没有仅受溢出真分支控制'
+    print(f'PASS {path}: f16转i16溢出为显式控制分支')
+
     files_line = re.search(r'(?m)^files (.*)$', text)
     assert files_line, f'{path}: 缺少源码文件表'
     files = shlex.split(files_line.group(1))

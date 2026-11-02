@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "model_commit": "a9fd9476fc1bf471070a38e01ee9233d10d742d3",
+  "model_commit": "6202e23fc43a9aa98d9fbfd42f0f2e6128cf7f9a",
   "model_dirty": false,
   "sail_version": "Sail 0.20.1 (feat/float-support @ f4f8e4584a70588c66c9e7a6286cc20211618f18)",
   "sail_binary_sha256": "373a37c268779bad65381b98c3dc13d56c3db9db90102d28d6f410278b23d45a",
@@ -58,7 +58,7 @@
         "rv64d.ir",
         "ir/rv64d_v128_e64.ir"
       ],
-      "sha256": "23e37501a6036ba92e0b043c261fc8efa91feb3e3b5d77698f14d9a0c1cd6048",
+      "sha256": "a877e245cda62b8430b13541faf05a3a2f47719dddad283dd336fa45e068f97e",
       "config": "rv64d.json",
       "config_sha256": "89923ebff21718bb382df38bf246207cbb1eb5ae0cd314d078d87c0ab2b9f625",
       "model_files": {
@@ -447,7 +447,7 @@
           "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
-          "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
+          "sha256": "34191de93086708b44f552606b39878e1ad68be07c67fb2321eb7bec1b1172e1"
         },
         "extensions/Zawrs/zawrs_insts.sail": {
           "sha256": "990d7ccecf1485aa92736738837053c693530c074e852b8944390fa62510fbc3"
@@ -561,13 +561,13 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1065.2106903900276
+      "generation_seconds": 446.4560482479865
     },
     {
       "paths": [
         "rv32d.ir"
       ],
-      "sha256": "4b28eca3954490e08eebd9c0974a8101f3fc34bb93174133ce776bc2e7d472c8",
+      "sha256": "76c06fd44a738e05add3333acb1437f45db53047e2895fd9f256495317873943",
       "config": "rv32d.json",
       "config_sha256": "bf36f1d84bc96d1229d546eefe3cae0b7282a03cea5064ade904eb1d90a23b30",
       "model_files": {
@@ -956,7 +956,7 @@
           "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
-          "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
+          "sha256": "34191de93086708b44f552606b39878e1ad68be07c67fb2321eb7bec1b1172e1"
         },
         "extensions/Zawrs/zawrs_insts.sail": {
           "sha256": "990d7ccecf1485aa92736738837053c693530c074e852b8944390fa62510fbc3"
@@ -1070,13 +1070,13 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1066.3772057970054
+      "generation_seconds": 445.40333861205727
     },
     {
       "paths": [
         "ir/rv64d_v256_e64.ir"
       ],
-      "sha256": "95223fc356812c60ce87b67f2aa0c40154152f32a127cba3d7ee6386e8b23eb4",
+      "sha256": "a55fb2fb224bc06baed5d1f29808011d39c14a3e7cfe7fd7c5b4120363a517b2",
       "config": "rv64d_v256_e64.json",
       "config_sha256": "e28ac77273be6a31c544db6b196914dfb55b3b9fb72295ae7ef6cfc7b99dfc47",
       "model_files": {
@@ -1465,7 +1465,7 @@
           "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
-          "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
+          "sha256": "34191de93086708b44f552606b39878e1ad68be07c67fb2321eb7bec1b1172e1"
         },
         "extensions/Zawrs/zawrs_insts.sail": {
           "sha256": "990d7ccecf1485aa92736738837053c693530c074e852b8944390fa62510fbc3"
@@ -1579,13 +1579,13 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1104.0339804019895
+      "generation_seconds": 451.09198780800216
     },
     {
       "paths": [
         "ir/rv64d_v512_e64.ir"
       ],
-      "sha256": "b81b8a83f3758b7ef4e7d9e99ce37122a1207986e13c4913f172c201fbab6963",
+      "sha256": "d674159a1635834cf201b9064b424beacf44f0fd85e3266ecdfff185268c29e0",
       "config": "rv64d_v512_e64.json",
       "config_sha256": "9b32561d0d880d01732da669769237d8fc881e5de3e4b6384073c928ef3c3ff1",
       "model_files": {
@@ -1974,7 +1974,7 @@
           "sha256": "c512f5707dac2a9c0513909239c97ade1b4b6eea5e742bbaf6dedb833bad5a12"
         },
         "extensions/V/vext_fp_utils_insts.sail": {
-          "sha256": "2e8d080c4d10f715c9e38ca15395aa80e698fe87de685dfceb1309f61073d578"
+          "sha256": "34191de93086708b44f552606b39878e1ad68be07c67fb2321eb7bec1b1172e1"
         },
         "extensions/Zawrs/zawrs_insts.sail": {
           "sha256": "990d7ccecf1485aa92736738837053c693530c074e852b8944390fa62510fbc3"
@@ -2088,9 +2088,9 @@
           "sha256": "9072eae0eac1dbd8822650f5f981af2be6f686afa7844fa68afdd259fd886f9a"
         }
       },
-      "generation_seconds": 1038.4182790680206
+      "generation_seconds": 449.9314387999475
     }
   ],
   "sail_reported_commit": "f4f8e4584a70588c66c9e7a6286cc20211618f18",
-  "change": "恢复各源独立NaN分类、其他格式NaN出口与剩余20个真实活动lane运算门控；保留已知超时的flags changed及窄饱和选择"
+  "change": "在活动lane控制下恢复f16转i16的显式溢出分支；与编码候选/执行约束分离配套验收"
 }
