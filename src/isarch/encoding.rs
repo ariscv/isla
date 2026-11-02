@@ -112,7 +112,7 @@ pub(super) fn encoding_paths<B: BV>(
     lets: &Bindings<B>,
     execution: Checkpoint<B>,
 ) -> Result<Vec<(Val<B>, Checkpoint<B>)>, ExecError> {
-    let isolated = execution.without_assertions();
+    let isolated = execution.with_instruction_assertions(instruction);
     let normal = mapping_paths(
         "zencdec_forwards",
         instruction,
@@ -146,7 +146,7 @@ mod tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
     use isla_lib::ir::ExitCause;
-    use isla_lib::ir::{Def, Exp, IRTypeInfo, Instr, Loc, Name, SharedState, Symtab, Ty, RETURN};
+    use isla_lib::ir::{Def, Exp, IRTypeInfo, Instr, Loc, Name, SharedState, Symtab, Ty, UVal, RETURN};
     use isla_lib::smt::smtlib::{self, Exp as SmtExp};
     use isla_lib::smt::Tactic;
     use std::collections::HashSet;
@@ -209,7 +209,7 @@ mod tests {
             }
             let execution = checkpoint(&mut solver);
             let input = Val::Symbolic(condition);
-            let isolated = execution.without_assertions();
+            let isolated = execution.with_instruction_assertions(&Val::Unit);
             if !unreachable_error {
                 let all_normal = mapping_paths(
                     "zencdec_forwards",
@@ -240,5 +240,96 @@ mod tests {
             let mut verified = Solver::from_checkpoint(&ctx, result.into_iter().next().unwrap().1);
             assert_eq!(verified.check_sat(loc), SmtResult::Sat);
         }
+    }
+
+    #[test]
+    fn instruction_guard_prunes_auxiliary_candidates_but_keeps_state_variants() {
+        isla_lib::smt::configure_tastic(Tactic::Qfaufbv);
+        let loc = SourceLoc::unknown();
+        let mut symtab = Symtab::new();
+        let normal = symtab.intern("zencdec_forwards");
+        let compressed = symtab.intern("zencdec_compressed_forwards");
+        let arg = symtab.intern("zargument");
+        let state_reg = symtab.intern("zstate");
+        let defs: Vec<Def<Name, B64>> = vec![
+            Def::Register(state_reg, Ty::Bool, vec![]),
+            Def::Val(normal, vec![Ty::Bool], Ty::Bits(32)),
+            Def::Fn(
+                normal,
+                vec![arg],
+                vec![
+                    Instr::Jump(Exp::Id(arg), 3, loc),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), loc),
+                    Instr::End,
+                    Instr::Jump(Exp::Id(state_reg), 6, loc),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x93, 32)), loc),
+                    Instr::End,
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x113, 32)), loc),
+                    Instr::End,
+                ],
+            ),
+            Def::Val(compressed, vec![Ty::Bool], Ty::Bits(16)),
+            Def::Fn(
+                compressed,
+                vec![arg],
+                vec![Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(1, 16)), loc), Instr::End],
+            ),
+        ];
+        let shared = SharedState::new(
+            symtab,
+            &defs,
+            IRTypeInfo::new(&defs),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let op = solver.declare_const(smtlib::Ty::Bool, loc);
+        let state = solver.declare_const(smtlib::Ty::Bool, loc);
+        solver.assert(SmtExp::Var(op));
+        let full = checkpoint(&mut solver);
+        let instruction = Val::Symbolic(op);
+        let mut regs = RegisterBindings::new();
+        regs.insert(state_reg, false, UVal::Init(Val::Symbolic(state)));
+        let baseline = full.with_instruction_assertions(&Val::Unit);
+        let all = mapping_paths(
+            "zencdec_forwards",
+            &instruction,
+            &shared,
+            &regs,
+            &Bindings::default(),
+            baseline.clone(),
+            &baseline,
+            &baseline,
+        )
+        .unwrap();
+        assert_eq!(all.encoded.len(), 3, "旧辅助域包含与原指令guard冲突的分支");
+        let isolated = full.with_instruction_assertions(&instruction);
+        let candidates = mapping_paths(
+            "zencdec_forwards",
+            &instruction,
+            &shared,
+            &regs,
+            &Bindings::default(),
+            isolated.clone(),
+            &isolated,
+            &isolated,
+        )
+        .unwrap();
+        assert_eq!(candidates.encoded.len(), 2);
+        let result = encoding_paths(&instruction, &shared, &regs, &Bindings::default(), full).unwrap();
+        assert_eq!(result.len(), 2);
+        let values: HashSet<_> = result
+            .into_iter()
+            .map(|(value, _)| match value {
+                Val::Bits(bits) => bits.lower_u64(),
+                other => panic!("预期编码位串，得到 {other:?}"),
+            })
+            .collect();
+        assert_eq!(values, HashSet::from([0x93, 0x113]));
     }
 }

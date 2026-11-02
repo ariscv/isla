@@ -215,17 +215,45 @@ impl<B> Checkpoint<B> {
 }
 
 impl<B: BV> Checkpoint<B> {
-    /// 为辅助探索保留符号声明、定义和编号，只暂时移去路径断言。
-    pub fn without_assertions(&self) -> Self {
-        let events = self.trace.as_ref().as_ref().map_or_else(Vec::new, |trace| {
-            trace
-                .to_vec()
-                .into_iter()
-                .rev()
-                .filter(|event| !matches!(event, Event::Smt(Def::Assert(_), _, _)))
-                .cloned()
-                .collect()
-        });
+    /// 辅助编码仅保留由指令字段和常量定义得到的原路径断言。
+    pub fn with_instruction_assertions(&self, instruction: &Val<B>) -> Self {
+        fn only_instruction_symbols(exp: &mut Exp<Sym>, pure_symbols: &HashSet<Sym>) -> bool {
+            let mut pure = true;
+            exp.modify(&mut |part| match part {
+                Exp::Var(sym) if !pure_symbols.contains(sym) => pure = false,
+                Exp::App(_, _) => pure = false,
+                _ => (),
+            });
+            pure
+        }
+
+        let inputs = instruction.symbolic_variables();
+        let mut pure_symbols = HashSet::new();
+        let mut events = Vec::new();
+        if let Some(trace) = self.trace.as_ref().as_ref() {
+            for mut event in trace.to_vec().into_iter().rev().cloned() {
+                let keep = match &mut event {
+                    Event::Smt(Def::DeclareConst(sym, _), _, _) => {
+                        if inputs.contains(sym) {
+                            pure_symbols.insert(*sym);
+                        }
+                        true
+                    }
+                    Event::Smt(Def::DefineConst(sym, exp), _, _) => {
+                        pure_symbols.remove(sym);
+                        if only_instruction_symbols(exp, &pure_symbols) {
+                            pure_symbols.insert(*sym);
+                        }
+                        true
+                    }
+                    Event::Smt(Def::Assert(exp), _, _) => only_instruction_symbols(exp, &pure_symbols),
+                    _ => true,
+                };
+                if keep {
+                    events.push(event);
+                }
+            }
+        }
         Checkpoint {
             num: 1,
             next_var: self.next_var,
@@ -3127,7 +3155,7 @@ mod tests {
         execution.trace_call(Name::from_u32(215));
         let full = checkpoint(&mut execution);
 
-        let isolated = full.without_assertions();
+        let isolated = full.with_instruction_assertions(&Val::Unit);
         let helper_ctx = Context::new(Config::new());
         let mut helper = Solver::from_checkpoint(&helper_ctx, isolated.clone());
         assert_eq!(helper.check_sat(loc), Sat);
@@ -3161,6 +3189,56 @@ mod tests {
         let next_verified_ctx = Context::new(Config::new());
         let mut verified = Solver::from_checkpoint(&next_verified_ctx, combined);
         assert_eq!(verified.check_sat(loc), Sat);
+    }
+
+    #[test]
+    fn instruction_checkpoint_keeps_only_instruction_derived_assertions() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut execution = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let op = execution.declare_const(Ty::Bool, loc);
+        let fpr = execution.declare_const(Ty::BitVec(32), loc);
+        let first = execution.define_const(Var(op), loc);
+        let second = execution.define_const(Var(first), loc);
+        let mixed = execution
+            .define_const(And(Box::new(Var(second)), Box::new(Eq(Box::new(Var(fpr)), Box::new(bits64(0, 32))))), loc);
+        let function = execution.fresh();
+        execution.add(DeclareFun(function, vec![Ty::Bool], Ty::Bool));
+        let unknown = execution.define_const(App(function, vec![Var(op)]), loc);
+        execution.assert(Var(op));
+        execution.assert(Var(second));
+        execution.assert_eq(Var(fpr), bits64(0, 32));
+        execution.assert(Var(mixed));
+        execution.assert(Var(unknown));
+        execution.assert(Bool(true));
+        let full = checkpoint(&mut execution);
+
+        let instruction = Val::<B64>::Symbolic(op);
+        let isolated = full.with_instruction_assertions(&instruction);
+        let kept: Vec<_> = isolated
+            .trace()
+            .as_ref()
+            .unwrap()
+            .to_vec()
+            .into_iter()
+            .filter_map(|event| if let Event::Smt(Def::Assert(exp), _, _) = event { Some(exp.clone()) } else { None })
+            .collect();
+        assert_eq!(kept.len(), 3);
+        assert!(kept.contains(&Var(op)));
+        assert!(kept.contains(&Var(second)));
+        assert!(kept.contains(&Bool(true)));
+
+        let helper_ctx = Context::new(Config::new());
+        let mut helper = Solver::from_checkpoint(&helper_ctx, isolated.clone());
+        assert_eq!(helper.check_sat(loc), Sat);
+        assert_eq!(helper.check_sat_with(&Not(Box::new(Var(op))), loc), Unsat);
+        assert_eq!(helper.check_sat_with(&Neq(Box::new(Var(fpr)), Box::new(bits64(0, 32))), loc), Sat);
+        helper.assert_eq(Var(fpr), bits64(1, 32));
+        let combined = full.with_suffix_from(&isolated, &checkpoint(&mut helper));
+        let verified_ctx = Context::new(Config::new());
+        let mut verified = Solver::from_checkpoint(&verified_ctx, combined);
+        assert_eq!(verified.check_sat(loc), Unsat);
     }
 
     #[test]
