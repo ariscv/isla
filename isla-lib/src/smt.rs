@@ -214,6 +214,48 @@ impl<B> Checkpoint<B> {
     }
 }
 
+impl<B: BV> Checkpoint<B> {
+    /// 为辅助探索保留符号声明、定义和编号，只暂时移去路径断言。
+    pub fn without_assertions(&self) -> Self {
+        let events = self.trace.as_ref().as_ref().map_or_else(Vec::new, |trace| {
+            trace
+                .to_vec()
+                .into_iter()
+                .rev()
+                .filter(|event| !matches!(event, Event::Smt(Def::Assert(_), _, _)))
+                .cloned()
+                .collect()
+        });
+        Checkpoint {
+            num: 1,
+            next_var: self.next_var,
+            trace: Arc::new(Some(Trace { checkpoints: 0, head: events, tail: Arc::new(None) })),
+        }
+    }
+
+    /// 将辅助 checkpoint 从 base 开始新增的事件接到完整执行 checkpoint。
+    pub fn with_suffix_from(&self, base: &Self, candidate: &Self) -> Self {
+        assert_eq!(self.next_var, base.next_var, "执行与辅助基点的符号编号不一致");
+        assert!(candidate.next_var >= base.next_var, "候选符号编号回退");
+        assert!(candidate.num >= base.num, "候选 checkpoint 早于辅助基点");
+        let mut suffix = Vec::with_capacity(candidate.num - base.num);
+        let mut cursor = candidate.trace.clone();
+        while !Arc::ptr_eq(&cursor, &base.trace) {
+            let segment = cursor.as_ref().as_ref().expect("候选 checkpoint 缺少辅助基点祖先");
+            suffix.push(segment.head.clone());
+            cursor = segment.tail.clone();
+        }
+        assert_eq!(suffix.len(), candidate.num - base.num, "候选 checkpoint 链长度不一致");
+        let mut trace = self.trace.clone();
+        let mut num = self.num;
+        for head in suffix.into_iter().rev() {
+            trace = Arc::new(Some(Trace { checkpoints: num, head, tail: trace }));
+            num += 1;
+        }
+        Checkpoint { num, next_var: candidate.next_var, trace }
+    }
+}
+
 /// For the concurrency models, register accesses must be logged at a
 /// subfield level granularity (e.g. for PSTATE in ARM ASL), which is
 /// what the Accessor type is for.
@@ -3069,6 +3111,56 @@ mod tests {
 
         let mut model = Model::new(&replayed);
         assert_eq!(model.get_var(v).unwrap().unwrap_exp(), Enum(member));
+    }
+
+    #[test]
+    fn isolated_checkpoint_preserves_definitions_and_rebases_only_new_constraints() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut execution = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let enum_id = execution.get_enum(Name::from_u32(214), 2);
+        let choice = execution.declare_const(Ty::Bool, loc);
+        let derived = execution.define_const(Var(choice), loc);
+        let enum_value = execution.declare_const(Ty::Enum(enum_id), loc);
+        execution.assert(Var(choice));
+        execution.trace_call(Name::from_u32(215));
+        let full = checkpoint(&mut execution);
+
+        let isolated = full.without_assertions();
+        let helper_ctx = Context::new(Config::new());
+        let mut helper = Solver::from_checkpoint(&helper_ctx, isolated.clone());
+        assert_eq!(helper.check_sat(loc), Sat);
+        helper.assert(Not(Box::new(Var(derived))));
+        assert_eq!(helper.check_sat(loc), Sat);
+        helper.trace_call(Name::from_u32(216));
+        let _intermediate = checkpoint(&mut helper);
+        let new_symbol = helper.declare_const(Ty::Bool, loc);
+        assert_ne!(new_symbol, choice);
+        assert_ne!(new_symbol, derived);
+        assert_ne!(new_symbol, enum_value);
+        let new_enum = helper.get_enum(Name::from_u32(217), 2);
+        let enum_symbol = helper.declare_const(Ty::Enum(new_enum), loc);
+        helper.assert_eq(Var(enum_symbol), Enum(new_enum.first_member()));
+        helper.assert(Var(new_symbol));
+        let candidate = checkpoint(&mut helper);
+
+        let combined = full.with_suffix_from(&isolated, &candidate);
+        let events = combined.trace().as_ref().unwrap().to_vec();
+        assert_eq!(events.iter().filter(|event| matches!(event, Event::Function { call: true, .. })).count(), 2);
+        assert_eq!(events.iter().filter(|event| matches!(event, Event::Smt(Def::Assert(_), _, _))).count(), 4);
+        let verified_ctx = Context::new(Config::new());
+        let mut verified = Solver::from_checkpoint(&verified_ctx, combined);
+        assert_eq!(verified.check_sat(loc), Unsat);
+
+        let next_helper_ctx = Context::new(Config::new());
+        let mut helper = Solver::from_checkpoint(&next_helper_ctx, isolated.clone());
+        helper.assert(Var(derived));
+        helper.assert_eq(Enum(enum_id.first_member()), Var(enum_value));
+        let combined = full.with_suffix_from(&isolated, &checkpoint(&mut helper));
+        let next_verified_ctx = Context::new(Config::new());
+        let mut verified = Solver::from_checkpoint(&next_verified_ctx, combined);
+        assert_eq!(verified.check_sat(loc), Sat);
     }
 
     #[test]
