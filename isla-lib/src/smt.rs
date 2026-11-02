@@ -56,6 +56,7 @@ use z3_sys::*;
 use std::time::Duration;
 use std::time::Instant;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::error::Error as StdError;
@@ -677,11 +678,12 @@ pub fn global_set_param_value(id: &str, value: &str) {
 /// Context is a wrapper around `Z3_context`.
 pub struct Context {
     z3_ctx: Z3_context,
+    enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
 
 impl Context {
     pub fn new(cfg: Config) -> Self {
-        unsafe { Context { z3_ctx: Z3_mk_context_rc(cfg.z3_cfg) } }
+        unsafe { Context { z3_ctx: Z3_mk_context_rc(cfg.z3_cfg), enum_cache: RefCell::new(HashMap::new()) } }
     }
 
     fn error(&self) -> ExecError {
@@ -696,14 +698,46 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        for (_, enumeration) in self.enum_cache.get_mut().drain() {
+            enumeration.dec_refs(self.z3_ctx);
+        }
         unsafe { Z3_del_context(self.z3_ctx) }
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum EnumSortKey {
+    Int(i32),
+    String(String),
+}
+
+#[derive(Clone)]
 struct Enum {
     sort: Z3_sort,
     consts: Vec<Z3_func_decl>,
     testers: Vec<Z3_func_decl>,
+}
+
+impl Enum {
+    fn inc_refs(&self, ctx: Z3_context) {
+        unsafe {
+            for i in 0..self.consts.len() {
+                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, self.consts[i]));
+                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, self.testers[i]));
+            }
+            Z3_inc_ref(ctx, Z3_sort_to_ast(ctx, self.sort));
+        }
+    }
+
+    fn dec_refs(&self, ctx: Z3_context) {
+        unsafe {
+            for i in 0..self.consts.len() {
+                Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, self.consts[i]));
+                Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, self.testers[i]));
+            }
+            Z3_dec_ref(ctx, Z3_sort_to_ast(ctx, self.sort));
+        }
+    }
 }
 
 struct Enums<'ctx> {
@@ -720,8 +754,22 @@ impl<'ctx> Enums<'ctx> {
         unsafe {
             let ctx = self.ctx.z3_ctx;
             let size = members.len();
+            assert!(size > 0, "枚举类型至少需要一个成员");
 
             let z3_name = symbol_namer.enum_sort(self.ctx, name);
+            let cache_key = match Z3_get_symbol_kind(ctx, z3_name) {
+                SymbolKind::Int => EnumSortKey::Int(Z3_get_symbol_int(ctx, z3_name)),
+                SymbolKind::String => {
+                    EnumSortKey::String(CStr::from_ptr(Z3_get_symbol_string(ctx, z3_name)).to_str().unwrap().to_owned())
+                }
+            };
+            if let Some(enumeration) = self.ctx.enum_cache.borrow().get(&cache_key) {
+                assert_eq!(enumeration.consts.len(), size, "枚举类型的成员数量冲突");
+                let enumeration = enumeration.clone();
+                enumeration.inc_refs(ctx);
+                self.enums.insert(name, enumeration);
+                return;
+            }
             let members: Vec<Z3_symbol> = members
                 .iter()
                 .enumerate()
@@ -743,28 +791,20 @@ impl<'ctx> Enums<'ctx> {
             let consts = Vec::from_raw_parts(consts.as_mut_ptr(), size, size);
             let testers = Vec::from_raw_parts(testers.as_mut_ptr(), size, size);
 
-            for i in 0..size {
-                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, consts[i]));
-                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, testers[i]))
-            }
-            Z3_inc_ref(ctx, Z3_sort_to_ast(ctx, sort));
-
-            self.enums.insert(name, Enum { sort, consts, testers });
+            let enumeration = Enum { sort, consts, testers };
+            enumeration.inc_refs(ctx);
+            self.ctx.enum_cache.borrow_mut().insert(cache_key, enumeration.clone());
+            enumeration.inc_refs(ctx);
+            self.enums.insert(name, enumeration);
         }
     }
 }
 
 impl Drop for Enums<'_> {
     fn drop(&mut self) {
-        unsafe {
-            let ctx = self.ctx.z3_ctx;
-            for (_, e) in self.enums.drain() {
-                for i in 0..e.consts.len() {
-                    Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, e.consts[i]));
-                    Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, e.testers[i]))
-                }
-                Z3_dec_ref(ctx, Z3_sort_to_ast(ctx, e.sort))
-            }
+        let ctx = self.ctx.z3_ctx;
+        for (_, e) in self.enums.drain() {
+            e.dec_refs(ctx);
         }
     }
 }
@@ -2358,9 +2398,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn get_enum(&mut self, id: Name, size: usize) -> EnumId {
-        if !self.enums.enums.contains_key(&id) {
-            self.add(Def::DefineEnum(id, size))
-        };
+        if let Some(enumeration) = self.enums.enums.get(&id) {
+            assert_eq!(enumeration.consts.len(), size, "枚举类型的成员数量冲突");
+        } else {
+            self.add(Def::DefineEnum(id, size));
+        }
         EnumId { id }
     }
 
@@ -2404,7 +2446,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.decls.insert(*v, ast);
             }
             Def::DefineEnum(name, size) => {
-                if !self.enums.enums.contains_key(name) {
+                assert!(*size > 0, "枚举类型至少需要一个成员");
+                if let Some(enumeration) = self.enums.enums.get(name) {
+                    assert_eq!(enumeration.consts.len(), *size, "枚举类型的成员数量冲突");
+                } else {
                     // Keep enum sort names deterministic across checkpoint replay.
                     // Member constructor names do not need to be stable: get_ast
                     // matches constructors through recognizers from the model
@@ -3115,6 +3160,7 @@ mod tests {
 
         let checkpoint = checkpoint(&mut solver);
         let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert!(unsafe { Z3_is_eq_sort(ctx.z3_ctx, solver.enums.enums[&e.id].sort, replayed.enums.enums[&e.id].sort) });
         assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
 
         let mut model = Model::new(&replayed);
@@ -3135,10 +3181,111 @@ mod tests {
 
         let checkpoint = checkpoint(&mut solver);
         let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert!(unsafe { Z3_is_eq_sort(ctx.z3_ctx, solver.enums.enums[&e.id].sort, replayed.enums.enums[&e.id].sort) });
         assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
 
         let mut model = Model::new(&replayed);
         assert_eq!(model.get_var(v).unwrap().unwrap_exp(), Enum(member));
+    }
+
+    #[test]
+    fn enum_checkpoint_replays_after_all_solvers_drop() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let loc = SourceLoc::unknown();
+        let (point, small_var, large_var, small_member, large_member) = {
+            let mut source = Solver::<B64>::new(&ctx);
+            let small = source.get_enum(Name::from_u32(30), 1);
+            let large = source.get_enum(Name::from_u32(31), 4);
+            let small_var = source.declare_const(Ty::Enum(small), loc);
+            let large_var = source.declare_const(Ty::Enum(large), loc);
+            let small_member = small.first_member();
+            let large_member = EnumMember { enum_id: large, member: 3 };
+            source.assert_eq(Var(small_var), Enum(small_member));
+            source.assert_eq(Var(large_var), Enum(large_member));
+            (checkpoint(&mut source), small_var, large_var, small_member, large_member)
+        };
+
+        for _ in 0..3 {
+            let mut replayed = Solver::from_checkpoint(&ctx, point.clone());
+            assert_eq!(replayed.check_sat(loc), Sat);
+            let mut model = Model::new(&replayed);
+            assert_eq!(model.get_var(small_var).unwrap().unwrap_exp(), Enum(small_member));
+            assert_eq!(model.get_var(large_var).unwrap().unwrap_exp(), Enum(large_member));
+        }
+
+        let other_ctx = Context::new(Config::new());
+        let mut replayed = Solver::from_checkpoint(&other_ctx, point);
+        assert_eq!(replayed.check_sat(loc), Sat);
+        let mut model = Model::new(&replayed);
+        assert_eq!(model.get_var(small_var).unwrap().unwrap_exp(), Enum(small_member));
+        assert_eq!(model.get_var(large_var).unwrap().unwrap_exp(), Enum(large_member));
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型的成员数量冲突")]
+    fn get_enum_rejects_conflicting_member_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        solver.get_enum(Name::from_u32(32), 2);
+        solver.get_enum(Name::from_u32(32), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型的成员数量冲突")]
+    fn get_enum_rejects_conflicting_member_count_across_solvers() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        Solver::<B64>::new(&ctx).get_enum(Name::from_u32(33), 2);
+        Solver::<B64>::new(&ctx).get_enum(Name::from_u32(33), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型的成员数量冲突")]
+    fn define_enum_rejects_conflicting_member_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let name = Name::from_u32(35);
+        solver.add(DefineEnum(name, 2));
+        solver.add(DefineEnum(name, 3));
+    }
+
+    #[test]
+    fn different_enums_keep_distinct_sorts_when_members_share_symbols() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let loc = SourceLoc::unknown();
+        let mut first = Solver::<B64>::new(&ctx);
+        let mut second = Solver::<B64>::new(&ctx);
+        let first_enum = first.get_enum(Name::from_u32(36), 2);
+        let second_enum = second.get_enum(Name::from_u32(37), 2);
+        assert!(!unsafe {
+            Z3_is_eq_sort(ctx.z3_ctx, first.enums.enums[&first_enum.id].sort, second.enums.enums[&second_enum.id].sort)
+        });
+        let first_var = first.declare_const(Ty::Enum(first_enum), loc);
+        let second_var = second.declare_const(Ty::Enum(second_enum), loc);
+        let first_member = EnumMember { enum_id: first_enum, member: 1 };
+        let second_member = EnumMember { enum_id: second_enum, member: 1 };
+        first.assert_eq(Var(first_var), Enum(first_member));
+        second.assert_eq(Var(second_var), Enum(second_member));
+        assert_eq!(first.check_sat(loc), Sat);
+        assert_eq!(second.check_sat(loc), Sat);
+        assert_eq!(Model::new(&first).get_var(first_var).unwrap().unwrap_exp(), Enum(first_member));
+        assert_eq!(Model::new(&second).get_var(second_var).unwrap().unwrap_exp(), Enum(second_member));
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型至少需要一个成员")]
+    fn get_enum_rejects_empty_enumeration() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        Solver::<B64>::new(&ctx).get_enum(Name::from_u32(34), 0);
     }
 
     #[test]
