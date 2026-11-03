@@ -1720,6 +1720,14 @@ fn sail_truncate_lsb<B: BV>(
 ) -> Result<Val<B>, ExecError> {
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("sail_truncateLSB", &len);
+    if let Val::I128(n) = &len {
+        if matches!(&bits, Val::Bits(_) | Val::Symbolic(_) | Val::MixedBits(_)) {
+            let source_len = length_bits(&bits, solver, info)?;
+            if *n > i128::from(source_len) {
+                return Err(ExecError::Type(format!("truncateLSB length {} > width {}", n, source_len), info));
+            }
+        }
+    }
     match (bits, len) {
         (Val::Bits(bits), Val::I128(len)) => match bits.truncate_lsb(len) {
             Some(truncated) => Ok(Val::Bits(truncated)),
@@ -2850,19 +2858,21 @@ fn concat_str<B: BV>(lhs: Val<B>, rhs: Val<B>, _: &mut Solver<B>, info: SourceLo
     }
 }
 
-fn hex_str<B: BV>(n: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match n {
+fn hex_str<B: BV>(n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    match concretize_proven_i128(n, solver, info)? {
         Val::I128(n) => Ok(Val::String(format!("0x{:x}", n))),
-        Val::Symbolic(v) => Ok(Val::String(format!("0x[{}]", v))),
-        _ => Err(ExecError::Type(format!("hex_str {:?}", &n), info)),
+        Val::I64(n) => Ok(Val::String(format!("0x{:x}", n))),
+        Val::Symbolic(_) => Err(ExecError::SymbolicLength("hex_str", info)),
+        other => Err(ExecError::Type(format!("hex_str {other:?}"), info)),
     }
 }
 
-fn dec_str<B: BV>(n: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match n {
+fn dec_str<B: BV>(n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    match concretize_proven_i128(n, solver, info)? {
         Val::I128(n) => Ok(Val::String(format!("{}", n))),
-        Val::Symbolic(v) => Ok(Val::String(format!("[{}]", v))),
-        _ => Err(ExecError::Type(format!("dec_str {:?}", &n), info)),
+        Val::I64(n) => Ok(Val::String(format!("{}", n))),
+        Val::Symbolic(_) => Err(ExecError::SymbolicLength("dec_str", info)),
+        other => Err(ExecError::Type(format!("dec_str {other:?}"), info)),
     }
 }
 

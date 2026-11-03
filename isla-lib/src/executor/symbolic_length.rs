@@ -85,6 +85,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         | "isla_vector_access_or_default"
         | "string_of_bits"
         | "string_of_int"
+        | "dec_str"
+        | "hex_str"
         | "decimal_string_of_bits"
         | "read_register_from_vector"
         | "write_register_from_vector" => &[0],
@@ -92,8 +94,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         "isla_read_vreg" => &[0, 1, 2],
         "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" | "vector_access"
         | "vector_update" | "string_take" | "string_drop" => &[1],
-        "slice_internal" | "platform_read_memt" | "read_mem_address" => &[2],
-        "read_memt_address" => &[1],
+        "slice_internal" | "platform_read_memt" | "read_mem_address" | "write_mem_address" => &[2],
+        "read_memt_address" | "write_memt_address" => &[1],
         "read_mem" | "read_mem_ifetch" | "read_mem_exclusive" => &[3],
         "subrange_internal" => &[1, 2],
         _ => return Err(error),

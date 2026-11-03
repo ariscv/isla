@@ -414,6 +414,7 @@ impl<B: BV> Memory<B> {
     fn check_concrete_overlap(
         &self,
         address: Sym,
+        bytes: u32,
         error: ExecError,
         solver: &mut Solver<B>,
     ) -> Result<Overlap, ExecError> {
@@ -425,7 +426,7 @@ impl<B: BV> Memory<B> {
         let addr_size = solver.length(address).unwrap_or_else(|| panic!("address is not a bitvector"));
 
         for region in &self.regions {
-            if !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)) {
+            if !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_) | Region::Excluded(_)) {
                 let Range { start, end } = region.region_range();
 
                 region_constraints.push(And(
@@ -433,6 +434,11 @@ impl<B: BV> Memory<B> {
                     Box::new(Bvult(Box::new(Var(address)), Box::new(bits64(*end, addr_size)))),
                 ))
             }
+        }
+
+        // 排除区域按完整访问区间检查，复用防止地址加法回绕的约束。
+        if let Some(allowed) = smt_excluded_constraint(&self.regions, &Var(address), bytes, solver) {
+            region_constraints.push(Not(Box::new(allowed)));
         }
 
         if let Some(r) = region_constraints.pop() {
@@ -584,6 +590,7 @@ impl<B: BV> Memory<B> {
                         // read again with that satisfiable value.
                         match self.check_concrete_overlap(
                             symbolic_addr,
+                            bytes,
                             ExecError::SymbolicLength(
                                 if tag { "read_memt_address" } else { "read_mem_address" },
                                 SourceLoc::unknown(),
@@ -603,7 +610,11 @@ impl<B: BV> Memory<B> {
                             Overlap::NoOverlap => {}
                         }
                     }
-                    self.read_symbolic(read_kind, address, bytes, solver, tag, opts, DEFAULT_REGION_NAME)
+                    if opts.is_ifetch {
+                        Err(ExecError::BadRead("Attempted to fetch instruction from default memory"))
+                    } else {
+                        self.read_symbolic(read_kind, address, bytes, solver, tag, opts, DEFAULT_REGION_NAME)
+                    }
                 }
 
                 _ => Err(ExecError::Type("Non bitvector address in read".to_string(), SourceLoc::unknown())),
@@ -649,7 +660,11 @@ impl<B: BV> Memory<B> {
                 if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_writes()) {
                     match self.check_concrete_overlap(
                         symbolic_addr,
-                        ExecError::BadWrite("possible symbolic address overlap"),
+                        data_bytes(&data, solver)?,
+                        ExecError::SymbolicLength(
+                            if tag.is_some() { "write_memt_address" } else { "write_mem_address" },
+                            SourceLoc::unknown(),
+                        ),
                         solver,
                     )? {
                         Overlap::Unique(concrete_addr) => {
@@ -1065,7 +1080,7 @@ mod tests {
         solver.add(Def::DeclareConst(addr, Ty::BitVec(64)));
         solver.add(Def::Assert(Exp::Eq(Box::new(Exp::Var(addr)), Box::new(bits64(0xA0, 64)))));
 
-        match mem.check_concrete_overlap(addr, ExecError::BadRead("test"), &mut solver) {
+        match mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), &mut solver) {
             Ok(Overlap::Unique(0xA0)) => (),
             _ => panic!("Unexpected result from check_concrete_overlap"),
         }
