@@ -887,8 +887,10 @@ fn pow2<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val
     }
 }
 
-fn pow_int<B: BV>(x: Val<B>, y: Val<B>, _solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+fn pow_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let y = concretize_proven_i128(y, solver, info)?;
     match (x, y) {
+        (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("pow_int", info)),
         (Val::I128(x), Val::I128(y)) => Ok(Val::I128(x.pow(y.try_into().map_err(|_| ExecError::Overflow)?))),
         (x, y) => Err(ExecError::Type(format!("pow_int {:?} {:?}", &x, &y), info)),
     }
@@ -1295,9 +1297,11 @@ macro_rules! slice {
                 // left shift before extracting between length - 1 to
                 // 0. We therefore need to make from the correct
                 // length so the bvlshr is type-correct.
-                let shift = if $bits_length > 128 {
-                    Exp::ZeroExtend($bits_length - 128, Box::new(Exp::Var(from)))
-                } else if $bits_length < 128 {
+                let from_width = $solver.length(from).expect("切片索引必须是位向量");
+                assert!(matches!(from_width, 64 | 128), "切片索引必须是机器整数或整数");
+                let shift = if $bits_length > from_width {
+                    Exp::ZeroExtend($bits_length - from_width, Box::new(Exp::Var(from)))
+                } else if $bits_length < from_width {
                     Exp::Extract($bits_length - 1, 0, Box::new(Exp::Var(from)))
                 } else {
                     Exp::Var(from)
@@ -1418,7 +1422,10 @@ fn slice_internal<B: BV>(
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     let bits_length = length_bits(&bits, solver, info)?;
+    let length = concretize_proven_i128(length, solver, info)?;
+    panic_if_negative_concretized_nat("slice_internal", &length);
     match length {
+        Val::Symbolic(_) => Err(ExecError::SymbolicLength("slice_internal", info)),
         Val::I128(length) => match bits {
             Val::Symbolic(bits) => slice!(bits_length, Exp::Var(bits), from, length, solver, info),
             Val::Bits(bits) => match from {
@@ -1537,7 +1544,10 @@ fn sail_truncate<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    slice_internal(bits, Val::I128(0), len, solver, info)
+    match slice_internal(bits, Val::I128(0), len, solver, info) {
+        Err(ExecError::SymbolicLength("slice_internal", info)) => Err(ExecError::SymbolicLength("sail_truncate", info)),
+        result => result,
+    }
 }
 
 fn sail_truncate_lsb<B: BV>(
@@ -1579,8 +1589,7 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
                 if length == 128 {
-                    // %i 按有符号 128 位解释，无符号转换结果必须保持非负。
-                    solver.add(Def::Assert(Exp::Bvsge(Box::new(Exp::Var(bits)), Box::new(smt_i128(0)))));
+                    // 保留全部 128 位，包括最高位为 1 的无符号输入。
                     Ok(Val::Symbolic(bits))
                 } else {
                     assert!(length < 128);
@@ -1627,13 +1636,26 @@ fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
                 } else {
                     Exp::Var(y)
                 };
-                solver.define_const(Exp::Bvlshr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+                let shifted = Exp::Bvlshr(Box::new(Exp::Var(x)), Box::new(shift));
+                solver
+                    .define_const(
+                        Exp::Ite(
+                            Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(length))))),
+                            Box::new(smt_zeros(i128::from(length))),
+                            Box::new(shifted),
+                        ),
+                        info,
+                    )
+                    .into()
             }
             None => Err(ExecError::Type(format!("shiftr {:?} {:?}", &x, &y), info)),
         },
         (Val::Symbolic(x), Val::I128(0)) => Ok(Val::Symbolic(x)),
         (Val::Symbolic(x), Val::I128(y)) => match solver.length(x) {
             Some(length) => {
+                if y >= i128::from(length) {
+                    return solver.define_const(smt_zeros(i128::from(length)), info).into();
+                }
                 let shift = if length < 128 {
                     Exp::Extract(length - 1, 0, Box::new(smt_i128(y)))
                 } else if length > 128 {
@@ -1647,7 +1669,14 @@ fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
         },
         (Val::Bits(x), Val::Symbolic(y)) => solver
             .define_const(
-                Exp::Bvlshr(Box::new(smt_sbits(x)), Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y))))),
+                Exp::Ite(
+                    Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(x.len()))))),
+                    Box::new(smt_zeros(i128::from(x.len()))),
+                    Box::new(Exp::Bvlshr(
+                        Box::new(smt_sbits(x)),
+                        Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y)))),
+                    )),
+                ),
                 info,
             )
             .into(),
@@ -1733,13 +1762,26 @@ fn shiftl<B: BV>(bits: Val<B>, len: Val<B>, solver: &mut Solver<B>, info: Source
                 } else {
                     Exp::Var(y)
                 };
-                solver.define_const(Exp::Bvshl(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+                let shifted = Exp::Bvshl(Box::new(Exp::Var(x)), Box::new(shift));
+                solver
+                    .define_const(
+                        Exp::Ite(
+                            Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(length))))),
+                            Box::new(smt_zeros(i128::from(length))),
+                            Box::new(shifted),
+                        ),
+                        info,
+                    )
+                    .into()
             }
             None => Err(ExecError::Type(format!("shiftl {:?} {:?}", &x, &y), info)),
         },
         (Val::Symbolic(x), Val::I128(0)) => Ok(Val::Symbolic(x)),
         (Val::Symbolic(x), Val::I128(y)) => match solver.length(x) {
             Some(length) => {
+                if y >= i128::from(length) {
+                    return solver.define_const(smt_zeros(i128::from(length)), info).into();
+                }
                 let shift = if length < 128 {
                     Exp::Extract(length - 1, 0, Box::new(smt_i128(y)))
                 } else if length > 128 {
@@ -1753,7 +1795,14 @@ fn shiftl<B: BV>(bits: Val<B>, len: Val<B>, solver: &mut Solver<B>, info: Source
         },
         (Val::Bits(x), Val::Symbolic(y)) => solver
             .define_const(
-                Exp::Bvshl(Box::new(smt_sbits(x)), Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y))))),
+                Exp::Ite(
+                    Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(x.len()))))),
+                    Box::new(smt_zeros(i128::from(x.len()))),
+                    Box::new(Exp::Bvshl(
+                        Box::new(smt_sbits(x)),
+                        Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y)))),
+                    )),
+                ),
                 info,
             )
             .into(),
@@ -1995,12 +2044,20 @@ macro_rules! set_slice {
             } else {
                 Exp::ZeroExtend($bits_length - $update_length, Box::new($update))
             };
-            let shift = if $bits_length < 128 {
-                Exp::Extract($bits_length - 1, 0, Box::new($n))
-            } else if $bits_length > 128 {
-                Exp::ZeroExtend($bits_length - 128, Box::new($n))
+            let index = $n;
+            let index_width = match &index {
+                Exp::Var(n) => $solver.length(*n).expect("更新索引必须是位向量"),
+                Exp::Bits(bits) => bits.len() as u32,
+                Exp::Bits64(bits) => bits.len(),
+                _ => panic!("更新索引必须是整数常量或符号量"),
+            };
+            assert!(matches!(index_width, 64 | 128), "更新索引必须是机器整数或整数");
+            let shift = if $bits_length < index_width {
+                Exp::Extract($bits_length - 1, 0, Box::new(index))
+            } else if $bits_length > index_width {
+                Exp::ZeroExtend($bits_length - index_width, Box::new(index))
             } else {
-                $n
+                index
             };
             let sliced = $solver.fresh();
             $solver.add(Def::DefineConst(
@@ -2245,12 +2302,27 @@ pub fn vector_update<B: BV>(
                 Ok(Val::Vector(vec))
             }
             Val::Symbolic(n) => {
+                let width = solver.length(n).expect("向量索引必须是位向量");
+                let (zero, bound) = match width {
+                    64 => (smt_i64(0), smt_i64(vec.len().try_into().unwrap())),
+                    128 => (smt_i128(0), smt_i128(vec.len() as i128)),
+                    _ => panic!("向量索引必须是 64 位或 128 位整数"),
+                };
+                solver.add(Def::Assert(Exp::Bvsge(Box::new(Exp::Var(n)), Box::new(zero))));
+                solver.add(Def::Assert(Exp::Bvslt(Box::new(Exp::Var(n)), Box::new(bound))));
                 for (i, item) in vec.iter_mut().enumerate() {
                     let var = solver.fresh();
                     solver.add(Def::DefineConst(
                         var,
                         Exp::Ite(
-                            Box::new(Exp::Eq(Box::new(Exp::Var(n)), Box::new(bits64(i as u64, 128)))),
+                            Box::new(Exp::Eq(
+                                Box::new(Exp::Var(n)),
+                                Box::new(if width == 64 {
+                                    smt_i64(i.try_into().unwrap())
+                                } else {
+                                    smt_i128(i as i128)
+                                }),
+                            )),
                             Box::new(smt_value(&args[2], info)?),
                             Box::new(smt_value(item, info)?),
                         ),
@@ -2465,6 +2537,20 @@ pub fn eq_anything<B: BV>(
                 eq_anything(*lhs_val, *rhs_val, solver, info)
             } else {
                 Ok(Val::Bool(false))
+            }
+        }
+        (Val::SymbolicCtor(sym, constructors), Val::Ctor(id, payload))
+        | (Val::Ctor(id, payload), Val::SymbolicCtor(sym, constructors)) => {
+            let Some(value) = constructors.get(&id) else { return Ok(Val::Bool(false)) };
+            let equal_payload = eq_anything(value.clone(), *payload, solver, info)?;
+            let equal_tag = Exp::Eq(Box::new(Exp::Var(sym)), Box::new(id.to_smt()));
+            match equal_payload {
+                Val::Bool(false) => Ok(Val::Bool(false)),
+                Val::Bool(true) => solver.define_const(equal_tag, info).into(),
+                Val::Symbolic(payload) => {
+                    solver.define_const(Exp::And(Box::new(equal_tag), Box::new(Exp::Var(payload))), info).into()
+                }
+                value => panic!("载荷相等比较必须返回布尔值：{value:?}"),
             }
         }
         (Val::Unit, Val::Unit) => Ok(Val::Bool(true)),

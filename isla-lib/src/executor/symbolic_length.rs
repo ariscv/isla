@@ -55,7 +55,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     // 只枚举需要具体化的长度参数，不能把位向量数据或向量元素也逐值展开。
     let indices: &[usize] = match op {
         "zeros" | "ones" | "undefined_vector" | "vector_init" | "get_slice_int" => &[0],
-        "extension" | "replicate_bits" | "sail_truncateLSB" => &[1],
+        "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" => &[1],
+        "slice_internal" => &[2],
         "subrange_internal" => &[1, 2],
         _ => return Err(error),
     };

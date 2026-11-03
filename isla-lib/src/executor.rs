@@ -1650,6 +1650,9 @@ fn merge_two_frames<'ir, B: BV>(
     if ws_then.memory_modified || ws_else.memory_modified {
         return Ok(false);
     }
+    if ws_then.modified_regs != ws_else.modified_regs {
+        return Err(ExecError::IncompatibleMerge);
+    }
 
     let mut modified_vars = HashSet::new();
     let mut modified_regs = HashSet::new();
@@ -1818,7 +1821,31 @@ fn try_merge_diamond<'ir, B: BV>(
                 } else {
                     arm_else.execution_limit_state.clone()
                 };
+                let ws_then = arm_then.write_set.as_ref().unwrap();
+                let ws_else = arm_else.write_set.as_ref().unwrap();
+                // 在事务中检查能否表达相等关系，提交后才加入断言。
+                let equalities: Result<Vec<_>, ExecError> = ws_then
+                    .read_regs
+                    .intersection(&ws_else.read_regs)
+                    .filter(|reg| !ws_then.modified_regs.contains(reg))
+                    .map(|reg| {
+                        let rt = arm_then.regs().get_last_if_initialized(*reg).unwrap();
+                        let re = arm_else.regs().get_last_if_initialized(*reg).unwrap();
+                        let equal = primop::eq_anything(rt.clone(), re.clone(), solver, info)?;
+                        crate::primop_util::smt_value(&equal, info)
+                    })
+                    .collect();
+                let equalities = match equalities {
+                    Ok(equalities) if !solver.transaction_invalid() => equalities,
+                    _ => {
+                        solver.rollback_transaction(tx);
+                        continue;
+                    }
+                };
                 solver.commit_transaction();
+                for equal in equalities {
+                    solver.add(smtlib::Def::Assert(equal));
+                }
                 *frame = merged_frame;
                 let mut reads = Vec::new();
                 for read in arm_else
@@ -3389,6 +3416,533 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review8_tests {
+        use super::*;
+
+        // 保留未合流行为与合流行为的差分证据。
+        #[test]
+        fn adversarial_merge_large_shift() {
+            let shared = empty_shared_state();
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let mut frame = make_frame(vec![
+                Instr::Jump(Exp::Bool(true), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(1, 8)), info()),
+                Instr::Goto(4),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(2, 8)), info()),
+                Instr::End,
+            ]);
+            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            let value =
+                eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+            let shift = *crate::primop::binary_primops::<B64>().get("shiftr").unwrap();
+            for n in [1, 2] {
+                assert_eq!(
+                    shift(Val::Bits(B64::new(n, 8)), Val::I128(256), &mut solver, info()).unwrap(),
+                    Val::Bits(B64::new(0, 8))
+                );
+            }
+            let shifted = shift(value, Val::I128(256), &mut solver, info()).unwrap();
+            let wrong = smtlib::Exp::Neq(
+                Box::new(crate::primop_util::smt_value(&shifted, info()).unwrap()),
+                Box::new(smtlib::Exp::Bits64(B64::new(0, 8))),
+            );
+            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat, "右移 256 位应为零");
+            for op in ["shiftr", "shiftl"] {
+                let shift = *crate::primop::binary_primops::<B64>().get(op).unwrap();
+                for width in [8, 64, 128, 256] {
+                    let bits = solver.define_const(smtlib::bits64(1, width), info());
+                    for amount in [0, 1, i128::from(width) - 1, i128::from(width), 256, i128::MAX] {
+                        let exponent = solver.define_const(crate::primop_util::smt_i128(amount), info());
+                        let expected = if amount >= i128::from(width) {
+                            crate::primop::smt_zeros(i128::from(width))
+                        } else {
+                            let amount = smtlib::bits64(amount as u64, width);
+                            if op == "shiftr" {
+                                smtlib::Exp::Bvlshr(Box::new(smtlib::Exp::Var(bits)), Box::new(amount))
+                            } else {
+                                smtlib::Exp::Bvshl(Box::new(smtlib::Exp::Var(bits)), Box::new(amount))
+                            }
+                        };
+                        for count in [Val::I128(amount), Val::Symbolic(exponent)] {
+                            let result = shift(Val::Symbolic(bits), count.clone(), &mut solver, info()).unwrap();
+                            let wrong = smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                                Box::new(expected.clone()),
+                            );
+                            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                            if width <= 64 {
+                                let result = shift(Val::Bits(B64::new(1, width)), count, &mut solver, info()).unwrap();
+                                let wrong = smtlib::Exp::Neq(
+                                    Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                                    Box::new(expected.clone()),
+                                );
+                                assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn adversarial_merge_constructor_equality() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let cond = shared.symtab.intern("zcond");
+                let value = shared.symtab.intern("zvalue");
+                let a = shared.symtab.intern("za");
+                let b = shared.symtab.intern("zb");
+                let mut lets = HashMap::default();
+                lets.insert(a, UVal::Init(Val::Ctor(test_name(180), Box::new(Val::Unit))));
+                lets.insert(b, UVal::Init(Val::Ctor(test_name(181), Box::new(Val::Unit))));
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(value, Ty::Union(test_name(182)), info()),
+                    Instr::Jump(Exp::Id(cond), 5, info()),
+                    Instr::Copy(Loc::Id(value), Exp::Id(a), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(value), Exp::Id(b), info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(value), Exp::Id(a)]), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    shared,
+                    RegisterBindings::new(),
+                    lets,
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("构造子相等比较：合流={enabled}，错误={errors:?}");
+                assert!(errors.is_empty(), "两条分支都支持相等比较");
+            }
+        }
+
+        #[test]
+        fn adversarial_merge_bits_to_pow() {
+            for enabled in [false, true] {
+                let cond = test_name(180);
+                let value = test_name(181);
+                let exponent = test_name(182);
+                let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+                let pow = *crate::primop::binary_primops::<B64>().get("pow_int").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(value, Ty::Bits(8), info()),
+                    Instr::Decl(exponent, Ty::I128, info()),
+                    Instr::Jump(Exp::Id(cond), 6, info()),
+                    Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(2, 8)), info()),
+                    Instr::PrimopUnary(Loc::Id(exponent), unsigned, Exp::Id(value), info()),
+                    Instr::PrimopBinary(Loc::Id(RETURN), pow, Exp::I128(2), Exp::Id(exponent), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("位向量转整数后乘方：合流={enabled}，错误={errors:?}");
+                assert!(errors.is_empty(), "指数为 1/2 的两条分支都应完成");
+                let mut values: Vec<_> = results
+                    .into_iter()
+                    .map(|result| match result.unwrap() {
+                        Run::Finished(Val::I128(value)) => value,
+                        _ => panic!("乘方必须返回具体整数"),
+                    })
+                    .collect();
+                values.sort_unstable();
+                assert_eq!(values, vec![2, 4]);
+            }
+        }
+
+        #[test]
+        fn adversarial_unsigned_128_must_not_prune_input() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            solver.assert_eq(smtlib::Exp::Var(bits), crate::primop_util::smt_i128(i128::MIN));
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+            let result = unsigned(Val::Symbolic(bits), &mut solver, info());
+            eprintln!("128 位无符号转换：调用成功={}，可满足性={:?}", result.is_ok(), solver.check_sat(info()));
+            assert!(
+                result.is_err() || solver.check_sat(info()) == crate::smt::SmtResult::Sat,
+                "转换溢出应报告错误，不能删除输入"
+            );
+        }
+
+        #[test]
+        fn adversarial_merge_machine_index_width() {
+            for enabled in [false, true] {
+                let cond = test_name(180);
+                let value = test_name(181);
+                let index = test_name(182);
+                let vector = test_name(183);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![Val::I128(0), Val::I128(0)])));
+                let update = *crate::primop::variadic_primops::<B64>().get("vector_update").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(value, Ty::Bits(8), info()),
+                    Instr::Decl(index, Ty::I64, info()),
+                    Instr::Jump(Exp::Id(cond), 6, info()),
+                    Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(0, 8)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(8), vec![Exp::Id(value)]), info()),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        update,
+                        vec![Exp::Id(vector), Exp::Id(index), Exp::I128(7)],
+                        info(),
+                    ),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                assert!(results.iter().all(|r| matches!(r, Ok(Run::Finished(_)))));
+            }
+        }
+
+        #[test]
+        fn adversarial_enum_cache_variable_collision() {
+            let ctx = Context::new(Config::new());
+            let enum_name = test_name(200);
+            {
+                let mut first = Solver::<B64>::new(&ctx);
+                for _ in 0..8 {
+                    first.declare_const(smtlib::Ty::Bool, info());
+                }
+                first.get_enum(enum_name, 2);
+            }
+            let mut second = Solver::<B64>::new(&ctx);
+            let eid = second.get_enum(enum_name, 2);
+            let mut variable = None;
+            for _ in 2..=8 {
+                variable = Some(second.declare_const(smtlib::Ty::Enum(eid), info()));
+            }
+            let variable = variable.unwrap();
+            let other = smtlib::Exp::Neq(
+                Box::new(smtlib::Exp::Var(variable)),
+                Box::new(smtlib::Exp::Enum(crate::smt::EnumMember { enum_id: eid, member: 0 })),
+            );
+            eprintln!("缓存复用后的枚举变量：{:?}，SMT={}", variable, second.exp_to_str(&smtlib::Exp::Var(variable)));
+            assert_eq!(
+                second.check_sat_with(&other, info()),
+                crate::smt::SmtResult::Sat,
+                "未约束的枚举变量必须能取非零成员"
+            );
+        }
+
+        #[test]
+        fn adversarial_merge_lazy_reads_trace() {
+            let mut shared = empty_shared_state();
+            let reg = shared.symtab.intern("zreg");
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let mut frame = make_frame(vec![
+                Instr::Jump(Exp::Bool(true), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+                Instr::Goto(4),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+                Instr::End,
+            ]);
+            frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
+            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            let events = solver.trace().to_vec();
+            let reads: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::ReadReg(r, _, value) if *r == reg => Some(value.clone()),
+                    _ => None,
+                })
+                .collect();
+            eprintln!("两臂均只读一次同一寄存器，合流后读事件：{reads:?}");
+            assert_eq!(reads.len(), 2);
+            let inconsistent = smtlib::Exp::Neq(
+                Box::new(crate::primop_util::smt_value(&reads[0], info()).unwrap()),
+                Box::new(crate::primop_util::smt_value(&reads[1], info()).unwrap()),
+            );
+            assert_eq!(
+                solver.check_sat_with(&inconsistent, info()),
+                crate::smt::SmtResult::Unsat,
+                "没有写入的同一寄存器不能连续读出不同值"
+            );
+        }
+
+        #[test]
+        fn adversarial_merge_disjoint_register_writes_trace() {
+            let mut shared = empty_shared_state();
+            let a = shared.symtab.intern("za");
+            let b = shared.symtab.intern("zb");
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let mut frame = make_frame(vec![
+                Instr::Jump(Exp::Bool(true), 3, info()),
+                Instr::Copy(Loc::Id(a), Exp::Bits(B64::new(1, 8)), info()),
+                Instr::Goto(4),
+                Instr::Copy(Loc::Id(b), Exp::Bits(B64::new(1, 8)), info()),
+                Instr::End,
+            ]);
+            frame.regs_mut().insert(a, false, UVal::Init(Val::Bits(B64::new(0, 8))));
+            frame.regs_mut().insert(b, false, UVal::Init(Val::Bits(B64::new(0, 8))));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(),
+                None,
+                "不同写集合必须保留分叉"
+            );
+            let events = solver.trace().to_vec();
+            let writes: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::WriteReg(reg, _, _) => Some(*reg),
+                    _ => None,
+                })
+                .collect();
+            eprintln!("每条分支仅写一个寄存器，合流后写事件：{writes:?}");
+            assert!(writes.is_empty(), "拒绝合流必须回滚推测产生的写事件");
+
+            let branch = shared.symtab.intern("zbranch");
+            let mut frame = make_frame(vec![
+                Instr::Decl(branch, Ty::Bool, info()),
+                Instr::Jump(Exp::Id(branch), 4, info()),
+                Instr::Copy(Loc::Id(a), Exp::Bits(B64::new(1, 8)), info()),
+                Instr::Goto(5),
+                Instr::Copy(Loc::Id(b), Exp::Bits(B64::new(1, 8)), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::End,
+            ]);
+            frame.regs_mut().insert(a, false, UVal::Init(Val::Bits(B64::new(0, 8))));
+            frame.regs_mut().insert(b, false, UVal::Init(Val::Bits(B64::new(0, 8))));
+            let task_state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+            let queue = Worker::new_lifo();
+            queue.push(frame.task(TaskId::from_usize(0), &task_state));
+            let mut written = Vec::new();
+            while let Some(mut task) = queue.pop() {
+                let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
+                if let Some((def, event)) = task.fork_cond {
+                    solver.add_event(event);
+                    solver.add(def);
+                }
+                let mut frame = unfreeze_frame(&task.frame);
+                let result = run_loop(
+                    0,
+                    task.id,
+                    &mut task.fraction,
+                    PathTimeout::unlimited(),
+                    task.stop_conditions,
+                    &SingleForkSink { queue: &queue },
+                    &mut frame,
+                    task.state,
+                    &shared,
+                    &mut solver,
+                )
+                .unwrap();
+                assert!(matches!(result, Run::Finished(_)));
+                let events = solver.trace().to_vec();
+                let writes: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::WriteReg(reg, _, _) => Some(*reg),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(writes.len(), 1, "每条实际路径只有一个写事件");
+                written.push(writes[0]);
+            }
+            assert_eq!(written.len(), 2);
+            assert!(written.contains(&a) && written.contains(&b));
+        }
+
+        #[test]
+        fn adversarial_merge_data_to_dynamic_slice() {
+            for enabled in [false, true] {
+                let cond = test_name(180);
+                let value = test_name(181);
+                let length = test_name(182);
+                let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+                let slice = *crate::primop::variadic_primops::<B64>().get("slice").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(value, Ty::Bits(8), info()),
+                    Instr::Decl(length, Ty::I128, info()),
+                    Instr::Jump(Exp::Id(cond), 6, info()),
+                    Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(2, 8)), info()),
+                    Instr::PrimopUnary(Loc::Id(length), unsigned, Exp::Id(value), info()),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        slice,
+                        vec![Exp::Bits(B64::new(7, 8)), Exp::I128(0), Exp::Id(length)],
+                        info(),
+                    ),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("位向量转整数后动态切片：合流={enabled}，错误={errors:?}");
+                assert!(errors.is_empty(), "长度为 1/2 的两条分支都应完成");
+                let mut widths: Vec<_> = results
+                    .into_iter()
+                    .map(|result| match result.unwrap() {
+                        Run::Finished(Val::Bits(bits)) => bits.len(),
+                        _ => panic!("动态切片必须返回具体位向量"),
+                    })
+                    .collect();
+                widths.sort_unstable();
+                assert_eq!(widths, vec![1, 2]);
+            }
+        }
+
+        #[test]
+        fn adversarial_relaxed_ctor_integer_history() {
+            let mut shared = empty_shared_state();
+            let reg = shared.symtab.intern("zreg");
+            let ctor = shared.symtab.intern("zctor");
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut regs = RegisterBindings::new();
+            regs.insert(reg, true, UVal::Init(Val::Ctor(ctor, Box::new(Val::I128(1)))));
+            regs.assign(reg, Val::Ctor(ctor, Box::new(Val::I128(2))), &shared);
+            regs.forget_last_reads();
+            let read = regs.get(reg, &shared, &mut solver, info());
+            eprintln!("未启用路径合流时读取 relaxed 构造子历史：{read:?}");
+            assert!(read.is_ok(), "通用 ITE 应保留整数载荷的历史选择");
+            let Val::Ctor(_, payload) = read.unwrap().unwrap() else { panic!("必须保留构造子") };
+            let payload = crate::primop_util::smt_value(payload, info()).unwrap();
+            for candidate in [1, 2, 3] {
+                let query =
+                    smtlib::Exp::Eq(Box::new(payload.clone()), Box::new(crate::primop_util::smt_i128(candidate)));
+                assert_eq!(solver.check_sat_with(&query, info()).is_sat().unwrap(), candidate != 3);
+            }
+        }
+
+        #[test]
+        fn machine_and_integer_indices_preserve_slice_and_update_values() {
+            for index_width in [64, 128] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                for width in [8, 64, 128, 256] {
+                    let bits = solver.define_const(crate::primop::smt_zeros(i128::from(width)), info());
+                    for offset in [0, width - 8] {
+                        let index = solver.define_const(smtlib::bits64(u64::from(offset), index_width), info());
+                        let value = crate::primop::op_set_slice(
+                            Val::Symbolic(bits),
+                            Val::Symbolic(index),
+                            Val::Bits(B64::new(0xa5, 8)),
+                            &mut solver,
+                            info(),
+                        )
+                        .unwrap();
+                        assert_eq!(crate::primop_util::length_bits(&value, &mut solver, info()).unwrap(), width);
+                        let result =
+                            crate::primop::op_slice(value, Val::Symbolic(index), 8, &mut solver, info()).unwrap();
+                        let wrong = smtlib::Exp::Neq(
+                            Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                            Box::new(smtlib::bits64(0xa5, 8)),
+                        );
+                        assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                    }
+                }
+                let index = solver.declare_const(smtlib::Ty::BitVec(index_width), info());
+                let mut frame = make_frame(vec![Instr::End]);
+                let result = crate::primop::vector_update(
+                    vec![Val::Vector(vec![Val::I128(0), Val::I128(0)]), Val::Symbolic(index), Val::I128(7)],
+                    &mut solver,
+                    &mut frame,
+                    info(),
+                )
+                .unwrap();
+                let Val::Vector(values) = result else { panic!("必须返回向量") };
+                for candidate in [0, 1] {
+                    let selected = smtlib::Exp::Eq(
+                        Box::new(smtlib::Exp::Var(index)),
+                        Box::new(smtlib::bits64(candidate as u64, index_width)),
+                    );
+                    for (element, value) in values.iter().enumerate() {
+                        let wrong = smtlib::Exp::And(
+                            Box::new(selected.clone()),
+                            Box::new(smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(value, info()).unwrap()),
+                                Box::new(crate::primop_util::smt_i128(if element == candidate { 7 } else { 0 })),
+                            )),
+                        );
+                        assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                    }
+                }
+                for invalid in [-1, 2] {
+                    let bound = if index_width == 64 {
+                        crate::primop_util::smt_i64(invalid)
+                    } else {
+                        crate::primop_util::smt_i128(i128::from(invalid))
+                    };
+                    let query = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(index)), Box::new(bound));
+                    assert_eq!(solver.check_sat_with(&query, info()), crate::smt::SmtResult::Unsat);
+                }
+            }
+        }
+
+        #[test]
+        fn symbolic_constructor_equality_checks_tag_and_payload() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let a = test_name(180);
+            let b = test_name(181);
+            let merged = crate::primop_util::merge_val(
+                cond,
+                &Val::Ctor(a, Box::new(Val::Bits(B64::new(1, 8)))),
+                &Val::Ctor(b, Box::new(Val::Bits(B64::new(2, 8)))),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            for tag in [a, b, test_name(182)] {
+                for payload in [1, 2] {
+                    let rhs = Val::Ctor(tag, Box::new(Val::Bits(B64::new(payload, 8))));
+                    for (lhs, rhs) in [(merged.clone(), rhs.clone()), (rhs, merged.clone())] {
+                        let equal = primop::eq_anything(lhs, rhs, &mut solver, info()).unwrap();
+                        for choice in [false, true] {
+                            let expected = if choice { tag == a && payload == 1 } else { tag == b && payload == 2 };
+                            let wrong = smtlib::Exp::And(
+                                Box::new(smtlib::Exp::Eq(
+                                    Box::new(smtlib::Exp::Var(cond)),
+                                    Box::new(smtlib::Exp::Bool(choice)),
+                                )),
+                                Box::new(smtlib::Exp::Neq(
+                                    Box::new(crate::primop_util::smt_value(&equal, info()).unwrap()),
+                                    Box::new(smtlib::Exp::Bool(expected)),
+                                )),
+                            );
+                            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::config::{ISAConfig, Tool};
     use crate::source_loc::SourceRegion;
@@ -5727,13 +6281,13 @@ fn zmemreadfork(zu) {
         let mut solver = Solver::<B64>::new(&ctx);
         let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
         let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
-        let lt = *crate::primop::binary_primops::<B64>().get("lt").unwrap();
         let value = unsigned(Val::Symbolic(bits), &mut solver, info()).unwrap();
-        let negative = lt(value, Val::I128(0), &mut solver, info()).unwrap();
-        let query = crate::primop_util::smt_value(&negative, info()).unwrap();
-        let result = solver.check_sat_with(&query, info());
-        eprintln!("unsigned(bits128) < 0：{result:?}");
-        assert_eq!(result, crate::smt::SmtResult::Unsat, "无符号整数转换不能产生负值");
+        assert_eq!(value, Val::Symbolic(bits));
+        for input in [0, i128::MAX, i128::MIN, -1] {
+            let query =
+                smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(bits)), Box::new(crate::primop_util::smt_i128(input)));
+            assert_eq!(solver.check_sat_with(&query, info()), crate::smt::SmtResult::Sat);
+        }
     }
 
     #[test]
@@ -5809,7 +6363,7 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn symbolic_length_retry_preserves_binary_and_variadic_operands() {
-        for consumer in ["vector_init", "get_slice_int"] {
+        for consumer in ["vector_init", "get_slice_int", "sail_truncate"] {
             let mut shared = empty_shared_state();
             let lengths = shared.symtab.intern("zlengths");
             let mut lets = HashMap::default();
@@ -5827,6 +6381,13 @@ fn zmemreadfork(zu) {
                     Loc::Id(RETURN),
                     *crate::primop::variadic_primops::<B64>().get(consumer).unwrap(),
                     vec![operand, Exp::I128(0), Exp::I128(0)],
+                    info(),
+                ),
+                "sail_truncate" => Instr::PrimopBinary(
+                    Loc::Id(RETURN),
+                    *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                    Exp::Bits(B64::new(0xffff, 16)),
+                    operand,
                     info(),
                 ),
                 _ => unreachable!(),

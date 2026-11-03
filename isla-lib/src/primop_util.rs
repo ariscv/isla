@@ -240,6 +240,17 @@ pub fn build_ite<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    build_ite_with(b, lhs, rhs, solver, info, build_ite)
+}
+
+fn build_ite_with<B: BV>(
+    b: Sym,
+    lhs: &Val<B>,
+    rhs: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut Solver<B>, SourceLoc) -> Result<Val<B>, ExecError>,
+) -> Result<Val<B>, ExecError> {
     if merge_bit_width(lhs, solver, info)? != merge_bit_width(rhs, solver, info)? {
         return Err(ExecError::IncompatibleMerge);
     }
@@ -253,7 +264,7 @@ pub fn build_ite<B: BV>(
                 .iter()
                 .map(|(k, l_val)| match r_fields.get(k) {
                     None => Err(ExecError::Type(format!("build_ite {:?}", &k), info)),
-                    Some(r_val) => Ok((*k, build_ite(b, l_val, r_val, solver, info)?)),
+                    Some(r_val) => Ok((*k, merge_payload(b, l_val, r_val, solver, info)?)),
                 })
                 .collect();
             Ok(Val::Struct(fields?))
@@ -261,7 +272,7 @@ pub fn build_ite<B: BV>(
 
         (Val::Ctor(l_id, lhs), Val::Ctor(r_id, rhs)) => {
             if l_id == r_id {
-                Ok(Val::Ctor(*l_id, Box::new(merge_val(b, lhs, rhs, solver, info)?)))
+                Ok(Val::Ctor(*l_id, Box::new(merge_payload(b, lhs, rhs, solver, info)?)))
             } else {
                 use smtlib::Exp::*;
                 let sym_id =
@@ -281,7 +292,7 @@ pub fn build_ite<B: BV>(
 
             let mut possibilities = rhs.clone();
             match possibilities.entry(*l_id) {
-                Entry::Occupied(o) => *o.into_mut() = merge_val(b, lhs, o.get(), solver, info)?,
+                Entry::Occupied(o) => *o.into_mut() = merge_payload(b, lhs, o.get(), solver, info)?,
                 Entry::Vacant(v) => {
                     v.insert(lhs.as_ref().clone());
                 }
@@ -293,7 +304,7 @@ pub fn build_ite<B: BV>(
         (Val::SymbolicCtor(_, _), Val::Ctor(_, _)) => {
             use smtlib::Exp::*;
             let not_b = solver.define_const(Not(Box::new(Var(b))), info);
-            build_ite(not_b, rhs, lhs, solver, info)
+            build_ite_with(not_b, rhs, lhs, solver, info, merge_payload)
         }
 
         (Val::SymbolicCtor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
@@ -303,7 +314,7 @@ pub fn build_ite<B: BV>(
             let mut possibilities = lhs.clone();
             for (ctor, rhs_val) in rhs.iter() {
                 match possibilities.entry(*ctor) {
-                    Entry::Occupied(o) => *o.into_mut() = merge_val(b, o.get(), rhs_val, solver, info)?,
+                    Entry::Occupied(o) => *o.into_mut() = merge_payload(b, o.get(), rhs_val, solver, info)?,
                     Entry::Vacant(v) => {
                         v.insert(rhs_val.clone());
                     }
@@ -370,7 +381,7 @@ mod build_ite_tests {
         let rhs = lhs.clone();
         assert_eq!(build_ite(condition, &lhs, &rhs, &mut solver, SourceLoc::unknown()).unwrap(), lhs);
 
-        // 同标签载荷必须遵循 merge_val：不同 I128 不可藏进构造子后绕过兼容性检查。
+        // 路径合流仍拒绝不同整数载荷，通用 ITE 则支持寄存器历史选择。
         let info = SourceLoc::unknown();
         let tag = solver.declare_const(smtlib::Ty::BitVec(32), info);
         let left_payload = Val::I128(8);
@@ -386,9 +397,10 @@ mod build_ite_tests {
         for left in &left_values {
             for right in &right_values {
                 assert!(matches!(
-                    build_ite(condition, left, right, &mut solver, info),
+                    merge_val(condition, left, right, &mut solver, info),
                     Err(ExecError::IncompatibleMerge)
                 ));
+                assert!(build_ite(condition, left, right, &mut solver, info).is_ok());
             }
         }
 
@@ -589,7 +601,9 @@ pub fn merge_val<B: BV>(
         (Val::Ctor(_, _), Val::Ctor(_, _))
         | (Val::Ctor(_, _), Val::SymbolicCtor(_, _))
         | (Val::SymbolicCtor(_, _), Val::Ctor(_, _))
-        | (Val::SymbolicCtor(_, _), Val::SymbolicCtor(_, _)) => build_ite(cond, val_a, val_b, solver, info),
+        | (Val::SymbolicCtor(_, _), Val::SymbolicCtor(_, _)) => {
+            build_ite_with(cond, val_a, val_b, solver, info, merge_val)
+        }
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
 
