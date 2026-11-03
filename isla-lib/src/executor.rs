@@ -2451,6 +2451,67 @@ where
     collected_lock.into_inner().unwrap()
 }
 
+/// 等价验证必须同时具备正常完成路径和所有路径证明成功。
+#[derive(Default)]
+pub struct EquivalenceResult {
+    failed: AtomicBool,
+    completed: AtomicUsize,
+}
+
+impl EquivalenceResult {
+    pub fn success(&self) -> bool {
+        !self.failed.load(Ordering::Acquire) && self.completed.load(Ordering::Acquire) > 0
+    }
+}
+
+pub fn equivalence_collector<'ir, B: BV>(
+    tid: usize,
+    task_id: TaskId,
+    result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
+    shared_state: &SharedState<'ir, B>,
+    mut solver: Solver<B>,
+    collected: &EquivalenceResult,
+) {
+    if let Ok((Run::Finished(value), frame)) = &result {
+        let expected = match value {
+            Val::Bool(true) => true,
+            Val::Symbolic(v) => solver.is_bool(*v),
+            _ => false,
+        };
+        if !expected {
+            collected.failed.store(true, Ordering::Release);
+            submit_itrace_for_local_frame(frame, shared_state);
+            return;
+        }
+    }
+    let finished = matches!(&result, Ok((Run::Finished(_), _)));
+    if finished {
+        match solver.check_sat(SourceLoc::unknown()) {
+            SmtResult::Sat => (),
+            SmtResult::Unsat => {
+                if let Ok((_, frame)) = result {
+                    submit_itrace_for_local_frame(&frame, shared_state);
+                }
+                return;
+            }
+            SmtResult::Unknown | SmtResult::Error(_) => {
+                collected.failed.store(true, Ordering::Release);
+                if let Ok((_, frame)) = result {
+                    submit_itrace_for_local_frame(&frame, shared_state);
+                }
+                return;
+            }
+        }
+    }
+    let valid = AtomicBool::new(true);
+    all_unsat_collector(tid, task_id, result, shared_state, solver, &valid);
+    if !valid.load(Ordering::Acquire) {
+        collected.failed.store(true, Ordering::Release);
+    } else if finished {
+        collected.completed.fetch_add(1, Ordering::Release);
+    }
+}
+
 /// This `Collector` is used for boolean Sail functions. It returns
 /// true via an AtomicBool if all reachable paths through the program
 /// are unsatisfiable, which implies that the function always returns
@@ -2466,6 +2527,9 @@ pub fn all_unsat_collector<'ir, B: BV>(
     match result {
         Ok((Run::Finished(value), frame)) => {
             match value {
+                Val::Symbolic(v) if !solver.is_bool(v) => {
+                    collected.store(false, Ordering::Release);
+                }
                 Val::Symbolic(v) => {
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
@@ -2488,13 +2552,17 @@ pub fn all_unsat_collector<'ir, B: BV>(
                     log_from!(tid, log::VERBOSE, "Got false");
                     collected.store(false, Ordering::Release)
                 }
-                _ => log_from!(tid, log::VERBOSE, &format!("Got value {:?}", value)),
+                _ => {
+                    log_from!(tid, log::VERBOSE, &format!("Got value {:?}", value));
+                    collected.store(false, Ordering::Release);
+                }
             }
             submit_itrace_for_local_frame(&frame, shared_state);
         }
         Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Ok((Run::Exit | Run::Suspended, frame)) => {
             log_from!(tid, log::VERBOSE, "Unexpected return".to_string());
+            collected.store(false, Ordering::Release);
             submit_itrace_for_local_frame(&frame, shared_state);
         }
         Err((err, frame)) => {
@@ -3561,12 +3629,143 @@ fn zcaller(za, zb) {
         assert_eq!(rewritten, 1, "期望 `<_u` 调用点被改写为一个 PrimopBinary");
     }
 
+    #[test]
+    fn equivalence_requires_normal_returns_and_preserves_failure() {
+        crate::smt::configure_tastic(Some("qfaufbv"));
+        let shared = empty_shared_state();
+        let ctx = Context::new(Config::new());
+        let collected = EquivalenceResult::default();
+        assert!(!collected.success());
+        equivalence_collector(
+            0,
+            TaskId::fresh(),
+            Ok((Run::Dead, make_frame(vec![Instr::End]))),
+            &shared,
+            Solver::<B64>::new(&ctx),
+            &collected,
+        );
+        assert!(!collected.success());
+        equivalence_collector(
+            0,
+            TaskId::fresh(),
+            Ok((Run::Finished(Val::Bool(true)), make_frame(vec![Instr::End]))),
+            &shared,
+            Solver::<B64>::new(&ctx),
+            &collected,
+        );
+        assert!(collected.success());
+        for outcome in [Run::Exit, Run::Suspended, Run::Finished(Val::Unit), Run::Finished(Val::Bool(false))] {
+            let result = EquivalenceResult::default();
+            equivalence_collector(
+                0,
+                TaskId::fresh(),
+                Ok((outcome, make_frame(vec![Instr::End]))),
+                &shared,
+                Solver::<B64>::new(&ctx),
+                &result,
+            );
+            equivalence_collector(
+                0,
+                TaskId::fresh(),
+                Ok((Run::Finished(Val::Bool(true)), make_frame(vec![Instr::End]))),
+                &shared,
+                Solver::<B64>::new(&ctx),
+                &result,
+            );
+            assert!(!result.success());
+        }
+    }
+
+    #[test]
+    fn equivalence_symbolic_results_require_boolean_unsat_proof() {
+        crate::smt::configure_tastic(Some("qfaufbv"));
+        let shared = empty_shared_state();
+        let ctx = Context::new(Config::new());
+        for (ty, proven, expected) in
+            [(smtlib::Ty::Bool, true, true), (smtlib::Ty::Bool, false, false), (smtlib::Ty::BitVec(1), false, false)]
+        {
+            let mut solver = Solver::<B64>::new(&ctx);
+            let value = solver.declare_const(ty, info());
+            if proven {
+                solver.assert(smtlib::Exp::Var(value));
+            }
+            let result = EquivalenceResult::default();
+            equivalence_collector(
+                0,
+                TaskId::fresh(),
+                Ok((Run::Finished(Val::Symbolic(value)), make_frame(vec![Instr::End]))),
+                &shared,
+                solver,
+                &result,
+            );
+            assert_eq!(result.success(), expected);
+        }
+    }
+
+    #[test]
+    fn all_unsat_rejects_non_boolean_symbolic_results() {
+        crate::smt::configure_tastic(Some("qfaufbv"));
+        let shared = empty_shared_state();
+        let ctx = Context::new(Config::new());
+        for ty in [smtlib::Ty::BitVec(1), smtlib::Ty::Array(Box::new(smtlib::Ty::Bool), Box::new(smtlib::Ty::Bool))] {
+            let mut solver = Solver::<B64>::new(&ctx);
+            let value = solver.declare_const(ty, info());
+            let collected = AtomicBool::new(true);
+            all_unsat_collector(
+                0,
+                TaskId::fresh(),
+                Ok((Run::Finished(Val::Symbolic(value)), make_frame(vec![Instr::End]))),
+                &shared,
+                solver,
+                &collected,
+            );
+            assert!(!collected.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn self_test_accepts_scalar_rewrite_and_rejects_counterexample_and_dead_paths() {
+        crate::smt::configure_tastic(Some("qfaufbv"));
+        let mut symtab = Symtab::new();
+        let arg = symtab.intern("zscalar_arg");
+        let original = vec![
+            Instr::Jump(Exp::Id(arg), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        let rewritten = crate::ir::partial_linearize::partial_linearize(original.clone(), &Ty::Bool, &mut symtab);
+        let check = |left, right| {
+            crate::ir::linearize::self_test(
+                2,
+                Vec::new(),
+                symtab.clone(),
+                IRTypeInfo::new::<B64>(&[]),
+                &empty_isa_config(),
+                &[arg],
+                &[Ty::Bool],
+                &Ty::Bool,
+                left,
+                right,
+            )
+        };
+        assert!(check(original.clone(), rewritten));
+        assert!(!check(original, vec![Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()), Instr::End]));
+        let dead =
+            vec![Instr::PrimopUnary(Loc::Id(RETURN), primop::assume::<B64>, Exp::Bool(false), info()), Instr::End];
+        assert!(!check(dead.clone(), dead));
+        let exit = vec![Instr::Exit(ExitCause::Explicit, info())];
+        assert!(!check(exit.clone(), exit));
+    }
+
     fn empty_tool() -> Tool {
         Tool { executable: PathBuf::new(), options: Vec::new() }
     }
 
     fn empty_isa_config() -> ISAConfig<B64> {
         ISAConfig {
+            linearize: crate::config::LinearizeConfig::default(),
             pc: Name::from_u32(u32::MAX),
             register_event_sets: HashMap::new(),
             assembler: empty_tool(),

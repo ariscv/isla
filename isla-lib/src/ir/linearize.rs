@@ -442,7 +442,6 @@ pub fn self_test<B: BV>(
 ) -> bool {
     use crate::executor;
     use crate::init::{initialize_architecture, Initialized};
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     let fn1 = symtab.intern("self_test_fn1#");
     let fn2 = symtab.intern("self_test_fn2#");
@@ -479,9 +478,16 @@ pub fn self_test<B: BV>(
         .add_lets(&lets)
         .add_regs(&regs)
         .task(executor::TaskId::fresh(), &task_state);
-    let result = Arc::new(AtomicBool::new(true));
+    let result = Arc::new(executor::EquivalenceResult::default());
 
-    executor::start_multi(num_threads, None, vec![task], &shared_state, result.clone(), &executor::all_unsat_collector);
+    executor::start_multi(
+        num_threads,
+        None,
+        vec![task],
+        &shared_state,
+        result.clone(),
+        &executor::equivalence_collector,
+    );
 
-    result.load(Ordering::Acquire)
+    result.success()
 }

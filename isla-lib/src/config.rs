@@ -2193,7 +2193,82 @@ fn case_quota_table(table: &toml::value::Table) -> Result<Option<BTreeMap<String
     Ok(Some(map))
 }
 
+/// 通用函数线性化配置，目标名在加载时编码一次。
+#[derive(Debug, Clone)]
+pub struct LinearizeConfig {
+    pub verify: bool,
+    pub targets: HashMap<Name, crate::ir::linearize_policy::LinearizeStrategy>,
+}
+
+impl Default for LinearizeConfig {
+    fn default() -> Self {
+        Self { verify: true, targets: HashMap::new() }
+    }
+}
+
+impl LinearizeConfig {
+    pub fn parse(config: &Value, symtab: &Symtab) -> Result<Self, String> {
+        use crate::ir::linearize_policy::LinearizeStrategy;
+        let mut parsed = Self::default();
+        let value = match config.get("linearize") {
+            None => return Ok(parsed),
+            Some(value) => value,
+        };
+        let table = value.as_table().ok_or("linearize 必须是表")?;
+        allowed_table_keys(table, "linearize", &["verify", "targets"])?;
+        if let Some(value) = table.get("verify") {
+            parsed.verify = value.as_bool().ok_or("linearize.verify 必须是布尔值")?;
+        }
+        if let Some(value) = table.get("targets") {
+            for target in value.as_array().ok_or("linearize.targets 必须是表数组")? {
+                let target = target.as_table().ok_or("linearize.targets 元素必须是表")?;
+                allowed_table_keys(
+                    target,
+                    "linearize.targets",
+                    &["function", "strategy", "max_branches", "max_instructions"],
+                )?;
+                let function =
+                    target.get("function").and_then(Value::as_str).ok_or("linearize 目标缺少字符串 function")?;
+                let name = symtab
+                    .get(&zencode::encode(function))
+                    .ok_or_else(|| format!("linearize 目标函数不存在：{}", function))?;
+                let strategy =
+                    target.get("strategy").and_then(Value::as_str).ok_or("linearize 目标缺少字符串 strategy")?;
+                let limit = |key: &str| -> Result<usize, String> {
+                    let n = target
+                        .get(key)
+                        .and_then(Value::as_integer)
+                        .ok_or_else(|| format!("linearize.{} 必须是非负整数", key))?;
+                    usize::try_from(n).map_err(|_| format!("linearize.{} 为负数或溢出", key))
+                };
+                let strategy = match strategy {
+                    "bounded" => LinearizeStrategy::Bounded {
+                        max_branches: limit("max_branches")?,
+                        max_instructions: limit("max_instructions")?,
+                    },
+                    "none" | "full" => {
+                        if target.contains_key("max_branches") || target.contains_key("max_instructions") {
+                            return Err("只有 bounded 策略允许成本阈值".into());
+                        }
+                        if strategy == "full" {
+                            LinearizeStrategy::Full
+                        } else {
+                            LinearizeStrategy::None
+                        }
+                    }
+                    other => return Err(format!("未知线性化策略：{}", other)),
+                };
+                if parsed.targets.insert(name, strategy).is_some() {
+                    return Err(format!("重复 linearize 目标：{}", function));
+                }
+            }
+        }
+        Ok(parsed)
+    }
+}
+
 pub struct ISAConfig<B> {
+    pub linearize: LinearizeConfig,
     /// The identifier for the program counter register
     pub pc: Name,
     /// Map from cat sets to register event kinds
@@ -2308,6 +2383,7 @@ impl<B: BV> ISAConfig<B> {
         let pmp = get_pmp_config(&config)?;
 
         Ok(ISAConfig {
+            linearize: LinearizeConfig::parse(&config, symtab)?,
             pc: get_program_counter(&config, symtab)?,
             register_event_sets: get_register_event_sets(&config, symtab)?,
             assembler: toolchain.assembler,
@@ -3487,5 +3563,36 @@ mod tests {
             let value = toml.parse::<Value>().unwrap();
             assert!(get_encoding_slices(&value).is_err(), "{} 应报错", why);
         }
+    }
+}
+
+#[cfg(test)]
+mod linearize_config_tests {
+    use super::*;
+
+    #[test]
+    fn linearize_config_defaults_and_validation() {
+        let mut symtab = Symtab::new();
+        let encoded = zencode::encode("pure_func");
+        let f = symtab.intern(&encoded);
+        let parse = |text: &str| LinearizeConfig::parse(&text.parse::<Value>().unwrap(), &symtab);
+        assert!(parse("").unwrap().verify);
+        let cfg = parse("[linearize]\n[[linearize.targets]]\nfunction='pure_func'\nstrategy='full'").unwrap();
+        assert_eq!(cfg.targets[&f], crate::ir::linearize_policy::LinearizeStrategy::Full);
+        for suffix in [
+            "strategy='invalid'",
+            "strategy='full'\nmax_branches=1",
+            "strategy='bounded'\nmax_branches=-1\nmax_instructions=1",
+            "strategy='bounded'\nmax_branches=1",
+            "strategy='none'\nextra=true",
+            "strategy='bounded'\nmax_branches=9223372036854775808\nmax_instructions=1",
+        ] {
+            let text = format!("[linearize]\n[[linearize.targets]]\nfunction='pure_func'\n{}", suffix);
+            assert!(text.parse::<Value>().map(|v| LinearizeConfig::parse(&v, &symtab).is_err()).unwrap_or(true));
+        }
+        assert!(parse("[linearize]\nunknown=true").is_err());
+        assert!(parse("[linearize]\nverify='true'").is_err());
+        assert!(parse("[linearize]\n[[linearize.targets]]\nfunction='missing'\nstrategy='full'").is_err());
+        assert!(parse("[linearize]\n[[linearize.targets]]\nfunction='pure_func'\nstrategy='full'\n[[linearize.targets]]\nfunction='pure_func'\nstrategy='none'").is_err());
     }
 }

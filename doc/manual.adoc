@@ -88,9 +88,9 @@ NOTE: The above options can be passed together, e.g. `-D fmp`
   
 * `--verbose` Print extra information during execution
 
-* `-L` Linearise a function. See the function linearisation section of this document.
+* `-L` 使用 `full` 安全资格要求线性化函数。参见 link:linearize_strategy.md[通用函数线性化三策略系统]。
 
-* `-P` Partially linearise a function.
+* `-P` 与 `-L` 使用统一调度，调用部分线性化改写。
 
 * `--test-linearize` After linearising a function, using the SMT
   solver to check the linearised version is equivalent to the

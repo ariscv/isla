@@ -62,6 +62,7 @@ use crate::tracetool::itrace::ItraceHandler;
 use crate::zencode;
 
 pub mod linearize;
+pub mod linearize_policy;
 pub mod partial_linearize;
 pub mod serialize;
 pub mod ssa;
@@ -1387,7 +1388,7 @@ pub enum AssertionMode {
 }
 
 /// Change Calls without implementations into Primops
-pub(crate) fn insert_primops<B: BV>(
+pub fn insert_primops<B: BV>(
     defs: &mut [Def<Name, B>],
     symtab: &Symtab,
     mode: AssertionMode,

@@ -379,135 +379,97 @@ pub fn parse_with_arch<'ir, B: BV>(
         }
     });
 
+    use isla_lib::ir::linearize_policy::{self, LinearizeStrategy};
+    let mut linearize_targets: HashMap<Name, (LinearizeStrategy, bool)> = isa_config
+        .linearize
+        .targets
+        .iter()
+        .map(|(name, strategy)| (*name, (*strategy, isa_config.linearize.verify)))
+        .collect();
+    for id in matches.opt_strs("partial-linearize").iter().chain(matches.opt_strs("linearize").iter()) {
+        let target = symtab.get(&zencode::encode(id)).unwrap_or_else(|| {
+            eprintln!("线性化目标函数不存在：{}", id);
+            exit(1)
+        });
+        linearize_targets.insert(target, (LinearizeStrategy::Full, isa_config.linearize.verify));
+    }
+    // 在副本上复用标准 primop 解析，拒绝的目标保留原始 IR。
+    let mut linearize_arch = Vec::new();
+    if !linearize_targets.is_empty() {
+        linearize_arch = arch.clone();
+        ir::insert_primops(&mut linearize_arch, &symtab, ir::AssertionMode::Pessimistic, &isa_config);
+    }
+    let mut targets: Vec<_> = linearize_targets.into_iter().collect();
+    targets.sort_by_key(|(name, _)| symtab.to_str(*name));
+    for (target, (strategy, verify)) in targets {
+        let id = symtab.to_str(target);
+        let (arg_tys, ret_ty) = arch
+            .iter()
+            .find_map(|def| match def {
+                Def::Val(f, arg_tys, ret_ty) if *f == target => Some((arg_tys.clone(), ret_ty.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                eprintln!("线性化目标缺少函数类型：{}", id);
+                exit(1)
+            });
+        let (args, body) = linearize_arch
+            .iter()
+            .find_map(|def| match def {
+                Def::Fn(f, args, body) if *f == target => Some((args.clone(), body.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                eprintln!("线性化目标缺少函数体：{}", id);
+                exit(1)
+            });
+        let fn_def = (args.clone(), arg_tys.clone(), body);
+        let accepted =
+            linearize_policy::should_linearize(&fn_def, &ret_ty, strategy, &symtab).unwrap_or_else(|reason| {
+                eprintln!("函数 {} 线性化安全资格检查失败：{}", id, reason);
+                exit(1)
+            });
+        if !accepted {
+            continue;
+        }
+        let original = arch
+            .iter()
+            .find_map(|def| match def {
+                Def::Fn(f, _, body) if *f == target => Some(body.clone()),
+                _ => None,
+            })
+            .expect("目标函数体丢失");
+        let rewritten = partial_linearize::partial_linearize(original.clone(), &ret_ty, &mut symtab);
+        if verify || matches.opt_present("test-linearize") {
+            if !linearize::self_test(
+                num_threads,
+                arch.clone(),
+                symtab.clone(),
+                type_info.clone(),
+                &isa_config,
+                &args,
+                &arg_tys,
+                &ret_ty,
+                original,
+                rewritten.clone(),
+            ) {
+                eprintln!("函数 {} 线性化等价验证失败", id);
+                exit(1);
+            }
+        }
+        let body = arch
+            .iter_mut()
+            .find_map(|def| match def {
+                Def::Fn(f, _, body) if *f == target => Some(body),
+                _ => None,
+            })
+            .expect("目标函数体丢失");
+        *body = rewritten;
+    }
+
     if matches.opt_present("fork-assertions") {
         ir::assertions_to_jumps(&mut arch)
     }
-
-    #[rustfmt::skip]
-    matches.opt_strs("partial-linearize").iter().for_each(|id| {
-        if let Some(target) = symtab.get(&zencode::encode(id)) {
-            let mut arg_tys: Option<&[Ty<Name>]> = None;
-            let mut ret_ty: Option<&Ty<Name>> = None;
-
-            let mut rewrites = HashMap::new();
-
-            for def in arch.iter() {
-                match def {
-                    Def::Val(f, tys, ty) if *f == target => {
-                        arg_tys = Some(tys);
-                        ret_ty = Some(ty)
-                    }
-
-                    Def::Fn(f, args, body) if *f == target => {
-                        if let (Some(arg_tys), Some(ret_ty)) = (arg_tys, ret_ty) {
-                            let rewritten_body = partial_linearize::partial_linearize(body.to_vec(), ret_ty, &mut symtab);
-
-                            if matches.opt_present("test-linearize") {
-                                let success = linearize::self_test(
-                                    num_threads,
-                                    arch.clone(),
-                                    symtab.clone(),
-                                    type_info.clone(),
-                                    &isa_config,
-                                    args,
-                                    arg_tys,
-                                    ret_ty,
-                                    body.to_vec(),
-                                    rewritten_body.to_vec()
-                                );
-                                if success {
-                                    log!(log::VERBOSE, &format!("Successfully proved linearization of {} equivalent", id))
-                                } else {
-                                    eprintln!("Failed to linearize {}", id);
-                                    exit(1)
-                                }
-                            }
-
-                            rewrites.insert(*f, rewritten_body);
-                        } else {
-                            eprintln!("Found function body before type signature when processing -P/--partial-linearize option for function {}", id);
-                            exit(1)
-                        }
-                    }
-
-                    _ => (),
-                }
-            }
-
-            for def in arch.iter_mut() {
-                if let Def::Fn(f, _, body) = def {
-                    if *f == target {
-                        *body = rewrites.remove(f).unwrap()
-                    }
-                }
-            }
-        } else {
-            eprintln!("Function {} could not be found when processing -P/--partial-linearize option", id)
-        }
-    });
-
-    #[rustfmt::skip]
-    matches.opt_strs("linearize").iter().for_each(|id| {
-        if let Some(target) = symtab.get(&zencode::encode(id)) {
-            let mut arg_tys: Option<&[Ty<Name>]> = None;
-            let mut ret_ty: Option<&Ty<Name>> = None;
-
-            let mut rewrites = HashMap::new();
-
-            for def in arch.iter() {
-                match def {
-                    Def::Val(f, tys, ty) if *f == target => {
-                        arg_tys = Some(tys);
-                        ret_ty = Some(ty)
-                    }
-
-                    Def::Fn(f, args, body) if *f == target => {
-                        if let (Some(arg_tys), Some(ret_ty)) = (arg_tys, ret_ty) {
-                            let rewritten_body = linearize::linearize(body.to_vec(), ret_ty, &mut symtab);
-
-                            if matches.opt_present("test-linearize") {
-                                let success = linearize::self_test(
-                                    num_threads,
-                                    arch.clone(),
-                                    symtab.clone(),
-                                    type_info.clone(),
-                                    &isa_config,
-                                    args,
-                                    arg_tys,
-                                    ret_ty,
-                                    body.to_vec(),
-                                    rewritten_body.to_vec()
-                                );
-                                if success {
-                                    log!(log::VERBOSE, &format!("Successfully proved linearization of {} equivalent", id))
-                                } else {
-                                    eprintln!("Failed to linearize {}", id);
-                                    exit(1)
-                                }
-                            }
-
-                            rewrites.insert(*f, rewritten_body);
-                        } else {
-                            eprintln!("Found function body before type signature when processing -L/--linearize option for function {}", id);
-                            exit(1)
-                        }
-                    }
-
-                    _ => (),
-                }
-            }
-
-            for def in arch.iter_mut() {
-                if let Def::Fn(f, _, body) = def {
-                    if *f == target {
-                        *body = rewrites.remove(f).unwrap()
-                    }
-                }
-            }
-        } else {
-            eprintln!("Function {} could not be found when processing -L/--linearize option", id)
-        }
-    });
 
     for constraint in matches.opt_strs("reset-constraint") {
         // NB: this doesn't have enough information to check if the locations exist

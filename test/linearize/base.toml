@@ -1,0 +1,21 @@
+pc = "pc"
+assembler = "/usr/bin/true"
+objdump = "/usr/bin/true"
+nm = "/usr/bin/true"
+linker = "/usr/bin/true"
+
+[mmu]
+page_table_base = "0"
+page_size = "4096"
+s2_page_table_base = "0"
+s2_page_size = "4096"
+
+[threads]
+base = "0"
+top = "4096"
+stride = "4096"
+
+[symbolic_addrs]
+base = "4096"
+top = "8192"
+stride = "8"

@@ -1,0 +1,38 @@
+register zpc : %bv64
+
+val znot = "not" : (%bool) -> %bool
+
+val zscalar : (%bool) -> %bool
+fn zscalar(zarg) {
+  jump zarg goto 3;
+  return = false;
+  goto 4;
+  return = true;
+  end;
+}
+
+val zpure : (%bool) -> %bool
+fn zpure(zarg) {
+  return = znot(zarg);
+  end;
+}
+
+val zimpure : (%bool) -> %bool
+fn zimpure(zarg) {
+  zpc = 0x0000000000000000;
+  return = zarg;
+  end;
+}
+
+val zloop : (%bool) -> %bool
+fn zloop(zarg) {
+  goto 0;
+}
+
+val zassertion : (%bool) -> %bool
+fn zassertion(zarg) {
+  zu : %unit;
+  zu = zsail_assert(zarg, "断言");
+  return = zarg;
+  end;
+}
