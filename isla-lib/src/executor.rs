@@ -400,35 +400,42 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
             for arg in unevaluated_args {
                 args.push(eval_exp(arg, local_state, shared_state, solver, info)?.into_owned())
             }
-            Owned(match op {
-                Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Gt => primop::op_gt(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Lteq => primop::op_lteq(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Gteq => primop::op_gteq(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Eq => primop::op_eq(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Neq => primop::op_neq(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Add => primop::op_add(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Sub => primop::op_sub(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Bvnot => primop::not_bits(args[0].clone(), solver, info)?,
-                Op::Bvor => primop::or_bits(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Bvxor => primop::xor_bits(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Bvand => primop::and_bits(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Bvadd => primop::add_bits(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Bvsub => primop::sub_bits(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Bvaccess => primop::vector_access(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Concat => primop::append(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Not => primop::not_bool(args[0].clone(), solver, info)?,
-                Op::And => primop::and_bool(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Or => primop::or_bool(args[0].clone(), args[1].clone(), solver, info)?,
-                Op::Slice(len) => primop::op_slice(args[0].clone(), args[1].clone(), *len, solver, info)?,
-                Op::SetSlice => primop::op_set_slice(args[0].clone(), args[1].clone(), args[2].clone(), solver, info)?,
-                Op::Unsigned(_) => primop::op_unsigned(args[0].clone(), solver, info)?,
-                Op::Signed(_) => primop::op_signed(args[0].clone(), solver, info)?,
-                Op::Head => primop::op_head(args[0].clone(), solver, info)?,
-                Op::Tail => primop::op_tail(args[0].clone(), solver, info)?,
-                Op::IsEmpty => primop::op_is_empty(args[0].clone(), solver, info)?,
-                Op::ZeroExtend(len) => primop::op_zero_extend(args[0].clone(), *len, solver, info)?,
-            })
+            let result = match op {
+                Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info),
+                Op::Gt => primop::op_gt(args[0].clone(), args[1].clone(), solver, info),
+                Op::Lteq => primop::op_lteq(args[0].clone(), args[1].clone(), solver, info),
+                Op::Gteq => primop::op_gteq(args[0].clone(), args[1].clone(), solver, info),
+                Op::Eq => primop::op_eq(args[0].clone(), args[1].clone(), solver, info),
+                Op::Neq => primop::op_neq(args[0].clone(), args[1].clone(), solver, info),
+                Op::Add => primop::op_add(args[0].clone(), args[1].clone(), solver, info),
+                Op::Sub => primop::op_sub(args[0].clone(), args[1].clone(), solver, info),
+                Op::Bvnot => primop::not_bits(args[0].clone(), solver, info),
+                Op::Bvor => primop::or_bits(args[0].clone(), args[1].clone(), solver, info),
+                Op::Bvxor => primop::xor_bits(args[0].clone(), args[1].clone(), solver, info),
+                Op::Bvand => primop::and_bits(args[0].clone(), args[1].clone(), solver, info),
+                Op::Bvadd => primop::add_bits(args[0].clone(), args[1].clone(), solver, info),
+                Op::Bvsub => primop::sub_bits(args[0].clone(), args[1].clone(), solver, info),
+                Op::Bvaccess => primop::vector_access(args[0].clone(), args[1].clone(), solver, info),
+                Op::Concat => primop::append(args[0].clone(), args[1].clone(), solver, info),
+                Op::Not => primop::not_bool(args[0].clone(), solver, info),
+                Op::And => primop::and_bool(args[0].clone(), args[1].clone(), solver, info),
+                Op::Or => primop::or_bool(args[0].clone(), args[1].clone(), solver, info),
+                Op::Slice(len) => primop::op_slice(args[0].clone(), args[1].clone(), *len, solver, info),
+                Op::SetSlice => primop::op_set_slice(args[0].clone(), args[1].clone(), args[2].clone(), solver, info),
+                Op::Unsigned(_) => primop::op_unsigned(args[0].clone(), solver, info),
+                Op::Signed(_) => primop::op_signed(args[0].clone(), solver, info),
+                Op::Head => primop::op_head(args[0].clone(), solver, info),
+                Op::Tail => primop::op_tail(args[0].clone(), solver, info),
+                Op::IsEmpty => primop::op_is_empty(args[0].clone(), solver, info),
+                Op::ZeroExtend(len) => primop::op_zero_extend(args[0].clone(), *len, solver, info),
+            };
+            if matches!(result, Err(ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..))) {
+                for (exp, value) in unevaluated_args.iter().zip(&args) {
+                    local_state.expression_values.insert(exp as *const Exp<Name> as usize, value.clone());
+                }
+                local_state.expression_retry_operands = Some(args);
+            }
+            Owned(result?)
         }
 
         Kind(ctor_a, exp) => {
@@ -517,6 +524,15 @@ fn eval_exp<'state, 'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Cow<'state, Val<B>>, ExecError> {
+    let key = exp as *const Exp<Name> as usize;
+    if let Some(value) = local_state.expression_values.get(&key) {
+        return Ok(Cow::Owned(value.clone()));
+    }
+    if matches!(exp, Exp::Undefined(_)) {
+        let value = eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)?.into_owned();
+        local_state.expression_values.insert(key, value.clone());
+        return Ok(Cow::Owned(value));
+    }
     eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)
 }
 
@@ -642,15 +658,26 @@ pub fn interrupt_pending<'ir, B: BV>(
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
     for interrupt in &task_state.interrupts {
-        let Some(Val::Bits(reg_value)) =
-            frame.local_state.regs.get(interrupt.trigger_register, shared_state, solver, info)?
-        else {
-            return Err(ExecError::BadInterrupt(
-                "trigger register does not exist, or does not have a concrete bitvector value",
-            ));
+        let triggered = match frame.local_state.regs.get(interrupt.trigger_register, shared_state, solver, info)? {
+            Some(Val::Bits(reg_value)) => *reg_value == interrupt.trigger_value,
+            Some(Val::Symbolic(sym)) => {
+                let equal = smtlib::Exp::Eq(
+                    Box::new(smtlib::Exp::Var(*sym)),
+                    Box::new(crate::primop_util::smt_sbits(interrupt.trigger_value)),
+                );
+                let triggered = solver.check_sat_with(&equal, info).is_sat()?;
+                if triggered {
+                    assert!(
+                        !solver.check_sat_with(&smtlib::Exp::Not(Box::new(equal)), info).is_sat()?,
+                        "中断查询前必须拆分触发与未触发路径"
+                    );
+                }
+                triggered
+            }
+            _ => return Err(ExecError::BadInterrupt("trigger register does not exist, or is not a bitvector")),
         };
 
-        if *reg_value == interrupt.trigger_value {
+        if triggered {
             for (taken_task_id, taken_interrupt_id) in frame.taken_interrupts.iter().cloned() {
                 if task_id == taken_task_id && interrupt.id == taken_interrupt_id {
                     return Ok(false);
@@ -1184,7 +1211,17 @@ fn run_special_primop<'ir, B: BV>(
                             return Err(ExecError::PCLimitReached(bv.lower_u64()));
                         }
                     }
-                    // We could just do nothing if the program counter register is symbolic?
+                    Val::Symbolic(sym) => {
+                        let value = primop::proven_symbolic_i128(*sym, solver, info)?
+                            .expect("指令公告前必须将符号 PC 拆分为唯一候选");
+                        let width = solver.length(*sym).expect("PC 必须是位向量");
+                        let bv = B::get_slice_int(width, value, 0);
+                        let count = frame.pc_counts.entry(bv).or_insert(0);
+                        *count += 1;
+                        if *count > limit {
+                            return Err(ExecError::PCLimitReached(bv.lower_u64()));
+                        }
+                    }
                     _ => {
                         return Err(ExecError::Type(
                             "Program counter contains non-bitvector or symbolic value".to_string(),
@@ -1643,6 +1680,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 return Ok(None);
             }
         }
+        arm.local_state.expression_values.clear();
         if had_register_write && arm.local_state.register_reads.as_ref().unwrap().len() > read_count {
             // 当前事务先提交读取再提交写入，无法保留写后读的原始顺序。
             return Ok(None);
@@ -1939,13 +1977,68 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<Run<B>, ExecError> {
-    let mut last_z3_reset = Instant::now();
-    let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
     // 路径级 SMT 调用本身以线程局部方式计时；调度器会在 fork 时把累计值冻结在 Frame，
     // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
     crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
+    loop {
+        frame.local_state.expression_retry_operands = None;
+        let error = match run_loop_inner(
+            tid,
+            task_id,
+            task_fraction,
+            timeout,
+            stop_conditions,
+            fork_sink,
+            frame,
+            task_state,
+            shared_state,
+            solver,
+        ) {
+            Ok(result) => return Ok(result),
+            Err(error) => error,
+        };
+        let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
+        if !symbolic_length::retry_symbolic_length(
+            error,
+            &operands,
+            task_id,
+            task_fraction,
+            stop_conditions,
+            fork_sink,
+            frame,
+            task_state,
+            solver,
+        )? {
+            return Ok(Run::Dead);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+    tid: usize,
+    task_id: TaskId,
+    task_fraction: &mut Fraction,
+    timeout: PathTimeout,
+    stop_conditions: Option<&'task StopConditions>,
+    fork_sink: &S,
+    frame: &mut LocalFrame<'ir, B>,
+    task_state: &'task TaskState<B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<Run<B>, ExecError> {
+    let mut last_z3_reset = Instant::now();
+    let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        if matches!(&frame.pending_retry_operand, Some((pc, Val::Unit)) if *pc != frame.pc) {
+            frame.pending_retry_operand = None;
+            frame.local_state.expression_values.clear();
+            frame.local_state.expression_retry_operands = None;
+        }
+        if frame.pending_retry_operand.is_none() {
+            frame.local_state.expression_values.clear();
+        }
         // Completion is checked before the soft timeout. Therefore a path that
         // finished its last IR instruction is reported as finished even if its
         // budget was crossed during that instruction. A path timeout only means
@@ -1984,6 +2077,11 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             }
 
             Instr::Jump(exp, target, info) => {
+                // 条件可能要求分叉重试；求值成功后再计入控制流和回跳预算。
+                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                frame.pending_retry_operand = None;
+                frame.local_state.expression_values.clear();
+                frame.local_state.expression_retry_operands = None;
                 let decision = match limit_handler.as_ref() {
                     Some(handler) => handler.on_conditional_jump(
                         &mut frame.execution_limit_state,
@@ -2004,62 +2102,54 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         record_execution_limit(frame, reason, "truncate");
                         return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                     }
-                    ExecutionLimitDecision::ConcretizeBranch { reason, sample } => {
-                        let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
-                        match *value.as_ref() {
-                            Val::Symbolic(v) => {
-                                use smtlib::Exp::*;
+                    ExecutionLimitDecision::ConcretizeBranch { reason, sample } => match value {
+                        Val::Symbolic(v) => {
+                            use smtlib::Exp::*;
 
-                                let handler = limit_handler.as_ref().expect("limit decision requires active handler");
-                                handler.commit_sample(&mut frame.execution_limit_state, &sample);
-                                record_execution_limit(frame, reason, "sample_branch_condition");
-                                let concrete_bool = if loop_limit_target(reason).is_some() {
-                                    match concretize_loop_branch_with_sampling(v, solver, *info, &sample)? {
-                                        Some(value) => value,
-                                        None => {
-                                            record_execution_limit(
-                                                frame,
-                                                reason,
-                                                "truncate_exit_direction_unsatisfiable",
-                                            );
-                                            return Err(execution_limit_error(reason, frame.function_name, frame.pc));
-                                        }
+                            let handler = limit_handler.as_ref().expect("limit decision requires active handler");
+                            handler.commit_sample(&mut frame.execution_limit_state, &sample);
+                            record_execution_limit(frame, reason, "sample_branch_condition");
+                            let concrete_bool = if loop_limit_target(reason).is_some() {
+                                match concretize_loop_branch_with_sampling(v, solver, *info, &sample)? {
+                                    Some(value) => value,
+                                    None => {
+                                        record_execution_limit(frame, reason, "truncate_exit_direction_unsatisfiable");
+                                        return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                                     }
-                                } else {
-                                    concretize_branch_with_sampling(v, solver, *info, &sample)?
-                                };
+                                }
+                            } else {
+                                concretize_branch_with_sampling(v, solver, *info, &sample)?
+                            };
 
-                                if concrete_bool {
-                                    itrace_push_branch_condition!(frame, Var(v));
-                                    frame.pc = *target;
-                                } else {
-                                    itrace_push_branch_condition!(frame, Not(Box::new(Var(v))));
-                                    frame.pc += 1;
-                                }
-                                continue 'main_loop;
+                            if concrete_bool {
+                                itrace_push_branch_condition!(frame, Var(v));
+                                frame.pc = *target;
+                            } else {
+                                itrace_push_branch_condition!(frame, Not(Box::new(Var(v))));
+                                frame.pc += 1;
                             }
-                            Val::Bool(jump) => {
-                                if loop_limit_target(reason).is_some() && jump {
-                                    record_execution_limit(frame, reason, "truncate_concrete_backjump");
-                                    return Err(execution_limit_error(reason, frame.function_name, frame.pc));
-                                }
-                                if jump {
-                                    frame.pc = *target;
-                                } else {
-                                    frame.pc += 1;
-                                }
-                                continue 'main_loop;
-                            }
-                            _ => return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info)),
+                            continue 'main_loop;
                         }
-                    }
+                        Val::Bool(jump) => {
+                            if loop_limit_target(reason).is_some() && jump {
+                                record_execution_limit(frame, reason, "truncate_concrete_backjump");
+                                return Err(execution_limit_error(reason, frame.function_name, frame.pc));
+                            }
+                            if jump {
+                                frame.pc = *target;
+                            } else {
+                                frame.pc += 1;
+                            }
+                            continue 'main_loop;
+                        }
+                        _ => return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info)),
+                    },
                     ExecutionLimitDecision::Fork { .. } | ExecutionLimitDecision::KeepCurrentModel { .. } => {
                         panic!("conditional jump pre-check returned an invalid execution-limit decision")
                     }
                 }
 
-                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?;
-                match *value.as_ref() {
+                match value {
                     Val::Symbolic(v) => {
                         use smtlib::Def::*;
                         use smtlib::Exp::*;
@@ -2332,11 +2422,82 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                 match shared_state.functions.get(f) {
                     None => {
-                        let operands = if *f == INTERNAL_VECTOR_INIT || *f == INSTR_ANNOUNCE {
+                        let operands = if *f == INTERNAL_VECTOR_INIT || *f == INSTR_ANNOUNCE || *f == INTERRUPT_PENDING
+                        {
                             Some(symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?)
                         } else {
                             None
                         };
+                        if *f == INSTR_ANNOUNCE {
+                            if let Some((arch_pc, _)) = task_state.pc_limit {
+                                let pc = frame.local_state.regs.get(arch_pc, shared_state, solver, *info)?.cloned();
+                                if let Some(Val::Symbolic(sym)) = pc {
+                                    if solver.check_sat(*info).is_unsat()? {
+                                        return Ok(Run::Dead);
+                                    }
+                                    if symbolic_length::fork_symbolic_value(
+                                        sym,
+                                        operands.as_ref().unwrap(),
+                                        *info,
+                                        task_id,
+                                        task_fraction,
+                                        stop_conditions,
+                                        fork_sink,
+                                        frame,
+                                        task_state,
+                                        solver,
+                                    )? {
+                                        continue 'main_loop;
+                                    }
+                                }
+                            }
+                        }
+                        if *f == INTERRUPT_PENDING {
+                            for interrupt in &task_state.interrupts {
+                                let reg = frame
+                                    .local_state
+                                    .regs
+                                    .get(interrupt.trigger_register, shared_state, solver, *info)?
+                                    .cloned();
+                                let equal = match reg {
+                                    Some(Val::Symbolic(sym)) => smtlib::Exp::Eq(
+                                        Box::new(smtlib::Exp::Var(sym)),
+                                        Box::new(crate::primop_util::smt_sbits(interrupt.trigger_value)),
+                                    ),
+                                    Some(Val::Bits(value)) if value == interrupt.trigger_value => break,
+                                    Some(Val::Bits(_)) => continue,
+                                    _ => {
+                                        return Err(ExecError::BadInterrupt(
+                                            "trigger register does not exist, or is not a bitvector",
+                                        ))
+                                    }
+                                };
+                                if solver.check_sat_with(&equal, *info).is_sat()? {
+                                    if solver
+                                        .check_sat_with(&smtlib::Exp::Not(Box::new(equal.clone())), *info)
+                                        .is_sat()?
+                                    {
+                                        let cond = solver.define_const(equal, *info);
+                                        symbolic_length::fork_retry_operand(
+                                            cond,
+                                            smtlib::Exp::Var(cond),
+                                            smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
+                                            operands.as_ref().unwrap(),
+                                            *info,
+                                            task_id,
+                                            task_fraction,
+                                            stop_conditions,
+                                            fork_sink,
+                                            frame,
+                                            task_state,
+                                            solver,
+                                        )?;
+                                        continue 'main_loop;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         if *f == INSTR_ANNOUNCE && task_state.zero_announce_exit {
                             if let Val::Symbolic(sym) = operands.as_ref().unwrap()[0] {
                                 let width = solver.length(sym).expect("指令编码必须是位向量");
@@ -2594,8 +2755,10 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             let sym = solver.declare_const(smtlib::Ty::Bool, *info);
                             solver.assert_eq(Var(v), Var(sym));
                         }
-                        Ty::I128 => {
-                            let sym = solver.declare_const(smtlib::Ty::BitVec(128), *info);
+                        Ty::I64 | Ty::I128 => {
+                            let width = if matches!(ty, Ty::I64) { 64 } else { 128 };
+                            assert_eq!(solver.length(v), Some(width), "整数具体化的位宽必须匹配类型");
+                            let sym = solver.declare_const(smtlib::Ty::BitVec(width), *info);
                             solver.assert_eq(Var(v), Var(sym));
                         }
                         _ => panic!("unknown monomorphize type {:?}", ty),
@@ -2616,6 +2779,10 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 }
                                 Ty::AnyBits => {
                                     (bits64(bv.lower_u64(), bv.len()), Val::Bits(B::new(bv.lower_u64(), bv.len())))
+                                }
+                                Ty::I64 => {
+                                    assert_eq!(bv.len(), 64);
+                                    (Bits64(bv), Val::I64(bv.lower_u64() as i64))
                                 }
                                 _ => panic!("failed to interpret monomorphized value"),
                             },
@@ -2639,6 +2806,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             Ok(ModelVal::Arbitrary(_)) => match ty {
                                 Ty::Bits(len) => (bits64(0, *len), Val::Bits(B::new(0, *len))),
                                 Ty::Bool => (Bool(false), Val::Bool(false)),
+                                Ty::I64 => (bits64(0, 64), Val::I64(0)),
                                 Ty::I128 => (Bits(vec![false; 128]), Val::I128(0)),
                                 _ => panic!("failed to interpret monomorphized value"),
                             },
@@ -2742,6 +2910,11 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 }
             }
         }
+        if matches!(&frame.pending_retry_operand, Some((_, Val::Unit))) {
+            frame.pending_retry_operand = None;
+        }
+        frame.local_state.expression_values.clear();
+        frame.local_state.expression_retry_operands = None;
     }
 }
 
@@ -3519,6 +3692,583 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+
+    mod review13_tests {
+        use super::*;
+
+        #[test]
+        fn nested_condition_retry_counts_control_flow_once() {
+            let branch = test_name(340);
+            let data = test_name(341);
+            let index = test_name(342);
+            let vector = test_name(343);
+            let mut lets = HashMap::default();
+            lets.insert(vector, UVal::Init(Val::Vector(vec![Val::List(vec![]), Val::List(vec![Val::Unit])])));
+            let results = run_all_with_bindings(
+                vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(data, Ty::Bits(8), info()),
+                    Instr::Decl(index, Ty::I128, info()),
+                    Instr::Jump(Exp::Id(branch), 6, info()),
+                    Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                    Instr::Goto(8),
+                    Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Goto(8),
+                    Instr::PrimopUnary(Loc::Id(index), primop::unary_primops()["sail_unsigned"], Exp::Id(data), info()),
+                    Instr::Jump(
+                        Exp::Call(Op::IsEmpty, vec![Exp::Call(Op::Bvaccess, vec![Exp::Id(vector), Exp::Id(index)])]),
+                        12,
+                        info(),
+                    ),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                    Instr::Goto(13),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                    Instr::End,
+                ],
+                ExecutionLimits::default().with_path_merging(true).with_max_path_depth(4),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                lets,
+            );
+            assert_eq!(results.len(), 2);
+            assert!(results.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bool(true))))));
+            assert!(results.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bool(false))))));
+        }
+
+        #[test]
+        fn nested_access_retry_continues_into_the_next_primop() {
+            for enabled in [false, true] {
+                let branch = test_name(330);
+                let index = test_name(331);
+                let data = test_name(332);
+                let vector = test_name(333);
+                let string = test_name(334);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![Val::String("甲".into()), Val::String("乙".into())])));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I128, info()),
+                        Instr::Decl(string, Ty::String, info()),
+                        Instr::Jump(Exp::Id(branch), 7, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(8),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(index),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::Copy(
+                            Loc::Id(string),
+                            Exp::Call(Op::Bvaccess, vec![Exp::Id(vector), Exp::Id(index)]),
+                            info(),
+                        ),
+                        Instr::PrimopUnary(
+                            Loc::Id(RETURN),
+                            primop::unary_primops()["string_length"],
+                            Exp::Id(string),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                assert_eq!(results.len(), 2);
+                assert!(results.iter().all(|r| matches!(r, Ok(Run::Finished(Val::I128(3))))));
+            }
+        }
+
+        #[test]
+        fn machine_integer_models_preserve_negative_i64_and_i128() {
+            for ty in [Ty::I64, Ty::I128] {
+                let branch = test_name(330);
+                let data = test_name(331);
+                let integer = test_name(332);
+                let conversion = if matches!(ty, Ty::I64) {
+                    Instr::Copy(Loc::Id(integer), Exp::Call(Op::Signed(8), vec![Exp::Id(data)]), info())
+                } else {
+                    Instr::PrimopUnary(Loc::Id(integer), primop::unary_primops()["sail_signed"], Exp::Id(data), info())
+                };
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(integer, ty.clone(), info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(255, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(128, 8)), info()),
+                        conversion,
+                        Instr::Monomorphize(integer, ty.clone(), info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Id(integer), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(true),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let mut values: Vec<i128> = results
+                    .into_iter()
+                    .map(|r| match (r.unwrap(), &ty) {
+                        (Run::Finished(Val::I64(value)), Ty::I64) => i128::from(value),
+                        (Run::Finished(Val::I128(value)), Ty::I128) => value,
+                        _ => panic!("整数具体化结果类型错误"),
+                    })
+                    .collect();
+                values.sort();
+                assert_eq!(values, [-128, -1]);
+            }
+        }
+
+        #[test]
+        fn all_string_conversions_preserve_each_reachable_candidate() {
+            for op in ["string_of_bits", "decimal_string_of_bits", "string_of_int"] {
+                let mut outcomes = Vec::new();
+                for enabled in [false, true] {
+                    let branch = test_name(330);
+                    let data = test_name(331);
+                    let integer = test_name(332);
+                    let results = run_all_with_bindings(
+                        vec![
+                            Instr::Decl(branch, Ty::Bool, info()),
+                            Instr::Decl(data, Ty::Bits(8), info()),
+                            Instr::Decl(integer, Ty::I128, info()),
+                            Instr::Jump(Exp::Id(branch), 6, info()),
+                            Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(255, 8)), info()),
+                            Instr::Goto(7),
+                            Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(128, 8)), info()),
+                            Instr::PrimopUnary(
+                                Loc::Id(integer),
+                                primop::unary_primops()["sail_signed"],
+                                Exp::Id(data),
+                                info(),
+                            ),
+                            Instr::PrimopUnary(
+                                Loc::Id(RETURN),
+                                primop::unary_primops()[op],
+                                Exp::Id(if op == "string_of_int" { integer } else { data }),
+                                info(),
+                            ),
+                            Instr::End,
+                        ],
+                        ExecutionLimits::default().with_path_merging(enabled),
+                        empty_shared_state(),
+                        RegisterBindings::new(),
+                        HashMap::default(),
+                    );
+                    let mut values: Vec<String> = results
+                        .into_iter()
+                        .map(|r| match r.unwrap() {
+                            Run::Finished(Val::String(value)) => value,
+                            _ => panic!("字符串转换结果类型错误"),
+                        })
+                        .collect();
+                    values.sort();
+                    assert_eq!(values.len(), 2);
+                    outcomes.push(values);
+                }
+                assert_eq!(outcomes[0], outcomes[1], "转换算子：{op}");
+            }
+        }
+
+        #[test]
+        fn pack_vreg_symbolic_sew_preserves_legal_paths() {
+            for enabled in [false, true] {
+                let branch = test_name(330);
+                let data = test_name(331);
+                let sew = test_name(332);
+                let vector = test_name(333);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![])));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(sew, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(8, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(16, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(sew),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(data),
+                            primop::variadic_primops()["isla_pack_vreg"],
+                            vec![Exp::Id(sew), Exp::I128(64), Exp::Id(vector)],
+                            info(),
+                        ),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                assert_eq!(results.len(), 2);
+                assert!(results.iter().all(|r| matches!(r, Ok(Run::Finished(Val::Unit)))));
+            }
+        }
+
+        fn check_concrete_register_observer(observer: &str) {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let reg = shared.symtab.intern("zreview13_observed_register");
+                let branch = test_name(320);
+                let data = test_name(321);
+                let mut instrs = vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(data, Ty::Bits(64), info()),
+                    Instr::Jump(Exp::Id(branch), 5, info()),
+                    Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0x1000, 64)), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0x2000, 64)), info()),
+                    Instr::Copy(Loc::Id(reg), Exp::Id(data), info()),
+                ];
+                let mut task_state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                if observer == "pc_limit" {
+                    task_state = task_state.with_pc_limit(reg, 1);
+                    instrs.push(Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        INSTR_ANNOUNCE,
+                        vec![Exp::Bits(B64::new(0x13, 32))],
+                        info(),
+                    ));
+                } else {
+                    task_state.add_interrupt(TaskInterrupt::new(1, reg, B64::new(0x1000, 64), HashMap::new()));
+                    instrs.push(Instr::Call(Loc::Id(RETURN), false, INTERRUPT_PENDING, vec![], info()));
+                }
+                instrs.push(Instr::End);
+                let mut frame = make_frame(instrs);
+                frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(0, 64))));
+                let results = std::sync::Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::fresh(), &task_state),
+                    &shared,
+                    &results,
+                    &|_, _, result, _, _, results| {
+                        let outcome = match result {
+                            Ok((Run::Finished(v), _)) => format!("完成 {v:?}"),
+                            Err((error, _)) => format!("错误 {error:?}"),
+                            _ => panic!("异常结果"),
+                        };
+                        results.lock().unwrap().push(outcome);
+                    },
+                );
+                let results = results.into_inner().unwrap();
+                eprintln!("寄存器观察：{observer}，合并={enabled}，结果={results:?}");
+                assert_eq!(results.iter().filter(|r| r.starts_with("完成")).count(), 2);
+            }
+        }
+
+        #[test]
+        fn pc_limit_after_indirect_merged_write() {
+            check_concrete_register_observer("pc_limit");
+        }
+
+        #[test]
+        fn interrupt_after_merged_write() {
+            check_concrete_register_observer("interrupt");
+        }
+
+        #[test]
+        fn monomorphize_machine_integer_after_merge_does_not_crash() {
+            for enabled in [false, true] {
+                let branch = test_name(320);
+                let data = test_name(321);
+                let integer = test_name(322);
+                let result = std::panic::catch_unwind(|| {
+                    run_all_with_bindings(
+                        vec![
+                            Instr::Decl(branch, Ty::Bool, info()),
+                            Instr::Decl(data, Ty::Bits(8), info()),
+                            Instr::Decl(integer, Ty::I64, info()),
+                            Instr::Jump(Exp::Id(branch), 6, info()),
+                            Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                            Instr::Goto(7),
+                            Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
+                            Instr::Copy(Loc::Id(integer), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                            Instr::Monomorphize(integer, Ty::I64, info()),
+                            Instr::Copy(Loc::Id(RETURN), Exp::Id(integer), info()),
+                            Instr::End,
+                        ],
+                        ExecutionLimits::default().with_path_merging(enabled),
+                        empty_shared_state(),
+                        RegisterBindings::new(),
+                        HashMap::default(),
+                    )
+                });
+                eprintln!("机器整数具体化：合并={enabled}，panic={}", result.is_err());
+                assert!(result.is_ok());
+                assert!(result.unwrap().iter().all(Result::is_ok));
+            }
+        }
+
+        #[test]
+        fn negative_integer_high_slice_matches_concrete_paths() {
+            for enabled in [false, true] {
+                let branch = test_name(320);
+                let data = test_name(321);
+                let integer = test_name(322);
+                let slice = test_name(323);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(integer, Ty::I128, info()),
+                        Instr::Decl(slice, Ty::Bits(64), info()),
+                        Instr::Jump(Exp::Id(branch), 7, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0xff, 8)), info()),
+                        Instr::Goto(8),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0xfe, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(integer),
+                            primop::unary_primops()["sail_signed"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(slice),
+                            primop::variadic_primops()["get_slice_int"],
+                            vec![Exp::I128(64), Exp::Id(integer), Exp::I128(96)],
+                            info(),
+                        ),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            primop::binary_primops()["eq_bits"],
+                            Exp::Id(slice),
+                            Exp::Bits(B64::ones(64)),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for r in &results {
+                    match r {
+                        Ok(Run::Finished(v)) => eprintln!("负整数高位切片：合并={enabled}，返回={v:?}"),
+                        Err(e) => eprintln!("负整数高位切片：合并={enabled}，错误={e:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert!(
+                    results.iter().all(|r| matches!(r, Ok(Run::Finished(Val::Bool(true))))),
+                    "负整数超出最高位的切片必须符号扩展"
+                );
+            }
+        }
+
+        #[test]
+        fn read_vreg_symbolic_sew_preserves_legal_paths() {
+            for enabled in [false, true] {
+                let branch = test_name(320);
+                let data = test_name(321);
+                let sew = test_name(322);
+                let vector = test_name(323);
+                let mut args = vec![Exp::I128(1), Exp::Id(sew), Exp::I128(0)];
+                args.extend((0..8).map(|_| Exp::Bits(B64::zeros(64))));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(sew, Ty::I128, info()),
+                        Instr::Decl(vector, Ty::Vector(Box::new(Ty::AnyBits)), info()),
+                        Instr::Jump(Exp::Id(branch), 7, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(8, 8)), info()),
+                        Instr::Goto(8),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(16, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(sew),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(vector),
+                            primop::variadic_primops()["isla_read_vreg"],
+                            args,
+                            info(),
+                        ),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for r in &results {
+                    match r {
+                        Ok(Run::Finished(v)) => eprintln!("符号SEW：合并={enabled}，返回={v:?}"),
+                        Err(e) => eprintln!("符号SEW：合并={enabled}，错误={e:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+
+        #[test]
+        fn nested_vector_access_preserves_both_legal_paths() {
+            for enabled in [false, true] {
+                let branch = test_name(320);
+                let data = test_name(321);
+                let index = test_name(322);
+                let vector = test_name(323);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![Val::String("左".into()), Val::String("右".into())])));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(index),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::Copy(
+                            Loc::Id(RETURN),
+                            Exp::Call(Op::Bvaccess, vec![Exp::Id(vector), Exp::Id(index)]),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                for r in &results {
+                    match r {
+                        Ok(Run::Finished(v)) => eprintln!("嵌套访问：合并={enabled}，返回={v:?}"),
+                        Err(e) => eprintln!("嵌套访问：合并={enabled}，错误={e:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+
+        #[test]
+        fn vector_update_preserves_concrete_elements() {
+            for enabled in [false, true] {
+                let branch = test_name(320);
+                let data = test_name(321);
+                let index = test_name(322);
+                let vector = test_name(323);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![Val::String("甲".into()), Val::String("乙".into())])));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(index),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["vector_update"],
+                            vec![Exp::Id(vector), Exp::Id(index), Exp::String("丙".into())],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                for r in &results {
+                    match r {
+                        Ok(Run::Finished(v)) => eprintln!("向量更新：合并={enabled}，返回={v:?}"),
+                        Err(e) => eprintln!("向量更新：合并={enabled}，错误={e:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+
+        #[test]
+        fn string_conversion_must_preserve_reachable_true_result() {
+            for enabled in [false, true] {
+                let branch = test_name(320);
+                let data = test_name(321);
+                let string = test_name(322);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(string, Ty::String, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(string),
+                            primop::unary_primops()["string_of_bits"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            primop::binary_primops()["eq_string"],
+                            Exp::Id(string),
+                            Exp::String(B64::new(1, 8).to_string()),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for r in &results {
+                    match r {
+                        Ok(Run::Finished(v)) => eprintln!("字符串转换：合并={enabled}，返回={v:?}"),
+                        Err(e) => eprintln!("字符串转换：合并={enabled}，错误={e:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert!(
+                    results.iter().any(|r| matches!(r, Ok(Run::Finished(Val::Bool(true))))),
+                    "真实的相等路径不能丢失"
+                );
+            }
+        }
+    }
+
     mod review12_tests {
         use super::*;
 

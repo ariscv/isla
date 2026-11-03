@@ -1218,7 +1218,7 @@ fn smt_i128_width<V>(value: i128, width: u32) -> Option<Exp<V>> {
     }
 
     if width <= 64 {
-        Some(Exp::Bits64(B64::new(value as u64, width)))
+        Some(Exp::Bits64(B64::get_slice_int(width, value, 0)))
     } else {
         let mut bits = vec![false; width as usize];
         for i in 0..width {
@@ -2683,7 +2683,23 @@ pub fn vector_update<B: BV>(
                         ),
                         info,
                     );
-                    *item = crate::primop_util::build_ite(is_i, &args[2], item, solver, info)?;
+                    *item = match build_ite(is_i, &args[2], item, solver, info) {
+                        Ok(value) => value,
+                        Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
+                            return match proven_symbolic_i128(n, solver, info)? {
+                                Some(index) => {
+                                    let mut values = match &args[0] {
+                                        Val::Vector(values) => values.clone(),
+                                        _ => unreachable!(),
+                                    };
+                                    values[usize::try_from(index).unwrap()] = args[2].clone();
+                                    Ok(Val::Vector(values))
+                                }
+                                None => Err(ExecError::SymbolicLength("vector_update", info)),
+                            };
+                        }
+                        Err(error) => return Err(error),
+                    };
                 }
                 Ok(Val::Vector(vec))
             }
@@ -2752,13 +2768,39 @@ fn get_slice_int_internal<B: BV>(
     panic_if_negative_concretized_nat("get_slice_int", &length);
     match length {
         Val::I128(length) => match n {
-            Val::Symbolic(n) => slice!(128, Exp::Var(n), from, length, solver, info),
-            Val::I128(n) => match from {
-                Val::I128(from) if length <= B::MAX_WIDTH as i128 => {
-                    Ok(Val::Bits(B::get_slice_int(length as u32, n, from as u32)))
+            Val::I128(n) if matches!(from, Val::I128(0..=127)) && length <= B::MAX_WIDTH as i128 => {
+                let Val::I128(from) = from else { unreachable!() };
+                Ok(Val::Bits(B::get_slice_int(length as u32, n, from as u32)))
+            }
+            Val::Symbolic(_) | Val::I128(_) => {
+                let length = u32::try_from(length).map_err(|_| ExecError::Overflow)?;
+                if length == 0 {
+                    return Ok(Val::Bits(B::zeros(0)));
                 }
-                _ => slice!(128, smt_i128(n), from, length, solver, info),
-            },
+                let bits = smt_value(&n, info)?;
+                // 整数右移必须保留符号位，包括起点已超出 127 的情况。
+                let shifted = match from {
+                    Val::I64(from) => Exp::Bvashr(Box::new(bits), Box::new(smt_i128(i128::from(from)))),
+                    Val::I128(from) => Exp::Bvashr(Box::new(bits), Box::new(smt_i128(from))),
+                    Val::Symbolic(from) => smt_shift(
+                        bits.clone(),
+                        128,
+                        Exp::Var(from),
+                        solver.length(from).expect("整数切片索引必须是位向量"),
+                        Exp::Bvashr,
+                        Exp::SignExtend(127, Box::new(Exp::Extract(127, 127, Box::new(bits)))),
+                    ),
+                    value => return Err(ExecError::Type(format!("get_slice_int from {value:?}"), info)),
+                };
+                let result = if length < 128 {
+                    Exp::Extract(length - 1, 0, Box::new(shifted))
+                } else if length > 128 {
+                    Exp::SignExtend(length - 128, Box::new(shifted))
+                } else {
+                    shifted
+                };
+                solver.define_bitvector(result, info).into()
+            }
             _ => Err(ExecError::Type(format!("get_slice_int {:?}", &length), info)),
         },
         Val::Symbolic(_) => Err(ExecError::SymbolicLength("get_slice_int", info)),
@@ -3010,47 +3052,62 @@ fn string_take<B: BV>(s: Val<B>, n: Val<B>, _: &mut Solver<B>, info: SourceLoc) 
     }
 }
 
-fn string_of_segment<B: BV>(segment: &BitsSegment<B>) -> String {
+fn string_of_segment<B: BV>(
+    segment: &BitsSegment<B>,
+    solver: &mut Solver<B>,
+    op: &'static str,
+    info: SourceLoc,
+) -> Result<String, ExecError> {
     match segment {
-        BitsSegment::Concrete(bv) => format!("{}", bv),
-        BitsSegment::Symbolic(v) => format!("v{}", v),
-    }
-}
-
-fn string_of_bits<B: BV>(bv: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match bv {
-        Val::Bits(bv) => Ok(Val::String(format!("{}", bv))),
-        Val::Symbolic(v) => Ok(Val::String(format!("v{}", v))),
-        Val::MixedBits(segments) => {
-            Ok(Val::String(segments.iter().map(|seg| string_of_segment::<B>(seg)).collect::<Vec<String>>().join(" ")))
+        BitsSegment::Concrete(bv) => Ok(bv.to_string()),
+        BitsSegment::Symbolic(sym) => {
+            let value = proven_symbolic_i128(*sym, solver, info)?.ok_or(ExecError::SymbolicLength(op, info))?;
+            let width = solver.length(*sym).expect("字符串转换参数必须是位向量");
+            assert!((1..=128).contains(&width), "已证明的整数候选必须能用 i128 表示");
+            Ok(crate::bitvector::b129::B129::get_slice_int(width, value, 0).to_string())
         }
-        other => Err(ExecError::Type(format!("string_of_bits {:?}", &other), info)),
     }
 }
 
-fn decimal_string_of_segment<B: BV>(segment: &BitsSegment<B>) -> String {
-    match segment {
-        BitsSegment::Concrete(bv) => format!("{}", bv),
-        BitsSegment::Symbolic(v) => format!("v{}", v),
-    }
+fn string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let string = match bv {
+        Val::Bits(bv) => bv.to_string(),
+        Val::Symbolic(sym) => string_of_segment::<B>(&BitsSegment::Symbolic(sym), solver, "string_of_bits", info)?,
+        Val::MixedBits(segments) => segments
+            .iter()
+            .map(|segment| string_of_segment(segment, solver, "string_of_bits", info))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" "),
+        other => return Err(ExecError::Type(format!("string_of_bits {other:?}"), info)),
+    };
+    Ok(Val::String(string))
 }
 
-fn decimal_string_of_bits<B: BV>(bv: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+fn decimal_string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match bv {
-        Val::Bits(bv) => Ok(Val::String(format!("{}", bv.signed()))),
-        Val::Symbolic(v) => Ok(Val::String(format!("v{}", v))),
+        Val::Bits(bv) => Ok(Val::String(bv.signed().to_string())),
+        Val::Symbolic(sym) => {
+            let value = proven_symbolic_i128(sym, solver, info)?
+                .ok_or(ExecError::SymbolicLength("decimal_string_of_bits", info))?;
+            Ok(Val::String(value.to_string()))
+        }
         Val::MixedBits(segments) => Ok(Val::String(
-            segments.iter().map(|seg| decimal_string_of_segment::<B>(seg)).collect::<Vec<String>>().join(" "),
+            segments
+                .iter()
+                .map(|segment| string_of_segment(segment, solver, "decimal_string_of_bits", info))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" "),
         )),
-        other => Err(ExecError::Type(format!("decimal_string_of_bits {:?}", &other), info)),
+        other => Err(ExecError::Type(format!("decimal_string_of_bits {other:?}"), info)),
     }
 }
 
-fn string_of_int<B: BV>(n: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match n {
-        Val::I128(n) => Ok(Val::String(format!("{}", n))),
-        Val::Symbolic(v) => Ok(Val::String(format!("v{}", v))),
-        other => Err(ExecError::Type(format!("string_of_int {:?}", &other), info)),
+fn string_of_int<B: BV>(n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    match concretize_proven_i128(n, solver, info)? {
+        Val::I128(n) => Ok(Val::String(n.to_string())),
+        Val::I64(n) => Ok(Val::String(n.to_string())),
+        Val::Symbolic(_) => Err(ExecError::SymbolicLength("string_of_int", info)),
+        other => Err(ExecError::Type(format!("string_of_int {other:?}"), info)),
     }
 }
 
@@ -3273,8 +3330,8 @@ fn isla_read_vreg_internal<B: BV>(
         return Err(ExecError::Type(format!("isla_read_vreg expected 11 arguments, got {}", args.len()), info));
     }
 
-    let sew = u32::try_from(expect_i128_arg(&args[1], "isla_read_vreg SEW", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
+    let sew = expect_concrete_len(args[1].clone(), "isla_read_vreg", solver, info)?;
+    let sew = u32::try_from(sew).map_err(|_| ExecError::Overflow)?;
     let vrid = usize::try_from(expect_i128_arg(&args[2], "isla_read_vreg vrid", solver, info)?)
         .map_err(|_| ExecError::Overflow)?;
     let num_elem_arg = args[0].clone();
@@ -4254,10 +4311,10 @@ fn isla_pack_vreg_internal<B: BV>(
         return Err(ExecError::Type(format!("isla_pack_vreg expected 3 arguments, got {}", args.len()), info));
     }
 
-    let sew = u32::try_from(expect_i128_arg(&args[0], "isla_pack_vreg SEW", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
-    let vlen = u32::try_from(expect_i128_arg(&args[1], "isla_pack_vreg VLEN", solver, info)?)
-        .map_err(|_| ExecError::Overflow)?;
+    let sew = expect_concrete_len(args[0].clone(), "isla_pack_vreg", solver, info)?;
+    let sew = u32::try_from(sew).map_err(|_| ExecError::Overflow)?;
+    let vlen = expect_concrete_len(args[1].clone(), "isla_pack_vreg", solver, info)?;
+    let vlen = u32::try_from(vlen).map_err(|_| ExecError::Overflow)?;
     let values = expect_vector_arg(args[2].clone(), "isla_pack_vreg vector", info)?;
 
     pack_vreg_values(sew, vlen, values, solver, info)
@@ -5274,6 +5331,50 @@ mod tests {
     use crate::smt::smtlib::Ty;
     use crate::smt::{Config, Context, SmtResult, Solver};
     use crate::source_loc::SourceLoc;
+
+    #[test]
+    fn review13_integer_slices_sign_extend_beyond_integer_width() -> Result<(), ExecError> {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        for value in [-2, 2] {
+            for from in [96, 127, 128, 160, i128::MAX] {
+                for symbolic in [false, true] {
+                    let n = if symbolic {
+                        let sym = solver.declare_const(Ty::BitVec(128), info);
+                        solver.assert_eq(Exp::Var(sym), smt_i128(value));
+                        Val::Symbolic(sym)
+                    } else {
+                        Val::I128(value)
+                    };
+                    let result = get_slice_int_internal(Val::I128(64), n, Val::I128(from), &mut solver, info)?;
+                    let expected = if value < 0 { smt_ones(64) } else { smt_zeros(64) };
+                    assert!(
+                        solver
+                            .check_sat_with(&Exp::Neq(Box::new(smt_value(&result, info)?), Box::new(expected)), info)
+                            .is_unsat()?,
+                        "整数={value}，起点={from}，符号={symbolic}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review13_unique_symbolic_strings_preserve_format_and_width() -> Result<(), ExecError> {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        for width in [7, 8, 64, 128] {
+            let sym = solver.declare_const(Ty::BitVec(width), info);
+            solver.assert_eq(Exp::Var(sym), smt_ones(i128::from(width)));
+            let expected = crate::bitvector::b129::B129::get_slice_int(width, -1, 0).to_string();
+            assert_eq!(string_of_bits(Val::Symbolic(sym), &mut solver, info)?, Val::String(expected));
+            assert_eq!(decimal_string_of_bits(Val::Symbolic(sym), &mut solver, info)?, Val::String("-1".into()));
+        }
+        Ok(())
+    }
 
     #[test]
     fn symbolic_integer_compare_uses_asserted_bounds_without_picking_candidate() -> Result<(), ExecError> {

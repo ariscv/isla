@@ -24,8 +24,10 @@ pub(super) fn eval_operands<'exp, 'ir, B: BV>(
 ) -> Result<Vec<Val<B>>, ExecError> {
     if let Some((pc, operand)) = &frame.pending_retry_operand {
         assert_eq!(*pc, frame.pc, "重试操作数必须属于当前指令");
-        let Val::Vector(operands) = operand else { panic!("重试缓存必须保存操作数列表") };
-        return Ok(operands.clone());
+        if let Val::Vector(operands) = operand {
+            return Ok(operands.clone());
+        }
+        assert!(matches!(operand, Val::Unit), "表达式重试必须使用独立的缓存");
     }
     operands
         .into_iter()
@@ -69,7 +71,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         return Ok(true);
     }
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
-    // 只枚举需要具体化的长度参数，不能把位向量数据或向量元素也逐值展开。
+    // 只枚举消费者必须具体化的参数：长度、索引和字符串转换的输入。
+    // 向量元素及其余位向量数据仍然保留符号关系。
     let indices: &[usize] = match op {
         "zeros"
         | "ones"
@@ -78,10 +81,14 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         | "vector_init"
         | "get_slice_int"
         | "internal_vector_init"
-        | "isla_read_vreg"
         | "isla_mask_from_low_bits"
-        | "isla_vector_access_or_default" => &[0],
-        "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" | "vector_access" => &[1],
+        | "isla_vector_access_or_default"
+        | "string_of_bits"
+        | "string_of_int"
+        | "decimal_string_of_bits" => &[0],
+        "isla_read_vreg" | "isla_pack_vreg" => &[0, 1],
+        "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" | "vector_access"
+        | "vector_update" => &[1],
         "slice_internal" => &[2],
         "subrange_internal" => &[1, 2],
         _ => return Err(error),
@@ -91,44 +98,86 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     }
 
     for &index in indices {
-        let Val::Symbolic(sym) = operands[index] else { continue };
-        let width = solver.length(sym).expect("长度参数必须是位向量");
-        assert!((1..=128).contains(&width), "整数长度参数不能超出 128 位");
-        let candidate = {
-            let mut model = Model::new(solver);
-            model.set_complete_model(true);
-            match model.get_var(sym)? {
-                ModelVal::Exp(candidate @ (Bits(_) | Bits64(_))) => candidate,
-                value => panic!("长度参数的模型不是位向量：{value:?}"),
+        let mut symbols = Vec::new();
+        match &operands[index] {
+            Val::Symbolic(sym) => symbols.push(*sym),
+            Val::MixedBits(segments) => {
+                for segment in segments {
+                    if let crate::ir::BitsSegment::Symbolic(sym) = segment {
+                        symbols.push(*sym);
+                    }
+                }
             }
-        };
-        let equal = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
-        let remainder = Neq(Box::new(Var(sym)), Box::new(candidate));
-        assert!(solver.check_sat_with(&equal, info).is_sat()?, "模型中的长度候选必须可满足");
-        if !solver.check_sat_with(&remainder, info).is_sat()? {
-            // 已唯一的操作数不是报错原因；subrange 可能还需拆分另一个边界。
-            // 下一次取模型前重新 check，避免使用临时探测后的模型。
-            assert!(solver.check_sat(info).is_sat()?, "探测不应改变路径可满足性");
-            continue;
+            _ => (),
         }
-
-        fork_retry_operand(
-            sym,
-            equal,
-            remainder,
-            operands,
-            info,
-            task_id,
-            task_fraction,
-            stop_conditions,
-            fork_sink,
-            frame,
-            task_state,
-            solver,
-        )?;
-        return Ok(true);
+        for sym in symbols {
+            if fork_symbolic_value(
+                sym,
+                operands,
+                info,
+                task_id,
+                task_fraction,
+                stop_conditions,
+                fork_sink,
+                frame,
+                task_state,
+                solver,
+            )? {
+                return Ok(true);
+            }
+        }
     }
     Err(error)
+}
+
+/// 将符号值拆为当前候选和剩余候选；唯一值不需要分叉。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+    sym: crate::smt::Sym,
+    operands: &[Val<B>],
+    info: SourceLoc,
+    task_id: TaskId,
+    task_fraction: &mut Fraction,
+    stop_conditions: Option<&'task StopConditions>,
+    fork_sink: &S,
+    frame: &mut LocalFrame<'ir, B>,
+    task_state: &'task TaskState<B>,
+    solver: &mut Solver<B>,
+) -> Result<bool, ExecError> {
+    use smtlib::Exp::*;
+    let width = solver.length(sym).expect("长度参数必须是位向量");
+    assert!(width > 0, "待枚举的位向量必须具有正位宽");
+    let candidate = {
+        let mut model = Model::new(solver);
+        model.set_complete_model(true);
+        match model.get_var(sym)? {
+            ModelVal::Exp(candidate @ (Bits(_) | Bits64(_))) => candidate,
+            value => panic!("长度参数的模型不是位向量：{value:?}"),
+        }
+    };
+    let equal = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
+    let remainder = Neq(Box::new(Var(sym)), Box::new(candidate));
+    assert!(solver.check_sat_with(&equal, info).is_sat()?, "模型中的长度候选必须可满足");
+    if !solver.check_sat_with(&remainder, info).is_sat()? {
+        assert!(solver.check_sat(info).is_sat()?, "探测不应改变路径可满足性");
+        return Ok(false);
+    }
+
+    fork_retry_operand(
+        sym,
+        equal,
+        remainder,
+        operands,
+        info,
+        task_id,
+        task_fraction,
+        stop_conditions,
+        fork_sink,
+        frame,
+        task_state,
+        solver,
+    )?;
+    Ok(true)
 }
 
 /// 两种重试都必须保存操作数，并沿用同一套执行限制和检查点语义。
@@ -175,7 +224,9 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     };
 
     // 在冻结子帧前保存；当前路径与剩余候选路径必须使用同一次求值的操作数。
-    frame.pending_retry_operand = Some((frame.pc, Val::Vector(operands.to_vec())));
+    let cached =
+        if frame.local_state.expression_retry_operands.is_some() { Val::Unit } else { Val::Vector(operands.to_vec()) };
+    frame.pending_retry_operand = Some((frame.pc, cached));
     if let Some(fork_id) = fork_id {
         let point = checkpoint(solver);
         frame.capture_path_smt_stats();

@@ -62,6 +62,9 @@ pub struct LocalState<'ir, B> {
     pub(super) probes: LocalDebugProbes,
     // 仅在菱形推测期间启用，保留求值器实际读取的访问路径和值，以便提交符号依赖。
     pub(super) register_reads: Option<Vec<(Name, Vec<Accessor>, Val<B>)>>,
+    // 表达式地址在 IR 生命周期内稳定；缓存只跨同一条指令的分叉重试。
+    pub(super) expression_values: HashMap<usize, Val<B>>,
+    pub(super) expression_retry_operands: Option<Vec<Val<B>>>,
 }
 
 impl<'ir, B: BV> LocalState<'ir, B> {
@@ -78,6 +81,9 @@ impl<'ir, B: BV> LocalState<'ir, B> {
             if let UVal::Init(value) = var {
                 value.collect_symbolic_variables(vars)
             }
+        }
+        for value in self.expression_values.values() {
+            value.collect_symbolic_variables(vars);
         }
         for (_, reg) in self.regs.iter() {
             reg.collect_symbolic_variables(vars)
@@ -424,7 +430,15 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc: 0,
             pending_retry_operand: None,
             execution_limit_state: ExecutionLimitPathState::default(),
-            local_state: LocalState { vars, regs, lets, probes, register_reads: None },
+            local_state: LocalState {
+                vars,
+                regs,
+                lets,
+                probes,
+                register_reads: None,
+                expression_values: HashMap::new(),
+                expression_retry_operands: None,
+            },
             memory: Memory::new(),
             instrs,
             stack_vars: Vec::new(),
