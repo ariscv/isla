@@ -54,6 +54,7 @@ use z3_sys::*;
 
 use std::time::{Duration, Instant};
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::error::Error as StdError;
@@ -613,11 +614,12 @@ pub fn global_set_param_value(id: &str, value: &str) {
 /// Context is a wrapper around `Z3_context`.
 pub struct Context {
     z3_ctx: Z3_context,
+    enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
 
 impl Context {
     pub fn new(cfg: Config) -> Self {
-        unsafe { Context { z3_ctx: Z3_mk_context_rc(cfg.z3_cfg) } }
+        unsafe { Context { z3_ctx: Z3_mk_context_rc(cfg.z3_cfg), enum_cache: RefCell::new(HashMap::new()) } }
     }
 
     fn error(&self) -> ExecError {
@@ -632,14 +634,46 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        for (_, enumeration) in self.enum_cache.get_mut().drain() {
+            enumeration.dec_refs(self.z3_ctx);
+        }
         unsafe { Z3_del_context(self.z3_ctx) }
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum EnumSortKey {
+    Int(i32),
+    String(String),
+}
+
+#[derive(Clone)]
 struct Enum {
     sort: Z3_sort,
     consts: Vec<Z3_func_decl>,
     testers: Vec<Z3_func_decl>,
+}
+
+impl Enum {
+    fn inc_refs(&self, ctx: Z3_context) {
+        unsafe {
+            for i in 0..self.consts.len() {
+                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, self.consts[i]));
+                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, self.testers[i]));
+            }
+            Z3_inc_ref(ctx, Z3_sort_to_ast(ctx, self.sort));
+        }
+    }
+
+    fn dec_refs(&self, ctx: Z3_context) {
+        unsafe {
+            for i in 0..self.consts.len() {
+                Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, self.consts[i]));
+                Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, self.testers[i]));
+            }
+            Z3_dec_ref(ctx, Z3_sort_to_ast(ctx, self.sort));
+        }
+    }
 }
 
 struct Enums<'ctx> {
@@ -656,8 +690,23 @@ impl<'ctx> Enums<'ctx> {
         unsafe {
             let ctx = self.ctx.z3_ctx;
             let size = members.len();
+            assert!(size > 0, "枚举类型至少需要一个成员");
 
             let z3_name = symbol_namer.enum_sort(self.ctx, name);
+            let cache_key = match Z3_get_symbol_kind(ctx, z3_name) {
+                SymbolKind::Int => EnumSortKey::Int(Z3_get_symbol_int(ctx, z3_name)),
+                SymbolKind::String => {
+                    EnumSortKey::String(CStr::from_ptr(Z3_get_symbol_string(ctx, z3_name)).to_str().unwrap().to_owned())
+                }
+            };
+            if let Some(enumeration) = self.ctx.enum_cache.borrow().get(&cache_key) {
+                assert_eq!(enumeration.consts.len(), size, "枚举类型的成员数量冲突");
+                let enumeration = enumeration.clone();
+                enumeration.inc_refs(ctx);
+                self.enums.insert(name, enumeration);
+                return;
+            }
+
             let members: Vec<Z3_symbol> = members
                 .iter()
                 .enumerate()
@@ -679,28 +728,20 @@ impl<'ctx> Enums<'ctx> {
             let consts = Vec::from_raw_parts(consts.as_mut_ptr(), size, size);
             let testers = Vec::from_raw_parts(testers.as_mut_ptr(), size, size);
 
-            for i in 0..size {
-                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, consts[i]));
-                Z3_inc_ref(ctx, Z3_func_decl_to_ast(ctx, testers[i]))
-            }
-            Z3_inc_ref(ctx, Z3_sort_to_ast(ctx, sort));
-
-            self.enums.insert(name, Enum { sort, consts, testers });
+            let enumeration = Enum { sort, consts, testers };
+            enumeration.inc_refs(ctx);
+            self.ctx.enum_cache.borrow_mut().insert(cache_key, enumeration.clone());
+            enumeration.inc_refs(ctx);
+            self.enums.insert(name, enumeration);
         }
     }
 }
 
 impl Drop for Enums<'_> {
     fn drop(&mut self) {
-        unsafe {
-            let ctx = self.ctx.z3_ctx;
-            for (_, e) in self.enums.drain() {
-                for i in 0..e.consts.len() {
-                    Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, e.consts[i]));
-                    Z3_dec_ref(ctx, Z3_func_decl_to_ast(ctx, e.testers[i]))
-                }
-                Z3_dec_ref(ctx, Z3_sort_to_ast(ctx, e.sort))
-            }
+        let ctx = self.ctx.z3_ctx;
+        for (_, e) in self.enums.drain() {
+            e.dec_refs(ctx);
         }
     }
 }
