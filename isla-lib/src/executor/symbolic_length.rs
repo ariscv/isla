@@ -48,7 +48,6 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     task_state: &'task TaskState<B>,
     solver: &mut Solver<B>,
 ) -> Result<bool, ExecError> {
-    use smtlib::Def::Assert;
     use smtlib::Exp::*;
 
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
@@ -86,55 +85,104 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             continue;
         }
 
-        let decision = match task_state.execution_limits.as_ref() {
-            Some(limits) => ExecutionLimitHandler::new(limits).on_monomorphize_fork_at(
-                &mut frame.execution_limit_state,
-                frame.function_name,
-                frame.pc,
-                &frame.backtrace,
-                info,
-            ),
-            None => ExecutionLimitDecision::Fork { fork_id: frame.execution_limit_state.record_fork() },
-        };
-        let fork_id = match decision {
-            ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
-            ExecutionLimitDecision::KeepCurrentModel { reason } => {
-                frame.execution_limit_state.record_kept_current_model();
-                record_execution_limit(frame, reason, "keep_current_model");
-                None
-            }
-            ExecutionLimitDecision::Truncate(reason) => {
-                record_execution_limit(frame, reason, "truncate_symbolic_length");
-                return Err(execution_limit_error(reason, frame.function_name, frame.pc));
-            }
-            ExecutionLimitDecision::Continue | ExecutionLimitDecision::ConcretizeBranch { .. } => {
-                panic!("符号长度分叉返回了无效的执行限制决策")
-            }
-        };
-
-        // 在冻结子帧前保存；当前路径与剩余候选路径必须使用同一次求值的操作数。
-        frame.pending_retry_operand = Some((frame.pc, Val::Vector(operands.to_vec())));
-        if let Some(fork_id) = fork_id {
-            let point = checkpoint(solver);
-            frame.capture_path_smt_stats();
-            let mut child = itrace_fork_frame_with_branch_condition!(frame, frame.pc, remainder.clone());
-            Arc::make_mut(&mut child.execution_limit_state).advance_path_signature(false);
-            frame.execution_limit_state.advance_path_signature(true);
-            let child_fraction = task_fraction.min_split(6);
-            fork_sink.submit(Task {
-                id: task_id,
-                fraction: child_fraction,
-                frame: child,
-                checkpoint: point,
-                fork_cond: Some((Assert(remainder), Event::Fork(fork_id, sym, 1, info))),
-                state: task_state,
-                stop_conditions,
-            });
-            solver.add_event(Event::Fork(fork_id, sym, 0, info));
-        }
-        solver.add(Assert(equal.clone()));
-        itrace_push_branch_condition!(frame, equal);
+        fork_retry_operand(
+            sym,
+            equal,
+            remainder,
+            operands,
+            info,
+            task_id,
+            task_fraction,
+            stop_conditions,
+            fork_sink,
+            frame,
+            task_state,
+            solver,
+        )?;
         return Ok(true);
     }
     Err(error)
+}
+
+/// 两种重试都必须保存操作数，并沿用同一套执行限制和检查点语义。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+    sym: crate::smt::Sym,
+    equal: smtlib::Exp<crate::smt::Sym>,
+    remainder: smtlib::Exp<crate::smt::Sym>,
+    operands: &[Val<B>],
+    info: SourceLoc,
+    task_id: TaskId,
+    task_fraction: &mut Fraction,
+    stop_conditions: Option<&'task StopConditions>,
+    fork_sink: &S,
+    frame: &mut LocalFrame<'ir, B>,
+    task_state: &'task TaskState<B>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
+    use smtlib::Def::Assert;
+    let decision = match task_state.execution_limits.as_ref() {
+        Some(limits) => ExecutionLimitHandler::new(limits).on_monomorphize_fork_at(
+            &mut frame.execution_limit_state,
+            frame.function_name,
+            frame.pc,
+            &frame.backtrace,
+            info,
+        ),
+        None => ExecutionLimitDecision::Fork { fork_id: frame.execution_limit_state.record_fork() },
+    };
+    let fork_id = match decision {
+        ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
+        ExecutionLimitDecision::KeepCurrentModel { reason } => {
+            frame.execution_limit_state.record_kept_current_model();
+            record_execution_limit(frame, reason, "keep_current_model");
+            None
+        }
+        ExecutionLimitDecision::Truncate(reason) => {
+            record_execution_limit(frame, reason, "truncate_symbolic_length");
+            return Err(execution_limit_error(reason, frame.function_name, frame.pc));
+        }
+        ExecutionLimitDecision::Continue | ExecutionLimitDecision::ConcretizeBranch { .. } => {
+            panic!("算子重试分叉返回了无效的执行限制决策")
+        }
+    };
+
+    // 在冻结子帧前保存；当前路径与剩余候选路径必须使用同一次求值的操作数。
+    frame.pending_retry_operand = Some((frame.pc, Val::Vector(operands.to_vec())));
+    if let Some(fork_id) = fork_id {
+        let point = checkpoint(solver);
+        frame.capture_path_smt_stats();
+        let mut child = itrace_fork_frame_with_branch_condition!(frame, frame.pc, remainder.clone());
+        Arc::make_mut(&mut child.execution_limit_state).advance_path_signature(false);
+        frame.execution_limit_state.advance_path_signature(true);
+        let child_fraction = task_fraction.min_split(6);
+        fork_sink.submit(Task {
+            id: task_id,
+            fraction: child_fraction,
+            frame: child,
+            checkpoint: point,
+            fork_cond: Some((Assert(remainder), Event::Fork(fork_id, sym, 1, info))),
+            state: task_state,
+            stop_conditions,
+        });
+        solver.add_event(Event::Fork(fork_id, sym, 0, info));
+    } else {
+        // 预算要求保留当前模型时，转换检查也必须按该模型选支。
+        assert!(solver.check_sat(info).is_sat()?, "重试分叉的前缀必须可满足");
+        let selected = {
+            let mut model = Model::new(solver);
+            model.set_complete_model(true);
+            match model.get_exp(&equal)? {
+                ModelVal::Exp(smtlib::Exp::Bool(true)) => equal,
+                ModelVal::Exp(smtlib::Exp::Bool(false)) => remainder,
+                value => panic!("重试分叉条件的模型必须是布尔值：{value:?}"),
+            }
+        };
+        solver.add(Assert(selected.clone()));
+        itrace_push_branch_condition!(frame, selected);
+        return Ok(());
+    }
+    solver.add(Assert(equal.clone()));
+    itrace_push_branch_condition!(frame, equal);
+    Ok(())
 }

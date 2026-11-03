@@ -529,7 +529,7 @@ pub type EvPath<B> = Vec<Event<B>>;
 
 /// Abstractly represents a sequence of events in such a way that
 /// checkpoints can be created and shared.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Trace<B> {
     checkpoints: usize,
     head: Vec<Event<B>>,
@@ -2543,6 +2543,34 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn define_bitvector(&mut self, exp: Exp<Sym>, info: SourceLoc) -> Sym {
         self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.define_const(exp, info))
+    }
+
+    /// 标记已有位向量，并同步定义属性，使检查点重放保留类别。
+    pub fn mark_bitvector(&mut self, sym: Sym) {
+        assert!(self.length(sym).is_some(), "只能标记已定义的位向量");
+        if self.is_sail_bitvector(sym) {
+            return;
+        }
+        let defines_sym = |event: &&mut Event<B>| matches!(event, Event::Smt(Def::DefineConst(v, _) | Def::DeclareConst(v, _), _, _) if *v == sym);
+        if self.in_transaction {
+            if let Some(Event::Smt(_, attrs, _)) = self.transaction_defs.iter_mut().rev().find(defines_sym) {
+                *attrs = attrs.sail_bitvector();
+                self.sail_bitvectors.insert(sym);
+            } else {
+                // 事务不能改变提交前已有符号的类别。
+                self.transaction_invalid = true;
+            }
+            return;
+        }
+        let mut trace = &mut self.trace;
+        loop {
+            if let Some(Event::Smt(_, attrs, _)) = trace.head.iter_mut().rev().find(defines_sym) {
+                *attrs = attrs.sail_bitvector();
+                break;
+            }
+            trace = Arc::make_mut(&mut trace.tail).as_mut().expect("已定义符号必须存在于轨迹中");
+        }
+        self.sail_bitvectors.insert(sym);
     }
 
     pub fn is_sail_bitvector(&self, sym: Sym) -> bool {

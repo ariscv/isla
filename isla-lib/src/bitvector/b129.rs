@@ -249,7 +249,7 @@ impl BV for B129 {
 
     fn trailing_zeros(self) -> u32 {
         let non_tag_tz = self.bits.trailing_zeros();
-        if non_tag_tz == 128 {
+        let count = if non_tag_tz == 128 {
             if self.tag {
                 128
             } else {
@@ -257,7 +257,8 @@ impl BV for B129 {
             }
         } else {
             non_tag_tz
-        }
+        };
+        std::cmp::min(count, self.len as u32)
     }
 
     fn from_u8(value: u8) -> Self {

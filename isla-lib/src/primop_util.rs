@@ -166,7 +166,7 @@ pub fn replace_mixed_bits<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: So
                     (next_exp, None) => Some(next_exp),
                 })
                 .ok_or_else(|| ExecError::Type("empty MixedBits".to_string(), info))?;
-            let sym = solver.define_const(smt_exp, info);
+            let sym = solver.define_bitvector(smt_exp, info);
             Ok(Val::Symbolic(sym))
         }
         _ => Ok(value),
@@ -235,7 +235,11 @@ pub fn smt_value<B: BV>(v: &Val<B>, info: SourceLoc) -> Result<Exp<Sym>, ExecErr
 }
 
 // 整数在 SMT 中也表示为位向量；非位向量值由后续结构化合并处理。
-fn merge_bit_width<B: BV>(value: &Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Option<u32>, ExecError> {
+pub(crate) fn merge_bit_width<B: BV>(
+    value: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<u32>, ExecError> {
     Ok(match value {
         Val::Bits(_) | Val::MixedBits(_) => Some(length_bits(value, solver, info)?),
         Val::I64(_) => Some(64),

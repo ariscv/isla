@@ -234,9 +234,12 @@ fn panic_if_negative_concretized_nat<B: BV>(op: &str, value: &Val<B>) {
 
 macro_rules! unary_primop_copy {
     ($f:ident, $name:expr, $unwrap:path, $wrap:path, $concrete_op:path, $smt_op:path) => {
+        unary_primop_copy!($f, $name, $unwrap, $wrap, $concrete_op, $smt_op, define_const);
+    };
+    ($f:ident, $name:expr, $unwrap:path, $wrap:path, $concrete_op:path, $smt_op:path, $define:ident) => {
         pub fn $f<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
             match replace_mixed_bits(x, solver, info)? {
-                Val::Symbolic(x) => solver.define_const($smt_op(Box::new(Exp::Var(x))), info).into(),
+                Val::Symbolic(x) => solver.$define($smt_op(Box::new(Exp::Var(x))), info).into(),
                 $unwrap(x) => Ok($wrap($concrete_op(x))),
                 _ => Err(ExecError::Type($name, info)),
             }
@@ -246,16 +249,19 @@ macro_rules! unary_primop_copy {
 
 macro_rules! binary_primop_copy {
     ($f:ident, $name:expr, $unwrap:path, $wrap:path, $concrete_op:path, $smt_op:path, $to_symbolic:path) => {
+        binary_primop_copy!($f, $name, $unwrap, $wrap, $concrete_op, $smt_op, $to_symbolic, define_const);
+    };
+    ($f:ident, $name:expr, $unwrap:path, $wrap:path, $concrete_op:path, $smt_op:path, $to_symbolic:path, $define:ident) => {
         pub fn $f<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
             match (replace_mixed_bits(x, solver, info)?, replace_mixed_bits(y, solver, info)?) {
                 (Val::Symbolic(x), Val::Symbolic(y)) => {
-                    solver.define_const($smt_op(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
+                    solver.$define($smt_op(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
                 }
                 (Val::Symbolic(x), $unwrap(y)) => {
-                    solver.define_const($smt_op(Box::new(Exp::Var(x)), Box::new($to_symbolic(y))), info).into()
+                    solver.$define($smt_op(Box::new(Exp::Var(x)), Box::new($to_symbolic(y))), info).into()
                 }
                 ($unwrap(x), Val::Symbolic(y)) => {
-                    solver.define_const($smt_op(Box::new($to_symbolic(x)), Box::new(Exp::Var(y))), info).into()
+                    solver.$define($smt_op(Box::new($to_symbolic(x)), Box::new(Exp::Var(y))), info).into()
                 }
                 ($unwrap(x), $unwrap(y)) => Ok($wrap($concrete_op(x, y))),
                 (_, _) => Err(ExecError::Type($name, info)),
@@ -378,7 +384,64 @@ fn i64_to_i128<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Res
     }
 }
 
+/// 返回整数转换的可表示条件；执行器在转换前据此保留溢出路径。
+pub(crate) fn integer_conversion_in_range<B: BV>(
+    f: Unary<B>,
+    value: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<Exp<Sym>>, ExecError> {
+    let narrow = std::ptr::fn_addr_eq(f, i128_to_i64::<B> as Unary<B>);
+    let signed = std::ptr::fn_addr_eq(f, sail_signed::<B> as Unary<B>);
+    let unsigned = std::ptr::fn_addr_eq(f, sail_unsigned::<B> as Unary<B>);
+    if !narrow && !signed && !unsigned {
+        return Ok(None);
+    }
+    let value = replace_mixed_bits(value.clone(), solver, info)?;
+    let Val::Symbolic(sym) = value else { return Ok(None) };
+    let Some(width) = solver.length(sym) else { return Ok(None) };
+    let range = if narrow {
+        assert_eq!(width, 128, "整数窄化的输入必须是 128 位");
+        Exp::Eq(
+            Box::new(Exp::Var(sym)),
+            Box::new(Exp::SignExtend(64, Box::new(Exp::Extract(63, 0, Box::new(Exp::Var(sym)))))),
+        )
+    } else if unsigned && width >= 128 {
+        // i128 的无符号可表示值最大为 2^127 - 1。
+        Exp::Eq(
+            Box::new(Exp::Extract(width - 1, 127, Box::new(Exp::Var(sym)))),
+            Box::new(smt_zeros(i128::from(width - 127))),
+        )
+    } else if signed && width > 128 {
+        Exp::Eq(
+            Box::new(Exp::Var(sym)),
+            Box::new(Exp::SignExtend(width - 128, Box::new(Exp::Extract(127, 0, Box::new(Exp::Var(sym)))))),
+        )
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(range))
+}
+
+fn check_integer_conversion<B: BV>(
+    f: Unary<B>,
+    value: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    if let Some(in_range) = integer_conversion_in_range(f, value, solver, info)? {
+        if !solver.check_sat_with(&in_range, info).is_sat()? {
+            return Err(ExecError::Overflow);
+        }
+        if solver.check_sat_with(&Exp::Not(Box::new(in_range.clone())), info).is_sat()? {
+            solver.assert(in_range);
+        }
+    }
+    Ok(())
+}
+
 fn i128_to_i64<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    check_integer_conversion(i128_to_i64::<B>, &x, solver, info)?;
     match x {
         Val::I128(x) => match i64::try_from(x) {
             Ok(y) => Ok(Val::I64(y)),
@@ -476,7 +539,7 @@ pub(crate) fn bool_to_bit<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: So
         Val::Bool(true) => Ok(Val::Bits(B::BIT_ONE)),
         Val::Bool(false) => Ok(Val::Bits(B::BIT_ZERO)),
         Val::Symbolic(value) => solver
-            .define_const(
+            .define_bitvector(
                 Exp::Ite(
                     Box::new(Exp::Var(value)),
                     Box::new(Exp::Bits64(B64::BIT_ONE)),
@@ -955,16 +1018,78 @@ fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<V
     }
 }
 
-binary_primop!(eq_bits, "eq_bits".to_string(), Val::Bits, Val::Bool, B::eq, Exp::Eq, smt_sbits);
-binary_primop!(neq_bits, "neq_bits".to_string(), Val::Bits, Val::Bool, B::ne, Exp::Neq, smt_sbits);
-unary_primop_copy!(not_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot);
-binary_primop_copy!(xor_bits, "xor_bits".to_string(), Val::Bits, Val::Bits, B::bitxor, Exp::Bvxor, smt_sbits);
-binary_primop_copy!(or_bits, "or_bits".to_string(), Val::Bits, Val::Bits, B::bitor, Exp::Bvor, smt_sbits);
-binary_primop_copy!(and_bits, "and_bits".to_string(), Val::Bits, Val::Bits, B::bitand, Exp::Bvand, smt_sbits);
-binary_primop_copy!(add_bits, "add_bits".to_string(), Val::Bits, Val::Bits, B::add, Exp::Bvadd, smt_sbits);
-binary_primop_copy!(sub_bits, "sub_bits".to_string(), Val::Bits, Val::Bits, B::sub, Exp::Bvsub, smt_sbits);
+fn eq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if length_bits(&x, solver, info)? != length_bits(&y, solver, info)? {
+        return Ok(Val::Bool(false));
+    }
+    let x = replace_mixed_bits(x, solver, info)?;
+    let y = replace_mixed_bits(y, solver, info)?;
+    if let (Val::Bits(x), Val::Bits(y)) = (&x, &y) {
+        return Ok(Val::Bool(x == y));
+    }
+    try_concretize_bool_exp(Exp::Eq(Box::new(smt_value(&x, info)?), Box::new(smt_value(&y, info)?)), solver, info)
+}
+
+fn neq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    not_bool(eq_bits(x, y, solver, info)?, solver, info)
+}
+unary_primop_copy!(not_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
+binary_primop_copy!(
+    xor_bits,
+    "xor_bits".to_string(),
+    Val::Bits,
+    Val::Bits,
+    B::bitxor,
+    Exp::Bvxor,
+    smt_sbits,
+    define_bitvector
+);
+binary_primop_copy!(
+    or_bits,
+    "or_bits".to_string(),
+    Val::Bits,
+    Val::Bits,
+    B::bitor,
+    Exp::Bvor,
+    smt_sbits,
+    define_bitvector
+);
+binary_primop_copy!(
+    and_bits,
+    "and_bits".to_string(),
+    Val::Bits,
+    Val::Bits,
+    B::bitand,
+    Exp::Bvand,
+    smt_sbits,
+    define_bitvector
+);
+binary_primop_copy!(
+    add_bits,
+    "add_bits".to_string(),
+    Val::Bits,
+    Val::Bits,
+    B::add,
+    Exp::Bvadd,
+    smt_sbits,
+    define_bitvector
+);
+binary_primop_copy!(
+    sub_bits,
+    "sub_bits".to_string(),
+    Val::Bits,
+    Val::Bits,
+    B::sub,
+    Exp::Bvsub,
+    smt_sbits,
+    define_bitvector
+);
 
 fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let bits = replace_mixed_bits(bits, solver, info)?;
+    if length_bits(&bits, solver, info)? == 0 {
+        return Ok(bits);
+    }
     match (bits, n) {
         (Val::Bits(bits), Val::I128(n)) => Ok(Val::Bits(bits.add_i128(n))),
         (Val::Symbolic(bits), Val::I128(n)) => {
@@ -982,6 +1107,7 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
                 result,
                 Exp::Bvadd(Box::new(Exp::Var(bits)), Box::new(smt_int_to_bits(smt_i128(n), len))),
             ));
+            solver.mark_bitvector(result);
             Ok(Val::Symbolic(result))
         }
         (Val::Bits(bits), Val::Symbolic(n)) => {
@@ -990,6 +1116,7 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
                 result,
                 Exp::Bvadd(Box::new(smt_sbits(bits)), Box::new(smt_int_to_bits(Exp::Var(n), bits.len()))),
             ));
+            solver.mark_bitvector(result);
             Ok(Val::Symbolic(result))
         }
         (Val::Symbolic(bits), Val::Symbolic(n)) => {
@@ -1007,6 +1134,7 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
                 result,
                 Exp::Bvadd(Box::new(Exp::Var(bits)), Box::new(smt_int_to_bits(Exp::Var(n), len))),
             ));
+            solver.mark_bitvector(result);
             Ok(Val::Symbolic(result))
         }
         (bits, n) => Err(ExecError::Type(format!("add_bits_int {:?} {:?}", &bits, &n), info)),
@@ -1014,6 +1142,10 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
 }
 
 fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let bits = replace_mixed_bits(bits, solver, info)?;
+    if length_bits(&bits, solver, info)? == 0 {
+        return Ok(bits);
+    }
     match (bits, n) {
         (Val::Bits(bits), Val::I128(n)) => Ok(Val::Bits(bits.sub_i128(n))),
         (Val::Symbolic(bits), Val::I128(n)) => {
@@ -1031,6 +1163,7 @@ fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
                 result,
                 Exp::Bvsub(Box::new(Exp::Var(bits)), Box::new(smt_int_to_bits(smt_i128(n), len))),
             ));
+            solver.mark_bitvector(result);
             Ok(Val::Symbolic(result))
         }
         (Val::Bits(bits), Val::Symbolic(n)) => {
@@ -1039,6 +1172,7 @@ fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
                 result,
                 Exp::Bvsub(Box::new(smt_sbits(bits)), Box::new(smt_int_to_bits(Exp::Var(n), bits.len()))),
             ));
+            solver.mark_bitvector(result);
             Ok(Val::Symbolic(result))
         }
         (Val::Symbolic(bits), Val::Symbolic(n)) => {
@@ -1056,6 +1190,7 @@ fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
                 result,
                 Exp::Bvsub(Box::new(Exp::Var(bits)), Box::new(smt_int_to_bits(Exp::Var(n), len))),
             ));
+            solver.mark_bitvector(result);
             Ok(Val::Symbolic(result))
         }
         (bits, n) => Err(ExecError::Type(format!("sub_bits_int {:?} {:?}", &bits, &n), info)),
@@ -1159,7 +1294,7 @@ fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
             if len <= B::MAX_WIDTH as i128 {
                 Ok(Val::Bits(B::zeros(len as u32)))
             } else {
-                solver.define_const(smt_zeros(len), info).into()
+                solver.define_bitvector(smt_zeros(len), info).into()
             }
         }
         Val::Symbolic(_) => Err(ExecError::SymbolicLength("zeros", info)),
@@ -1175,7 +1310,7 @@ fn ones<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<V
             if len <= B::MAX_WIDTH as i128 {
                 Ok(Val::Bits(B::ones(len as u32)))
             } else {
-                solver.define_const(smt_ones(len), info).into()
+                solver.define_bitvector(smt_ones(len), info).into()
             }
         }
         Val::Symbolic(_) => Err(ExecError::SymbolicLength("ones", info)),
@@ -1209,7 +1344,7 @@ macro_rules! extension {
                     }
                     if len > B::MAX_WIDTH {
                         let ext = len - bits.len();
-                        solver.define_const($smt_extension(ext, Box::new(smt_sbits(bits))), info).into()
+                        solver.define_bitvector($smt_extension(ext, Box::new(smt_sbits(bits))), info).into()
                     } else {
                         Ok(Val::Bits($concrete_extension(bits, len)))
                     }
@@ -1220,7 +1355,7 @@ macro_rules! extension {
                         None => return Err(ExecError::Type($name, info)),
                         Some(_) => return Err(ExecError::Type($name, info)),
                     };
-                    solver.define_const($smt_extension(ext, Box::new(Exp::Var(bits))), info).into()
+                    solver.define_bitvector($smt_extension(ext, Box::new(Exp::Var(bits))), info).into()
                 }
                 _ => Err(ExecError::Type($name, info)),
             }
@@ -1242,7 +1377,7 @@ pub(crate) fn op_zero_extend<B: BV>(
         Val::Bits(bits) => {
             if len > 64 {
                 let ext = len - bits.len();
-                solver.define_const(Exp::ZeroExtend(ext, Box::new(smt_sbits(bits))), info).into()
+                solver.define_bitvector(Exp::ZeroExtend(ext, Box::new(smt_sbits(bits))), info).into()
             } else {
                 Ok(Val::Bits(B::zero_extend(bits, len)))
             }
@@ -1257,7 +1392,7 @@ pub(crate) fn op_zero_extend<B: BV>(
                     ))
                 }
             };
-            solver.define_const(Exp::ZeroExtend(ext, Box::new(Exp::Var(bits))), info).into()
+            solver.define_bitvector(Exp::ZeroExtend(ext, Box::new(Exp::Var(bits))), info).into()
         }
         _ => Err(ExecError::Type(format!("op_zero_extend {:?}", &bits), info)),
     }
@@ -1286,13 +1421,13 @@ fn replicate_bits<B: BV>(
     match (bits, times) {
         (Val::Bits(bits), Val::I128(times)) => match bits.replicate(times) {
             Some(replicated) => Ok(Val::Bits(replicated)),
-            None => solver.define_const(replicate_exp(smt_sbits(bits), times), info).into(),
+            None => solver.define_bitvector(replicate_exp(smt_sbits(bits), times), info).into(),
         },
         (Val::Symbolic(bits), Val::I128(times)) => {
             if times == 0 {
                 Ok(Val::Bits(B::zeros(0)))
             } else {
-                solver.define_const(replicate_exp(Exp::Var(bits), times), info).into()
+                solver.define_bitvector(replicate_exp(Exp::Var(bits), times), info).into()
             }
         }
         (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("replicate_bits", info)),
@@ -1317,17 +1452,16 @@ macro_rules! slice {
                 // length so the bvlshr is type-correct.
                 let from_width = $solver.length(from).expect("切片索引必须是位向量");
                 assert!(matches!(from_width, 64 | 128), "切片索引必须是机器整数或整数");
-                let shift = if $bits_length > from_width {
-                    Exp::ZeroExtend($bits_length - from_width, Box::new(Exp::Var(from)))
-                } else if $bits_length < from_width {
-                    Exp::Extract($bits_length - 1, 0, Box::new(Exp::Var(from)))
-                } else {
-                    Exp::Var(from)
-                };
-                $solver.add(Def::DefineConst(
-                    sliced,
-                    Exp::Extract($slice_length as u32 - 1, 0, Box::new(Exp::Bvlshr(Box::new($bits), Box::new(shift)))),
-                ));
+                let shifted = smt_shift(
+                    $bits,
+                    $bits_length,
+                    Exp::Var(from),
+                    from_width,
+                    Exp::Bvlshr,
+                    smt_zeros(i128::from($bits_length)),
+                );
+                $solver.add(Def::DefineConst(sliced, Exp::Extract($slice_length as u32 - 1, 0, Box::new(shifted))));
+                $solver.mark_bitvector(sliced);
                 Ok(Val::Symbolic(sliced))
             }
 
@@ -1341,6 +1475,7 @@ macro_rules! slice {
                         Exp::Extract((from + $slice_length - 1) as u32, from as u32, Box::new($bits)),
                     ))
                 }
+                $solver.mark_bitvector(sliced);
                 Ok(Val::Symbolic(sliced))
             }
 
@@ -1354,6 +1489,7 @@ macro_rules! slice {
                         Exp::Extract((from as i128 + $slice_length - 1) as u32, from as u32, Box::new($bits)),
                     ))
                 }
+                $solver.mark_bitvector(sliced);
                 Ok(Val::Symbolic(sliced))
             }
 
@@ -1387,7 +1523,7 @@ fn mixed_bits_slice<B: BV>(
                 let segment_from = from.saturating_sub(segment_bottom);
                 let new_segment = match segment {
                     BitsSegment::Symbolic(v) => BitsSegment::Symbolic(
-                        solver.define_const(Exp::Extract(segment_to, segment_from, Box::new(Exp::Var(*v))), info),
+                        solver.define_bitvector(Exp::Extract(segment_to, segment_from, Box::new(Exp::Var(*v))), info),
                     ),
                     BitsSegment::Concrete(bv) => BitsSegment::Concrete(
                         bv.extract(segment_to, segment_from)
@@ -1500,7 +1636,7 @@ pub fn subrange_internal<B: BV>(
     panic_if_negative_concretized_nat("subrange_internal", &low);
     match (bits, high, low) {
         (Val::Symbolic(bits), Val::I128(high), Val::I128(low)) => {
-            solver.define_const(Exp::Extract(high as u32, low as u32, Box::new(Exp::Var(bits))), info).into()
+            solver.define_bitvector(Exp::Extract(high as u32, low as u32, Box::new(Exp::Var(bits))), info).into()
         }
         (Val::Bits(bits), Val::I128(high), Val::I128(low)) => match bits.extract(high as u32, low as u32) {
             Some(bits) => Ok(Val::Bits(bits)),
@@ -1586,7 +1722,7 @@ fn sail_truncate_lsb<B: BV>(
                 Ok(Val::Bits(B::new(0, 0)))
             } else if let Some(orig_len) = solver.length(bits) {
                 let low = orig_len - (len as u32);
-                solver.define_const(Exp::Extract(orig_len - 1, low, Box::new(Exp::Var(bits))), info).into()
+                solver.define_bitvector(Exp::Extract(orig_len - 1, low, Box::new(Exp::Var(bits))), info).into()
             } else {
                 Err(ExecError::Type(format!("sail_truncateLSB (invalid length) {:?} {:?}", &bits, &len), info))
             }
@@ -1602,6 +1738,7 @@ fn sail_truncate_lsb<B: BV>(
 
 fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
+    check_integer_conversion(sail_unsigned::<B>, &bits, solver, info)?;
     match bits {
         Val::Bits(bits) => {
             if bits.len() - bits.leading_zeros() > 127 {
@@ -1611,22 +1748,17 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
         }
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
-                if length == 128 {
-                    let is_negative = Exp::Bvslt(Box::new(Exp::Var(bits)), Box::new(smt_zeros(128)));
-                    if solver.check_sat_with(&is_negative, info).is_sat()? {
-                        return Err(ExecError::Overflow);
-                    }
-                    if solver.is_sail_bitvector(bits) {
-                        solver.define_const(Exp::Var(bits), info).into()
-                    } else {
-                        Ok(Val::Symbolic(bits))
-                    }
-                } else {
-                    if length > 128 {
-                        return Err(ExecError::Overflow);
-                    }
-                    solver.define_const(Exp::ZeroExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
+                if length == 128 && !solver.is_sail_bitvector(bits) {
+                    return Ok(Val::Symbolic(bits));
                 }
+                let exp = if length > 128 {
+                    Exp::Extract(127, 0, Box::new(Exp::Var(bits)))
+                } else if length < 128 {
+                    Exp::ZeroExtend(128 - length, Box::new(Exp::Var(bits)))
+                } else {
+                    Exp::Var(bits)
+                };
+                solver.define_const(exp, info).into()
             }
             None => Err(ExecError::Type(format!("sail_unsigned (solver cannot determine length) {:?}", &bits), info)),
         },
@@ -1636,21 +1768,31 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
 
 fn sail_signed<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
+    check_integer_conversion(sail_signed::<B>, &bits, solver, info)?;
     match bits {
-        Val::Bits(bits) => Ok(Val::I128(bits.signed())),
+        Val::Bits(bits) => {
+            if bits.len() > 128 {
+                let low = bits.slice(0, 128).unwrap();
+                if low.sign_extend(bits.len()) != bits {
+                    return Err(ExecError::Overflow);
+                }
+                return Ok(Val::I128(low.signed()));
+            }
+            Ok(Val::I128(bits.signed()))
+        }
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
-                // 位宽相同，但带有 Sail 位向量标记时需用独立符号保留整数语义。
-                if length == 128 {
-                    if solver.is_sail_bitvector(bits) {
-                        solver.define_const(Exp::Var(bits), info).into()
-                    } else {
-                        Ok(Val::Symbolic(bits))
-                    }
-                } else {
-                    assert!(length < 128);
-                    solver.define_const(Exp::SignExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
+                if length == 128 && !solver.is_sail_bitvector(bits) {
+                    return Ok(Val::Symbolic(bits));
                 }
+                let exp = if length > 128 {
+                    Exp::Extract(127, 0, Box::new(Exp::Var(bits)))
+                } else if length < 128 {
+                    Exp::SignExtend(128 - length, Box::new(Exp::Var(bits)))
+                } else {
+                    Exp::Var(bits)
+                };
+                solver.define_const(exp, info).into()
             }
             None => Err(ExecError::Type(format!("sail_signed (solver cannot determine length) {:?}", &bits), info)),
         },
@@ -1667,7 +1809,10 @@ fn smt_shift(
     op: fn(Box<Exp<Sym>>, Box<Exp<Sym>>) -> Exp<Sym>,
     saturated: Exp<Sym>,
 ) -> Exp<Sym> {
-    assert!(bits_len > 0 && shift_len > 0, "SMT 移位操作数必须具有正位宽");
+    assert!(bits_len > 0, "SMT 移位数据必须具有正位宽");
+    if shift_len == 0 {
+        return bits;
+    }
     let amount = if bits_len < shift_len {
         Exp::Extract(bits_len - 1, 0, Box::new(shift.clone()))
     } else if bits_len > shift_len {
@@ -1689,6 +1834,9 @@ fn smt_shift(
 
 fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
+    if matches!(&shift, Val::Bits(amount) if amount.len() == 0) {
+        return Ok(bits);
+    }
     match (bits, shift) {
         (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
             let length = length_bits(&bits, solver, info)?;
@@ -1709,7 +1857,7 @@ fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
                 smt_zeros(i128::from(length)),
             );
             solver
-                .define_const(
+                .define_bitvector(
                     Exp::Ite(
                         Box::new(Exp::Bvslt(Box::new(Exp::Var(y)), Box::new(smt_i128(0)))),
                         Box::new(negative),
@@ -1724,7 +1872,7 @@ fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
                 let length = length_bits(&bits, solver, info)?;
                 return match bits {
                     Val::Bits(_) => Ok(Val::Bits(B::zeros(length))),
-                    _ => solver.define_const(smt_zeros(i128::from(length)), info).into(),
+                    _ => solver.define_bitvector(smt_zeros(i128::from(length)), info).into(),
                 };
             }
             shiftl(bits, Val::I128(y.abs()), solver, info)
@@ -1735,9 +1883,9 @@ fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
             let bits_exp = Exp::Var(x);
             let saturated = smt_zeros(i128::from(length));
             if y >= i128::from(length) {
-                return solver.define_const(saturated, info).into();
+                return solver.define_bitvector(saturated, info).into();
             }
-            solver.define_const(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvlshr, saturated), info).into()
+            solver.define_bitvector(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvlshr, saturated), info).into()
         }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.shiftr(y))),
         (bits, shift) => Err(ExecError::Type(format!("shiftr {:?} {:?}", &bits, &shift), info)),
@@ -1778,7 +1926,7 @@ fn arith_shiftr<B: BV>(
                 smt_zeros(i128::from(length)),
             );
             solver
-                .define_const(
+                .define_bitvector(
                     Exp::Ite(
                         Box::new(Exp::Bvslt(Box::new(Exp::Var(y)), Box::new(smt_i128(0)))),
                         Box::new(negative),
@@ -1793,7 +1941,7 @@ fn arith_shiftr<B: BV>(
                 let length = length_bits(&bits, solver, info)?;
                 return match bits {
                     Val::Bits(_) => Ok(Val::Bits(B::zeros(length))),
-                    _ => solver.define_const(smt_zeros(i128::from(length)), info).into(),
+                    _ => solver.define_bitvector(smt_zeros(i128::from(length)), info).into(),
                 };
             }
             shiftl(bits, Val::I128(y.abs()), solver, info)
@@ -1808,9 +1956,9 @@ fn arith_shiftr<B: BV>(
                 Box::new(smt_zeros(i128::from(length))),
             );
             if y >= i128::from(length) {
-                return solver.define_const(saturated, info).into();
+                return solver.define_bitvector(saturated, info).into();
             }
-            solver.define_const(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvashr, saturated), info).into()
+            solver.define_bitvector(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvashr, saturated), info).into()
         }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.arith_shiftr(y))),
         (bits @ (Val::Bits(_) | Val::Symbolic(_)), shift @ (Val::Bits(_) | Val::MixedBits(_))) => {
@@ -1820,6 +1968,9 @@ fn arith_shiftr<B: BV>(
                 return Ok(bits);
             }
             let shift_len = length_bits(&shift, solver, info)?;
+            if shift_len == 0 {
+                return Ok(bits);
+            }
             let bits_exp = smt_value(&bits, info)?;
             let saturated = Exp::Ite(
                 Box::new(Exp::Bvslt(Box::new(bits_exp.clone()), Box::new(smt_zeros(i128::from(length))))),
@@ -1833,7 +1984,7 @@ fn arith_shiftr<B: BV>(
                 return Ok(Val::Bits(if x.leading_zeros() > 0 { B::zeros(length) } else { B::ones(length) }));
             }
             solver
-                .define_const(
+                .define_bitvector(
                     smt_shift(bits_exp, length, smt_value(&shift, info)?, shift_len, Exp::Bvashr, saturated),
                     info,
                 )
@@ -1845,6 +1996,9 @@ fn arith_shiftr<B: BV>(
 
 fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
+    if matches!(&shift, Val::Bits(amount) if amount.len() == 0) {
+        return Ok(bits);
+    }
     match (bits, shift) {
         (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
             let length = length_bits(&bits, solver, info)?;
@@ -1865,7 +2019,7 @@ fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
                 smt_zeros(i128::from(length)),
             );
             solver
-                .define_const(
+                .define_bitvector(
                     Exp::Ite(
                         Box::new(Exp::Bvslt(Box::new(Exp::Var(y)), Box::new(smt_i128(0)))),
                         Box::new(negative),
@@ -1880,7 +2034,7 @@ fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
                 let length = length_bits(&bits, solver, info)?;
                 return match bits {
                     Val::Bits(_) => Ok(Val::Bits(B::zeros(length))),
-                    _ => solver.define_const(smt_zeros(i128::from(length)), info).into(),
+                    _ => solver.define_bitvector(smt_zeros(i128::from(length)), info).into(),
                 };
             }
             shiftr(bits, Val::I128(y.abs()), solver, info)
@@ -1891,9 +2045,9 @@ fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: Sour
             let bits_exp = Exp::Var(x);
             let saturated = smt_zeros(i128::from(length));
             if y >= i128::from(length) {
-                return solver.define_const(saturated, info).into();
+                return solver.define_bitvector(saturated, info).into();
             }
-            solver.define_const(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvshl, saturated), info).into()
+            solver.define_bitvector(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvshl, saturated), info).into()
         }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.shiftl(y))),
         (bits, shift) => Err(ExecError::Type(format!("shiftl {:?} {:?}", &bits, &shift), info)),
@@ -1911,13 +2065,16 @@ pub fn shift_bits_right<B: BV>(
     let bits_len = length_bits(&bits, solver, info)?;
     let shift = replace_mixed_bits(shift, solver, info)?;
     let shift_len = length_bits(&shift, solver, info)?;
+    if bits_len == 0 || shift_len == 0 {
+        return Ok(bits);
+    }
     match (&bits, &shift) {
         (Val::Symbolic(_), Val::Symbolic(_)) | (Val::Bits(_), Val::Symbolic(_)) | (Val::Symbolic(_), Val::Bits(_)) => {
             if bits_len == 0 {
                 return Ok(bits);
             }
             solver
-                .define_const(
+                .define_bitvector(
                     smt_shift(
                         smt_value(&bits, info)?,
                         bits_len,
@@ -1951,13 +2108,16 @@ pub fn shift_bits_left<B: BV>(
     let bits_len = length_bits(&bits, solver, info)?;
     let shift = replace_mixed_bits(shift, solver, info)?;
     let shift_len = length_bits(&shift, solver, info)?;
+    if bits_len == 0 || shift_len == 0 {
+        return Ok(bits);
+    }
     match (&bits, &shift) {
         (Val::Symbolic(_), Val::Symbolic(_)) | (Val::Bits(_), Val::Symbolic(_)) | (Val::Symbolic(_), Val::Bits(_)) => {
             if bits_len == 0 {
                 return Ok(bits);
             }
             solver
-                .define_const(
+                .define_bitvector(
                     smt_shift(
                         smt_value(&bits, info)?,
                         bits_len,
@@ -1988,25 +2148,25 @@ pub(crate) fn append<B: BV>(
 ) -> Result<Val<B>, ExecError> {
     match (lhs, rhs) {
         (Val::Symbolic(x), Val::Symbolic(y)) => {
-            solver.define_const(Exp::Concat(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
+            solver.define_bitvector(Exp::Concat(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
         }
         (Val::Symbolic(x), Val::Bits(y)) => {
             if y.len() == 0 {
-                solver.define_const(Exp::Var(x), info).into()
+                solver.define_bitvector(Exp::Var(x), info).into()
             } else {
-                solver.define_const(Exp::Concat(Box::new(Exp::Var(x)), Box::new(smt_sbits(y))), info).into()
+                solver.define_bitvector(Exp::Concat(Box::new(Exp::Var(x)), Box::new(smt_sbits(y))), info).into()
             }
         }
         (Val::Bits(x), Val::Symbolic(y)) => {
             if x.len() == 0 {
-                solver.define_const(Exp::Var(y), info).into()
+                solver.define_bitvector(Exp::Var(y), info).into()
             } else {
-                solver.define_const(Exp::Concat(Box::new(smt_sbits(x)), Box::new(Exp::Var(y))), info).into()
+                solver.define_bitvector(Exp::Concat(Box::new(smt_sbits(x)), Box::new(Exp::Var(y))), info).into()
             }
         }
         (Val::Bits(x), Val::Bits(y)) => match x.append(y) {
             Some(z) => Ok(Val::Bits(z)),
-            None => solver.define_const(Exp::Concat(Box::new(smt_sbits(x)), Box::new(smt_sbits(y))), info).into(),
+            None => solver.define_bitvector(Exp::Concat(Box::new(smt_sbits(x)), Box::new(smt_sbits(y))), info).into(),
         },
         (Val::MixedBits(mut segments), Val::Symbolic(v)) => {
             segments.push(BitsSegment::Symbolic(v));
@@ -2055,6 +2215,32 @@ pub(crate) fn vector_access<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if matches!(&vec, Val::Bits(_) | Val::MixedBits(_) | Val::Symbolic(_)) {
+        let length = length_bits(&vec, solver, info)?;
+        if length == 0 {
+            return Err(ExecError::OutOfBounds("vector_access"));
+        }
+        match &n {
+            Val::I128(index) if *index < 0 || *index >= i128::from(length) => {
+                return Err(ExecError::OutOfBounds("vector_access"));
+            }
+            Val::Symbolic(index) => {
+                let width = solver.length(*index).expect("位向量索引必须具有位宽");
+                let in_bounds = if width < 32 && u64::from(length) >= (1u64 << width) {
+                    Exp::Bool(true)
+                } else {
+                    Exp::Bvult(Box::new(Exp::Var(*index)), Box::new(smt_u64_width(u64::from(length), width)))
+                };
+                if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                    if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+                        return Err(ExecError::OutOfBounds("vector_access"));
+                    }
+                    solver.assert(in_bounds);
+                }
+            }
+            _ => (),
+        }
+    }
     let (vec, n) = match (vec, n) {
         (Val::MixedBits(segments), Val::I128(n)) => segment_for_bit(&segments, n as u32, solver, info)?,
         (vec, n) => (replace_mixed_bits(vec, solver, info)?, n),
@@ -2072,7 +2258,7 @@ pub(crate) fn vector_access<B: BV>(
                     Exp::Var(n)
                 };
                 solver
-                    .define_const(
+                    .define_bitvector(
                         Exp::Extract(0, 0, Box::new(Exp::Bvlshr(Box::new(Exp::Var(bits)), Box::new(shift)))),
                         info,
                     )
@@ -2090,7 +2276,7 @@ pub(crate) fn vector_access<B: BV>(
                     smt_i128(n)
                 };
                 solver
-                    .define_const(
+                    .define_bitvector(
                         Exp::Extract(0, 0, Box::new(Exp::Bvlshr(Box::new(Exp::Var(bits)), Box::new(shift)))),
                         info,
                     )
@@ -2108,7 +2294,7 @@ pub(crate) fn vector_access<B: BV>(
                 Exp::Var(n)
             };
             solver
-                .define_const(
+                .define_bitvector(
                     Exp::Extract(0, 0, Box::new(Exp::Bvlshr(Box::new(smt_sbits(bits)), Box::new(shift)))),
                     info,
                 )
@@ -2160,10 +2346,19 @@ pub(crate) fn vector_access<B: BV>(
 /// function it implements, plus the solver as a final argument.
 macro_rules! set_slice {
     ($bits_length: expr, $update_length: ident, $bits: expr, $n: expr, $update: expr, $solver: ident, $info: ident) => {
+        set_slice!($bits_length, $update_length, $bits, $n, $update, $solver, $info, true)
+    };
+    ($bits_length: expr, $update_length: ident, $bits: expr, $n: expr, $update: expr, $solver: ident, $info: ident, $mark:expr) => {
         if $bits_length == 0 {
             Ok(Val::Bits(B::zeros(0)))
         } else if $update_length == 0 {
-            $solver.define_const($bits, $info).into()
+            {
+                let result = $solver.define_const($bits, $info);
+                if $mark {
+                    $solver.mark_bitvector(result);
+                }
+                Ok(Val::Symbolic(result))
+            }
         } else {
             let mask_lower = smt_mask_lower($bits_length as usize, $update_length as usize);
             let update = if $bits_length == $update_length {
@@ -2179,24 +2374,27 @@ macro_rules! set_slice {
                 _ => panic!("更新索引必须是整数常量或符号量"),
             };
             assert!(matches!(index_width, 64 | 128), "更新索引必须是机器整数或整数");
-            let shift = if $bits_length < index_width {
-                Exp::Extract($bits_length - 1, 0, Box::new(index))
-            } else if $bits_length > index_width {
-                Exp::ZeroExtend($bits_length - index_width, Box::new(index))
-            } else {
-                index
-            };
+            let shifted_mask = smt_shift(
+                mask_lower,
+                $bits_length,
+                index.clone(),
+                index_width,
+                Exp::Bvshl,
+                smt_zeros(i128::from($bits_length)),
+            );
+            let shifted_update =
+                smt_shift(update, $bits_length, index, index_width, Exp::Bvshl, smt_zeros(i128::from($bits_length)));
             let sliced = $solver.fresh();
             $solver.add(Def::DefineConst(
                 sliced,
                 Exp::Bvor(
-                    Box::new(Exp::Bvand(
-                        Box::new($bits),
-                        Box::new(Exp::Bvnot(Box::new(Exp::Bvshl(Box::new(mask_lower), Box::new(shift.clone()))))),
-                    )),
-                    Box::new(Exp::Bvshl(Box::new(update), Box::new(shift))),
+                    Box::new(Exp::Bvand(Box::new($bits), Box::new(Exp::Bvnot(Box::new(shifted_mask))))),
+                    Box::new(shifted_update),
                 ),
             ));
+            if $mark {
+                $solver.mark_bitvector(sliced);
+            }
             Ok(Val::Symbolic(sliced))
         }
     };
@@ -2205,10 +2403,19 @@ macro_rules! set_slice {
 /// A special case of set_slice! for when $n == 0, and therefore no shift needs to be applied.
 macro_rules! set_slice_n0 {
     ($bits_length: expr, $update_length: ident, $bits: expr, $update: expr, $solver: ident, $info: ident) => {
+        set_slice_n0!($bits_length, $update_length, $bits, $update, $solver, $info, true)
+    };
+    ($bits_length: expr, $update_length: ident, $bits: expr, $update: expr, $solver: ident, $info: ident, $mark:expr) => {
         if $bits_length == 0 {
             Ok(Val::Bits(B::zeros(0)))
         } else if $update_length == 0 {
-            $solver.define_const($bits, $info).into()
+            {
+                let result = $solver.define_const($bits, $info);
+                if $mark {
+                    $solver.mark_bitvector(result);
+                }
+                Ok(Val::Symbolic(result))
+            }
         } else {
             let mask_lower = smt_mask_lower($bits_length as usize, $update_length as usize);
             let update = if $bits_length == $update_length {
@@ -2224,6 +2431,9 @@ macro_rules! set_slice_n0 {
                     Box::new(update),
                 ),
             ));
+            if $mark {
+                $solver.mark_bitvector(sliced);
+            }
             Ok(Val::Symbolic(sliced))
         }
     };
@@ -2306,36 +2516,36 @@ fn set_slice_int_internal<B: BV>(
     let update_length = length_bits(&update, solver, info)?;
     match (int, n, update) {
         (Val::Symbolic(int), Val::Symbolic(n), Val::Symbolic(update)) => {
-            set_slice!(128, update_length, Exp::Var(int), Exp::Var(n), Exp::Var(update), solver, info)
+            set_slice!(128, update_length, Exp::Var(int), Exp::Var(n), Exp::Var(update), solver, info, false)
         }
         (Val::Symbolic(int), Val::Symbolic(n), Val::Bits(update)) => {
-            set_slice!(128, update_length, Exp::Var(int), Exp::Var(n), smt_sbits(update), solver, info)
+            set_slice!(128, update_length, Exp::Var(int), Exp::Var(n), smt_sbits(update), solver, info, false)
         }
         (Val::Symbolic(int), Val::I128(n), Val::Symbolic(update)) => {
             if n == 0 {
-                set_slice_n0!(128, update_length, Exp::Var(int), Exp::Var(update), solver, info)
+                set_slice_n0!(128, update_length, Exp::Var(int), Exp::Var(update), solver, info, false)
             } else {
-                set_slice!(128, update_length, Exp::Var(int), smt_i128(n), Exp::Var(update), solver, info)
+                set_slice!(128, update_length, Exp::Var(int), smt_i128(n), Exp::Var(update), solver, info, false)
             }
         }
         (Val::Symbolic(int), Val::I128(n), Val::Bits(update)) => {
             if n == 0 {
-                set_slice_n0!(128, update_length, Exp::Var(int), smt_sbits(update), solver, info)
+                set_slice_n0!(128, update_length, Exp::Var(int), smt_sbits(update), solver, info, false)
             } else {
-                set_slice!(128, update_length, Exp::Var(int), smt_i128(n), smt_sbits(update), solver, info)
+                set_slice!(128, update_length, Exp::Var(int), smt_i128(n), smt_sbits(update), solver, info, false)
             }
         }
         (Val::I128(int), Val::Symbolic(n), Val::Symbolic(update)) => {
-            set_slice!(128, update_length, smt_i128(int), Exp::Var(n), Exp::Var(update), solver, info)
+            set_slice!(128, update_length, smt_i128(int), Exp::Var(n), Exp::Var(update), solver, info, false)
         }
         (Val::I128(int), Val::Symbolic(n), Val::Bits(update)) => {
-            set_slice!(128, update_length, smt_i128(int), Exp::Var(n), smt_sbits(update), solver, info)
+            set_slice!(128, update_length, smt_i128(int), Exp::Var(n), smt_sbits(update), solver, info, false)
         }
         (Val::I128(int), Val::I128(n), Val::Symbolic(update)) => {
             if n == 0 {
-                set_slice_n0!(128, update_length, smt_i128(int), Exp::Var(update), solver, info)
+                set_slice_n0!(128, update_length, smt_i128(int), Exp::Var(update), solver, info, false)
             } else {
-                set_slice!(128, update_length, smt_i128(int), smt_i128(n), Exp::Var(update), solver, info)
+                set_slice!(128, update_length, smt_i128(int), smt_i128(n), Exp::Var(update), solver, info, false)
             }
         }
         (Val::I128(int), Val::I128(n), Val::Bits(update)) => Ok(Val::I128(B::set_slice_int(int, n as u32, update))),
@@ -2608,6 +2818,11 @@ pub fn eq_anything<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
+        if left != right {
+            return Ok(Val::Bool(false));
+        }
+    }
     match (replace_mixed_bits(lhs, solver, info)?, replace_mixed_bits(rhs, solver, info)?) {
         (Val::Symbolic(lhs), Val::Symbolic(rhs)) => {
             solver.define_const(Exp::Eq(Box::new(Exp::Var(lhs)), Box::new(Exp::Var(rhs))), info).into()
@@ -2713,6 +2928,11 @@ pub fn eq_anything<B: BV>(
 }
 
 fn neq_anything<B: BV>(lhs: Val<B>, rhs: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
+        if left != right {
+            return Ok(Val::Bool(true));
+        }
+    }
     match (replace_mixed_bits(lhs, solver, info)?, replace_mixed_bits(rhs, solver, info)?) {
         (Val::Symbolic(lhs), Val::Symbolic(rhs)) => {
             solver.define_const(Exp::Neq(Box::new(Exp::Var(lhs)), Box::new(Exp::Var(rhs))), info).into()
@@ -2887,7 +3107,7 @@ fn undefined_bitvector<B: BV>(sz: Val<B>, solver: &mut Solver<B>, info: SourceLo
 }
 
 fn undefined_bit<B: BV>(_: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    solver.declare_const(Ty::BitVec(1), info).into()
+    solver.declare_bitvector(1, info).into()
 }
 
 fn undefined_bool<B: BV>(_: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
@@ -2925,7 +3145,7 @@ fn one_if<B: BV>(condition: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> 
         Val::Bool(true) => Ok(Val::Bits(B::BIT_ONE)),
         Val::Bool(false) => Ok(Val::Bits(B::BIT_ZERO)),
         Val::Symbolic(v) => solver
-            .define_const(
+            .define_bitvector(
                 Exp::Ite(Box::new(Exp::Var(v)), Box::new(smt_sbits(B::BIT_ONE)), Box::new(smt_sbits(B::BIT_ZERO))),
                 info,
             )
@@ -2939,7 +3159,7 @@ fn zero_if<B: BV>(condition: Val<B>, solver: &mut Solver<B>, info: SourceLoc) ->
         Val::Bool(true) => Ok(Val::Bits(B::BIT_ZERO)),
         Val::Bool(false) => Ok(Val::Bits(B::BIT_ONE)),
         Val::Symbolic(v) => solver
-            .define_const(
+            .define_bitvector(
                 Exp::Ite(Box::new(Exp::Var(v)), Box::new(smt_sbits(B::BIT_ZERO)), Box::new(smt_sbits(B::BIT_ONE))),
                 info,
             )
@@ -3034,7 +3254,7 @@ fn vreg_element<B: BV>(
             None => Err(ExecError::Type(format!("isla_read_vreg concrete slice {} {}", offset, sew), info)),
         },
         Val::Symbolic(reg) => {
-            solver.define_const(Exp::Extract(offset + sew - 1, offset, Box::new(Exp::Var(reg))), info).into()
+            solver.define_bitvector(Exp::Extract(offset + sew - 1, offset, Box::new(Exp::Var(reg))), info).into()
         }
         value => Err(ExecError::Type(format!("isla_read_vreg element {:?}", value), info)),
     }
@@ -3316,7 +3536,7 @@ fn isla_fixed_rounding_incr_internal<B: BV>(
         );
     }
 
-    solver.define_const(exp, info).into()
+    solver.define_bitvector(exp, info).into()
 }
 
 fn isla_fixed_rounding_incr<B: BV>(
@@ -3374,7 +3594,7 @@ fn isla_init_mask_internal<B: BV>(
             return Ok(Val::Bits(value));
         }
 
-        return solver.define_const(Exp::Bits(bits), info).into();
+        return solver.define_bitvector(Exp::Bits(bits), info).into();
     }
 
     let start_element = int_exp_128(&args[1], solver, "isla_init_mask start", info)?;
@@ -3401,7 +3621,7 @@ fn isla_init_mask_internal<B: BV>(
         });
     }
 
-    solver.define_const(exp.expect("non-empty mask expression"), info).into()
+    solver.define_bitvector(exp.expect("non-empty mask expression"), info).into()
 }
 
 fn isla_init_mask<B: BV>(
@@ -3502,7 +3722,7 @@ fn isla_mask_from_low_bits_internal<B: BV>(
         });
     }
 
-    solver.define_const(exp.expect("non-empty mask expression"), info).into()
+    solver.define_bitvector(exp.expect("non-empty mask expression"), info).into()
 }
 
 fn isla_mask_from_low_bits<B: BV>(
@@ -3549,16 +3769,10 @@ fn select_value<B: BV>(
     match condition {
         Condition::Concrete(true) => Ok(true_value.clone()),
         Condition::Concrete(false) => Ok(false_value.clone()),
-        Condition::Symbolic(condition) => solver
-            .define_const(
-                Exp::Ite(
-                    Box::new(condition),
-                    Box::new(smt_value(true_value, info)?),
-                    Box::new(smt_value(false_value, info)?),
-                ),
-                info,
-            )
-            .into(),
+        Condition::Symbolic(condition) => {
+            let condition = solver.define_const(condition, info);
+            build_ite(condition, true_value, false_value, solver, info)
+        }
     }
 }
 
@@ -3702,7 +3916,7 @@ fn isla_vector_access_or_default_internal<B: BV>(
     let index_width = length_bits(&index, solver, info)?;
     let exp = vector_array_access_or_default_exp(valid_len, &value_exps, &index, default_len, &default, solver, info)?;
     debug_assert!(index_width > 0);
-    solver.define_const(exp, info).into()
+    solver.define_bitvector(exp, info).into()
 }
 
 fn isla_vector_access_or_default<B: BV>(
@@ -3995,7 +4209,7 @@ fn pack_vreg_bits<B: BV>(elements: &[Val<B>], solver: &mut Solver<B>, info: Sour
 
     match concrete {
         Some(bits) => Ok(Val::Bits(bits)),
-        None => solver.define_const(exp.expect("packed vreg has at least one element"), info).into(),
+        None => solver.define_bitvector(exp.expect("packed vreg has at least one element"), info).into(),
     }
 }
 
@@ -4278,7 +4492,7 @@ fn align_bits<B: BV>(
         // Fast path for small bitvectors with power of two alignments
         (Val::Symbolic(bv), Val::I128(alignment)) if (bv_len <= 64) & ((alignment & (alignment - 1)) == 0) => {
             let mask = !B::new((alignment as u64) - 1, bv_len);
-            solver.define_const(Exp::Bvand(Box::new(Exp::Var(bv)), Box::new(smt_sbits(mask))), info).into()
+            solver.define_bitvector(Exp::Bvand(Box::new(Exp::Var(bv)), Box::new(smt_sbits(mask))), info).into()
         }
         (bv, alignment) => {
             let x = sail_unsigned(bv, solver, info)?;
@@ -4304,8 +4518,8 @@ fn smt_clz<B: BV>(bv: Sym, len: u32, solver: &mut Solver<B>, info: SourceLoc) ->
         let low_len = len / 2;
         let top_len = len - low_len;
 
-        let top = solver.define_const(Exp::Extract(len - 1, low_len, Box::new(Exp::Var(bv))), info);
-        let low = solver.define_const(Exp::Extract(low_len - 1, 0, Box::new(Exp::Var(bv))), info);
+        let top = solver.define_bitvector(Exp::Extract(len - 1, low_len, Box::new(Exp::Var(bv))), info);
+        let low = solver.define_bitvector(Exp::Extract(low_len - 1, 0, Box::new(Exp::Var(bv))), info);
 
         let top_bits_are_zero = Exp::Eq(Box::new(Exp::Var(top)), Box::new(smt_zeros(top_len as i128)));
 
@@ -4338,8 +4552,8 @@ fn smt_ctz<B: BV>(bv: Sym, len: u32, solver: &mut Solver<B>, info: SourceLoc) ->
         let low_len = len / 2;
         let top_len = len - low_len;
 
-        let top = solver.define_const(Exp::Extract(len - 1, low_len, Box::new(Exp::Var(bv))), info);
-        let low = solver.define_const(Exp::Extract(low_len - 1, 0, Box::new(Exp::Var(bv))), info);
+        let top = solver.define_bitvector(Exp::Extract(len - 1, low_len, Box::new(Exp::Var(bv))), info);
+        let low = solver.define_bitvector(Exp::Extract(low_len - 1, 0, Box::new(Exp::Var(bv))), info);
 
         let low_bits_are_zero = Exp::Eq(Box::new(Exp::Var(low)), Box::new(smt_zeros(low_len as i128)));
 
@@ -4392,10 +4606,10 @@ fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, 
     let result_len = len * 2;
 
     // Zero extend b to result_len
-    let b_extended = solver.define_const(Exp::ZeroExtend(len, Box::new(Exp::Var(b))), info);
+    let b_extended = solver.define_bitvector(Exp::ZeroExtend(len, Box::new(Exp::Var(b))), info);
 
     // Initialize result to zeros
-    let mut result = solver.define_const(smt_zeros(result_len as i128), info);
+    let mut result = solver.define_bitvector(smt_zeros(result_len as i128), info);
 
     // For each bit position i in a:
     // - Extract bit a[i]
@@ -4407,14 +4621,14 @@ fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, 
     //   result = result ^ term
     for i in 0..len {
         // Extract bit i from a
-        let bit_i = solver.define_const(
+        let bit_i = solver.define_bitvector(
             Exp::Extract(0, 0, Box::new(Exp::Bvlshr(Box::new(Exp::Var(a)), Box::new(smt_u64_width(i as u64, len))))),
             info,
         );
 
         // Replicate bit_i to result_len bits
         // If bit_i = 1, mask = all_ones, else mask = all_zeros
-        let mask = solver.define_const(
+        let mask = solver.define_bitvector(
             Exp::Ite(
                 Box::new(Exp::Eq(Box::new(Exp::Var(bit_i)), Box::new(bits64(1, 1)))),
                 Box::new(smt_ones(result_len as i128)),
@@ -4424,16 +4638,16 @@ fn smt_carryless_mul<V>(a: Sym, b: Sym, len: u32, solver: &mut Solver<impl BV>, 
         );
 
         // Shift b_extended by i positions
-        let shifted = solver.define_const(
+        let shifted = solver.define_bitvector(
             Exp::Bvshl(Box::new(Exp::Var(b_extended)), Box::new(smt_u64_width(i as u64, result_len))),
             info,
         );
 
         // Mask the shifted value: if bit_i = 1, we get (b << i), else 0
-        let term = solver.define_const(Exp::Bvand(Box::new(Exp::Var(shifted)), Box::new(Exp::Var(mask))), info);
+        let term = solver.define_bitvector(Exp::Bvand(Box::new(Exp::Var(shifted)), Box::new(Exp::Var(mask))), info);
 
         // XOR into result
-        result = solver.define_const(Exp::Bvxor(Box::new(Exp::Var(result)), Box::new(Exp::Var(term))), info);
+        result = solver.define_bitvector(Exp::Bvxor(Box::new(Exp::Var(result)), Box::new(Exp::Var(term))), info);
     }
 
     result
@@ -4453,8 +4667,8 @@ fn carryless_mul<B: BV>(a: Val<B>, b: Val<B>, solver: &mut Solver<B>, info: Sour
             // Check if result fits in BV::MAX_WIDTH
             if result_len > B::MAX_WIDTH {
                 // Fallback to symbolic computation for large results
-                let a_sym = solver.define_const(smt_sbits(a), info);
-                let b_sym = solver.define_const(smt_sbits(b), info);
+                let a_sym = solver.define_bitvector(smt_sbits(a), info);
+                let b_sym = solver.define_bitvector(smt_sbits(b), info);
                 return smt_carryless_mul::<Sym>(a_sym, b_sym, len, solver, info).into();
             }
 
@@ -4484,14 +4698,14 @@ fn carryless_mul<B: BV>(a: Val<B>, b: Val<B>, solver: &mut Solver<B>, info: Sour
             // Mixed case: if a is all zeros, result is zeros
             if a.is_zero() {
                 let len = a.len() * 2;
-                Ok(Val::Symbolic(solver.define_const(smt_zeros(len as i128), info)))
+                Ok(Val::Symbolic(solver.define_bitvector(smt_zeros(len as i128), info)))
             } else if a.to_vec().iter().filter(|&&x| x).count() == 1 {
                 // If a has only one bit set, we just need to shift b
                 let bit_pos = a.trailing_zeros();
                 let operand_len = a.len();
                 let result_len = operand_len * 2;
-                let b_extended = solver.define_const(Exp::ZeroExtend(operand_len, Box::new(Exp::Var(b))), info);
-                let result = solver.define_const(
+                let b_extended = solver.define_bitvector(Exp::ZeroExtend(operand_len, Box::new(Exp::Var(b))), info);
+                let result = solver.define_bitvector(
                     Exp::Bvshl(Box::new(Exp::Var(b_extended)), Box::new(smt_u64_width(bit_pos as u64, result_len))),
                     info,
                 );
@@ -4499,7 +4713,7 @@ fn carryless_mul<B: BV>(a: Val<B>, b: Val<B>, solver: &mut Solver<B>, info: Sour
             } else {
                 // Fallback: treat both as symbolic
                 if let Some(len) = solver.length(b) {
-                    let a_sym = solver.define_const(smt_sbits(a), info);
+                    let a_sym = solver.define_bitvector(smt_sbits(a), info);
                     smt_carryless_mul::<Sym>(a_sym, b, len, solver, info).into()
                 } else {
                     Err(ExecError::Type("carryless_mul (solver could not determine length)".to_string(), info))
@@ -4510,20 +4724,20 @@ fn carryless_mul<B: BV>(a: Val<B>, b: Val<B>, solver: &mut Solver<B>, info: Sour
             // Mixed case (symmetric to above)
             if b.is_zero() {
                 let len = b.len() * 2;
-                Ok(Val::Symbolic(solver.define_const(smt_zeros(len as i128), info)))
+                Ok(Val::Symbolic(solver.define_bitvector(smt_zeros(len as i128), info)))
             } else if b.to_vec().iter().filter(|&&x| x).count() == 1 {
                 let bit_pos = b.trailing_zeros();
                 let operand_len = b.len();
                 let result_len = operand_len * 2;
-                let a_extended = solver.define_const(Exp::ZeroExtend(operand_len, Box::new(Exp::Var(a))), info);
-                let result = solver.define_const(
+                let a_extended = solver.define_bitvector(Exp::ZeroExtend(operand_len, Box::new(Exp::Var(a))), info);
+                let result = solver.define_bitvector(
                     Exp::Bvshl(Box::new(Exp::Var(a_extended)), Box::new(smt_u64_width(bit_pos as u64, result_len))),
                     info,
                 );
                 Ok(Val::Symbolic(result))
             } else {
                 if let Some(len) = solver.length(a) {
-                    let b_sym = solver.define_const(smt_sbits(b), info);
+                    let b_sym = solver.define_bitvector(smt_sbits(b), info);
                     smt_carryless_mul::<Sym>(a, b_sym, len, solver, info).into()
                 } else {
                     Err(ExecError::Type("carryless_mul (solver could not determine length)".to_string(), info))
@@ -4615,7 +4829,7 @@ fn isla_cpop_width<B: BV>(
                     Exp::ZeroExtend(result_width - 1, Box::new(Exp::Extract(bit, bit, Box::new(bits_exp.clone()))));
                 count = Exp::Bvadd(Box::new(count), Box::new(bit_value));
             }
-            solver.define_const(count, info).into()
+            solver.define_bitvector(count, info).into()
         }
         value => Err(ExecError::Type(format!("isla_cpop {:?}", value), info)),
     }
@@ -4663,7 +4877,7 @@ fn isla_brev8<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> R
                     None => bit_exp,
                 });
             }
-            solver.define_const(result.expect("non-empty brev8 expression"), info).into()
+            solver.define_bitvector(result.expect("non-empty brev8 expression"), info).into()
         }
         value => Err(ExecError::Type(format!("isla_brev8 {:?}", value), info)),
     }
@@ -4701,7 +4915,7 @@ fn isla_rev8<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Re
                     None => byte_exp,
                 });
             }
-            solver.define_const(result.expect("non-empty rev8 expression"), info).into()
+            solver.define_bitvector(result.expect("non-empty rev8 expression"), info).into()
         }
         value => Err(ExecError::Type(format!("isla_rev8 {:?}", value), info)),
     }
@@ -4795,7 +5009,7 @@ fn xperm<B: BV>(
         (rs1, rs2) => {
             let rs1_exp = smt_value(&rs1, info)?;
             let rs2_exp = smt_value(&rs2, info)?;
-            solver.define_const(xperm_symbolic_exp(rs1_exp, rs2_exp, xlen, elem_width), info).into()
+            solver.define_bitvector(xperm_symbolic_exp(rs1_exp, rs2_exp, xlen, elem_width), info).into()
         }
     }
 }

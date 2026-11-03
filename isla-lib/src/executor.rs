@@ -1515,6 +1515,8 @@ fn simulate_diamond_arm<'ir, B: BV>(
             return Ok(None);
         }
         steps += 1;
+        let had_register_write = !arm.write_set.as_ref().unwrap().register_write_order.is_empty();
+        let read_count = arm.local_state.register_reads.as_ref().unwrap().len();
         match &arm.instrs[arm.pc] {
             Instr::Decl(v, ty, _) => {
                 arm.vars_mut().insert(*v, UVal::Uninit(ty));
@@ -1621,6 +1623,10 @@ fn simulate_diamond_arm<'ir, B: BV>(
             _ => {
                 return Ok(None);
             }
+        }
+        if had_register_write && arm.local_state.register_reads.as_ref().unwrap().len() > read_count {
+            // 当前事务先提交读取再提交写入，无法保留写后读的原始顺序。
+            return Ok(None);
         }
     }
     arm.write_set
@@ -2183,6 +2189,27 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
+                if let Some(in_range) = primop::integer_conversion_in_range(*f, &arg, solver, *info)? {
+                    if solver.check_sat_with(&in_range, *info).is_sat()?
+                        && solver.check_sat_with(&smtlib::Exp::Not(Box::new(in_range.clone())), *info).is_sat()?
+                    {
+                        let cond = solver.define_const(in_range, *info);
+                        symbolic_length::fork_retry_operand(
+                            cond,
+                            smtlib::Exp::Var(cond),
+                            smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
+                            &[arg.clone()],
+                            *info,
+                            task_id,
+                            task_fraction,
+                            stop_conditions,
+                            fork_sink,
+                            frame,
+                            task_state,
+                            solver,
+                        )?;
+                    }
+                }
                 let value = match f(arg.clone(), solver, *info) {
                     Ok(value) => value,
                     Err(error) => {
@@ -3423,6 +3450,544 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+
+    mod review11_tests {
+
+        #[test]
+        fn review11_conversion_range_forks() {
+            for (name, width) in [("sail_unsigned", 128), ("sail_unsigned", 129), ("sail_signed", 129)] {
+                let data = test_name(303);
+                let unary = crate::primop::unary_primops::<B64>();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(data, Ty::Bits(width), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(data),
+                            unary["undefined_bitvector"],
+                            Exp::I128(width as i128),
+                            info(),
+                        ),
+                        Instr::PrimopUnary(Loc::Id(RETURN), unary[name], Exp::Id(data), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(true),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                assert_eq!(results.len(), 2, "{name} bv{width}");
+                assert_eq!(results.iter().filter(|result| matches!(result, Err(ExecError::Overflow))).count(), 1);
+                assert_eq!(results.iter().filter(|result| matches!(result, Ok(Run::Finished(_)))).count(), 1);
+            }
+        }
+
+        #[test]
+        fn review11_integer_slice_result_category() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let integer = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            let ops = crate::primop::variadic_primops::<B64>();
+            let mut frame = make_frame(vec![Instr::End]);
+            let result = ops["set_slice_int"](
+                vec![Val::I128(1), Val::Symbolic(integer), Val::I128(0), Val::Bits(B64::BIT_ONE)],
+                &mut solver,
+                &mut frame,
+                info(),
+            )
+            .unwrap();
+            let Val::Symbolic(sym) = result else { panic!("预期符号整数") };
+            assert!(!solver.is_sail_bitvector(sym));
+        }
+
+        #[test]
+        fn review11_bit_access_original_index_bounds() {
+            for mixed in [false, true] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let input = if mixed {
+                    Val::MixedBits(vec![
+                        crate::ir::BitsSegment::Symbolic(solver.declare_bitvector(4, info())),
+                        crate::ir::BitsSegment::Concrete(B64::zeros(4)),
+                    ])
+                } else {
+                    Val::Bits(B64::zeros(8))
+                };
+                for index in [-1, 8, 256, 1i128 << 64] {
+                    assert!(matches!(
+                        crate::primop::vector_access(input.clone(), Val::I128(index), &mut solver, info()),
+                        Err(ExecError::OutOfBounds(_))
+                    ));
+                }
+                let index = solver.define_const(crate::primop_util::smt_i128(256), info());
+                assert!(matches!(
+                    crate::primop::vector_access(input, Val::Symbolic(index), &mut solver, info()),
+                    Err(ExecError::OutOfBounds(_))
+                ));
+            }
+        }
+
+        #[test]
+        fn review11_slice_indices_do_not_wrap() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let index = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            solver.assert_eq(smtlib::Exp::Var(index), crate::primop_util::smt_i128(256));
+            let value = solver.define_bitvector(crate::primop_util::smt_sbits(B64::new(0xff, 8)), info());
+            let slice =
+                crate::primop::op_slice(Val::Symbolic(value), Val::Symbolic(index), 1, &mut solver, info()).unwrap();
+            let updated = crate::primop::set_slice_internal(
+                Val::Symbolic(value),
+                Val::Symbolic(index),
+                Val::Bits(B64::zeros(1)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            for (result, expected) in [(slice, B64::zeros(1)), (updated, B64::new(0xff, 8))] {
+                let wrong = smtlib::Exp::Neq(
+                    Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                    Box::new(crate::primop_util::smt_sbits(expected)),
+                );
+                assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+            }
+        }
+
+        #[test]
+        fn review11_bitvector_categories_and_replay() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let input = Val::Symbolic(solver.declare_bitvector(128, info()));
+            let unary = crate::primop::unary_primops::<B129>();
+            let binary = crate::primop::binary_primops::<B129>();
+            let mut results = vec![unary["not_bits"](input.clone(), &mut solver, info()).unwrap()];
+            for name in ["xor_bits", "or_bits", "and_bits", "add_bits", "sub_bits"] {
+                results.push(binary[name](input.clone(), input.clone(), &mut solver, info()).unwrap());
+            }
+            for name in ["add_bits_int", "sub_bits_int", "shiftl", "shiftr", "arith_shiftr"] {
+                results.push(binary[name](input.clone(), Val::I128(1), &mut solver, info()).unwrap());
+            }
+            results.push(crate::primop::op_slice(input.clone(), Val::I64(0), 64, &mut solver, info()).unwrap());
+            results.push(crate::primop::append(input.clone(), input.clone(), &mut solver, info()).unwrap());
+            for name in ["zero_extend", "sign_extend"] {
+                results.push(binary[name](input.clone(), Val::I128(129), &mut solver, info()).unwrap());
+            }
+            for result in &results {
+                let Val::Symbolic(sym) = result else { panic!("预期符号位向量") };
+                assert!(solver.is_sail_bitvector(*sym));
+            }
+            let signed = unary["sail_signed"](input.clone(), &mut solver, info()).unwrap();
+            let unsigned = unary["sail_unsigned"](input, &mut solver, info()).unwrap();
+            let integer_input = Val::Symbolic(solver.declare_bitvector(8, info()));
+            let clz = unary["count_leading_zeros"](integer_input.clone(), &mut solver, info()).unwrap();
+            let ctz = unary["count_trailing_zeros"](integer_input, &mut solver, info()).unwrap();
+            for value in [signed, unsigned, clz, ctz] {
+                let Val::Symbolic(sym) = value else { panic!("预期符号整数") };
+                assert!(!solver.is_sail_bitvector(sym));
+            }
+            let raw = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            let before_mark = checkpoint(&mut solver);
+            solver.mark_bitvector(raw);
+            assert!(!Solver::from_checkpoint(&ctx, before_mark).is_sail_bitvector(raw));
+            let point = checkpoint(&mut solver);
+            let replay = Solver::from_checkpoint(&ctx, point);
+            assert!(replay.is_sail_bitvector(raw));
+            for result in results {
+                let Val::Symbolic(sym) = result else { unreachable!() };
+                assert!(replay.is_sail_bitvector(sym));
+            }
+        }
+
+        #[test]
+        fn review11_zero_width_operations() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let input = Val::Symbolic(solver.declare_bitvector(8, info()));
+            let integer = Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(128), info()));
+            let ops = crate::primop::binary_primops::<B64>();
+            for name in ["shift_bits_left", "shift_bits_right", "arith_shiftr", "shiftl", "shiftr"] {
+                assert_eq!(ops[name](input.clone(), Val::Bits(B64::zeros(0)), &mut solver, info()).unwrap(), input);
+            }
+            for name in ["add_bits_int", "sub_bits_int"] {
+                assert_eq!(
+                    ops[name](Val::Bits(B64::zeros(0)), integer.clone(), &mut solver, info()).unwrap(),
+                    Val::Bits(B64::zeros(0))
+                );
+            }
+        }
+
+        #[test]
+        fn review11_equality_width_matrix() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let a = solver.declare_bitvector(8, info());
+            let b = solver.declare_bitvector(16, info());
+            let low = solver.declare_bitvector(4, info());
+            let mixed = Val::MixedBits(vec![
+                crate::ir::BitsSegment::Symbolic(low),
+                crate::ir::BitsSegment::Concrete(B64::zeros(4)),
+            ]);
+            let ops = crate::primop::binary_primops::<B64>();
+            for name in ["eq_bits", "neq_bits", "eq_anything", "%neq"] {
+                let op = if name == "%neq" { crate::primop::op_neq::<B64> } else { *ops.get(name).unwrap() };
+                for left in [Val::Symbolic(a), Val::Bits(B64::zeros(8)), mixed.clone()] {
+                    for right in [Val::Symbolic(b), Val::Bits(B64::zeros(16))] {
+                        assert_eq!(
+                            op(left.clone(), right.clone(), &mut solver, info()).unwrap(),
+                            Val::Bool(name.contains("neq"))
+                        );
+                        assert_eq!(
+                            op(right, left.clone(), &mut solver, info()).unwrap(),
+                            Val::Bool(name.contains("neq"))
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn review11_signed_129_boundaries() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let signed = *crate::primop::unary_primops::<B129>().get("sail_signed").unwrap();
+            for value in [i128::MIN, -1, 0, i128::MAX] {
+                let bits = B129::from_str(&format!("0x{:032x}", value as u128)).unwrap().sign_extend(129);
+                assert_eq!(signed(Val::Bits(bits), &mut solver, info()).unwrap(), Val::I128(value));
+            }
+            for bits in [B129::new(1, 129).shiftl(127), B129::new(1, 129).shiftl(128)] {
+                assert!(matches!(signed(Val::Bits(bits), &mut solver, info()), Err(ExecError::Overflow)));
+            }
+        }
+
+        #[test]
+        fn review11_ctz_width_boundaries() {
+            for width in [0, 1, 8, 64, 128, 129] {
+                assert_eq!(B129::zeros(width).trailing_zeros(), width);
+            }
+            assert_eq!(B129::new(1, 129).shiftl(128).trailing_zeros(), 128);
+        }
+
+        #[test]
+        fn review11_run_loop_narrow_overflow() {
+            for enabled in [false, true] {
+                let cond = test_name(300);
+                let data = test_name(301);
+                let integer = test_name(302);
+                let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+                let narrow = *crate::primop::unary_primops::<B64>().get("%i->%i64").unwrap();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(cond, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(64), info()),
+                        Instr::Decl(integer, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(cond), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 64)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1u64 << 63, 64)), info()),
+                        Instr::PrimopUnary(Loc::Id(integer), unsigned, Exp::Id(data), info()),
+                        Instr::PrimopUnary(Loc::Id(RETURN), narrow, Exp::Id(integer), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let overflows = results.iter().filter(|result| matches!(result, Err(ExecError::Overflow))).count();
+                let finished = results.iter().filter(|result| matches!(result, Ok(Run::Finished(_)))).count();
+                eprintln!("实际执行：合并={enabled}，路径数={}，溢出={overflows}，完成={finished}", results.len());
+                assert_eq!(overflows, 1, "合并不能把溢出分支变成成功执行");
+            }
+        }
+
+        #[test]
+        fn review11_unsigned_mixed_128() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
+            assert_eq!(unsigned(Val::Bits(B129::new(1, 128)), &mut solver, info()).unwrap(), Val::I128(1));
+            let value = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B129::new(1, 128)),
+                &Val::Bits(B129::ones(128)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let result = unsigned(value, &mut solver, info());
+            eprintln!("混合可表示值与溢出值的 unsigned={result:?}");
+            assert!(result.is_ok(), "仍可行的合法支不能因另一个模型溢出而消失");
+        }
+
+        #[test]
+        fn review11_ctz_b129_zero() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let ctz = *crate::primop::unary_primops::<B129>().get("count_trailing_zeros").unwrap();
+            let expected = ctz(Val::Bits(B129::zeros(8)), &mut solver, info()).unwrap();
+            let input = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B129::zeros(8)),
+                &Val::Bits(B129::new(1, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let result = ctz(input, &mut solver, info()).unwrap();
+            solver.assert(smtlib::Exp::Var(cond));
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            eprintln!("B129 ctz(0:bv8) 单臂={expected:?}，合并={:?}", Model::new(&solver).get_val(&result).unwrap());
+            let wrong = smtlib::Exp::Neq(
+                Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                Box::new(crate::primop_util::smt_value(&expected, info()).unwrap()),
+            );
+            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+        }
+
+        #[test]
+        fn review11_empty_shift_amount() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let shift = crate::primop::shift_bits_right::<B64>;
+            for n in [1, 2] {
+                assert_eq!(
+                    shift(Val::Bits(B64::new(n, 8)), Val::Bits(B64::zeros(0)), &mut solver, info()).unwrap(),
+                    Val::Bits(B64::new(n, 8))
+                );
+            }
+            let value = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B64::new(1, 8)),
+                &Val::Bits(B64::new(2, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert!(shift(value, Val::Bits(B64::zeros(0)), &mut solver, info()).is_ok());
+        }
+
+        #[test]
+        fn review11_zero_width_add_int() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let add = *crate::primop::binary_primops::<B64>().get("add_bits_int").unwrap();
+            let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+            for n in [0, 1] {
+                assert_eq!(
+                    add(Val::Bits(B64::zeros(0)), Val::I128(n), &mut solver, info()).unwrap(),
+                    Val::Bits(B64::zeros(0))
+                );
+            }
+            let amount = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B64::new(0, 8)),
+                &Val::Bits(B64::new(1, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let amount = unsigned(amount, &mut solver, info()).unwrap();
+            assert!(add(Val::Bits(B64::zeros(0)), amount, &mut solver, info()).is_ok());
+        }
+
+        #[test]
+        fn review11_narrow_overflow() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+            let narrow = *crate::primop::unary_primops::<B64>().get("%i->%i64").unwrap();
+            let too_big = Val::Bits(B64::new(1u64 << 63, 64));
+            let concrete = unsigned(too_big.clone(), &mut solver, info()).unwrap();
+            assert!(matches!(narrow(concrete, &mut solver, info()), Err(ExecError::Overflow)));
+            let value = crate::primop_util::merge_val(cond, &too_big, &Val::Bits(B64::new(1, 64)), &mut solver, info())
+                .unwrap();
+            let value = unsigned(value, &mut solver, info()).unwrap();
+            solver.assert(smtlib::Exp::Var(cond));
+            let result = narrow(value, &mut solver, info());
+            eprintln!("合并后溢出窄化={result:?}");
+            if let Ok(value) = &result {
+                assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+                eprintln!("溢出窄化物化={:?}", Model::new(&solver).get_val(value).unwrap());
+            }
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn review11_different_width_equality() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let eq = crate::primop::eq_anything::<B64>;
+            for n in [1, 2] {
+                assert_eq!(
+                    eq(Val::Bits(B64::new(n, 8)), Val::Bits(B64::new(1, 16)), &mut solver, info()).unwrap(),
+                    Val::Bool(false)
+                );
+            }
+            let value = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B64::new(1, 8)),
+                &Val::Bits(B64::new(2, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert!(eq(value, Val::Bits(B64::new(1, 16)), &mut solver, info()).is_ok());
+        }
+        use super::*;
+        use crate::bitvector::b129::B129;
+
+        #[test]
+        fn review11_bitvector_category_after_not() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let amount = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B129::new(0, 128)),
+                &Val::Bits(B129::new(1, 128)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let not = *crate::primop::unary_primops::<B129>().get("not_bits").unwrap();
+            let shift = *crate::primop::binary_primops::<B129>().get("arith_shiftr").unwrap();
+            for n in [0, 1] {
+                let concrete_amount = not(Val::Bits(B129::new(n, 128)), &mut solver, info()).unwrap();
+                assert_eq!(
+                    shift(Val::Bits(B129::new(0x80, 8)), concrete_amount, &mut solver, info()).unwrap(),
+                    Val::Bits(B129::new(0xff, 8))
+                );
+            }
+            let amount = not(amount, &mut solver, info()).unwrap();
+            let Val::Symbolic(sym) = amount else { panic!("预期符号量") };
+            eprintln!("not_bits 后位向量标记={}", solver.is_sail_bitvector(sym));
+            let result = shift(Val::Bits(B129::new(0x80, 8)), amount, &mut solver, info()).unwrap();
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            eprintln!("合并后结果={:?}", Model::new(&solver).get_val(&result).unwrap());
+            let wrong = smtlib::Exp::Neq(
+                Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                Box::new(crate::primop_util::smt_sbits(B129::new(0xff, 8))),
+            );
+            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+        }
+
+        #[test]
+        fn review11_merged_129_unsigned() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
+            for n in [1, 2] {
+                assert_eq!(unsigned(Val::Bits(B129::new(n, 129)), &mut solver, info()).unwrap(), Val::I128(n as i128));
+            }
+            let value = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B129::new(1, 129)),
+                &Val::Bits(B129::new(2, 129)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let result = unsigned(value, &mut solver, info());
+            eprintln!("合并后 unsigned={result:?}");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn review11_merged_129_signed() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let signed = *crate::primop::unary_primops::<B129>().get("sail_signed").unwrap();
+            for n in [1, 2] {
+                assert_eq!(signed(Val::Bits(B129::new(n, 129)), &mut solver, info()).unwrap(), Val::I128(n as i128));
+            }
+            let value = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B129::new(1, 129)),
+                &Val::Bits(B129::new(2, 129)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert!(signed(value, &mut solver, info()).is_ok());
+        }
+
+        #[test]
+        fn review11_write_read_interleaving() {
+            let mut shared = empty_shared_state();
+            let written = shared.symtab.intern("zreview11_written");
+            let read = shared.symtab.intern("zreview11_read");
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let mut frame = make_frame(vec![
+                Instr::Jump(Exp::Bool(true), 4, info()),
+                Instr::Copy(Loc::Id(written), Exp::Bits(B64::new(1, 8)), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(read), info()),
+                Instr::Goto(6),
+                Instr::Copy(Loc::Id(written), Exp::Bits(B64::new(2, 8)), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(read), info()),
+                Instr::End,
+            ]);
+            frame.regs_mut().insert(written, false, UVal::Init(Val::Bits(B64::new(0, 8))));
+            frame.regs_mut().insert(read, false, UVal::Init(Val::Bits(B64::new(3, 8))));
+            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None).unwrap();
+            if merged.is_none() {
+                assert!(!solver
+                    .trace()
+                    .to_vec()
+                    .iter()
+                    .any(|event| matches!(event, Event::ReadReg(..) | Event::WriteReg(..))));
+                return;
+            }
+            assert_eq!(merged, Some(6));
+            let events: Vec<_> = solver
+                .trace()
+                .to_vec()
+                .into_iter()
+                .rev()
+                .filter_map(|event| match event {
+                    Event::ReadReg(reg, _, _) => Some(("read", *reg)),
+                    Event::WriteReg(reg, _, _) => Some(("write", *reg)),
+                    _ => None,
+                })
+                .collect();
+            eprintln!("合并后读写顺序={events:?}");
+            assert_eq!(events, vec![("write", written), ("read", read)]);
+        }
+
+        #[test]
+        fn review11_bit_access_large_index() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            for n in [1, 3] {
+                assert!(crate::primop::vector_access(Val::Bits(B64::new(n, 8)), Val::I128(256), &mut solver, info())
+                    .is_err());
+            }
+            let value = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B64::new(1, 8)),
+                &Val::Bits(B64::new(3, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let result = crate::primop::vector_access(value, Val::I128(256), &mut solver, info());
+            eprintln!("越界位访问={result:?}");
+            if let Ok(value) = &result {
+                assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+                eprintln!("越界位访问物化={:?}", Model::new(&solver).get_val(value).unwrap());
+            }
+            assert!(result.is_err());
+        }
+    }
     mod review10_tests {
         use super::*;
         #[test]
@@ -7018,7 +7583,14 @@ fn zmemreadfork(zu) {
             }
             assert_eq!(unsigned(Val::Bits(B129::ones(127)), &mut solver, info()).unwrap(), Val::I128(i128::MAX));
             let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
-            assert!(matches!(unsigned(Val::Symbolic(bits), &mut solver, info()), Err(ExecError::Overflow)));
+            // 混合范围保留合法模型；只有全部模型越界才返回溢出。
+            assert!(unsigned(Val::Symbolic(bits), &mut solver, info()).is_ok());
+            let overflow = solver.declare_bitvector(128, info());
+            solver.assert(smtlib::Exp::Bvslt(
+                Box::new(smtlib::Exp::Var(overflow)),
+                Box::new(crate::primop_util::smt_i128(0)),
+            ));
+            assert!(matches!(unsigned(Val::Symbolic(overflow), &mut solver, info()), Err(ExecError::Overflow)));
             solver.assert(smtlib::Exp::Bvsge(
                 Box::new(smtlib::Exp::Var(bits)),
                 Box::new(crate::primop_util::smt_i128(0)),
