@@ -1573,13 +1573,14 @@ pub(crate) fn op_slice<B: BV>(
     let from = if let Some(from) = concrete_from {
         // 先检查原始整数，不能先窄化索引再检查，否则巨大索引会发生截断。
         if from < 0 || from >= i128::from(bits_length) {
-            return Ok(Val::Bits(B::zeros(length)));
+            return zeros(Val::I128(i128::from(length)), solver, info);
         }
         let from = u32::try_from(from).unwrap();
         let available = bits_length - from;
         if length > available {
             let valid = op_slice(bits, Val::I64(i64::from(from)), available, solver, info)?;
-            return append(Val::Bits(B::zeros(length - available)), valid, solver, info);
+            let padding = zeros(Val::I128(i128::from(length - available)), solver, info)?;
+            return append(padding, valid, solver, info);
         }
         Val::I64(i64::from(from))
     } else {
@@ -1592,7 +1593,7 @@ pub(crate) fn op_slice<B: BV>(
                 Some(bits) => Ok(Val::Bits(bits)),
                 None => Err(ExecError::Type("op_slice (can't slice)".to_string(), info)),
             },
-            _ if bits.is_zero() => Ok(Val::Bits(B::zeros(length))),
+            _ if bits.is_zero() => zeros(Val::I128(i128::from(length)), solver, info),
             _ => slice!(bits_length, smt_sbits(bits), from, length as i128, solver, info),
         },
         Val::MixedBits(ref segments) => match from {
@@ -3121,22 +3122,55 @@ fn string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceLoc) ->
 }
 
 fn decimal_string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match bv {
-        Val::Bits(bv) => Ok(Val::String(bv.signed().to_string())),
+    let bits = match bv {
+        Val::Bits(bv) => bv.to_vec(),
         Val::Symbolic(sym) => {
-            let value = proven_symbolic_i128(sym, solver, info)?
-                .ok_or(ExecError::SymbolicLength("decimal_string_of_bits", info))?;
-            Ok(Val::String(value.to_string()))
+            if !solver.check_sat(info).is_sat()? {
+                return Err(ExecError::SymbolicLength("decimal_string_of_bits", info));
+            }
+            let candidate = {
+                let mut model = Model::new(solver);
+                model.set_complete_model(true);
+                let ModelVal::Exp(candidate @ (Exp::Bits(_) | Exp::Bits64(_))) = model.get_var(sym)? else {
+                    panic!("十进制字符串转换的模型必须是位向量")
+                };
+                candidate
+            };
+            if !solver
+                .check_sat_with(&Exp::Neq(Box::new(Exp::Var(sym)), Box::new(candidate.clone())), info)
+                .is_unsat()?
+            {
+                return Err(ExecError::SymbolicLength("decimal_string_of_bits", info));
+            }
+            match candidate {
+                Exp::Bits(bits) => bits,
+                Exp::Bits64(bits) => bits.to_vec(),
+                _ => unreachable!("候选已经确认是位向量"),
+            }
         }
-        Val::MixedBits(segments) => Ok(Val::String(
-            segments
-                .iter()
-                .map(|segment| string_of_segment(segment, solver, "decimal_string_of_bits", info))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(" "),
-        )),
-        other => Err(ExecError::Type(format!("decimal_string_of_bits {other:?}"), info)),
+        Val::MixedBits(segments) => {
+            return Ok(Val::String(
+                segments
+                    .iter()
+                    .map(|segment| string_of_segment(segment, solver, "decimal_string_of_bits", info))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(" "),
+            ))
+        }
+        other => return Err(ExecError::Type(format!("decimal_string_of_bits {other:?}"), info)),
+    };
+    // 按完整位宽解释二进制补码，避免宽位向量经过 i128 时丢失高位。
+    let mut bytes = vec![0_u8; bits.len().div_ceil(8)];
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit {
+            bytes[index / 8] |= 1 << (index % 8);
+        }
     }
+    let mut value = num_bigint::BigInt::from_bytes_le(num_bigint::Sign::Plus, &bytes);
+    if bits.last() == Some(&true) {
+        value -= num_bigint::BigInt::from(1) << bits.len();
+    }
+    Ok(Val::String(value.to_string()))
 }
 
 fn string_of_int<B: BV>(n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
@@ -5404,6 +5438,44 @@ mod tests {
     use crate::smt::smtlib::Ty;
     use crate::smt::{Config, Context, SmtResult, Solver};
     use crate::source_loc::SourceLoc;
+
+    #[test]
+    fn review15_decimal_preserves_full_signed_width() -> Result<(), ExecError> {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&ctx);
+        let info = SourceLoc::unknown();
+        for width in [129, 256] {
+            for negative in [false, true] {
+                let mut bits = vec![false; width];
+                bits[width - 2] = true;
+                bits[width - 1] = negative;
+                let magnitude = num_bigint::BigInt::from(1) << (width - 2);
+                let expected = if negative { -magnitude } else { magnitude }.to_string();
+                let sym = solver.define_bitvector(Exp::Bits(bits), info);
+                assert_eq!(decimal_string_of_bits(Val::Symbolic(sym), &mut solver, info)?, Val::String(expected));
+            }
+        }
+        for bits in [B129::zeros(129), B129::ones(129), B129::zeros(129).set_slice(128, B129::new(1, 1))] {
+            let concrete = decimal_string_of_bits(Val::Bits(bits), &mut solver, info)?;
+            let sym = solver.define_bitvector(smt_sbits(bits), info);
+            assert_eq!(decimal_string_of_bits(Val::Symbolic(sym), &mut solver, info)?, concrete);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review15_wide_out_of_bounds_slices_are_zero() -> Result<(), ExecError> {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        for from in [-1, 64, i128::MAX] {
+            let result = op_slice(Val::Bits(B64::ones(64)), Val::I128(from), 256, &mut solver, info)?;
+            assert!(solver
+                .check_sat_with(&Exp::Neq(Box::new(smt_value(&result, info)?), Box::new(smt_zeros(256))), info,)
+                .is_unsat()?);
+        }
+        Ok(())
+    }
 
     #[test]
     fn review13_integer_slices_sign_extend_beyond_integer_width() -> Result<(), ExecError> {

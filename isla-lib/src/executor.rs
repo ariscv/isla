@@ -362,20 +362,42 @@ fn write_register_from_vector<'ir, B: BV>(
         }
         SymbolicIndex(i) => {
             let mut reg_values = Vec::new();
+            let mut updates: HashMap<Name, Val<B>> = HashMap::new();
             for (j, reg) in regs.iter().enumerate() {
-                solver.set_def_attrs(DefAttrs::uninteresting());
                 let choice = solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
                     solver.define_const(Eq(Box::new(Var(i)), Box::new(Bits64(B64::new(j as u64, rib)))), info)
                 });
-                let current_value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone();
-                local_state.regs.assign(
-                    *reg,
-                    solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
-                        build_ite(choice, &value, &current_value, solver, info)
-                    })?,
-                    shared_state,
-                );
+                let current_value = match updates.get(reg) {
+                    Some(value) => value.clone(),
+                    None => local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone(),
+                };
+                let updated = match solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
+                    build_ite(choice, &value, &current_value, solver, info)
+                }) {
+                    Ok(updated) => updated,
+                    Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
+                        // 所有候选准备成功后才写回，防止重试继承部分更新的寄存器。
+                        let index = fix_index_length(i, rib, 128, solver, info);
+                        return match primop::proven_symbolic_i128(index, solver, info)? {
+                            Some(index) => write_register_from_vector(
+                                Val::I128(index),
+                                value,
+                                regs_vector,
+                                local_state,
+                                shared_state,
+                                solver,
+                                info,
+                            ),
+                            None => Err(ExecError::SymbolicLength("write_register_from_vector", info)),
+                        };
+                    }
+                    Err(error) => return Err(error),
+                };
+                updates.insert(*reg, updated);
                 reg_values.push(current_value);
+            }
+            for (reg, updated) in updates {
+                local_state.regs.assign(reg, updated, shared_state);
             }
             solver.add_event(Event::Abstract {
                 name: WRITE_REGISTER_FROM_VECTOR,
@@ -1208,9 +1230,10 @@ fn run_special_primop<'ir, B: BV>(
         frame.pc += 1
     } else if f == WRITE_REGISTER_FROM_VECTOR {
         assert!(args.len() == 3);
-        let n = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
-        let value = eval_exp(&args[1], &mut frame.local_state, shared_state, solver, info)?.into_owned();
-        let regs = eval_exp(&args[2], &mut frame.local_state, shared_state, solver, info)?.into_owned();
+        let mut operands = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
+        let regs = operands.pop().unwrap();
+        let value = operands.pop().unwrap();
+        let n = operands.pop().unwrap();
         write_register_from_vector(n, value, regs, &mut frame.local_state, shared_state, solver, info)?;
         assign(tid, loc, Val::Unit, &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
@@ -2443,6 +2466,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             INTERNAL_VECTOR_INIT
                                 | INTERNAL_VECTOR_UPDATE
                                 | READ_REGISTER_FROM_VECTOR
+                                | WRITE_REGISTER_FROM_VECTOR
                                 | INSTR_ANNOUNCE
                                 | INTERRUPT_PENDING
                         ) {
@@ -3714,6 +3738,328 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review15_tests {
+        use super::*;
+
+        #[derive(Clone)]
+        struct AuditDevice {
+            value: u8,
+        }
+
+        impl crate::memory::CustomRegion<B64> for AuditDevice {
+            fn read(
+                &self,
+                read_kind: Val<B64>,
+                address: u64,
+                bytes: u32,
+                solver: &mut Solver<B64>,
+                tag: bool,
+            ) -> Result<Val<B64>, ExecError> {
+                let _ = (read_kind, address, bytes, solver, tag);
+                Ok(Val::Bits(B64::from_u8(self.value)))
+            }
+            fn write(
+                &mut self,
+                write_kind: Val<B64>,
+                address: u64,
+                data: Val<B64>,
+                solver: &mut Solver<B64>,
+                tag: Option<Val<B64>>,
+            ) -> Result<Val<B64>, ExecError> {
+                let _ = (write_kind, address, solver, tag);
+                let Val::Bits(data) = data else { panic!("设备测试只写入具体字节") };
+                self.value = data.lower_u8();
+                Ok(Val::Bool(true))
+            }
+            fn initial_value(&self, address: u64, bytes: u32) -> Option<B64> {
+                let _ = (address, bytes);
+                Some(B64::from_u8(self.value))
+            }
+            fn region_name(&self) -> &'static str {
+                "审查设备"
+            }
+            fn clone_dyn(&self) -> Box<dyn Send + Sync + crate::memory::CustomRegion<B64>> {
+                Box::new(self.clone())
+            }
+        }
+
+        #[test]
+        fn merged_custom_memory_write_preserves_device_state() {
+            for enabled in [false, true] {
+                let branch = test_name(450);
+                let addr = test_name(451);
+                let temp = test_name(452);
+                let primops = primop::variadic_primops::<B64>();
+                let mut frame = make_frame(vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(addr, Ty::Bits(64), info()),
+                    Instr::Decl(temp, Ty::Bool, info()),
+                    Instr::Jump(Exp::Id(branch), 6, info()),
+                    Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1000, 64)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1001, 64)), info()),
+                    Instr::Jump(Exp::Id(branch), 10, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 8)), info()),
+                    Instr::Goto(12),
+                    Instr::PrimopVariadic(
+                        Loc::Id(temp),
+                        primops["platform_write_mem"],
+                        vec![Exp::Unit, Exp::I128(64), Exp::Id(addr), Exp::I128(1), Exp::Bits(B64::new(7, 8))],
+                        info(),
+                    ),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primops["platform_read_mem"],
+                        vec![Exp::Unit, Exp::I128(64), Exp::Id(addr), Exp::I128(1)],
+                        info(),
+                    ),
+                    Instr::End,
+                ]);
+                frame
+                    .memory_mut()
+                    .add_region(crate::memory::Region::Custom(0x1000..0x1002, Box::new(AuditDevice { value: 0 })));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let shared = empty_shared_state();
+                let collected = Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::from_usize(0), &state),
+                    &shared,
+                    &collected,
+                    &|tid, id, result, shared, solver, collected| {
+                        let _ = (tid, id, shared, solver);
+                        let value = match result {
+                            Ok((Run::Finished(Val::Bits(bits)), _)) => bits.lower_u64(),
+                            _ => panic!("设备读写必须完成"),
+                        };
+                        collected.lock().unwrap().push(value);
+                    },
+                );
+                let mut values = collected.into_inner().unwrap();
+                values.sort();
+                eprintln!("设备写后读：合并={enabled}，结果={values:?}");
+                assert_eq!(values, vec![0, 7], "合并不能跳过设备写入");
+            }
+        }
+
+        #[test]
+        fn merged_concrete_memory_addresses_preserve_reads() {
+            for enabled in [false, true] {
+                let branch = test_name(450);
+                let addr = test_name(451);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(addr, Ty::Bits(64), info()),
+                    Instr::Jump(Exp::Id(branch), 5, info()),
+                    Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1000, 64)), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1001, 64)), info()),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primop::variadic_primops()["platform_read_mem"],
+                        vec![Exp::Unit, Exp::I128(64), Exp::Id(addr), Exp::I128(1)],
+                        info(),
+                    ),
+                    Instr::End,
+                ]);
+                frame.memory_mut().add_concrete_region(0x1000..0x1002, HashMap::from([(0x1000, 1), (0x1001, 2)]));
+                let shared = empty_shared_state();
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let results = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &results, &|_, _, result, _, _, results| {
+                    let outcome = match result {
+                        Ok((Run::Finished(value), _)) => format!("完成 {value:?}"),
+                        Err((error, _)) => format!("错误 {error:?}"),
+                        _ => panic!("异常结果"),
+                    };
+                    results.lock().unwrap().push(outcome);
+                });
+                let results = results.into_inner().unwrap();
+                eprintln!("具体内存的有限地址：合并={enabled}，结果={results:?}");
+                assert_eq!(results.iter().filter(|r| r.starts_with("完成")).count(), 2);
+            }
+        }
+
+        #[test]
+        fn write_register_vector_strings_after_merge() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let r0 = shared.symtab.intern("zaudit15_r0");
+                let r1 = shared.symtab.intern("zaudit15_r1");
+                let branch = test_name(450);
+                let data = test_name(451);
+                let refs = test_name(452);
+                let mut lets = HashMap::default();
+                lets.insert(refs, UVal::Init(Val::Vector(vec![Val::Ref(r0), Val::Ref(r1)])));
+                let mut regs = RegisterBindings::new();
+                regs.insert(r0, false, UVal::Init(Val::String("甲".into())));
+                regs.insert(r1, false, UVal::Init(Val::String("乙".into())));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Call(
+                            Loc::Id(RETURN),
+                            false,
+                            WRITE_REGISTER_FROM_VECTOR,
+                            vec![Exp::Id(data), Exp::String("丙".into()), Exp::Id(refs)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    shared,
+                    regs,
+                    lets,
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+                eprintln!(
+                    "寄存器向量写入：合并={enabled}，完成={}，错误={errors:?}",
+                    results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count()
+                );
+                assert!(errors.is_empty(), "合法具体索引写入不能因合并而失败");
+            }
+        }
+
+        #[test]
+        fn decimal_129_unique_merged_value() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let c = solver.declare_const(smtlib::Ty::Bool, info());
+            let f = primop::unary_primops::<B129>()["decimal_string_of_bits"];
+            let left = Val::Bits(B129::new(1, 129));
+            let right = Val::Bits(B129::new(2, 129));
+            assert_eq!(f(left.clone(), &mut solver, info()).unwrap(), Val::String("1".into()));
+            let merged = crate::primop_util::merge_val(c, &left, &right, &mut solver, info()).unwrap();
+            solver.assert(smtlib::Exp::Var(c));
+            let result = f(merged, &mut solver, info());
+            eprintln!("129 位唯一候选的十进制转换：{result:?}");
+            assert_eq!(result.unwrap(), Val::String("1".into()));
+        }
+
+        #[test]
+        fn decimal_129_after_merge_preserves_paths() {
+            use crate::bitvector::b129::B129;
+            let branch = test_name(450);
+            let data = test_name(451);
+            let left = test_name(452);
+            let right = test_name(453);
+            for enabled in [false, true] {
+                let instrs: Vec<Instr<Name, B129>> = vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(data, Ty::Bits(129), info()),
+                    Instr::Jump(Exp::Id(branch), 5, info()),
+                    Instr::Copy(Loc::Id(data), Exp::Id(left), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(data), Exp::Id(right), info()),
+                    Instr::PrimopUnary(
+                        Loc::Id(RETURN),
+                        primop::unary_primops()["decimal_string_of_bits"],
+                        Exp::Id(data),
+                        info(),
+                    ),
+                    Instr::End,
+                ];
+                let shared = SharedState::<B129>::empty(Symtab::new());
+                let mut frame = LocalFrame::new(test_name(25), &[], &Ty::String, None, &instrs);
+                frame.lets_mut().insert(left, UVal::Init(Val::Bits(B129::new(1, 129))));
+                frame.lets_mut().insert(right, UVal::Init(Val::Bits(B129::new(2, 129))));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let results = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &results, &|_, _, result, _, _, results| {
+                    let outcome = match result {
+                        Ok((Run::Finished(value), _)) => format!("完成 {value:?}"),
+                        Err((error, _)) => format!("错误 {error:?}"),
+                        _ => panic!("异常结果"),
+                    };
+                    results.lock().unwrap().push(outcome);
+                });
+                let results = results.into_inner().unwrap();
+                eprintln!("129 位十进制字符串：合并={enabled}，结果={results:?}");
+                assert_eq!(results.iter().filter(|r| r.starts_with("完成")).count(), 2);
+            }
+        }
+
+        #[test]
+        fn wide_zero_padding_slice() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let source = solver.define_bitvector(primop::smt_ones(256), info());
+            let start = solver.define_const(crate::primop_util::smt_i128(224), info());
+            let symbolic =
+                primop::op_slice(Val::Symbolic(source), Val::Symbolic(start), 128, &mut solver, info()).unwrap();
+            let expected = smtlib::Exp::ZeroExtend(96, Box::new(primop::smt_ones(32)));
+            assert!(solver
+                .check_sat_with(
+                    &smtlib::Exp::Neq(
+                        Box::new(crate::primop_util::smt_value(&symbolic, info()).unwrap()),
+                        Box::new(expected)
+                    ),
+                    info()
+                )
+                .is_unsat()
+                .unwrap());
+            let result = primop::op_slice(Val::Symbolic(source), Val::I128(224), 128, &mut solver, info());
+            assert!(result.is_ok(), "宽位切片的补零必须使用符号位向量");
+        }
+
+        #[test]
+        fn wide_slice_symbolic_start_matches_concrete_start() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let source = solver.define_bitvector(primop::smt_ones(256), info());
+            let start = solver.define_const(crate::primop_util::smt_i128(256), info());
+            assert!(primop::op_slice(Val::Symbolic(source), Val::Symbolic(start), 128, &mut solver, info()).is_ok());
+            assert!(primop::op_slice(Val::Symbolic(source), Val::I128(256), 128, &mut solver, info()).is_ok());
+        }
+    }
+
+    mod review15_boundary_tests {
+        use super::*;
+
+        #[test]
+        fn symbolic_write_preserves_aliased_register_references() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let shared = empty_shared_state();
+            let reg = test_name(460);
+            let mut frame = make_frame(vec![]);
+            frame.local_state.regs.insert(reg, false, UVal::Init(Val::I128(0)));
+            let index = solver.declare_const(smtlib::Ty::BitVec(1), info());
+            write_register_from_vector(
+                Val::Symbolic(index),
+                Val::I128(7),
+                Val::Vector(vec![Val::Ref(reg), Val::Ref(reg)]),
+                &mut frame.local_state,
+                &shared,
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let result = frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap().clone();
+            assert!(
+                solver
+                    .check_sat_with(
+                        &smtlib::Exp::Neq(
+                            Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
+                            Box::new(crate::primop_util::smt_i128(7)),
+                        ),
+                        info(),
+                    )
+                    .is_unsat()
+                    .unwrap(),
+                "任一索引都必须更新同一个寄存器"
+            );
+        }
+    }
+
     mod review14_tests {
         #[test]
         fn memory_read_bitvector_category_survives_checkpoint() {

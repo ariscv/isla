@@ -441,6 +441,7 @@ impl<B: BV> Memory<B> {
                 Sat => {
                     let sat_address = {
                         let mut model = Model::new(solver);
+                        model.set_complete_model(true);
                         let ModelVal::Exp(Bits64(sat_address)) = model.get_var(address)? else {
                             return Err(ExecError::Z3Error(
                                 "No bitvector address variable found in model during check_concrete_overlap"
@@ -583,7 +584,10 @@ impl<B: BV> Memory<B> {
                         // read again with that satisfiable value.
                         match self.check_concrete_overlap(
                             symbolic_addr,
-                            ExecError::BadRead("Possible symbolic address overlap"),
+                            ExecError::SymbolicLength(
+                                if tag { "read_memt_address" } else { "read_mem_address" },
+                                SourceLoc::unknown(),
+                            ),
                             solver,
                         )? {
                             Overlap::Unique(concrete_addr) => {
@@ -643,11 +647,23 @@ impl<B: BV> Memory<B> {
 
             Val::Symbolic(symbolic_addr) => {
                 if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_writes()) {
-                    self.check_concrete_overlap(
+                    match self.check_concrete_overlap(
                         symbolic_addr,
                         ExecError::BadWrite("possible symbolic address overlap"),
                         solver,
-                    )?;
+                    )? {
+                        Overlap::Unique(concrete_addr) => {
+                            return self.write(
+                                write_kind,
+                                Val::Bits(B::new(concrete_addr, 64)),
+                                data,
+                                solver,
+                                tag,
+                                opts,
+                            )
+                        }
+                        Overlap::NoOverlap => {}
+                    }
                 }
                 self.write_symbolic(write_kind, address, data, solver, tag, opts, DEFAULT_REGION_NAME)
             }
