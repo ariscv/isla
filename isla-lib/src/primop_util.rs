@@ -222,6 +222,17 @@ pub fn smt_value<B: BV>(v: &Val<B>, info: SourceLoc) -> Result<Exp<Sym>, ExecErr
     })
 }
 
+// 整数在 SMT 中也表示为位向量；非位向量值由后续结构化合并处理。
+fn merge_bit_width<B: BV>(value: &Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Option<u32>, ExecError> {
+    Ok(match value {
+        Val::Bits(_) | Val::MixedBits(_) => Some(length_bits(value, solver, info)?),
+        Val::I64(_) => Some(64),
+        Val::I128(_) => Some(128),
+        Val::Symbolic(sym) => solver.length(*sym),
+        _ => None,
+    })
+}
+
 pub fn build_ite<B: BV>(
     b: Sym,
     lhs: &Val<B>,
@@ -229,6 +240,9 @@ pub fn build_ite<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if merge_bit_width(lhs, solver, info)? != merge_bit_width(rhs, solver, info)? {
+        return Err(ExecError::IncompatibleMerge);
+    }
     if lhs == rhs {
         return Ok(lhs.clone());
     }
@@ -313,6 +327,38 @@ mod build_ite_tests {
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::smt::{Config, Context};
+
+    #[test]
+    fn different_bit_widths_are_rejected() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let condition = solver.declare_const(smtlib::Ty::Bool, info);
+        let values = [
+            Val::Bits(B64::new(1, 8)),
+            Val::Bits(B64::new(2, 16)),
+            Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(8), info)),
+            Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(16), info)),
+            Val::MixedBits(vec![BitsSegment::Concrete(B64::new(1, 8))]),
+            Val::MixedBits(vec![BitsSegment::Concrete(B64::new(2, 16))]),
+        ];
+        for lhs in &values {
+            for rhs in &values {
+                if length_bits(lhs, &mut solver, info).unwrap() == length_bits(rhs, &mut solver, info).unwrap() {
+                    continue;
+                }
+                assert!(matches!(build_ite(condition, lhs, rhs, &mut solver, info), Err(ExecError::IncompatibleMerge)));
+                assert!(matches!(merge_val(condition, lhs, rhs, &mut solver, info), Err(ExecError::IncompatibleMerge)));
+            }
+        }
+        for value in [Val::I64(1), Val::I128(1)] {
+            assert!(build_ite(condition, &value, &value, &mut solver, info).is_ok());
+            assert!(matches!(
+                build_ite(condition, &value, &values[2], &mut solver, info),
+                Err(ExecError::IncompatibleMerge)
+            ));
+        }
+    }
 
     #[test]
     fn matching_ctor_merges_nested_payload() {
@@ -485,6 +531,9 @@ pub fn merge_val<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if merge_bit_width(val_a, solver, info)? != merge_bit_width(val_b, solver, info)? {
+        return Err(ExecError::IncompatibleMerge);
+    }
     match (val_a, val_b) {
         (Val::Bool(_), Val::Bool(_))
         | (Val::I64(_), Val::I64(_))

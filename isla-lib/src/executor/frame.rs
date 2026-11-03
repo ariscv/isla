@@ -44,7 +44,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
-use crate::smt::{Checkpoint, Solver, Sym};
+use crate::smt::{Accessor, Checkpoint, Solver, Sym};
 use crate::timeout::{SmtCallStats, SmtDumpNames};
 #[cfg(feature = "tracetool")]
 use crate::tracetool::itrace::ItracePerPath;
@@ -60,6 +60,8 @@ pub struct LocalState<'ir, B> {
     pub(super) regs: RegisterBindings<'ir, B>,
     pub(super) lets: Bindings<'ir, B>,
     pub(super) probes: LocalDebugProbes,
+    // 仅在菱形推测期间启用，保留求值器实际读取的访问路径和值，以便提交符号依赖。
+    pub(super) register_reads: Option<Vec<(Name, Vec<Accessor>, Val<B>)>>,
 }
 
 impl<'ir, B: BV> LocalState<'ir, B> {
@@ -128,6 +130,19 @@ pub struct Frame<'ir, B> {
     pub(super) pc_counts: Arc<HashMap<B, usize>>,
     pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
     pub(super) write_set: Option<WriteSet>,
+    /*
+     * ATTENTION git-block:
+     * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
+     * 该字段来自 origin/dev-isarch-pathmerge；字段本身由 dea623a
+     * `feat(executor): add ForkTreeNode + StateSerialize trait + IR merge annotation stub` 引入。
+     * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
+     * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
+     * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
+     * 分支条件是 itrace/path 级别的观测元数据，必须保存在 itrace_path 内部。
+     * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
+     * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
+     */
+    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
     #[cfg(feature = "tracetool")]
     pub(super) itrace_path: Arc<ItracePerPath>,
 }
@@ -174,6 +189,19 @@ pub struct LocalFrame<'ir, B> {
     pub(super) pc_counts: HashMap<B, usize>,
     pub(super) taken_interrupts: Vec<(TaskId, u8)>,
     pub(super) write_set: Option<WriteSet>,
+    /*
+     * ATTENTION git-block:
+     * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
+     * 该字段来自 origin/dev-isarch-pathmerge；字段本身由 dea623a
+     * `feat(executor): add ForkTreeNode + StateSerialize trait + IR merge annotation stub` 引入。
+     * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
+     * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
+     * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
+     * 分支条件属于当前 itrace path 的输出上下文，不属于 executor 的可执行状态。
+     * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
+     * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
+     */
+    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
     #[cfg(feature = "tracetool")]
     pub(super) itrace_path: ItracePerPath,
 }
@@ -387,7 +415,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             function_name: name,
             pc: 0,
             execution_limit_state: ExecutionLimitPathState::default(),
-            local_state: LocalState { vars, regs, lets, probes },
+            local_state: LocalState { vars, regs, lets, probes, register_reads: None },
             memory: Memory::new(),
             instrs,
             stack_vars: Vec::new(),

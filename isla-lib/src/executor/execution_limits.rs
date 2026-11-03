@@ -481,7 +481,7 @@ pub(super) enum ExecutionLimitDecision {
 /// `ExecutionLimitPathState` 参数传入。
 #[derive(Copy, Clone, Debug)]
 pub(super) struct ExecutionLimitHandler<'config> {
-    config: &'config ExecutionLimits,
+    pub(super) config: &'config ExecutionLimits,
 }
 
 impl<'config> ExecutionLimitHandler<'config> {
