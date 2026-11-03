@@ -165,9 +165,16 @@ macro_rules! fp_rounding_unary_primop {
     ($f:ident, $op:expr) => {
         pub fn $f<B: BV>(rm: Val<B>, v: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
             match (rm, v) {
-                (Val::Symbolic(rm), Val::Symbolic(v)) => solver
-                    .define_const(Exp::FPRoundingUnary($op, Box::new(Exp::Var(rm)), Box::new(Exp::Var(v))), info)
-                    .into(),
+                (Val::Symbolic(rm), Val::Symbolic(v)) => {
+                    let op = $op;
+                    let exp = Exp::FPRoundingUnary(op, Box::new(Exp::Var(rm)), Box::new(Exp::Var(v)));
+                    match op {
+                        FPRoundingUnary::ToSigned(_) | FPRoundingUnary::ToUnsigned(_) => {
+                            solver.define_bitvector(exp, info).into()
+                        }
+                        _ => solver.define_const(exp, info).into(),
+                    }
+                }
                 _ => Err(ExecError::Type(stringify!($f).to_string(), info)),
             }
         }

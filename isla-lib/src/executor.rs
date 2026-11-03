@@ -3520,13 +3520,32 @@ pub fn trace_result_collector<'ir, B: BV>(
     task_id: TaskId,
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
-    solver: Solver<B>,
+    mut solver: Solver<B>,
     collected: &TraceResultQueue<B>,
 ) {
     match result {
         Ok((Run::Finished(Val::Bool(result)), frame)) => {
             let mut events = solver.trace().to_vec();
             collected.push(Ok((task_id, result, events.drain(..).cloned().collect())));
+            submit_itrace_for_local_frame(&frame, shared_state);
+        }
+        Ok((Run::Finished(Val::Symbolic(sym)), frame)) if solver.is_bool(sym) => {
+            let info = SourceLoc::unknown();
+            for result in [false, true] {
+                let condition =
+                    if result { smtlib::Exp::Var(sym) } else { smtlib::Exp::Not(Box::new(smtlib::Exp::Var(sym))) };
+                match solver.check_sat_with(&condition, info).is_sat() {
+                    Ok(true) => {
+                        // 轨迹按逆序存储；只向本结果的副本追加断言，不改变下一分支的 solver。
+                        let mut events = vec![Event::Smt(smtlib::Def::Assert(condition), DefAttrs::default(), info)];
+                        events.extend(solver.trace().to_vec().into_iter().cloned());
+                        collected.push(Ok((task_id, result, events)));
+                    }
+                    Ok(false) => (),
+                    Err(error) => collected
+                        .push(Err(TraceError::exec(error, backtrace_string(&frame.backtrace, &shared_state.symtab)))),
+                }
+            }
             submit_itrace_for_local_frame(&frame, shared_state);
         }
         Ok((Run::Exit, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
@@ -3754,6 +3773,424 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review17_tests {
+        use super::*;
+
+        #[test]
+        fn review17_subrange_all_representations() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let sym = solver.define_bitvector(smtlib::Exp::Bits64(B64::new(0xab, 8)), info());
+            let values = [
+                Val::Bits(B64::new(0xab, 8)),
+                Val::Symbolic(sym),
+                Val::MixedBits(vec![crate::ir::BitsSegment::Symbolic(sym)]),
+            ];
+            for bits in values {
+                for (high, low) in [(8, 0), (7, -1), (-1, 0), (2, 3), (i128::MAX, 0), (1_i128 << 32, 0)] {
+                    assert!(
+                        matches!(
+                            primop::subrange_internal(
+                                bits.clone(),
+                                Val::I128(high),
+                                Val::I128(low),
+                                &mut solver,
+                                info()
+                            ),
+                            Err(ExecError::Type(_, _))
+                        ),
+                        "越界索引必须返回类型错误"
+                    );
+                }
+                let sliced = primop::subrange_internal(bits, Val::I128(7), Val::I128(0), &mut solver, info()).unwrap();
+                assert!(solver.check_sat(info()).is_sat().unwrap());
+                assert_eq!(Model::new(&solver).get_val(&sliced).unwrap(), Val::Bits(B64::new(0xab, 8)));
+            }
+        }
+
+        #[test]
+        fn review17_symbolic_code_ifetch() {
+            for enabled in [false, true] {
+                let branch = test_name(490);
+                let addr = test_name(491);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(addr, Ty::Bits(64), info()),
+                    Instr::Jump(Exp::Id(branch), 5, info()),
+                    Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1000, 64)), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1004, 64)), info()),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primop::variadic_primops()["platform_read_mem_ifetch"],
+                        vec![Exp::Unit, Exp::I128(64), Exp::Id(addr), Exp::I128(4)],
+                        info(),
+                    ),
+                    Instr::End,
+                ]);
+                frame.memory_mut().add_region(crate::memory::Region::SymbolicCode(0x1000..0x2000));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let shared = empty_shared_state();
+                let outcomes = Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::fresh(), &state),
+                    &shared,
+                    &outcomes,
+                    &|_, _, result, _, _, outcomes| {
+                        outcomes.lock().unwrap().push(match result {
+                            Ok((Run::Finished(value), _)) => format!("完成 {value:?}"),
+                            Err((error, _)) => format!("错误 {error:?}"),
+                            _ => panic!("异常结果"),
+                        });
+                    },
+                );
+                let outcomes = outcomes.into_inner().unwrap();
+                eprintln!("代码区取指：合并={enabled}，结果={outcomes:?}");
+                assert!(outcomes.iter().all(|r| r.starts_with("完成")), "合法代码区的取指不得失败");
+            }
+        }
+
+        #[test]
+        fn review17_ifetch_region_dispatch() {
+            for enabled in [false, true] {
+                for (other, expected) in
+                    [(0x3004, vec![true, true]), (0x4000, vec![true, true]), (0x5000, vec![false, true])]
+                {
+                    let branch = test_name(490);
+                    let addr = test_name(491);
+                    let mut frame = make_frame(vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(addr, Ty::Bits(64), info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(0x1000, 64)), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(addr), Exp::Bits(B64::new(other, 64)), info()),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["platform_read_mem_ifetch"],
+                            vec![Exp::Unit, Exp::I128(64), Exp::Id(addr), Exp::I128(4)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ]);
+                    frame.memory_mut().add_region(crate::memory::Region::SymbolicCode(0x1000..0x2000));
+                    frame.memory_mut().add_region(crate::memory::Region::SymbolicCode(0x3000..0x4000));
+                    frame.memory_mut().add_zero_region(0x4000..0x4004);
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                    let shared = empty_shared_state();
+                    let results = Mutex::new(Vec::new());
+                    start_single(
+                        frame.task(TaskId::fresh(), &state),
+                        &shared,
+                        &results,
+                        &|_, _, result, _, _, results| {
+                            results.lock().unwrap().push(match result {
+                                Ok((Run::Finished(_), _)) => true,
+                                Err((ExecError::BadRead(_), _)) => false,
+                                _ => panic!("异常取指结果"),
+                            });
+                        },
+                    );
+                    let mut results = results.into_inner().unwrap();
+                    results.sort();
+                    assert_eq!(results, expected, "跨代码区、具体区和默认区域必须按候选独立分派");
+                }
+            }
+        }
+
+        #[test]
+        fn review17_hex_machine_integer_width() {
+            for enabled in [false, true] {
+                let branch = test_name(490);
+                let bits = test_name(491);
+                let integer = test_name(492);
+                let outcomes = run_all_with_shared_state(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(bits, Ty::Bits(8), info()),
+                        Instr::Decl(integer, Ty::I64, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(255, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(254, 8)), info()),
+                        Instr::Copy(Loc::Id(integer), Exp::Call(Op::Signed(8), vec![Exp::Id(bits)]), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(RETURN),
+                            primop::unary_primops()["hex_str"],
+                            Exp::Id(integer),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                );
+                let values: Vec<_> = outcomes
+                    .into_iter()
+                    .map(|r| match r {
+                        Ok(Run::Finished(Val::String(value))) => value,
+                        _ => panic!("异常结果"),
+                    })
+                    .collect();
+                eprintln!("机器整数十六进制：合并={enabled}，结果={values:?}");
+                assert!(values.iter().all(|v| v.len() == 18), "i64 十六进制格式必须保持 16 位");
+            }
+        }
+
+        #[test]
+        fn review17_float_bitvector_shift_category() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<crate::bitvector::b129::B129>::new(&ctx);
+            let unary = primop::unary_primops::<crate::bitvector::b129::B129>();
+            let binary = primop::binary_primops::<crate::bitvector::b129::B129>();
+            let rounding = unary["round_toward_zero"](Val::Unit, &mut solver, info()).unwrap();
+            let ieee = solver.define_bitvector(smtlib::Exp::Bits64(B64::new(0xbf800000, 32)), info());
+            let fp = unary["fp32_from_ieee"](Val::Symbolic(ieee), &mut solver, info()).unwrap();
+            let amount = binary["fp_to_signed128"](rounding, fp, &mut solver, info()).unwrap();
+            let Val::Symbolic(amount_sym) = &amount else { panic!("转换必须返回符号位向量") };
+            assert!(solver.is_sail_bitvector(*amount_sym), "浮点转换必须标记 Sail 位向量");
+            let mut replayed = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+            assert!(replayed.is_sail_bitvector(*amount_sym), "检查点重放必须保留位向量类别");
+            let replayed_result = binary["arith_shiftr"](
+                Val::Bits(crate::bitvector::b129::B129::new(1, 8)),
+                amount.clone(),
+                &mut replayed,
+                info(),
+            )
+            .unwrap();
+            assert!(replayed.check_sat(info()).is_sat().unwrap());
+            assert_eq!(
+                Model::new(&replayed).get_val(&replayed_result).unwrap(),
+                Val::Bits(crate::bitvector::b129::B129::zeros(8))
+            );
+            let shifted = binary["arith_shiftr"](
+                Val::Bits(crate::bitvector::b129::B129::new(1, 8)),
+                amount.clone(),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert!(solver.check_sat(info()).is_sat().unwrap());
+            let mut model = Model::new(&solver);
+            let concrete_amount = model.get_val(&amount).unwrap();
+            let concrete_result = model.get_val(&shifted).unwrap();
+            drop(model);
+            let expected = binary["arith_shiftr"](
+                Val::Bits(crate::bitvector::b129::B129::new(1, 8)),
+                concrete_amount.clone(),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            eprintln!("浮点转换移位量={concrete_amount:?}，符号移位={concrete_result:?}，具体移位={expected:?}");
+            assert_eq!(
+                solver.check_sat_with(
+                    &smtlib::Exp::Neq(
+                        Box::new(crate::primop_util::smt_value(&shifted, info()).unwrap()),
+                        Box::new(smtlib::Exp::Bits64(B64::zeros(8))),
+                    ),
+                    info()
+                ),
+                SmtResult::Unsat,
+                "位向量移位量必须按无符号解释"
+            );
+        }
+
+        #[test]
+        fn review17_subrange_bounds() {
+            for enabled in [false, true] {
+                let branch = test_name(490);
+                let bits = test_name(491);
+                let outcomes = run_all_with_shared_state(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(bits, Ty::Bits(8), info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["vector_subrange"],
+                            vec![Exp::Id(bits), Exp::I128(8), Exp::I128(0)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                );
+                for outcome in outcomes {
+                    match outcome {
+                        Err(error) => eprintln!("越界子范围：合并={enabled}，错误={error:?}"),
+                        _ => panic!("越界子范围必须返回执行错误"),
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn review17_mixed_bits_string_representation() {
+            for name in ["string_of_bits", "decimal_string_of_bits"] {
+                for enabled in [false, true] {
+                    let branch = test_name(490);
+                    let bits = test_name(491);
+                    let mixed = test_name(492);
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::<B64>::new(&ctx);
+                    let low = solver.define_bitvector(smtlib::Exp::Bits64(B64::new(11, 8)), info());
+                    let mut frame = make_frame(vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(bits, Ty::Bits(16), info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(bits), Exp::Id(mixed), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(
+                            Loc::Id(bits),
+                            Exp::Call(Op::Bvor, vec![Exp::Id(mixed), Exp::Bits(B64::zeros(16))]),
+                            info(),
+                        ),
+                        Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()[name], Exp::Id(bits), info()),
+                        Instr::End,
+                    ]);
+                    frame.lets_mut().insert(
+                        mixed,
+                        UVal::Init(Val::MixedBits(vec![
+                            crate::ir::BitsSegment::Concrete(B64::new(10, 8)),
+                            crate::ir::BitsSegment::Symbolic(low),
+                        ])),
+                    );
+                    let shared = empty_shared_state();
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                    let outcomes = Mutex::new(Vec::new());
+                    start_single(
+                        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+                        &shared,
+                        &outcomes,
+                        &|_, _, result, _, _, outcomes| {
+                            outcomes.lock().unwrap().push(match result {
+                                Ok((Run::Finished(value), _)) => format!("完成 {value:?}"),
+                                Err((error, _)) => format!("错误 {error:?}"),
+                                _ => panic!("异常结果"),
+                            });
+                        },
+                    );
+                    let outcomes = outcomes.into_inner().unwrap();
+                    eprintln!("分段位向量：算子={name}，合并={enabled}，结果={outcomes:?}");
+                    let expected = if name == "string_of_bits" { "#x0a0b" } else { "2571" };
+                    assert!(!outcomes.is_empty(), "字符串转换必须有可达结果");
+                    assert!(
+                        outcomes.iter().all(|r| *r == format!("完成 String(\"{expected}\")")),
+                        "必须按完整位向量统一格式化"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn review17_boolean_trace_result_collector() {
+            for enabled in [false, true] {
+                let branch = test_name(490);
+                let frame = make_frame(vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Jump(Exp::Id(branch), 4, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                    Instr::Goto(5),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                    Instr::End,
+                ]);
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let shared = empty_shared_state();
+                let queue = TraceResultQueue::new();
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &queue, &trace_result_collector);
+                let mut values = Vec::new();
+                while let Some(result) = queue.pop() {
+                    values.push(match result {
+                        Ok((_, value, events)) => {
+                            let assertions: Vec<_> = events
+                                .iter()
+                                .filter_map(|event| match event {
+                                    Event::Smt(smtlib::Def::Assert(exp), ..) => Some(exp),
+                                    _ => None,
+                                })
+                                .collect();
+                            assert!(!assertions.is_empty(), "每条布尔结果轨迹必须携带对应断言");
+                            let ctx = Context::new(Config::new());
+                            let mut replayed = Solver::<B64>::new(&ctx);
+                            for event in events.iter().rev() {
+                                if let Event::Smt(def, ..) = event {
+                                    replayed.add(def.clone());
+                                }
+                            }
+                            assert!(replayed.check_sat(info()).is_sat().unwrap(), "结果轨迹必须独立可满足");
+                            if enabled {
+                                let last = assertions[0];
+                                assert_eq!(matches!(last, smtlib::Exp::Not(_)), !value, "返回值必须匹配分支断言");
+                                assert_eq!(
+                                    replayed.check_sat_with(&smtlib::Exp::Not(Box::new(last.clone())), info()),
+                                    SmtResult::Unsat
+                                );
+                            }
+                            format!("完成 {value}")
+                        }
+                        Err(error) => format!("错误 {error:?}"),
+                    });
+                }
+                values.sort();
+                eprintln!("布尔轨迹收集：合并={enabled}，结果={values:?}");
+                assert_eq!(values, vec!["完成 false", "完成 true"], "布尔返回结果及其轨迹不得丢失");
+            }
+        }
+
+        #[test]
+        fn review17_initial_register_model_materialization() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let reg = shared.symtab.intern("zreview17_output");
+                let branch = test_name(490);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Jump(Exp::Id(branch), 4, info()),
+                    Instr::Copy(Loc::Id(reg), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Goto(5),
+                    Instr::Copy(Loc::Id(reg), Exp::Bits(B64::new(2, 8)), info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                    Instr::End,
+                ]);
+                frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::zeros(8))));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let values = Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::fresh(), &state),
+                    &shared,
+                    &values,
+                    &|_, _, result, _, solver, values| {
+                        assert!(result.is_ok(), "合法寄存器写入必须完成");
+                        let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
+                        let initial = crate::trace::RegisterState::from_events(&events);
+                        let model = initial.model().unwrap();
+                        let value = match initial.values.get(&reg).unwrap() {
+                            Val::Bits(bits) => bits.lower_u64(),
+                            Val::Symbolic(sym) => match model.get(sym).unwrap() {
+                                smtlib::Exp::Bits64(bits) => bits.lower_u64(),
+                                _ => panic!("预期 8 位常量"),
+                            },
+                            _ => panic!("预期寄存器值"),
+                        };
+                        values.lock().unwrap().push(value);
+                    },
+                );
+                let values = values.into_inner().unwrap();
+                eprintln!("初始寄存器轨迹模型：合并={enabled}，结果={values:?}");
+                assert!(values.iter().all(|value| [1, 2].contains(value)), "物化不能产生两臂均不可达的值");
+            }
+        }
+    }
     mod review16_tests {
         use super::*;
 

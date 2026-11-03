@@ -408,14 +408,13 @@ impl<B: BV> Memory<B> {
         }
     }
 
-    // Checks that a symbolic address does not overlap with any
-    // concrete regions of memory. If it does, then we won't know what
-    // value should be returned.
+    // 检查需要具体分派的区域重叠；取指跨区域时也包含符号区域，以复用地址拆分。
     fn check_concrete_overlap(
         &self,
         address: Sym,
         bytes: u32,
         error: ExecError,
+        include_symbolic: bool,
         solver: &mut Solver<B>,
     ) -> Result<Overlap, ExecError> {
         use Exp::*;
@@ -426,7 +425,9 @@ impl<B: BV> Memory<B> {
         let addr_size = solver.length(address).unwrap_or_else(|| panic!("address is not a bitvector"));
 
         for region in &self.regions {
-            if !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_) | Region::Excluded(_)) {
+            if !matches!(region, Region::Excluded(_))
+                && (include_symbolic || !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)))
+            {
                 let Range { start, end } = region.region_range();
 
                 region_constraints.push(And(
@@ -580,10 +581,11 @@ impl<B: BV> Memory<B> {
                 }
 
                 Val::Symbolic(symbolic_addr) => {
-                    // 数组内存模型等自约束回调负责读地址的合法性（区域 OR 链会把地址
-                    // 收窄进合法区域），跳过具体区域重叠预检查，避免尚未收窄的符号地址
-                    // 被提前以 BadRead 拒绝（与写侧 constrains_symbolic_writes 对称）。
-                    if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads()) {
+                    // 数据读允许自约束回调收窄读地址，跳过具体区域预检查（与写侧对称）。
+                    // 取指始终检查区域分派及判死区域，回调不能跳过取指规则。
+                    if opts.is_ifetch
+                        || !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads())
+                    {
                         // If the symbolic address overlaps a concrete
                         // region, but actually only has a single unique
                         // satisfiable value, then we can recursively call
@@ -595,6 +597,7 @@ impl<B: BV> Memory<B> {
                                 if tag { "read_memt_address" } else { "read_mem_address" },
                                 SourceLoc::unknown(),
                             ),
+                            false,
                             solver,
                         )? {
                             Overlap::Unique(concrete_addr) => {
@@ -611,7 +614,62 @@ impl<B: BV> Memory<B> {
                         }
                     }
                     if opts.is_ifetch {
-                        Err(ExecError::BadRead("Attempted to fetch instruction from default memory"))
+                        let info = SourceLoc::unknown();
+                        let width = solver.length(symbolic_addr).expect("取指地址必须是位向量");
+                        let mut unmatched = Exp::Bool(true);
+                        for region in &self.regions {
+                            if matches!(region, Region::Excluded(_)) {
+                                continue;
+                            }
+                            let range = region.region_range();
+                            let in_region = Exp::And(
+                                Box::new(Exp::Bvule(
+                                    Box::new(bits64(range.start, width)),
+                                    Box::new(Exp::Var(symbolic_addr)),
+                                )),
+                                Box::new(Exp::Bvult(
+                                    Box::new(Exp::Var(symbolic_addr)),
+                                    Box::new(bits64(range.end, width)),
+                                )),
+                            );
+                            // 沿用具体地址的区域优先级，证明所有候选都由同一区域处理。
+                            let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
+                            if matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
+                                && solver.check_sat_with(&Exp::Not(Box::new(selected)), info).is_unsat()?
+                            {
+                                return self.read_symbolic(
+                                    read_kind,
+                                    address,
+                                    bytes,
+                                    solver,
+                                    tag,
+                                    opts,
+                                    region.region_name(),
+                                );
+                            }
+                            unmatched = Exp::And(Box::new(unmatched), Box::new(Exp::Not(Box::new(in_region))));
+                        }
+                        // 跨区域候选复用地址拆分重试；唯一候选回到具体分派。
+                        // 自约束回调也必须经过这一步，不能把合法代码区当成默认内存。
+                        match self.check_concrete_overlap(
+                            symbolic_addr,
+                            bytes,
+                            ExecError::SymbolicLength(if tag { "read_memt_address" } else { "read_mem_address" }, info),
+                            true,
+                            solver,
+                        )? {
+                            Overlap::Unique(concrete_addr) => self.read(
+                                read_kind,
+                                Val::Bits(B::new(concrete_addr, width)),
+                                Val::I128(i128::from(bytes)),
+                                solver,
+                                tag,
+                                opts,
+                            ),
+                            Overlap::NoOverlap => {
+                                Err(ExecError::BadRead("Attempted to fetch instruction from default memory"))
+                            }
+                        }
                     } else {
                         self.read_symbolic(read_kind, address, bytes, solver, tag, opts, DEFAULT_REGION_NAME)
                     }
@@ -665,6 +723,7 @@ impl<B: BV> Memory<B> {
                             if tag.is_some() { "write_memt_address" } else { "write_mem_address" },
                             SourceLoc::unknown(),
                         ),
+                        false,
                         solver,
                     )? {
                         Overlap::Unique(concrete_addr) => {
@@ -1067,6 +1126,90 @@ mod tests {
     use crate::smt::smtlib::{bits64, Def, Exp, Ty};
     use crate::smt::{Config, Context, Solver, Sym};
 
+    #[derive(Clone, Debug)]
+    struct ConstrainingReads;
+
+    impl MemoryCallbacks<B64> for ConstrainingReads {
+        fn constrains_symbolic_reads(&self) -> bool {
+            true
+        }
+
+        fn symbolic_read(
+            &self,
+            _: &[Region<B64>],
+            _: &mut Solver<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: u32,
+            _: &Option<Val<B64>>,
+            _: &ReadOpts,
+        ) -> bool {
+            false
+        }
+
+        fn symbolic_write(
+            &mut self,
+            _: &[Region<B64>],
+            _: &mut Solver<B64>,
+            _: Sym,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: u32,
+            _: &Option<Val<B64>>,
+            _: &WriteOpts,
+        ) -> bool {
+            panic!("本测试不应写内存")
+        }
+
+        fn symbolic_write_tag(
+            &mut self,
+            _: &[Region<B64>],
+            _: &mut Solver<B64>,
+            _: Sym,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+        ) {
+            panic!("本测试不应写标签")
+        }
+    }
+
+    #[test]
+    fn symbolic_ifetch_callbacks_preserve_regions_and_exclusions() {
+        for callback in [false, true] {
+            for excluded in [false, true] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let info = SourceLoc::unknown();
+                let addr = solver.declare_bitvector(64, info);
+                solver.assert_eq(Exp::Var(addr), bits64(0x1000, 64));
+                let mut mem = Memory::<B64>::new();
+                mem.add_region(Region::SymbolicCode(0x1000..0x2000));
+                if callback {
+                    mem.set_client_info(Box::new(ConstrainingReads));
+                }
+                if excluded {
+                    mem.add_region(Region::Excluded(0x1000..0x1004));
+                }
+                let result =
+                    mem.read(Val::Unit, Val::Symbolic(addr), Val::I128(4), &mut solver, false, ReadOpts::ifetch());
+                if excluded {
+                    assert!(matches!(result, Err(ExecError::BadRead(_))), "回调不得绕过判死区域");
+                    assert!(!solver.trace().to_vec().iter().any(|event| matches!(event, Event::ReadMem { .. })));
+                } else {
+                    assert!(result.is_ok(), "回调不得把合法代码区误判为默认内存");
+                    assert!(solver
+                        .trace()
+                        .to_vec()
+                        .iter()
+                        .any(|event| matches!(event, Event::ReadMem { region: "symbolic code", .. })));
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_symbolic_overlap() {
         let mut mem = Memory::<B64>::new();
@@ -1080,7 +1223,7 @@ mod tests {
         solver.add(Def::DeclareConst(addr, Ty::BitVec(64)));
         solver.add(Def::Assert(Exp::Eq(Box::new(Exp::Var(addr)), Box::new(bits64(0xA0, 64)))));
 
-        match mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), &mut solver) {
+        match mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver) {
             Ok(Overlap::Unique(0xA0)) => (),
             _ => panic!("Unexpected result from check_concrete_overlap"),
         }

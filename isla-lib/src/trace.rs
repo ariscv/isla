@@ -36,8 +36,7 @@ use std::collections::{HashMap, HashSet};
 use crate::bitvector::{b129::B129, BV};
 use crate::error::ExecError;
 use crate::ir::{Name, Val};
-use crate::primop;
-use crate::smt::smtlib::{self, Def, Exp, Ty};
+use crate::smt::smtlib::{self, Def, Exp};
 use crate::smt::{Accessor, Config, Context, Event, Model, ModelVal, Solver, Sym};
 use crate::source_loc::SourceLoc;
 
@@ -132,6 +131,7 @@ impl<B: BV> RegisterState<B> {
             return Err(ExecError::Smt(error));
         }
         let mut model = Model::new(&solver);
+        model.set_complete_model(true);
 
         let mut vars = HashSet::default();
         for (_, value) in self.values.iter() {
@@ -142,13 +142,7 @@ impl<B: BV> RegisterState<B> {
 
         for v in vars.drain() {
             match model.get_var(v)? {
-                ModelVal::Arbitrary(ty) => {
-                    match ty {
-                        Ty::Bool => interpreted.insert(v, Exp::Bool(false)),
-                        Ty::BitVec(n) => interpreted.insert(v, primop::smt_zeros(n as i128)),
-                        _ => panic!("Invalid type found in register state model"),
-                    };
-                }
+                ModelVal::Arbitrary(ty) => panic!("寄存器状态模型补全后仍无法求值：{v:?}，类型 {ty:?}"),
                 ModelVal::Exp(exp) => {
                     assert!(exp.variables().is_empty());
                     interpreted.insert(v, exp);

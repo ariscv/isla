@@ -1639,9 +1639,13 @@ pub fn subrange_internal<B: BV>(
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     let high = concretize_proven_i128(high, solver, info)?;
-    panic_if_negative_concretized_nat("subrange_internal", &high);
     let low = concretize_proven_i128(low, solver, info)?;
-    panic_if_negative_concretized_nat("subrange_internal", &low);
+    if let (Val::I128(high), Val::I128(low)) = (&high, &low) {
+        let width = length_bits(&bits, solver, info)?;
+        if *low < 0 || high < low || *high >= i128::from(width) {
+            return Err(ExecError::Type("vector_subrange out of bounds".to_string(), info));
+        }
+    }
     match (bits, high, low) {
         (Val::Symbolic(bits), Val::I128(high), Val::I128(low)) => {
             solver.define_bitvector(Exp::Extract(high as u32, low as u32, Box::new(Exp::Var(bits))), info).into()
@@ -2859,7 +2863,9 @@ fn concat_str<B: BV>(lhs: Val<B>, rhs: Val<B>, _: &mut Solver<B>, info: SourceLo
 }
 
 fn hex_str<B: BV>(n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let is_i64 = matches!(&n, Val::Symbolic(sym) if solver.length(*sym) == Some(64));
     match concretize_proven_i128(n, solver, info)? {
+        Val::I128(n) if is_i64 => Ok(Val::String(format!("0x{:x}", i64::try_from(n).unwrap()))),
         Val::I128(n) => Ok(Val::String(format!("0x{:x}", n))),
         Val::I64(n) => Ok(Val::String(format!("0x{:x}", n))),
         Val::Symbolic(_) => Err(ExecError::SymbolicLength("hex_str", info)),
@@ -3118,21 +3124,16 @@ fn string_of_segment<B: BV>(
 }
 
 fn string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let string = match bv {
+    let string = match replace_mixed_bits(bv, solver, info)? {
         Val::Bits(bv) => bv.to_string(),
         Val::Symbolic(sym) => string_of_segment::<B>(&BitsSegment::Symbolic(sym), solver, "string_of_bits", info)?,
-        Val::MixedBits(segments) => segments
-            .iter()
-            .map(|segment| string_of_segment(segment, solver, "string_of_bits", info))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(" "),
         other => return Err(ExecError::Type(format!("string_of_bits {other:?}"), info)),
     };
     Ok(Val::String(string))
 }
 
 fn decimal_string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    let bits = match bv {
+    let bits = match replace_mixed_bits(bv, solver, info)? {
         Val::Bits(bv) => bv.to_vec(),
         Val::Symbolic(sym) => {
             if !solver.check_sat(info).is_sat()? {
@@ -3157,15 +3158,6 @@ fn decimal_string_of_bits<B: BV>(bv: Val<B>, solver: &mut Solver<B>, info: Sourc
                 Exp::Bits64(bits) => bits.to_vec(),
                 _ => unreachable!("候选已经确认是位向量"),
             }
-        }
-        Val::MixedBits(segments) => {
-            return Ok(Val::String(
-                segments
-                    .iter()
-                    .map(|segment| string_of_segment(segment, solver, "decimal_string_of_bits", info))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(" "),
-            ))
         }
         other => return Err(ExecError::Type(format!("decimal_string_of_bits {other:?}"), info)),
     };
@@ -6018,8 +6010,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "nat invariant violated in subrange_internal")]
-    fn subrange_panics_on_negative_proven_symbolic_bounds() {
+    fn subrange_rejects_negative_proven_symbolic_bounds() {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6028,13 +6019,15 @@ mod tests {
         solver.assert_eq(Exp::Var(high), smt_i128(-1));
         solver.assert_eq(Exp::Var(low), smt_i128(-4));
 
-        let _ = subrange_internal(
+        let error = subrange_internal(
             Val::Bits(B64::new(0b1011_0010, 8)),
             Val::Symbolic(high),
             Val::Symbolic(low),
             &mut solver,
             SourceLoc::unknown(),
-        );
+        )
+        .expect_err("负索引必须返回越界错误");
+        assert!(matches!(error, ExecError::Type(message, _) if message == "vector_subrange out of bounds"));
     }
 
     #[test]
