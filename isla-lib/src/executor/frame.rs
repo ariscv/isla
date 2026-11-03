@@ -119,6 +119,7 @@ pub struct Frame<'ir, B> {
     pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,
     pub(super) pc: usize,
+    pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
     pub(super) memory: Arc<Memory<B>>,
@@ -153,6 +154,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
+        pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: (*frame.execution_limit_state).clone(),
         local_state: (*frame.local_state).clone(),
         memory: (*frame.memory).clone(),
@@ -178,6 +180,8 @@ pub struct LocalFrame<'ir, B> {
     pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,
     pub(super) pc: usize,
+    // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
+    pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: ExecutionLimitPathState,
     pub(super) local_state: LocalState<'ir, B>,
     pub(super) memory: Memory<B>,
@@ -212,6 +216,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
+        pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
         local_state: Arc::new(frame.local_state.clone()),
         memory: Arc::new(frame.memory.clone()),
@@ -240,6 +245,9 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn collect_symbolic_variables(&self, vars: &mut HashSet<Sym, ahash::RandomState>) {
         self.local_state.collect_symbolic_variables(vars);
+        if let Some((_, operand)) = &self.pending_retry_operand {
+            operand.collect_symbolic_variables(vars);
+        }
 
         for (_, var) in self.stack_vars.iter().flat_map(|frame| frame.iter()) {
             if let UVal::Init(value) = var {
@@ -414,6 +422,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             path_smt_stats: SmtCallStats::empty(),
             function_name: name,
             pc: 0,
+            pending_retry_operand: None,
             execution_limit_state: ExecutionLimitPathState::default(),
             local_state: LocalState { vars, regs, lets, probes, register_reads: None },
             memory: Memory::new(),

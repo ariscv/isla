@@ -1579,6 +1579,8 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
                 if length == 128 {
+                    // %i 按有符号 128 位解释，无符号转换结果必须保持非负。
+                    solver.add(Def::Assert(Exp::Bvsge(Box::new(Exp::Var(bits)), Box::new(smt_i128(0)))));
                     Ok(Val::Symbolic(bits))
                 } else {
                     assert!(length < 128);
@@ -5008,7 +5010,7 @@ mod tests {
         assert!(lt_bits_u(Val::I128(1), Val::I128(2), &mut solver, loc).is_err());
     }
 
-    /// 128 位符号量已具有 %i 的 SMT 位宽，unsigned 转换直接恒等返回。
+    /// 128 位符号量已具有 %i 的 SMT 位宽，unsigned 转换保留符号并约束非负。
     #[test]
     fn sail_unsigned_symbolic_128_is_identity() {
         let cfg = Config::new();

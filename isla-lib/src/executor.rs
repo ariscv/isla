@@ -2160,14 +2160,15 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             }
 
             Instr::PrimopUnary(loc, f, arg, info) => {
-                let arg = eval_exp(arg, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                let symbols = [if let Val::Symbolic(sym) = &arg { Some(*sym) } else { None }];
-                let value = match f(arg, solver, *info) {
+                let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
+                assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
+                let arg = args.pop().unwrap();
+                let value = match f(arg.clone(), solver, *info) {
                     Ok(value) => value,
                     Err(error) => {
                         if symbolic_length::retry_symbolic_length(
                             error,
-                            &symbols,
+                            &[arg],
                             task_id,
                             task_fraction,
                             stop_conditions,
@@ -2181,20 +2182,22 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         return Ok(Run::Dead);
                     }
                 };
+                frame.pending_retry_operand = None;
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
-                let arg1 = eval_exp(arg1, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                let arg2 = eval_exp(arg2, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                let symbols = [&arg1, &arg2].map(|arg| if let Val::Symbolic(sym) = arg { Some(*sym) } else { None });
-                let value = match f(arg1, arg2, solver, *info) {
+                let mut args = symbolic_length::eval_operands([arg1, arg2], frame, shared_state, solver, *info)?;
+                assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
+                let arg2 = args.pop().unwrap();
+                let arg1 = args.pop().unwrap();
+                let value = match f(arg1.clone(), arg2.clone(), solver, *info) {
                     Ok(value) => value,
                     Err(error) => {
                         if symbolic_length::retry_symbolic_length(
                             error,
-                            &symbols,
+                            &[arg1, arg2],
                             task_id,
                             task_fraction,
                             stop_conditions,
@@ -2208,23 +2211,19 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         return Ok(Run::Dead);
                     }
                 };
+                frame.pending_retry_operand = None;
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
             Instr::PrimopVariadic(loc, f, args, info) => {
-                let args: Vec<_> = args
-                    .iter()
-                    .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, *info).map(Cow::into_owned))
-                    .collect::<Result<_, _>>()?;
-                let symbols: Vec<_> =
-                    args.iter().map(|arg| if let Val::Symbolic(sym) = arg { Some(*sym) } else { None }).collect();
-                let value = match f(args, solver, frame, *info) {
+                let args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                let value = match f(args.clone(), solver, frame, *info) {
                     Ok(value) => value,
                     Err(error) => {
                         if symbolic_length::retry_symbolic_length(
                             error,
-                            &symbols,
+                            &args,
                             task_id,
                             task_fraction,
                             stop_conditions,
@@ -2238,6 +2237,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         return Ok(Run::Dead);
                     }
                 };
+                frame.pending_retry_operand = None;
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
@@ -5722,6 +5722,437 @@ fn zmemreadfork(zu) {
     }
 
     #[test]
+    fn review7_unsigned_128_preserves_nonnegative() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
+        let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+        let lt = *crate::primop::binary_primops::<B64>().get("lt").unwrap();
+        let value = unsigned(Val::Symbolic(bits), &mut solver, info()).unwrap();
+        let negative = lt(value, Val::I128(0), &mut solver, info()).unwrap();
+        let query = crate::primop_util::smt_value(&negative, info()).unwrap();
+        let result = solver.check_sat_with(&query, info());
+        eprintln!("unsigned(bits128) < 0：{result:?}");
+        assert_eq!(result, crate::smt::SmtResult::Unsat, "无符号整数转换不能产生负值");
+    }
+
+    #[test]
+    fn review7_slice_machine_index_width() {
+        for enabled in [false, true] {
+            let cond = test_name(180);
+            let index = test_name(181);
+            let bits = test_name(182);
+            let instrs = vec![
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Decl(index, Ty::I64, info()),
+                Instr::Decl(bits, Ty::Bits(128), info()),
+                Instr::Init(
+                    bits,
+                    Ty::Bits(128),
+                    Exp::Call(Op::Concat, vec![Exp::Bits(B64::new(1, 64)), Exp::Bits(B64::new(2, 64))]),
+                    info(),
+                ),
+                Instr::Jump(Exp::Id(cond), 7, info()),
+                Instr::Copy(Loc::Id(index), Exp::I64(0), info()),
+                Instr::Goto(8),
+                Instr::Copy(Loc::Id(index), Exp::I64(8), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Slice(8), vec![Exp::Id(bits), Exp::Id(index)]), info()),
+                Instr::End,
+            ];
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_path_merging(enabled),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+            eprintln!("机器整数切片索引：合并={enabled}，完成={}，错误={errors:?}", results.len());
+            assert!(errors.is_empty());
+        }
+    }
+
+    #[test]
+    fn review7_retry_preserves_finite_operand() {
+        for stored in [true, false] {
+            let zeros = *crate::primop::unary_primops::<B64>().get("zeros").unwrap();
+            let mut shared = empty_shared_state();
+            let lengths = shared.symtab.intern("zlengths");
+            let length = shared.symtab.intern("zlength");
+            let mut lets = HashMap::default();
+            lets.insert(lengths, UVal::Init(Val::Vector(vec![Val::I128(8), Val::I128(16)])));
+            let operand = Exp::Call(Op::Bvaccess, vec![Exp::Id(lengths), Exp::Undefined(Ty::I128)]);
+            let mut instrs = Vec::new();
+            if stored {
+                instrs.push(Instr::Init(length, Ty::I128, operand.clone(), info()));
+            }
+            instrs.push(Instr::PrimopUnary(
+                Loc::Id(RETURN),
+                zeros,
+                if stored { Exp::Id(length) } else { operand },
+                info(),
+            ));
+            instrs.push(Instr::End);
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_max_forks_per_path(3),
+                shared,
+                RegisterBindings::new(),
+                lets,
+            );
+            let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+            let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+            eprintln!("128 位有限长度 8/16：先存变量={stored}，完成={finished}，错误={errors:?}");
+            assert_eq!(finished, 2, "有限的两个长度应各执行一次");
+        }
+    }
+
+    #[test]
+    fn symbolic_length_retry_preserves_binary_and_variadic_operands() {
+        for consumer in ["vector_init", "get_slice_int"] {
+            let mut shared = empty_shared_state();
+            let lengths = shared.symtab.intern("zlengths");
+            let mut lets = HashMap::default();
+            lets.insert(lengths, UVal::Init(Val::Vector(vec![Val::I128(8), Val::I128(16)])));
+            let operand = Exp::Call(Op::Bvaccess, vec![Exp::Id(lengths), Exp::Undefined(Ty::I128)]);
+            let consume = match consumer {
+                "vector_init" => Instr::PrimopBinary(
+                    Loc::Id(RETURN),
+                    *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                    operand,
+                    Exp::I128(0),
+                    info(),
+                ),
+                "get_slice_int" => Instr::PrimopVariadic(
+                    Loc::Id(RETURN),
+                    *crate::primop::variadic_primops::<B64>().get(consumer).unwrap(),
+                    vec![operand, Exp::I128(0), Exp::I128(0)],
+                    info(),
+                ),
+                _ => unreachable!(),
+            };
+            let results = run_all_with_bindings(
+                vec![consume, Instr::End],
+                ExecutionLimits::default().with_max_forks_per_path(3),
+                shared,
+                RegisterBindings::new(),
+                lets,
+            );
+            let mut widths: Vec<_> = results
+                .into_iter()
+                .map(|result| match result.unwrap() {
+                    Run::Finished(Val::Vector(values)) => values.len() as u32,
+                    Run::Finished(Val::Bits(bits)) => bits.len(),
+                    Run::Finished(value) => panic!("长度消费者 {consumer} 返回了错误类型：{value:?}"),
+                    Run::Dead | Run::Exit | Run::Suspended => panic!("长度消费者 {consumer} 未正常完成"),
+                })
+                .collect();
+            widths.sort_unstable();
+            assert_eq!(widths, vec![8, 16], "{consumer} 必须复用拆分前的操作数");
+        }
+    }
+
+    #[test]
+    fn review7_vector_update_i64_index() {
+        for enabled in [false, true] {
+            let mut shared = empty_shared_state();
+            let cond = shared.symtab.intern("zcond");
+            let index = shared.symtab.intern("zindex");
+            let vec = shared.symtab.intern("zvec");
+            let init = *crate::primop::binary_primops::<B64>().get("vector_init").unwrap();
+            let update = *crate::primop::variadic_primops::<B64>().get("vector_update").unwrap();
+            let instrs = vec![
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Decl(index, Ty::I64, info()),
+                Instr::Decl(vec, Ty::Vector(Box::new(Ty::I128)), info()),
+                Instr::PrimopBinary(Loc::Id(vec), init, Exp::I128(2), Exp::I128(0), info()),
+                Instr::Jump(Exp::Id(cond), 7, info()),
+                Instr::Copy(Loc::Id(index), Exp::I64(0), info()),
+                Instr::Goto(8),
+                Instr::Copy(Loc::Id(index), Exp::I64(1), info()),
+                Instr::PrimopVariadic(Loc::Id(vec), update, vec![Exp::Id(vec), Exp::Id(index), Exp::I128(7)], info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::End,
+            ];
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_path_merging(enabled),
+                shared,
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            eprintln!("vector_update：合并={enabled}，完成={}", results.len());
+            assert!(results.iter().all(|r| matches!(r, Ok(Run::Finished(_)))));
+        }
+    }
+
+    #[test]
+    fn review7_dynamic_length_slice() {
+        for consumer in ["slice"] {
+            for enabled in [false, true] {
+                let cond = test_name(160);
+                let length = test_name(161);
+                let wide = test_name(162);
+                let buffer = test_name(163);
+                let consume = match consumer {
+                    "zeros" | "ones" => Instr::PrimopUnary(
+                        Loc::Id(buffer),
+                        *crate::primop::unary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "sail_truncate" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Bits(B64::new(1, 64)),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "undefined_vector" | "vector_init" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        Exp::Bool(false),
+                        info(),
+                    ),
+                    "slice" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get(consumer).unwrap(),
+                        vec![Exp::Bits(B64::new(1, 64)), Exp::I128(0), Exp::Id(wide)],
+                        info(),
+                    ),
+                    "vector_subrange" | "vector_subrange_low" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get("vector_subrange").unwrap(),
+                        if consumer == "vector_subrange_low" {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::I128(23), Exp::Id(wide)]
+                        } else {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::Id(wide), Exp::I128(1)]
+                        },
+                        info(),
+                    ),
+                    _ => unreachable!(),
+                };
+                let widen = *crate::primop::unary_primops::<B64>().get("%i64->%i").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(length, Ty::I64, info()),
+                    Instr::Decl(wide, Ty::I128, info()),
+                    Instr::Decl(buffer, Ty::AnyBits, info()),
+                    Instr::Jump(Exp::Id(cond), 7, info()),
+                    Instr::Copy(Loc::Id(length), Exp::I64(8), info()),
+                    Instr::Goto(8),
+                    Instr::Copy(Loc::Id(length), Exp::I64(16), info()),
+                    Instr::PrimopUnary(Loc::Id(wide), widen, Exp::Id(length), info()),
+                    consume,
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(buffer), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!(
+                    "第七轮未覆盖的长度消费者：算子={consumer}，合并={enabled}，完成={finished}，错误={errors:?}"
+                );
+                assert!(errors.is_empty(), "合法动态长度路径不应在合并后失败");
+                let mut widths: Vec<_> = results
+                    .iter()
+                    .filter_map(|result| match result {
+                        Ok(Run::Finished(Val::Bits(bits))) => Some(bits.len()),
+                        Ok(Run::Finished(Val::Vector(values))) => Some(values.len() as u32),
+                        _ => None,
+                    })
+                    .collect();
+                widths.sort_unstable();
+                assert_eq!(widths, vec![8, 16], "必须完成两个不同长度候选");
+            }
+        }
+    }
+
+    #[test]
+    fn review7_pow_int_after_i64_merge() {
+        for consumer in ["pow_int"] {
+            for enabled in [false, true] {
+                let cond = test_name(160);
+                let length = test_name(161);
+                let wide = test_name(162);
+                let buffer = test_name(163);
+                let consume = match consumer {
+                    "zeros" | "ones" => Instr::PrimopUnary(
+                        Loc::Id(buffer),
+                        *crate::primop::unary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "pow_int" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::I128(2),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "undefined_vector" | "vector_init" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        Exp::Bool(false),
+                        info(),
+                    ),
+                    "slice" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get(consumer).unwrap(),
+                        vec![Exp::Bits(B64::new(1, 64)), Exp::I128(0), Exp::Id(wide)],
+                        info(),
+                    ),
+                    "vector_subrange" | "vector_subrange_low" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get("vector_subrange").unwrap(),
+                        if consumer == "vector_subrange_low" {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::I128(23), Exp::Id(wide)]
+                        } else {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::Id(wide), Exp::I128(1)]
+                        },
+                        info(),
+                    ),
+                    _ => unreachable!(),
+                };
+                let widen = *crate::primop::unary_primops::<B64>().get("%i64->%i").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(length, Ty::I64, info()),
+                    Instr::Decl(wide, Ty::I128, info()),
+                    Instr::Decl(buffer, Ty::AnyBits, info()),
+                    Instr::Jump(Exp::Id(cond), 7, info()),
+                    Instr::Copy(Loc::Id(length), Exp::I64(8), info()),
+                    Instr::Goto(8),
+                    Instr::Copy(Loc::Id(length), Exp::I64(16), info()),
+                    Instr::PrimopUnary(Loc::Id(wide), widen, Exp::Id(length), info()),
+                    consume,
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(buffer), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!(
+                    "第七轮未覆盖的长度消费者：算子={consumer}，合并={enabled}，完成={finished}，错误={errors:?}"
+                );
+                assert!(errors.is_empty(), "两个具体整数幂应在合并后仍能执行");
+                let mut values: Vec<_> = results
+                    .iter()
+                    .filter_map(|r| match r {
+                        Ok(Run::Finished(Val::I128(v))) => Some(*v),
+                        _ => None,
+                    })
+                    .collect();
+                values.sort_unstable();
+                assert_eq!(values, vec![256, 65536]);
+            }
+        }
+    }
+
+    #[test]
+    fn review7_dynamic_length_missing_consumers() {
+        for consumer in ["sail_truncate", "slice"] {
+            for enabled in [false, true] {
+                let cond = test_name(160);
+                let length = test_name(161);
+                let wide = test_name(162);
+                let buffer = test_name(163);
+                let consume = match consumer {
+                    "zeros" | "ones" => Instr::PrimopUnary(
+                        Loc::Id(buffer),
+                        *crate::primop::unary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "sail_truncate" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Bits(B64::new(1, 64)),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "undefined_vector" | "vector_init" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        Exp::Bool(false),
+                        info(),
+                    ),
+                    "slice" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get(consumer).unwrap(),
+                        vec![Exp::Bits(B64::new(1, 64)), Exp::I128(0), Exp::Id(wide)],
+                        info(),
+                    ),
+                    "vector_subrange" | "vector_subrange_low" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get("vector_subrange").unwrap(),
+                        if consumer == "vector_subrange_low" {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::I128(23), Exp::Id(wide)]
+                        } else {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::Id(wide), Exp::I128(1)]
+                        },
+                        info(),
+                    ),
+                    _ => unreachable!(),
+                };
+                let widen = *crate::primop::unary_primops::<B64>().get("%i64->%i").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(length, Ty::I64, info()),
+                    Instr::Decl(wide, Ty::I128, info()),
+                    Instr::Decl(buffer, Ty::AnyBits, info()),
+                    Instr::Jump(Exp::Id(cond), 7, info()),
+                    Instr::Copy(Loc::Id(length), Exp::I64(8), info()),
+                    Instr::Goto(8),
+                    Instr::Copy(Loc::Id(length), Exp::I64(16), info()),
+                    Instr::PrimopUnary(Loc::Id(wide), widen, Exp::Id(length), info()),
+                    consume,
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(buffer), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!(
+                    "第七轮未覆盖的长度消费者：算子={consumer}，合并={enabled}，完成={finished}，错误={errors:?}"
+                );
+                assert!(errors.is_empty(), "合法动态长度路径不应在合并后失败");
+                let mut widths: Vec<_> = results
+                    .iter()
+                    .filter_map(|result| match result {
+                        Ok(Run::Finished(Val::Bits(bits))) => Some(bits.len()),
+                        Ok(Run::Finished(Val::Vector(values))) => Some(values.len() as u32),
+                        _ => None,
+                    })
+                    .collect();
+                widths.sort_unstable();
+                assert_eq!(widths, vec![8, 16], "必须完成两个不同长度候选");
+            }
+        }
+    }
+
+    #[test]
     fn review6_i64_dynamic_length() {
         for consumer in [
             "zeros",
@@ -6090,11 +6521,11 @@ fn zmemreadfork(zu) {
         let result = test_name(101);
         let instrs = vec![
             Instr::Decl(cond, Ty::Bool, info()),
-            Instr::Decl(result, Ty::I64, info()),
+            Instr::Decl(result, Ty::Bits(64), info()),
             Instr::Jump(Exp::Id(cond), 5, info()),
-            Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+            Instr::Copy(Loc::Id(result), Exp::Bits(B64::new(10, 64)), info()),
             Instr::Goto(6),
-            Instr::Copy(Loc::Id(result), Exp::I64(20), info()),
+            Instr::Copy(Loc::Id(result), Exp::Bits(B64::new(20, 64)), info()),
             Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
             Instr::End,
         ];
@@ -6535,13 +6966,25 @@ fn zmemreadfork(zu) {
         let b = solver.declare_const(smtlib::Ty::Bool, info());
         let tag_a = test_name(150);
         let tag_b = test_name(151);
-        // 真值表验证使用可合并的 I64；不同 I128 载荷按第六轮策略拒绝合并。
-        let ca = Val::Ctor(tag_a, Box::new(Val::I64(11)));
-        let cb = Val::Ctor(tag_b, Box::new(Val::I64(22)));
-        let sa = crate::primop_util::merge_val(a, &ca, &Val::Ctor(tag_b, Box::new(Val::I64(12))), &mut solver, info())
-            .unwrap();
-        let sb = crate::primop_util::merge_val(b, &Val::Ctor(tag_a, Box::new(Val::I64(21))), &cb, &mut solver, info())
-            .unwrap();
+        // 真值表验证使用可合并的位向量载荷；不同 I64 和 I128 整数均拒绝合并。
+        let ca = Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(11, 64))));
+        let cb = Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(22, 64))));
+        let sa = crate::primop_util::merge_val(
+            a,
+            &ca,
+            &Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(12, 64)))),
+            &mut solver,
+            info(),
+        )
+        .unwrap();
+        let sb = crate::primop_util::merge_val(
+            b,
+            &Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(21, 64)))),
+            &cb,
+            &mut solver,
+            info(),
+        )
+        .unwrap();
         for (lhs, rhs) in [(&ca, &cb), (&ca, &sb), (&sa, &cb), (&sa, &sb)] {
             let merged = crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()).unwrap();
             let Val::SymbolicCtor(discriminant, possibilities) = merged else { panic!("期望符号构造子") };

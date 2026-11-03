@@ -557,10 +557,7 @@ pub fn merge_val<B: BV>(
         return Err(ExecError::IncompatibleMerge);
     }
     match (val_a, val_b) {
-        (Val::Bool(_), Val::Bool(_))
-        | (Val::I64(_), Val::I64(_))
-        | (Val::Bits(_), Val::Bits(_))
-        | (Val::Enum(_), Val::Enum(_)) => {
+        (Val::Bool(_), Val::Bool(_)) | (Val::Bits(_), Val::Bits(_)) | (Val::Enum(_), Val::Enum(_)) => {
             if val_a == val_b {
                 Ok(val_a.clone())
             } else {
@@ -596,8 +593,9 @@ pub fn merge_val<B: BV>(
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
 
-        // I128 可能用作向量长度；不同整数必须保留具体值，避免产生不支持的符号长度。
-        (Val::I128(_), Val::I128(_))
+        // I64 和 I128 都可能用于长度、索引和位宽计算；不同整数必须保留具体值。
+        (Val::I64(_), Val::I64(_))
+        | (Val::I128(_), Val::I128(_))
         | (Val::MixedBits(_), Val::MixedBits(_))
         | (Val::String(_), Val::String(_))
         | (Val::Ref(_), Val::Ref(_))

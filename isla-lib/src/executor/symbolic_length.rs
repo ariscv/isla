@@ -10,13 +10,36 @@ use super::{
 use crate::bitvector::BV;
 use crate::error::ExecError;
 use crate::fraction::Fraction;
-use crate::smt::{checkpoint, smtlib, Event, Model, ModelVal, Solver, Sym};
+use crate::ir::{Exp, Name, SharedState, Val};
+use crate::smt::{checkpoint, smtlib, Event, Model, ModelVal, Solver};
+use crate::source_loc::SourceLoc;
+
+/// 同一条 primop 重试时复用全部操作数，保持它们与已有拆分约束之间的关系。
+pub(super) fn eval_operands<'exp, 'ir, B: BV>(
+    operands: impl IntoIterator<Item = &'exp Exp<Name>>,
+    frame: &mut LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Vec<Val<B>>, ExecError> {
+    if let Some((pc, operand)) = &frame.pending_retry_operand {
+        assert_eq!(*pc, frame.pc, "重试操作数必须属于当前指令");
+        let Val::Vector(operands) = operand else { panic!("重试缓存必须保存操作数列表") };
+        return Ok(operands.clone());
+    }
+    operands
+        .into_iter()
+        .map(|operand| {
+            super::eval_exp(operand, &mut frame.local_state, shared_state, solver, info).map(|v| v.into_owned())
+        })
+        .collect()
+}
 
 /// 返回 true 时保持当前 pc 重试，false 表示当前约束不可满足。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     error: ExecError,
-    operands: &[Option<Sym>],
+    operands: &[Val<B>],
     task_id: TaskId,
     task_fraction: &mut Fraction,
     stop_conditions: Option<&'task StopConditions>,
@@ -41,7 +64,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     }
 
     for &index in indices {
-        let Some(sym) = operands[index] else { continue };
+        let Val::Symbolic(sym) = operands[index] else { continue };
         let width = solver.length(sym).expect("长度参数必须是位向量");
         assert!((1..=128).contains(&width), "整数长度参数不能超出 128 位");
         let candidate = {
@@ -88,6 +111,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             }
         };
 
+        // 在冻结子帧前保存；当前路径与剩余候选路径必须使用同一次求值的操作数。
+        frame.pending_retry_operand = Some((frame.pc, Val::Vector(operands.to_vec())));
         if let Some(fork_id) = fork_id {
             let point = checkpoint(solver);
             frame.capture_path_smt_stats();
