@@ -63,6 +63,72 @@ pub mod memory;
 
 pub type Unary<B> = fn(Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 pub type Binary<B> = fn(Val<B>, Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
+
+pub fn is_pure_unary<B: BV>(f: Unary<B>) -> bool {
+    let primops = unary_primops::<B>();
+    [
+        "%i64->%i",
+        "%i->%i64",
+        "bit_to_bool",
+        "isla_bool_to_bit",
+        "not",
+        "neg_int",
+        "abs_int",
+        "pow2",
+        "not_bits",
+        "length",
+        "count_leading_zeros",
+        "count_trailing_zeros",
+    ]
+    .iter()
+    .any(|name| primops.get(*name).is_some_and(|pure| std::ptr::fn_addr_eq(*pure, f)))
+}
+
+pub fn is_pure_binary<B: BV>(f: Binary<B>) -> bool {
+    let primops = binary_primops::<B>();
+    [
+        "and_bool",
+        "or_bool",
+        "eq_int",
+        "eq_bool",
+        "lteq",
+        "gteq",
+        "lt",
+        "gt",
+        "add_int",
+        "sub_int",
+        "sub_nat",
+        "mult_int",
+        "tdiv_int",
+        "tmod_int",
+        "ediv_int",
+        "emod_int",
+        "pow_int",
+        "shl_int",
+        "shr_int",
+        "eq_bit",
+        "eq_bits",
+        "neq_bits",
+        "xor_bits",
+        "or_bits",
+        "and_bits",
+        "add_bits",
+        "sub_bits",
+        "add_bits_int",
+        "sub_bits_int",
+        "zero_extend",
+        "sign_extend",
+        "sail_truncate",
+        "replicate_bits",
+        "shiftr",
+        "shiftl",
+        "arith_shiftr",
+        "append",
+        "eq_anything",
+    ]
+    .iter()
+    .any(|name| primops.get(*name).is_some_and(|pure| std::ptr::fn_addr_eq(*pure, f)))
+}
 pub type Variadic<B> =
     fn(Vec<Val<B>>, solver: &mut Solver<B>, frame: &mut LocalFrame<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 

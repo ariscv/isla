@@ -1448,6 +1448,13 @@ fn simulate_assign<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<(), ExecError> {
+    let mut base_loc = loc;
+    while let Loc::Field(inner, _) = base_loc {
+        base_loc = inner;
+    }
+    if matches!(base_loc, Loc::Addr(_)) {
+        return Err(ExecError::IncompatibleMerge);
+    }
     match loc {
         Loc::Id(id) => {
             if local_state.vars.contains_key(id) {
@@ -1471,12 +1478,13 @@ fn simulate_assign<'ir, B: BV>(
                 Err(ExecError::Type(format!("Assign to field of non-struct {:?}", loc), info))
             }
         }
-        Loc::Addr(_) => Ok(()),
+        Loc::Addr(_) => Err(ExecError::IncompatibleMerge),
     }
 }
 
 fn simulate_diamond_arm<'ir, B: BV>(
     start_pc: usize,
+    end_pc: usize,
     join_pc: usize,
     mut arm: LocalFrame<'ir, B>,
     shared_state: &SharedState<'ir, B>,
@@ -1486,7 +1494,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
     arm.write_set = Some(WriteSet::default());
     let mut steps = 0;
     while arm.pc != join_pc {
-        if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc || arm.pc > join_pc {
+        if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc || arm.pc > end_pc {
             return Ok(None);
         }
         steps += 1;
@@ -1513,6 +1521,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 arm.pc += 1;
             }
             Instr::PrimopUnary(loc, f, arg, info) => {
+                if !crate::primop::is_pure_unary(*f) {
+                    return Ok(None);
+                }
                 let arg = eval_exp(arg, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let value = f(arg, solver, *info)?;
                 record_loc_write(loc, &mut arm);
@@ -1520,6 +1531,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 arm.pc += 1;
             }
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
+                if !crate::primop::is_pure_binary(*f) {
+                    return Ok(None);
+                }
                 let arg1 = eval_exp(arg1, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let arg2 = eval_exp(arg2, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let value = f(arg1, arg2, solver, *info)?;
@@ -1527,18 +1541,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
                 arm.pc += 1;
             }
-            Instr::PrimopVariadic(loc, f, args, info) => {
-                let args = args
-                    .iter()
-                    .map(|arg| eval_exp(arg, &mut arm.local_state, shared_state, solver, *info).map(std::borrow::Cow::into_owned))
-                    .collect::<Result<_, _>>()?;
-                let value = f(args, solver, &mut arm, *info)?;
-                record_loc_write(loc, &mut arm);
-                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
-                arm.pc += 1;
-            }
+            Instr::PrimopVariadic(..) => return Ok(None),
             Instr::Goto(target) => {
-                if *target > join_pc || *target < start_pc || *target > arm.instrs.len() {
+                if (*target != join_pc && (*target < start_pc || *target > end_pc)) || *target > arm.instrs.len() {
                     return Ok(None);
                 }
                 arm.pc = *target;
@@ -1547,13 +1552,15 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?;
                 match *value.as_ref() {
                     Val::Bool(true) => {
-                        if *target > join_pc || *target < start_pc || *target > arm.instrs.len() {
+                        if (*target != join_pc && (*target < start_pc || *target > end_pc))
+                            || *target > arm.instrs.len()
+                        {
                             return Ok(None);
                         }
                         arm.pc = *target;
                     }
                     Val::Bool(false) => {
-                        if arm.pc + 1 > join_pc {
+                        if arm.pc + 1 != join_pc && arm.pc + 1 > end_pc {
                             return Ok(None);
                         }
                         arm.pc += 1;
@@ -1598,8 +1605,17 @@ fn merge_two_frames<'ir, B: BV>(
     modified_regs.extend(ws_else.modified_regs.iter().copied());
 
     for var in &modified_vars {
-        let v_then = arm_then.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
-        let v_else = arm_else.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+        if !frame.vars().contains_key(var) && !frame.lets().contains_key(var) {
+            continue;
+        }
+        let v_then = arm_then.vars().get(var).and_then(|u| match u {
+            UVal::Init(v) => Some(v),
+            _ => None,
+        });
+        let v_else = arm_else.vars().get(var).and_then(|u| match u {
+            UVal::Init(v) => Some(v),
+            _ => None,
+        });
 
         if frame.vars().contains_key(var) {
             match (v_then, v_else) {
@@ -1613,8 +1629,14 @@ fn merge_two_frames<'ir, B: BV>(
                 _ => return Ok(false),
             }
         } else if frame.lets().contains_key(var) {
-            let l_then = arm_then.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
-            let l_else = arm_else.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            let l_then = arm_then.lets().get(var).and_then(|u| match u {
+                UVal::Init(v) => Some(v),
+                _ => None,
+            });
+            let l_else = arm_else.lets().get(var).and_then(|u| match u {
+                UVal::Init(v) => Some(v),
+                _ => None,
+            });
             match (l_then, l_else) {
                 (Some(vt), Some(ve)) => {
                     let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
@@ -1622,18 +1644,6 @@ fn merge_two_frames<'ir, B: BV>(
                         Err(_) => return Ok(false),
                     };
                     frame.lets_mut().insert(*var, UVal::Init(merged));
-                }
-                _ => return Ok(false),
-            }
-        } else {
-            // Variable was declared inside an arm
-            match (v_then, v_else) {
-                (Some(vt), Some(ve)) => {
-                    let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
-                        Ok(m) => m,
-                        Err(_) => return Ok(false),
-                    };
-                    frame.vars_mut().insert(*var, UVal::Init(merged));
                 }
                 _ => return Ok(false),
             }
@@ -1650,7 +1660,6 @@ fn merge_two_frames<'ir, B: BV>(
                     Err(_) => return Ok(false),
                 };
                 frame.regs_mut().assign(*reg, merged.clone(), shared_state);
-                solver.add_event(Event::WriteReg(*reg, Vec::new(), merged));
             }
             _ => return Ok(false),
         }
@@ -1672,23 +1681,38 @@ fn try_merge_diamond<'ir, B: BV>(
     for join_pc in candidate_joins {
         let tx = solver.start_transaction();
 
-        let arm_else = match simulate_diamond_arm(pc + 1, join_pc, frame.clone(), shared_state, solver)? {
-            Some(a) => a,
-            None => {
+        let arm_else = match simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver) {
+            Ok(Some(a)) if !solver.transaction_invalid() => a,
+            _ => {
                 solver.rollback_transaction(tx);
                 continue;
             }
         };
-        let arm_then = match simulate_diamond_arm(target, join_pc, frame.clone(), shared_state, solver)? {
-            Some(a) => a,
-            None => {
-                solver.rollback_transaction(tx);
-                continue;
-            }
-        };
+        let arm_then =
+            match simulate_diamond_arm(target, join_pc.saturating_sub(1), join_pc, frame.clone(), shared_state, solver)
+            {
+                Ok(Some(a)) if !solver.transaction_invalid() => a,
+                _ => {
+                    solver.rollback_transaction(tx);
+                    continue;
+                }
+            };
 
-        match merge_two_frames(cond_sym, frame, &arm_then, &arm_else, shared_state, solver, info) {
-            Ok(true) => {
+        let mut merged_frame = frame.clone();
+        match merge_two_frames(cond_sym, &mut merged_frame, &arm_then, &arm_else, shared_state, solver, info) {
+            Ok(true) if !solver.transaction_invalid() => {
+                solver.commit_transaction();
+                *frame = merged_frame;
+                let modified_regs = arm_then
+                    .write_set
+                    .as_ref()
+                    .unwrap()
+                    .modified_regs
+                    .union(&arm_else.write_set.as_ref().unwrap().modified_regs);
+                for reg in modified_regs {
+                    let value = frame.regs().get_last_if_initialized(*reg).unwrap().clone();
+                    solver.add_event(Event::WriteReg(*reg, Vec::new(), value));
+                }
                 solver.add_event(Event::Merge(0, 2, info));
                 return Ok(Some(join_pc));
             }
@@ -1859,11 +1883,8 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         let can_be_false = solver.check_sat_with(&test_false, *info).is_sat()?;
 
                         if can_be_true && can_be_false {
-                            let path_merging = task_state
-                                .execution_limits
-                                .as_ref()
-                                .map(|l| l.path_merging)
-                                .unwrap_or(false);
+                            let path_merging =
+                                task_state.execution_limits.as_ref().map(|l| l.path_merging).unwrap_or(false);
                             if path_merging {
                                 if let Ok(Some(new_pc)) =
                                     try_merge_diamond(v, *target, frame, shared_state, solver, *info)
@@ -5537,6 +5558,80 @@ fn zmemreadfork(zu) {
         );
         assert_eq!(results_merge.len(), 1);
         assert!(matches!(results_merge[0], Ok(Run::Finished(_))));
+    }
+
+    #[test]
+    fn path_merging_ignores_branch_local_declaration() {
+        let cond = test_name(110);
+        let result = test_name(111);
+        let temporary = test_name(112);
+        let instrs = vec![
+            Instr::Decl(cond, Ty::Bool, info()),
+            Instr::Decl(result, Ty::I64, info()),
+            Instr::Jump(Exp::Id(cond), 5, info()),
+            Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+            Instr::Goto(8),
+            Instr::Decl(temporary, Ty::I64, info()),
+            Instr::Copy(Loc::Id(temporary), Exp::I64(99), info()),
+            Instr::Copy(Loc::Id(result), Exp::I64(20), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ];
+        let results = run_all_with_bindings(
+            instrs,
+            ExecutionLimits::default().with_path_merging(true),
+            empty_shared_state(),
+            RegisterBindings::new(),
+            HashMap::default(),
+        );
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], Ok(Run::Finished(_))));
+    }
+
+    #[test]
+    fn path_merging_rejects_cross_arm_jump() {
+        let cond = test_name(113);
+        let result = test_name(114);
+        let instrs = vec![
+            Instr::Decl(cond, Ty::Bool, info()),
+            Instr::Decl(result, Ty::I64, info()),
+            Instr::Jump(Exp::Id(cond), 6, info()),
+            Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+            Instr::Goto(6),
+            Instr::Goto(8),
+            Instr::Copy(Loc::Id(result), Exp::I64(20), info()),
+            Instr::Goto(8),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ];
+        let results = run_all_with_bindings(
+            instrs,
+            ExecutionLimits::default().with_path_merging(true),
+            empty_shared_state(),
+            RegisterBindings::new(),
+            HashMap::default(),
+        );
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn diamond_simulation_rejects_memory_and_assertion_primops_before_execution() {
+        let shared_state = empty_shared_state();
+        let ctx = crate::smt::Context::new(crate::smt::Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let result = test_name(115);
+        let read_mem = *crate::primop::variadic_primops::<B64>().get("platform_read_mem").unwrap();
+        let programs = [
+            vec![Instr::PrimopVariadic(Loc::Id(result), read_mem, Vec::new(), info()), Instr::End],
+            vec![Instr::PrimopUnary(Loc::Id(result), crate::primop::assume, Exp::Bool(false), info()), Instr::End],
+        ];
+        for instrs in &programs {
+            let frame = LocalFrame::new(test_name(116), &[], &Ty::Unit, None, instrs);
+            let tx = solver.start_transaction();
+            assert!(simulate_diamond_arm(0, 0, 1, frame, &shared_state, &mut solver).unwrap().is_none());
+            assert!(!solver.transaction_invalid());
+            solver.rollback_transaction(tx);
+        }
     }
 
     #[test]

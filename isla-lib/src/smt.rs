@@ -1593,6 +1593,9 @@ pub struct Solver<'ctx, B> {
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
     stashed_model: Option<Z3_model>,
+    in_transaction: bool,
+    transaction_invalid: bool,
+    transaction_defs: Vec<Event<B>>,
 }
 
 impl<B> Drop for Solver<'_, B> {
@@ -2194,6 +2197,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 asserts_since_check: 0,
                 last_check_sat: false,
                 stashed_model: None,
+                in_transaction: false,
+                transaction_invalid: false,
+                transaction_defs: Vec::new(),
             }
         }
     }
@@ -2369,6 +2375,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
+        if self.in_transaction && matches!(def, Def::Assert(_) | Def::DefineEnum(_, _)) {
+            self.transaction_invalid = true;
+            return;
+        }
         match &def {
             Def::Assert(exp) => {
                 self.asserts_since_check += 1;
@@ -2476,12 +2486,26 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn add(&mut self, def: Def) {
         self.add_internal(&def, SourceLoc::unknown());
-        self.trace.head.push(Event::Smt(def, self.def_attrs, SourceLoc::unknown()))
+        if !self.transaction_invalid {
+            let event = Event::Smt(def, self.def_attrs, SourceLoc::unknown());
+            if self.in_transaction {
+                self.transaction_defs.push(event)
+            } else {
+                self.trace.head.push(event)
+            }
+        }
     }
 
     pub fn add_with_location(&mut self, def: Def, info: SourceLoc) {
         self.add_internal(&def, info);
-        self.trace.head.push(Event::Smt(def, self.def_attrs, info))
+        if !self.transaction_invalid {
+            let event = Event::Smt(def, self.def_attrs, info);
+            if self.in_transaction {
+                self.transaction_defs.push(event)
+            } else {
+                self.trace.head.push(event)
+            }
+        }
     }
 
     pub fn declare_const(&mut self, ty: Ty, info: SourceLoc) -> Sym {
@@ -2526,6 +2550,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn add_event(&mut self, event: Event<B>) {
+        if self.in_transaction {
+            if matches!(&event, Event::Smt(Def::Assert(_) | Def::DefineEnum(_, _), _, _)) {
+                self.transaction_invalid = true;
+            } else if let Event::Smt(def, _, info) = &event {
+                self.add_internal(def, *info);
+                self.transaction_defs.push(event);
+            }
+            return;
+        }
         self.add_event_internal(&event);
         self.trace.head.push(event)
     }
@@ -2808,7 +2841,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         cs.to_string_lossy().to_string()
     }
 
-    pub fn start_transaction(&self) -> SolverTransaction {
+    pub fn start_transaction(&mut self) -> SolverTransaction {
+        assert!(!self.in_transaction);
+        self.in_transaction = true;
+        self.transaction_invalid = false;
         SolverTransaction {
             head_len: self.trace.head.len(),
             next_var: self.next_var,
@@ -2817,13 +2853,29 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn rollback_transaction(&mut self, tx: SolverTransaction) {
+        assert!(self.in_transaction);
+        self.clear_stashed_model();
         self.trace.head.truncate(tx.head_len);
         for var_id in tx.next_var..self.next_var {
             let sym = Sym::from_u32(var_id);
             self.decls.remove(&sym);
+            self.func_decls.remove(&sym);
         }
-        self.next_var = tx.next_var;
         self.asserts_since_check = tx.asserts_since_check;
+        self.last_check_sat = false;
+        self.transaction_defs.clear();
+        self.transaction_invalid = false;
+        self.in_transaction = false;
+    }
+
+    pub fn transaction_invalid(&self) -> bool {
+        self.transaction_invalid
+    }
+
+    pub fn commit_transaction(&mut self) {
+        assert!(self.in_transaction && !self.transaction_invalid);
+        self.trace.head.append(&mut self.transaction_defs);
+        self.in_transaction = false;
     }
 }
 
@@ -2898,6 +2950,38 @@ mod tests {
     use super::Def::*;
     use super::Exp::*;
     use super::*;
+
+    #[test]
+    fn transaction_keeps_trace_and_solver_state_isolated() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let before = solver.trace.head.len();
+        let tx = solver.start_transaction();
+        let speculative = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.add_event(Event::Cycle);
+        solver.assert(Exp::Bool(false));
+        assert!(solver.transaction_invalid());
+        assert_eq!(solver.trace.head.len(), before);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        solver.rollback_transaction(tx);
+        assert!(!solver.decls.contains_key(&speculative));
+        assert!(solver.fresh().id > speculative.id);
+        assert!(!solver.has_stashed_model());
+        assert_eq!(solver.trace.head.len(), before);
+    }
+
+    #[test]
+    fn committed_transaction_replays_only_smt_definitions() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let tx = solver.start_transaction();
+        let symbol = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.add_event(Event::Cycle);
+        assert_eq!(solver.trace.head.len(), tx.head_len);
+        solver.commit_transaction();
+        assert_eq!(solver.trace.head.len(), tx.head_len + 1);
+        assert!(matches!(&solver.trace.head[tx.head_len], Event::Smt(Def::DeclareConst(v, _), _, _) if *v == symbol));
+    }
 
     macro_rules! bv {
         ( $bv_string:expr ) => {{

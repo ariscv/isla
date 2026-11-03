@@ -229,7 +229,11 @@ pub fn build_ite<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if lhs == rhs {
+        return Ok(lhs.clone());
+    }
     match (lhs, rhs) {
+        (Val::Unit, Val::Unit) => Ok(Val::Unit),
         (Val::Struct(l_fields), Val::Struct(r_fields)) => {
             let fields: Result<_, _> = l_fields
                 .iter()
@@ -243,21 +247,11 @@ pub fn build_ite<B: BV>(
 
         (Val::Ctor(l_id, lhs), Val::Ctor(r_id, rhs)) => {
             if l_id == r_id {
-                let v = solver.define_const(
-                    Exp::Ite(Box::new(Exp::Var(b)), Box::new(smt_value(lhs, info)?), Box::new(smt_value(rhs, info)?)),
-                    info,
-                );
-                Ok(Val::Ctor(*l_id, Box::new(Val::Symbolic(v))))
+                Ok(Val::Ctor(*l_id, Box::new(build_ite(b, lhs, rhs, solver, info)?)))
             } else {
                 use smtlib::Exp::*;
-                let sym_id = solver.define_const(
-                    Ite(
-                        Box::new(Var(b)),
-                        Box::new(l_id.to_smt()),
-                        Box::new(r_id.to_smt()),
-                    ),
-                    info,
-                );
+                let sym_id =
+                    solver.define_const(Ite(Box::new(Var(b)), Box::new(l_id.to_smt()), Box::new(r_id.to_smt())), info);
 
                 let mut possibilities = HashMap::default();
                 possibilities.insert(*l_id, lhs.as_ref().clone());
@@ -268,14 +262,8 @@ pub fn build_ite<B: BV>(
 
         (Val::Ctor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
             use smtlib::Exp::*;
-            let sym_id = solver.define_const(
-                Ite(
-                    Box::new(Var(b)),
-                    Box::new(l_id.to_smt()),
-                    Box::new(Var(*r_id)),
-                ),
-                info,
-            );
+            let sym_id =
+                solver.define_const(Ite(Box::new(Var(b)), Box::new(l_id.to_smt()), Box::new(Var(*r_id))), info);
 
             let mut possibilities = rhs.clone();
             match possibilities.entry(*l_id) {
@@ -296,14 +284,7 @@ pub fn build_ite<B: BV>(
 
         (Val::SymbolicCtor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
             use smtlib::Exp::*;
-            let sym_id = solver.define_const(
-                Ite(
-                    Box::new(Var(b)),
-                    Box::new(Var(*l_id)),
-                    Box::new(Var(*r_id)),
-                ),
-                info,
-            );
+            let sym_id = solver.define_const(Ite(Box::new(Var(b)), Box::new(Var(*l_id)), Box::new(Var(*r_id))), info);
 
             let mut possibilities = lhs.clone();
             for (ctor, rhs_val) in rhs.iter() {
@@ -324,6 +305,42 @@ pub fn build_ite<B: BV>(
                 info,
             )
             .into(),
+    }
+}
+
+#[cfg(test)]
+mod build_ite_tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::{Config, Context};
+
+    #[test]
+    fn matching_ctor_merges_nested_payload() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let condition = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());
+        let ctor = Name::from_u32(91);
+        let lhs = Val::Ctor(ctor, Box::new(Val::Ctor(ctor, Box::new(Val::Unit))));
+        let rhs = lhs.clone();
+        assert_eq!(build_ite(condition, &lhs, &rhs, &mut solver, SourceLoc::unknown()).unwrap(), lhs);
+
+        let mut left_fields = ahash::HashMap::default();
+        left_fields.insert(ctor, Val::Unit);
+        left_fields.insert(Name::from_u32(92), Val::Bool(false));
+        let mut right_fields = ahash::HashMap::default();
+        right_fields.insert(ctor, Val::Unit);
+        right_fields.insert(Name::from_u32(92), Val::Bool(true));
+        let left = Val::Ctor(ctor, Box::new(Val::Struct(left_fields)));
+        let right = Val::Ctor(ctor, Box::new(Val::Struct(right_fields)));
+        let merged = build_ite(condition, &left, &right, &mut solver, SourceLoc::unknown()).unwrap();
+        let Val::Ctor(_, payload) = merged else {
+            panic!("必须保持构造子");
+        };
+        let Val::Struct(fields) = *payload else {
+            panic!("必须保持结构载荷");
+        };
+        assert_eq!(fields.get(&ctor), Some(&Val::Unit));
+        assert!(matches!(fields.get(&Name::from_u32(92)), Some(Val::Symbolic(_))));
     }
 }
 
@@ -585,7 +602,9 @@ fn merge_struct_fields_nary<B: BV>(
             for fields in structs.iter().skip(1) {
                 match fields.get(field) {
                     Some(value) => field_values.push(value),
-                    None => return Err(ExecError::Type(format!("merge_val_nary missing struct field {:?}", field), info)),
+                    None => {
+                        return Err(ExecError::Type(format!("merge_val_nary missing struct field {:?}", field), info))
+                    }
                 }
             }
             Ok((*field, merge_val_nary(conditions, &field_values, solver, info)?))

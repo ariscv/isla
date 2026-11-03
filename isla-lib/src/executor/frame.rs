@@ -110,6 +110,7 @@ pub fn backtrace_string<'ir>(backtrace: &[(Name, usize)], symtab: &Symtab<'ir>) 
 /// is being symbolically executed.
 #[derive(Clone)]
 pub struct Frame<'ir, B> {
+    // ATTENTION git-block: 不要恢复旧字段 branch_conditions
     pub(super) path_time_totals: PathTimeTotals,
     pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,

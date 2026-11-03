@@ -1645,7 +1645,14 @@ pub fn write_events_in_context<B: BV>(
             }
 
             Merge(group_id, path_count, loc) => {
-                write!(buf, "\n{}  (merge {} {} \"{}\")", indent, group_id, path_count, loc.location_string(symtab.files()))
+                write!(
+                    buf,
+                    "\n{}  (merge {} {} \"{}\")",
+                    indent,
+                    group_id,
+                    path_count,
+                    loc.location_string(symtab.files())
+                )
             }
 
             Function { name, call } => {
