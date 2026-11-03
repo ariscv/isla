@@ -239,8 +239,14 @@ fn read_register_from_vector<'ir, B: BV>(
         Val::Symbolic(v) => {
             if let Some(len) = solver.length(v) {
                 if regs.len() == 1 {
+                    let zero = Eq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
                     let nonzero = Neq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
-                    if !solver.check_sat_with(&nonzero, info).is_unsat()? {
+                    let zero_sat = !solver.check_sat_with(&zero, info).is_unsat()?;
+                    let nonzero_sat = !solver.check_sat_with(&nonzero, info).is_unsat()?;
+                    if zero_sat && nonzero_sat {
+                        return Err(ExecError::SymbolicLength("read_register_from_vector", info));
+                    }
+                    if !zero_sat {
                         return Err(ExecError::Type(invalid_index_argument.to_string(), info));
                     }
                     ConcreteIndex(0)
@@ -349,8 +355,14 @@ fn write_register_from_vector<'ir, B: BV>(
         Val::Symbolic(v) => {
             if let Some(len) = solver.length(v) {
                 if regs.len() == 1 {
+                    let zero = Eq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
                     let nonzero = Neq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
-                    if !solver.check_sat_with(&nonzero, info).is_unsat()? {
+                    let zero_sat = !solver.check_sat_with(&zero, info).is_unsat()?;
+                    let nonzero_sat = !solver.check_sat_with(&nonzero, info).is_unsat()?;
+                    if zero_sat && nonzero_sat {
+                        return Err(ExecError::SymbolicLength("write_register_from_vector", info));
+                    }
+                    if !zero_sat {
                         return Err(ExecError::Type(invalid_index_argument.to_string(), info));
                     }
                     ConcreteIndex(0)
@@ -2870,6 +2882,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     assert_eq!(bv.len(), *len as usize);
                                     (Bits(bv.clone()), Val::Bits(crate::smt::model_bits_to_bv(&bv)?))
                                 }
+                                Ty::AnyBits => (Bits(bv.clone()), Val::Bits(crate::smt::model_bits_to_bv(&bv)?)),
                                 Ty::I128 => {
                                     assert!(bv.len() == 128);
                                     let i = i128_from_bits(&bv);
@@ -3793,6 +3806,211 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+
+    mod review19_tests {
+        use super::*;
+
+        #[test]
+        fn review19_singleton_mixed_index_keeps_zero_candidate() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut shared = empty_shared_state();
+            let reg = shared.symtab.intern("zreview19_singleton");
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+            let choice = solver.declare_const(smtlib::Ty::Bool, info());
+            let index = solver.define_const(
+                smtlib::Exp::Ite(
+                    Box::new(smtlib::Exp::Var(choice)),
+                    Box::new(smtlib::bits64(0, 8)),
+                    Box::new(smtlib::bits64(1, 8)),
+                ),
+                info(),
+            );
+            let result = read_register_from_vector(
+                Val::Symbolic(index),
+                Val::Vector(vec![Val::Ref(reg)]),
+                &mut frame.local_state,
+                &shared,
+                &mut solver,
+                info(),
+            );
+            eprintln!("索引仍可为 0，读取结果：{result:?}");
+            assert!(
+                matches!(result, Err(ExecError::SymbolicLength("read_register_from_vector", location)) if location == info()),
+                "混合索引必须触发自适应分叉，保留索引 0 的合法路径"
+            );
+        }
+
+        #[test]
+        fn review19_singleton_write_mixed_index_keeps_zero_candidate() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut shared = empty_shared_state();
+            let reg = shared.symtab.intern("zreview19_singleton_write");
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+            let choice = solver.declare_const(smtlib::Ty::Bool, info());
+            let index = solver.define_const(
+                smtlib::Exp::Ite(
+                    Box::new(smtlib::Exp::Var(choice)),
+                    Box::new(smtlib::bits64(0, 8)),
+                    Box::new(smtlib::bits64(1, 8)),
+                ),
+                info(),
+            );
+            let result = write_register_from_vector(
+                Val::Symbolic(index),
+                Val::Bits(B64::new(7, 8)),
+                Val::Vector(vec![Val::Ref(reg)]),
+                &mut frame.local_state,
+                &shared,
+                &mut solver,
+                info(),
+            );
+            eprintln!("索引仍可为 0，写入结果：{result:?}");
+            assert!(
+                matches!(result, Err(ExecError::SymbolicLength("write_register_from_vector", location)) if location == info()),
+                "混合索引必须触发自适应分叉，保留索引 0 的合法路径"
+            );
+            assert_eq!(
+                frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap(),
+                &Val::Bits(B64::new(42, 8)),
+                "等待索引拆分时不得提前修改寄存器"
+            );
+        }
+
+        #[test]
+        fn review19_proven_i128_completion_keeps_free_variable_symbolic() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let free = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            assert_eq!(primop::proven_symbolic_i128(free, &mut solver, info()).unwrap(), None);
+            let zero = solver.define_const(
+                smtlib::Exp::Bvxor(Box::new(smtlib::Exp::Var(free)), Box::new(smtlib::Exp::Var(free))),
+                info(),
+            );
+            assert_eq!(primop::proven_symbolic_i128(zero, &mut solver, info()).unwrap(), Some(0));
+        }
+
+        #[test]
+        fn review19_wide_anybits_monomorphize() {
+            use crate::bitvector::b129::B129;
+            let bits = test_name(1901);
+            let instrs = Box::leak(
+                vec![
+                    Instr::Monomorphize(bits, Ty::AnyBits, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(bits), info()),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame: LocalFrame<B129> = LocalFrame::new(test_name(25), &[], &Ty::Unit, None, instrs);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let sym = solver.declare_bitvector(128, info());
+            solver.assert_eq(smtlib::Exp::Var(sym), smtlib::Exp::Bits(vec![true; 128]));
+            frame.vars_mut().insert(bits, UVal::Init(Val::Symbolic(sym)));
+            let state = TaskState::new();
+            let shared = SharedState::<B129>::empty(Symtab::new());
+            let queue = Worker::new_lifo();
+            let result = run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver,
+            );
+            match result.unwrap() {
+                Run::Finished(Val::Bits(value)) => {
+                    assert_eq!(value, B129::ones(128));
+                }
+                _ => panic!("宽位 AnyBits 具化结果错误"),
+            }
+        }
+
+        #[test]
+        fn review19_wide_unassigned_monomorphize() {
+            use crate::bitvector::b129::B129;
+            let bits = test_name(1902);
+            let instrs = Box::leak(
+                vec![
+                    Instr::Decl(bits, Ty::Bits(128), info()),
+                    Instr::Monomorphize(bits, Ty::Bits(128), info()),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame: LocalFrame<B129> = LocalFrame::new(test_name(25), &[], &Ty::Unit, None, instrs);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let state = TaskState::new().with_execution_limits(
+                ExecutionLimits::default().with_max_forks_per_path(0).with_limit_behavior(LimitBehavior::Concretize),
+            );
+            let shared = SharedState::<B129>::empty(Symtab::new());
+            let queue = Worker::new_lifo();
+            let result = run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver,
+            );
+            assert!(matches!(result, Ok(Run::Finished(_))));
+        }
+
+        #[test]
+        fn review19_wide_anybits_after_diamond() {
+            use crate::bitvector::b129::B129;
+            for enabled in [false, true] {
+                let branch = test_name(1910);
+                let bits = test_name(1911);
+                let instrs = Box::leak(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(bits, Ty::AnyBits, info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(bits), Exp::Id(test_name(1912)), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(bits), Exp::Id(test_name(1913)), info()),
+                        Instr::Monomorphize(bits, Ty::AnyBits, info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Id(bits), info()),
+                        Instr::End,
+                    ]
+                    .into_boxed_slice(),
+                );
+                let mut frame: LocalFrame<B129> = LocalFrame::new(test_name(25), &[], &Ty::Unit, None, instrs);
+                frame.lets_mut().insert(test_name(1912), UVal::Init(Val::Bits(B129::new(1, 128))));
+                frame.lets_mut().insert(test_name(1913), UVal::Init(Val::Bits(B129::new(2, 128))));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let shared = SharedState::<B129>::empty(Symtab::new());
+                let values = Mutex::new(Vec::new());
+                eprintln!("AnyBits 菱形复现，合并={enabled}");
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &values, &|_, _, result, _, _, values| {
+                    values.lock().unwrap().push(match result {
+                        Ok((Run::Finished(Val::Bits(value)), _)) => value.lower_u64(),
+                        Err((error, _)) => panic!("宽位 AnyBits 具化失败：{error:?}"),
+                        _ => panic!("返回类型错误"),
+                    });
+                });
+                let mut values = values.into_inner().unwrap();
+                values.sort();
+                eprintln!("AnyBits 菱形复现，合并={enabled}，结果={values:?}");
+                assert_eq!(values, vec![1, 2]);
+            }
+        }
+    }
 
     mod review18_tests {
         use super::*;
