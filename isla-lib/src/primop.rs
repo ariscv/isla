@@ -1576,8 +1576,12 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
         Val::Bits(bits) => Ok(Val::I128(bits.unsigned())),
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
-                assert!(length < 128);
-                solver.define_const(Exp::ZeroExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
+                if length == 128 {
+                    Ok(Val::Symbolic(bits))
+                } else {
+                    assert!(length < 128);
+                    solver.define_const(Exp::ZeroExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
+                }
             }
             None => Err(ExecError::Type(format!("sail_unsigned (solver cannot determine length) {:?}", &bits), info)),
         },
@@ -4995,16 +4999,14 @@ mod tests {
         assert!(lt_bits_u(Val::I128(1), Val::I128(2), &mut solver, loc).is_err());
     }
 
-    /// sail_unsigned 对 128 位符号量保留诚实 panic：无符号 128 位值没有 %i 表示，
-    /// `<_u` 等比较已改写为不经 %i 往返（见 lt_bits_u），其余调用方仍应立即暴露。
+    /// 128 位符号量已具有 %i 的 SMT 位宽，unsigned 转换直接恒等返回。
     #[test]
-    #[should_panic(expected = "length < 128")]
-    fn sail_unsigned_symbolic_128_still_panics() {
+    fn sail_unsigned_symbolic_128_is_identity() {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         let x = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
-        let _ = sail_unsigned(Val::Symbolic(x), &mut solver, SourceLoc::unknown());
+        assert_eq!(sail_unsigned(Val::Symbolic(x), &mut solver, SourceLoc::unknown()).unwrap(), Val::Symbolic(x));
     }
 
     /// sail_signed 放宽到 128 位：有符号解释恰好可由 i128 表示，符号化 128 位

@@ -537,7 +537,6 @@ pub fn merge_val<B: BV>(
     match (val_a, val_b) {
         (Val::Bool(_), Val::Bool(_))
         | (Val::I64(_), Val::I64(_))
-        | (Val::I128(_), Val::I128(_))
         | (Val::Bits(_), Val::Bits(_))
         | (Val::Enum(_), Val::Enum(_)) => {
             if val_a == val_b {
@@ -575,7 +574,9 @@ pub fn merge_val<B: BV>(
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
 
-        (Val::MixedBits(_), Val::MixedBits(_))
+        // I128 可能用作向量长度；不同整数必须保留具体值，避免产生不支持的符号长度。
+        (Val::I128(_), Val::I128(_))
+        | (Val::MixedBits(_), Val::MixedBits(_))
         | (Val::String(_), Val::String(_))
         | (Val::Ref(_), Val::Ref(_))
         | (Val::Vector(_), Val::Vector(_))
@@ -720,6 +721,13 @@ pub fn merge_register_bindings_nary<'ir, B: BV>(
 ) -> Result<RegisterBindings<'ir, B>, ExecError> {
     if reg_bindings.is_empty() {
         return Ok(RegisterBindings::new());
+    }
+    if reg_bindings.len() == 1 {
+        return Ok((*reg_bindings[0]).clone());
+    }
+    // 当前值的 ITE 无法保留 relaxed 寄存器的读取语义和历史写入。
+    if reg_bindings.iter().any(|regs| regs.iter().any(|(key, _)| regs.is_relaxed(*key) || regs.has_old_writes(*key))) {
+        return Err(ExecError::IncompatibleMerge);
     }
 
     let keys = register_binding_keys(reg_bindings);

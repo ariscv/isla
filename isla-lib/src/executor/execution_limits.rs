@@ -328,7 +328,7 @@ impl ExecutionLimits {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ControlFlowScope {
+pub(super) struct ControlFlowScope {
     function_name: Name,
     pc: usize,
     call_context: Option<Vec<(Name, usize)>>,
@@ -360,7 +360,7 @@ impl ControlFlowScope {
 pub(super) struct ExecutionLimitPathState {
     control_flow_steps: u32,
     total_forks: u32,
-    loop_counts: HashMap<ControlFlowScope, u32>,
+    pub(super) loop_counts: HashMap<ControlFlowScope, u32>,
     branch_forks: HashMap<ControlFlowScope, u32>,
     region_forks: HashMap<usize, u32>,
     sample_ordinals: HashMap<ControlFlowScope, u32>,

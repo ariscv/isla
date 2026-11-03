@@ -1798,6 +1798,13 @@ fn try_merge_diamond<'ir, B: BV>(
             solver.rollback_transaction(tx);
             continue;
         }
+        // 有回跳预算时，两臂必须保留相同的循环计数历史。
+        if limit_handler.map_or(false, |handler| handler.config.max_backjumps_per_loop.is_some())
+            && arm_then.execution_limit_state.loop_counts != arm_else.execution_limit_state.loop_counts
+        {
+            solver.rollback_transaction(tx);
+            continue;
+        }
         match merge_two_frames(cond_sym, &mut merged_frame, &arm_then, &arm_else, shared_state, solver, info) {
             Ok(true) if !solver.transaction_invalid() => {
                 merged_frame.execution_limit_state = if arm_then.execution_limit_state.control_flow_steps()
@@ -6152,6 +6159,203 @@ fn zmemreadfork(zu) {
         let mut replay = Solver::<B64>::from_checkpoint(&ctx, cp);
         crate::primop_util::symbolic(&Ty::Enum(enum_name), &shared, &mut replay, info()).unwrap();
         assert_eq!(replay.check_sat(info()), crate::smt::SmtResult::Sat);
+    }
+
+    #[test]
+    fn review5_dynamic_length() {
+        for enabled in [false, true] {
+            let cond = test_name(140);
+            let length = test_name(141);
+            let zeros = *crate::primop::unary_primops::<B64>().get("zeros").unwrap();
+            let instrs = vec![
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Decl(length, Ty::I128, info()),
+                Instr::Jump(Exp::Id(cond), 5, info()),
+                Instr::Copy(Loc::Id(length), Exp::I128(8), info()),
+                Instr::Goto(6),
+                Instr::Copy(Loc::Id(length), Exp::I128(16), info()),
+                Instr::PrimopUnary(Loc::Id(RETURN), zeros, Exp::Id(length), info()),
+                Instr::End,
+            ];
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_path_merging(enabled),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+            let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+            eprintln!("动态位宽：合并={enabled}，完成={finished}，错误={errors:?}");
+            assert_eq!(finished, 2, "两个合法的动态位宽路径都应完成");
+            assert!(errors.is_empty(), "动态位宽路径不应报错");
+        }
+    }
+
+    #[test]
+    fn review5_loop_history() {
+        for enabled in [false, true] {
+            let cond = test_name(140);
+            let rounds = test_name(141);
+            let add = *crate::primop::binary_primops::<B64>().get("add_int").unwrap();
+            let instrs = vec![
+                Instr::Init(rounds, Ty::I128, Exp::I128(0), info()),
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Jump(Exp::Id(cond), 7, info()),
+                Instr::Goto(5),
+                Instr::Goto(11),
+                Instr::Goto(4),
+                Instr::Goto(11),
+                Instr::Goto(9),
+                Instr::Goto(11),
+                Instr::Goto(8),
+                Instr::Goto(11),
+                Instr::PrimopBinary(Loc::Id(rounds), add, Exp::Id(rounds), Exp::I128(1), info()),
+                Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(rounds), Exp::I128(2)]), 14, info()),
+                Instr::Goto(2),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::End,
+            ];
+            let limits = ExecutionLimits::default().with_path_merging(enabled).with_max_backjumps_per_loop(1);
+            let results = run_all_with_bindings(
+                instrs,
+                limits,
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+            let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+            eprintln!("循环预算：合并={enabled}，完成={finished}，错误={errors:?}");
+            assert_eq!(finished, 0, "两条路径第二次执行同一实际回跳时均应耗尽预算");
+        }
+    }
+
+    #[test]
+    fn review5_unsigned_128_continuation() {
+        use crate::bitvector::b129::B129;
+        let defs: &[crate::ir::Def<Name, B129>] = &[];
+        let shared = SharedState::new(
+            Symtab::new(),
+            defs,
+            IRTypeInfo::new(defs),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&ctx);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let result = test_name(142);
+        let bits = |n| Exp::Call(Op::Concat, vec![Exp::Bits(B64::new(0, 64)), Exp::Bits(B64::new(n, 64))]);
+        let instrs: Vec<Instr<Name, B129>> = vec![
+            Instr::Jump(Exp::Bool(true), 3, info()),
+            Instr::Copy(Loc::Id(result), bits(1), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(result), bits(2), info()),
+            Instr::End,
+        ];
+        let mut frame = LocalFrame::new(test_name(143), &[], &Ty::I128, None, &instrs);
+        frame.vars_mut().insert(result, UVal::Uninit(&Ty::Bits(128)));
+        let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
+        for n in [1, 2] {
+            assert_eq!(unsigned(Val::Bits(B129::new(n, 128)), &mut solver, info()).unwrap(), Val::I128(n as i128));
+        }
+        assert_eq!(try_merge_diamond(condition, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        let merged =
+            eval_exp(&Exp::Id(result), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsigned(merged, &mut solver, info())));
+        assert!(result.is_ok(), "两个合法的 128 位常量经合并后不能使 unsigned 转换 panic");
+    }
+
+    #[test]
+    fn review5_constructor_condition_truth_table() {
+        use crate::smt::smtlib::Exp as SExp;
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let c = solver.declare_const(smtlib::Ty::Bool, info());
+        let a = solver.declare_const(smtlib::Ty::Bool, info());
+        let b = solver.declare_const(smtlib::Ty::Bool, info());
+        let tag_a = test_name(150);
+        let tag_b = test_name(151);
+        let ca = Val::Ctor(tag_a, Box::new(Val::I128(11)));
+        let cb = Val::Ctor(tag_b, Box::new(Val::I128(22)));
+        let sa = crate::primop_util::merge_val(a, &ca, &Val::Ctor(tag_b, Box::new(Val::I128(12))), &mut solver, info())
+            .unwrap();
+        let sb = crate::primop_util::merge_val(b, &Val::Ctor(tag_a, Box::new(Val::I128(21))), &cb, &mut solver, info())
+            .unwrap();
+        for (lhs, rhs) in [(&ca, &cb), (&ca, &sb), (&sa, &cb), (&sa, &sb)] {
+            let merged = crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()).unwrap();
+            let Val::SymbolicCtor(discriminant, possibilities) = merged else { panic!("期望符号构造子") };
+            for cv in [false, true] {
+                for av in [false, true] {
+                    for bv in [false, true] {
+                        let (tag, payload) = match if cv { lhs } else { rhs } {
+                            Val::Ctor(tag, value) => (*tag, value.as_ref().clone()),
+                            Val::SymbolicCtor(sym, values) => {
+                                let flag = if matches!(lhs, Val::SymbolicCtor(l, _) if l == sym) { av } else { bv };
+                                let tag = if flag { tag_a } else { tag_b };
+                                (tag, values[&tag].clone())
+                            }
+                            _ => unreachable!(),
+                        };
+                        let mut assertion = SExp::Bool(true);
+                        for (sym, value) in [(c, cv), (a, av), (b, bv)] {
+                            assertion = SExp::And(
+                                Box::new(assertion),
+                                Box::new(SExp::Eq(Box::new(SExp::Var(sym)), Box::new(SExp::Bool(value)))),
+                            );
+                        }
+                        let wrong_tag = SExp::Neq(Box::new(SExp::Var(discriminant)), Box::new(tag.to_smt()));
+                        let wrong_payload = SExp::Neq(
+                            Box::new(crate::primop_util::smt_value(&possibilities[&tag], info()).unwrap()),
+                            Box::new(crate::primop_util::smt_value(&payload, info()).unwrap()),
+                        );
+                        let bad = SExp::And(
+                            Box::new(assertion),
+                            Box::new(SExp::Or(Box::new(wrong_tag), Box::new(wrong_payload))),
+                        );
+                        assert_eq!(
+                            solver.check_sat_with(&bad, info()),
+                            crate::smt::SmtResult::Unsat,
+                            "构造子判别值和载荷必须服从对应条件"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn review5_nary_register_history() {
+        let mut shared = empty_shared_state();
+        let reg = shared.symtab.intern("zreg");
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let mut regs = RegisterBindings::new();
+        regs.insert(reg, true, UVal::Init(Val::I64(0)));
+        regs.assign(reg, Val::I64(1), &shared);
+        let merged = crate::primop_util::merge_register_bindings_nary(&[], &[&regs], &mut solver, info()).unwrap();
+        eprintln!("通用寄存器合并：relaxed={}，保留历史={}", merged.is_relaxed(reg), merged.has_old_writes(reg));
+        assert!(merged.is_relaxed(reg) && merged.has_old_writes(reg), "即便只有一个输入也不能清除 relaxed 语义和历史");
+        assert_eq!(merged.get_last_if_initialized(reg), Some(&Val::I64(1)));
+
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut relaxed_only = RegisterBindings::new();
+        relaxed_only.insert(reg, true, UVal::Init(Val::I64(1)));
+        for relaxed_regs in [&regs, &relaxed_only] {
+            let mut plain_regs = RegisterBindings::new();
+            plain_regs.insert(reg, false, UVal::Init(Val::I64(1)));
+            for inputs in [[relaxed_regs, &plain_regs], [&plain_regs, relaxed_regs]] {
+                assert!(matches!(
+                    crate::primop_util::merge_register_bindings_nary(&[condition], &inputs, &mut solver, info()),
+                    Err(ExecError::IncompatibleMerge)
+                ));
+            }
+        }
     }
 }
 pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(
