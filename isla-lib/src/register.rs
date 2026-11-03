@@ -355,6 +355,14 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         self.map.contains_key(&id)
     }
 
+    pub fn is_relaxed(&self, id: Name) -> bool {
+        self.map.get(&id).expect("register must exist").relaxed
+    }
+
+    pub fn has_old_writes(&self, id: Name) -> bool {
+        matches!(self.map.get(&id).expect("register must exist").read_old_if_initialized(), Some(writes) if !writes.is_empty())
+    }
+
     pub fn assign(&mut self, id: Name, v: Val<B>, shared_state: &SharedState<'ir, B>) {
         if let Some(reg) = self.map.get_mut(&id) {
             reg.write(v)

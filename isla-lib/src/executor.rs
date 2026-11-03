@@ -1418,7 +1418,22 @@ fn record_loc_write<B: BV>(loc: &Loc<Name>, frame: &mut LocalFrame<B>) {
         if frame.local_state.vars.contains_key(&id) || frame.local_state.lets.contains_key(&id) {
             ws.modified_vars.insert(id);
         } else {
-            ws.modified_regs.insert(id);
+            if !ws.modified_regs.insert(id) {
+                ws.multiple_written_regs.insert(id);
+            }
+            if matches!(loc, Loc::Field(_, _)) {
+                ws.read_regs.insert(id);
+            }
+        }
+    }
+}
+
+fn record_exp_reads<B: BV>(exp: &Exp<Name>, local_state: &LocalState<B>, ws: &mut WriteSet) {
+    let mut ids = HashSet::new();
+    exp.collect_ids(&mut ids);
+    for id in ids {
+        if !local_state.vars.contains_key(&id) && local_state.regs.contains_key(id) {
+            ws.read_regs.insert(id);
         }
     }
 }
@@ -1489,6 +1504,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
     mut arm: LocalFrame<'ir, B>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
+    limit_handler: Option<&ExecutionLimitHandler<'_>>,
 ) -> Result<Option<LocalFrame<'ir, B>>, ExecError> {
     arm.pc = start_pc;
     arm.write_set = Some(WriteSet::default());
@@ -1507,6 +1523,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 arm.pc += 1;
             }
             Instr::Init(var, _, exp, info) => {
+                record_exp_reads(exp, &arm.local_state, arm.write_set.as_mut().unwrap());
                 let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 arm.vars_mut().insert(*var, UVal::Init(value));
                 if let Some(ws) = arm.write_set.as_mut() {
@@ -1515,6 +1532,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 arm.pc += 1;
             }
             Instr::Copy(loc, exp, info) => {
+                record_exp_reads(exp, &arm.local_state, arm.write_set.as_mut().unwrap());
                 let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 record_loc_write(loc, &mut arm);
                 simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
@@ -1524,6 +1542,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 if !crate::primop::is_pure_unary(*f) {
                     return Ok(None);
                 }
+                record_exp_reads(arg, &arm.local_state, arm.write_set.as_mut().unwrap());
                 let arg = eval_exp(arg, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let value = f(arg, solver, *info)?;
                 record_loc_write(loc, &mut arm);
@@ -1534,6 +1553,8 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 if !crate::primop::is_pure_binary(*f) {
                     return Ok(None);
                 }
+                record_exp_reads(arg1, &arm.local_state, arm.write_set.as_mut().unwrap());
+                record_exp_reads(arg2, &arm.local_state, arm.write_set.as_mut().unwrap());
                 let arg1 = eval_exp(arg1, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let arg2 = eval_exp(arg2, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let value = f(arg1, arg2, solver, *info)?;
@@ -1546,10 +1567,44 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 if (*target != join_pc && (*target < start_pc || *target > end_pc)) || *target > arm.instrs.len() {
                     return Ok(None);
                 }
+                let decision = match limit_handler {
+                    Some(handler) => handler.on_goto(
+                        &mut arm.execution_limit_state,
+                        arm.function_name,
+                        arm.pc,
+                        *target,
+                        &arm.backtrace,
+                    ),
+                    None => {
+                        arm.execution_limit_state.advance_control_flow();
+                        ExecutionLimitDecision::Continue
+                    }
+                };
+                if !matches!(decision, ExecutionLimitDecision::Continue) {
+                    return Ok(None);
+                }
                 arm.pc = *target;
             }
             Instr::Jump(exp, target, info) => {
+                record_exp_reads(exp, &arm.local_state, arm.write_set.as_mut().unwrap());
                 let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?;
+                let decision = match limit_handler {
+                    Some(handler) => handler.on_conditional_jump(
+                        &mut arm.execution_limit_state,
+                        arm.function_name,
+                        arm.pc,
+                        *target,
+                        &arm.backtrace,
+                        *info,
+                    ),
+                    None => {
+                        arm.execution_limit_state.advance_control_flow();
+                        ExecutionLimitDecision::Continue
+                    }
+                };
+                if !matches!(decision, ExecutionLimitDecision::Continue) {
+                    return Ok(None);
+                }
                 match *value.as_ref() {
                     Val::Bool(true) => {
                         if (*target != join_pc && (*target < start_pc || *target > end_pc))
@@ -1603,11 +1658,20 @@ fn merge_two_frames<'ir, B: BV>(
     modified_vars.extend(ws_else.modified_vars.iter().copied());
     modified_regs.extend(ws_then.modified_regs.iter().copied());
     modified_regs.extend(ws_else.modified_regs.iter().copied());
+    modified_vars
+        .extend(frame.vars().iter().filter_map(|(name, value)| matches!(value, UVal::Uninit(_)).then_some(*name)));
+    modified_vars
+        .extend(frame.lets().iter().filter_map(|(name, value)| matches!(value, UVal::Uninit(_)).then_some(*name)));
+    for reg in ws_then.read_regs.union(&ws_else.read_regs) {
+        if frame.regs().is_relaxed(*reg) {
+            return Ok(false);
+        }
+        if frame.regs().get_last_if_initialized(*reg).is_none() {
+            modified_regs.insert(*reg);
+        }
+    }
 
     for var in &modified_vars {
-        if !frame.vars().contains_key(var) && !frame.lets().contains_key(var) {
-            continue;
-        }
         let v_then = arm_then.vars().get(var).and_then(|u| match u {
             UVal::Init(v) => Some(v),
             _ => None,
@@ -1617,7 +1681,10 @@ fn merge_two_frames<'ir, B: BV>(
             _ => None,
         });
 
-        if frame.vars().contains_key(var) {
+        if matches!(frame.vars().get(var), Some(UVal::Uninit(_))) && v_then.is_none() && v_else.is_none() {
+            continue;
+        }
+        if frame.vars().contains_key(var) || (arm_then.vars().contains_key(var) && arm_else.vars().contains_key(var)) {
             match (v_then, v_else) {
                 (Some(vt), Some(ve)) => {
                     let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
@@ -1637,6 +1704,9 @@ fn merge_two_frames<'ir, B: BV>(
                 UVal::Init(v) => Some(v),
                 _ => None,
             });
+            if matches!(frame.lets().get(var), Some(UVal::Uninit(_))) && l_then.is_none() && l_else.is_none() {
+                continue;
+            }
             match (l_then, l_else) {
                 (Some(vt), Some(ve)) => {
                     let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
@@ -1647,10 +1717,22 @@ fn merge_two_frames<'ir, B: BV>(
                 }
                 _ => return Ok(false),
             }
+        } else if arm_then.vars().contains_key(var) || arm_else.vars().contains_key(var) {
+            continue;
         }
     }
 
     for reg in &modified_regs {
+        if frame.regs().is_relaxed(*reg)
+            || ws_then.multiple_written_regs.contains(reg)
+            || ws_else.multiple_written_regs.contains(reg)
+            || arm_then.regs().has_old_writes(*reg)
+            || arm_else.regs().has_old_writes(*reg)
+            || (ws_then.modified_regs.contains(reg) || ws_else.modified_regs.contains(reg))
+                && (ws_then.read_regs.contains(reg) || ws_else.read_regs.contains(reg))
+        {
+            return Ok(false);
+        }
         let r_then = arm_then.regs().get_last_if_initialized(*reg);
         let r_else = arm_else.regs().get_last_if_initialized(*reg);
         match (r_then, r_else) {
@@ -1675,21 +1757,15 @@ fn try_merge_diamond<'ir, B: BV>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
+    limit_handler: Option<&ExecutionLimitHandler<'_>>,
 ) -> Result<Option<usize>, ExecError> {
     let pc = frame.pc;
     let candidate_joins = detect_diamond_joins(frame.instrs, pc, target);
     for join_pc in candidate_joins {
         let tx = solver.start_transaction();
 
-        let arm_else = match simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver) {
-            Ok(Some(a)) if !solver.transaction_invalid() => a,
-            _ => {
-                solver.rollback_transaction(tx);
-                continue;
-            }
-        };
-        let arm_then =
-            match simulate_diamond_arm(target, join_pc.saturating_sub(1), join_pc, frame.clone(), shared_state, solver)
+        let arm_else =
+            match simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver, limit_handler)
             {
                 Ok(Some(a)) if !solver.transaction_invalid() => a,
                 _ => {
@@ -1697,12 +1773,54 @@ fn try_merge_diamond<'ir, B: BV>(
                     continue;
                 }
             };
+        let arm_then = match simulate_diamond_arm(
+            target,
+            join_pc.saturating_sub(1),
+            join_pc,
+            frame.clone(),
+            shared_state,
+            solver,
+            limit_handler,
+        ) {
+            Ok(Some(a)) if !solver.transaction_invalid() => a,
+            _ => {
+                solver.rollback_transaction(tx);
+                continue;
+            }
+        };
 
         let mut merged_frame = frame.clone();
         match merge_two_frames(cond_sym, &mut merged_frame, &arm_then, &arm_else, shared_state, solver, info) {
             Ok(true) if !solver.transaction_invalid() => {
+                merged_frame.execution_limit_state = if arm_then.execution_limit_state.control_flow_steps()
+                    >= arm_else.execution_limit_state.control_flow_steps()
+                {
+                    arm_then.execution_limit_state.clone()
+                } else {
+                    arm_else.execution_limit_state.clone()
+                };
                 solver.commit_transaction();
                 *frame = merged_frame;
+                let mut read_regs: Vec<Name> = arm_then
+                    .write_set
+                    .as_ref()
+                    .unwrap()
+                    .read_regs
+                    .union(&arm_else.write_set.as_ref().unwrap().read_regs)
+                    .copied()
+                    .collect();
+                read_regs.sort_unstable();
+                for reg in read_regs {
+                    if zencode::decode(shared_state.symtab.to_str(reg)) == "_TLB" {
+                        continue;
+                    }
+                    let value = frame
+                        .regs()
+                        .get_last_if_initialized(reg)
+                        .expect("merged register read must be initialized")
+                        .clone();
+                    solver.add_event(Event::ReadReg(reg, Vec::new(), value));
+                }
                 let modified_regs = arm_then
                     .write_set
                     .as_ref()
@@ -1886,9 +2004,15 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             let path_merging =
                                 task_state.execution_limits.as_ref().map(|l| l.path_merging).unwrap_or(false);
                             if path_merging {
-                                if let Ok(Some(new_pc)) =
-                                    try_merge_diamond(v, *target, frame, shared_state, solver, *info)
-                                {
+                                if let Ok(Some(new_pc)) = try_merge_diamond(
+                                    v,
+                                    *target,
+                                    frame,
+                                    shared_state,
+                                    solver,
+                                    *info,
+                                    limit_handler.as_ref(),
+                                ) {
                                     frame.pc = new_pc;
                                     continue 'main_loop;
                                 }
@@ -5523,6 +5647,177 @@ fn zmemreadfork(zu) {
         }
     }
 
+    // 第三轮审查反例：只写入临时副本。
+    #[test]
+    fn review3_lazy_read_must_keep_identity() {
+        let shared = empty_shared_state();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let cond = solver.declare_const(smtlib::Ty::Bool, info());
+        let x = test_name(120);
+        let y = test_name(121);
+        let mut frame = make_frame(vec![
+            Instr::Jump(Exp::Bool(true), 3, info()),
+            Instr::Copy(Loc::Id(y), Exp::Id(x), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(y), Exp::Id(x), info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(x, UVal::Uninit(&Ty::I64));
+        frame.vars_mut().insert(y, UVal::Uninit(&Ty::I64));
+        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        let xv = eval_exp(&Exp::Id(x), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+        let yv = eval_exp(&Exp::Id(y), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+        let unequal = smtlib::Exp::Neq(
+            Box::new(crate::primop_util::smt_value(&xv, info()).unwrap()),
+            Box::new(crate::primop_util::smt_value(&yv, info()).unwrap()),
+        );
+        assert_eq!(
+            solver.check_sat_with(&unequal, info()),
+            crate::smt::SmtResult::Unsat,
+            "两臂均为 y=x，汇合后不能允许 y!=x"
+        );
+    }
+
+    #[test]
+    fn review3_live_out_declared_in_both_arms() {
+        for enabled in [false, true] {
+            let mut shared = empty_shared_state();
+            let cond = shared.symtab.intern("zcond");
+            let result = shared.symtab.intern("zresult");
+            let instrs = vec![
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Jump(Exp::Id(cond), 4, info()),
+                Instr::Init(result, Ty::I64, Exp::I64(10), info()),
+                Instr::Goto(5),
+                Instr::Init(result, Ty::I64, Exp::I64(20), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+                Instr::End,
+            ];
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_path_merging(enabled),
+                shared,
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            assert!(
+                results.iter().all(|r| matches!(r, Ok(Run::Finished(_)))),
+                "汇合点使用的变量不得被丢弃，启用合并={enabled}"
+            );
+        }
+    }
+
+    #[test]
+    fn review3_first_enum_use_must_not_panic() {
+        let enum_name = test_name(122);
+        let shared =
+            shared_state_from_defs(vec![crate::ir::Def::Enum(enum_name, vec![test_name(123), test_name(124)])]);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let cond = solver.declare_const(smtlib::Ty::Bool, info());
+        let result = test_name(125);
+        let mut frame = make_frame(vec![
+            Instr::Jump(Exp::Bool(true), 3, info()),
+            Instr::Copy(Loc::Id(result), Exp::Undefined(Ty::Enum(enum_name)), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(result), Exp::Undefined(Ty::Enum(enum_name)), info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(result, UVal::Uninit(Box::leak(Box::new(Ty::Enum(enum_name)))));
+        let result = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None);
+        assert!(result.is_ok(), "不支持的枚举推测应回退");
+    }
+
+    #[test]
+    fn review3_successful_merge_must_preserve_register_reads() {
+        let mut shared = empty_shared_state();
+        let reg = shared.symtab.intern("zregister");
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let cond = solver.declare_const(smtlib::Ty::Bool, info());
+        let result = test_name(126);
+        let mut frame = make_frame(vec![
+            Instr::Jump(Exp::Bool(true), 3, info()),
+            Instr::Copy(Loc::Id(result), Exp::Id(reg), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(result), Exp::Id(reg), info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(result, UVal::Uninit(&Ty::I64));
+        frame.regs_mut().insert(reg, false, UVal::Init(Val::I64(1)));
+        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        assert!(
+            solver.trace().to_vec().iter().any(|e| matches!(e, Event::ReadReg(r, _, _) if *r == reg)),
+            "两臂必读的寄存器应出现在成功合并后的 Trace 中"
+        );
+    }
+
+    #[test]
+    fn review3_relaxed_register_must_keep_intermediate_writes() {
+        let mut shared = empty_shared_state();
+        let reg = shared.symtab.intern("zregister");
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let cond = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut frame = make_frame(vec![
+            Instr::Jump(Exp::Bool(true), 4, info()),
+            Instr::Copy(Loc::Id(reg), Exp::I64(1), info()),
+            Instr::Copy(Loc::Id(reg), Exp::I64(2), info()),
+            Instr::Goto(6),
+            Instr::Copy(Loc::Id(reg), Exp::I64(3), info()),
+            Instr::Copy(Loc::Id(reg), Exp::I64(4), info()),
+            Instr::End,
+        ]);
+        frame.regs_mut().insert(reg, true, UVal::Init(Val::I64(0)));
+        assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None).unwrap(), None);
+        let mut frame = simulate_diamond_arm(4, 5, 6, frame, &shared, &mut solver, None).unwrap().unwrap();
+        frame.regs_mut().forget_last_reads();
+        let value = frame.regs_mut().get(reg, &shared, &mut solver, info()).unwrap().unwrap().clone();
+        let can_read_intermediate = smtlib::Exp::And(
+            Box::new(smtlib::Exp::Var(cond)),
+            Box::new(smtlib::Exp::Eq(
+                Box::new(crate::primop_util::smt_value(&value, info()).unwrap()),
+                Box::new(crate::primop_util::smt_value(&Val::<B64>::I64(3), info()).unwrap()),
+            )),
+        );
+        assert_eq!(
+            solver.check_sat_with(&can_read_intermediate, info()),
+            crate::smt::SmtResult::Sat,
+            "relaxed 寄存器必须允许读取真实执行过的中间写入"
+        );
+    }
+
+    #[test]
+    fn review3_merge_must_respect_depth_limit() {
+        for enabled in [false, true] {
+            let cond = test_name(127);
+            let result = test_name(128);
+            let instrs = vec![
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Decl(result, Ty::I64, info()),
+                Instr::Jump(Exp::Id(cond), 5, info()),
+                Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+                Instr::Goto(7),
+                Instr::Copy(Loc::Id(result), Exp::I64(20), info()),
+                Instr::Goto(7),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+                Instr::End,
+            ];
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_max_path_depth(1).with_path_merging(enabled),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            assert!(
+                results.iter().all(|r| matches!(r, Err(ExecError::DepthLimitReached))),
+                "深度限制不能因合并被跳过，启用合并={enabled}"
+            );
+        }
+    }
+
     #[test]
     fn path_merging_diamond_reduces_forks() {
         let cond = test_name(100);
@@ -5628,7 +5923,7 @@ fn zmemreadfork(zu) {
         for instrs in &programs {
             let frame = LocalFrame::new(test_name(116), &[], &Ty::Unit, None, instrs);
             let tx = solver.start_transaction();
-            assert!(simulate_diamond_arm(0, 0, 1, frame, &shared_state, &mut solver).unwrap().is_none());
+            assert!(simulate_diamond_arm(0, 0, 1, frame, &shared_state, &mut solver, None).unwrap().is_none());
             assert!(!solver.transaction_invalid());
             solver.rollback_transaction(tx);
         }

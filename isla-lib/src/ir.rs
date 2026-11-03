@@ -590,7 +590,7 @@ pub enum Exp<A> {
 }
 
 impl<A: Hash + Eq + Clone> Exp<A> {
-    fn collect_ids(&self, ids: &mut HashSet<A>) {
+    pub(crate) fn collect_ids(&self, ids: &mut HashSet<A>) {
         use Exp::*;
         match self {
             Id(id) => {

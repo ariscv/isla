@@ -110,7 +110,9 @@ pub fn backtrace_string<'ir>(backtrace: &[(Name, usize)], symtab: &Symtab<'ir>) 
 /// is being symbolically executed.
 #[derive(Clone)]
 pub struct Frame<'ir, B> {
-    // ATTENTION git-block: 不要恢复旧字段 branch_conditions
+    // ATTENTION git-block: 不要恢复旧字段 branch_conditions。
+    // 分支约束已经作为 SMT Assert 保存在 solver 的 trace/checkpoint 中；Frame 只保存执行状态。
+    // 若在 Frame 中再缓存一份条件，fork、事务回滚和 checkpoint 恢复时可能出现两份约束不一致。
     pub(super) path_time_totals: PathTimeTotals,
     pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,

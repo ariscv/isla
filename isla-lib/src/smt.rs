@@ -2375,7 +2375,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
-        if self.in_transaction && matches!(def, Def::Assert(_) | Def::DefineEnum(_, _)) {
+        if self.in_transaction && matches!(def, Def::Assert(_)) {
             self.transaction_invalid = true;
             return;
         }
@@ -2486,7 +2486,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn add(&mut self, def: Def) {
         self.add_internal(&def, SourceLoc::unknown());
-        if !self.transaction_invalid {
+        if !self.transaction_invalid || matches!(def, Def::DefineEnum(_, _)) {
             let event = Event::Smt(def, self.def_attrs, SourceLoc::unknown());
             if self.in_transaction {
                 self.transaction_defs.push(event)
@@ -2498,7 +2498,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn add_with_location(&mut self, def: Def, info: SourceLoc) {
         self.add_internal(&def, info);
-        if !self.transaction_invalid {
+        if !self.transaction_invalid || matches!(def, Def::DefineEnum(_, _)) {
             let event = Event::Smt(def, self.def_attrs, info);
             if self.in_transaction {
                 self.transaction_defs.push(event)
@@ -2551,7 +2551,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn add_event(&mut self, event: Event<B>) {
         if self.in_transaction {
-            if matches!(&event, Event::Smt(Def::Assert(_) | Def::DefineEnum(_, _), _, _)) {
+            if matches!(&event, Event::Smt(Def::Assert(_), _, _)) {
                 self.transaction_invalid = true;
             } else if let Event::Smt(def, _, info) = &event {
                 self.add_internal(def, *info);
@@ -2856,6 +2856,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         assert!(self.in_transaction);
         self.clear_stashed_model();
         self.trace.head.truncate(tx.head_len);
+        // 枚举 sort 属于 solver 的全局注册状态，无法随分支回滚；重放时也必须保留定义。
+        self.trace.head.extend(
+            self.transaction_defs
+                .iter()
+                .filter(|event| matches!(event, Event::Smt(Def::DefineEnum(_, _), _, _)))
+                .cloned(),
+        );
         for var_id in tx.next_var..self.next_var {
             let sym = Sym::from_u32(var_id);
             self.decls.remove(&sym);
