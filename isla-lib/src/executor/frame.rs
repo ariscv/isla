@@ -39,7 +39,7 @@ use crate::bitvector::BV;
 use crate::error::{ExecError, SmtError};
 use crate::executor::execution_limits::ExecutionLimitPathState;
 use crate::executor::path_timing::{PathTimeTotals, PathTiming};
-use crate::executor::task::{ForkTreeNode, Task, TaskId, TaskState, WriteSet};
+use crate::executor::task::{Task, TaskId, TaskState, WriteSet};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
@@ -125,8 +125,6 @@ pub struct Frame<'ir, B> {
     pub(super) pc_counts: Arc<HashMap<B, usize>>,
     pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
     pub(super) write_set: Option<WriteSet>,
-    pub(super) fork_tree_node: Option<ForkTreeNode>,
-    pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
     #[cfg(feature = "tracetool")]
     pub(super) itrace_path: Arc<ItracePerPath>,
 }
@@ -148,8 +146,6 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc_counts: (*frame.pc_counts).clone(),
         taken_interrupts: (*frame.taken_interrupts).clone(),
         write_set: frame.write_set.clone(),
-        fork_tree_node: frame.fork_tree_node.clone(),
-        branch_conditions: frame.branch_conditions.clone(),
         #[cfg(feature = "tracetool")]
         itrace_path: (*frame.itrace_path).clone(),
     }
@@ -175,8 +171,6 @@ pub struct LocalFrame<'ir, B> {
     pub(super) pc_counts: HashMap<B, usize>,
     pub(super) taken_interrupts: Vec<(TaskId, u8)>,
     pub(super) write_set: Option<WriteSet>,
-    pub(super) fork_tree_node: Option<ForkTreeNode>,
-    pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
     #[cfg(feature = "tracetool")]
     pub(super) itrace_path: ItracePerPath,
 }
@@ -198,8 +192,6 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         pc_counts: Arc::new(frame.pc_counts.clone()),
         taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
         write_set: frame.write_set.clone(),
-        fork_tree_node: frame.fork_tree_node.clone(),
-        branch_conditions: frame.branch_conditions.clone(),
         #[cfg(feature = "tracetool")]
         itrace_path: Arc::new(frame.itrace_path.clone()),
     }
@@ -402,8 +394,6 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc_counts: HashMap::new(),
             taken_interrupts: Vec::new(),
             write_set: None,
-            fork_tree_node: None,
-            branch_conditions: Vec::new(),
             #[cfg(feature = "tracetool")]
             itrace_path: ItracePerPath::default(),
         }
@@ -433,8 +423,6 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();
         new_frame.write_set = self.write_set.clone();
-        new_frame.fork_tree_node = self.fork_tree_node.clone();
-        new_frame.branch_conditions = self.branch_conditions.clone();
         #[cfg(feature = "tracetool")]
         {
             new_frame.itrace_path = self.itrace_path.clone();

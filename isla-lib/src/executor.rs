@@ -71,7 +71,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
-pub use task::{ForkTreeNode, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
+pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1440,6 +1440,41 @@ fn detect_diamond_joins<B: BV>(instrs: &[Instr<Name, B>], pc: usize, target: usi
     joins
 }
 
+fn simulate_assign<'ir, B: BV>(
+    loc: &Loc<Name>,
+    v: Val<B>,
+    local_state: &mut LocalState<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    match loc {
+        Loc::Id(id) => {
+            if local_state.vars.contains_key(id) {
+                local_state.vars.insert(*id, UVal::Init(v));
+            } else if local_state.lets.contains_key(id) {
+                local_state.lets.insert(*id, UVal::Init(v));
+            } else {
+                local_state.regs.assign(*id, v, shared_state);
+            }
+            Ok(())
+        }
+        Loc::Field(sub_loc, field) => {
+            let mut accessor = Vec::new();
+            if let Val::Struct(field_values) =
+                get_loc_and_initialize(sub_loc, local_state, shared_state, solver, &mut accessor, info, false)?
+            {
+                let mut field_values = field_values.clone();
+                field_values.insert(*field, v);
+                simulate_assign(sub_loc, Val::Struct(field_values), local_state, shared_state, solver, info)
+            } else {
+                Err(ExecError::Type(format!("Assign to field of non-struct {:?}", loc), info))
+            }
+        }
+        Loc::Addr(_) => Ok(()),
+    }
+}
+
 fn simulate_diamond_arm<'ir, B: BV>(
     start_pc: usize,
     join_pc: usize,
@@ -1451,7 +1486,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
     arm.write_set = Some(WriteSet::default());
     let mut steps = 0;
     while arm.pc != join_pc {
-        if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc {
+        if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc || arm.pc > join_pc {
             return Ok(None);
         }
         steps += 1;
@@ -1474,14 +1509,14 @@ fn simulate_diamond_arm<'ir, B: BV>(
             Instr::Copy(loc, exp, info) => {
                 let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 record_loc_write(loc, &mut arm);
-                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
                 arm.pc += 1;
             }
             Instr::PrimopUnary(loc, f, arg, info) => {
                 let arg = eval_exp(arg, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let value = f(arg, solver, *info)?;
                 record_loc_write(loc, &mut arm);
-                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
                 arm.pc += 1;
             }
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
@@ -1489,7 +1524,7 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 let arg2 = eval_exp(arg2, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
                 let value = f(arg1, arg2, solver, *info)?;
                 record_loc_write(loc, &mut arm);
-                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
                 arm.pc += 1;
             }
             Instr::PrimopVariadic(loc, f, args, info) => {
@@ -1499,11 +1534,11 @@ fn simulate_diamond_arm<'ir, B: BV>(
                     .collect::<Result<_, _>>()?;
                 let value = f(args, solver, &mut arm, *info)?;
                 record_loc_write(loc, &mut arm);
-                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
                 arm.pc += 1;
             }
             Instr::Goto(target) => {
-                if *target > arm.instrs.len() || *target < start_pc {
+                if *target > join_pc || *target < start_pc || *target > arm.instrs.len() {
                     return Ok(None);
                 }
                 arm.pc = *target;
@@ -1511,8 +1546,18 @@ fn simulate_diamond_arm<'ir, B: BV>(
             Instr::Jump(exp, target, info) => {
                 let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?;
                 match *value.as_ref() {
-                    Val::Bool(true) => arm.pc = *target,
-                    Val::Bool(false) => arm.pc += 1,
+                    Val::Bool(true) => {
+                        if *target > join_pc || *target < start_pc || *target > arm.instrs.len() {
+                            return Ok(None);
+                        }
+                        arm.pc = *target;
+                    }
+                    Val::Bool(false) => {
+                        if arm.pc + 1 > join_pc {
+                            return Ok(None);
+                        }
+                        arm.pc += 1;
+                    }
                     _ => return Ok(None),
                 }
             }
@@ -1553,23 +1598,42 @@ fn merge_two_frames<'ir, B: BV>(
     modified_regs.extend(ws_else.modified_regs.iter().copied());
 
     for var in &modified_vars {
+        let v_then = arm_then.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+        let v_else = arm_else.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+
         if frame.vars().contains_key(var) {
-            let v_then = arm_then.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
-            let v_else = arm_else.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
             match (v_then, v_else) {
                 (Some(vt), Some(ve)) => {
-                    let merged = crate::primop_util::merge_val(cond_sym, vt, ve, solver, info)?;
+                    let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
+                        Ok(m) => m,
+                        Err(_) => return Ok(false),
+                    };
                     frame.vars_mut().insert(*var, UVal::Init(merged));
                 }
                 _ => return Ok(false),
             }
         } else if frame.lets().contains_key(var) {
-            let v_then = arm_then.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
-            let v_else = arm_else.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            let l_then = arm_then.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            let l_else = arm_else.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            match (l_then, l_else) {
+                (Some(vt), Some(ve)) => {
+                    let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
+                        Ok(m) => m,
+                        Err(_) => return Ok(false),
+                    };
+                    frame.lets_mut().insert(*var, UVal::Init(merged));
+                }
+                _ => return Ok(false),
+            }
+        } else {
+            // Variable was declared inside an arm
             match (v_then, v_else) {
                 (Some(vt), Some(ve)) => {
-                    let merged = crate::primop_util::merge_val(cond_sym, vt, ve, solver, info)?;
-                    frame.lets_mut().insert(*var, UVal::Init(merged));
+                    let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
+                        Ok(m) => m,
+                        Err(_) => return Ok(false),
+                    };
+                    frame.vars_mut().insert(*var, UVal::Init(merged));
                 }
                 _ => return Ok(false),
             }
@@ -1581,8 +1645,12 @@ fn merge_two_frames<'ir, B: BV>(
         let r_else = arm_else.regs().get_last_if_initialized(*reg);
         match (r_then, r_else) {
             (Some(rt), Some(re)) => {
-                let merged = crate::primop_util::merge_val(cond_sym, rt, re, solver, info)?;
-                frame.regs_mut().assign(*reg, merged, shared_state);
+                let merged = match crate::primop_util::merge_val(cond_sym, rt, re, solver, info) {
+                    Ok(m) => m,
+                    Err(_) => return Ok(false),
+                };
+                frame.regs_mut().assign(*reg, merged.clone(), shared_state);
+                solver.add_event(Event::WriteReg(*reg, Vec::new(), merged));
             }
             _ => return Ok(false),
         }
@@ -1602,18 +1670,31 @@ fn try_merge_diamond<'ir, B: BV>(
     let pc = frame.pc;
     let candidate_joins = detect_diamond_joins(frame.instrs, pc, target);
     for join_pc in candidate_joins {
+        let tx = solver.start_transaction();
+
         let arm_else = match simulate_diamond_arm(pc + 1, join_pc, frame.clone(), shared_state, solver)? {
             Some(a) => a,
-            None => continue,
+            None => {
+                solver.rollback_transaction(tx);
+                continue;
+            }
         };
         let arm_then = match simulate_diamond_arm(target, join_pc, frame.clone(), shared_state, solver)? {
             Some(a) => a,
-            None => continue,
+            None => {
+                solver.rollback_transaction(tx);
+                continue;
+            }
         };
 
-        if merge_two_frames(cond_sym, frame, &arm_then, &arm_else, shared_state, solver, info)? {
-            solver.add_event(Event::Merge(0, 2, info));
-            return Ok(Some(join_pc));
+        match merge_two_frames(cond_sym, frame, &arm_then, &arm_else, shared_state, solver, info) {
+            Ok(true) => {
+                solver.add_event(Event::Merge(0, 2, info));
+                return Ok(Some(join_pc));
+            }
+            _ => {
+                solver.rollback_transaction(tx);
+            }
         }
     }
     Ok(None)
@@ -1787,7 +1868,6 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 if let Ok(Some(new_pc)) =
                                     try_merge_diamond(v, *target, frame, shared_state, solver, *info)
                                 {
-                                    itrace_push_branch_condition!(frame, test_true);
                                     frame.pc = new_pc;
                                     continue 'main_loop;
                                 }

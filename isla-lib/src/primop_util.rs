@@ -250,11 +250,14 @@ pub fn build_ite<B: BV>(
                 Ok(Val::Ctor(*l_id, Box::new(Val::Symbolic(v))))
             } else {
                 use smtlib::Exp::*;
-                let sym_id = solver.declare_const(Name::smt_ty(), info);
-                solver.assert(Or(
-                    Box::new(Eq(Box::new(Var(sym_id)), Box::new(l_id.to_smt()))),
-                    Box::new(Eq(Box::new(Var(sym_id)), Box::new(r_id.to_smt()))),
-                ));
+                let sym_id = solver.define_const(
+                    Ite(
+                        Box::new(Var(b)),
+                        Box::new(l_id.to_smt()),
+                        Box::new(r_id.to_smt()),
+                    ),
+                    info,
+                );
 
                 let mut possibilities = HashMap::default();
                 possibilities.insert(*l_id, lhs.as_ref().clone());
@@ -265,11 +268,14 @@ pub fn build_ite<B: BV>(
 
         (Val::Ctor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
             use smtlib::Exp::*;
-            let sym_id = solver.declare_const(Name::smt_ty(), info);
-            solver.assert(Or(
-                Box::new(Eq(Box::new(Var(sym_id)), Box::new(l_id.to_smt()))),
-                Box::new(Eq(Box::new(Var(sym_id)), Box::new(Var(*r_id)))),
-            ));
+            let sym_id = solver.define_const(
+                Ite(
+                    Box::new(Var(b)),
+                    Box::new(l_id.to_smt()),
+                    Box::new(Var(*r_id)),
+                ),
+                info,
+            );
 
             let mut possibilities = rhs.clone();
             match possibilities.entry(*l_id) {
@@ -282,15 +288,22 @@ pub fn build_ite<B: BV>(
             Ok(Val::SymbolicCtor(sym_id, possibilities))
         }
 
-        (Val::SymbolicCtor(_, _), Val::Ctor(_, _)) => build_ite(b, rhs, lhs, solver, info),
+        (Val::SymbolicCtor(_, _), Val::Ctor(_, _)) => {
+            use smtlib::Exp::*;
+            let not_b = solver.define_const(Not(Box::new(Var(b))), info);
+            build_ite(not_b, rhs, lhs, solver, info)
+        }
 
         (Val::SymbolicCtor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
             use smtlib::Exp::*;
-            let sym_id = solver.declare_const(Name::smt_ty(), info);
-            solver.assert(Or(
-                Box::new(Eq(Box::new(Var(sym_id)), Box::new(Var(*l_id)))),
-                Box::new(Eq(Box::new(Var(sym_id)), Box::new(Var(*r_id)))),
-            ));
+            let sym_id = solver.define_const(
+                Ite(
+                    Box::new(Var(b)),
+                    Box::new(Var(*l_id)),
+                    Box::new(Var(*r_id)),
+                ),
+                info,
+            );
 
             let mut possibilities = lhs.clone();
             for (ctor, rhs_val) in rhs.iter() {
@@ -504,7 +517,7 @@ pub fn merge_val<B: BV>(
             if val_a == val_b {
                 Ok(val_a.clone())
             } else {
-                Ok(Val::Poison)
+                Err(ExecError::IncompatibleMerge)
             }
         }
 
@@ -512,7 +525,7 @@ pub fn merge_val<B: BV>(
             if val_a == val_b {
                 Ok(val_a.clone())
             } else {
-                Ok(Val::Poison)
+                Err(ExecError::IncompatibleMerge)
             }
         }
     }

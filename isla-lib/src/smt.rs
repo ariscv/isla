@@ -2766,6 +2766,31 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         cs.to_string_lossy().to_string()
     }
+
+    pub fn start_transaction(&self) -> SolverTransaction {
+        SolverTransaction {
+            head_len: self.trace.head.len(),
+            next_var: self.next_var,
+            asserts_since_check: self.asserts_since_check,
+        }
+    }
+
+    pub fn rollback_transaction(&mut self, tx: SolverTransaction) {
+        self.trace.head.truncate(tx.head_len);
+        for var_id in tx.next_var..self.next_var {
+            let sym = Sym::from_u32(var_id);
+            self.decls.remove(&sym);
+        }
+        self.next_var = tx.next_var;
+        self.asserts_since_check = tx.asserts_since_check;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SolverTransaction {
+    head_len: usize,
+    next_var: u32,
+    asserts_since_check: usize,
 }
 
 /// 清空当前线程的路径级 SMT 统计。
