@@ -24,6 +24,7 @@ use z3_sys::Z3_interrupt;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum Z3TimeoutError {
+    #[cfg_attr(not(feature = "smt-thread-interrupt"), allow(dead_code))]
     Interrupted,
 }
 

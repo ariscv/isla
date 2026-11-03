@@ -54,6 +54,18 @@ pub fn smt_i128<V>(i: i128) -> Exp<V> {
     Exp::Bits(bitvec.to_vec())
 }
 
+/// 将 128 位补码整数调整为位向量算术所需的宽度。
+pub fn smt_int_to_bits<V>(value: Exp<V>, width: u32) -> Exp<V> {
+    assert!(width > 0, "SMT 位向量宽度必须非零");
+    if width > 128 {
+        Exp::SignExtend(width - 128, Box::new(value))
+    } else if width < 128 {
+        Exp::Extract(width - 1, 0, Box::new(value))
+    } else {
+        value
+    }
+}
+
 pub fn i128_from_bits(bitvec: &[bool]) -> i128 {
     let mut i = 0;
     for n in 0..128 {
@@ -324,12 +336,19 @@ fn build_ite_with<B: BV>(
             Ok(Val::SymbolicCtor(sym_id, possibilities))
         }
 
-        _ => solver
-            .define_const(
-                Exp::Ite(Box::new(Exp::Var(b)), Box::new(smt_value(lhs, info)?), Box::new(smt_value(rhs, info)?)),
-                info,
-            )
-            .into(),
+        _ => {
+            let exp = Exp::Ite(Box::new(Exp::Var(b)), Box::new(smt_value(lhs, info)?), Box::new(smt_value(rhs, info)?));
+            let is_bits = |value: &Val<B>| match value {
+                Val::Bits(_) | Val::MixedBits(_) => true,
+                Val::Symbolic(sym) => solver.is_sail_bitvector(*sym),
+                _ => false,
+            };
+            if is_bits(lhs) || is_bits(rhs) {
+                solver.define_bitvector(exp, info).into()
+            } else {
+                solver.define_const(exp, info).into()
+            }
+        }
     }
 }
 
@@ -481,9 +500,9 @@ pub fn symbolic_from_typedefs<B: BV>(
 
         Ty::I64 => smtlib::Ty::BitVec(64),
         Ty::I128 => smtlib::Ty::BitVec(128),
-        Ty::Bits(sz) => smtlib::Ty::BitVec(*sz),
+        Ty::Bits(sz) => return solver.declare_bitvector(*sz, info).into(),
         Ty::Bool => smtlib::Ty::Bool,
-        Ty::Bit => smtlib::Ty::BitVec(1),
+        Ty::Bit => return solver.declare_bitvector(1, info).into(),
 
         Ty::Struct(name) => {
             if let Some(field_types) = typedefs.structs.get(name) {

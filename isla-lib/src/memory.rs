@@ -966,7 +966,7 @@ fn reverse_endianness(bytes: &mut [u8]) {
 #[allow(clippy::too_many_arguments)]
 fn read_constrained<B: BV>(
     range: &Range<Address>,
-    generator: &(dyn Fn(&mut Solver<B>) -> Sym),
+    generator: &dyn Fn(&mut Solver<B>) -> Sym,
     read_kind: Val<B>,
     address: Address,
     bytes: u32,

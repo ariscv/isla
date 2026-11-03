@@ -161,7 +161,7 @@ impl EnumMember {
             .type_info
             .enum_members
             .get(&member_name)
-            .map(|&(member, enum_size, enum_name)| EnumMember { enum_id: EnumId::from_name(enum_name), member })
+            .map(|&(member, _, enum_name)| EnumMember { enum_id: EnumId::from_name(enum_name), member })
             .unwrap_or_else(|| {
                 panic!("Can't find '{}' in typeinfo: {:?}", member_name.to_str(&shared_state), member_name)
             })
@@ -280,6 +280,11 @@ impl DefAttrs {
     /// can be hidden to give a more concise view of the trace.
     pub fn uninteresting() -> Self {
         DefAttrs { attrs: 1 }
+    }
+
+    /// 标记 Sail 位向量，区分同样编码为 BV128 的有符号整数。
+    fn sail_bitvector(self) -> Self {
+        DefAttrs { attrs: self.attrs | 2 }
     }
 
     pub fn is_uninteresting(self) -> bool {
@@ -1578,6 +1583,7 @@ pub struct Solver<'ctx, B> {
     def_attrs: DefAttrs,
     cycles: i128,
     decls: HashMap<Sym, Ast<'ctx>>,
+    sail_bitvectors: HashSet<Sym>,
     func_decls: HashMap<Sym, FuncDecl<'ctx>>,
     enums: Enums<'ctx>,
     z3_solver: Z3_solver,
@@ -1807,7 +1813,10 @@ impl<'ctx, B: BV> Model<'ctx, B> {
 
     pub fn get_val(&mut self, var: &Val<B>) -> Result<Val<B>, ExecError> {
         use crate::ir::Val::*;
-        match var {
+        // 物化必须为自由变量补全模型，不能把未约简的 ITE 当作任意值。
+        let complete_model = self.complete_model;
+        self.complete_model = true;
+        let result = (|| match var {
             Symbolic(sym) => {
                 let model_val = self.get_var(*sym)?;
                 match model_val {
@@ -1823,8 +1832,9 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                         ))
                     }
                     ModelVal::Arbitrary(ty) => match ty {
-                        smtlib::Ty::BitVec(len) => Ok(Val::Bits(B::new(0, len))),
-                        smtlib::Ty::Bool => Ok(Val::Bool(false)),
+                        smtlib::Ty::BitVec(_) | smtlib::Ty::Bool => {
+                            panic!("补全模型后仍无法物化标量：{sym:?}，{ty:?}")
+                        }
                         smtlib::Ty::Enum(_) => Err(ExecError::Type(
                             format!("Cannot create default enum value for {:?}", ty),
                             SourceLoc::unknown(),
@@ -1887,8 +1897,8 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                                 ModelVal::Exp(Exp::Bits(bv)) => {
                                     new_segments.push(crate::ir::BitsSegment::Concrete(model_bits_to_bv(&bv)?));
                                 }
-                                ModelVal::Arbitrary(smtlib::Ty::BitVec(len)) => {
-                                    new_segments.push(crate::ir::BitsSegment::Concrete(B::new(0, len)));
+                                ModelVal::Arbitrary(smtlib::Ty::BitVec(_)) => {
+                                    panic!("补全模型后仍无法物化位向量片段：{sym:?}");
                                 }
                                 _ => {
                                     return Err(ExecError::Type(
@@ -1907,29 +1917,24 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             }
 
             SymbolicCtor(sym, fields) => {
-                // 对于符号构造器，获取其枚举成员并递归处理字段
-                let model_val = self.get_var(*sym)?;
-                match model_val {
-                    ModelVal::Exp(Exp::Enum(enum_member)) => {
-                        let mut new_fields =
-                            ahash::HashMap::with_capacity_and_hasher(fields.len(), ahash::RandomState::new());
-                        for (name, val) in fields {
-                            new_fields.insert(*name, self.get_val(&val)?);
-                        }
-                        // 这里需要确定枚举成员对应的 Name
-                        // 假设我们可以从 enum_member 获取对应的名称
-                        Err(ExecError::Type(
-                            format!("SymbolicCtor resolution not fully implemented for {:?}", enum_member),
-                            SourceLoc::unknown(),
-                        ))
+                let tag = match self.get_var(*sym)? {
+                    ModelVal::Exp(Exp::Bits64(bits)) => {
+                        assert_eq!(bits.len(), 32, "构造子标签必须为 32 位 Name");
+                        bits.lower_u64() as u32
                     }
-                    _ => Err(ExecError::Type(
-                        format!("Expected enum member for SymbolicCtor, got: {:?}", model_val),
-                        SourceLoc::unknown(),
-                    )),
-                }
+                    ModelVal::Exp(Exp::Bits(bits)) => {
+                        assert_eq!(bits.len(), 32, "构造子标签必须为 32 位 Name");
+                        bits.iter().enumerate().fold(0u32, |tag, (i, bit)| tag | (u32::from(*bit) << i))
+                    }
+                    value => panic!("构造子标签必须物化为 Name 位向量：{value:?}"),
+                };
+                let name = crate::ir::Name::from_u32(tag);
+                let payload = fields.get(&name).expect("模型选择的构造子必须属于候选集");
+                Ok(Ctor(name, Box::new(self.get_val(payload)?)))
             }
-        }
+        })();
+        self.complete_model = complete_model;
+        result
     }
 
     // Requiring the model to be mutable as I expect Z3 will alter the underlying data
@@ -2190,6 +2195,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 cycles: 0,
                 trace: Trace::new(),
                 decls: HashMap::new(),
+                sail_bitvectors: HashSet::new(),
                 func_decls: HashMap::new(),
                 enums: Enums::new(ctx),
                 symbol_namer,
@@ -2399,6 +2405,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
                 self.decls.insert(*v, Ast::mk_constant(&fd));
+                if self.def_attrs.attrs & 2 != 0 {
+                    self.sail_bitvectors.insert(*v);
+                }
             }
             Def::DeclareFun(v, arg_tys, result_ty) => {
                 if cfg!(feature = "smtperf") {
@@ -2418,6 +2427,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 let mut ast = self.translate_exp(exp);
                 ast.simplify();
                 self.decls.insert(*v, ast);
+                if self.def_attrs.attrs & 2 != 0 {
+                    self.sail_bitvectors.insert(*v);
+                }
             }
             Def::DefineEnum(name, size) => {
                 if !self.enums.enums.contains_key(name) {
@@ -2451,6 +2463,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
+    pub fn is_bool(&self, v: Sym) -> bool {
+        let ast = self.decls.get(&v).expect("布尔类型查询必须引用已声明符号");
+        unsafe { Z3_get_sort_kind(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, ast.z3_ast)) == SortKind::Bool }
+    }
+
     pub fn is_bitvector(&mut self, v: Sym) -> bool {
         match self.decls.get(&v) {
             Some(ast) => unsafe {
@@ -2467,7 +2484,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn with_def_attrs<F, A>(&mut self, attrs: DefAttrs, f: F) -> A
     where
-        F: Fn(&mut Self) -> A,
+        F: FnOnce(&mut Self) -> A,
     {
         let old_attrs = self.def_attrs;
         self.def_attrs = attrs;
@@ -2520,6 +2537,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         sym
     }
 
+    pub fn declare_bitvector(&mut self, width: u32, info: SourceLoc) -> Sym {
+        self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.declare_const(Ty::BitVec(width), info))
+    }
+
+    pub fn define_bitvector(&mut self, exp: Exp<Sym>, info: SourceLoc) -> Sym {
+        self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.define_const(exp, info))
+    }
+
+    pub fn is_sail_bitvector(&self, sym: Sym) -> bool {
+        self.sail_bitvectors.contains(&sym)
+    }
+
     pub fn choice(&mut self, exp1: Exp<Sym>, exp2: Exp<Sym>, info: SourceLoc) -> Sym {
         use Exp::*;
         let b = self.declare_const(Ty::Bool, info);
@@ -2544,8 +2573,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn add_event_internal(&mut self, event: &Event<B>) {
-        if let Event::Smt(def, _, info) = event {
-            self.add_internal(def, *info)
+        if let Event::Smt(def, attrs, info) = event {
+            self.with_def_attrs(*attrs, |solver| solver.add_internal(def, *info))
         };
     }
 
@@ -2553,9 +2582,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.in_transaction {
             if matches!(&event, Event::Smt(Def::Assert(_), _, _)) {
                 self.transaction_invalid = true;
-            } else if let Event::Smt(def, _, info) = &event {
-                self.add_internal(def, *info);
+            } else if let Event::Smt(def, attrs, info) = &event {
+                self.with_def_attrs(*attrs, |solver| solver.add_internal(def, *info));
                 self.transaction_defs.push(event);
+            } else if let Event::ReadReg(reg, accessor, value) = &event {
+                if !self.transaction_defs.iter().any(
+                    |existing| matches!(existing, Event::ReadReg(r, a, v) if r == reg && a == accessor && v == value),
+                ) {
+                    self.transaction_defs.push(event);
+                }
             }
             return;
         }
@@ -2866,6 +2901,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         for var_id in tx.next_var..self.next_var {
             let sym = Sym::from_u32(var_id);
             self.decls.remove(&sym);
+            self.sail_bitvectors.remove(&sym);
             self.func_decls.remove(&sym);
         }
         self.asserts_since_check = tx.asserts_since_check;

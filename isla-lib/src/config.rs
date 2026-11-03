@@ -2304,7 +2304,7 @@ impl<B: BV> ISAConfig<B> {
 
         let toolchain = get_toolchain(&config, toolchain_name)?;
 
-        let mut default_registers = get_default_registers(&config, symtab, type_info)?;
+        let default_registers = get_default_registers(&config, symtab, type_info)?;
         let symbolic_registers = get_symbolic_registers(&config, symtab, &default_registers)?;
         let value_hints = get_value_hints(&config)?.unwrap_or_default();
         let encoding_slices = get_encoding_slices(&config)?.unwrap_or_default();
@@ -3063,7 +3063,7 @@ mod tests {
 
     #[test]
     fn symbolic_registers_parses_string_and_table_forms() {
-        let (mut symtab, defaults) = symbolic_registers_fixture(&["mstatus", "satp"]);
+        let (symtab, defaults) = symbolic_registers_fixture(&["mstatus", "satp"]);
         let satp = symtab.get(&zencode::encode("satp")).unwrap();
         let value = r#"
             [symbolic_registers]

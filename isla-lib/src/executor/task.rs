@@ -46,6 +46,7 @@ static TASK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 pub struct WriteSet {
     pub modified_vars: HashSet<Name>,
     pub modified_regs: HashSet<Name>,
+    pub register_write_order: Vec<Name>,
     pub multiple_written_regs: HashSet<Name>,
     pub read_regs: HashSet<Name>,
     pub memory_modified: bool,

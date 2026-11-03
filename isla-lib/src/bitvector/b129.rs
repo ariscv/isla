@@ -397,11 +397,16 @@ impl BV for B129 {
     }
 
     fn add_i128(self, op: i128) -> Self {
-        if op > 0 {
+        if op >= 0 {
             self + bzhi(B129 { len: self.len, tag: false, bits: op as u128 }, self.len)
         } else {
             self + bzhi(B129 { len: self.len, tag: true, bits: op as u128 }, self.len)
         }
+    }
+
+    fn sub_i128(self, op: i128) -> Self {
+        // 直接减去符号扩展后的操作数，避免对 i128::MIN 取负溢出。
+        self - bzhi(B129 { len: self.len, tag: op < 0, bits: op as u128 }, self.len)
     }
 
     fn set_slice(self, n: u32, update: Self) -> Self {

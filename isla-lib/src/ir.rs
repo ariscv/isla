@@ -1299,7 +1299,7 @@ impl<'ir, B: BV> SharedState<'ir, B> {
         }
     }
 
-    pub fn typedefs(&self) -> Typedefs {
+    pub fn typedefs(&self) -> Typedefs<'_> {
         Typedefs {
             structs: &self.type_info.structs,
             enums: &self.type_info.enums,

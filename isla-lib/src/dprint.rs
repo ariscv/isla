@@ -464,7 +464,6 @@ impl<B: BV> Val<B> {
 
     pub fn from_str(s: &str, shared_state: &SharedState<B>) -> Result<Self, String> {
         let s = s.trim();
-        let chars: Vec<char> = s.chars().collect();
 
         // Symbolic: Sym(name)
         if s.starts_with("Sym(") && s.ends_with(')') {
@@ -683,7 +682,6 @@ impl<B: BV> Val<B> {
         if let Some(double_colon_pos) = s.find("::") {
             if let Some(paren_pos) = s.find('(') {
                 let _enum_name = &s[..double_colon_pos];
-                let member_part = &s[double_colon_pos + 2..paren_pos];
                 let inner = &s[paren_pos + 1..s.len() - 1]; // EnumMember.member:N
 
                 // 解析 EnumMember.member:N
@@ -791,6 +789,7 @@ impl<B: BV> Val<B> {
     }
 }
 
+#[allow(non_snake_case)] // 保留已有公共 API 的名称。
 pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>, symtab: &Symtab) -> &'a mut String {
     macro_rules! s {
         ($id:expr) => {
@@ -820,6 +819,7 @@ pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>,
             write!(f, "PrimopVariadic {:?} = {:p}({:?}) ` {:?}", loc, fptr, args, info)
         }
     };
+    res.expect("向 String 格式化指令不应失败");
 
     f
 }
