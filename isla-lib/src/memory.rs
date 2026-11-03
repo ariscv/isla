@@ -47,6 +47,7 @@ use crate::error::ExecError;
 use crate::ir;
 use crate::ir::Val;
 use crate::log;
+use crate::primop_util::replace_mixed_bits;
 use crate::probe;
 use crate::smt::smtlib::{bits64, Def, Exp};
 use crate::smt::{Event, Model, ModelVal, ReadOpts, SmtResult, Solver, Sym, WriteOpts};
@@ -493,6 +494,7 @@ impl<B: BV> Memory<B> {
         opts: ReadOpts,
     ) -> Result<Val<B>, ExecError> {
         log!(log::MEMORY, &format!("Read: {:?} {:?} {:?} {:?}", read_kind, address, bytes, tag));
+        let address = replace_mixed_bits(address, solver, SourceLoc::unknown())?;
 
         if let Val::I128(bytes) = bytes.widen_int() {
             let bytes = u32::try_from(bytes).expect("Bytes did not fit in u32 in memory read");
@@ -619,6 +621,7 @@ impl<B: BV> Memory<B> {
         opts: WriteOpts,
     ) -> Result<Val<B>, ExecError> {
         log!(log::MEMORY, &format!("Write: {:?} {:?} {:?} {:?}", write_kind, address, data, tag));
+        let address = replace_mixed_bits(address, solver, SourceLoc::unknown())?;
 
         match address {
             Val::Bits(concrete_addr) => {
@@ -1047,6 +1050,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_overlap() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut mem = Memory::<B64>::new();
         mem.add_zero_region(0x00..0xFF);
 

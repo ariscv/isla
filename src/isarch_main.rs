@@ -327,10 +327,10 @@ fn parse_duration_arg(flag: &str, value: Option<&str>, allow_milliseconds: bool)
 
 fn parse_timeout_smt_output(
     value: Option<&str>,
-    itrace_enabled: bool,
+    trace_enabled: bool,
 ) -> Result<isarch::exec::TimeoutSmtOutput, String> {
     let Some(value) = value else {
-        return Ok(isarch::exec::TimeoutSmtOutput::new(true, false, itrace_enabled));
+        return Ok(isarch::exec::TimeoutSmtOutput::new(true, false, trace_enabled));
     };
     if value.trim().is_empty() {
         return Err("--timeout-smt-output 不能为空".to_string());
@@ -338,35 +338,74 @@ fn parse_timeout_smt_output(
 
     let mut file = false;
     let mut stdout = false;
-    let mut itrace = false;
+    let mut trace = false;
     for destination in value.split(',').map(str::trim) {
         match destination {
             "file" => file = true,
             "stdout" => stdout = true,
-            "itrace" => itrace = true,
+            "itrace" => trace = true,
             "" => return Err("--timeout-smt-output 包含空输出目标".to_string()),
             destination => {
                 return Err(format!("--timeout-smt-output 不支持 '{}': 只能使用 file,stdout,itrace", destination))
             }
         }
     }
-    if itrace && !itrace_enabled {
+    if trace && !trace_enabled {
         return Err("--timeout-smt-output 请求 itrace，但没有配置 --itrace".to_string());
     }
-    if !file && !stdout && !itrace {
+    if !file && !stdout && !trace {
         return Err("--timeout-smt-output 至少需要一个输出目标".to_string());
     }
-    Ok(isarch::exec::TimeoutSmtOutput::new(file, stdout, itrace))
+    Ok(isarch::exec::TimeoutSmtOutput::new(file, stdout, trace))
 }
 
-fn validate_execution_limits_ir(config: &ExecutionLimitsConfig, arch_path: &Path) -> Result<(), String> {
-    if !config.strict {
-        return Ok(());
-    }
+fn validate_execution_limits_ir(config: &ExecutionLimitsConfig, arch_path: &Path) -> Result<Option<String>, String> {
+    let Some(expected) = config.ir_sha256.as_deref() else {
+        return Ok(None);
+    };
     let contents =
         std::fs::read(arch_path).map_err(|error| format!("无法读取 IR {}：{}", arch_path.display(), error))?;
     let actual = format!("{:x}", Sha256::digest(&contents));
-    config.validate_ir_sha256(&actual).map_err(|error| format!("{}（IR 文件：{}）", error, arch_path.display()))
+    if config.strict {
+        config.validate_ir_sha256(&actual).map_err(|error| format!("{}（IR 文件：{}）", error, arch_path.display()))?;
+        Ok(None)
+    } else if expected.eq_ignore_ascii_case(&actual) {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "IR SHA-256 不匹配：期望 {}，实际 {}（IR 文件：{}）；继续执行",
+            expected,
+            actual,
+            arch_path.display()
+        )))
+    }
+}
+
+fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool::TraceOptions, String> {
+    let instruction_path = matches.opt_str("itrace");
+    let output = matches.opt_str("trace-output");
+    if let (Some(left), Some(right)) = (&instruction_path, &output) {
+        if left != right {
+            return Err("--itrace 与 --trace-output 必须指定同一路径".into());
+        }
+    }
+    let options = isla_lib::tracetool::TraceOptions {
+        output: instruction_path.clone().or(output).map(std::path::PathBuf::from),
+        instructions: instruction_path.is_some(),
+        functions: matches.opt_present("ftrace"),
+        branches: matches.opt_present("btrace"),
+    };
+    let enabled = options.instructions || options.functions || options.branches;
+    if enabled && options.output.is_none() {
+        return Err("开启 ftrace/btrace 时需要 --trace-output 或 --itrace 指定输出文件".into());
+    }
+    if !enabled && options.output.is_some() {
+        return Err("--trace-output 需要选择 --ftrace 或 --btrace".into());
+    }
+    if enabled && !cfg!(feature = "tracetool") {
+        return Err("当前构建未启用轨迹支持，请启用 itrace/ftrace/btrace feature".into());
+    }
+    Ok(options)
 }
 
 fn isla_main() -> i32 {
@@ -385,11 +424,21 @@ fn isla_main() -> i32 {
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
-    opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
+    opts.optopt("", "itrace", "把完整逐指令轨迹写入文件，可与 ftrace/btrace 组合", "<path>");
+    opts.optflag("", "ftrace", "记录函数调用和返回");
+    opts.optflag("", "btrace", "输出静态分支清单和实际条件分支轨迹");
+    opts.optopt("", "trace-output", "ftrace/btrace 的输出文件；与 --itrace 共用时路径须一致", "<path>");
 
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
-    let itrace_path = matches.opt_str("itrace").map(std::path::PathBuf::from);
+    let trace_options = match parse_trace_options(&matches) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{}", error);
+            return 1;
+        }
+    };
+    let trace_path = trace_options.output.clone();
     let arch_path = matches.opt_str("arch").map(std::path::PathBuf::from);
     let timeout_arg = matches.opt_str("timeout");
     let timeout: Option<u64> = match parse_timeout_seconds(timeout_arg.as_deref()) {
@@ -411,7 +460,7 @@ fn isla_main() -> i32 {
         }
     };
     let timeout_smt_output =
-        match parse_timeout_smt_output(matches.opt_str("timeout-smt-output").as_deref(), itrace_path.is_some()) {
+        match parse_timeout_smt_output(matches.opt_str("timeout-smt-output").as_deref(), trace_path.is_some()) {
             Ok(output) => output,
             Err(e) => {
                 eprintln!("{}", e);
@@ -452,15 +501,31 @@ fn isla_main() -> i32 {
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
+    if matches!(subcommand, Subcommand::SolveState { .. }) {
+        // solve-state 必须同时保留符号 assert 的 true/false 两臂。
+        if !matches.opt_present("fork-assertions") {
+            isla_lib::ir::assertions_to_jumps(&mut arch);
+        }
+    }
+
+    if trace_options.functions {
+        // 复用已有 --trace-all 的函数事件采集，无第二套调用跟踪器。
+        isa_config.trace_functions.extend(symtab.all_names());
+    }
+
     if let Some(config) = execution_limits_override {
         isa_config.execution_limits = Some(config);
     }
 
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
     if let Some(config) = isa_config.execution_limits.as_ref() {
-        if let Err(error) = validate_execution_limits_ir(config, configured_arch_path) {
-            eprintln!("{}", error);
-            return 1;
+        match validate_execution_limits_ir(config, configured_arch_path) {
+            Ok(Some(warning)) => eprintln!("警告：{}", warning),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("{}", error);
+                return 1;
+            }
         }
     }
 
@@ -625,7 +690,7 @@ fn isla_main() -> i32 {
                         &extensions,
                         &instruction_names,
                         run_all,
-                        itrace_path.clone(),
+                        trace_options.clone(),
                         arch_path.clone(),
                         num_threads,
                         timeout,
@@ -639,6 +704,8 @@ fn isla_main() -> i32 {
                 }
                 64 => {
                     let mut target = RV64::default();
+                    target.initial_state = isa_config.initial_state.clone();
+                    target.initial_state_rv64_domain = isa_config.initial_state_rv64_domain;
                     target.pmp_symbolic = pmp_symbolic;
                     if pma_size_symbolic {
                         target.symbolic_pma_regions =
@@ -660,7 +727,7 @@ fn isla_main() -> i32 {
                         &extensions,
                         &instruction_names,
                         run_all,
-                        itrace_path.clone(),
+                        trace_options.clone(),
                         arch_path.clone(),
                         num_threads,
                         timeout,
@@ -699,6 +766,36 @@ mod tests {
     }
 
     #[test]
+    fn trace_cli_composes_and_rejects_incomplete_options() {
+        let mut opts = getopts::Options::new();
+        opts.optopt("", "itrace", "", "path");
+        opts.optopt("", "trace-output", "", "path");
+        opts.optflag("", "ftrace", "");
+        opts.optflag("", "btrace", "");
+        let parse = |args: &[&str]| parse_trace_options(&opts.parse(args).unwrap());
+        assert!(parse(&[]).unwrap().output.is_none());
+        assert!(parse(&["--ftrace"]).is_err());
+        assert!(parse(&["--trace-output=out"]).is_err());
+        assert!(parse(&["--itrace=a", "--trace-output=b"]).is_err());
+        for (args, expected) in [
+            (vec!["--itrace=out"], (true, false, false)),
+            (vec!["--ftrace", "--trace-output=out"], (false, true, false)),
+            (vec!["--btrace", "--trace-output=out"], (false, false, true)),
+            (vec!["--ftrace", "--btrace", "--trace-output=out"], (false, true, true)),
+            (vec!["--itrace=out", "--ftrace", "--btrace"], (true, true, true)),
+        ] {
+            let result = parse(&args);
+            if cfg!(feature = "tracetool") {
+                let options = result.unwrap();
+                assert_eq!((options.instructions, options.functions, options.branches), expected);
+                assert_eq!(options.output.unwrap(), std::path::PathBuf::from("out"));
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
     fn parse_tastic_option() {
         let matches = make_matches(&["--tastic", "qfaufbv", "list-instructions"]);
         assert_eq!(matches.opt_str("tastic").as_deref(), Some("qfaufbv"));
@@ -722,6 +819,27 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(error.contains("IR SHA-256 不匹配"));
+    }
+
+    #[test]
+    fn non_strict_execution_limits_warns_changed_ir() {
+        let path = std::env::temp_dir().join(format!(
+            "isarch-warning-limits-{}-{}.ir",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, "changed IR").unwrap();
+        let config = ExecutionLimitsConfig {
+            strict: false,
+            ir_sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            ..ExecutionLimitsConfig::default()
+        };
+
+        let warning = validate_execution_limits_ir(&config, &path).unwrap().expect("IR 哈希不匹配应当告警");
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(warning.contains("IR SHA-256 不匹配"));
+        assert!(warning.contains("继续执行"));
     }
 
     #[test]
@@ -770,7 +888,7 @@ mod tests {
         let output = parse_timeout_smt_output(Some("file,stdout,itrace"), true).unwrap();
         assert!(output.file);
         assert!(output.stdout);
-        assert!(output.itrace);
+        assert!(output.trace);
 
         assert!(parse_timeout_smt_output(Some("itrace"), false).is_err());
         assert!(parse_timeout_smt_output(Some("file,network"), true).is_err());
@@ -782,12 +900,12 @@ mod tests {
         let with_itrace = parse_timeout_smt_output(None, true).unwrap();
         assert!(with_itrace.file);
         assert!(!with_itrace.stdout);
-        assert!(with_itrace.itrace);
+        assert!(with_itrace.trace);
 
         let without_itrace = parse_timeout_smt_output(None, false).unwrap();
         assert!(without_itrace.file);
         assert!(!without_itrace.stdout);
-        assert!(!without_itrace.itrace);
+        assert!(!without_itrace.trace);
     }
 
     #[test]

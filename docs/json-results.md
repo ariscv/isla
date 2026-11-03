@@ -4,7 +4,9 @@
 
 `path-signature`用于同次运行的轨迹关联，不是跨IR稳定的源码分支ID。`provenance`记录实际命令行及显式IR、ISA配置、执行限制配置文件的SHA256。IR生成来源见`ir/provenance/manifest.json`。初态、常量primop与执行限制仍定义受测域；这些统计不证明SMT表达式中的数据条件全部被见证。
 
-memory终值查询超时进入`diagnostics`，包含`status=incomplete`、原因、路径签名及符号返回值文本，不进入可重放`gen`。增量产物尚有`pending-batches`时标为partial。外部直接杀进程不能保证正在运行的批次生成JSON，必须同时检查进程退出状态。
+完成路径在同一个最终SMT模型中取得机器编码、三种指令表示、返回值、寄存器初态及后态（包括FPR/fcsr）、`memory-events`、`pre-memory`和`post-memory`。任一必需字段求值失败，整例不进入可重放`gen`，并记录`status=incomplete`诊断；`summary.status`为`partial`。`pre-memory`中首次触碰为写入且此前未观测的旧字节允许为`null`，这是自由初态，不表示求值失败。无访存事件时三个内存字段分别为空数组。
+
+终值查询超时同样进入`diagnostics`，不产生不完整`gen`。增量产物尚有`pending-batches`时标为partial。外部直接杀进程不能保证正在运行的批次生成JSON，必须同时检查进程退出状态。
 
 汇编验收要求GCC与Clang驱动均通过，且逐条`.text`字节等于JSON机器编码：
 
@@ -27,3 +29,9 @@ python3 scripts/regenerate_ir.py --model ../sail-riscv --sail SAIL --plugin PLUG
 ```
 
 按`manifest.json`的哈希与配置分别生成RV32、RV64/V128/V256/V512。默认`rv64d.ir`与`ir/rv64d_v128_e64.ir`内容相同。生成脚本保留必要F/V寄存器接口、转换helper及压缩编码接口，不手工修改生成IR。源码位置预算由模型仓`configs/isla/workarounds/`统一维护；代码变化时迁移坐标，IR哈希变化本身不要求改源码坐标。
+
+## NaN-boxing控制流（2026-10-31）
+
+`nan_unbox`恢复原Sail显式if，保留boxing高位检查的两个分支。该处不再以未经整Clause性能对照证实的收益合并为ITE。`test/float_ir/check_nan_unbox_branches.py`检查全部受支持IR；可用`--fleq-json`额外核对实际两侧见证。
+
+这只恢复boxing有效/无效判断；有效boxing的低位仍可能是普通数、NaN、无穷等。其余ITE及数值分类条件、非法布局双工具链表示、ExecuteAs等独立review项不能据此算作已修复。恢复分支后需重新验证产物，历史样本数与性能记录仅适用于原版本。

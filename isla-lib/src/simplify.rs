@@ -1516,6 +1516,7 @@ fn write_exp<B: BV, V: WriteVar>(
                 IsNegative => write!(buf, "fp.isNegative ")?,
                 IsPositive => write!(buf, "fp.isPositive ")?,
                 FromIEEE(ebits, sbits) => write!(buf, "(_ to_fp {} {}) ", ebits, sbits)?,
+                ToIEEE(..) => write!(buf, "(_ fp.to_ieee_bv) ")?,
             }
             write_exp(buf, exp, shared_state, opts)?;
             write!(buf, ")")

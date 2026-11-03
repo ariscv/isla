@@ -91,7 +91,7 @@ impl fmt::Display for SmtError {
 
 impl Error for SmtError {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExecError {
     Type(String, SourceLoc),
     VariableNotFound(String, SourceLoc),

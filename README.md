@@ -498,8 +498,8 @@ RAM 区域（如 difftest 重放兜底），两种显式方式二选一：
 路径结果 JSON（`output/<arch>_<clause>.json`）中的内存相关字段：
 
 * `memory-events`：本路径的 ReadMem/WriteMem 访存事件，按**真实执行顺序**排列
-  （轨迹本身是逆时间序，收集层已整体反转）。地址/数值经 model 物化为
-  `N'hHEX` 字符串，查不到模型值的分量输出 null。
+  （轨迹本身是逆时间序，收集层已整体反转）。地址/数值使用最终求解模型
+  具体化为 `N'hHEX` 字符串；必需分量求值失败时整例不进入 `gen`。
 * `pre-memory` / `post-memory`：按事件顺序重放得到的稀疏内存快照，元素为
   `{address, bytes, value}` 连续段（段长不超过 8 字节，`value` 是段内字节按
   小端拼成位向量的十六进制）。规则：
@@ -507,11 +507,11 @@ RAM 区域（如 difftest 重放兜底），两种显式方式二选一：
     读值对应字节；首触是写则初值自由，`value` 为 null（不编造）。
   * `post-memory`：重放结束后的最终字节内容；只读未写的字节取最后一次读值
     （数组模型下与写数据一致）。
-  * 地址或数值分量查不到模型值时输出 null 并在日志中计数。
+  * 地址、读值或写数据取值失败时整例进入 `diagnostics`，不输出不完整内存快照。
 
 `WriteMem` 的 `value` 是返回布尔值，`data` 才是写入位串，`exclusive`
 标明独占写。普通写发出事件即更新数组，与布尔值无关；独占写仅在布尔值
-为 true 时更新，false 时不更新，未知时 `post-memory` 对相关字节输出 null。
+为 true 时更新，false 时不更新；结果未知时整例失败。
 异常路径上的 `post-memory` 描述这些事件的重放结果，不单独证明硬件提交。
 
 路径终值物化（最终 `check_sat` + 取模型）的两层策略（W6）：
@@ -520,9 +520,8 @@ RAM 区域（如 difftest 重放兜底），两种显式方式二选一：
   solver 中仍持有的那次模型，跳过重复求解（数组模型的读写约束是在最后
   一次 check 之后直接 Assert 的，重解代价可能远高于执行期查询）。
 * 否则按时间盒重解：环境变量 `ISLA_RISCV_MODEL_TIMEOUT_MS`（毫秒，默认
-  30000）。超时路径不卡死整个 clause，而是降级输出 JSON——`ret_val` 等
-  无需模型的结果字段照常，`test-ins`/`isa-state`/`memory-events`/
-  `pre-memory`/`post-memory` 等模型物化字段置空，日志汇总降级路径数。
+  30000）。超时路径不进入 `gen`，在 `diagnostics` 记录不完整路径，
+  `summary.status` 为 `partial`。
   真正中断 Z3 需要 `smt-thread-interrupt` feature（`make solve-%` 默认
   启用）；未启用该 feature 的构建无法中断，行为退化为普通 `check_sat`。
 
@@ -597,3 +596,75 @@ Digital Security by Design (DSbD) Programme, to deliver a DSbDtech
 enabled digital platform (grant 105694), in part funded by an Arm
 iCASE doctoral studentship (18000005, Simner), and in part funded by
 Google.
+
+### 组合执行轨迹
+
+`isarch solve-state` 支持三类可组合轨迹（构建时启用 `itrace`、`ftrace` 或 `btrace` feature）：
+
+- `--itrace=FILE`：逐指令轨迹，指令来自实际执行的 IR。
+- `--ftrace --trace-output=FILE`：函数调用和返回，复用 SMT Function 事件。
+- `--btrace --trace-output=FILE`：全部静态条件分支清单，以及各路径实际经过的条件分支；包括没有产生新任务的确定分支。
+- `--ftrace --btrace --trace-output=FILE`：只输出函数和分支，不保存普通逐指令记录。还需要指令时，使用 `--itrace=FILE --ftrace --btrace`。
+
+组合共用同一个文件；同时指定 `--itrace` 与 `--trace-output` 时路径必须一致。多 clause 自动附加 clause 文件名后缀。路径签名、指令数量、执行函数集合、耗时和诊断是公共路径信息。`branch sites` 是包括未执行分支的静态清单；`branch_edge` 才表示实际经过的边，两者都使用运行时 IR 的函数/PC 坐标。路径签名不保证全局唯一，不能单凭它证明覆盖完整。
+
+Make 入口默认关闭轨迹。例如 `make solve ALL=MRET THREADS=1 FTRACE=1 BTRACE=1`，追加 `ITRACE=1` 可同时输出逐指令记录。
+
+三种工具在代码中平级隶属 `isla-lib/src/tracetool/`：`itrace.rs` 处理逐指令记录，`ftrace.rs` 投影函数事件，`btrace.rs` 处理静态分支清单和实际边。公共 `TraceOptions`、`TraceHandler`、`TracePerPath`、`TraceCompletedPath` 通过 `tracetool` 入口提供；路径组合、writer 和共享序列分别位于 `common.rs`、`writer.rs`、`sequence.rs`。执行器共用 `trace_path`，三种工具不各建一套 writer。
+
+逐指令记录及摘要仍归 itrace 所有（`itrace::ItracePerInstr`、`itrace_records`），其他工具可以复用这些数据。公共 `TracePerPath` 组合各工具的记录，`TraceHandler` 统一提交和输出；复用不改变数据归属，各工具保留自己的采集入口。
+
+### solve-state 的部分符号化初态
+
+在 `-C` 指定的 ISA TOML 末尾添加，例如：
+
+```toml
+[initial_state]
+x1 = 42
+x2 = "?"
+x3 = "x"
+mstatus = "0b11_?????????"
+fcsr = "0b000_?????"
+```
+
+`0b` 位模式从右向左对应 bit 0、bit 1……；`0/1` 固定对应位，`?` 和 `x` 都保留为稳定的符号位，`_` 仅用于分隔。模式可以短于寄存器宽度，未写出的高位继续符号化；超过寄存器宽度报错。上述 `mstatus` 只固定 bit 10:9，不解释这些位的架构含义。具体值支持非负整数和十进制／`0x` 字符串，例如 `"0xffffffffffffffff"`。整寄存器具体值将高位补零。
+
+当前支持位向量寄存器及 Sail 的单字段位向量结构，向量寄存器按已有 `vlen` 定宽。配置中的寄存器会加入本次初态符号化和见证输出；不在 `[initial_state]` 中的寄存器继续沿用原流程。`registers.defaults` 仍用于初始化，但本配置在 solve-state 重新符号化之后施加约束。禁止配置 `x0` 或 `PC`。
+
+`?` 和 `x` 目前求解语义相同，不增加关注度或输出过滤机制；同一位多次读取保持一致。执行语义仍可以约束这些符号位，完整见证输出仍会从最终模型取得具体值。
+
+本分支默认关闭额外的 RV64 privilege/SXL/UXL/MPP 初态域限制。需要旧限制时，在 TOML **顶层**（任何表之前）添加 `initial_state_rv64_domain = true`；它与本配置共同生效，冲突时无可满足结果。已有 RVV `vtype/vl` 约束继续保留。
+
+### 求解策略
+
+直接运行 `isarch` 时，不传 `--tastic` 使用 Z3 的 `default` 策略；也可显式选择
+`--tastic qffp`、`--tastic qfaufbv` 或 `--tastic smt`。策略仍需通过当前 Z3 的随机种子参数能力检查。
+本工作区链接的官方 Z3 已包含浮点与枚举组合的策略修复，`default` 和显式 `qffp` 均可使用；
+仅更换 PATH 中的 `z3` 不会更换 Isla 实际链接的共享库。
+
+`scripts/run.mk` 为 `ALL` 中各 Clause 写明策略：非访存浮点 Clause 使用 `qffp`，其余使用 `qfaufbv`。
+`make solve-FLEQ_S` 会显式传 `--tastic qffp`，`make solve-MRET`、`make solve-LOAD` 传 `--tastic qfaufbv`。
+可用 `make solve-FLEQ_S TASTIC=smt` 临时覆盖，未新增缺少策略的报错规则。
+
+### 本工作区的官方 Z3 链接版本
+
+`make build-isarch` 和 `make solve-*` 默认使用用户前缀
+`~/.local/opt/z3-official-1fd1d3613` 中的官方 Z3，源码提交为
+`1fd1d3613c1f34c4dff36cba3209b2234f6c6d2b`。需先将该官方构建安装到此前缀，
+或用 `make build-isarch Z3_PREFIX=/path/to/installed/z3` 指定实际安装位置。
+Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/release/isarch --version`
+可确认实际加载版本。CLI 的默认策略和 Make 的各 Clause 策略保持独立。
+
+### 指令 JSON 的三种表示
+
+`solve-state` 每条记录保留 `test-ins`（助记符）和 `test-ins-encdec`（原定宽编码），
+并增加 `instruction-representations`：`mnemonic`、`encoding.bits`（精确二进制位串）、
+`encoding.hex`、`encoding.bytes-le`（按内存顺序的小端字节）及 `insn.text`（精确 `.insn`）。
+例如编码 `32'hee1750d7` 对应 `.insn 4, 0xee1750d7`、字节 `d75017ee`。
+16/32位完整编码的 `status` 为 `complete`；缺失、含未具体化位或未支持位宽明确标为 `incomplete`。
+
+助记符保留模型给出的文本。非法 BF16 寄存器布局可能被 Clang 拒绝，
+此时可用精确 `.insn` 或 `encoding.bytes-le` 生成的 `.byte` 保留原指令；
+机器码能汇编并不代表它在模型中合法退休，仍须检查 `ret_val`。
+`ExecuteAs` 是中间执行结果；生成器继续执行其载荷后才输出最终返回值和寄存器后态，
+记录中的编码和助记符仍属于原请求指令。
