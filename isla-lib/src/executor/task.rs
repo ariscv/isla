@@ -29,8 +29,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::executor::frame::{Backtrace, Frame};
 use crate::fraction::Fraction;
@@ -41,6 +41,39 @@ use crate::zencode;
 use super::execution_limits::ExecutionLimits;
 
 static TASK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static FORK_TREE_NODE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ForkTreeNode {
+    pub id: u32,
+    pub parent: Option<u32>,
+    pub branch_conditions_at_fork: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WriteSet {
+    pub modified_vars: HashSet<Name>,
+    pub modified_regs: HashSet<Name>,
+    pub memory_modified: bool,
+}
+
+impl ForkTreeNode {
+    pub fn fresh_root(branch_conditions_at_fork: usize) -> Self {
+        ForkTreeNode {
+            id: FORK_TREE_NODE_COUNTER.fetch_add(1, Ordering::SeqCst),
+            parent: None,
+            branch_conditions_at_fork,
+        }
+    }
+
+    pub fn fresh_child(parent: u32, branch_conditions_at_fork: usize) -> Self {
+        ForkTreeNode {
+            id: FORK_TREE_NODE_COUNTER.fetch_add(1, Ordering::SeqCst),
+            parent: Some(parent),
+            branch_conditions_at_fork,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TaskId {

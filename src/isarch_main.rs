@@ -385,6 +385,7 @@ fn isla_main() -> i32 {
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
+    opts.optflag("", "path-merging", "启用运行时动态路径合并 (Veritesting)");
     opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
 
     let mut hasher = Sha256::new();
@@ -454,6 +455,12 @@ fn isla_main() -> i32 {
 
     if let Some(config) = execution_limits_override {
         isa_config.execution_limits = Some(config);
+    }
+
+    if matches.opt_present("path-merging") {
+        let mut limits = isa_config.execution_limits.take().unwrap_or_default();
+        limits.path_merging = Some(true);
+        isa_config.execution_limits = Some(limits);
     }
 
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");

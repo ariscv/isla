@@ -130,6 +130,7 @@ pub enum ExecError {
     DepthLimitReached,
     InconsistentRegisterReset,
     BadInterrupt(&'static str),
+    IncompatibleMerge,
 }
 
 impl IslaError for ExecError {
@@ -185,6 +186,7 @@ impl fmt::Display for ExecError {
             DepthLimitReached => write!(f, "Execution depth limit reached"),
             InconsistentRegisterReset => write!(f, "Inconsistent register reset constraints"),
             BadInterrupt(msg) => write!(f, "Bad task interrupt: {}", msg),
+            IncompatibleMerge => write!(f, "Incompatible merge"),
         }
     }
 }

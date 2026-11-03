@@ -71,7 +71,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
-pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState};
+pub use task::{ForkTreeNode, StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
 /// following case:
@@ -1412,6 +1412,213 @@ fn loop_limit_target(reason: ExecutionLimitReason) -> Option<usize> {
     }
 }
 
+fn record_loc_write<B: BV>(loc: &Loc<Name>, frame: &mut LocalFrame<B>) {
+    if let Some(ws) = frame.write_set.as_mut() {
+        let id = loc.id();
+        if frame.local_state.vars.contains_key(&id) || frame.local_state.lets.contains_key(&id) {
+            ws.modified_vars.insert(id);
+        } else {
+            ws.modified_regs.insert(id);
+        }
+    }
+}
+
+fn detect_diamond_joins<B: BV>(instrs: &[Instr<Name, B>], pc: usize, target: usize) -> Vec<usize> {
+    let mut joins = Vec::new();
+    if target > pc + 1 && target <= instrs.len() {
+        if target > 0 {
+            if let Instr::Goto(join) = instrs[target - 1] {
+                if join >= target && join <= pc + 64 && join <= instrs.len() {
+                    joins.push(join);
+                }
+            }
+        }
+        if target <= pc + 64 {
+            joins.push(target);
+        }
+    }
+    joins
+}
+
+fn simulate_diamond_arm<'ir, B: BV>(
+    start_pc: usize,
+    join_pc: usize,
+    mut arm: LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<Option<LocalFrame<'ir, B>>, ExecError> {
+    arm.pc = start_pc;
+    arm.write_set = Some(WriteSet::default());
+    let mut steps = 0;
+    while arm.pc != join_pc {
+        if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc {
+            return Ok(None);
+        }
+        steps += 1;
+        match &arm.instrs[arm.pc] {
+            Instr::Decl(v, ty, _) => {
+                arm.vars_mut().insert(*v, UVal::Uninit(ty));
+                if let Some(ws) = arm.write_set.as_mut() {
+                    ws.modified_vars.insert(*v);
+                }
+                arm.pc += 1;
+            }
+            Instr::Init(var, _, exp, info) => {
+                let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
+                arm.vars_mut().insert(*var, UVal::Init(value));
+                if let Some(ws) = arm.write_set.as_mut() {
+                    ws.modified_vars.insert(*var);
+                }
+                arm.pc += 1;
+            }
+            Instr::Copy(loc, exp, info) => {
+                let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
+                record_loc_write(loc, &mut arm);
+                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                arm.pc += 1;
+            }
+            Instr::PrimopUnary(loc, f, arg, info) => {
+                let arg = eval_exp(arg, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
+                let value = f(arg, solver, *info)?;
+                record_loc_write(loc, &mut arm);
+                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                arm.pc += 1;
+            }
+            Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
+                let arg1 = eval_exp(arg1, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
+                let arg2 = eval_exp(arg2, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
+                let value = f(arg1, arg2, solver, *info)?;
+                record_loc_write(loc, &mut arm);
+                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                arm.pc += 1;
+            }
+            Instr::PrimopVariadic(loc, f, args, info) => {
+                let args = args
+                    .iter()
+                    .map(|arg| eval_exp(arg, &mut arm.local_state, shared_state, solver, *info).map(std::borrow::Cow::into_owned))
+                    .collect::<Result<_, _>>()?;
+                let value = f(args, solver, &mut arm, *info)?;
+                record_loc_write(loc, &mut arm);
+                assign(0, loc, value, &mut arm.local_state, shared_state, solver, *info)?;
+                arm.pc += 1;
+            }
+            Instr::Goto(target) => {
+                if *target > arm.instrs.len() || *target < start_pc {
+                    return Ok(None);
+                }
+                arm.pc = *target;
+            }
+            Instr::Jump(exp, target, info) => {
+                let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?;
+                match *value.as_ref() {
+                    Val::Bool(true) => arm.pc = *target,
+                    Val::Bool(false) => arm.pc += 1,
+                    _ => return Ok(None),
+                }
+            }
+            _ => {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(arm))
+}
+
+fn merge_two_frames<'ir, B: BV>(
+    cond_sym: Sym,
+    frame: &mut LocalFrame<'ir, B>,
+    arm_then: &LocalFrame<'ir, B>,
+    arm_else: &LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<bool, ExecError> {
+    let ws_then = match arm_then.write_set.as_ref() {
+        Some(ws) => ws,
+        None => return Ok(false),
+    };
+    let ws_else = match arm_else.write_set.as_ref() {
+        Some(ws) => ws,
+        None => return Ok(false),
+    };
+    if ws_then.memory_modified || ws_else.memory_modified {
+        return Ok(false);
+    }
+
+    let mut modified_vars = HashSet::new();
+    let mut modified_regs = HashSet::new();
+    modified_vars.extend(ws_then.modified_vars.iter().copied());
+    modified_vars.extend(ws_else.modified_vars.iter().copied());
+    modified_regs.extend(ws_then.modified_regs.iter().copied());
+    modified_regs.extend(ws_else.modified_regs.iter().copied());
+
+    for var in &modified_vars {
+        if frame.vars().contains_key(var) {
+            let v_then = arm_then.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            let v_else = arm_else.vars().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            match (v_then, v_else) {
+                (Some(vt), Some(ve)) => {
+                    let merged = crate::primop_util::merge_val(cond_sym, vt, ve, solver, info)?;
+                    frame.vars_mut().insert(*var, UVal::Init(merged));
+                }
+                _ => return Ok(false),
+            }
+        } else if frame.lets().contains_key(var) {
+            let v_then = arm_then.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            let v_else = arm_else.lets().get(var).and_then(|u| match u { UVal::Init(v) => Some(v), _ => None });
+            match (v_then, v_else) {
+                (Some(vt), Some(ve)) => {
+                    let merged = crate::primop_util::merge_val(cond_sym, vt, ve, solver, info)?;
+                    frame.lets_mut().insert(*var, UVal::Init(merged));
+                }
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    for reg in &modified_regs {
+        let r_then = arm_then.regs().get_last_if_initialized(*reg);
+        let r_else = arm_else.regs().get_last_if_initialized(*reg);
+        match (r_then, r_else) {
+            (Some(rt), Some(re)) => {
+                let merged = crate::primop_util::merge_val(cond_sym, rt, re, solver, info)?;
+                frame.regs_mut().assign(*reg, merged, shared_state);
+            }
+            _ => return Ok(false),
+        }
+    }
+
+    Ok(true)
+}
+
+fn try_merge_diamond<'ir, B: BV>(
+    cond_sym: Sym,
+    target: usize,
+    frame: &mut LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<usize>, ExecError> {
+    let pc = frame.pc;
+    let candidate_joins = detect_diamond_joins(frame.instrs, pc, target);
+    for join_pc in candidate_joins {
+        let arm_else = match simulate_diamond_arm(pc + 1, join_pc, frame.clone(), shared_state, solver)? {
+            Some(a) => a,
+            None => continue,
+        };
+        let arm_then = match simulate_diamond_arm(target, join_pc, frame.clone(), shared_state, solver)? {
+            Some(a) => a,
+            None => continue,
+        };
+
+        if merge_two_frames(cond_sym, frame, &arm_then, &arm_else, shared_state, solver, info)? {
+            solver.add_event(Event::Merge(0, 2, info));
+            return Ok(Some(join_pc));
+        }
+    }
+    Ok(None)
+}
+
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
@@ -1571,6 +1778,21 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         let can_be_false = solver.check_sat_with(&test_false, *info).is_sat()?;
 
                         if can_be_true && can_be_false {
+                            let path_merging = task_state
+                                .execution_limits
+                                .as_ref()
+                                .map(|l| l.path_merging)
+                                .unwrap_or(false);
+                            if path_merging {
+                                if let Ok(Some(new_pc)) =
+                                    try_merge_diamond(v, *target, frame, shared_state, solver, *info)
+                                {
+                                    itrace_push_branch_condition!(frame, test_true);
+                                    frame.pc = new_pc;
+                                    continue 'main_loop;
+                                }
+                            }
+
                             let decision = match limit_handler.as_ref() {
                                 Some(handler) => handler.on_branch_fork(
                                     &mut frame.execution_limit_state,
@@ -5198,6 +5420,69 @@ fn zmemreadfork(zu) {
             assert_eq!(run_worker_invariant_sampling_program(1), expected);
             assert_eq!(run_worker_invariant_sampling_program(4), expected);
         }
+    }
+
+    #[test]
+    fn path_merging_diamond_reduces_forks() {
+        let cond = test_name(100);
+        let result = test_name(101);
+        let instrs = vec![
+            Instr::Decl(cond, Ty::Bool, info()),
+            Instr::Decl(result, Ty::I64, info()),
+            Instr::Jump(Exp::Id(cond), 5, info()),
+            Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+            Instr::Goto(6),
+            Instr::Copy(Loc::Id(result), Exp::I64(20), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ];
+
+        let limits_no_merge = ExecutionLimits::default();
+        let results_no_merge = run_all_with_bindings(
+            instrs.clone(),
+            limits_no_merge,
+            empty_shared_state(),
+            RegisterBindings::new(),
+            HashMap::default(),
+        );
+        assert_eq!(results_no_merge.len(), 2);
+
+        let limits_merge = ExecutionLimits::default().with_path_merging(true);
+        let results_merge = run_all_with_bindings(
+            instrs,
+            limits_merge,
+            empty_shared_state(),
+            RegisterBindings::new(),
+            HashMap::default(),
+        );
+        assert_eq!(results_merge.len(), 1);
+        assert!(matches!(results_merge[0], Ok(Run::Finished(_))));
+    }
+
+    #[test]
+    fn path_merging_fallback_when_arm_has_exit() {
+        let cond = test_name(102);
+        let result = test_name(103);
+        let instrs = vec![
+            Instr::Decl(cond, Ty::Bool, info()),
+            Instr::Decl(result, Ty::I64, info()),
+            Instr::Jump(Exp::Id(cond), 5, info()),
+            Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+            Instr::Goto(6),
+            Instr::Exit(ExitCause::Explicit, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ];
+
+        let limits_merge = ExecutionLimits::default().with_path_merging(true);
+        let results_merge = run_all_with_bindings(
+            instrs,
+            limits_merge,
+            empty_shared_state(),
+            RegisterBindings::new(),
+            HashMap::default(),
+        );
+        assert_eq!(results_merge.len(), 2);
     }
 }
 pub fn execute_ir_function_with_checkpoint_and_memory<'ir, B: BV, R>(

@@ -101,6 +101,7 @@ pub struct ExecutionLimits {
     pub call_context_depth: Option<usize>,
     /// 受限分支具体化时使用的可复现抽样 seed。
     pub branch_sampling_seed: u64,
+    pub path_merging: bool,
     pub on_limit_reached: LimitBehavior,
 }
 
@@ -118,6 +119,7 @@ impl Default for ExecutionLimits {
             region_fork_limits: Vec::new(),
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
+            path_merging: false,
             on_limit_reached: LimitBehavior::Truncate,
         }
     }
@@ -138,6 +140,11 @@ impl ExecutionLimits {
 
     pub fn with_max_path_depth(self, max_path_depth: u64) -> Self {
         ExecutionLimits { max_path_depth: Some(max_path_depth), ..self }
+    }
+
+    pub fn with_path_merging(mut self, enabled: bool) -> Self {
+        self.path_merging = enabled;
+        self
     }
 
     pub fn with_limit_behavior(self, on_limit_reached: LimitBehavior) -> Self {
@@ -220,6 +227,9 @@ impl ExecutionLimits {
         }
         if let Some(value) = config.branch_sampling_seed {
             self = self.with_branch_sampling_seed(value);
+        }
+        if let Some(value) = config.path_merging {
+            self = self.with_path_merging(value);
         }
         if let Some(value) = config.on_limit_reached {
             self = self.with_limit_behavior(match value {
@@ -313,6 +323,7 @@ impl ExecutionLimits {
             || self.max_fork_pct_per_branch.is_some()
             || !self.branch_region_limits.is_empty()
             || !self.region_fork_limits.is_empty()
+            || self.path_merging
     }
 }
 

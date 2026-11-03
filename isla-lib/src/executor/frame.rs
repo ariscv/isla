@@ -39,7 +39,7 @@ use crate::bitvector::BV;
 use crate::error::{ExecError, SmtError};
 use crate::executor::execution_limits::ExecutionLimitPathState;
 use crate::executor::path_timing::{PathTimeTotals, PathTiming};
-use crate::executor::task::{Task, TaskId, TaskState};
+use crate::executor::task::{ForkTreeNode, Task, TaskId, TaskState, WriteSet};
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
@@ -124,19 +124,9 @@ pub struct Frame<'ir, B> {
     pub(super) function_assumptions: Arc<HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>>,
     pub(super) pc_counts: Arc<HashMap<B, usize>>,
     pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
-    /*
-     * ATTENTION git-block:
-     * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
-     * 该字段来自 origin/dev-isarch-pathmerge；字段本身由 dea623a
-     * `feat(executor): add ForkTreeNode + StateSerialize trait + IR merge annotation stub` 引入。
-     * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
-     * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
-     * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
-     * 分支条件是 itrace/path 级别的观测元数据，必须保存在 itrace_path 内部。
-     * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
-     * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
-     */
-    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
+    pub(super) write_set: Option<WriteSet>,
+    pub(super) fork_tree_node: Option<ForkTreeNode>,
+    pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
     #[cfg(feature = "tracetool")]
     pub(super) itrace_path: Arc<ItracePerPath>,
 }
@@ -157,6 +147,9 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         function_assumptions: (*frame.function_assumptions).clone(),
         pc_counts: (*frame.pc_counts).clone(),
         taken_interrupts: (*frame.taken_interrupts).clone(),
+        write_set: frame.write_set.clone(),
+        fork_tree_node: frame.fork_tree_node.clone(),
+        branch_conditions: frame.branch_conditions.clone(),
         #[cfg(feature = "tracetool")]
         itrace_path: (*frame.itrace_path).clone(),
     }
@@ -165,6 +158,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
 /// A `LocalFrame` is a mutable frame which is used by a currently
 /// executing thread. It is turned into an immutable `Frame` when the
 /// control flow forks on a choice, which can be shared by threads.
+#[derive(Clone)]
 pub struct LocalFrame<'ir, B> {
     pub(super) path_timing: PathTiming,
     pub(super) path_smt_stats: SmtCallStats,
@@ -180,29 +174,15 @@ pub struct LocalFrame<'ir, B> {
     pub(super) function_assumptions: HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>,
     pub(super) pc_counts: HashMap<B, usize>,
     pub(super) taken_interrupts: Vec<(TaskId, u8)>,
-    /*
-     * ATTENTION git-block:
-     * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
-     * 该字段来自 origin/dev-isarch-pathmerge；字段本身由 dea623a
-     * `feat(executor): add ForkTreeNode + StateSerialize trait + IR merge annotation stub` 引入。
-     * 真正需要它的是 38923e3 `feat(executor): add N-way merge_frames with write-set-aware constraint diffing`，
-     * 用途是 `merge_frames` 通过 `branch_conditions[fork_depth..]` 计算执行语义级路径条件；
-     * 更早的 9d561d1 也出现过 `frame.branch_conditions.push(...)` 的 exec-around 实验逻辑。
-     * 分支条件属于当前 itrace path 的输出上下文，不属于 executor 的可执行状态。
-     * 这里故意保留一个被注释掉且带说明的旧字段形状，方便当前 review 识别并忽略；
-     * 将来合并旧分支时，如果旧字段被带回到这个位置，应优先触发人工 review，而不是直接恢复字段。
-     */
-    // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use itrace_path
+    pub(super) write_set: Option<WriteSet>,
+    pub(super) fork_tree_node: Option<ForkTreeNode>,
+    pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,
     #[cfg(feature = "tracetool")]
     pub(super) itrace_path: ItracePerPath,
 }
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
     Frame {
-        // A frozen frame is a scheduler-safe snapshot: it stores accumulated
-        // totals, never an absolute wall or thread-CPU clock. If this snapshot
-        // is taken at a fork while the parent remains active, both paths inherit
-        // exactly the timing prefix observed at this point and diverge afterwards.
         path_time_totals: frame.path_timing.fork_snapshot(),
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
@@ -217,6 +197,9 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         function_assumptions: Arc::new(frame.function_assumptions.clone()),
         pc_counts: Arc::new(frame.pc_counts.clone()),
         taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
+        write_set: frame.write_set.clone(),
+        fork_tree_node: frame.fork_tree_node.clone(),
+        branch_conditions: frame.branch_conditions.clone(),
         #[cfg(feature = "tracetool")]
         itrace_path: Arc::new(frame.itrace_path.clone()),
     }
@@ -418,9 +401,20 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             function_assumptions: HashMap::new(),
             pc_counts: HashMap::new(),
             taken_interrupts: Vec::new(),
+            write_set: None,
+            fork_tree_node: None,
+            branch_conditions: Vec::new(),
             #[cfg(feature = "tracetool")]
             itrace_path: ItracePerPath::default(),
         }
+    }
+
+    pub fn write_set_mut(&mut self) -> Option<&mut WriteSet> {
+        self.write_set.as_mut()
+    }
+
+    pub fn write_set(&self) -> Option<&WriteSet> {
+        self.write_set.as_ref()
     }
 
     pub fn new_call(
@@ -438,6 +432,9 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();
+        new_frame.write_set = self.write_set.clone();
+        new_frame.fork_tree_node = self.fork_tree_node.clone();
+        new_frame.branch_conditions = self.branch_conditions.clone();
         #[cfg(feature = "tracetool")]
         {
             new_frame.itrace_path = self.itrace_path.clone();

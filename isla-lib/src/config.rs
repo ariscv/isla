@@ -1862,6 +1862,7 @@ pub struct ExecutionLimitsConfig {
     pub max_fork_pct_check_delay: Option<u32>,
     pub call_context_depth: Option<usize>,
     pub branch_sampling_seed: Option<u64>,
+    pub path_merging: Option<bool>,
     pub on_limit_reached: Option<LimitBehaviorConfig>,
     pub regions: Option<Vec<SourceRegionSpec>>,
     pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
@@ -2022,6 +2023,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "max_fork_pct_check_delay",
             "call_context_depth",
             "branch_sampling_seed",
+            "path_merging",
             "on_limit_reached",
             "regions",
             "branch_region_limits",
@@ -2168,6 +2170,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         call_context_depth: optional_u64(table, "call_context_depth", "execution_limits")?
             .map(|value| usize::try_from(value).expect("usize 无法表示 execution_limits.call_context_depth")),
         branch_sampling_seed: optional_u64(table, "branch_sampling_seed", "execution_limits")?,
+        path_merging: optional_bool(table, "path_merging", "execution_limits")?,
         on_limit_reached,
         regions,
         branch_region_limits,
