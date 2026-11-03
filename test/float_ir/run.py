@@ -37,6 +37,7 @@ assert run('migration-conflicts', ['python3', ROOT / 'test/float_ir/test_migrati
 assert run('nan-unbox-branches', ['python3', ROOT / 'test/float_ir/check_nan_unbox_branches.py']) == 0
 assert run('explicit-semantic-branches', ['python3', ROOT / 'test/float_ir/check_explicit_semantic_branches.py']) == 0
 assert run('special-semantic-branches', ['python3', ROOT / 'test/float_ir/check_special_semantic_branches.py']) == 0
+assert run('float-closure-branches', ['python3', ROOT / 'test/float_ir/check_float_closure_branches.py']) == 0
 for name in ['rv64d.ir', 'rv32d.ir', 'ir/rv64d_v128_e64.ir', 'ir/rv64d_v256_e64.ir', 'ir/rv64d_v512_e64.ir']:
     ir = ROOT / name
     label = ir.stem

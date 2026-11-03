@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import re
 import shlex
+from check_float_closure_branches import check_narrow, check_operand_order
 
 ROOT = Path(__file__).resolve().parents[2]
 IRS = ['rv64d.ir', 'rv32d.ir', 'ir/rv64d_v128_e64.ir',
@@ -70,8 +71,8 @@ def check(text, path):
             expected_mode = 'zsignaling' if op == 'lt' else 'false'
             assert all(resolve(mode) == expected_mode for mode, raw in calls), \
                 f'{path}: {name}quiet/ordered模式变化'
-            assert not re.search(r'(?m)^\s*(?:jump|goto) ', body), \
-                f'{path}: {name}源分类调用出现短路控制'
+            check_operand_order(name, [line.strip() for line in body.splitlines() if line.strip()],
+                                len(roles))
             operand_count += 1
 
     # 规范化出口须是真分支；ROD模式选择和普通数值ITE不在这里机械禁止。
@@ -91,48 +92,11 @@ def check(text, path):
     assert not re.search(r'= zfp32_(?:add|mul)\(', functions['zriscv_f32MulAdd']), \
         f'{path}: f32融合运算被拆成乘加'
 
-    narrow = functions['zriscv_f16ToI16_pure']
-    conditions = re.findall(r'^\s*jump (\w+) goto \d+', narrow, re.M)
-    assert len(conditions) == 1, f'{path}: f16转i16缺少唯一溢出控制分支'
-    definitions = dict(re.findall(r'^\s*(\w+) = (.*?) `', narrow, re.M))
-    inverted = re.fullmatch(r'znot_bool\((\w+)\)', definitions.get(conditions[0], ''))
-    assert inverted, f'{path}: 饱和分支未判断转换值能否由低16位符号扩展恢复'
-    comparison = re.fullmatch(r'zeq_anythingzIB32zK\((\w+), (\w+)\)',
-                              definitions.get(inverted[1], ''))
-
-    def resolve_narrow(value):
-        seen = set()
-        while value in definitions and value not in seen:
-            seen.add(value)
-            value = definitions[value]
-        return value
-
-    assert comparison and any(resolve_narrow(value).startswith('zsign_extend(')
-                              for value in comparison.groups()), f'{path}: 溢出分支条件变化'
-    assert not re.search(r'= zitezIB5zK\(', narrow), f'{path}: 饱和异常仍使用ITE合并'
-    assert len(re.findall(r'= znvFlag\(', narrow)) == 1, f'{path}: 饱和NV出口变化'
-    narrow_instructions = [line.strip() for line in narrow.splitlines() if line.strip()]
-    branch = next(pc for pc, instruction in enumerate(narrow_instructions) if instruction.startswith('jump '))
-    active = int(re.search(r'goto (\d+)', narrow_instructions[branch])[1])
-
-    def narrow_reachable(start):
-        visited, pending = set(), [start]
-        while pending:
-            pc = pending.pop()
-            if pc in visited:
-                continue
-            visited.add(pc)
-            instruction = narrow_instructions[pc]
-            if instruction.startswith('goto '):
-                pending.append(int(re.search(r'goto (\d+)', instruction)[1]))
-            elif instruction != 'end;':
-                pending.append(pc + 1)
-        return visited
-
-    nv = next(pc for pc, instruction in enumerate(narrow_instructions) if '= znvFlag(' in instruction)
-    assert nv in narrow_reachable(active) and nv not in narrow_reachable(branch + 1), \
-        f'{path}: NV计算没有仅受溢出真分支控制'
-    print(f'PASS {path}: f16转i16溢出为显式控制分支')
+    # 与完整闭环回归共用真实overflow/符号/NV/端点控制检查。
+    narrow = [line.strip() for line in functions['zriscv_f16ToI16_pure'].splitlines()
+              if line.strip()]
+    check_narrow('zriscv_f16ToI16_pure', narrow, 16, True)
+    print(f'PASS {path}: f16转i16的两端饱和与NV仍受目标Jump控制')
 
     files_line = re.search(r'(?m)^files (.*)$', text)
     assert files_line, f'{path}: 缺少源码文件表'

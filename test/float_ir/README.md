@@ -29,3 +29,14 @@ python3 test/float_ir/check_nan_unbox_branches.py --fleq-json output/rv64_zFLEQ_
 ```
 
 恢复该判断不能代表其余浮点数据条件已全部覆盖；本回归不以路径数量或执行耗时下降作为通过条件。
+
+`check_float_closure_branches.py` 检查收敛模型的浮点控制与值来源，并已接入 `run.py`。五份IR保留 `accrue_fflags` changed/Ext_F 写回控制、f16→i16 的旧溢出Jump、18个异常helper的 finite/valid gate、ROD模式与finite gate，以及跨格式/BF16转换finite gate。其余五个窄转换用同一overflow值选择NV/原flags及端点/原低位；18个异常helper在两出口保留同一NV/DZ表达式，只在有限真臂计算舍入事实，并对H/S/D代表位模式逐项核NV/DZ与gate；12个整数包装用invalid/NaN/符号值选择饱和结果，仍核候选转换值和flags来源。rounded、exact_threshold、fp_to_int_core、round与ROD jam的纯数据出口核字段来源；`ieee_mask_exact_exceptions`已删除。`check_special_semantic_branches.py`继续核源分类及20个活动lane gate。
+
+可对单份尚未安装的生成 IR 先核 CFG：
+
+```sh
+python3 test/float_ir/check_float_closure_branches.py --ir <生成IR路径>
+python3 test/float_ir/check_special_semantic_branches.py --ir <生成IR路径>
+```
+
+这些检查验证静态控制关系，不代替具体值/flags/后态的 oracle 或整 Clause 完整域求解预算。源码、IR、配置或生成器变化后，应在新五 IR 上重跑；旧版本的绿测不迁移。
