@@ -1546,6 +1546,8 @@ fn sail_truncate_lsb<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    let len = concretize_proven_i128(len, solver, info)?;
+    panic_if_negative_concretized_nat("sail_truncateLSB", &len);
     match (bits, len) {
         (Val::Bits(bits), Val::I128(len)) => match bits.truncate_lsb(len) {
             Some(truncated) => Ok(Val::Bits(truncated)),
@@ -2281,7 +2283,14 @@ fn vector_update_subrange<B: BV>(
     set_slice_internal(args[0].clone(), args[2].clone(), args[3].clone(), solver, info)
 }
 
-fn undefined_vector<B: BV>(len: Val<B>, elem: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+fn undefined_vector<B: BV>(
+    len: Val<B>,
+    elem: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    let len = concretize_proven_i128(len, solver, info)?;
+    panic_if_negative_concretized_nat("undefined_vector", &len);
     if let Val::I128(len) = len {
         if let Ok(len) = usize::try_from(len) {
             Ok(Val::Vector(vec![elem; len]))

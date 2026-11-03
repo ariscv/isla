@@ -61,6 +61,7 @@ use crate::zencode;
 mod execution_limits;
 mod frame;
 mod path_timing;
+mod symbolic_length;
 mod task;
 
 use crate::register::RegisterBindings;
@@ -1325,6 +1326,9 @@ macro_rules! itrace_fork_frame_with_branch_condition {
     }};
 }
 
+use itrace_fork_frame_with_branch_condition;
+use itrace_push_branch_condition;
+
 /// 路径撞上 `--timeout` 预算时，输出这条路径的 SMT 用时构成与超时原因判定。
 ///
 /// 关键区分是"确实需要更多时间"还是"少数 SMT 操作打满单次上限把预算吃掉了"：前者放宽
@@ -2157,7 +2161,26 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
             Instr::PrimopUnary(loc, f, arg, info) => {
                 let arg = eval_exp(arg, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                let value = f(arg, solver, *info)?;
+                let symbols = [if let Val::Symbolic(sym) = &arg { Some(*sym) } else { None }];
+                let value = match f(arg, solver, *info) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if symbolic_length::retry_symbolic_length(
+                            error,
+                            &symbols,
+                            task_id,
+                            task_fraction,
+                            stop_conditions,
+                            fork_sink,
+                            frame,
+                            task_state,
+                            solver,
+                        )? {
+                            continue 'main_loop;
+                        }
+                        return Ok(Run::Dead);
+                    }
+                };
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
@@ -2165,17 +2188,56 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
                 let arg1 = eval_exp(arg1, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
                 let arg2 = eval_exp(arg2, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                let value = f(arg1, arg2, solver, *info)?;
+                let symbols = [&arg1, &arg2].map(|arg| if let Val::Symbolic(sym) = arg { Some(*sym) } else { None });
+                let value = match f(arg1, arg2, solver, *info) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if symbolic_length::retry_symbolic_length(
+                            error,
+                            &symbols,
+                            task_id,
+                            task_fraction,
+                            stop_conditions,
+                            fork_sink,
+                            frame,
+                            task_state,
+                            solver,
+                        )? {
+                            continue 'main_loop;
+                        }
+                        return Ok(Run::Dead);
+                    }
+                };
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
             Instr::PrimopVariadic(loc, f, args, info) => {
-                let args = args
+                let args: Vec<_> = args
                     .iter()
                     .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, *info).map(Cow::into_owned))
                     .collect::<Result<_, _>>()?;
-                let value = f(args, solver, frame, *info)?;
+                let symbols: Vec<_> =
+                    args.iter().map(|arg| if let Val::Symbolic(sym) = arg { Some(*sym) } else { None }).collect();
+                let value = match f(args, solver, frame, *info) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if symbolic_length::retry_symbolic_length(
+                            error,
+                            &symbols,
+                            task_id,
+                            task_fraction,
+                            stop_conditions,
+                            fork_sink,
+                            frame,
+                            task_state,
+                            solver,
+                        )? {
+                            continue 'main_loop;
+                        }
+                        return Ok(Run::Dead);
+                    }
+                };
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
@@ -5659,6 +5721,198 @@ fn zmemreadfork(zu) {
         }
     }
 
+    #[test]
+    fn review6_i64_dynamic_length() {
+        for consumer in [
+            "zeros",
+            "ones",
+            "replicate_bits",
+            "vector_subrange",
+            "vector_subrange_low",
+            "zero_extend",
+            "sign_extend",
+            "sail_truncateLSB",
+            "undefined_vector",
+            "vector_init",
+            "get_slice_int",
+        ] {
+            for enabled in [false, true] {
+                let cond = test_name(160);
+                let length = test_name(161);
+                let wide = test_name(162);
+                let buffer = test_name(163);
+                let consume = match consumer {
+                    "zeros" | "ones" => Instr::PrimopUnary(
+                        Loc::Id(buffer),
+                        *crate::primop::unary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "replicate_bits" | "zero_extend" | "sign_extend" | "sail_truncateLSB" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Bits(B64::new(1, if consumer == "sail_truncateLSB" { 64 } else { 1 })),
+                        Exp::Id(wide),
+                        info(),
+                    ),
+                    "undefined_vector" | "vector_init" => Instr::PrimopBinary(
+                        Loc::Id(buffer),
+                        *crate::primop::binary_primops::<B64>().get(consumer).unwrap(),
+                        Exp::Id(wide),
+                        Exp::Bool(false),
+                        info(),
+                    ),
+                    "get_slice_int" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get(consumer).unwrap(),
+                        vec![Exp::Id(wide), Exp::I128(0), Exp::I128(0)],
+                        info(),
+                    ),
+                    "vector_subrange" | "vector_subrange_low" => Instr::PrimopVariadic(
+                        Loc::Id(buffer),
+                        *crate::primop::variadic_primops::<B64>().get("vector_subrange").unwrap(),
+                        if consumer == "vector_subrange_low" {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::I128(23), Exp::Id(wide)]
+                        } else {
+                            vec![Exp::Bits(B64::new(0, 64)), Exp::Id(wide), Exp::I128(1)]
+                        },
+                        info(),
+                    ),
+                    _ => unreachable!(),
+                };
+                let widen = *crate::primop::unary_primops::<B64>().get("%i64->%i").unwrap();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(length, Ty::I64, info()),
+                    Instr::Decl(wide, Ty::I128, info()),
+                    Instr::Decl(buffer, Ty::AnyBits, info()),
+                    Instr::Jump(Exp::Id(cond), 7, info()),
+                    Instr::Copy(Loc::Id(length), Exp::I64(8), info()),
+                    Instr::Goto(8),
+                    Instr::Copy(Loc::Id(length), Exp::I64(16), info()),
+                    Instr::PrimopUnary(Loc::Id(wide), widen, Exp::Id(length), info()),
+                    consume,
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(buffer), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("第六轮 I64 动态长度：算子={consumer}，合并={enabled}，完成={finished}，错误={errors:?}");
+                assert!(errors.is_empty(), "合法动态长度路径不应在合并后失败");
+                let mut widths: Vec<_> = results
+                    .iter()
+                    .filter_map(|result| match result {
+                        Ok(Run::Finished(Val::Bits(bits))) => Some(bits.len()),
+                        Ok(Run::Finished(Val::Vector(values))) => Some(values.len() as u32),
+                        _ => None,
+                    })
+                    .collect();
+                widths.sort_unstable();
+                assert_eq!(widths, vec![8, 16], "必须完成两个不同长度候选");
+            }
+        }
+    }
+
+    #[test]
+    fn review6_constructor_dynamic_length() {
+        for enabled in [false, true] {
+            let mut shared = empty_shared_state();
+            let a = shared.symtab.intern("za");
+            let b = shared.symtab.intern("zb");
+            let first = shared.symtab.intern("zfirst");
+            let result = shared.symtab.intern("zresult");
+            let tag = shared.symtab.intern("ztag");
+            let other_tag = shared.symtab.intern("zother");
+            let ca = shared.symtab.intern("zca");
+            let cb = shared.symtab.intern("zcb");
+            let cc = shared.symtab.intern("zcc");
+            let buffer = shared.symtab.intern("zbuffer");
+            let union = test_name(170);
+            shared.type_info.unions.insert(union, vec![(tag, Ty::I128), (other_tag, Ty::I128)]);
+            shared.type_info.union_ctors.extend([tag, other_tag]);
+            let zeros = *crate::primop::unary_primops::<B64>().get("zeros").unwrap();
+            let instrs = vec![
+                Instr::Decl(a, Ty::Bool, info()),
+                Instr::Decl(b, Ty::Bool, info()),
+                Instr::Decl(first, Ty::Union(union), info()),
+                Instr::Decl(result, Ty::Union(union), info()),
+                Instr::Decl(buffer, Ty::AnyBits, info()),
+                Instr::Jump(Exp::Id(a), 8, info()),
+                Instr::Copy(Loc::Id(first), Exp::Id(cb), info()),
+                Instr::Goto(9),
+                Instr::Copy(Loc::Id(first), Exp::Id(ca), info()),
+                Instr::Jump(Exp::Id(b), 12, info()),
+                Instr::Copy(Loc::Id(result), Exp::Id(cc), info()),
+                Instr::Goto(13),
+                Instr::Copy(Loc::Id(result), Exp::Id(first), info()),
+                Instr::Jump(Exp::Kind(tag, Box::new(Exp::Id(result))), 15, info()),
+                Instr::PrimopUnary(Loc::Id(buffer), zeros, Exp::Unwrap(tag, Box::new(Exp::Id(result))), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::End,
+            ];
+            let mut lets = HashMap::default();
+            lets.insert(ca, UVal::Init(Val::Ctor(tag, Box::new(Val::I128(8)))));
+            lets.insert(cb, UVal::Init(Val::Ctor(other_tag, Box::new(Val::I128(8)))));
+            lets.insert(cc, UVal::Init(Val::Ctor(tag, Box::new(Val::I128(16)))));
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_path_merging(enabled),
+                shared,
+                RegisterBindings::new(),
+                lets,
+            );
+            let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+            let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+            eprintln!("第六轮构造子动态长度：合并={enabled}，完成={finished}，错误={errors:?}");
+            assert!(errors.is_empty(), "构造子载荷中的合法动态长度路径不应在合并后失败");
+        }
+    }
+
+    #[test]
+    fn review6_bits_dynamic_length() {
+        for enabled in [false, true] {
+            let cond = test_name(160);
+            let bits = test_name(161);
+            let length = test_name(162);
+            let buffer = test_name(163);
+            let zeros = *crate::primop::unary_primops::<B64>().get("zeros").unwrap();
+            let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+            let instrs = vec![
+                Instr::Decl(cond, Ty::Bool, info()),
+                Instr::Decl(bits, Ty::Bits(64), info()),
+                Instr::Decl(length, Ty::I128, info()),
+                Instr::Decl(buffer, Ty::AnyBits, info()),
+                Instr::Jump(Exp::Id(cond), 7, info()),
+                Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(8, 64)), info()),
+                Instr::Goto(8),
+                Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(16, 64)), info()),
+                Instr::PrimopUnary(Loc::Id(length), unsigned, Exp::Id(bits), info()),
+                Instr::PrimopUnary(Loc::Id(buffer), zeros, Exp::Id(length), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::End,
+            ];
+            let results = run_all_with_bindings(
+                instrs,
+                ExecutionLimits::default().with_path_merging(enabled),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+            let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+            eprintln!("第六轮位向量动态长度：合并={enabled}，完成={finished}，错误={errors:?}");
+            assert!(errors.is_empty(), "由位向量转换的合法动态长度路径不应在合并后失败");
+            assert_eq!(finished, 2, "必须完成两个不同长度候选");
+        }
+    }
+
     // 第三轮审查反例：只写入临时副本。
     #[test]
     fn review3_lazy_read_must_keep_identity() {
@@ -6281,11 +6535,12 @@ fn zmemreadfork(zu) {
         let b = solver.declare_const(smtlib::Ty::Bool, info());
         let tag_a = test_name(150);
         let tag_b = test_name(151);
-        let ca = Val::Ctor(tag_a, Box::new(Val::I128(11)));
-        let cb = Val::Ctor(tag_b, Box::new(Val::I128(22)));
-        let sa = crate::primop_util::merge_val(a, &ca, &Val::Ctor(tag_b, Box::new(Val::I128(12))), &mut solver, info())
+        // 真值表验证使用可合并的 I64；不同 I128 载荷按第六轮策略拒绝合并。
+        let ca = Val::Ctor(tag_a, Box::new(Val::I64(11)));
+        let cb = Val::Ctor(tag_b, Box::new(Val::I64(22)));
+        let sa = crate::primop_util::merge_val(a, &ca, &Val::Ctor(tag_b, Box::new(Val::I64(12))), &mut solver, info())
             .unwrap();
-        let sb = crate::primop_util::merge_val(b, &Val::Ctor(tag_a, Box::new(Val::I128(21))), &cb, &mut solver, info())
+        let sb = crate::primop_util::merge_val(b, &Val::Ctor(tag_a, Box::new(Val::I64(21))), &cb, &mut solver, info())
             .unwrap();
         for (lhs, rhs) in [(&ca, &cb), (&ca, &sb), (&sa, &cb), (&sa, &sb)] {
             let merged = crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()).unwrap();

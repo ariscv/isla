@@ -261,7 +261,7 @@ pub fn build_ite<B: BV>(
 
         (Val::Ctor(l_id, lhs), Val::Ctor(r_id, rhs)) => {
             if l_id == r_id {
-                Ok(Val::Ctor(*l_id, Box::new(build_ite(b, lhs, rhs, solver, info)?)))
+                Ok(Val::Ctor(*l_id, Box::new(merge_val(b, lhs, rhs, solver, info)?)))
             } else {
                 use smtlib::Exp::*;
                 let sym_id =
@@ -281,7 +281,7 @@ pub fn build_ite<B: BV>(
 
             let mut possibilities = rhs.clone();
             match possibilities.entry(*l_id) {
-                Entry::Occupied(o) => *o.into_mut() = build_ite(b, lhs, o.get(), solver, info)?,
+                Entry::Occupied(o) => *o.into_mut() = merge_val(b, lhs, o.get(), solver, info)?,
                 Entry::Vacant(v) => {
                     v.insert(lhs.as_ref().clone());
                 }
@@ -303,7 +303,7 @@ pub fn build_ite<B: BV>(
             let mut possibilities = lhs.clone();
             for (ctor, rhs_val) in rhs.iter() {
                 match possibilities.entry(*ctor) {
-                    Entry::Occupied(o) => *o.into_mut() = build_ite(b, o.get(), rhs_val, solver, info)?,
+                    Entry::Occupied(o) => *o.into_mut() = merge_val(b, o.get(), rhs_val, solver, info)?,
                     Entry::Vacant(v) => {
                         v.insert(rhs_val.clone());
                     }
@@ -369,6 +369,28 @@ mod build_ite_tests {
         let lhs = Val::Ctor(ctor, Box::new(Val::Ctor(ctor, Box::new(Val::Unit))));
         let rhs = lhs.clone();
         assert_eq!(build_ite(condition, &lhs, &rhs, &mut solver, SourceLoc::unknown()).unwrap(), lhs);
+
+        // 同标签载荷必须遵循 merge_val：不同 I128 不可藏进构造子后绕过兼容性检查。
+        let info = SourceLoc::unknown();
+        let tag = solver.declare_const(smtlib::Ty::BitVec(32), info);
+        let left_payload = Val::I128(8);
+        let right_payload = Val::I128(16);
+        let left_values = [
+            Val::Ctor(ctor, Box::new(left_payload.clone())),
+            Val::SymbolicCtor(tag, HashMap::from_iter([(ctor, left_payload)])),
+        ];
+        let right_values = [
+            Val::Ctor(ctor, Box::new(right_payload.clone())),
+            Val::SymbolicCtor(tag, HashMap::from_iter([(ctor, right_payload)])),
+        ];
+        for left in &left_values {
+            for right in &right_values {
+                assert!(matches!(
+                    build_ite(condition, left, right, &mut solver, info),
+                    Err(ExecError::IncompatibleMerge)
+                ));
+            }
+        }
 
         let mut left_fields = ahash::HashMap::default();
         left_fields.insert(ctor, Val::Unit);
