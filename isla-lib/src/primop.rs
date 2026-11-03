@@ -1276,6 +1276,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
 
     let candidate = {
         let mut model = Model::new(solver);
+        model.set_complete_model(true);
         match model.get_var(sym)? {
             ModelVal::Exp(Exp::Bits64(bv)) => bv.signed(),
             ModelVal::Exp(Exp::Bits(bits)) => match i128_from_model_bits(&bits) {
@@ -1644,6 +1645,23 @@ pub fn subrange_internal<B: BV>(
         let width = length_bits(&bits, solver, info)?;
         if *low < 0 || high < low || *high >= i128::from(width) {
             return Err(ExecError::Type("vector_subrange out of bounds".to_string(), info));
+        }
+    } else if matches!(high, Val::Symbolic(_)) || matches!(low, Val::Symbolic(_)) {
+        let source_width = length_bits(&bits, solver, info)?;
+        let high = smt_value(&high, info)?;
+        let low = smt_value(&low, info)?;
+        let out_of_bounds = Exp::Or(
+            Box::new(Exp::Bvsge(Box::new(high.clone()), Box::new(smt_i128(i128::from(source_width))))),
+            Box::new(Exp::Or(
+                Box::new(Exp::Bvslt(Box::new(low.clone()), Box::new(smt_i128(0)))),
+                Box::new(Exp::Bvsgt(Box::new(low), Box::new(high))),
+            )),
+        );
+        if !solver.check_sat_with(&out_of_bounds, info).is_unsat()? {
+            if solver.check_sat_with(&Exp::Not(Box::new(out_of_bounds)), info).is_unsat()? {
+                return Err(ExecError::Type("vector_subrange bounds out of range".to_string(), info));
+            }
+            return Err(ExecError::SymbolicLength("vector_subrange", info));
         }
     }
     match (bits, high, low) {
@@ -2964,8 +2982,23 @@ pub fn eq_anything<B: BV>(
             let mut common = false;
             for (id, left) in l_ctors {
                 let Some(right) = r_ctors.get(&id) else { continue };
+                let both_tags = Exp::And(
+                    Box::new(Exp::Eq(Box::new(Exp::Var(l_sym)), Box::new(id.to_smt()))),
+                    Box::new(Exp::Eq(Box::new(Exp::Var(r_sym)), Box::new(id.to_smt()))),
+                );
+                if solver.check_sat_with(&both_tags, info).is_unsat()? {
+                    continue;
+                }
                 common = true;
-                let payload = eq_anything(left, right.clone(), solver, info)?;
+                let payload = match eq_anything(left, right.clone(), solver, info) {
+                    Ok(payload) => payload,
+                    Err(ExecError::Type(..))
+                        if !solver.check_sat_with(&Exp::Not(Box::new(both_tags)), info).is_unsat()? =>
+                    {
+                        return Err(ExecError::SymbolicLength("eq_anything", info));
+                    }
+                    Err(error) => return Err(error),
+                };
                 let payload = match payload {
                     Val::Bool(value) => Exp::Bool(value),
                     Val::Symbolic(sym) => Exp::Var(sym),
@@ -2993,8 +3026,19 @@ pub fn eq_anything<B: BV>(
         (Val::SymbolicCtor(sym, constructors), Val::Ctor(id, payload))
         | (Val::Ctor(id, payload), Val::SymbolicCtor(sym, constructors)) => {
             let Some(value) = constructors.get(&id) else { return Ok(Val::Bool(false)) };
-            let equal_payload = eq_anything(value.clone(), *payload, solver, info)?;
             let equal_tag = Exp::Eq(Box::new(Exp::Var(sym)), Box::new(id.to_smt()));
+            if solver.check_sat_with(&equal_tag, info).is_unsat()? {
+                return Ok(Val::Bool(false));
+            }
+            let equal_payload = match eq_anything(value.clone(), *payload, solver, info) {
+                Ok(payload) => payload,
+                Err(ExecError::Type(..))
+                    if !solver.check_sat_with(&Exp::Not(Box::new(equal_tag.clone())), info).is_unsat()? =>
+                {
+                    return Err(ExecError::SymbolicLength("eq_anything", info));
+                }
+                Err(error) => return Err(error),
+            };
             match equal_payload {
                 Val::Bool(false) => Ok(Val::Bool(false)),
                 Val::Bool(true) => solver.define_const(equal_tag, info).into(),
@@ -5807,13 +5851,14 @@ mod tests {
         crate::smt::reset_path_smt_stats();
         assert_eq!(proven_symbolic_i128(vs1, &mut solver, SourceLoc::unknown())?, None);
         let one_proof = crate::smt::path_smt_stats().calls;
-        assert!(one_proof <= 4, "证明失败时用了 {} 次求解", one_proof);
+        // 完整模型求值包含一次整体求值和两次 64 位分块求值，再加两次可满足性查询。
+        assert!(one_proof <= 5, "证明失败时用了 {} 次求解", one_proof);
 
         // max_int 会对两个参数各做一次具体化，逐 lane 调用时这里的常数就是路径预算的关键。
         crate::smt::reset_path_smt_stats();
         let _ = max_int(Val::Symbolic(vs1), Val::Symbolic(vs2), &mut solver, SourceLoc::unknown())?;
         let max_calls = crate::smt::path_smt_stats().calls;
-        assert!(max_calls <= 8, "一次 max_int 用了 {} 次求解", max_calls);
+        assert!(max_calls <= 10, "一次 max_int 用了 {} 次求解", max_calls);
 
         Ok(())
     }
@@ -6062,6 +6107,20 @@ mod tests {
         let high = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
         let low = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
         solver.assert_eq(Exp::Bvsub(Box::new(Exp::Var(high)), Box::new(Exp::Var(low))), smt_i128(7));
+
+        assert!(matches!(
+            subrange_internal(
+                Val::Bits(B64::zeros(64)),
+                Val::Symbolic(high),
+                Val::Symbolic(low),
+                &mut solver,
+                SourceLoc::unknown(),
+            ),
+            Err(ExecError::SymbolicLength("vector_subrange", _))
+        ));
+        solver.assert(Exp::Bvsge(Box::new(Exp::Var(low)), Box::new(smt_i128(0))));
+        solver.assert(Exp::Bvsle(Box::new(Exp::Var(low)), Box::new(Exp::Var(high))));
+        solver.assert(Exp::Bvslt(Box::new(Exp::Var(high)), Box::new(smt_i128(64))));
 
         match subrange_internal(
             Val::Symbolic(solver.declare_const(Ty::BitVec(64), SourceLoc::unknown())),

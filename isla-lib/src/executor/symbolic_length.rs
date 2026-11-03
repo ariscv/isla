@@ -97,7 +97,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         "slice_internal" | "platform_read_memt" | "read_mem_address" | "write_mem_address" => &[2],
         "read_memt_address" | "write_memt_address" => &[1],
         "read_mem" | "read_mem_ifetch" | "read_mem_exclusive" => &[3],
-        "subrange_internal" => &[1, 2],
+        "subrange_internal" | "vector_subrange" => &[1, 2],
+        "eq_anything" => &[0, 1],
         _ => return Err(error),
     };
     if solver.check_sat(info).is_unsat()? {
@@ -106,16 +107,33 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
 
     for &index in indices {
         let mut symbols = Vec::new();
-        match &operands[index] {
-            Val::Symbolic(sym) => symbols.push(*sym),
-            Val::MixedBits(segments) => {
-                for segment in segments {
-                    if let crate::ir::BitsSegment::Symbolic(sym) = segment {
+        if op == "eq_anything" {
+            // 只枚举构造子标签，保留载荷中位向量数据的符号关系。
+            let mut values = vec![&operands[index]];
+            while let Some(value) = values.pop() {
+                match value {
+                    Val::SymbolicCtor(sym, constructors) => {
                         symbols.push(*sym);
+                        values.extend(constructors.values());
                     }
+                    Val::Ctor(_, payload) => values.push(payload),
+                    Val::Struct(fields) => values.extend(fields.values()),
+                    Val::Vector(elements) | Val::List(elements) => values.extend(elements),
+                    _ => (),
                 }
             }
-            _ => (),
+        } else {
+            match &operands[index] {
+                Val::Symbolic(sym) => symbols.push(*sym),
+                Val::MixedBits(segments) => {
+                    for segment in segments {
+                        if let crate::ir::BitsSegment::Symbolic(sym) = segment {
+                            symbols.push(*sym);
+                        }
+                    }
+                }
+                _ => (),
+            }
         }
         for sym in symbols {
             if fork_symbolic_value(

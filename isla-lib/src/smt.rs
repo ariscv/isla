@@ -1683,7 +1683,7 @@ impl ModelVal {
     }
 }
 
-fn model_bits_to_bv<B: BV>(bits: &[bool]) -> Result<B, ExecError> {
+pub(crate) fn model_bits_to_bv<B: BV>(bits: &[bool]) -> Result<B, ExecError> {
     let width: u32 = bits.len().try_into().expect("模型位向量长度超出 u32");
     if width > B::MAX_WIDTH {
         return Err(ExecError::Type(
