@@ -2260,6 +2260,7 @@ mod tests {
 
     #[test]
     fn setup_pre_state固定值覆盖寄存器且同步输出() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let mut symtab = Symtab::new();
@@ -2368,6 +2369,7 @@ mod tests {
 
     #[test]
     fn solve_pre_state_serializes_arbitrary_fpr_and_vpr_registers() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // F4（campaign24，30 例 ok 路径 post-mismatch）：f/v 寄存器在 pre_state
         // 有符号，但访存路径只把它们的值织进 DefineConst 链、不产生断言，最终
         // 模型不解释 → arbitrary 过滤把它们从 isa-state 丢弃 → 重放无法编程
@@ -2631,6 +2633,7 @@ mod tests {
     /// 具体字段（base/属性/具体 size）保持 W10 构造形状。
     #[test]
     fn pma_regions_symbolic_injection_assigns_register_and_records_syms() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         use isla_lib::config::PmaSize;
         use isla_lib::ir::SharedState;
         use isla_lib::register::RegisterBindings;
@@ -2817,6 +2820,7 @@ mod tests {
     /// 直接 Symbolic；pin 与 nonzero 断言都真实进入 solver（违反即 Unsat）。
     #[test]
     fn symbolic_csrs_injection_shapes_and_constraints() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let fixture = symbolic_csr_fixture();
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -2887,6 +2891,7 @@ mod tests {
     /// ④ 全组干净 ∧ SD=0 → Sat（合法域非空）。
     #[test]
     fn symbolic_csrs_derive_bit_equivalence_is_bidirectional() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let pin_mask = 0x0000_183C_0000_0000u64;
         let pin_value = 0x0000_1008_0000_0000u64;
         let fixture = symbolic_csr_fixture();
@@ -2965,6 +2970,7 @@ mod tests {
     /// W22：派生位/组位超出实际寄存器位宽是配置与 IR 的矛盾，注入期硬 panic。
     #[test]
     fn symbolic_csrs_derive_bit_rejects_out_of_width_bits() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let fixture = symbolic_csr_fixture();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut symtab = Symtab::new();
@@ -3010,7 +3016,13 @@ mod tests {
             let mut solver = Solver::<B64>::new(&context);
             target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
         }));
-        assert!(result.is_err(), "派生位超出位宽应 panic");
+        let panic = result.expect_err("派生位超出位宽应 panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic 应携带文字");
+        assert!(message.contains("派生位 40 超出 32 位宽"), "错误应来自派生位检查: {message}");
         let _ = fixture;
     }
 
@@ -3018,6 +3030,7 @@ mod tests {
     /// 门使用；未注入记录（空 pre_state）是调用序错误，硬 panic。
     #[test]
     fn symbolic_csrs_concretize_for_gate() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let fixture = symbolic_csr_fixture();
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -3050,6 +3063,7 @@ mod tests {
     /// 不支持形状（两字段 struct）与超宽 pin_mask 均硬 panic（防御式）。
     #[test]
     fn symbolic_csrs_rejects_unsupported_shapes() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let mut symtab = Symtab::new();
         let wide_name = symtab.intern(intern_static(&zencode::encode("wide_csr")));
         let two_field_name = symtab.intern(intern_static(&zencode::encode("two_field_csr")));
@@ -3092,7 +3106,13 @@ mod tests {
             let mut solver = Solver::<B64>::new(&context);
             target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
         }));
-        assert!(result.is_err(), "pin_mask 超宽应 panic");
+        let panic = result.expect_err("pin_mask 超宽应 panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic 应携带文字");
+        assert!(message.contains("pin_mask") && message.contains("超出 32 位宽"), "错误应来自掩码位宽检查: {message}");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut target = rv64();
@@ -3104,7 +3124,13 @@ mod tests {
             let mut solver = Solver::<B64>::new(&context);
             target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
         }));
-        assert!(result.is_err(), "两字段 struct 应 panic");
+        let panic = result.expect_err("两字段 struct 应 panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic 应携带文字");
+        assert!(message.contains("只支持单 bits 字段"), "错误应来自结构形状检查: {message}");
     }
 
     /// 端到端输出：注入后 pre_state 的符号 CSR 在模型下求解，solve_pre_state
@@ -3112,6 +3138,7 @@ mod tests {
     /// （CSR 走 pre_state 主通道，无需额外记录）。
     #[test]
     fn solve_pre_state_outputs_symbolic_csr_model_value() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let fixture = symbolic_csr_fixture();
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);

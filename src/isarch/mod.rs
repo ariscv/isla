@@ -1225,6 +1225,7 @@ mod tests {
 
     #[test]
     fn inline_mapping_match_failure_is_not_default_rejection() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let mut symtab = Symtab::new();
         let function = symtab.intern("zassembly_forwards");
         let argument = symtab.intern("zargument");

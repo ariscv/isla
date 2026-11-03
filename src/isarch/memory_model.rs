@@ -278,6 +278,7 @@ mod tests {
 
     #[test]
     fn 同地址两次读模型值一致() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -297,6 +298,7 @@ mod tests {
 
     #[test]
     fn 写八字节后读同地址等于写数据() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -318,6 +320,7 @@ mod tests {
 
     #[test]
     fn 写四字节后读中间一字节等于对应字节() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -346,6 +349,7 @@ mod tests {
 
     #[test]
     fn 独占写事件按模型语义必已提交_bool钉为真() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // F3（campaign24，7 例 AMO 非 aqrl post==pre）：Sail 模型的 write_ram 对
         // 并发接口返回值 `Ok(_) => true`（phys_mem_interface.sail:109-115，IR
         // zwrite_ram 中 zz410 = true），独占写 Bool 被调用方丢弃、永不约束——
@@ -374,6 +378,7 @@ mod tests {
 
     #[test]
     fn 独占写失败分支在注入后不可表达() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // 原"独占失败写"场景（调用方事后断言 Bool=false）在钉真后必须整体 Unsat：
         // 这不是合法路径，而是模型不变量违反，防御式地让断言方直接看到矛盾。
         let ctx = Context::new(Config::new());
@@ -388,6 +393,7 @@ mod tests {
 
     #[test]
     fn 普通写返回布尔假仍提交数据() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -407,6 +413,7 @@ mod tests {
 
     #[test]
     fn 独占符号写提交后读值与先前读取解耦() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // 钉真后不存在"真假两臂"：独占写无条件提交，写后读值恒等于写数据，
         // 与写前读值是否一致无关（写数据可以覆盖任意先前内容）。
         let ctx = Context::new(Config::new());
@@ -431,6 +438,7 @@ mod tests {
     /// W7 立即检查直接 BadRead 判死，不发出 ReadMem 事件。
     #[test]
     fn 判死区域内符号读立即BadRead无事件且Unsat() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -459,6 +467,7 @@ mod tests {
     /// → BadWrite 判死、无事件、断言集 Unsat。
     #[test]
     fn 判死区域内符号写立即BadWrite无事件且Unsat() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -494,6 +503,7 @@ mod tests {
     /// 边界精确性：恰好在判死区域外完成的八字节读可满足，跨入一字节即死。
     #[test]
     fn 判死区域外符号读Sat事件可见且边界精确() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -540,6 +550,7 @@ mod tests {
     /// 不因 ReadOpts::ifetch 而豁免。
     #[test]
     fn 判死区域对ifetch读同样生效() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -566,6 +577,7 @@ mod tests {
     /// 区域内即死，区域外可解。
     #[test]
     fn 多判死区域并集生效() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -597,6 +609,7 @@ mod tests {
 
     #[test]
     fn 未配置区域时符号地址不受限() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -618,6 +631,7 @@ mod tests {
     /// 末字节伸入区域）同样判死。
     #[test]
     fn 具体地址落在判死区域直接拒绝() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // 读侧：区域内具体地址
         {
             let ctx = Context::new(Config::new());
@@ -701,6 +715,7 @@ mod tests {
     /// 区域的具体地址命中语义——快照内容照常可读、事件照常发出。
     #[test]
     fn 判死区域不改变concrete区域具体读取() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -728,6 +743,7 @@ mod tests {
 
     #[test]
     fn 克隆内存保留数组模型回调() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -753,6 +769,7 @@ mod tests {
 
     #[test]
     fn 克隆路径的写入不污染另一条路径() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut initial = Memory::<B64>::new();
@@ -780,6 +797,7 @@ mod tests {
 
     #[test]
     fn 六十四位地址高位不与低位别名() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -808,6 +826,7 @@ mod tests {
     /// 已删除）——默认全符号化下具体地址写走 write_symbolic，正常提交。
     #[test]
     fn 具体地址写concrete区域不再被白名单拒绝() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -833,6 +852,7 @@ mod tests {
 
     #[test]
     fn 默认内存保留具体区域重叠写入错误() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -859,6 +879,7 @@ mod tests {
     /// concrete 区域（无 Symbolic）时区域约束整体不生成，读地址全域自由。
     #[test]
     fn 数组模型下未约束符号读地址不被具体区域预检查拒绝() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -895,6 +916,7 @@ mod tests {
     /// **不加约束**（地址全域自由），不是"禁止一切写"。
     #[test]
     fn 零符号区域时符号写不被空or链判死() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -930,6 +952,7 @@ mod tests {
     /// 内置默认 CLINT 只参与具体地址分派，不参与约束生成。
     #[test]
     fn 零配置全符号化读写不受区域约束且事件可见() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         use crate::isarch::memory_builder::MemoryBuilder;
         use crate::isarch::target::RV64;
 
@@ -991,6 +1014,7 @@ mod tests {
     /// W6/W7 证据一致：ROM 边界断言 addr ∈ [0x1000,0x2000) + 判死同区间。
     #[test]
     fn 判死约束与既有路径断言矛盾时符号读立即判死() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -1022,6 +1046,7 @@ mod tests {
     /// 不把 Unsat 留到路径终值查询。
     #[test]
     fn 判死约束与既有路径断言矛盾时符号写立即判死() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -1064,6 +1089,7 @@ mod tests {
     /// 由模型 PMA 分叉决定（端到端验证）。
     #[test]
     fn 默认分层下配置sym_ram符号读不被区域圈定() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -1098,6 +1124,7 @@ mod tests {
     /// 无关）。
     #[test]
     fn 默认分层下配置sym_ram符号写不被区域圈定() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -1141,6 +1168,7 @@ mod tests {
     /// 不产生任何约束（W9 纯声明语义）。
     #[test]
     fn 默认分层下与PMA断言矛盾的读写不被判死() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // 读侧：ROM 钉死断言 + sym_ram 纯声明区域，零判死区域应正常返回符号值
         {
             let ctx = Context::new(Config::new());
@@ -1209,6 +1237,7 @@ mod tests {
     /// sym_ram 外的任意非判死位置（symbolic 声明不圈地址），落进判死段才死。
     #[test]
     fn 判死与symbolic声明并存时仅判死生效() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -1259,6 +1288,7 @@ mod tests {
     /// `ISLA_RISCV_DEFAULT_SYM_RAM=1` 显式开启，零配置不再隐式补区域。
     #[test]
     fn 默认配置内存经装配后符号读写可满足且事件可见() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         use crate::isarch::memory_builder::ensure_solve_state_memory;
 
         let ctx = Context::new(Config::new());

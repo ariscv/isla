@@ -2573,6 +2573,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Could not get Z3 func_decl")]
     fn concrete_function_result外部solver符号寄存器硬失败() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let (shared_state, mstatus_name) = decode_probe_shared_state();
         let context = Context::new(Config::new());
         let mut main_solver = Solver::<B64>::new(&context);
@@ -2592,6 +2593,7 @@ mod tests {
     /// 语义约束：初始具体值 + --prestate 钉值即可安全跨 solver 复用。
     #[test]
     fn concrete_function_result具体寄存器环境成功() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let (shared_state, mstatus_name) = decode_probe_shared_state();
         let mut regs = RegisterBindings::new();
         let ty = Ty::<Name>::Bits(64);
@@ -3877,6 +3879,7 @@ mod tests {
     /// 收集层必须整体反转恢复真实执行顺序；本用例跨两个轨迹段（中间夹 checkpoint）。
     #[test]
     fn memory_events_chronological_跨段恢复执行顺序() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         solver.add_event(read_mem_event(0x100, 4, 0xAABBCCDD));
@@ -3893,6 +3896,7 @@ mod tests {
 
     #[test]
     fn memory_events_chronological_段内恢复执行顺序() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         solver.add_event(read_mem_event(0x100, 4, 0xAABBCCDD));
@@ -3907,6 +3911,7 @@ mod tests {
 
     #[test]
     fn 真实memory回调事件可物化普通假返回写的前后态() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         use isla_lib::memory::Memory;
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -4097,6 +4102,7 @@ mod tests {
 
     #[test]
     fn materialize_le_bytes_物化符号与具体值() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let sym = solver.declare_const(isla_lib::smt::smtlib::Ty::BitVec(32), SourceLoc::unknown());
@@ -4116,6 +4122,7 @@ mod tests {
 
     #[test]
     fn materialize_le_bytes_宽混合位串不截断高位() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         use isla_lib::bitvector::b129::B129;
         let context = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&context);
