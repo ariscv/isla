@@ -892,6 +892,19 @@ fn pow_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
     match (x, y) {
         (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("pow_int", info)),
         (Val::I128(x), Val::I128(y)) => Ok(Val::I128(x.pow(y.try_into().map_err(|_| ExecError::Overflow)?))),
+        (Val::Symbolic(base), Val::I128(exp)) => {
+            if exp < 0 {
+                return Err(ExecError::Overflow);
+            }
+            if exp == 0 {
+                return Ok(Val::I128(1));
+            }
+            let mut acc = Val::Symbolic(base);
+            for _ in 1..exp {
+                acc = mult_int(acc, Val::Symbolic(base), solver, info)?;
+            }
+            Ok(acc)
+        }
         (x, y) => Err(ExecError::Type(format!("pow_int {:?} {:?}", &x, &y), info)),
     }
 }
@@ -1585,14 +1598,24 @@ fn sail_truncate_lsb<B: BV>(
 fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
     match bits {
-        Val::Bits(bits) => Ok(Val::I128(bits.unsigned())),
+        Val::Bits(bits) => {
+            if bits.len() > 128 || (bits.len() == 128 && bits.leading_zeros() == 0) {
+                return Err(ExecError::Overflow);
+            }
+            Ok(Val::I128(bits.unsigned()))
+        }
         Val::Symbolic(bits) => match solver.length(bits) {
             Some(length) => {
                 if length == 128 {
-                    // 保留全部 128 位，包括最高位为 1 的无符号输入。
+                    let is_negative = Exp::Bvslt(Box::new(Exp::Var(bits)), Box::new(smt_zeros(128)));
+                    if solver.check_sat_with(&is_negative, info).is_sat()? {
+                        return Err(ExecError::Overflow);
+                    }
                     Ok(Val::Symbolic(bits))
                 } else {
-                    assert!(length < 128);
+                    if length > 128 {
+                        return Err(ExecError::Overflow);
+                    }
                     solver.define_const(Exp::ZeroExtend(128 - length, Box::new(Exp::Var(bits))), info).into()
                 }
             }
@@ -1623,63 +1646,87 @@ fn sail_signed<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> 
     }
 }
 
+// 三种整数移位和两种位向量移位共用宽度转换；截断移位量前必须检查越界。
+fn smt_shift(
+    bits: Exp<Sym>,
+    bits_len: u32,
+    shift: Exp<Sym>,
+    shift_len: u32,
+    op: fn(Box<Exp<Sym>>, Box<Exp<Sym>>) -> Exp<Sym>,
+    saturated: Exp<Sym>,
+) -> Exp<Sym> {
+    assert!(bits_len > 0 && shift_len > 0, "SMT 移位操作数必须具有正位宽");
+    let amount = if bits_len < shift_len {
+        Exp::Extract(bits_len - 1, 0, Box::new(shift.clone()))
+    } else if bits_len > shift_len {
+        Exp::ZeroExtend(bits_len - shift_len, Box::new(shift.clone()))
+    } else {
+        shift.clone()
+    };
+    let shifted = op(Box::new(bits), Box::new(amount));
+    if bits_len < shift_len {
+        Exp::Ite(
+            Box::new(Exp::Bvuge(Box::new(shift), Box::new(smt_u64_width(u64::from(bits_len), shift_len)))),
+            Box::new(saturated),
+            Box::new(shifted),
+        )
+    } else {
+        shifted
+    }
+}
+
 fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    // We could support (MixedBits, I128) explicitly, if necessary
     let bits = replace_mixed_bits(bits, solver, info)?;
     match (bits, shift) {
-        (Val::Symbolic(x), Val::Symbolic(y)) => match solver.length(x) {
-            Some(length) => {
-                let shift = if length < 128 {
-                    Exp::Extract(length - 1, 0, Box::new(Exp::Var(y)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(Exp::Var(y)))
-                } else {
-                    Exp::Var(y)
-                };
-                let shifted = Exp::Bvlshr(Box::new(Exp::Var(x)), Box::new(shift));
-                solver
-                    .define_const(
-                        Exp::Ite(
-                            Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(length))))),
-                            Box::new(smt_zeros(i128::from(length))),
-                            Box::new(shifted),
-                        ),
-                        info,
-                    )
-                    .into()
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
+            let length = length_bits(&bits, solver, info)?;
+            if length == 0 {
+                return Ok(bits);
             }
-            None => Err(ExecError::Type(format!("shiftr {:?} {:?}", &x, &y), info)),
-        },
+            assert_eq!(solver.length(y).expect("整数移位量必须是位向量"), 128, "整数移位量必须是 128 位");
+            let bits_exp = smt_value(&bits, info)?;
+            let saturated = smt_zeros(i128::from(length));
+            let positive = smt_shift(bits_exp.clone(), length, Exp::Var(y), 128, Exp::Bvlshr, saturated);
+            // 负移位量反转方向；在 128 位无符号域中取绝对值也涵盖 i128::MIN。
+            let negative = smt_shift(
+                bits_exp,
+                length,
+                Exp::Bvneg(Box::new(Exp::Var(y))),
+                128,
+                Exp::Bvshl,
+                smt_zeros(i128::from(length)),
+            );
+            solver
+                .define_const(
+                    Exp::Ite(
+                        Box::new(Exp::Bvslt(Box::new(Exp::Var(y)), Box::new(smt_i128(0)))),
+                        Box::new(negative),
+                        Box::new(positive),
+                    ),
+                    info,
+                )
+                .into()
+        }
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::I128(y)) if y < 0 => {
+            if y == i128::MIN {
+                let length = length_bits(&bits, solver, info)?;
+                return match bits {
+                    Val::Bits(_) => Ok(Val::Bits(B::zeros(length))),
+                    _ => solver.define_const(smt_zeros(i128::from(length)), info).into(),
+                };
+            }
+            shiftl(bits, Val::I128(y.abs()), solver, info)
+        }
         (Val::Symbolic(x), Val::I128(0)) => Ok(Val::Symbolic(x)),
-        (Val::Symbolic(x), Val::I128(y)) => match solver.length(x) {
-            Some(length) => {
-                if y >= i128::from(length) {
-                    return solver.define_const(smt_zeros(i128::from(length)), info).into();
-                }
-                let shift = if length < 128 {
-                    Exp::Extract(length - 1, 0, Box::new(smt_i128(y)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(smt_i128(y)))
-                } else {
-                    smt_i128(y)
-                };
-                solver.define_const(Exp::Bvlshr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+        (Val::Symbolic(x), Val::I128(y)) => {
+            let length = solver.length(x).expect("移位数据必须是位向量");
+            let bits_exp = Exp::Var(x);
+            let saturated = smt_zeros(i128::from(length));
+            if y >= i128::from(length) {
+                return solver.define_const(saturated, info).into();
             }
-            None => Err(ExecError::Type(format!("shiftr {:?} {:?}", &x, &y), info)),
-        },
-        (Val::Bits(x), Val::Symbolic(y)) => solver
-            .define_const(
-                Exp::Ite(
-                    Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(x.len()))))),
-                    Box::new(smt_zeros(i128::from(x.len()))),
-                    Box::new(Exp::Bvlshr(
-                        Box::new(smt_sbits(x)),
-                        Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y)))),
-                    )),
-                ),
-                info,
-            )
-            .into(),
+            solver.define_const(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvlshr, saturated), info).into()
+        }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.shiftr(y))),
         (bits, shift) => Err(ExecError::Type(format!("shiftr {:?} {:?}", &bits, &shift), info)),
     }
@@ -1691,123 +1738,150 @@ fn arith_shiftr<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    // We could support (MixedBits, I128) explicitly, if necessary
     let bits = replace_mixed_bits(bits, solver, info)?;
     match (bits, shift) {
-        (Val::Symbolic(x), Val::Symbolic(y)) => match solver.length(x) {
-            Some(length) => {
-                let shift = if length < 128 {
-                    Exp::Extract(length - 1, 0, Box::new(Exp::Var(y)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(Exp::Var(y)))
-                } else {
-                    Exp::Var(y)
-                };
-                solver.define_const(Exp::Bvashr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
+            let length = length_bits(&bits, solver, info)?;
+            if length == 0 {
+                return Ok(bits);
             }
-            None => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &x, &y), info)),
-        },
+            assert_eq!(solver.length(y).expect("整数移位量必须是位向量"), 128, "整数移位量必须是 128 位");
+            let bits_exp = smt_value(&bits, info)?;
+            let saturated = Exp::Ite(
+                Box::new(Exp::Bvslt(Box::new(bits_exp.clone()), Box::new(smt_zeros(i128::from(length))))),
+                Box::new(smt_ones(i128::from(length))),
+                Box::new(smt_zeros(i128::from(length))),
+            );
+            let positive = smt_shift(bits_exp.clone(), length, Exp::Var(y), 128, Exp::Bvashr, saturated);
+            // 负移位量反转方向；在 128 位无符号域中取绝对值也涵盖 i128::MIN。
+            let negative = smt_shift(
+                bits_exp,
+                length,
+                Exp::Bvneg(Box::new(Exp::Var(y))),
+                128,
+                Exp::Bvshl,
+                smt_zeros(i128::from(length)),
+            );
+            solver
+                .define_const(
+                    Exp::Ite(
+                        Box::new(Exp::Bvslt(Box::new(Exp::Var(y)), Box::new(smt_i128(0)))),
+                        Box::new(negative),
+                        Box::new(positive),
+                    ),
+                    info,
+                )
+                .into()
+        }
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::I128(y)) if y < 0 => {
+            if y == i128::MIN {
+                let length = length_bits(&bits, solver, info)?;
+                return match bits {
+                    Val::Bits(_) => Ok(Val::Bits(B::zeros(length))),
+                    _ => solver.define_const(smt_zeros(i128::from(length)), info).into(),
+                };
+            }
+            shiftl(bits, Val::I128(y.abs()), solver, info)
+        }
         (Val::Symbolic(x), Val::I128(0)) => Ok(Val::Symbolic(x)),
-        (Val::Symbolic(x), Val::I128(y)) => match solver.length(x) {
-            Some(length) => {
-                let shift = if length < 128 {
-                    Exp::Extract(length - 1, 0, Box::new(smt_i128(y)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(smt_i128(y)))
-                } else {
-                    smt_i128(y)
-                };
-                solver.define_const(Exp::Bvashr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+        (Val::Symbolic(x), Val::I128(y)) => {
+            let length = solver.length(x).expect("移位数据必须是位向量");
+            let bits_exp = Exp::Var(x);
+            let saturated = Exp::Ite(
+                Box::new(Exp::Bvslt(Box::new(bits_exp.clone()), Box::new(smt_zeros(i128::from(length))))),
+                Box::new(smt_ones(i128::from(length))),
+                Box::new(smt_zeros(i128::from(length))),
+            );
+            if y >= i128::from(length) {
+                return solver.define_const(saturated, info).into();
             }
-            None => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &x, &y), info)),
-        },
-        (Val::Bits(x), Val::Symbolic(y)) => solver
-            .define_const(
-                Exp::Bvashr(Box::new(smt_sbits(x)), Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y))))),
-                info,
-            )
-            .into(),
-        (Val::Symbolic(x), Val::Bits(y)) => match solver.length(x) {
-            Some(length) => {
-                let shift = if length < y.len() {
-                    Exp::Extract(length - 1, 0, Box::new(smt_sbits(y)))
-                } else if length > y.len() {
-                    Exp::ZeroExtend(length - y.len(), Box::new(smt_sbits(y)))
-                } else {
-                    smt_sbits(y)
-                };
-                solver.define_const(Exp::Bvashr(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
-            }
-            None => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &x, &y), info)),
-        },
-        (Val::Bits(x), Val::Bits(y)) => {
-            let shift: u64 = y.try_into()?;
-            Ok(Val::Bits(x.arith_shiftr(i128::from(shift))))
+            solver.define_const(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvashr, saturated), info).into()
         }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.arith_shiftr(y))),
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), shift @ (Val::Bits(_) | Val::MixedBits(_))) => {
+            let shift = replace_mixed_bits(shift, solver, info)?;
+            let length = length_bits(&bits, solver, info)?;
+            if length == 0 {
+                return Ok(bits);
+            }
+            let shift_len = length_bits(&shift, solver, info)?;
+            let bits_exp = smt_value(&bits, info)?;
+            let saturated = Exp::Ite(
+                Box::new(Exp::Bvslt(Box::new(bits_exp.clone()), Box::new(smt_zeros(i128::from(length))))),
+                Box::new(smt_ones(i128::from(length))),
+                Box::new(smt_zeros(i128::from(length))),
+            );
+            if let (Val::Bits(x), Val::Bits(y)) = (&bits, &shift) {
+                if y.leading_zeros() == y.len() || y.len() - y.leading_zeros() <= 32 {
+                    return Ok(Val::Bits(x.arith_shiftr(i128::from(y.lower_u64()))));
+                }
+                return Ok(Val::Bits(if x.leading_zeros() > 0 { B::zeros(length) } else { B::ones(length) }));
+            }
+            solver
+                .define_const(
+                    smt_shift(bits_exp, length, smt_value(&shift, info)?, shift_len, Exp::Bvashr, saturated),
+                    info,
+                )
+                .into()
+        }
         (bits, shift) => Err(ExecError::Type(format!("arith_shiftr {:?} {:?}", &bits, &shift), info)),
     }
 }
 
-fn shiftl<B: BV>(bits: Val<B>, len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    // We could support (MixedBits, I128) explicitly, if necessary
+fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
-    match (bits, len) {
-        (Val::Symbolic(x), Val::Symbolic(y)) => match solver.length(x) {
-            Some(length) => {
-                let shift = if length < 128 {
-                    Exp::Extract(length - 1, 0, Box::new(Exp::Var(y)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(Exp::Var(y)))
-                } else {
-                    Exp::Var(y)
-                };
-                let shifted = Exp::Bvshl(Box::new(Exp::Var(x)), Box::new(shift));
-                solver
-                    .define_const(
-                        Exp::Ite(
-                            Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(length))))),
-                            Box::new(smt_zeros(i128::from(length))),
-                            Box::new(shifted),
-                        ),
-                        info,
-                    )
-                    .into()
+    match (bits, shift) {
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
+            let length = length_bits(&bits, solver, info)?;
+            if length == 0 {
+                return Ok(bits);
             }
-            None => Err(ExecError::Type(format!("shiftl {:?} {:?}", &x, &y), info)),
-        },
+            assert_eq!(solver.length(y).expect("整数移位量必须是位向量"), 128, "整数移位量必须是 128 位");
+            let bits_exp = smt_value(&bits, info)?;
+            let saturated = smt_zeros(i128::from(length));
+            let positive = smt_shift(bits_exp.clone(), length, Exp::Var(y), 128, Exp::Bvshl, saturated);
+            // 负移位量反转方向；在 128 位无符号域中取绝对值也涵盖 i128::MIN。
+            let negative = smt_shift(
+                bits_exp,
+                length,
+                Exp::Bvneg(Box::new(Exp::Var(y))),
+                128,
+                Exp::Bvlshr,
+                smt_zeros(i128::from(length)),
+            );
+            solver
+                .define_const(
+                    Exp::Ite(
+                        Box::new(Exp::Bvslt(Box::new(Exp::Var(y)), Box::new(smt_i128(0)))),
+                        Box::new(negative),
+                        Box::new(positive),
+                    ),
+                    info,
+                )
+                .into()
+        }
+        (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::I128(y)) if y < 0 => {
+            if y == i128::MIN {
+                let length = length_bits(&bits, solver, info)?;
+                return match bits {
+                    Val::Bits(_) => Ok(Val::Bits(B::zeros(length))),
+                    _ => solver.define_const(smt_zeros(i128::from(length)), info).into(),
+                };
+            }
+            shiftr(bits, Val::I128(y.abs()), solver, info)
+        }
         (Val::Symbolic(x), Val::I128(0)) => Ok(Val::Symbolic(x)),
-        (Val::Symbolic(x), Val::I128(y)) => match solver.length(x) {
-            Some(length) => {
-                if y >= i128::from(length) {
-                    return solver.define_const(smt_zeros(i128::from(length)), info).into();
-                }
-                let shift = if length < 128 {
-                    Exp::Extract(length - 1, 0, Box::new(smt_i128(y)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(smt_i128(y)))
-                } else {
-                    smt_i128(y)
-                };
-                solver.define_const(Exp::Bvshl(Box::new(Exp::Var(x)), Box::new(shift)), info).into()
+        (Val::Symbolic(x), Val::I128(y)) => {
+            let length = solver.length(x).expect("移位数据必须是位向量");
+            let bits_exp = Exp::Var(x);
+            let saturated = smt_zeros(i128::from(length));
+            if y >= i128::from(length) {
+                return solver.define_const(saturated, info).into();
             }
-            None => Err(ExecError::Type(format!("shiftl {:?} {:?}", &x, &y), info)),
-        },
-        (Val::Bits(x), Val::Symbolic(y)) => solver
-            .define_const(
-                Exp::Ite(
-                    Box::new(Exp::Bvuge(Box::new(Exp::Var(y)), Box::new(smt_i128(i128::from(x.len()))))),
-                    Box::new(smt_zeros(i128::from(x.len()))),
-                    Box::new(Exp::Bvshl(
-                        Box::new(smt_sbits(x)),
-                        Box::new(Exp::Extract(x.len() - 1, 0, Box::new(Exp::Var(y)))),
-                    )),
-                ),
-                info,
-            )
-            .into(),
+            solver.define_const(smt_shift(bits_exp, length, smt_i128(y), 128, Exp::Bvshl, saturated), info).into()
+        }
         (Val::Bits(x), Val::I128(y)) => Ok(Val::Bits(x.shiftl(y))),
-        (bits, len) => Err(ExecError::Type(format!("shiftl {:?} {:?}", &bits, &len), info)),
+        (bits, shift) => Err(ExecError::Type(format!("shiftl {:?} {:?}", &bits, &shift), info)),
     }
 }
 
@@ -1824,18 +1898,28 @@ pub fn shift_bits_right<B: BV>(
     let shift_len = length_bits(&shift, solver, info)?;
     match (&bits, &shift) {
         (Val::Symbolic(_), Val::Symbolic(_)) | (Val::Bits(_), Val::Symbolic(_)) | (Val::Symbolic(_), Val::Bits(_)) => {
-            let shift = if bits_len < shift_len {
-                Exp::Extract(bits_len - 1, 0, Box::new(smt_value(&shift, info)?))
-            } else if bits_len > shift_len {
-                Exp::ZeroExtend(bits_len - shift_len, Box::new(smt_value(&shift, info)?))
-            } else {
-                smt_value(&shift, info)?
-            };
-            solver.define_const(Exp::Bvlshr(Box::new(smt_value(&bits, info)?), Box::new(shift)), info).into()
+            if bits_len == 0 {
+                return Ok(bits);
+            }
+            solver
+                .define_const(
+                    smt_shift(
+                        smt_value(&bits, info)?,
+                        bits_len,
+                        smt_value(&shift, info)?,
+                        shift_len,
+                        Exp::Bvlshr,
+                        smt_zeros(i128::from(bits_len)),
+                    ),
+                    info,
+                )
+                .into()
         }
         (Val::Bits(x), Val::Bits(y)) => {
-            let shift: u64 = (*y).try_into()?;
-            Ok(Val::Bits(x.shiftr(shift as i128)))
+            if y.len() - y.leading_zeros() > 32 {
+                return Ok(Val::Bits(B::zeros(bits_len)));
+            }
+            Ok(Val::Bits(x.shiftr(i128::from(y.lower_u64()))))
         }
         (_, _) => Err(ExecError::Type(format!("shift_bits_right {:?} {:?}", &bits, &shift), info)),
     }
@@ -1854,18 +1938,28 @@ pub fn shift_bits_left<B: BV>(
     let shift_len = length_bits(&shift, solver, info)?;
     match (&bits, &shift) {
         (Val::Symbolic(_), Val::Symbolic(_)) | (Val::Bits(_), Val::Symbolic(_)) | (Val::Symbolic(_), Val::Bits(_)) => {
-            let shift = if bits_len < shift_len {
-                Exp::Extract(bits_len - 1, 0, Box::new(smt_value(&shift, info)?))
-            } else if bits_len > shift_len {
-                Exp::ZeroExtend(bits_len - shift_len, Box::new(smt_value(&shift, info)?))
-            } else {
-                smt_value(&shift, info)?
-            };
-            solver.define_const(Exp::Bvshl(Box::new(smt_value(&bits, info)?), Box::new(shift)), info).into()
+            if bits_len == 0 {
+                return Ok(bits);
+            }
+            solver
+                .define_const(
+                    smt_shift(
+                        smt_value(&bits, info)?,
+                        bits_len,
+                        smt_value(&shift, info)?,
+                        shift_len,
+                        Exp::Bvshl,
+                        smt_zeros(i128::from(bits_len)),
+                    ),
+                    info,
+                )
+                .into()
         }
         (Val::Bits(x), Val::Bits(y)) => {
-            let shift: u64 = (*y).try_into()?;
-            Ok(Val::Bits(x.shiftl(shift as i128)))
+            if y.len() - y.leading_zeros() > 32 {
+                return Ok(Val::Bits(B::zeros(bits_len)));
+            }
+            Ok(Val::Bits(x.shiftl(i128::from(y.lower_u64()))))
         }
         (_, _) => Err(ExecError::Type(format!("shift_bits_left {:?} {:?}", &bits, &shift), info)),
     }
@@ -1954,10 +2048,11 @@ pub(crate) fn vector_access<B: BV>(
     match (vec, n) {
         (Val::Symbolic(bits), Val::Symbolic(n)) => match solver.length(bits) {
             Some(length) => {
-                let shift = if length < 128 {
+                let n_len = solver.length(n).expect("vector_access 索引必须具有位宽");
+                let shift = if length < n_len {
                     Exp::Extract(length - 1, 0, Box::new(Exp::Var(n)))
-                } else if length > 128 {
-                    Exp::ZeroExtend(length - 128, Box::new(Exp::Var(n)))
+                } else if length > n_len {
+                    Exp::ZeroExtend(length - n_len, Box::new(Exp::Var(n)))
                 } else {
                     Exp::Var(n)
                 };
@@ -1989,7 +2084,14 @@ pub(crate) fn vector_access<B: BV>(
             None => Err(ExecError::Type(format!("vector_access {:?} {:?}", &bits, &n), info)),
         },
         (Val::Bits(bits), Val::Symbolic(n)) => {
-            let shift = Exp::Extract(bits.len() - 1, 0, Box::new(Exp::Var(n)));
+            let n_len = solver.length(n).expect("vector_access 索引必须具有位宽");
+            let shift = if n_len < bits.len() {
+                Exp::ZeroExtend(bits.len() - n_len, Box::new(Exp::Var(n)))
+            } else if n_len > bits.len() {
+                Exp::Extract(bits.len() - 1, 0, Box::new(Exp::Var(n)))
+            } else {
+                Exp::Var(n)
+            };
             solver
                 .define_const(
                     Exp::Extract(0, 0, Box::new(Exp::Bvlshr(Box::new(smt_sbits(bits)), Box::new(shift)))),
@@ -2311,23 +2413,14 @@ pub fn vector_update<B: BV>(
                 solver.add(Def::Assert(Exp::Bvsge(Box::new(Exp::Var(n)), Box::new(zero))));
                 solver.add(Def::Assert(Exp::Bvslt(Box::new(Exp::Var(n)), Box::new(bound))));
                 for (i, item) in vec.iter_mut().enumerate() {
-                    let var = solver.fresh();
-                    solver.add(Def::DefineConst(
-                        var,
-                        Exp::Ite(
-                            Box::new(Exp::Eq(
-                                Box::new(Exp::Var(n)),
-                                Box::new(if width == 64 {
-                                    smt_i64(i.try_into().unwrap())
-                                } else {
-                                    smt_i128(i as i128)
-                                }),
-                            )),
-                            Box::new(smt_value(&args[2], info)?),
-                            Box::new(smt_value(item, info)?),
+                    let is_i = solver.define_const(
+                        Exp::Eq(
+                            Box::new(Exp::Var(n)),
+                            Box::new(if width == 64 { smt_i64(i.try_into().unwrap()) } else { smt_i128(i as i128) }),
                         ),
-                    ));
-                    *item = Val::Symbolic(var);
+                        info,
+                    );
+                    *item = crate::primop_util::build_ite(is_i, &args[2], item, solver, info)?;
                 }
                 Ok(Val::Vector(vec))
             }
@@ -2538,6 +2631,37 @@ pub fn eq_anything<B: BV>(
             } else {
                 Ok(Val::Bool(false))
             }
+        }
+        (Val::SymbolicCtor(l_sym, l_ctors), Val::SymbolicCtor(r_sym, r_ctors)) => {
+            let mut equal_payload = Exp::Bool(false);
+            let mut common = false;
+            for (id, left) in l_ctors {
+                let Some(right) = r_ctors.get(&id) else { continue };
+                common = true;
+                let payload = eq_anything(left, right.clone(), solver, info)?;
+                let payload = match payload {
+                    Val::Bool(value) => Exp::Bool(value),
+                    Val::Symbolic(sym) => Exp::Var(sym),
+                    value => panic!("载荷相等比较必须返回布尔值：{value:?}"),
+                };
+                equal_payload = Exp::Ite(
+                    Box::new(Exp::Eq(Box::new(Exp::Var(l_sym)), Box::new(id.to_smt()))),
+                    Box::new(payload),
+                    Box::new(equal_payload),
+                );
+            }
+            if !common {
+                return Ok(Val::Bool(false));
+            }
+            solver
+                .define_const(
+                    Exp::And(
+                        Box::new(Exp::Eq(Box::new(Exp::Var(l_sym)), Box::new(Exp::Var(r_sym)))),
+                        Box::new(equal_payload),
+                    ),
+                    info,
+                )
+                .into()
         }
         (Val::SymbolicCtor(sym, constructors), Val::Ctor(id, payload))
         | (Val::Ctor(id, payload), Val::SymbolicCtor(sym, constructors)) => {
@@ -5103,6 +5227,7 @@ mod tests {
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         let x = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
+        solver.assert(Exp::Bvsge(Box::new(Exp::Var(x)), Box::new(smt_i128(0))));
         assert_eq!(sail_unsigned(Val::Symbolic(x), &mut solver, SourceLoc::unknown()).unwrap(), Val::Symbolic(x));
     }
 

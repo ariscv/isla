@@ -6275,18 +6275,529 @@ fn zmemreadfork(zu) {
         }
     }
 
+    mod review9_tests {
+        use super::*;
+
+        #[test]
+        fn signed_symbolic_shift_boundaries() {
+            for op in ["shiftr", "shiftl", "arith_shiftr"] {
+                for amount in [i128::MIN, -256, -8, -1, 0, 1, 7, 8, 256, i128::MAX] {
+                    for value in [1, 0x80] {
+                        for symbolic_bits in [false, true] {
+                            let ctx = Context::new(Config::new());
+                            let mut solver = Solver::<B64>::new(&ctx);
+                            let bits = B64::new(value, 8);
+                            let input = if symbolic_bits {
+                                Val::Symbolic(solver.define_const(crate::primop_util::smt_sbits(bits), info()))
+                            } else {
+                                Val::Bits(bits)
+                            };
+                            let shift = solver.declare_const(smtlib::Ty::BitVec(128), info());
+                            solver.assert_eq(smtlib::Exp::Var(shift), crate::primop_util::smt_i128(amount));
+                            let f = *crate::primop::binary_primops::<B64>().get(op).unwrap();
+                            let actual = f(input, Val::Symbolic(shift), &mut solver, info()).unwrap();
+                            let expected = f(Val::Bits(bits), Val::I128(amount), &mut solver, info()).unwrap();
+                            let wrong = smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                                Box::new(crate::primop_util::smt_value(&expected, info()).unwrap()),
+                            );
+                            assert_eq!(
+                                solver.check_sat_with(&wrong, info()),
+                                crate::smt::SmtResult::Unsat,
+                                "符号移位不一致：{op}，移位量={amount}，数据={value}，符号数据={symbolic_bits}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn constructor_tags_and_payloads() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let a = test_name(180);
+            let b = test_name(181);
+            let left_cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let right_cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let ctor = |tag, payload| Val::Ctor(tag, Box::new(Val::I128(payload)));
+            let left = crate::primop_util::build_ite(left_cond, &ctor(a, 1), &ctor(b, 2), &mut solver, info()).unwrap();
+            for (a_payload, b_payload) in [(1, 2), (3, 2), (3, 4)] {
+                let right = crate::primop_util::build_ite(
+                    right_cond,
+                    &ctor(a, a_payload),
+                    &ctor(b, b_payload),
+                    &mut solver,
+                    info(),
+                )
+                .unwrap();
+                for unequal in [false, true] {
+                    let f = if unequal { crate::primop::op_neq::<B64> } else { crate::primop::op_eq::<B64> };
+                    let actual = f(left.clone(), right.clone(), &mut solver, info()).unwrap();
+                    let mut expected = smtlib::Exp::Or(
+                        Box::new(smtlib::Exp::And(
+                            Box::new(smtlib::Exp::Var(left_cond)),
+                            Box::new(smtlib::Exp::And(
+                                Box::new(smtlib::Exp::Var(right_cond)),
+                                Box::new(smtlib::Exp::Bool(a_payload == 1)),
+                            )),
+                        )),
+                        Box::new(smtlib::Exp::And(
+                            Box::new(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(left_cond)))),
+                            Box::new(smtlib::Exp::And(
+                                Box::new(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(right_cond)))),
+                                Box::new(smtlib::Exp::Bool(b_payload == 2)),
+                            )),
+                        )),
+                    );
+                    if unequal {
+                        expected = smtlib::Exp::Not(Box::new(expected));
+                    }
+                    let wrong = smtlib::Exp::Neq(
+                        Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                        Box::new(expected),
+                    );
+                    assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                }
+            }
+            let disjoint = crate::primop_util::build_ite(
+                right_cond,
+                &ctor(test_name(182), 1),
+                &ctor(test_name(183), 2),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert_eq!(crate::primop::eq_anything(left, disjoint, &mut solver, info()).unwrap(), Val::Bool(false));
+        }
+
+        #[test]
+        fn unsigned_concrete_and_symbolic_range() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
+            for bits in [B129::ones(128), B129::new(1, 129)] {
+                assert!(matches!(unsigned(Val::Bits(bits), &mut solver, info()), Err(ExecError::Overflow)));
+            }
+            assert_eq!(unsigned(Val::Bits(B129::ones(127)), &mut solver, info()).unwrap(), Val::I128(i128::MAX));
+            let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            assert!(matches!(unsigned(Val::Symbolic(bits), &mut solver, info()), Err(ExecError::Overflow)));
+            solver.assert(smtlib::Exp::Bvsge(
+                Box::new(smtlib::Exp::Var(bits)),
+                Box::new(crate::primop_util::smt_i128(0)),
+            ));
+            assert_eq!(unsigned(Val::Symbolic(bits), &mut solver, info()).unwrap(), Val::Symbolic(bits));
+        }
+
+        #[test]
+        fn pow_symbolic_base_values_and_exponent_retry() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let base = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            let pow = *crate::primop::binary_primops::<B64>().get("pow_int").unwrap();
+            assert!(matches!(pow(Val::Symbolic(base), Val::I128(-1), &mut solver, info()), Err(ExecError::Overflow)));
+            assert_eq!(pow(Val::Symbolic(base), Val::I128(0), &mut solver, info()).unwrap(), Val::I128(1));
+            assert_eq!(pow(Val::Symbolic(base), Val::I128(1), &mut solver, info()).unwrap(), Val::Symbolic(base));
+            let cube = pow(Val::Symbolic(base), Val::I128(3), &mut solver, info()).unwrap();
+            solver.assert_eq(smtlib::Exp::Var(base), crate::primop_util::smt_i128(-3));
+            let wrong = smtlib::Exp::Neq(
+                Box::new(crate::primop_util::smt_value(&cube, info()).unwrap()),
+                Box::new(crate::primop_util::smt_i128(-27)),
+            );
+            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+            let cond = test_name(180);
+            let exponent = test_name(181);
+            let results = run_all_with_bindings(
+                vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(exponent, Ty::I128, info()),
+                    Instr::Jump(Exp::Id(cond), 5, info()),
+                    Instr::Copy(Loc::Id(exponent), Exp::I128(2), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(exponent), Exp::I128(3), info()),
+                    Instr::PrimopBinary(Loc::Id(RETURN), pow, Exp::I128(3), Exp::Id(exponent), info()),
+                    Instr::End,
+                ],
+                ExecutionLimits::default().with_path_merging(true),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            assert_eq!(results.len(), 2);
+            assert!(results.iter().all(Result::is_ok));
+        }
+
+        #[test]
+        fn vector_access_index_widths() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            for data_width in [8, 64, 128, 129] {
+                let bits = B129::new(1, data_width);
+                let data = solver.define_const(crate::primop_util::smt_sbits(bits), info());
+                for index_width in [8, 64, 128, 129, 256] {
+                    let index = solver.declare_const(smtlib::Ty::BitVec(index_width), info());
+                    for input in [Val::Bits(bits), Val::Symbolic(data)] {
+                        let actual =
+                            crate::primop::vector_access(input, Val::Symbolic(index), &mut solver, info()).unwrap();
+                        let expected = smtlib::Exp::Ite(
+                            Box::new(smtlib::Exp::Eq(
+                                Box::new(smtlib::Exp::Var(index)),
+                                Box::new(crate::primop::smt_zeros(i128::from(index_width))),
+                            )),
+                            Box::new(smtlib::Exp::Bits64(B64::new(1, 1))),
+                            Box::new(smtlib::Exp::Bits64(B64::new(0, 1))),
+                        );
+                        // 索引只取合法位置，独立验证宽度调整与取位结果。
+                        let in_range = smtlib::Exp::Bvult(
+                            Box::new(smtlib::Exp::Var(index)),
+                            Box::new(smtlib::bits64(u64::from(data_width), index_width)),
+                        );
+                        let wrong = smtlib::Exp::And(
+                            Box::new(in_range),
+                            Box::new(smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                                Box::new(expected),
+                            )),
+                        );
+                        assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                    }
+                    for n in [0, 1] {
+                        let actual =
+                            crate::primop::vector_access(Val::Symbolic(data), Val::I128(n), &mut solver, info())
+                                .unwrap();
+                        let wrong = smtlib::Exp::Neq(
+                            Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                            Box::new(smtlib::Exp::Bits64(B64::new(if n == 0 { 1 } else { 0 }, 1))),
+                        );
+                        assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wide_bitvector_shift_amounts() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            for (data_width, shift_width, amount) in
+                [(8, 16, 256), (129, 8, 1), (128, 129, 128), (8, 128, 256), (8, 8, 1)]
+            {
+                let bits = B129::new(0x81, data_width);
+                let shift = B129::new(amount, shift_width);
+                let data_sym = solver.define_const(crate::primop_util::smt_sbits(bits), info());
+                let shift_sym = solver.define_const(crate::primop_util::smt_sbits(shift), info());
+                for op in [
+                    crate::primop::shift_bits_left::<B129> as crate::primop::Binary<B129>,
+                    crate::primop::shift_bits_right::<B129>,
+                ] {
+                    let expected = op(Val::Bits(bits), Val::Bits(shift), &mut solver, info()).unwrap();
+                    for data in [Val::Bits(bits), Val::Symbolic(data_sym)] {
+                        for shift in [Val::Bits(shift), Val::Symbolic(shift_sym)] {
+                            let actual = op(data.clone(), shift, &mut solver, info()).unwrap();
+                            let wrong = smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                                Box::new(crate::primop_util::smt_value(&expected, info()).unwrap()),
+                            );
+                            assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn vector_update_nested_elements_preserves_selected_index() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut frame = make_frame(vec![Instr::End]);
+            let field = test_name(180);
+            let old_struct = Val::Struct(HashMap::from_iter([(field, Val::Bool(false))]));
+            let new_struct = Val::Struct(HashMap::from_iter([(field, Val::Bool(true))]));
+            let old_ctor = Val::Ctor(test_name(181), Box::new(old_struct.clone()));
+            let new_ctor = Val::Ctor(test_name(182), Box::new(new_struct.clone()));
+            for (old, new) in [
+                (old_struct, new_struct),
+                (old_ctor.clone(), new_ctor.clone()),
+                (
+                    Val::Struct(HashMap::from_iter([(field, old_ctor)])),
+                    Val::Struct(HashMap::from_iter([(field, new_ctor)])),
+                ),
+            ] {
+                for width in [64, 128] {
+                    let index = solver.declare_const(smtlib::Ty::BitVec(width), info());
+                    let actual = crate::primop::vector_update(
+                        vec![Val::Vector(vec![old.clone(), old.clone()]), Val::Symbolic(index), new.clone()],
+                        &mut solver,
+                        &mut frame,
+                        info(),
+                    )
+                    .unwrap();
+                    let Val::Vector(items) = actual else { panic!("向量更新必须返回向量") };
+                    for (i, item) in items.into_iter().enumerate() {
+                        let selected = smtlib::Exp::Eq(
+                            Box::new(smtlib::Exp::Var(index)),
+                            Box::new(smtlib::bits64(i as u64, width)),
+                        );
+                        let equals_new =
+                            crate::primop::eq_anything(item.clone(), new.clone(), &mut solver, info()).unwrap();
+                        let equals_old = crate::primop::eq_anything(item, old.clone(), &mut solver, info()).unwrap();
+                        let wrong = smtlib::Exp::Or(
+                            Box::new(smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(&equals_new, info()).unwrap()),
+                                Box::new(selected.clone()),
+                            )),
+                            Box::new(smtlib::Exp::Neq(
+                                Box::new(crate::primop_util::smt_value(&equals_old, info()).unwrap()),
+                                Box::new(smtlib::Exp::Not(Box::new(selected))),
+                            )),
+                        );
+                        assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn adversarial_review_shift_equivalence() {
+            let mut failures = Vec::new();
+            for (op, amount, left, right) in
+                [("shiftr", -1, 1, 2), ("shiftl", -1, 4, 8), ("arith_shiftr", 256, 0x80, 0x81)]
+            {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let cond = solver.declare_const(smtlib::Ty::Bool, info());
+                let x = test_name(180);
+                let shared = empty_shared_state();
+                let mut frame = make_frame(vec![
+                    Instr::Jump(Exp::Bool(true), 3, info()),
+                    Instr::Copy(Loc::Id(x), Exp::Bits(B64::new(left, 8)), info()),
+                    Instr::Goto(4),
+                    Instr::Copy(Loc::Id(x), Exp::Bits(B64::new(right, 8)), info()),
+                    Instr::End,
+                ]);
+                frame.vars_mut().insert(x, UVal::Uninit(&Ty::Bits(8)));
+                assert_eq!(
+                    try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(),
+                    Some(4)
+                );
+                let f = *crate::primop::binary_primops::<B64>().get(op).unwrap();
+                let input =
+                    eval_exp(&Exp::Id(x), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+                let actual = f(input, Val::I128(amount), &mut solver, info()).unwrap();
+                let expected_then = f(Val::Bits(B64::new(right, 8)), Val::I128(amount), &mut solver, info()).unwrap();
+                let expected_else = f(Val::Bits(B64::new(left, 8)), Val::I128(amount), &mut solver, info()).unwrap();
+                let expected =
+                    crate::primop_util::build_ite(cond, &expected_then, &expected_else, &mut solver, info()).unwrap();
+                let wrong = smtlib::Exp::Neq(
+                    Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                    Box::new(crate::primop_util::smt_value(&expected, info()).unwrap()),
+                );
+                let result = solver.check_sat_with(&wrong, info());
+                eprintln!("移位反例：{op}，移位量={amount}，错误结果可满足={result:?}");
+                if result != crate::smt::SmtResult::Unsat {
+                    failures.push((op, amount));
+                }
+            }
+            assert!(failures.is_empty(), "移位语义不一致：{failures:?}");
+        }
+
+        #[test]
+        fn adversarial_review_bits_shift_equivalence() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let left = Val::Bits(B64::new(1, 8));
+            let right = Val::Bits(B64::new(2, 8));
+            let merged = crate::primop_util::merge_val(cond, &left, &right, &mut solver, info()).unwrap();
+            let mut failures = Vec::new();
+            for (op, f) in [
+                ("shift_bits_left", crate::primop::shift_bits_left::<B64> as crate::primop::Binary<B64>),
+                ("shift_bits_right", crate::primop::shift_bits_right::<B64>),
+            ] {
+                let shift = Val::Bits(B64::new(256, 16));
+                assert_eq!(f(left.clone(), shift.clone(), &mut solver, info()).unwrap(), Val::Bits(B64::new(0, 8)));
+                assert_eq!(f(right.clone(), shift.clone(), &mut solver, info()).unwrap(), Val::Bits(B64::new(0, 8)));
+                let actual = f(merged.clone(), shift, &mut solver, info()).unwrap();
+                let wrong = smtlib::Exp::Neq(
+                    Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                    Box::new(crate::primop_util::smt_value(&Val::Bits(B64::new(0, 8)), info()).unwrap()),
+                );
+                let result = solver.check_sat_with(&wrong, info());
+                eprintln!("宽移位量反例：{op}，错误结果可满足={result:?}");
+                if result != crate::smt::SmtResult::Unsat {
+                    failures.push(op);
+                }
+            }
+            assert!(failures.is_empty(), "位向量移位语义不一致：{failures:?}");
+        }
+
+        #[test]
+        fn adversarial_review_vector_update_struct() {
+            for enabled in [false, true] {
+                let cond = test_name(180);
+                let bits = test_name(181);
+                let index = test_name(182);
+                let vector = test_name(183);
+                let update = test_name(184);
+                let field = test_name(185);
+                let a = Val::Struct(HashMap::from_iter([(field, Val::Bool(false))]));
+                let b = Val::Struct(HashMap::from_iter([(field, Val::Bool(true))]));
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![a.clone(), a])));
+                lets.insert(update, UVal::Init(b));
+                let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+                let update_op = *crate::primop::variadic_primops::<B64>().get("vector_update").unwrap();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(cond, Ty::Bool, info()),
+                        Instr::Decl(bits, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(cond), 6, info()),
+                        Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(Loc::Id(index), unsigned, Exp::Id(bits), info()),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            update_op,
+                            vec![Exp::Id(vector), Exp::Id(index), Exp::Id(update)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("结构向量更新：合并={enabled}，路径数={}，错误={errors:?}", results.len());
+                assert!(errors.is_empty());
+            }
+        }
+
+        #[test]
+        fn adversarial_review_constructor_self_equality() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let cond = shared.symtab.intern("zcond");
+                let x = shared.symtab.intern("zx");
+                let a = shared.symtab.intern("za");
+                let b = shared.symtab.intern("zb");
+                let tag_a = shared.symtab.intern("zA");
+                let tag_b = shared.symtab.intern("zB");
+                let mut lets = HashMap::default();
+                lets.insert(a, UVal::Init(Val::Ctor(tag_a, Box::new(Val::Unit))));
+                lets.insert(b, UVal::Init(Val::Ctor(tag_b, Box::new(Val::Unit))));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(cond, Ty::Bool, info()),
+                        Instr::Decl(x, Ty::Union(test_name(181)), info()),
+                        Instr::Jump(Exp::Id(cond), 5, info()),
+                        Instr::Copy(Loc::Id(x), Exp::Id(a), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(x), Exp::Id(b), info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(x), Exp::Id(x)]), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    shared,
+                    RegisterBindings::new(),
+                    lets,
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("构造子自比较：合并={enabled}，路径数={}，错误={errors:?}", results.len());
+                assert!(errors.is_empty());
+            }
+        }
+
+        #[test]
+        fn adversarial_review_pow_symbolic_base() {
+            for enabled in [false, true] {
+                let cond = test_name(180);
+                let x = test_name(181);
+                let n = test_name(182);
+                let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+                let pow = *crate::primop::binary_primops::<B64>().get("pow_int").unwrap();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(cond, Ty::Bool, info()),
+                        Instr::Decl(x, Ty::Bits(8), info()),
+                        Instr::Decl(n, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(cond), 6, info()),
+                        Instr::Copy(Loc::Id(x), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(x), Exp::Bits(B64::new(3, 8)), info()),
+                        Instr::PrimopUnary(Loc::Id(n), unsigned, Exp::Id(x), info()),
+                        Instr::PrimopBinary(Loc::Id(RETURN), pow, Exp::Id(n), Exp::I128(2), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
+                eprintln!("整数幂符号底数：合并={enabled}，路径数={}，错误={errors:?}", results.len());
+                assert!(errors.is_empty());
+            }
+        }
+
+        #[test]
+        fn adversarial_review_unsigned_128_sign() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            solver.assert_eq(smtlib::Exp::Var(bits), crate::primop_util::smt_i128(-1));
+            let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+            assert!(matches!(unsigned(Val::Symbolic(bits), &mut solver, info()), Err(ExecError::Overflow)));
+        }
+
+        #[test]
+        fn review_wide_vector_access_crash() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let data = Val::Bits(B129::new(1, 129));
+            for n in [0, 1] {
+                let value = crate::primop::vector_access(data.clone(), Val::I128(n), &mut solver, info()).unwrap();
+                assert_eq!(value, Val::Bits(B129::new(if n == 0 { 1 } else { 0 }, 1)));
+            }
+            let merged = crate::primop_util::merge_val(
+                cond,
+                &Val::Bits(B129::new(0, 8)),
+                &Val::Bits(B129::new(1, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
+            let index = unsigned(merged, &mut solver, info()).unwrap();
+            let actual = crate::primop::vector_access(data, index, &mut solver, info()).unwrap();
+            assert!(matches!(actual, Val::Symbolic(_)));
+        }
+    }
+
     #[test]
     fn review7_unsigned_128_preserves_nonnegative() {
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
         let unsigned = *crate::primop::unary_primops::<B64>().get("sail_unsigned").unwrap();
+        solver.assert(smtlib::Exp::Bvsge(Box::new(smtlib::Exp::Var(bits)), Box::new(crate::primop_util::smt_i128(0))));
         let value = unsigned(Val::Symbolic(bits), &mut solver, info()).unwrap();
         assert_eq!(value, Val::Symbolic(bits));
         for input in [0, i128::MAX, i128::MIN, -1] {
             let query =
                 smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(bits)), Box::new(crate::primop_util::smt_i128(input)));
-            assert_eq!(solver.check_sat_with(&query, info()), crate::smt::SmtResult::Sat);
+            assert_eq!(
+                solver.check_sat_with(&query, info()),
+                if input >= 0 { crate::smt::SmtResult::Sat } else { crate::smt::SmtResult::Unsat }
+            );
         }
     }
 
