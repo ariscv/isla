@@ -39,34 +39,7 @@ use crate::ir::Val;
 use crate::smt::*;
 use crate::source_loc::SourceLoc;
 
-use super::Variadic;
-
-fn read_mem<B: BV>(
-    args: Vec<Val<B>>,
-    solver: &mut Solver<B>,
-    frame: &mut LocalFrame<B>,
-    _: SourceLoc,
-) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[2].clone(), args[3].clone(), solver, false, ReadOpts::default())
-}
-
-fn read_mem_ifetch<B: BV>(
-    args: Vec<Val<B>>,
-    solver: &mut Solver<B>,
-    frame: &mut LocalFrame<B>,
-    _: SourceLoc,
-) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[2].clone(), args[3].clone(), solver, false, ReadOpts::ifetch())
-}
-
-fn read_mem_exclusive<B: BV>(
-    args: Vec<Val<B>>,
-    solver: &mut Solver<B>,
-    frame: &mut LocalFrame<B>,
-    _: SourceLoc,
-) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[2].clone(), args[3].clone(), solver, false, ReadOpts::exclusive())
-}
+use super::{read_mem, read_mem_exclusive, read_mem_ifetch, Variadic};
 
 fn write_mem<B: BV>(
     args: Vec<Val<B>>,

@@ -682,18 +682,8 @@ impl<B: BV> Memory<B> {
         opts: ReadOpts,
         region: &'static str,
     ) -> Result<Val<B>, ExecError> {
-        use crate::smt::smtlib::*;
-
-        let value = solver.fresh();
-        solver.add(Def::DeclareConst(value, Ty::BitVec(8 * bytes)));
-
-        let tag_value = if tag {
-            let v = solver.fresh();
-            solver.add(Def::DeclareConst(v, Ty::BitVec(1)));
-            Some(v)
-        } else {
-            None
-        };
+        let value = solver.declare_bitvector(8 * bytes, SourceLoc::unknown());
+        let tag_value = if tag { Some(solver.declare_bitvector(1, SourceLoc::unknown())) } else { None };
         let tag_ir_value = tag_value.map(Val::Symbolic);
         let constrained = if let Some(c) = &self.client_info {
             c.symbolic_read(
@@ -976,6 +966,7 @@ fn read_constrained<B: BV>(
     region: &'static str,
 ) -> Result<Val<B>, ExecError> {
     let constrained = generator(solver);
+    solver.mark_bitvector(constrained);
     if address == range.start && address + bytes as u64 == range.end {
         solver.add_event(Event::ReadMem {
             value: Val::Symbolic(constrained),

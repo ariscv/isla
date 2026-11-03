@@ -267,9 +267,27 @@ fn read_register_from_vector<'ir, B: BV>(
                 });
                 let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap();
                 reg_values.push(value.clone());
-                chain = solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
-                    build_ite(choice, value, &chain, solver, info)
-                })?
+                chain = match solver
+                    .with_def_attrs(DefAttrs::uninteresting(), |solver| build_ite(choice, value, &chain, solver, info))
+                {
+                    Ok(value) => value,
+                    Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
+                        // 沿用向量访问的索引拆分；唯一候选必须执行具体寄存器读取并记录 ReadReg。
+                        let index = fix_index_length(i, rib, 128, solver, info);
+                        return match primop::proven_symbolic_i128(index, solver, info)? {
+                            Some(index) => read_register_from_vector(
+                                Val::I128(index),
+                                regs_vector,
+                                local_state,
+                                shared_state,
+                                solver,
+                                info,
+                            ),
+                            None => Err(ExecError::SymbolicLength("read_register_from_vector", info)),
+                        };
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             solver.add_event(Event::Abstract {
                 name: READ_REGISTER_FROM_VECTOR,
@@ -1097,10 +1115,7 @@ fn run_special_primop<'ir, B: BV>(
         };
         frame.pc += 1
     } else if f == INTERNAL_VECTOR_UPDATE && args.len() == 3 {
-        let args = args
-            .iter()
-            .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, info).map(Cow::into_owned))
-            .collect::<Result<Vec<Val<B>>, _>>()?;
+        let args = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
         let vector = primop::vector_update(args, solver, frame, info)?;
         assign(tid, loc, vector, &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
@@ -1185,8 +1200,9 @@ fn run_special_primop<'ir, B: BV>(
         frame.pc += 1
     } else if f == READ_REGISTER_FROM_VECTOR {
         assert!(args.len() == 2);
-        let n = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
-        let regs = eval_exp(&args[1], &mut frame.local_state, shared_state, solver, info)?.into_owned();
+        let mut operands = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
+        let regs = operands.pop().unwrap();
+        let n = operands.pop().unwrap();
         let value = read_register_from_vector(n, regs, &mut frame.local_state, shared_state, solver, info)?;
         assign(tid, loc, value, &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
@@ -2422,8 +2438,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                 match shared_state.functions.get(f) {
                     None => {
-                        let operands = if *f == INTERNAL_VECTOR_INIT || *f == INSTR_ANNOUNCE || *f == INTERRUPT_PENDING
-                        {
+                        let operands = if matches!(
+                            *f,
+                            INTERNAL_VECTOR_INIT
+                                | INTERNAL_VECTOR_UPDATE
+                                | READ_REGISTER_FROM_VECTOR
+                                | INSTR_ANNOUNCE
+                                | INTERRUPT_PENDING
+                        ) {
                             Some(symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?)
                         } else {
                             None
@@ -3692,6 +3714,382 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review14_tests {
+        #[test]
+        fn memory_read_bitvector_category_survives_checkpoint() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let value = crate::memory::Memory::new()
+                .read(Val::Unit, Val::Bits(B64::new(0x1000, 64)), Val::I128(16), &mut solver, true, ReadOpts::default())
+                .unwrap();
+            let Val::Struct(fields) = value else { panic!("带标签读取必须返回结构体") };
+            let replay = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+            for value in fields.values() {
+                let Val::Symbolic(sym) = value else { panic!("读取结果必须为符号位向量") };
+                assert!(replay.is_sail_bitvector(*sym), "检查点必须保留数据和标签的位向量类别");
+            }
+        }
+
+        #[test]
+        fn string_drop_retries_merged_length() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let n = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            let drop = primop::binary_primops()["string_drop"];
+            assert!(matches!(
+                drop(Val::String("abc".into()), Val::Symbolic(n), &mut solver, info()),
+                Err(ExecError::SymbolicLength("string_drop", _))
+            ));
+            solver.assert_eq(smtlib::Exp::Var(n), crate::primop_util::smt_i128(1));
+            assert_eq!(
+                drop(Val::String("abc".into()), Val::Symbolic(n), &mut solver, info()).unwrap(),
+                Val::String("bc".into())
+            );
+        }
+
+        #[test]
+        fn platform_read_memt_retries_merged_byte_count() {
+            for enabled in [false, true] {
+                let branch = test_name(400);
+                let data = test_name(401);
+                let bytes = test_name(402);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(bytes, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(4, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(8, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(bytes),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["platform_read_memt"],
+                            vec![Exp::Unit, Exp::Bits(B64::new(0x1000, 64)), Exp::Id(bytes)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                assert_eq!(results.len(), 2);
+                assert!(
+                    results.iter().all(|result| matches!(result, Ok(Run::Finished(Val::Struct(_))))),
+                    "带标签的访存必须保留两个字节数候选"
+                );
+            }
+        }
+
+        #[test]
+        fn read_mem_retries_merged_byte_count() {
+            for enabled in [false, true] {
+                let branch = test_name(400);
+                let data = test_name(401);
+                let bytes = test_name(402);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(bytes, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(4, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(8, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(bytes),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["read_mem"],
+                            vec![Exp::Unit, Exp::I128(64), Exp::Bits(B64::new(0x1000, 64)), Exp::Id(bytes)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => eprintln!("访存字节数：合并={enabled}，完成={value:?}"),
+                        Err(error) => eprintln!("访存字节数：合并={enabled}，错误={error:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+
+        #[test]
+        fn string_take_retries_merged_length() {
+            for enabled in [false, true] {
+                let branch = test_name(400);
+                let data = test_name(401);
+                let len = test_name(402);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(len, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(len),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            primop::binary_primops()["string_take"],
+                            Exp::String("abc".into()),
+                            Exp::Id(len),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => eprintln!("字符串截取：合并={enabled}，完成={value:?}"),
+                        Err(error) => eprintln!("字符串截取：合并={enabled}，错误={error:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+        #[test]
+        fn memory_bitvector_shift_keeps_unsigned_amount() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let memory = crate::memory::Memory::new();
+            let shift = memory
+                .read(
+                    Val::Unit,
+                    Val::Bits(B64::new(0x1000, 64)),
+                    Val::I128(16),
+                    &mut solver,
+                    false,
+                    ReadOpts::default(),
+                )
+                .unwrap();
+            let Val::Symbolic(sym) = shift else { panic!("内存读取必须产生符号位向量") };
+            solver.assert_eq(smtlib::Exp::Var(sym), primop::smt_ones(128));
+            let f = primop::binary_primops()["arith_shiftr"];
+            let actual = f(Val::Bits(B64::new(1, 8)), Val::Symbolic(sym), &mut solver, info()).unwrap();
+            assert!(solver.check_sat(info()).is_sat().unwrap());
+            let materialized = Model::new(&solver).get_val(&actual).unwrap();
+            eprintln!("内存位向量移位：类别={}，实际={materialized:?}，预期=0", solver.is_sail_bitvector(sym));
+            assert_eq!(materialized, Val::Bits(B64::new(0, 8)));
+        }
+
+        #[test]
+        fn read_register_vector_retries_strings() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let reg0 = shared.symtab.intern("zaudit_string_reg0");
+                let reg1 = shared.symtab.intern("zaudit_string_reg1");
+                let branch = test_name(400);
+                let data = test_name(401);
+                let index = test_name(402);
+                let refs = test_name(403);
+                let mut lets = HashMap::default();
+                lets.insert(refs, UVal::Init(Val::Vector(vec![Val::Ref(reg0), Val::Ref(reg1)])));
+                let mut regs = RegisterBindings::new();
+                regs.insert(reg0, false, UVal::Init(Val::String("甲".into())));
+                regs.insert(reg1, false, UVal::Init(Val::String("乙".into())));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I64, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                        Instr::Call(
+                            Loc::Id(RETURN),
+                            false,
+                            READ_REGISTER_FROM_VECTOR,
+                            vec![Exp::Id(index), Exp::Id(refs)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    shared,
+                    regs,
+                    lets,
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => eprintln!("寄存器向量读取：合并={enabled}，完成={value:?}"),
+                        Err(error) => eprintln!("寄存器向量读取：合并={enabled}，错误={error:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+        use super::*;
+
+        #[test]
+        fn internal_vector_update_retries_merged_index() {
+            for enabled in [false, true] {
+                let branch = test_name(400);
+                let data = test_name(401);
+                let index = test_name(402);
+                let vector = test_name(403);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(vec![Val::String("甲".into()), Val::String("乙".into())])));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I64, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                        Instr::Call(
+                            Loc::Id(RETURN),
+                            false,
+                            INTERNAL_VECTOR_UPDATE,
+                            vec![Exp::Id(vector), Exp::Id(index), Exp::String("丙".into())],
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => eprintln!("内部向量更新：合并={enabled}，完成={value:?}"),
+                        Err(error) => eprintln!("内部向量更新：合并={enabled}，错误={error:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+
+        #[test]
+        fn read_vreg_retries_merged_vrid() {
+            for enabled in [false, true] {
+                let branch = test_name(400);
+                let data = test_name(401);
+                let vrid = test_name(402);
+                let mut args = vec![Exp::I128(1), Exp::I128(8), Exp::Id(vrid)];
+                args.extend((0..8).map(|_| Exp::Bits(B64::zeros(64))));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(vrid, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(vrid),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["isla_read_vreg"],
+                            args,
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => eprintln!("向量寄存器编号：合并={enabled}，完成={value:?}"),
+                        Err(error) => eprintln!("向量寄存器编号：合并={enabled}，错误={error:?}"),
+                        _ => panic!("异常结果"),
+                    }
+                }
+                assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 2);
+            }
+        }
+
+        #[test]
+        fn string_of_bits_keeps_129_bit_candidates() {
+            use crate::bitvector::b129::B129;
+            let branch = test_name(400);
+            let data = test_name(401);
+            let left = test_name(402);
+            let right = test_name(403);
+            for enabled in [false, true] {
+                let instrs: Vec<Instr<Name, B129>> = vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(data, Ty::Bits(129), info()),
+                    Instr::Jump(Exp::Id(branch), 5, info()),
+                    Instr::Copy(Loc::Id(data), Exp::Id(left), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(data), Exp::Id(right), info()),
+                    Instr::PrimopUnary(
+                        Loc::Id(RETURN),
+                        primop::unary_primops()["string_of_bits"],
+                        Exp::Id(data),
+                        info(),
+                    ),
+                    Instr::End,
+                ];
+                let shared = SharedState::<B129>::empty(Symtab::new());
+                let mut frame = LocalFrame::new(test_name(25), &[], &Ty::String, None, &instrs);
+                frame.lets_mut().insert(left, UVal::Init(Val::Bits(B129::new(1, 129))));
+                frame.lets_mut().insert(right, UVal::Init(Val::Bits(B129::new(2, 129))));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let results = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &results, &|_, _, result, _, _, results| {
+                    let outcome = match result {
+                        Ok((Run::Finished(value), _)) => format!("完成 {value:?}"),
+                        Err((error, _)) => format!("错误 {error:?}"),
+                        _ => panic!("异常结果"),
+                    };
+                    results.lock().unwrap().push(outcome);
+                });
+                let results = results.into_inner().unwrap();
+                eprintln!("129位字符串：合并={enabled}，结果={results:?}");
+                assert_eq!(results.iter().filter(|r| r.starts_with("完成")).count(), 2);
+            }
+        }
+    }
 
     mod review13_tests {
         use super::*;

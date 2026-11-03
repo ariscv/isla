@@ -3038,16 +3038,20 @@ fn string_length<B: BV>(s: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result
     }
 }
 
-fn string_drop<B: BV>(s: Val<B>, n: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+fn string_drop<B: BV>(s: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let n = concretize_proven_i128(n, solver, info)?;
     match (s, n) {
         (Val::String(s), Val::I128(n)) => Ok(Val::String(s.get((n as usize)..).unwrap_or("").to_string())),
+        (Val::String(_), Val::Symbolic(_)) => Err(ExecError::SymbolicLength("string_drop", info)),
         other => Err(ExecError::Type(format!("string_drop {:?}", &other), info)),
     }
 }
 
-fn string_take<B: BV>(s: Val<B>, n: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+fn string_take<B: BV>(s: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let n = concretize_proven_i128(n, solver, info)?;
     match (s, n) {
         (Val::String(s), Val::I128(n)) => Ok(Val::String(s.get(..(n as usize)).unwrap_or(&s).to_string())),
+        (Val::String(_), Val::Symbolic(_)) => Err(ExecError::SymbolicLength("string_take", info)),
         other => Err(ExecError::Type(format!("string_take {:?}", &other), info)),
     }
 }
@@ -3061,10 +3065,43 @@ fn string_of_segment<B: BV>(
     match segment {
         BitsSegment::Concrete(bv) => Ok(bv.to_string()),
         BitsSegment::Symbolic(sym) => {
-            let value = proven_symbolic_i128(*sym, solver, info)?.ok_or(ExecError::SymbolicLength(op, info))?;
+            if !solver.check_sat(info).is_sat()? {
+                return Err(ExecError::SymbolicLength(op, info));
+            }
             let width = solver.length(*sym).expect("字符串转换参数必须是位向量");
-            assert!((1..=128).contains(&width), "已证明的整数候选必须能用 i128 表示");
-            Ok(crate::bitvector::b129::B129::get_slice_int(width, value, 0).to_string())
+            let (candidate, string) = {
+                let mut model = Model::new(solver);
+                model.set_complete_model(true);
+                let ModelVal::Exp(candidate @ (Exp::Bits(_) | Exp::Bits64(_))) = model.get_var(*sym)? else {
+                    panic!("字符串转换的模型必须是位向量")
+                };
+                let string = if width <= B::MAX_WIDTH {
+                    let Val::Bits(bits) = model.get_val(&Val::Symbolic(*sym))? else {
+                        panic!("字符串转换必须物化为位向量")
+                    };
+                    bits.to_string()
+                } else {
+                    // 超过具体表示上限的符号位向量直接格式化完整模型，不能经过 i128。
+                    let mut bits = match &candidate {
+                        Exp::Bits(bits) => bits.clone(),
+                        Exp::Bits64(bits) => bits.to_vec(),
+                        _ => unreachable!("候选已经确认是位向量"),
+                    };
+                    if width == 129 {
+                        // 与 B129 的标签位加 32 位十六进制数据格式保持一致。
+                        bits.resize(132, false);
+                    }
+                    let mut buf = Vec::new();
+                    crate::simplify::write_bits(&mut buf, &bits).unwrap();
+                    String::from_utf8(buf).unwrap()
+                };
+                (candidate, string)
+            };
+            if solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(*sym)), Box::new(candidate)), info).is_unsat()? {
+                Ok(string)
+            } else {
+                Err(ExecError::SymbolicLength(op, info))
+            }
         }
     }
 }
@@ -3332,7 +3369,11 @@ fn isla_read_vreg_internal<B: BV>(
 
     let sew = expect_concrete_len(args[1].clone(), "isla_read_vreg", solver, info)?;
     let sew = u32::try_from(sew).map_err(|_| ExecError::Overflow)?;
-    let vrid = usize::try_from(expect_i128_arg(&args[2], "isla_read_vreg vrid", solver, info)?)
+    let vrid = concretize_proven_i128(args[2].clone(), solver, info)?;
+    if matches!(vrid, Val::Symbolic(_)) {
+        return Err(ExecError::SymbolicLength("isla_read_vreg", info));
+    }
+    let vrid = usize::try_from(expect_i128_arg(&vrid, "isla_read_vreg vrid", solver, info)?)
         .map_err(|_| ExecError::Overflow)?;
     let num_elem_arg = args[0].clone();
 
@@ -4343,36 +4384,68 @@ fn read_mem<B: BV>(
     args: Vec<Val<B>>,
     solver: &mut Solver<B>,
     frame: &mut LocalFrame<B>,
-    _: SourceLoc,
+    info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[2].clone(), args[3].clone(), solver, false, ReadOpts::default())
+    let bytes = expect_concrete_len(args[3].clone(), "read_mem", solver, info)?;
+    frame.memory().read(
+        args[0].clone(),
+        args[2].clone(),
+        Val::I128(bytes.try_into().unwrap()),
+        solver,
+        false,
+        ReadOpts::default(),
+    )
 }
 
 fn read_mem_ifetch<B: BV>(
     args: Vec<Val<B>>,
     solver: &mut Solver<B>,
     frame: &mut LocalFrame<B>,
-    _: SourceLoc,
+    info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[2].clone(), args[3].clone(), solver, false, ReadOpts::ifetch())
+    let bytes = expect_concrete_len(args[3].clone(), "read_mem_ifetch", solver, info)?;
+    frame.memory().read(
+        args[0].clone(),
+        args[2].clone(),
+        Val::I128(bytes.try_into().unwrap()),
+        solver,
+        false,
+        ReadOpts::ifetch(),
+    )
 }
 
 fn read_mem_exclusive<B: BV>(
     args: Vec<Val<B>>,
     solver: &mut Solver<B>,
     frame: &mut LocalFrame<B>,
-    _: SourceLoc,
+    info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[2].clone(), args[3].clone(), solver, false, ReadOpts::exclusive())
+    let bytes = expect_concrete_len(args[3].clone(), "read_mem_exclusive", solver, info)?;
+    frame.memory().read(
+        args[0].clone(),
+        args[2].clone(),
+        Val::I128(bytes.try_into().unwrap()),
+        solver,
+        false,
+        ReadOpts::exclusive(),
+    )
 }
 
 fn read_memt<B: BV>(
     args: Vec<Val<B>>,
     solver: &mut Solver<B>,
     frame: &mut LocalFrame<B>,
-    _: SourceLoc,
+    info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    frame.memory().read(args[0].clone(), args[1].clone(), args[2].clone(), solver, true, ReadOpts::default())
+    let bytes = expect_concrete_len(args[2].clone(), "platform_read_memt", solver, info)?;
+    frame.memory().read(
+        args[0].clone(),
+        args[1].clone(),
+        Val::I128(bytes.try_into().unwrap()),
+        solver,
+        true,
+        ReadOpts::default(),
+    )
 }
 
 fn bad_read<B: BV>(_: Val<B>, _: &mut Solver<B>, _: SourceLoc) -> Result<Val<B>, ExecError> {
