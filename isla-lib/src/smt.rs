@@ -2912,6 +2912,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             head_len: self.trace.head.len(),
             next_var: self.next_var,
             asserts_since_check: self.asserts_since_check,
+            #[cfg(feature = "smtperf")]
+            performance_nodes: self.performance_info.vars.node_count(),
         }
     }
 
@@ -2931,6 +2933,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.decls.remove(&sym);
             self.sail_bitvectors.remove(&sym);
             self.func_decls.remove(&sym);
+        }
+        #[cfg(feature = "smtperf")]
+        while self.performance_info.vars.node_count() > tx.performance_nodes {
+            // 从末尾删除，避免 Graph 的 swap_remove 改变已有符号的 NodeIndex。
+            let index = NodeIndex::new(self.performance_info.vars.node_count() - 1);
+            let (sym, _) = self.performance_info.vars.remove_node(index).unwrap();
+            assert_eq!(self.performance_info.var_nodes.remove(&sym), Some(index));
         }
         self.asserts_since_check = tx.asserts_since_check;
         self.last_check_sat = false;
@@ -2952,6 +2961,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SolverTransaction {
+    #[cfg(feature = "smtperf")]
+    performance_nodes: usize,
     head_len: usize,
     next_var: u32,
     asserts_since_check: usize,
@@ -3012,6 +3023,53 @@ pub fn z3_version() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "smtperf")]
+    #[test]
+    fn review12_transaction_performance_graph_leak() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        for _ in 0..32 {
+            let tx = solver.start_transaction();
+            solver.declare_const(Ty::Bool, SourceLoc::unknown());
+            solver.rollback_transaction(tx);
+        }
+        eprintln!(
+            "回滚后：声明={}，性能图节点={}，性能图符号={}",
+            solver.decls.len(),
+            solver.performance_info.vars.node_count(),
+            solver.performance_info.var_nodes.len()
+        );
+        assert_eq!(solver.performance_info.vars.node_count(), 0, "事务回滚必须释放推测分配的性能图节点");
+    }
+
+    #[cfg(feature = "smtperf")]
+    #[test]
+    fn review12_transaction_preserves_existing_performance_graph() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let root = solver.declare_const(Ty::Bool, info);
+        let old = solver.define_const(Not(Box::new(Var(root))), info);
+        let nodes = solver.performance_info.var_nodes.clone();
+        let edges = solver.performance_info.vars.edge_count();
+        for _ in 0..32 {
+            let tx = solver.start_transaction();
+            let new = solver.define_const(And(Box::new(Var(root)), Box::new(Var(old))), info);
+            solver.define_const(Not(Box::new(Var(new))), info);
+            solver.rollback_transaction(tx);
+            assert_eq!(solver.performance_info.var_nodes, nodes);
+            assert_eq!(solver.performance_info.vars.node_count(), nodes.len());
+            assert_eq!(solver.performance_info.vars.edge_count(), edges);
+            for (sym, index) in &nodes {
+                assert_eq!(solver.performance_info.vars[*index].0, *sym);
+            }
+        }
+        let tx = solver.start_transaction();
+        let committed = solver.define_const(Not(Box::new(Var(root))), info);
+        solver.commit_transaction();
+        assert!(solver.performance_info.var_nodes.contains_key(&committed));
+    }
+
     use std::sync::Arc;
     use std::time::Duration;
 

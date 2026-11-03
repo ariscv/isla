@@ -430,11 +430,11 @@ fn check_integer_conversion<B: BV>(
     info: SourceLoc,
 ) -> Result<(), ExecError> {
     if let Some(in_range) = integer_conversion_in_range(f, value, solver, info)? {
-        if !solver.check_sat_with(&in_range, info).is_sat()? {
-            return Err(ExecError::Overflow);
-        }
         if solver.check_sat_with(&Exp::Not(Box::new(in_range.clone())), info).is_sat()? {
-            solver.assert(in_range);
+            if !solver.check_sat_with(&in_range, info).is_sat()? {
+                return Err(ExecError::Overflow);
+            }
+            return Err(ExecError::IntegerConversion(in_range, info));
         }
     }
     Ok(())
@@ -956,28 +956,40 @@ fn pow_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
         (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("pow_int", info)),
         (Val::I128(x), Val::I128(y)) => Ok(Val::I128(x.pow(y.try_into().map_err(|_| ExecError::Overflow)?))),
         (Val::Symbolic(base), Val::I128(exp)) => {
-            if exp < 0 {
-                return Err(ExecError::Overflow);
-            }
+            let exp = u32::try_from(exp).map_err(|_| ExecError::Overflow)?;
             if exp == 0 {
                 return Ok(Val::I128(1));
             }
             let mut exponent = exp;
-            let mut power = Val::Symbolic(base);
+            // 使用声明与等式保持 Z3 中间乘积共享，不能用会被内联化简的 DefineConst。
+            // 这些断言在推测事务中会使事务无效，由执行器拒绝该次合并。
+            let mut power = base;
             let mut acc = None;
             while exponent > 0 {
                 if exponent & 1 == 1 {
                     acc = Some(match acc {
-                        Some(value) => mult_int(value, power.clone(), solver, info)?,
-                        None => power.clone(),
+                        Some(value) => {
+                            let product = solver.declare_const(smtlib::Ty::BitVec(128), info);
+                            solver.assert(Exp::Eq(
+                                Box::new(Exp::Var(product)),
+                                Box::new(Exp::Bvmul(Box::new(Exp::Var(value)), Box::new(Exp::Var(power)))),
+                            ));
+                            product
+                        }
+                        None => power,
                     });
                 }
                 exponent >>= 1;
                 if exponent > 0 {
-                    power = mult_int(power.clone(), power, solver, info)?;
+                    let square = solver.declare_const(smtlib::Ty::BitVec(128), info);
+                    solver.assert(Exp::Eq(
+                        Box::new(Exp::Var(square)),
+                        Box::new(Exp::Bvmul(Box::new(Exp::Var(power)), Box::new(Exp::Var(power)))),
+                    ));
+                    power = square;
                 }
             }
-            Ok(acc.unwrap())
+            Ok(Val::Symbolic(acc.unwrap()))
         }
         (x, y) => Err(ExecError::Type(format!("pow_int {:?} {:?}", &x, &y), info)),
     }
@@ -1440,9 +1452,9 @@ fn replicate_bits<B: BV>(
 /// used for slice, get_slice_int, etc.
 macro_rules! slice {
     ($bits_length: expr, $bits: expr, $from: expr, $slice_length: expr, $solver: ident, $info: ident) => {{
-        assert!(($slice_length as u32) <= $bits_length);
+        let length = u32::try_from($slice_length).map_err(|_| ExecError::Overflow)?;
         match $from {
-            _ if $slice_length == 0 => Ok(Val::Bits(B::zeros(0))),
+            _ if length == 0 || $bits_length == 0 => Ok(Val::Bits(B::zeros(length))),
 
             Val::Symbolic(from) => {
                 let sliced = $solver.fresh();
@@ -1460,37 +1472,37 @@ macro_rules! slice {
                     Exp::Bvlshr,
                     smt_zeros(i128::from($bits_length)),
                 );
-                $solver.add(Def::DefineConst(sliced, Exp::Extract($slice_length as u32 - 1, 0, Box::new(shifted))));
+                let valid_length = length.min($bits_length);
+                let extracted = Exp::Extract(valid_length - 1, 0, Box::new(shifted));
+                let result = if length > valid_length {
+                    Exp::ZeroExtend(length - valid_length, Box::new(extracted))
+                } else {
+                    extracted
+                };
+                $solver.add(Def::DefineConst(sliced, result));
                 $solver.mark_bitvector(sliced);
                 Ok(Val::Symbolic(sliced))
             }
 
-            Val::I128(from) => {
-                let sliced = $solver.fresh();
-                if from == 0 && ($slice_length as u32) == $bits_length {
-                    $solver.add(Def::DefineConst(sliced, $bits))
+            from @ (Val::I128(_) | Val::I64(_)) => {
+                let from = match from {
+                    Val::I128(from) => from,
+                    Val::I64(from) => i128::from(from),
+                    _ => unreachable!(),
+                };
+                if from < 0 || from >= i128::from($bits_length) {
+                    Ok(Val::Bits(B::zeros(length)))
                 } else {
-                    $solver.add(Def::DefineConst(
-                        sliced,
-                        Exp::Extract((from + $slice_length - 1) as u32, from as u32, Box::new($bits)),
-                    ))
+                    let from = u32::try_from(from).unwrap();
+                    let valid_length = length.min($bits_length - from);
+                    let extracted = Exp::Extract(from + valid_length - 1, from, Box::new($bits));
+                    let value = if valid_length < length {
+                        Exp::ZeroExtend(length - valid_length, Box::new(extracted))
+                    } else {
+                        extracted
+                    };
+                    $solver.define_bitvector(value, $info).into()
                 }
-                $solver.mark_bitvector(sliced);
-                Ok(Val::Symbolic(sliced))
-            }
-
-            Val::I64(from) => {
-                let sliced = $solver.fresh();
-                if from == 0 && ($slice_length as u32) == $bits_length {
-                    $solver.add(Def::DefineConst(sliced, $bits))
-                } else {
-                    $solver.add(Def::DefineConst(
-                        sliced,
-                        Exp::Extract((from as i128 + $slice_length - 1) as u32, from as u32, Box::new($bits)),
-                    ))
-                }
-                $solver.mark_bitvector(sliced);
-                Ok(Val::Symbolic(sliced))
             }
 
             _ => Err(ExecError::Type(format!("slice! {:?}", &$from), $info)),
@@ -1550,6 +1562,29 @@ pub(crate) fn op_slice<B: BV>(
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     let bits_length = length_bits(&bits, solver, info)?;
+    if length == 0 {
+        return Ok(Val::Bits(B::zeros(0)));
+    }
+    let concrete_from = match from {
+        Val::I64(from) => Some(i128::from(from)),
+        Val::I128(from) => Some(from),
+        _ => None,
+    };
+    let from = if let Some(from) = concrete_from {
+        // 先检查原始整数，不能先窄化索引再检查，否则巨大索引会发生截断。
+        if from < 0 || from >= i128::from(bits_length) {
+            return Ok(Val::Bits(B::zeros(length)));
+        }
+        let from = u32::try_from(from).unwrap();
+        let available = bits_length - from;
+        if length > available {
+            let valid = op_slice(bits, Val::I64(i64::from(from)), available, solver, info)?;
+            return append(Val::Bits(B::zeros(length - available)), valid, solver, info);
+        }
+        Val::I64(i64::from(from))
+    } else {
+        from
+    };
     match bits {
         Val::Symbolic(bits) => slice!(bits_length, Exp::Var(bits), from, length as i128, solver, info),
         Val::Bits(bits) => match from {
@@ -1575,41 +1610,13 @@ fn slice_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let bits_length = length_bits(&bits, solver, info)?;
     let length = concretize_proven_i128(length, solver, info)?;
     panic_if_negative_concretized_nat("slice_internal", &length);
     match length {
         Val::Symbolic(_) => Err(ExecError::SymbolicLength("slice_internal", info)),
-        Val::I128(length) => match bits {
-            Val::Symbolic(bits) => slice!(bits_length, Exp::Var(bits), from, length, solver, info),
-            Val::Bits(bits) => match from {
-                Val::I128(from) => match bits.slice(from as u32, length as u32) {
-                    Some(bits) => Ok(Val::Bits(bits)),
-                    None => {
-                        // Out-of-range slices shouldn't happen in IR from well-typed Sail, but linearization can
-                        // produce them (although the result will be thrown away).  This should match the semantics
-                        // of the symbolic case but isn't tested because the results aren't used.
-                        match bits.shiftr(from).slice(0, length as u32) {
-                            Some(bits) => Ok(Val::Bits(bits)),
-                            None => Err(ExecError::Type(
-                                format!("slice_internal (cannot slice) {:?} {:?}", &from, &length),
-                                info,
-                            )),
-                        }
-                    }
-                },
-                _ if bits.is_zero() => Ok(Val::Bits(B::zeros(length as u32))),
-                _ => slice!(bits_length, smt_sbits(bits), from, length, solver, info),
-            },
-            Val::MixedBits(ref segments) => match from {
-                Val::I128(from) => mixed_bits_slice(segments, bits_length, from as u32, length as u32, solver, info),
-                _ => {
-                    let bits_smt = mixed_bits_to_smt(bits, solver, info)?;
-                    slice!(bits_length, bits_smt, from, length, solver, info)
-                }
-            },
-            _ => Err(ExecError::Type(format!("slice_internal {:?}", &bits), info)),
-        },
+        Val::I128(length) => {
+            op_slice(bits, from, u32::try_from(length).map_err(|_| ExecError::Overflow)?, solver, info)
+        }
         _ => Err(ExecError::Type(format!("slice_internal {:?}", &length), info)),
     }
 }
@@ -2325,14 +2332,35 @@ pub(crate) fn vector_access<B: BV>(
                 }
                 solver.assert(in_bounds);
             }
-            let mut it = vec.iter().enumerate().rev();
+            let candidates = bitvec_value_count(width).map_or(vec.len(), |count| vec.len().min(count));
+            let mut it = vec[..candidates].iter().enumerate().rev();
             let mut result = it.next().unwrap().1.clone();
             for (i, item) in it {
                 let cond = solver.define_const(
                     Exp::Eq(Box::new(Exp::Var(n)), Box::new(smt_u64_width(i.try_into().unwrap(), width))),
                     info,
                 );
-                result = build_ite(cond, item, &result, solver, info)?;
+                result = match build_ite(cond, item, &result, solver, info) {
+                    Ok(value) => value,
+                    Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
+                        // 具体结构不能用 ITE 表达时，只拆分索引；唯一索引直接返回原元素。
+                        // 索引是无符号值，先零扩展，避免整数具体化把窄索引最高位解释成符号位。
+                        let index = if width < 128 {
+                            solver.define_const(Exp::ZeroExtend(128 - width, Box::new(Exp::Var(n))), info)
+                        } else {
+                            n
+                        };
+                        return match proven_symbolic_i128(index, solver, info)? {
+                            Some(index) => {
+                                let index =
+                                    usize::try_from(index).map_err(|_| ExecError::OutOfBounds("vector_access"))?;
+                                vec.get(index).cloned().ok_or(ExecError::OutOfBounds("vector_access"))
+                            }
+                            None => Err(ExecError::SymbolicLength("vector_access", info)),
+                        };
+                    }
+                    Err(error) => return Err(error),
+                };
             }
             Ok(result)
         }
@@ -3205,30 +3233,6 @@ fn expect_i128_arg<B: BV>(
     }
 }
 
-fn expect_usize_or_symbolic_bound<B: BV>(
-    value: &Val<B>,
-    upper_bound: usize,
-    name: &str,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-) -> Result<usize, ExecError> {
-    let value = concretize_proven_i128(value.clone(), solver, info)?;
-    panic_if_negative_concretized_nat(name, &value);
-    match &value {
-        Val::I128(value) => usize::try_from(*value).map_err(|_| ExecError::Overflow),
-        Val::I64(value) => usize::try_from(*value).map_err(|_| ExecError::Overflow),
-        Val::Symbolic(sym) => {
-            let width = solver.length(*sym).ok_or_else(|| ExecError::Type(format!("{} {:?}", name, value), info))?;
-            let lower = smt_i128_width(0, width).ok_or(ExecError::Overflow)?;
-            let upper = smt_i128_width(upper_bound as i128, width).ok_or(ExecError::Overflow)?;
-            solver.add(Def::Assert(Exp::Bvsge(Box::new(Exp::Var(*sym)), Box::new(lower))));
-            solver.add(Def::Assert(Exp::Bvsle(Box::new(Exp::Var(*sym)), Box::new(upper))));
-            Ok(upper_bound)
-        }
-        _ => Err(ExecError::Type(format!("{} {:?}", name, value), info)),
-    }
-}
-
 fn expect_bits_arg<B: BV>(
     value: Val<B>,
     name: &str,
@@ -3297,8 +3301,7 @@ fn isla_read_vreg_internal<B: BV>(
 
     let elem_per_reg = (vlen / sew) as usize;
     let max_num_elem = elem_per_reg * regs.len();
-    let num_elem =
-        expect_usize_or_symbolic_bound(&num_elem_arg, max_num_elem, "isla_read_vreg num_elem", solver, info)?;
+    let num_elem = expect_concrete_len(num_elem_arg, "isla_read_vreg", solver, info)?;
     if num_elem > max_num_elem || vrid >= 32 {
         return Err(ExecError::Type(format!("isla_read_vreg out of range num_elem={} vrid={}", num_elem, vrid), info));
     }
@@ -3645,8 +3648,9 @@ fn isla_mask_from_low_bits_internal<B: BV>(
         ));
     }
 
-    let num_elem_concrete = concrete_i128_arg(&args[0]);
-    let num_elem = int_exp_128(&args[0], solver, "isla_mask_from_low_bits num_elem", info)?;
+    let num_elem_arg = concretize_proven_i128(args[0].clone(), solver, info)?;
+    let num_elem_concrete = concrete_i128_arg(&num_elem_arg);
+    let num_elem = int_exp_128(&num_elem_arg, solver, "isla_mask_from_low_bits num_elem", info)?;
     let vm = expect_bits_arg(args[1].clone(), "isla_mask_from_low_bits vm", solver, info)?;
     let fill = expect_bits_arg(args[2].clone(), "isla_mask_from_low_bits fill", solver, info)?;
     let source = expect_bits_arg(args[3].clone(), "isla_mask_from_low_bits source", solver, info)?;
@@ -3663,7 +3667,7 @@ fn isla_mask_from_low_bits_internal<B: BV>(
         }
         u32::try_from(num_elem).map_err(|_| ExecError::Overflow)?
     } else {
-        source_len
+        return Err(ExecError::SymbolicLength("isla_mask_from_low_bits", info));
     };
 
     if length_bits(&vm, solver, info)? != 1 {
@@ -3785,7 +3789,7 @@ fn expect_vector_arg<B: BV>(value: Val<B>, name: &str, info: SourceLoc) -> Resul
 
 fn expect_concrete_len<B: BV>(
     value: Val<B>,
-    name: &str,
+    name: &'static str,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<usize, ExecError> {
@@ -3794,6 +3798,7 @@ fn expect_concrete_len<B: BV>(
     match value {
         Val::I128(value) => usize::try_from(value).map_err(|_| ExecError::Overflow),
         Val::I64(value) => usize::try_from(value).map_err(|_| ExecError::Overflow),
+        Val::Symbolic(_) => Err(ExecError::SymbolicLength(name, info)),
         value => Err(ExecError::Type(format!("{} must be concrete, got {:?}", name, value), info)),
     }
 }
@@ -3871,7 +3876,7 @@ fn isla_vector_access_or_default_internal<B: BV>(
         ));
     }
 
-    let valid_len = expect_concrete_len(args[0].clone(), "isla_vector_access_or_default valid_len", solver, info)?;
+    let valid_len = expect_concrete_len(args[0].clone(), "isla_vector_access_or_default", solver, info)?;
     let values = expect_vector_arg(args[1].clone(), "isla_vector_access_or_default vector", info)?;
     let index = expect_bits_arg(args[2].clone(), "isla_vector_access_or_default index", solver, info)?;
     let default = expect_bits_arg(args[3].clone(), "isla_vector_access_or_default default", solver, info)?;
@@ -4490,7 +4495,12 @@ fn align_bits<B: BV>(
     let bv_len = length_bits(&bv, solver, info)?;
     match (bv, alignment) {
         // Fast path for small bitvectors with power of two alignments
-        (Val::Symbolic(bv), Val::I128(alignment)) if (bv_len <= 64) & ((alignment & (alignment - 1)) == 0) => {
+        (Val::Symbolic(bv), Val::I128(alignment))
+            if bv_len <= 64 && alignment > 0 && (alignment & (alignment - 1)) == 0 =>
+        {
+            if alignment as u128 >= (1u128 << bv_len) {
+                return Ok(Val::Bits(B::zeros(bv_len)));
+            }
             let mask = !B::new((alignment as u64) - 1, bv_len);
             solver.define_bitvector(Exp::Bvand(Box::new(Exp::Var(bv)), Box::new(smt_sbits(mask))), info).into()
         }
@@ -5892,21 +5902,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "nat invariant violated in expect_usize_or_symbolic_bound test")]
-    fn expect_usize_or_symbolic_bound_panics_on_negative_proven_symbolic_value() {
+    #[should_panic(expected = "nat invariant violated in expect_concrete_len test")]
+    fn expect_concrete_len_panics_on_negative_proven_symbolic_value() {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         let value = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
         solver.assert_eq(Exp::Var(value), smt_i128(-1));
 
-        let _ = expect_usize_or_symbolic_bound(
-            &Val::Symbolic(value),
-            8,
-            "expect_usize_or_symbolic_bound test",
-            &mut solver,
-            SourceLoc::unknown(),
-        );
+        let _ =
+            expect_concrete_len(Val::Symbolic(value), "expect_concrete_len test", &mut solver, SourceLoc::unknown());
     }
 
     #[test]
@@ -6296,7 +6301,7 @@ mod tests {
     }
 
     #[test]
-    fn isla_read_vreg_allows_symbolic_num_elem() -> Result<(), ExecError> {
+    fn isla_read_vreg_requires_unique_symbolic_num_elem() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6316,9 +6321,14 @@ mod tests {
             zero,
         ];
 
+        assert!(matches!(
+            isla_read_vreg_internal(args.clone(), &mut solver, SourceLoc::unknown()),
+            Err(ExecError::SymbolicLength("isla_read_vreg", _))
+        ));
+        solver.assert_eq(Exp::Var(num_elem), smt_i128(2));
         match isla_read_vreg_internal(args, &mut solver, SourceLoc::unknown())? {
             Val::Vector(values) => {
-                assert_eq!(values.len(), 16);
+                assert_eq!(values.len(), 2);
                 assert_eq!(values[0], Val::Bits(B64::new(0x5566_7788, 32)));
                 assert_eq!(values[1], Val::Bits(B64::new(0x1122_3344, 32)));
             }
@@ -6536,20 +6546,23 @@ mod tests {
     }
 
     #[test]
-    fn isla_mask_from_low_bits_uses_source_width_for_symbolic_len_without_template() -> Result<(), ExecError> {
+    fn isla_mask_from_low_bits_requires_unique_len_without_template() -> Result<(), ExecError> {
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         let num_elem = solver.declare_const(Ty::BitVec(128), SourceLoc::unknown());
         let vm = solver.declare_const(Ty::BitVec(1), SourceLoc::unknown());
 
-        match isla_mask_from_low_bits_internal(
-            vec![Val::Symbolic(num_elem), Val::Symbolic(vm), Val::Bits(B64::BIT_ONE), Val::Bits(B64::new(0b10101, 8))],
-            &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Symbolic(mask) => assert_eq!(solver.length(mask), Some(8)),
-            value => panic!("expected symbolic mask, got {:?}", value),
+        let args =
+            vec![Val::Symbolic(num_elem), Val::Symbolic(vm), Val::Bits(B64::BIT_ONE), Val::Bits(B64::new(0b10101, 8))];
+        assert!(matches!(
+            isla_mask_from_low_bits_internal(args.clone(), &mut solver, SourceLoc::unknown()),
+            Err(ExecError::SymbolicLength("isla_mask_from_low_bits", _))
+        ));
+        solver.assert_eq(Exp::Var(num_elem), smt_i128(3));
+        match isla_mask_from_low_bits_internal(args, &mut solver, SourceLoc::unknown())? {
+            Val::Symbolic(mask) => assert_eq!(solver.length(mask), Some(3)),
+            value => panic!("预期三位符号掩码，实际为 {value:?}"),
         }
 
         Ok(())

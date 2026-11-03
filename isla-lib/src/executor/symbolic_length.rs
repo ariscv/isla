@@ -50,11 +50,38 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
 
+    if let ExecError::IntegerConversion(in_range, info) = error {
+        let cond = solver.define_const(in_range, info);
+        fork_retry_operand(
+            cond,
+            Var(cond),
+            Not(Box::new(Var(cond))),
+            operands,
+            info,
+            task_id,
+            task_fraction,
+            stop_conditions,
+            fork_sink,
+            frame,
+            task_state,
+            solver,
+        )?;
+        return Ok(true);
+    }
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
     // 只枚举需要具体化的长度参数，不能把位向量数据或向量元素也逐值展开。
     let indices: &[usize] = match op {
-        "zeros" | "ones" | "undefined_bitvector" | "undefined_vector" | "vector_init" | "get_slice_int" => &[0],
-        "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" => &[1],
+        "zeros"
+        | "ones"
+        | "undefined_bitvector"
+        | "undefined_vector"
+        | "vector_init"
+        | "get_slice_int"
+        | "internal_vector_init"
+        | "isla_read_vreg"
+        | "isla_mask_from_low_bits"
+        | "isla_vector_access_or_default" => &[0],
+        "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" | "vector_access" => &[1],
         "slice_internal" => &[2],
         "subrange_internal" => &[1, 2],
         _ => return Err(error),

@@ -99,6 +99,8 @@ pub enum ExecError {
     AssertionFailure(Option<String>, SourceLoc),
     NoFunction(String, SourceLoc),
     Overflow,
+    /// 内部整数转换需要由执行器保留可表示与溢出两条路径。
+    IntegerConversion(crate::smt::smtlib::Exp<crate::smt::Sym>, SourceLoc),
     /// SMTLIB only supports fixed-length bitvectors. This error is
     /// raised if a bitvector width would become symbolic.
     SymbolicLength(&'static str, SourceLoc),
@@ -140,6 +142,7 @@ impl IslaError for ExecError {
             Type(_, info)
             | AssertionFailure(_, info)
             | NoFunction(_, info)
+            | IntegerConversion(_, info)
             | SymbolicLength(_, info)
             | VariableNotFound(_, info)
             | MatchFailure(info) => *info,
@@ -161,6 +164,7 @@ impl fmt::Display for ExecError {
             AssertionFailure(Some(msg), _) => write!(f, "Assertion failure: {}", msg),
             NoFunction(func, _) => write!(f, "Function {} does not exist", func),
             Overflow => write!(f, "Integer overflow"),
+            IntegerConversion(_, _) => write!(f, "整数转换需要分叉检查范围"),
             SymbolicLength(func, _) => write!(f, "Symbolic (bit)vector length in {}", func),
             NoSymbolicType => write!(f, "No symbolic representation for type"),
             Unreachable(msg) => write!(f, "Unreachable: {}", msg),

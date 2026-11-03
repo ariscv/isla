@@ -275,6 +275,16 @@ fn build_ite_with<B: BV>(
     }
     match (lhs, rhs) {
         (Val::Unit, Val::Unit) => Ok(Val::Unit),
+        (Val::Vector(lhs), Val::Vector(rhs)) if lhs.len() == rhs.len() => lhs
+            .iter()
+            .zip(rhs)
+            .map(|(l, r)| merge_payload(b, l, r, solver, info))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Val::Vector),
+        (Val::Vector(_), Val::Vector(_))
+        | (Val::String(_), Val::String(_))
+        | (Val::Ref(_), Val::Ref(_))
+        | (Val::List(_), Val::List(_)) => Err(ExecError::NoSymbolicType),
         (Val::Struct(l_fields), Val::Struct(r_fields)) => {
             let fields: Result<_, _> = l_fields
                 .iter()

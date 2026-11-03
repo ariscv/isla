@@ -1045,13 +1045,20 @@ fn run_special_primop<'ir, B: BV>(
     solver: &mut Solver<B>,
 ) -> Result<SpecialResult, ExecError> {
     if f == INTERNAL_VECTOR_INIT && args.len() == 1 {
-        let arg = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
+        let arg = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?.pop().unwrap();
+        let arg = match arg {
+            Val::Symbolic(sym) => match primop::proven_symbolic_i128(sym, solver, info)? {
+                Some(len) => Val::I64(i64::try_from(len).map_err(|_| ExecError::Overflow)?),
+                None => return Err(ExecError::SymbolicLength("internal_vector_init", info)),
+            },
+            value => value,
+        };
         match loc {
             Loc::Id(v) => match (arg, frame.vars().get(v)) {
                 (Val::I64(len), Some(UVal::Uninit(Ty::Vector(_) | Ty::FixedVector(_, _)))) => assign(
                     tid,
                     loc,
-                    Val::Vector(vec![Val::Poison; len as usize]),
+                    Val::Vector(vec![Val::Poison; usize::try_from(len).map_err(|_| ExecError::Overflow)?]),
                     &mut frame.local_state,
                     shared_state,
                     solver,
@@ -1166,7 +1173,7 @@ fn run_special_primop<'ir, B: BV>(
         frame.pc += 1
     } else if f == INSTR_ANNOUNCE {
         assert!(args.len() == 1);
-        let opcode = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
+        let opcode = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?.pop().unwrap();
         if let Some((arch_pc, limit)) = task_state.pc_limit {
             if let Some(reg) = frame.local_state.regs.get(arch_pc, shared_state, solver, info)? {
                 match reg {
@@ -1189,6 +1196,18 @@ fn run_special_primop<'ir, B: BV>(
         };
         match opcode {
             Val::Bits(bv) if bv.is_zero() && task_state.zero_announce_exit => return Ok(SpecialResult::Exit),
+            Val::Symbolic(sym) if task_state.zero_announce_exit => {
+                let width = solver.length(sym).expect("指令编码必须是位向量");
+                let zero =
+                    smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(sym)), Box::new(primop::smt_zeros(i128::from(width))));
+                if solver.check_sat_with(&zero, info).is_sat()? {
+                    assert!(
+                        !solver.check_sat_with(&smtlib::Exp::Not(Box::new(zero)), info).is_sat()?,
+                        "公告前必须拆分零指令路径"
+                    );
+                    return Ok(SpecialResult::Exit);
+                }
+            }
             _ => (),
         };
         solver.add_event(Event::Instr(opcode));
@@ -1785,6 +1804,7 @@ fn try_merge_diamond<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
     limit_handler: Option<&ExecutionLimitHandler<'_>>,
+    limited_pc: Option<Name>,
 ) -> Result<Option<usize>, ExecError> {
     let pc = frame.pc;
     let candidate_joins = detect_diamond_joins(frame.instrs, pc, target);
@@ -1816,6 +1836,14 @@ fn try_merge_diamond<'ir, B: BV>(
             }
         };
 
+        if let Some(pc) = limited_pc {
+            if arm_then.write_set.as_ref().unwrap().modified_regs.contains(&pc)
+                || arm_else.write_set.as_ref().unwrap().modified_regs.contains(&pc)
+            {
+                solver.rollback_transaction(tx);
+                continue;
+            }
+        }
         let mut merged_frame = frame.clone();
         // 有深度预算时，不等深度的两臂不能共享最大步数，否则会提前截断短路径。
         if limit_handler.map_or(false, |handler| handler.config.max_path_depth.is_some())
@@ -2054,6 +2082,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     solver,
                                     *info,
                                     limit_handler.as_ref(),
+                                    task_state.pc_limit.map(|(pc, _)| pc),
                                 ) {
                                     frame.pc = new_pc;
                                     continue 'main_loop;
@@ -2189,27 +2218,6 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
-                if let Some(in_range) = primop::integer_conversion_in_range(*f, &arg, solver, *info)? {
-                    if solver.check_sat_with(&in_range, *info).is_sat()?
-                        && solver.check_sat_with(&smtlib::Exp::Not(Box::new(in_range.clone())), *info).is_sat()?
-                    {
-                        let cond = solver.define_const(in_range, *info);
-                        symbolic_length::fork_retry_operand(
-                            cond,
-                            smtlib::Exp::Var(cond),
-                            smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
-                            &[arg.clone()],
-                            *info,
-                            task_id,
-                            task_fraction,
-                            stop_conditions,
-                            fork_sink,
-                            frame,
-                            task_state,
-                            solver,
-                        )?;
-                    }
-                }
                 let value = match f(arg.clone(), solver, *info) {
                     Ok(value) => value,
                     Err(error) => {
@@ -2297,11 +2305,16 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
             // Call 的深度限制同 Goto，无条件控制流只能截断。
             Instr::Call(loc, _, f, args, info) => {
-                let decision = match limit_handler.as_ref() {
-                    Some(handler) => handler.on_call(&mut frame.execution_limit_state),
-                    None => {
-                        frame.execution_limit_state.advance_control_flow();
-                        ExecutionLimitDecision::Continue
+                // 长度或条件拆分重试的是同一条 Call，只在首次执行时计入深度。
+                let decision = if frame.pending_retry_operand.is_some() {
+                    ExecutionLimitDecision::Continue
+                } else {
+                    match limit_handler.as_ref() {
+                        Some(handler) => handler.on_call(&mut frame.execution_limit_state),
+                        None => {
+                            frame.execution_limit_state.advance_control_flow();
+                            ExecutionLimitDecision::Continue
+                        }
                     }
                 };
                 match decision {
@@ -2319,6 +2332,45 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                 match shared_state.functions.get(f) {
                     None => {
+                        let operands = if *f == INTERNAL_VECTOR_INIT || *f == INSTR_ANNOUNCE {
+                            Some(symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?)
+                        } else {
+                            None
+                        };
+                        if *f == INSTR_ANNOUNCE && task_state.zero_announce_exit {
+                            if let Val::Symbolic(sym) = operands.as_ref().unwrap()[0] {
+                                let width = solver.length(sym).expect("指令编码必须是位向量");
+                                let zero = smtlib::Exp::Eq(
+                                    Box::new(smtlib::Exp::Var(sym)),
+                                    Box::new(primop::smt_zeros(i128::from(width))),
+                                );
+                                if solver.check_sat_with(&zero, *info).is_sat()?
+                                    && solver
+                                        .check_sat_with(&smtlib::Exp::Not(Box::new(zero.clone())), *info)
+                                        .is_sat()?
+                                {
+                                    let cond = solver.define_const(zero, *info);
+                                    symbolic_length::fork_retry_operand(
+                                        cond,
+                                        smtlib::Exp::Var(cond),
+                                        smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
+                                        operands.as_ref().unwrap(),
+                                        *info,
+                                        task_id,
+                                        task_fraction,
+                                        stop_conditions,
+                                        fork_sink,
+                                        frame,
+                                        task_state,
+                                        solver,
+                                    )?;
+                                }
+                            }
+                        }
+                        // 特殊调用也必须复用预检时的操作数，避免重试时重新读取寄存器。
+                        if let Some(operands) = &operands {
+                            frame.pending_retry_operand = Some((frame.pc, Val::Vector(operands.clone())));
+                        }
                         match run_special_primop(
                             loc,
                             *f,
@@ -2330,9 +2382,26 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             task_state,
                             shared_state,
                             solver,
-                        )? {
-                            SpecialResult::Continue => (),
-                            SpecialResult::Exit => return Ok(Run::Exit),
+                        ) {
+                            Ok(SpecialResult::Continue) => frame.pending_retry_operand = None,
+                            Ok(SpecialResult::Exit) => return Ok(Run::Exit),
+                            Err(error) => {
+                                let Some(operands) = operands else { return Err(error) };
+                                if symbolic_length::retry_symbolic_length(
+                                    error,
+                                    &operands,
+                                    task_id,
+                                    task_fraction,
+                                    stop_conditions,
+                                    fork_sink,
+                                    frame,
+                                    task_state,
+                                    solver,
+                                )? {
+                                    continue 'main_loop;
+                                }
+                                return Ok(Run::Dead);
+                            }
                         }
                     }
 
@@ -3450,6 +3519,655 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review12_tests {
+        use super::*;
+
+        fn slice_program(enabled: bool) {
+            let branch = test_name(310);
+            let data = test_name(311);
+            let slice = crate::primop::variadic_primops::<B64>()["slice"];
+            let results = run_all_with_bindings(
+                vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Decl(data, Ty::Bits(8), info()),
+                    Instr::Jump(Exp::Id(branch), 5, info()),
+                    Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0x12, 8)), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0x34, 8)), info()),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        slice,
+                        vec![Exp::Id(data), Exp::I128(8), Exp::I128(1)],
+                        info(),
+                    ),
+                    Instr::End,
+                ],
+                ExecutionLimits::default().with_path_merging(enabled),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            for result in &results {
+                match result {
+                    Ok(Run::Finished(value)) => eprintln!("合并={enabled}，返回={value:?}"),
+                    Err(error) => eprintln!("合并={enabled}，错误={error:?}"),
+                    _ => panic!("执行结果异常"),
+                }
+                assert!(matches!(result, Ok(Run::Finished(Val::Bits(value))) if *value == B64::new(0, 1)));
+            }
+        }
+
+        #[test]
+        fn special_primop_retry_counts_call_once() {
+            for op in [INTERNAL_VECTOR_INIT, INSTR_ANNOUNCE] {
+                let data = test_name(311);
+                let vector = test_name(313);
+                let arg = if op == INTERNAL_VECTOR_INIT {
+                    Exp::Call(Op::Unsigned(1), vec![Exp::Id(data)])
+                } else {
+                    Exp::Id(data)
+                };
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(data, Ty::Bits(1), info()),
+                        Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bool)), info()),
+                        Instr::Call(Loc::Id(vector), false, op, vec![arg], info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_max_path_depth(1),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                assert_eq!(results.len(), 2);
+                assert!(
+                    results.iter().all(|r| matches!(r, Ok(Run::Finished(_) | Run::Exit))),
+                    "内部重试不能重复计入 Call 深度"
+                );
+            }
+        }
+
+        #[test]
+        fn slice_partial_zero_extension_indices() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let bits = solver.declare_bitvector(8, info());
+            solver.assert_eq(smtlib::Exp::Var(bits), smtlib::Exp::Bits64(B64::new(0xd2, 8)));
+            let inputs = [
+                Val::Symbolic(bits),
+                Val::Bits(B64::new(0xd2, 8)),
+                Val::MixedBits(vec![
+                    crate::ir::BitsSegment::Concrete(B64::new(0xd, 4)),
+                    crate::ir::BitsSegment::Concrete(B64::new(2, 4)),
+                ]),
+            ];
+            for input in inputs {
+                for index in [Val::I64(6), Val::I128(6), Val::I64(8), Val::I128(i128::MAX)] {
+                    let expected = if matches!(index, Val::I64(6) | Val::I128(6)) { 3 } else { 0 };
+                    let value = primop::op_slice(input.clone(), index, 4, &mut solver, info()).unwrap();
+                    assert_eq!(crate::primop_util::length_bits(&value, &mut solver, info()).unwrap(), 4);
+                    let wrong = smtlib::Exp::Neq(
+                        Box::new(crate::primop_util::smt_value(&value, info()).unwrap()),
+                        Box::new(smtlib::Exp::Bits64(B64::new(expected, 4))),
+                    );
+                    assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
+                }
+            }
+        }
+
+        #[test]
+        fn internal_conversion_retry_keeps_success_and_overflow() {
+            let data = test_name(311);
+            let results = run_all_with_bindings(
+                vec![
+                    Instr::Decl(data, Ty::Bits(128), info()),
+                    Instr::PrimopUnary(
+                        Loc::Id(data),
+                        primop::unary_primops()["undefined_bitvector"],
+                        Exp::I128(128),
+                        info(),
+                    ),
+                    Instr::PrimopBinary(
+                        Loc::Id(RETURN),
+                        primop::binary_primops()["align_bits"],
+                        Exp::Id(data),
+                        Exp::I128(3),
+                        info(),
+                    ),
+                    Instr::End,
+                ],
+                ExecutionLimits::default().with_path_merging(true),
+                empty_shared_state(),
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            assert_eq!(results.len(), 2);
+            assert_eq!(results.iter().filter(|r| matches!(r, Err(ExecError::Overflow))).count(), 1);
+            assert_eq!(results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count(), 1);
+        }
+
+        #[test]
+        fn vector_access_concrete_only_elements_retry() {
+            for values in [
+                vec![Val::String("左".to_owned()), Val::String("右".to_owned())],
+                vec![Val::Ref(test_name(301)), Val::Ref(test_name(302))],
+                vec![Val::Vector(vec![Val::Bool(false)]), Val::Vector(vec![Val::Bool(true), Val::Bool(false)])],
+            ] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let index = test_name(312);
+                let vector = test_name(313);
+                let mut lets = HashMap::default();
+                lets.insert(vector, UVal::Init(Val::Vector(values.clone())));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(index),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(data),
+                            info(),
+                        ),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            primop::binary_primops()["vector_access"],
+                            Exp::Id(vector),
+                            Exp::Id(index),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(true),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    lets,
+                );
+                assert_eq!(results.len(), 2);
+                for expected in values {
+                    assert!(
+                        results.iter().any(|r| matches!(r, Ok(Run::Finished(value)) if *value == expected)),
+                        "必须按索引返回原元素"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn slice_concrete_paths() {
+            slice_program(false);
+        }
+
+        #[test]
+        fn slice_after_merge() {
+            slice_program(true);
+        }
+
+        #[test]
+        fn small_index_vector() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let n = solver.declare_const(smtlib::Ty::BitVec(1), info());
+            let value = primop::vector_access(
+                Val::Vector((0..4).map(Val::I128).collect()),
+                Val::Symbolic(n),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            eprintln!("向量结果={value:?}");
+            solver.assert_eq(smtlib::Exp::Var(n), smtlib::Exp::Bits64(B64::BIT_ONE));
+            let values = Val::Vector(vec![Val::String("左".to_owned()), Val::String("右".to_owned())]);
+            assert_eq!(
+                primop::vector_access(values, Val::Symbolic(n), &mut solver, info()).unwrap(),
+                Val::String("右".to_owned())
+            );
+        }
+
+        #[test]
+        fn large_pow_exponent() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let b = solver.declare_const(smtlib::Ty::Bool, info());
+            let bits = crate::primop_util::merge_val(
+                b,
+                &Val::Bits(B64::new(0, 8)),
+                &Val::Bits(B64::new(1, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let unsigned = crate::primop::unary_primops::<B64>()["sail_unsigned"];
+            let pow = crate::primop::binary_primops::<B64>()["pow_int"];
+            let base = unsigned(bits, &mut solver, info()).unwrap();
+            let exp = Val::I128(1_i128 << 32);
+            for x in [0, 1] {
+                assert!(matches!(pow(Val::I128(x), exp.clone(), &mut solver, info()), Err(ExecError::Overflow)));
+            }
+            let result = pow(base, exp, &mut solver, info());
+            eprintln!("合并后的幂={result:?}");
+            assert!(matches!(result, Err(ExecError::Overflow)), "合并应保留逐分支的溢出结果");
+        }
+
+        #[test]
+        fn zero_instruction_announce() {
+            for enabled in [false, true] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Call(Loc::Id(RETURN), false, INSTR_ANNOUNCE, vec![Exp::Id(data)], info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let exits = results.iter().filter(|r| matches!(r, Ok(Run::Exit))).count();
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                eprintln!("合并={enabled}，Exit={exits}，Finished={finished}");
+                assert_eq!(exits, 1, "必须保留零指令的停止路径");
+                assert_eq!(finished, 1, "必须保留非零指令的继续路径");
+            }
+        }
+
+        #[test]
+        fn internal_vector_init_after_merge() {
+            for enabled in [false, true] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let length = test_name(312);
+                let vector = test_name(313);
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(length, Ty::I64, info()),
+                        Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bool)), info()),
+                        Instr::Jump(Exp::Id(branch), 7, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Goto(8),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::Copy(Loc::Id(length), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                        Instr::Call(Loc::Id(vector), false, INTERNAL_VECTOR_INIT, vec![Exp::Id(length)], info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for result in &results {
+                    if let Err(error) = result {
+                        eprintln!("合并={enabled}，错误={error:?}");
+                    }
+                }
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                eprintln!("合并={enabled}，正常路径={finished}");
+                assert_eq!(finished, 2, "必须保留两条合法的向量长度路径");
+                assert_eq!(results.len(), 2);
+            }
+        }
+
+        #[test]
+        fn read_vreg_length_after_merge() {
+            for enabled in [false, true] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let length = test_name(312);
+                let vector = test_name(313);
+                let unary = primop::unary_primops::<B64>();
+                let variadic = primop::variadic_primops::<B64>();
+                let mut args = vec![Exp::Id(length), Exp::I128(32), Exp::I128(0)];
+                args.extend((0..8).map(|_| Exp::Bits(B64::new(0, 64))));
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(length, Ty::I128, info()),
+                        Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bits(32))), info()),
+                        Instr::Jump(Exp::Id(branch), 7, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Goto(8),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::PrimopUnary(Loc::Id(length), unary["sail_unsigned"], Exp::Id(data), info()),
+                        Instr::PrimopVariadic(Loc::Id(vector), variadic["isla_read_vreg"], args, info()),
+                        Instr::PrimopUnary(Loc::Id(RETURN), unary["length"], Exp::Id(vector), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let mut lengths = Vec::new();
+                for result in results {
+                    match result {
+                        Ok(Run::Finished(Val::I128(n))) => lengths.push(n),
+                        Err(error) => panic!("执行失败：{error:?}"),
+                        _ => panic!("执行结果异常"),
+                    }
+                }
+                lengths.sort_unstable();
+                assert_eq!(lengths, vec![1, 2], "必须保留两个真实的候选长度");
+                eprintln!("合并={enabled}，读取的向量长度={lengths:?}");
+                assert!(lengths.iter().all(|n| [1, 2].contains(n)), "不能把动态长度替换为物理容量");
+            }
+        }
+
+        #[test]
+        fn mask_width_after_merge() {
+            for enabled in [false, true] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let length = test_name(312);
+                let mask = test_name(313);
+                let unary = primop::unary_primops::<B64>();
+                let variadic = primop::variadic_primops::<B64>();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(length, Ty::I128, info()),
+                        Instr::Decl(mask, Ty::AnyBits, info()),
+                        Instr::Jump(Exp::Id(branch), 7, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::Goto(8),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
+                        Instr::PrimopUnary(Loc::Id(length), unary["sail_unsigned"], Exp::Id(data), info()),
+                        Instr::PrimopVariadic(
+                            Loc::Id(mask),
+                            variadic["isla_mask_from_low_bits"],
+                            vec![
+                                Exp::Id(length),
+                                Exp::Bits(B64::BIT_ZERO),
+                                Exp::Bits(B64::BIT_ZERO),
+                                Exp::Bits(B64::new(3, 8)),
+                            ],
+                            info(),
+                        ),
+                        Instr::PrimopUnary(Loc::Id(RETURN), unary["length"], Exp::Id(mask), info()),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                let mut lengths = Vec::new();
+                for result in results {
+                    match result {
+                        Ok(Run::Finished(Val::I128(n))) => lengths.push(n),
+                        Err(error) => panic!("执行失败：{error:?}"),
+                        _ => panic!("执行结果异常"),
+                    }
+                }
+                lengths.sort_unstable();
+                assert_eq!(lengths, vec![1, 2], "必须保留两种结果位宽");
+                eprintln!("合并={enabled}，掩码长度={lengths:?}");
+                assert!(lengths.iter().all(|n| [1, 2].contains(n)), "不能把动态结果位宽替换为源位宽");
+            }
+        }
+
+        #[test]
+        fn nested_vector_access_after_merge() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let vector = shared.symtab.intern("zreview12_nested_vector");
+                let branch = test_name(310);
+                let data = test_name(311);
+                let index = test_name(312);
+                let unary = primop::unary_primops::<B64>();
+                let binary = primop::binary_primops::<B64>();
+                let mut lets = HashMap::default();
+                lets.insert(
+                    vector,
+                    UVal::Init(Val::Vector(vec![
+                        Val::Vector(vec![Val::Bool(false)]),
+                        Val::Vector(vec![Val::Bool(true)]),
+                    ])),
+                );
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(index, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(Loc::Id(index), unary["sail_unsigned"], Exp::Id(data), info()),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            binary["vector_access"],
+                            Exp::Id(vector),
+                            Exp::Id(index),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    shared,
+                    RegisterBindings::new(),
+                    lets,
+                );
+                for result in &results {
+                    if let Err(error) = result {
+                        eprintln!("合并={enabled}，错误={error:?}");
+                    }
+                }
+                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
+                eprintln!("合并={enabled}，嵌套向量正常路径={finished}");
+                assert!(finished > 0, "向量元素为向量时也必须保留合法索引路径");
+            }
+        }
+
+        #[test]
+        fn align_overflow_after_merge() {
+            for enabled in [false, true] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let binary = primop::binary_primops::<B64>();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Jump(Exp::Id(branch), 5, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            binary["align_bits"],
+                            Exp::Id(data),
+                            Exp::I128(512),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => assert_eq!(*value, Val::Bits(B64::zeros(8))),
+                        Err(error) => panic!("对齐失败：{error:?}"),
+                        _ => panic!("执行结果异常"),
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn pow_valid_exponent_cost() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let b = solver.declare_const(smtlib::Ty::Bool, info());
+            let bits = crate::primop_util::merge_val(
+                b,
+                &Val::Bits(B64::new(0, 8)),
+                &Val::Bits(B64::new(1, 8)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            let unsigned = crate::primop::unary_primops::<B64>()["sail_unsigned"];
+            let pow = crate::primop::binary_primops::<B64>()["pow_int"];
+            let base = unsigned(bits, &mut solver, info()).unwrap();
+            for exp in [1_i128 << 20, i128::from(u32::MAX)] {
+                for x in [0, 1] {
+                    assert_eq!(pow(Val::I128(x), Val::I128(exp), &mut solver, info()).unwrap(), Val::I128(x));
+                }
+                let started = Instant::now();
+                let result = pow(base.clone(), Val::I128(exp), &mut solver, info()).unwrap();
+                let expression = crate::primop_util::smt_value(&result, info()).unwrap();
+                assert!(solver.exp_to_str(&expression).len() < 256, "实际 Z3 表达式必须使用共享常量");
+                for (condition, expected) in
+                    [(smtlib::Exp::Var(b), 0), (smtlib::Exp::Not(Box::new(smtlib::Exp::Var(b))), 1)]
+                {
+                    let wrong = smtlib::Exp::And(
+                        Box::new(condition),
+                        Box::new(smtlib::Exp::Neq(
+                            Box::new(expression.clone()),
+                            Box::new(crate::primop_util::smt_i128(expected)),
+                        )),
+                    );
+                    assert_eq!(
+                        solver.check_sat_with(&wrong, info()),
+                        crate::smt::SmtResult::Unsat,
+                        "指数 {exp} 的结果必须与具体路径一致"
+                    );
+                }
+                eprintln!("有效指数={exp}，合并幂结果={result:?}，构造与校验耗时={:?}", started.elapsed());
+            }
+        }
+
+        #[test]
+        fn pc_limit_after_merge() {
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let pc = shared.symtab.intern("zreview12_pc");
+                let branch = test_name(310);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(branch, Ty::Bool, info()),
+                    Instr::Jump(Exp::Id(branch), 4, info()),
+                    Instr::Copy(Loc::Id(pc), Exp::Bits(B64::new(0x1000, 64)), info()),
+                    Instr::Goto(5),
+                    Instr::Copy(Loc::Id(pc), Exp::Bits(B64::new(0x2000, 64)), info()),
+                    Instr::Call(Loc::Id(RETURN), false, INSTR_ANNOUNCE, vec![Exp::Bits(B64::new(0x13, 32))], info()),
+                    Instr::End,
+                ]);
+                frame.regs_mut().insert(pc, false, UVal::Init(Val::Bits(B64::new(0, 64))));
+                let task_state = TaskState::new()
+                    .with_pc_limit(pc, 1)
+                    .with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let results = std::sync::Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::fresh(), &task_state),
+                    &shared,
+                    &results,
+                    &|_, _, result, _, _, results| {
+                        let outcome = match result {
+                            Ok((Run::Finished(_), _)) => "完成".to_owned(),
+                            Err((error, _)) => format!("{error:?}"),
+                            _ => panic!("执行结果异常"),
+                        };
+                        results.lock().unwrap().push(outcome);
+                    },
+                );
+                let outcomes = results.into_inner().unwrap();
+                eprintln!("合并={enabled}，PC 预算结果={outcomes:?}");
+                assert!(outcomes.iter().all(|outcome| outcome == "完成"), "第一次访问每个 PC 不得报错");
+            }
+        }
+
+        #[test]
+        fn align_internal_conversion_prunes_overflow() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let cond = solver.declare_const(smtlib::Ty::Bool, info());
+            let good = Val::Bits(B129::zeros(128));
+            let bad = Val::Bits(B129::ones(128));
+            let align = primop::binary_primops::<B129>()["align_bits"];
+            assert!(align(good.clone(), Val::I128(3), &mut solver, info()).is_ok());
+            assert!(matches!(align(bad.clone(), Val::I128(3), &mut solver, info()), Err(ExecError::Overflow)));
+            let merged = crate::primop_util::merge_val(cond, &good, &bad, &mut solver, info()).unwrap();
+            let result = align(merged, Val::I128(3), &mut solver, info());
+            let overflow_path = solver.check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))), info());
+            eprintln!("内部转换合并结果={result:?}，溢出分支可满足性={overflow_path:?}");
+            assert_eq!(overflow_path, crate::smt::SmtResult::Sat, "不得直接加入可表示断言并删除溢出路径");
+        }
+
+        #[test]
+        fn large_pow_exponent_after_merge_fast() {
+            for enabled in [false, true] {
+                let branch = test_name(310);
+                let data = test_name(311);
+                let integer = test_name(312);
+                let unary = primop::unary_primops::<B64>();
+                let binary = primop::binary_primops::<B64>();
+                let results = run_all_with_bindings(
+                    vec![
+                        Instr::Decl(branch, Ty::Bool, info()),
+                        Instr::Decl(data, Ty::Bits(8), info()),
+                        Instr::Decl(integer, Ty::I128, info()),
+                        Instr::Jump(Exp::Id(branch), 6, info()),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
+                        Instr::Goto(7),
+                        Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
+                        Instr::PrimopUnary(Loc::Id(integer), unary["sail_unsigned"], Exp::Id(data), info()),
+                        Instr::PrimopBinary(
+                            Loc::Id(integer),
+                            binary["sub_int"],
+                            Exp::Id(integer),
+                            Exp::Id(integer),
+                            info(),
+                        ),
+                        Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            binary["pow_int"],
+                            Exp::Id(integer),
+                            Exp::I128(1_i128 << 32),
+                            info(),
+                        ),
+                        Instr::End,
+                    ],
+                    ExecutionLimits::default().with_path_merging(enabled),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                for result in &results {
+                    match result {
+                        Ok(Run::Finished(value)) => eprintln!("合并={enabled}，幂结果={value:?}"),
+                        Err(error) => eprintln!("合并={enabled}，幂错误={error:?}"),
+                        _ => panic!("执行结果异常"),
+                    }
+                }
+                assert!(
+                    results.iter().all(|r| matches!(r, Err(ExecError::Overflow))),
+                    "指数表示范围不能取决于底数是否为符号值"
+                );
+            }
+        }
+    }
 
     mod review11_tests {
 
@@ -3576,6 +4294,11 @@ mod tests {
                 assert!(solver.is_sail_bitvector(*sym));
             }
             let signed = unary["sail_signed"](input.clone(), &mut solver, info()).unwrap();
+            let unsigned = unary["sail_unsigned"](input.clone(), &mut solver, info());
+            let Err(ExecError::IntegerConversion(in_range, _)) = unsigned else {
+                panic!("无约束的 128 位 unsigned 必须检查范围")
+            };
+            solver.assert(in_range);
             let unsigned = unary["sail_unsigned"](input, &mut solver, info()).unwrap();
             let integer_input = Val::Symbolic(solver.declare_bitvector(8, info()));
             let clz = unary["count_leading_zeros"](integer_input.clone(), &mut solver, info()).unwrap();
@@ -3716,7 +4439,19 @@ mod tests {
             .unwrap();
             let result = unsigned(value, &mut solver, info());
             eprintln!("混合可表示值与溢出值的 unsigned={result:?}");
-            assert!(result.is_ok(), "仍可行的合法支不能因另一个模型溢出而消失");
+            let Err(ExecError::IntegerConversion(in_range, _)) = result else {
+                panic!("混合范围必须请求执行器分叉")
+            };
+            assert_eq!(solver.check_sat_with(&smtlib::Exp::Var(cond), info()), crate::smt::SmtResult::Sat);
+            assert_eq!(
+                solver.check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))), info()),
+                crate::smt::SmtResult::Sat
+            );
+            solver.assert(in_range);
+            assert_eq!(
+                solver.check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))), info()),
+                crate::smt::SmtResult::Unsat
+            );
         }
 
         #[test]
@@ -3937,7 +4672,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(written, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(read, false, UVal::Init(Val::Bits(B64::new(3, 8))));
-            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None).unwrap();
+            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             if merged.is_none() {
                 assert!(!solver
                     .trace()
@@ -4116,7 +4851,7 @@ mod tests {
             for reg in [left, right] {
                 frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(true)));
             }
-            assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None).unwrap(), None);
+            assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
             assert!(
                 !solver.trace().to_vec().iter().any(|event| matches!(event, Event::ReadReg(..))),
                 "拒绝合并必须回滚读取事件"
@@ -4196,7 +4931,10 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             );
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             let value =
                 eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
@@ -4245,7 +4983,10 @@ mod tests {
             for bits in [B129::new(1, 129), B129::new(2, 129)] {
                 assert!(add(Val::Bits(bits), Val::I128(1), &mut solver, info()).is_ok());
             }
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             let value =
                 eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             let result = add(value, Val::I128(1), &mut solver, info());
@@ -4302,7 +5043,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(left, false, UVal::Init(Val::Bits(B64::new(1, 8))));
             frame.regs_mut().insert(right, false, UVal::Init(Val::Bits(B64::new(2, 8))));
-            let merged = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap();
+            let merged = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             let events = solver.trace().to_vec();
             let reads: Vec<_> = events
                 .iter()
@@ -4335,7 +5076,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(left, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(right, false, UVal::Init(Val::Bits(B64::new(0, 8))));
-            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None).unwrap();
+            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             let events = solver.trace().to_vec();
             let writes: Vec<_> = events
                 .iter()
@@ -4366,7 +5107,10 @@ mod tests {
                 Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(2, 8)), info()),
                 Instr::End,
             ]);
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             let value =
                 eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
@@ -4395,7 +5139,10 @@ mod tests {
             let cond_value =
                 eval_exp(&Exp::Id(reg), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             let Val::Symbolic(cond) = cond_value else { panic!("条件必须是符号布尔值") };
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             solver.add_event(Event::Branch { address: Val::Bits(B64::new(0x1000, 64)) });
             let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
             let refs = crate::simplify::EventReferences::from_events(&events);
@@ -4487,7 +5234,10 @@ mod tests {
                 Instr::End,
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::Bool));
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             let result =
                 eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             let Val::Symbolic(result) = result else { panic!("必须是符号结果") };
@@ -4634,7 +5384,10 @@ mod tests {
                 Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(2, 8)), info()),
                 Instr::End,
             ]);
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             let value =
                 eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             let shift = *crate::primop::binary_primops::<B64>().get("shiftr").unwrap();
@@ -4862,7 +5615,10 @@ mod tests {
                 Instr::End,
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+            assert_eq!(
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4)
+            );
             let events = solver.trace().to_vec();
             let reads: Vec<_> = events
                 .iter()
@@ -4902,7 +5658,7 @@ mod tests {
             frame.regs_mut().insert(a, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(b, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(),
+                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 None,
                 "不同写集合必须保留分叉"
             );
@@ -7583,8 +8339,18 @@ fn zmemreadfork(zu) {
             }
             assert_eq!(unsigned(Val::Bits(B129::ones(127)), &mut solver, info()).unwrap(), Val::I128(i128::MAX));
             let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
-            // 混合范围保留合法模型；只有全部模型越界才返回溢出。
-            assert!(unsigned(Val::Symbolic(bits), &mut solver, info()).is_ok());
+            // 混合范围交回执行器分叉，转换层不得自行删除溢出模型。
+            assert!(matches!(
+                unsigned(Val::Symbolic(bits), &mut solver, info()),
+                Err(ExecError::IntegerConversion(_, _))
+            ));
+            assert_eq!(
+                solver.check_sat_with(
+                    &smtlib::Exp::Bvslt(Box::new(smtlib::Exp::Var(bits)), Box::new(crate::primop_util::smt_i128(0))),
+                    info()
+                ),
+                crate::smt::SmtResult::Sat
+            );
             let overflow = solver.declare_bitvector(128, info());
             solver.assert(smtlib::Exp::Bvslt(
                 Box::new(smtlib::Exp::Var(overflow)),
@@ -7788,7 +8554,7 @@ fn zmemreadfork(zu) {
                 ]);
                 frame.vars_mut().insert(x, UVal::Uninit(&Ty::Bits(8)));
                 assert_eq!(
-                    try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(),
+                    try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                     Some(4)
                 );
                 let f = *crate::primop::binary_primops::<B64>().get(op).unwrap();
@@ -8642,7 +9408,7 @@ fn zmemreadfork(zu) {
         ]);
         frame.vars_mut().insert(x, UVal::Uninit(&Ty::I64));
         frame.vars_mut().insert(y, UVal::Uninit(&Ty::I64));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
         let xv = eval_exp(&Exp::Id(x), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let yv = eval_exp(&Exp::Id(y), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let unequal = smtlib::Exp::Neq(
@@ -8702,7 +9468,7 @@ fn zmemreadfork(zu) {
             Instr::End,
         ]);
         frame.vars_mut().insert(result, UVal::Uninit(Box::leak(Box::new(Ty::Enum(enum_name)))));
-        let result = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None);
+        let result = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None);
         assert!(result.is_ok(), "不支持的枚举推测应回退");
     }
 
@@ -8723,7 +9489,7 @@ fn zmemreadfork(zu) {
         ]);
         frame.vars_mut().insert(result, UVal::Uninit(&Ty::I64));
         frame.regs_mut().insert(reg, false, UVal::Init(Val::I64(1)));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
         assert!(
             solver.trace().to_vec().iter().any(|e| matches!(e, Event::ReadReg(r, _, _) if *r == reg)),
             "两臂必读的寄存器应出现在成功合并后的 Trace 中"
@@ -8747,7 +9513,7 @@ fn zmemreadfork(zu) {
             Instr::End,
         ]);
         frame.regs_mut().insert(reg, true, UVal::Init(Val::I64(0)));
-        assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None).unwrap(), None);
+        assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
         let mut frame = simulate_diamond_arm(4, 5, 6, frame, &shared, &mut solver, None).unwrap().unwrap();
         frame.regs_mut().forget_last_reads();
         let value = frame.regs_mut().get(reg, &shared, &mut solver, info()).unwrap().unwrap().clone();
@@ -9036,7 +9802,7 @@ fn zmemreadfork(zu) {
         let mut fields = HashMap::default();
         fields.insert(field, Val::I64(1));
         frame.regs_mut().insert(reg, false, UVal::Init(Val::Struct(fields)));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
         let trace = solver.trace().to_vec();
         let accessors: Vec<_> = trace
             .iter()
@@ -9064,7 +9830,7 @@ fn zmemreadfork(zu) {
             Instr::End,
         ]);
         frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
         let result =
             eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let trace = solver.trace().to_vec();
@@ -9090,7 +9856,7 @@ fn zmemreadfork(zu) {
                 Instr::End,
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
-            let merged = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None).unwrap();
+            let merged = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             if symmetric {
                 assert_eq!(merged, Some(4));
                 let value = eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info())
@@ -9229,7 +9995,10 @@ fn zmemreadfork(zu) {
         for n in [1, 2] {
             assert_eq!(unsigned(Val::Bits(B129::new(n, 128)), &mut solver, info()).unwrap(), Val::I128(n as i128));
         }
-        assert_eq!(try_merge_diamond(condition, 3, &mut frame, &shared, &mut solver, info(), None).unwrap(), Some(4));
+        assert_eq!(
+            try_merge_diamond(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            Some(4)
+        );
         let merged =
             eval_exp(&Exp::Id(result), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsigned(merged, &mut solver, info())));
