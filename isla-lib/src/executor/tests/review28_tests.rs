@@ -129,7 +129,7 @@ fn 排除谓词必须与完整低位投影访问区间一致() {
             crate::memory::Region::<B129>::Excluded(u64::MAX - 4..u64::MAX),
             crate::memory::Region::<B129>::Excluded(256..512),
         ];
-        for bytes in [1, 4, 8, u32::MAX] {
+        for bytes in [0, 1, 4, 8, u32::MAX] {
             let allowed =
                 crate::memory::smt_excluded_constraint(&regions, &smtlib::Exp::Var(address), bytes, &mut solver)
                     .unwrap();
@@ -145,9 +145,18 @@ fn 排除谓词必须与完整低位投影访问区间一致() {
                     bits[width as usize - 1] = true;
                 }
                 let concrete = smtlib::Exp::Bits(bits);
+                // Review 36：按实际位宽回绕；用两个不回绕区间构造独立预期值。
+                let domain_end = 1u128 << width.min(64);
+                let end = u128::from(low) + u128::from(bytes);
                 let overlap = regions.iter().any(|region| {
                     let range = region.region_range();
-                    low < range.end && u128::from(low) + u128::from(bytes) > u128::from(range.start)
+                    let start = u128::from(range.start);
+                    let top = u128::from(range.end).min(domain_end);
+                    bytes != 0
+                        && start < top
+                        && (u128::from(bytes) >= domain_end
+                            || (u128::from(low) < top && end.min(domain_end) > start)
+                            || (end > domain_end && end - domain_end > start))
                 });
                 let mismatch = smtlib::Exp::And(
                     Box::new(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(address)), Box::new(concrete))),

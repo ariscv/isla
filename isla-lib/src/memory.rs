@@ -176,13 +176,15 @@ impl<B> Region<B> {
 
 pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync {
     /// 回调若会用区域约束排除非符号内存的写入，可直接处理尚未收窄的符号地址。
-    /// 默认仍由 Memory 提前拒绝可能与具体区域重叠的地址。
+    /// Custom 区域始终先经 Memory 检查，唯一地址调用设备，否则拆分重试。
+    /// 默认仍由 Memory 提前检查可能与具体区域重叠的地址。
     fn constrains_symbolic_writes(&self) -> bool {
         false
     }
 
     /// 回调能自行处理符号读地址约束时，可直接处理尚未收窄的符号地址。
-    /// 回调须保留具体区域的已知内容；需要接管普通具体读时另启用 handles_concrete_reads。
+    /// 回调须保留具体区域的已知内容；Custom/Constrained 始终经专属分派。
+    /// 需要接管普通具体读时另启用 handles_concrete_reads。
     /// 默认仍由 Memory 先检查具体区域重叠，必要时请求地址拆分。
     fn constrains_symbolic_reads(&self) -> bool {
         false
@@ -413,13 +415,13 @@ impl<B: BV> Memory<B> {
         }
     }
 
-    // 检查需要具体分派的区域重叠；跨区域读取也包含符号区域，以复用地址拆分。
+    // 按调用方选择的区域检查重叠；回调只能接管普通内存，专属区域仍须具体分派。
     fn check_concrete_overlap(
         &self,
         address: Sym,
         bytes: u32,
         error: ExecError,
-        include_symbolic: bool,
+        include_region: impl Fn(&Region<B>) -> bool,
         solver: &mut Solver<B>,
     ) -> Result<Overlap, ExecError> {
         use Exp::*;
@@ -439,9 +441,7 @@ impl<B: BV> Memory<B> {
         };
 
         for region in &self.regions {
-            if !matches!(region, Region::Excluded(_))
-                && (include_symbolic || !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)))
-            {
+            if !matches!(region, Region::Excluded(_)) && include_region(region) {
                 let Range { start, end } = region.region_range();
 
                 region_constraints.push(And(
@@ -451,8 +451,10 @@ impl<B: BV> Memory<B> {
             }
         }
 
-        // 排除区域按完整访问区间检查，复用防止地址加法回绕的约束。
-        if let Some(allowed) = smt_excluded_constraint(&self.regions, &Var(address), bytes, solver) {
+        // 自约束回调负责排除区域时不请求拆分；其余调用方检查全部实际访问字节。
+        if self.regions.iter().any(|region| matches!(region, Region::Excluded(_)) && include_region(region)) {
+            let allowed = smt_excluded_constraint(&self.regions, &Var(address), bytes, solver)
+                .expect("已选中的排除区域必须生成约束");
             // 无合法候选时无需拆分地址，交给符号读写追加排除约束并返回访问错误。
             if self.client_info.is_none() && solver.check_sat_with(&allowed, SourceLoc::unknown()).is_unsat()? {
                 return Ok(Overlap::NoOverlap);
@@ -611,44 +613,65 @@ impl<B: BV> Memory<B> {
                 }
 
                 Val::Symbolic(symbolic_addr) => {
-                    // 数据读允许自约束回调收窄读地址，跳过具体区域预检查（与写侧对称）。
-                    // 取指始终检查区域分派及判死区域，回调不能跳过取指规则。
-                    if opts.is_ifetch
-                        || !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads())
-                    {
-                        // 低 64 位投影只用于区域分派，符号读事件保留完整的原始地址。
-                        match self.check_concrete_overlap(
-                            symbolic_addr,
-                            bytes,
-                            ExecError::SymbolicLength(
-                                if tag { "read_memt_address" } else { "read_mem_address" },
-                                SourceLoc::unknown(),
-                            ),
-                            false,
-                            solver,
-                        )? {
-                            Overlap::Unique(concrete_addr) => {
-                                if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
-                                    return Err(ExecError::BadRead("excluded memory region"));
-                                }
-                                for region in &self.regions {
-                                    match region {
-                                        Region::Constrained(range, generator) if range.contains(&concrete_addr) => {
-                                            return read_constrained(
-                                                range,
-                                                generator.as_ref(),
-                                                read_kind,
-                                                concrete_addr,
-                                                address,
-                                                bytes,
-                                                solver,
-                                                tag,
-                                                opts,
-                                                region.region_name(),
-                                            )
-                                        }
-                                        Region::Symbolic(range) | Region::SymbolicCode(range)
-                                            if range.contains(&concrete_addr) =>
+                    // 自约束回调可接管普通数据读，Custom/Constrained 始终保留专属分派。
+                    let callback_reads = !opts.is_ifetch
+                        && self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads());
+                    // 低 64 位投影只用于区域分派，符号读事件保留完整的原始地址。
+                    match self.check_concrete_overlap(
+                        symbolic_addr,
+                        bytes,
+                        ExecError::SymbolicLength(
+                            if tag { "read_memt_address" } else { "read_mem_address" },
+                            SourceLoc::unknown(),
+                        ),
+                        |region| {
+                            if callback_reads {
+                                matches!(region, Region::Custom(..) | Region::Constrained(..))
+                            } else {
+                                !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
+                            }
+                        },
+                        solver,
+                    )? {
+                        Overlap::Unique(concrete_addr) => {
+                            if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
+                                return Err(ExecError::BadRead("excluded memory region"));
+                            }
+                            for region in &self.regions {
+                                match region {
+                                    Region::Constrained(range, generator) if range.contains(&concrete_addr) => {
+                                        return read_constrained(
+                                            range,
+                                            generator.as_ref(),
+                                            read_kind,
+                                            concrete_addr,
+                                            address,
+                                            bytes,
+                                            solver,
+                                            tag,
+                                            opts,
+                                            region.region_name(),
+                                        )
+                                    }
+                                    Region::Symbolic(range) | Region::SymbolicCode(range)
+                                        if range.contains(&concrete_addr) =>
+                                    {
+                                        return self.read_symbolic(
+                                            read_kind,
+                                            address,
+                                            bytes,
+                                            solver,
+                                            tag,
+                                            opts,
+                                            region.region_name(),
+                                        )
+                                    }
+                                    Region::Concrete(range, contents) if range.contains(&concrete_addr) => {
+                                        if callback_reads
+                                            && self
+                                                .client_info
+                                                .as_ref()
+                                                .is_some_and(|client| client.handles_concrete_reads())
                                         {
                                             return self.read_symbolic(
                                                 read_kind,
@@ -658,30 +681,29 @@ impl<B: BV> Memory<B> {
                                                 tag,
                                                 opts,
                                                 region.region_name(),
-                                            )
+                                            );
                                         }
-                                        Region::Concrete(range, contents) if range.contains(&concrete_addr) => {
-                                            return read_concrete(
-                                                contents,
-                                                read_kind,
-                                                concrete_addr,
-                                                address,
-                                                bytes,
-                                                solver,
-                                                tag,
-                                                opts,
-                                                region.region_name(),
-                                            )
-                                        }
-                                        Region::Custom(range, contents) if range.contains(&concrete_addr) => {
-                                            return contents.read(read_kind, concrete_addr, bytes, solver, tag)
-                                        }
-                                        _ => continue,
+                                        return read_concrete(
+                                            contents,
+                                            read_kind,
+                                            concrete_addr,
+                                            address,
+                                            bytes,
+                                            solver,
+                                            tag,
+                                            opts,
+                                            region.region_name(),
+                                        );
                                     }
+                                    Region::Custom(range, contents) if range.contains(&concrete_addr) => {
+                                        return contents.read(read_kind, concrete_addr, bytes, solver, tag)
+                                    }
+                                    _ => continue,
                                 }
                             }
-                            Overlap::NoOverlap => {}
+                            panic!("唯一重叠地址必须属于已定义区域");
                         }
+                        Overlap::NoOverlap => {}
                     }
                     let info = SourceLoc::unknown();
                     let width = solver.length(symbolic_addr).expect("读地址必须是位向量");
@@ -735,7 +757,7 @@ impl<B: BV> Memory<B> {
                         symbolic_addr,
                         bytes,
                         ExecError::SymbolicLength(if tag { "read_memt_address" } else { "read_mem_address" }, info),
-                        true,
+                        |_| true,
                         solver,
                     )? {
                         Overlap::Unique(concrete_addr) => {
@@ -841,34 +863,40 @@ impl<B: BV> Memory<B> {
             }
 
             Val::Symbolic(symbolic_addr) => {
-                if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_writes()) {
-                    let bytes = data_bytes(&data, solver)?;
-                    match self.check_concrete_overlap(
-                        symbolic_addr,
-                        bytes,
-                        ExecError::SymbolicLength(
-                            if tag.is_some() { "write_memt_address" } else { "write_mem_address" },
-                            SourceLoc::unknown(),
-                        ),
-                        false,
-                        solver,
-                    )? {
-                        Overlap::Unique(concrete_addr) => {
-                            if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
-                                return Err(ExecError::BadWrite("excluded memory region"));
-                            }
-                            for region in self.regions.iter_mut() {
-                                match region {
-                                    Region::Custom(range, contents) if range.contains(&concrete_addr) => {
-                                        return contents.write(write_kind, concrete_addr, data, solver, tag)
-                                    }
-                                    _ => continue,
-                                }
-                            }
-                            // 低 64 位投影只用于区域分派，写事件必须保留完整符号地址。
+                let callback_writes =
+                    self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_writes());
+                let bytes = data_bytes(&data, solver)?;
+                match self.check_concrete_overlap(
+                    symbolic_addr,
+                    bytes,
+                    ExecError::SymbolicLength(
+                        if tag.is_some() { "write_memt_address" } else { "write_mem_address" },
+                        SourceLoc::unknown(),
+                    ),
+                    |region| {
+                        if callback_writes {
+                            matches!(region, Region::Custom(..))
+                        } else {
+                            !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
                         }
-                        Overlap::NoOverlap => {}
+                    },
+                    solver,
+                )? {
+                    Overlap::Unique(concrete_addr) => {
+                        if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
+                            return Err(ExecError::BadWrite("excluded memory region"));
+                        }
+                        for region in self.regions.iter_mut() {
+                            match region {
+                                Region::Custom(range, contents) if range.contains(&concrete_addr) => {
+                                    return contents.write(write_kind, concrete_addr, data, solver, tag)
+                                }
+                                _ => continue,
+                            }
+                        }
+                        // 低 64 位投影只用于区域分派，写事件必须保留完整符号地址。
                     }
+                    Overlap::NoOverlap => {}
                 }
                 self.write_symbolic(write_kind, address, data, solver, tag, opts, DEFAULT_REGION_NAME)
             }
@@ -1041,11 +1069,12 @@ impl<B: BV> Memory<B> {
     }
 }
 
-/// 具体访问区间 `[address, address+bytes)` 与判死区域是否重叠（u128 加法
-/// 避免 address+bytes 回绕）。起始在区域外、末字节伸入区域的跨界访问同样
-/// 算重叠——与符号侧 NOT 链的"触到任一字节即死"语义一致。
+/// 访问起点已在区域内，或沿模地址空间到区域起点的距离小于访问长度，即触碰区域。
+/// 这一判断等价于逐字节检查，且不会为超大访问长度线性枚举。
 fn excluded_overlap(range: &Range<Address>, address: Address, bytes: u32) -> bool {
-    address < range.end && (address as u128 + u128::from(bytes)) > range.start as u128
+    bytes != 0
+        && range.start < range.end
+        && (range.contains(&address) || range.start.wrapping_sub(address) < u64::from(bytes))
 }
 
 /// 具体地址（读或写）是否落在任一判死区域内。
@@ -1130,13 +1159,9 @@ pub fn smt_address_constraint<B: BV>(
         })
 }
 
-/// 判死区域（`Region::Excluded`）的符号地址约束：NOT(访问区间与任一判死
-/// 区域重叠)。访问区间 `[addr, addr+bytes)` 与 `[start, end)` 重叠定义为
-/// `addr <u end && addr + bytes >u start`（地址先投影到低 64 位，加法在 65 位上做，避免
-/// 回绕）。零判死区域返回 `None`——零约束零开销，与默认全符号化一致。
-/// 注意与白名单 OR 链（`smt_address_constraint`，W8 已从 solve-state 移除）
-/// 相反：这里任何与区域**重叠**（哪怕一字节）都判死，不要求访问完整落入
-/// 区域内，区域也不需要装得下整个访问。
+/// 排除每个实际访问的字节，包括按地址位宽相加回绕后的字节。
+/// 使用模距离表达逐字节重叠条件，不随 bytes 增长约束规模。
+/// 区域仍按低 64 位地址匹配；没有排除区域时不加约束。
 pub fn smt_excluded_constraint<B: BV>(
     regions: &[Region<B>],
     address: &Exp<Sym>,
@@ -1144,43 +1169,43 @@ pub fn smt_excluded_constraint<B: BV>(
     solver: &mut Solver<B>,
 ) -> Option<Exp<Sym>> {
     use crate::smt::smtlib::Exp::*;
+    if !regions.iter().any(|region| matches!(region, Region::Excluded(_))) {
+        return None;
+    }
+    if bytes == 0 {
+        return Some(Bool(true));
+    }
     let addr_var = match address {
         Var(v) => *v,
-        _ => {
-            let v = solver.fresh();
-            solver.add(Def::DefineConst(v, address.clone()));
-            v
-        }
+        _ => solver.define_const(address.clone(), SourceLoc::unknown()),
     };
-    let addr_size = solver.length(addr_var).unwrap_or_else(|| panic!("address is not a bitvector"));
-    let cmp_size = 64;
-    let addr_exp = if addr_size > cmp_size {
-        Extract(63, 0, Box::new(Var(addr_var)))
-    } else if addr_size < cmp_size {
-        ZeroExtend(cmp_size - addr_size, Box::new(Var(addr_var)))
-    } else {
-        Var(addr_var)
-    };
-    let mut overlap: Option<Exp<Sym>> = None;
+    let addr_size = solver.length(addr_var).expect("排除检查地址必须是位向量");
+    assert!(addr_size > 0, "排除检查地址位宽必须为正");
+    let cmp_size = addr_size.min(64);
+    let addr_exp = if addr_size > 64 { Extract(63, 0, Box::new(Var(addr_var))) } else { Var(addr_var) };
+    let region_addr =
+        if cmp_size < 64 { ZeroExtend(64 - cmp_size, Box::new(addr_exp.clone())) } else { addr_exp.clone() };
+    let domain_end = 1u128 << cmp_size;
+    let mut allowed = Bool(true);
     for region in regions {
         let Region::Excluded(range) = region else { continue };
+        // 窄地址空间无法命中域外区域，跨越域末端的区域只保留域内部分。
+        let end = u128::from(range.end).min(domain_end);
+        if u128::from(range.start) >= end {
+            continue;
+        }
         let in_range = And(
-            Box::new(Bvult(Box::new(addr_exp.clone()), Box::new(bits64(range.end, cmp_size)))),
-            // 多一位加法防止 addr+bytes 回绕成小值
-            Box::new(Bvugt(
-                Box::new(Bvadd(
-                    Box::new(ZeroExtend(1, Box::new(addr_exp.clone()))),
-                    Box::new(ZeroExtend(1, Box::new(bits64(u64::from(bytes), cmp_size)))),
-                )),
-                Box::new(ZeroExtend(1, Box::new(bits64(range.start, cmp_size)))),
-            )),
+            Box::new(Bvule(Box::new(bits64(range.start, 64)), Box::new(region_addr.clone()))),
+            Box::new(Bvult(Box::new(region_addr.clone()), Box::new(bits64(u64::try_from(end).unwrap(), 64)))),
         );
-        overlap = match overlap {
-            None => Some(in_range),
-            Some(acc) => Some(Or(Box::new(acc), Box::new(in_range))),
-        };
+        let distance = Bvsub(Box::new(bits64(range.start, cmp_size)), Box::new(addr_exp.clone()));
+        let distance = if cmp_size < 64 { ZeroExtend(64 - cmp_size, Box::new(distance)) } else { distance };
+        // 起点在区域内，或某个字节回绕后首先触到区域起点。
+        let overlap =
+            Or(Box::new(in_range), Box::new(Bvult(Box::new(distance), Box::new(bits64(u64::from(bytes), 64)))));
+        allowed = And(Box::new(allowed), Box::new(Not(Box::new(overlap))));
     }
-    overlap.map(|union| Not(Box::new(union)))
+    Some(allowed)
 }
 
 fn reverse_endianness(bytes: &mut [u8]) {
@@ -1374,7 +1399,13 @@ mod tests {
             solver.assert_eq(Exp::Var(addr), bits64(0x1001, width));
 
             assert!(matches!(
-                mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
+                mem.check_concrete_overlap(
+                    addr,
+                    1,
+                    ExecError::BadRead("test"),
+                    |region| !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)),
+                    &mut solver
+                ),
                 Ok(Overlap::Unique(0x1001))
             ));
         }
@@ -1392,7 +1423,13 @@ mod tests {
         solver.assert_eq(Exp::Var(addr), Exp::Bits(bits));
 
         assert!(matches!(
-            mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
+            mem.check_concrete_overlap(
+                addr,
+                1,
+                ExecError::BadRead("test"),
+                |region| !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)),
+                &mut solver
+            ),
             Ok(Overlap::Unique(0x1001))
         ));
     }
@@ -1408,7 +1445,13 @@ mod tests {
             solver.assert_eq(Exp::Extract(63, 0, Box::new(Exp::Var(addr))), bits64(0x1001, 64));
 
             assert!(matches!(
-                mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
+                mem.check_concrete_overlap(
+                    addr,
+                    1,
+                    ExecError::BadRead("test"),
+                    |region| !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)),
+                    &mut solver
+                ),
                 Ok(Overlap::Unique(0x1001))
             ));
         }
@@ -1492,7 +1535,13 @@ mod tests {
         solver.add(Def::DeclareConst(addr, Ty::BitVec(64)));
         solver.add(Def::Assert(Exp::Eq(Box::new(Exp::Var(addr)), Box::new(bits64(0xA0, 64)))));
 
-        match mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver) {
+        match mem.check_concrete_overlap(
+            addr,
+            1,
+            ExecError::BadRead("test"),
+            |region| !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_)),
+            &mut solver,
+        ) {
             Ok(Overlap::Unique(0xA0)) => (),
             _ => panic!("Unexpected result from check_concrete_overlap"),
         }

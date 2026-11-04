@@ -1,5 +1,52 @@
 # 验证记录
 
+## 2026-11-04 Review 36
+
+受测基线：`985e0a93645367cdcb8fb10d5491adf494255802` 加本轮未提交修复。开始时目标工作树干净。审查补丁已成功应用，只新增 `tests/review36.rs`；补丁 SHA-256 为 `a4b612d09168d763f6ff5fbb05dcf66ef84683fe3af548a8869c942c830b783f`，测试文件 SHA-256 为 `e39a534c5f7ae6fcec14845878a54a9ff33a2386ae73004781398eb808f0c1a5`，与报告一致。范围见 [计划](../agents/review36/plan.md)。
+
+工具：rustc 1.93.1、Cargo 1.93.1。测试程序实际链接系统动态库 `libz3.so.4`，调用该库 `Z3_get_full_version` 核对为 4.13.3.0。默认 debug，构建并行度 8；扩展验证使用 `itrace,smtperf`。日志位于系统临时目录，文件名如下，未覆盖审查人员的原日志。
+
+| 阶段 | 命令 | 结果 | 日志文件名 |
+| --- | --- | --- | --- |
+| 仅应用复现补丁 | `cargo test -p isla --test review36 -j 8 -- --nocapture` | 退出 101：2 通过、6 失败，与审查一致 | `isla-review36-fix-before.log` |
+| 首版修复 | 同上 | 8 通过，后续代码修订后须重新验证 | `isla-review36-fix-after.log` |
+| 补充边界首轮 | `cargo test -p isla --test review36 --test review36_boundaries -j 8 -- --nocapture` | 审查 8 通过；补充 3 通过、3 失败：一个暴露 Concrete 遮蔽区域后读旧初值，另两个误把 SMT 定义事件当作内存事件；已补齐实现并使断言专门检查 ReadMem／WriteMem | `isla-review36-fix-final-repro.log` |
+| 补充边界独立确认 | `cargo test -p isla --test review36_boundaries -j 8 -- --nocapture` | 同上 3 通过、3 失败；最终修订尚待后续结果 | `isla-review36-fix-shadow-before.log` |
+
+首轮最终复验：审查 8/8（`isla-review36-final-repro.log`）、补充边界 6/6（`isla-review36-final-boundaries.log`）通过；`cargo test -p isla-lib --lib -j 8` 为 572 通过、2 失败（`isla-review36-final-lib.log`）。失败分别为 Review 23 对排除谓词旧表达式形状的断言，以及 Review 28 的旧不回绕区间预期。后者还包含 `u32::MAX` 长度，暴露逐字节生成约束不适合大长度，因此实现改为等价的模距离判断；预期改用两个不回绕区间独立计算，保留全部长度并新增零长度。Review 23 保留完整子域 SAT 验证，不绑定排除谓词内部形状。旧日志保留，最终复验另用新文件名。
+
+模距离版定向核对的首轮失败仅发生在新增零长度的测试 oracle：将空区间误算为重叠（`isla-review36-modular-oracle.log`），已增加非零长度条件，生产实现的零长度直接返回真保持不变。随后最终核心库全量 574/574 通过（`isla-review36-verified-lib.log`）。要求的 Rust 测试及格式检查均通过；额外 MRET smoke 运行成功，但仍存在基线已有的 partial 边界。命令及结果如下。
+
+| 命令 | 结果 | 日志文件名 |
+| --- | --- | --- |
+| `cargo test -p isla-lib --lib -j 8` | PASS：574/574 | `isla-review36-verified-lib.log` |
+| `cargo test -p isla --test review36 -- --nocapture` | PASS：8/8 | `isla-review36-verified-repro.log` |
+| `cargo test -p isla --test review36_boundaries -j 8 -- --nocapture` | PASS：6/6 | `isla-review36-verified-boundaries.log` |
+| `cargo test -p isla --lib isarch::memory_model::tests -j 8` | PASS：33/33 | `isla-review36-verified-memory-model.log` |
+| `cargo test --workspace -j 8` | PASS：累计 807 通过、0 失败、0 忽略，包含应用库 152、核心库 574、集成及文档测试 | `isla-review36-verified-workspace.log` |
+| `cargo test -p isla-lib --lib --features itrace,smtperf -j 8` | PASS：637/637 | `isla-review36-verified-features.log` |
+| `CARGO_BUILD_JOBS=8 make solve-MRET -j 1 THREADS=8` | 运行通过／覆盖有限：退出 0、4 条用例、diagnostics 为空，summary.partial、unfinished-paths=1 | `isla-review36-smoke.log`、`output/log/MRET.log` |
+| `cargo fmt --check`、`git diff --check` | PASS：退出 0 | `isla-review36-fmt-check.log`、最终复核输出 |
+
+以上套件统计有重叠，不能相加解释为独立覆盖。补充测试覆盖设备／RAM 混合域拆分前无写事件和无设备变更、129 位地址唯一低位分派、多字节生成器整区域合同、原始事件地址、全部切片宽度逐位 oracle、B64 全部宽度整数极值、32／64 位数组回绕的合法候选保留，以及区域遮蔽时的写后读。
+
+
+MRET 使用 `smt-thread-interrupt` 构建，IR `rv64d.ir` SHA-256 为 `c65b26c8518042c67bfcb48c9feaf2a13a6eb7d741bc01ae8688d78c4370e5d9`，配置 `configs/riscv64_difftest.toml` SHA-256 为 `9a315cbcc83837a4a245a03a5f8d4c9c88d69622ffe1abb47777cb761b909fc2`。旧 `output/` 已保存在系统临时目录 `isla-review36-output-before.7r4qsoxr/output/`；新结果为 `output/rv64_zMRET.json`。逐字段核对备份中的旧 JSON：原本即为相同 summary（partial、1 条 unfinished、0 errors／timeouts）和 4 条 gen。新旧日志均包含 `zMRET` 返回 Poison 的模型 `_inner_error_` 路径；这是该 IR／配置已有的覆盖边界，不记为整 Clause 完整 PASS，不在 F1～F5 修复中改写模型。未生成新 IR，未执行全部 ISA clause 或硬件差异测试，未提交改动。
+
+最终受测源码／新增测试 SHA-256（验证期间逐文件复核一致）：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `isla-lib/src/memory.rs` | `7b817939cc2abdd797907a8d0e1f0ffab1d2026b03247754c1902754f6b5a4b6` |
+| `isla-lib/src/bitvector.rs` | `e80cef0a088dd3e969d1676584cb666a4534663bc81db1df4ea486444578f59b` |
+| `isla-lib/src/bitvector/b129.rs` | `a594e4774c1c8557b2b86968ddc43a40264d0f6dcefa0fe2456d75f3dc03e347` |
+| `src/isarch/memory_model.rs` | `afc23aa609c43aa7e59846919ba109b053be8fa66fe4d569ba8f6e46f8feaee5` |
+| `isla-lib/src/executor.rs` | `fb0a8585da5b4bc0e72a9b041ea03f8f350a65a656663adc096589d69a75c5ce` |
+| `isla-lib/src/executor/tests/review28_tests.rs` | `c46847b99d8c165c3528e872e7ecec6865440f68816b7dfe117db152f06631c9` |
+| `tests/review36.rs` | `e39a534c5f7ae6fcec14845878a54a9ff33a2386ae73004781398eb808f0c1a5` |
+| `tests/review36_boundaries.rs` | `8695c256ddfecb9a32f8eaf9a7337c324cbd66dc92cadde268fbabb96d7059a1` |
+
+
 ## 2026-11-04 Review 35
 
 受测基线：`ea45622cdd09ab6b9239d99d367fcd0a3e991d3c` 加本轮未提交修复。开始时工作树干净。审查全量测试补丁预检查与应用均成功，补丁 SHA-256：`96778c534fe93fc64ac89252be72537e1bbd1955e8ae56290dbe4464d58e282b`。范围见 [计划](../agents/review35/plan.md)。

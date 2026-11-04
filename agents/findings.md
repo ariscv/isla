@@ -351,3 +351,10 @@
 ## 2026-10-30 JSON范围与IR同步修订
 
 旧版本关于同名IR和本地workaround哈希的结论仅适用于其记录的提交。本轮IR从模型议题分支完整生成，来源见`ir/provenance/manifest.json`；运行JSON含执行范围摘要和输入哈希，正常结束不等于源码控制流覆盖。现行结果合同见`docs/json-results.md`。memory的终值查询超时只作为diagnostics，不进入可重放gen；其VVTYPE配置现由模型仓唯一维护，移除了旧本地副本。
+
+## 专属区域分派与回绕排除语义
+
+- `MemoryCallbacks::constrains_symbolic_reads/writes` 只允许回调接管普通内存。符号写可能命中 `Custom` 时，`check_concrete_overlap` 证明低 64 位唯一后调用设备 `write`；存在多个可能地址时返回 `SymbolicLength`，执行器通过已有地址拆分重试保存设备副作用。符号读对 `Custom`／`Constrained` 使用相同的专属分派原则，Constrained 继续调用 `read_constrained`，保留整区域读契约和生成器约束。
+- 区域优先级仍由 Memory 的顺序分派决定。若较早的 Concrete 遮蔽较后的专属区域，且回调接管具体读，唯一符号地址读取仍查询当前数组，不能改读 Concrete 的旧快照。
+- `smt_excluded_constraint` 以“起点在区域内，或到区域起点的模距离小于访问长度”表达逐字节重叠，约束规模不随访问长度增长；窄地址域先裁剪区域边界。回绕发生在传入地址的位宽上，区域仍按低 64 位匹配。SeqMemory 传入 `array_address` 投影后的数组索引，因此排除约束和实际 Select／Store 使用同一字节集合；事件仍保留原始地址。无排除区域返回 None，合法候选保留。
+- `BV::sub_i128` 可先通过同宽零值加法构造补码操作数，再直接进行位向量减法，避免对有符号最小整数取负。B129 的专用减法保留第 129 位；`get_slice_int` 在 129 位结果上将整数符号填入 tag，低 128 位按算术右移后截断。

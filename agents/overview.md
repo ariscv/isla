@@ -1,5 +1,8 @@
 # 议题入口
 
+- [Review 36 修复](review36/status.md)：设备写分派、Constrained 生成器、整数边界与回绕排除检查。
+
+
 - [Review 35 修复](review35/status.md)：宽地址数组索引、向量越界、符号解包错误路径和寄存器过滤。
 
 - [Review 34 修复](review34/status.md)：菱形推测解包、具体内存初值与向量越界路径。

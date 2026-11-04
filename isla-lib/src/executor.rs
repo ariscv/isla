@@ -4741,15 +4741,14 @@ mod tests {
                         panic!("{op}，{region:?} 必须保留区域外谓词")
                     };
                     let excluded = matches!(region, Region::Excluded(_));
-                    assert!(
-                        matches!(&outside, smtlib::Exp::Not(predicate) if
-                        if excluded {
-                            matches!(predicate.as_ref(), smtlib::Exp::Not(allowed) if matches!(allowed.as_ref(), smtlib::Exp::And(..)))
-                        } else {
-                            matches!(predicate.as_ref(), smtlib::Exp::And(..))
-                        }),
-                        "区域拆分必须使用完整区域谓词，不得使用地址相等谓词"
-                    );
+                    // 排除谓词由模地址重叠条件生成；下方 SAT 检查验证完整子域，
+                    // 不绑定其内部 And／Not 形状。普通区域仍使用既有范围谓词。
+                    if !excluded {
+                        assert!(
+                            matches!(&outside, smtlib::Exp::Not(predicate) if matches!(predicate.as_ref(), smtlib::Exp::And(..))),
+                            "区域拆分必须使用完整区域谓词，不得使用地址相等谓词"
+                        );
+                    }
                     let mut replay = Solver::from_checkpoint(&ctx, child.checkpoint);
                     replay.add(Def::Assert(outside));
                     for (candidate, expected) in [(0, false), (1, true), ((1u64 << 32) + 1, true)] {

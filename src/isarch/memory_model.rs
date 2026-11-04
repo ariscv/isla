@@ -7,6 +7,7 @@
 //!   独占写按返回 Bool 条件提交，之后同一路径的读写都基于新数组；
 //! - 具体区域：按需约束初始数组中被读取的字节，未列出的内容字节为零；
 //!   普通具体读与符号读共享当前数组，后续写入可以覆盖初值；
+//! - Custom 与 Constrained 由 Memory 保留设备／生成器分派，多候选地址先拆分；
 //! - **默认（W9 语义）：全符号化**。符号读写地址全域自由、读值/写效来自
 //!   字节数组，`[[memory_regions]]` 的 symbolic 声明只是"这一段是 RAM、
 //!   内容未知"的**纯声明**，不产生任何约束；可访问性/trap 完全交给模型
@@ -131,8 +132,6 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
 
         let read_exp = smt_value(value, SourceLoc::unknown())
             .unwrap_or_else(|err| panic!("符号读值不是位向量 {:?}: {}", value, err));
-        let addr_exp = smt_value(address, SourceLoc::unknown())
-            .unwrap_or_else(|err| panic!("符号读地址不是位向量 {:?}: {}", address, err));
         let array_addr = self.array_address(address, solver);
 
         // 只约束本次查询涉及的初始字节；Store 链仍可覆盖初值，不能钉死当前数组。
@@ -193,7 +192,7 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
         // 判死区域（W9）：追加以读地址为自由变量的 NOT(与判死区域并集重叠)
         // 约束；零判死区域返回 None，不加任何约束（默认全符号化语义不变）。
         // 返回 true 触发 read_symbolic 的 W7 立即判死检查。
-        let (full_constraint, constrained) = match smt_excluded_constraint(regions, &addr_exp, bytes, solver) {
+        let (full_constraint, constrained) = match smt_excluded_constraint(regions, &array_addr, bytes, solver) {
             Some(not_overlap) => (Exp::And(Box::new(not_overlap), Box::new(read_prop)), true),
             None => (read_prop, false),
         };
@@ -223,8 +222,6 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
 
         let data_exp = smt_value(data, SourceLoc::unknown())
             .unwrap_or_else(|err| panic!("符号写数据不是位向量 {:?}: {}", data, err));
-        let addr_exp = smt_value(address, SourceLoc::unknown())
-            .unwrap_or_else(|err| panic!("符号写地址不是位向量 {:?}: {}", address, err));
         let array_addr = self.array_address(address, solver);
 
         // 小端逐字节 Store 链：第 i 字节写到 addr+i
@@ -260,7 +257,7 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
         // 判死区域（W9）：与读侧对称，追加 NOT(与判死区域并集重叠) 约束，
         // 返回 true 触发 write_symbolic 的 W7 立即判死检查；零判死区域不加
         // 任何约束。
-        match smt_excluded_constraint(regions, &addr_exp, bytes, solver) {
+        match smt_excluded_constraint(regions, &array_addr, bytes, solver) {
             Some(not_overlap) => {
                 solver.add(Def::Assert(not_overlap));
                 true

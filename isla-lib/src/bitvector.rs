@@ -259,7 +259,8 @@ where
     fn add_i128(self, op: i128) -> Self;
 
     fn sub_i128(self, op: i128) -> Self {
-        self.add_i128(-op)
+        // 先构造同宽补码操作数，再做位向量减法，避免有符号 MIN 取负溢出。
+        self - Self::zeros(self.len()).add_i128(op)
     }
 
     /// zero_extend a bitvector to a specific new length.

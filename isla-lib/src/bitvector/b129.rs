@@ -424,8 +424,9 @@ impl BV for B129 {
     }
 
     fn get_slice_int(len: u32, int: i128, n: u32) -> Self {
-        assert!(len <= 128);
-        B129 { len, tag: false, bits: bzhi_u128((int >> n) as u128, len) }
+        assert!(len <= 129);
+        assert!(n < 128);
+        B129 { len, tag: len == 129 && int < 0, bits: bzhi_u128((int >> n) as u128, len) }
     }
 }
 
