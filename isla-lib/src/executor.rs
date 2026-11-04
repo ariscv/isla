@@ -132,7 +132,7 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
                 }
                 let symbol = zencode::decode(shared_state.symtab.to_str(id));
                 // HACK: Don't store the entire TLB in the trace
-                if !for_write && !symbol.contains("_TLB") {
+                if !for_write && symbol != "_TLB" {
                     solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
                 }
                 Borrowed(value)
@@ -299,7 +299,9 @@ fn read_register_from_vector<'ir, B: BV>(
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
             let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap();
-            solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
+            if zencode::decode(shared_state.symtab.to_str(regs[i])) != "_TLB" {
+                solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
+            }
             Ok(value.clone())
         }
         SymbolicIndex(i) => {
@@ -448,7 +450,9 @@ fn write_register_from_vector<'ir, B: BV>(
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
             local_state.regs.assign(regs[i], value.clone(), shared_state);
-            solver.add_event(Event::WriteReg(regs[i], Vec::new(), value))
+            if zencode::decode(shared_state.symtab.to_str(regs[i])) != "_TLB" {
+                solver.add_event(Event::WriteReg(regs[i], Vec::new(), value))
+            }
         }
         SymbolicIndex(i) => {
             if regs.iter().any(|reg| local_state.regs.is_relaxed(*reg) || local_state.regs.has_old_writes(*reg)) {
@@ -579,7 +583,10 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Op::IsEmpty => primop::op_is_empty(args[0].clone(), solver, info),
                 Op::ZeroExtend(len) => primop::op_zero_extend(args[0].clone(), *len, solver, info),
             };
-            if matches!(result, Err(ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..))) {
+            if matches!(
+                result,
+                Err(ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..) | ExecError::RetryCondition(..))
+            ) {
                 local_state.expression_retry_operands = Some(args);
             }
             Owned(result?)
@@ -600,48 +607,28 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
 
         Unwrap(ctor_a, exp) => {
             let speculative = local_state.register_reads.is_some();
-            let v = eval_exp(exp, local_state, shared_state, solver, info)?;
+            let v = eval_exp(exp, local_state, shared_state, solver, info)?.into_owned();
             match v {
-                Borrowed(Val::Ctor(ctor_b, v)) if *ctor_a == *ctor_b => Borrowed(v),
-
-                Owned(Val::Ctor(ctor_b, v)) if *ctor_a == ctor_b => Owned(*v),
-
-                Borrowed(Val::SymbolicCtor(tag, possibilities)) => match possibilities.get(ctor_a) {
-                    Some(v) => {
-                        let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(*tag)), Box::new(ctor_a.to_smt()));
-                        if speculative
-                            && !solver
-                                .check_sat_with(&smtlib::Exp::Not(Box::new(matches_tag.clone())), info)
-                                .is_unsat()?
-                        {
-                            return Err(ExecError::IncompatibleMerge);
-                        }
-                        if solver.check_sat_with(&matches_tag, info).is_unsat()? {
-                            return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
-                        }
-                        Borrowed(v)
-                    }
-                    None => return Err(ExecError::Type("No possible value for constructor".to_string(), info)),
-                },
-
-                Owned(Val::SymbolicCtor(tag, mut possibilities)) => match possibilities.remove(ctor_a) {
+                Val::Ctor(ctor_b, v) if *ctor_a == ctor_b => Owned(*v),
+                Val::SymbolicCtor(tag, mut possibilities) => match possibilities.remove(ctor_a) {
                     Some(v) => {
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
-                        if speculative
-                            && !solver
-                                .check_sat_with(&smtlib::Exp::Not(Box::new(matches_tag.clone())), info)
-                                .is_unsat()?
-                        {
+                        let mismatch = smtlib::Exp::Not(Box::new(matches_tag.clone()));
+                        if speculative && !solver.check_sat_with(&mismatch, info).is_unsat()? {
                             return Err(ExecError::IncompatibleMerge);
                         }
                         if solver.check_sat_with(&matches_tag, info).is_unsat()? {
                             return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
+                        }
+                        if !speculative && solver.check_sat_with(&mismatch, info).is_sat()? {
+                            // 载荷表达式已缓存，两个任务重试时不会重复记录读取副作用。
+                            local_state.expression_retry_operands = Some(Vec::new());
+                            return Err(ExecError::RetryCondition(matches_tag, info));
                         }
                         Owned(v)
                     }
                     None => return Err(ExecError::Type("No possible value for constructor".to_string(), info)),
                 },
-
                 _ => {
                     return Err(ExecError::Type(
                         format!("Tried to unwrap non-constructor, or constructors didn't match {:?}", &v),
@@ -1320,7 +1307,9 @@ fn run_special_primop<'ir, B: BV>(
         if let Val::Ref(reg) = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned() {
             match frame.regs_mut().get(reg, shared_state, solver, info)? {
                 Some(value) => {
-                    solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
+                    if zencode::decode(shared_state.symtab.to_str(reg)) != "_TLB" {
+                        solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
+                    }
                     assign(tid, loc, value.clone(), &mut frame.local_state, shared_state, solver, info)?
                 }
                 None => return Err(ExecError::Type(format!("reg_deref {:?}", &reg), info)),
@@ -2141,7 +2130,7 @@ fn try_merge_diamond<'ir, B: BV>(
                         build_ite(cond_sym, val_then, val_else, solver, info)?
                     };
                     let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
-                    if !symbol.contains("_TLB") {
+                    if symbol != "_TLB" {
                         solver.add_event(Event::ReadReg(*reg, accessor.clone(), val));
                     }
                 }
@@ -3940,6 +3929,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod boundary_regression_tests;
     mod review27_tests;
     mod review28_tests;
     mod review29_tests;
@@ -3947,6 +3937,7 @@ mod tests {
     mod review31_tests;
     mod review32_tests;
     mod review33_tests;
+    mod review35_tests;
     mod symbolic_ctor_unwrap_tests;
 
     mod review26_tests {
@@ -4691,7 +4682,7 @@ mod tests {
                     );
                     let counts = out.into_inner().unwrap();
                     assert_eq!(counts.len(), if enabled { 1 } else { 2 }, "开启合并时必须确实合流");
-                    let expected = usize::from(!name.contains("_TLB"));
+                    let expected = usize::from(name != "_TLB");
                     assert!(
                         counts.iter().all(|count| *count == expected),
                         "{name}，合并={enabled}，读取次数={counts:?}"
@@ -9642,9 +9633,10 @@ mod tests {
                 Val::Bits(B64::zeros(1)),
                 &mut solver,
                 info(),
-            )
-            .unwrap();
-            for (result, expected) in [(slice, B64::zeros(1)), (updated, B64::new(0xff, 8))] {
+            );
+            assert!(matches!(updated, Err(ExecError::OutOfBounds("vector_update"))));
+            assert!(solver.check_sat(info()).is_sat().unwrap(), "越界检查不能抹掉当前路径");
+            for (result, expected) in [(slice, B64::zeros(1))] {
                 let wrong = smtlib::Exp::Neq(
                     Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
                     Box::new(crate::primop_util::smt_sbits(expected)),
@@ -11204,6 +11196,26 @@ mod tests {
                     }
                 }
                 let index = solver.declare_const(smtlib::Ty::BitVec(index_width), info());
+                // 单独验证混合域要求拆分，且不会静默约束非法索引。
+                let mut frame = make_frame(vec![Instr::End]);
+                let mixed = crate::primop::vector_update(
+                    vec![Val::Vector(vec![Val::I128(0), Val::I128(0)]), Val::Symbolic(index), Val::I128(7)],
+                    &mut solver,
+                    &mut frame,
+                    info(),
+                );
+                assert!(matches!(mixed, Err(ExecError::SymbolicLength("vector_update", _))));
+                assert!(solver
+                    .check_sat_with(
+                        &smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(index)), Box::new(smtlib::bits64(2, index_width))),
+                        info()
+                    )
+                    .is_sat()
+                    .unwrap());
+                solver.assert(smtlib::Exp::Bvult(
+                    Box::new(smtlib::Exp::Var(index)),
+                    Box::new(smtlib::bits64(2, index_width)),
+                ));
                 let mut frame = make_frame(vec![Instr::End]);
                 let result = crate::primop::vector_update(
                     vec![Val::Vector(vec![Val::I128(0), Val::I128(0)]), Val::Symbolic(index), Val::I128(7)],
@@ -13894,6 +13906,11 @@ fn zmemreadfork(zu) {
             {
                 for width in [64, 128] {
                     let index = solver.declare_const(smtlib::Ty::BitVec(width), info());
+                    // 此处验证合法元素的递归更新；越界分叉由独立回归测试检查。
+                    solver.assert(smtlib::Exp::Bvult(
+                        Box::new(smtlib::Exp::Var(index)),
+                        Box::new(smtlib::bits64(2, width)),
+                    ));
                     let actual = crate::primop::vector_update(
                         vec![Val::Vector(vec![old.clone(), old.clone()]), Val::Symbolic(index), new.clone()],
                         &mut solver,

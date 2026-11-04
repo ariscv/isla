@@ -2378,10 +2378,10 @@ pub(crate) fn vector_access<B: BV>(
             Some(bit) => Ok(Val::Bits(bit)),
             None => Err(ExecError::Type(format!("vector_access {:?} {:?}", &bits, &n), info)),
         },
-        (Val::Vector(vec), Val::I128(n)) => match vec.get(n as usize) {
-            Some(elem) => Ok(elem.clone()),
-            None => Err(ExecError::OutOfBounds("vector_access")),
-        },
+        (Val::Vector(vec), Val::I128(n)) => {
+            let index = usize::try_from(n).map_err(|_| ExecError::OutOfBounds("vector_access"))?;
+            vec.get(index).cloned().ok_or(ExecError::OutOfBounds("vector_access"))
+        }
         (Val::Vector(vec), Val::Symbolic(n)) => {
             if vec.is_empty() {
                 return Err(ExecError::OutOfBounds("vector_access"));
@@ -2435,6 +2435,34 @@ pub(crate) fn vector_access<B: BV>(
     }
 }
 
+/// 在原始索引位宽上检查整个更新范围，禁止移位截断掩盖越界。
+fn check_slice_update_bounds<B: BV>(
+    bits_length: u32,
+    update_length: u32,
+    index: Exp<Sym>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    let Some(max_index) = bits_length.checked_sub(update_length) else {
+        return Err(ExecError::OutOfBounds("vector_update"));
+    };
+    let width = match &index {
+        Exp::Var(n) => solver.length(*n).expect("更新索引必须是位向量"),
+        Exp::Bits(bits) => u32::try_from(bits.len()).unwrap(),
+        Exp::Bits64(bits) => bits.len(),
+        _ => panic!("更新索引必须是整数常量或符号量"),
+    };
+    assert!(matches!(width, 64 | 128), "更新索引必须是机器整数或整数");
+    let in_bounds = Exp::Bvule(Box::new(index), Box::new(smt_u64_width(u64::from(max_index), width)));
+    if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+        if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+            return Err(ExecError::OutOfBounds("vector_update"));
+        }
+        return Err(ExecError::RetryCondition(in_bounds, info));
+    }
+    Ok(())
+}
+
 /// The set_slice! macro implements the Sail set_slice builtin for any
 /// combination of symbolic or concrete operands, with the result
 /// always being symbolic. The argument order is the same as the Sail
@@ -2443,7 +2471,8 @@ macro_rules! set_slice {
     ($bits_length: expr, $update_length: ident, $bits: expr, $n: expr, $update: expr, $solver: ident, $info: ident) => {
         set_slice!($bits_length, $update_length, $bits, $n, $update, $solver, $info, true)
     };
-    ($bits_length: expr, $update_length: ident, $bits: expr, $n: expr, $update: expr, $solver: ident, $info: ident, $mark:expr) => {
+    ($bits_length: expr, $update_length: ident, $bits: expr, $n: expr, $update: expr, $solver: ident, $info: ident, $mark:expr) => {{
+        check_slice_update_bounds($bits_length, $update_length, $n, $solver, $info)?;
         if $bits_length == 0 {
             Ok(Val::Bits(B::zeros(0)))
         } else if $update_length == 0 {
@@ -2492,7 +2521,7 @@ macro_rules! set_slice {
             }
             Ok(Val::Symbolic(sliced))
         }
-    };
+    }};
 }
 
 /// A special case of set_slice! for when $n == 0, and therefore no shift needs to be applied.
@@ -2500,7 +2529,8 @@ macro_rules! set_slice_n0 {
     ($bits_length: expr, $update_length: ident, $bits: expr, $update: expr, $solver: ident, $info: ident) => {
         set_slice_n0!($bits_length, $update_length, $bits, $update, $solver, $info, true)
     };
-    ($bits_length: expr, $update_length: ident, $bits: expr, $update: expr, $solver: ident, $info: ident, $mark:expr) => {
+    ($bits_length: expr, $update_length: ident, $bits: expr, $update: expr, $solver: ident, $info: ident, $mark:expr) => {{
+        check_slice_update_bounds($bits_length, $update_length, smt_i128(0), $solver, $info)?;
         if $bits_length == 0 {
             Ok(Val::Bits(B::zeros(0)))
         } else if $update_length == 0 {
@@ -2531,7 +2561,7 @@ macro_rules! set_slice_n0 {
             }
             Ok(Val::Symbolic(sliced))
         }
-    };
+    }};
 }
 
 pub fn set_slice_internal<B: BV>(
@@ -2584,7 +2614,14 @@ pub fn set_slice_internal<B: BV>(
                 set_slice!(bits_length, update_length, smt_sbits(bits), smt_i128(n), Exp::Var(update), solver, info)
             }
         }
-        (Val::Bits(bits), Val::I128(n), Val::Bits(update)) => Ok(Val::Bits(bits.set_slice(n as u32, update))),
+        (Val::Bits(bits), Val::I128(n), Val::Bits(update)) => {
+            check_slice_update_bounds(bits_length, update_length, smt_i128(n), solver, info)?;
+            if update_length == 0 {
+                Ok(Val::Bits(bits))
+            } else {
+                Ok(Val::Bits(bits.set_slice(u32::try_from(n).unwrap(), update)))
+            }
+        }
         (bits, n, update) => Err(ExecError::Type(format!("set_slice {:?} {:?} {:?}", &bits, &n, &update), info)),
     }
 }
@@ -2643,7 +2680,14 @@ fn set_slice_int_internal<B: BV>(
                 set_slice!(128, update_length, smt_i128(int), smt_i128(n), Exp::Var(update), solver, info, false)
             }
         }
-        (Val::I128(int), Val::I128(n), Val::Bits(update)) => Ok(Val::I128(B::set_slice_int(int, n as u32, update))),
+        (Val::I128(int), Val::I128(n), Val::Bits(update)) => {
+            check_slice_update_bounds(128, update_length, smt_i128(n), solver, info)?;
+            if update_length == 0 {
+                Ok(Val::I128(int))
+            } else {
+                Ok(Val::I128(B::set_slice_int(int, u32::try_from(n).unwrap(), update)))
+            }
+        }
         (int, n, update) => Err(ExecError::Type(format!("set_slice_int {:?} {:?} {:?}", &int, &n, &update), info)),
     }
 }
@@ -2706,7 +2750,14 @@ pub(crate) fn op_set_slice<B: BV>(
                 set_slice!(bits_length, update_length, smt_sbits(bits), smt_i64(n), Exp::Var(update), solver, info)
             }
         }
-        (Val::Bits(bits), Val::I64(n), Val::Bits(update)) => Ok(Val::Bits(bits.set_slice(n as u32, update))),
+        (Val::Bits(bits), Val::I64(n), Val::Bits(update)) => {
+            check_slice_update_bounds(bits_length, update_length, smt_i64(n), solver, info)?;
+            if update_length == 0 {
+                Ok(Val::Bits(bits))
+            } else {
+                Ok(Val::Bits(bits.set_slice(u32::try_from(n).unwrap(), update)))
+            }
+        }
         (bits, n, update) => Err(ExecError::Type(format!("set_slice {:?} {:?} {:?}", &bits, &n, &update), info)),
     }
 }
@@ -2726,22 +2777,31 @@ pub fn vector_update<B: BV>(
     match arg0 {
         Val::Vector(mut vec) => match args[1] {
             Val::I128(n) => {
-                vec[n as usize] = args[2].clone();
+                let index = usize::try_from(n).map_err(|_| ExecError::OutOfBounds("vector_update"))?;
+                *vec.get_mut(index).ok_or(ExecError::OutOfBounds("vector_update"))? = args[2].clone();
                 Ok(Val::Vector(vec))
             }
             Val::I64(n) => {
-                vec[n as usize] = args[2].clone();
+                let index = usize::try_from(n).map_err(|_| ExecError::OutOfBounds("vector_update"))?;
+                *vec.get_mut(index).ok_or(ExecError::OutOfBounds("vector_update"))? = args[2].clone();
                 Ok(Val::Vector(vec))
             }
             Val::Symbolic(n) => {
                 let width = solver.length(n).expect("向量索引必须是位向量");
-                let (zero, bound) = match width {
-                    64 => (smt_i64(0), smt_i64(vec.len().try_into().unwrap())),
-                    128 => (smt_i128(0), smt_i128(vec.len() as i128)),
-                    _ => panic!("向量索引必须是 64 位或 128 位整数"),
-                };
-                solver.add(Def::Assert(Exp::Bvsge(Box::new(Exp::Var(n)), Box::new(zero))));
-                solver.add(Def::Assert(Exp::Bvslt(Box::new(Exp::Var(n)), Box::new(bound))));
+                assert!(matches!(width, 64 | 128), "向量索引必须是 64 位或 128 位整数");
+                if vec.is_empty() {
+                    return Err(ExecError::OutOfBounds("vector_update"));
+                }
+                let in_bounds = Exp::Bvult(
+                    Box::new(Exp::Var(n)),
+                    Box::new(smt_u64_width(u64::try_from(vec.len()).unwrap(), width)),
+                );
+                if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                    if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+                        return Err(ExecError::OutOfBounds("vector_update"));
+                    }
+                    return Err(ExecError::SymbolicLength("vector_update", info));
+                }
                 for (i, item) in vec.iter_mut().enumerate() {
                     let is_i = solver.define_const(
                         Exp::Eq(

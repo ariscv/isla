@@ -255,7 +255,7 @@ fn 边界菱形和回边必须保持单态化候选与特殊寄存器事件() {
                         .filter(|event| matches!(event, Event::ReadReg(name, _, _) if *name == reg))
                         .count();
                     assert_eq!(writes, usize::from(register_name != "_TLB"));
-                    assert_eq!(reads, usize::from(!register_name.contains("_TLB")));
+                    assert_eq!(reads, usize::from(register_name != "_TLB"));
                     out.lock().unwrap().insert(actual.lower_u64());
                 });
                 assert_eq!(*out.lock().unwrap(), BTreeSet::from([7, 9]), "臂长度={arm_length}，合并={enabled}");

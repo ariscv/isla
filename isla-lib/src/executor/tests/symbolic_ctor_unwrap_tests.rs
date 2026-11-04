@@ -33,6 +33,12 @@ fn 符号构造子的直接与字段解包必须检查标签可满足性() {
                     .map(Cow::into_owned);
             if selected_tag == Some(tag_b) {
                 assert!(matches!(result, Err(ExecError::Type(..))), "标签不可匹配时必须保留类型错误");
+            } else if selected_tag.is_none() {
+                let Err(ExecError::RetryCondition(condition, _)) = result else {
+                    panic!("标签不确定时必须请求条件分叉")
+                };
+                assert!(solver.check_sat_with(&condition, info()).is_sat().unwrap());
+                assert!(solver.check_sat_with(&smtlib::Exp::Not(Box::new(condition)), info()).is_sat().unwrap());
             } else {
                 assert_eq!(result.unwrap(), Val::Bits(B64::new(11, 8)));
             }

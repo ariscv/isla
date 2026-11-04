@@ -328,7 +328,7 @@ fn 混合特殊寄存器读取与普通写入不得改变轨迹() {
                     })
                     .collect();
                 let mut expected = Vec::new();
-                if !name.contains("_TLB") {
+                if name != "_TLB" {
                     expected.push((false, source));
                 }
                 expected.push((true, dest));

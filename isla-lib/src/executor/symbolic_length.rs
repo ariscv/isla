@@ -53,7 +53,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
 
-    if let ExecError::IntegerConversion(in_range, info) = error {
+    if let ExecError::IntegerConversion(in_range, info) | ExecError::RetryCondition(in_range, info) = error {
         let cond = solver.define_const(in_range, info);
         fork_retry_operand(
             cond,
@@ -138,7 +138,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         }
         for sym in symbols {
             let partition = match op {
-                "vector_access" => {
+                "vector_access" | "vector_update" => {
                     let len = match &operands[0] {
                         Val::Vector(values) => u64::try_from(values.len()).unwrap(),
                         bits => u64::from(crate::primop_util::length_bits(bits, solver, info)?),

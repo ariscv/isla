@@ -11,6 +11,14 @@
 - `LocalState::register_reads` 只在菱形推测期间启用。表达式求值器据此要求符号构造子解包的标签在当前臂条件下必然匹配；否则返回 `IncompatibleMerge`，由合流入口回滚并保留原生执行。
 - `vector_access` 对普通向量和位向量的混合合法／越界索引返回 `SymbolicLength`。`executor/symbolic_length.rs` 按无符号索引边界拆分，合法侧继续使用符号索引，非法侧由消费者产生 `OutOfBounds`；不使用断言静默过滤非法候选。
 
+## 数组索引、更新边界与符号解包
+
+- `SeqMemory` 的数组索引宽度由 `install_seq_memory` 决定。读写先经 `array_address` 投影或零扩展，再用于初值、Select、Store 和字节偏移；区域排除仍使用原始地址表达式，ReadMem／WriteMem 仍由 Memory 保存原始地址。
+- `vector_update` 与 `vector_access` 共用无符号边界分区，混合合法／非法域返回 `SymbolicLength`，不追加合法性断言。普通向量具体索引先用 `usize::try_from` 检查，再用 `get`／`get_mut` 检查容器边界。
+- 切片更新在移位前检查 `update_length <= bits_length` 且 `index <= bits_length - update_length`。减法使用 `checked_sub`，索引保留原始 64／128 位宽；负数的补码超出无符号上界。混合域通过 `RetryCondition` 使用已有条件分叉和操作数缓存，非法侧重试返回 `OutOfBounds`。合法空更新保留原值，避免末尾零宽更新触发宿主整数移位溢出。
+- 普通符号构造子 Unwrap 只有在标签必然匹配时成功；匹配／不匹配均可达时返回 `RetryCondition`。表达式缓存保存已求值的构造子，执行器复用 `fork_retry_operand` 保留成功侧与 Type 错误侧，不重复读取副作用。推测期间仍要求标签必然匹配，否则拒绝合流。
+- 整个 `_TLB` 的 ReadReg／WriteReg 按解码后的寄存器名称精确过滤；标量、合流、寄存器向量的具体选择和 REG_DEREF 使用同一规则。`core_TLB`、`_TLB_cache` 均保留事件。早于 Review 35 的 contains 预期已由本轮反例修订。多候选符号寄存器向量仍通过 Abstract 记录索引、引用列表及候选值；这一既有契约不同于具体选择的 ReadReg／WriteReg，单候选与构造子拆分后的具体选择会经过精确过滤。
+
 ## isarch 符号执行
 
 - `isarch_exec.rs` 的 `run_symbolic_execute(...)` 通过 `execute_ir_function_with_checkpoint(...)` 启动 `zexecute`，只注入 `regs/lets`，没有注入 `Memory`。

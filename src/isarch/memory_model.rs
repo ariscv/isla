@@ -31,7 +31,7 @@ use isla_lib::bitvector::BV;
 use isla_lib::ir::Val;
 use isla_lib::log;
 use isla_lib::memory::{smt_excluded_constraint, Memory, MemoryCallbacks, Region};
-use isla_lib::primop_util::smt_value;
+use isla_lib::primop_util::{length_bits, smt_value};
 use isla_lib::smt::smtlib::{bits64, Def, Exp, Ty};
 use isla_lib::smt::{ReadOpts, Solver, Sym, WriteOpts};
 use isla_lib::source_loc::SourceLoc;
@@ -63,6 +63,7 @@ pub fn array_model_enabled() -> bool {
 /// 并把回调装入 `memory`。必须在生成后续 checkpoint 之前调用，使所有执行
 /// 路径共享初始数组定义。
 pub fn install_seq_memory<B: BV>(memory: &mut Memory<B>, addr_size: u32, solver: &mut Solver<B>) {
+    assert!(addr_size > 0, "数组索引位宽必须为正");
     let memory_var = solver.fresh();
     solver.add(Def::DeclareConst(memory_var, Ty::Array(Box::new(Ty::BitVec(addr_size)), Box::new(Ty::BitVec(8)))));
     memory.set_client_info(Box::new(SeqMemory { initial_memory_var: memory_var, memory_var, addr_size }));
@@ -82,6 +83,21 @@ fn smt_read_exp(memory: Sym, addr_exp: &Exp<Sym>, addr_size: u32, bytes: u64) ->
         )
     }
     mem_exp
+}
+
+impl SeqMemory {
+    /// 数组运算统一使用索引位宽；访存事件仍由 Memory 保存原始地址。
+    fn array_address<B: BV>(&self, address: &Val<B>, solver: &mut Solver<B>) -> Exp<Sym> {
+        let width = length_bits(address, solver, SourceLoc::unknown()).expect("数组地址必须是位向量");
+        let address = smt_value(address, SourceLoc::unknown()).expect("数组地址必须具有 SMT 表示");
+        if width > self.addr_size {
+            Exp::Extract(self.addr_size - 1, 0, Box::new(address))
+        } else if width < self.addr_size {
+            Exp::ZeroExtend(self.addr_size - width, Box::new(address))
+        } else {
+            address
+        }
+    }
 }
 
 impl<B: BV> MemoryCallbacks<B> for SeqMemory {
@@ -117,13 +133,14 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
             .unwrap_or_else(|err| panic!("符号读值不是位向量 {:?}: {}", value, err));
         let addr_exp = smt_value(address, SourceLoc::unknown())
             .unwrap_or_else(|err| panic!("符号读地址不是位向量 {:?}: {}", address, err));
+        let array_addr = self.array_address(address, solver);
 
         // 只约束本次查询涉及的初始字节；Store 链仍可覆盖初值，不能钉死当前数组。
         // 沿用 Memory 的区域优先级，较早的符号或自定义区域会遮蔽后面的具体区域。
         if regions.iter().any(|region| matches!(region, Region::Concrete(..))) {
             for i in 0..bytes {
                 let byte_addr = solver.define_const(
-                    Exp::Bvadd(Box::new(addr_exp.clone()), Box::new(bits64(u64::from(i), self.addr_size))),
+                    Exp::Bvadd(Box::new(array_addr.clone()), Box::new(bits64(u64::from(i), self.addr_size))),
                     SourceLoc::unknown(),
                 );
                 let region_addr = if self.addr_size > 64 {
@@ -170,7 +187,7 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
         // 读值逐字节等于数组内容（小端拼接）
         let read_prop = Exp::Eq(
             Box::new(read_exp),
-            Box::new(smt_read_exp(self.memory_var, &addr_exp, self.addr_size, u64::from(bytes))),
+            Box::new(smt_read_exp(self.memory_var, &array_addr, self.addr_size, u64::from(bytes))),
         );
 
         // 判死区域（W9）：追加以读地址为自由变量的 NOT(与判死区域并集重叠)
@@ -208,17 +225,18 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
             .unwrap_or_else(|err| panic!("符号写数据不是位向量 {:?}: {}", data, err));
         let addr_exp = smt_value(address, SourceLoc::unknown())
             .unwrap_or_else(|err| panic!("符号写地址不是位向量 {:?}: {}", address, err));
+        let array_addr = self.array_address(address, solver);
 
         // 小端逐字节 Store 链：第 i 字节写到 addr+i
         let mut mem_exp = Exp::Store(
             Box::new(Exp::Var(self.memory_var)),
-            Box::new(addr_exp.clone()),
+            Box::new(array_addr.clone()),
             Box::new(Exp::Extract(7, 0, Box::new(data_exp.clone()))),
         );
         for i in 1..bytes {
             mem_exp = Exp::Store(
                 Box::new(mem_exp),
-                Box::new(Exp::Bvadd(Box::new(addr_exp.clone()), Box::new(bits64(u64::from(i), self.addr_size)))),
+                Box::new(Exp::Bvadd(Box::new(array_addr.clone()), Box::new(bits64(u64::from(i), self.addr_size)))),
                 Box::new(Exp::Extract(i * 8 + 7, i * 8, Box::new(data_exp.clone()))),
             );
         }
@@ -269,6 +287,48 @@ mod tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
     use isla_lib::smt::{Config, Context, Event, SmtResult};
+
+    #[test]
+    fn 数组索引投影必须保留多字节初值写后读与原始事件地址() {
+        for width in [32, 64, 65, 129, 1024] {
+            let info = SourceLoc::unknown();
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut memory = Memory::new();
+            memory.add_concrete_region(0x1000..0x1004, std::collections::HashMap::from([(0x1001, 0x42)]));
+            install_seq_memory(&mut memory, 64, &mut solver);
+            let address = solver.declare_const(Ty::BitVec(width), info);
+            let original = if width > 64 {
+                Exp::Concat(Box::new(bits64(1, width - 64)), Box::new(bits64(0x1000, 64)))
+            } else {
+                bits64(0x1000, width)
+            };
+            solver.assert_eq(Exp::Var(address), original);
+            let before = read_bytes(&memory, &mut solver, Val::Symbolic(address), 4);
+            assert!(solver.check_sat(info).is_sat().unwrap());
+            expect_unsat(
+                &mut solver,
+                Exp::Neq(Box::new(smt_value(&before, info).unwrap()), Box::new(bits64(0x4200, 32))),
+                "多字节初值必须按数组索引逐字节约束",
+            );
+            write_bytes(&mut memory, &mut solver, Val::Symbolic(address), B64::new(0xa1b2c3d4, 32));
+            let after = read_bytes(&memory, &mut solver, Val::Bits(B64::new(0x1000, 64)), 4);
+            assert!(solver.check_sat(info).is_sat().unwrap());
+            expect_unsat(
+                &mut solver,
+                Exp::Neq(Box::new(smt_value(&after, info).unwrap()), Box::new(bits64(0xa1b2c3d4, 32))),
+                "宽窄地址必须共享低64位上的写后读",
+            );
+            let events = solver.trace().to_vec();
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, Event::ReadMem { address: Val::Symbolic(a), .. } if *a == address)));
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, Event::WriteMem { address: Val::Symbolic(a), .. } if *a == address)));
+            assert_eq!(solver.length(address), Some(width));
+        }
+    }
 
     /// 测试用符号地址 id 从 9000 起，避免与 install/fresh 生成的 Sym id 冲突。
     fn test_sym(id: u32) -> Sym {

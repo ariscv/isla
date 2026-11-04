@@ -401,7 +401,7 @@ fn 极端菱形回边与连续寄存器事件必须逐输入一致() {
                                 expected.push((true, source));
                             }
                             expected.push((false, dest));
-                            if !special_name.contains("_TLB") {
+                            if special_name != "_TLB" {
                                 expected.push((false, source));
                             }
                         }
