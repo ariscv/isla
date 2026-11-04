@@ -596,10 +596,7 @@ impl<B: BV> Memory<B> {
                     if opts.is_ifetch
                         || !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads())
                     {
-                        // If the symbolic address overlaps a concrete
-                        // region, but actually only has a single unique
-                        // satisfiable value, then we can recursively call
-                        // read again with that satisfiable value.
+                        // 低 64 位投影只用于区域分派，符号读事件保留完整的原始地址。
                         match self.check_concrete_overlap(
                             symbolic_addr,
                             bytes,
@@ -611,14 +608,55 @@ impl<B: BV> Memory<B> {
                             solver,
                         )? {
                             Overlap::Unique(concrete_addr) => {
-                                return self.read(
-                                    read_kind,
-                                    Val::Bits(B::new(concrete_addr, 64)),
-                                    Val::I128(bytes as i128),
-                                    solver,
-                                    tag,
-                                    opts,
-                                )
+                                if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
+                                    return Err(ExecError::BadRead("excluded memory region"));
+                                }
+                                for region in &self.regions {
+                                    match region {
+                                        Region::Constrained(range, generator) if range.contains(&concrete_addr) => {
+                                            return read_constrained(
+                                                range,
+                                                generator.as_ref(),
+                                                read_kind,
+                                                concrete_addr,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            )
+                                        }
+                                        Region::Symbolic(range) | Region::SymbolicCode(range)
+                                            if range.contains(&concrete_addr) =>
+                                        {
+                                            return self.read_symbolic(
+                                                read_kind,
+                                                address,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            )
+                                        }
+                                        Region::Concrete(range, contents) if range.contains(&concrete_addr) => {
+                                            return read_concrete(
+                                                contents,
+                                                read_kind,
+                                                concrete_addr,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            )
+                                        }
+                                        Region::Custom(range, contents) if range.contains(&concrete_addr) => {
+                                            return contents.read(read_kind, concrete_addr, bytes, solver, tag)
+                                        }
+                                        _ => continue,
+                                    }
+                                }
                             }
                             Overlap::NoOverlap => {}
                         }
@@ -667,7 +705,7 @@ impl<B: BV> Memory<B> {
                             }
                             unmatched = Exp::And(Box::new(unmatched), Box::new(Exp::Not(Box::new(in_region))));
                         }
-                        // 跨区域候选复用地址拆分重试；唯一候选回到具体分派。
+                        // 跨区域候选复用地址拆分重试；唯一低位投影用于区域分派。
                         // 自约束回调也必须经过这一步，不能把合法代码区当成默认内存。
                         match self.check_concrete_overlap(
                             symbolic_addr,
@@ -676,14 +714,58 @@ impl<B: BV> Memory<B> {
                             true,
                             solver,
                         )? {
-                            Overlap::Unique(concrete_addr) => self.read(
-                                read_kind,
-                                Val::Bits(B::new(concrete_addr, width)),
-                                Val::I128(i128::from(bytes)),
-                                solver,
-                                tag,
-                                opts,
-                            ),
+                            Overlap::Unique(concrete_addr) => {
+                                if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
+                                    return Err(ExecError::BadRead("excluded memory region"));
+                                }
+                                for region in &self.regions {
+                                    match region {
+                                        Region::Constrained(range, generator) if range.contains(&concrete_addr) => {
+                                            return read_constrained(
+                                                range,
+                                                generator.as_ref(),
+                                                read_kind,
+                                                concrete_addr,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            )
+                                        }
+                                        Region::Symbolic(range) | Region::SymbolicCode(range)
+                                            if range.contains(&concrete_addr) =>
+                                        {
+                                            return self.read_symbolic(
+                                                read_kind,
+                                                address,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            )
+                                        }
+                                        Region::Concrete(range, contents) if range.contains(&concrete_addr) => {
+                                            return read_concrete(
+                                                contents,
+                                                read_kind,
+                                                concrete_addr,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            )
+                                        }
+                                        Region::Custom(range, contents) if range.contains(&concrete_addr) => {
+                                            return contents.read(read_kind, concrete_addr, bytes, solver, tag)
+                                        }
+                                        _ => continue,
+                                    }
+                                }
+                                Err(ExecError::BadRead("Attempted to fetch instruction from default memory"))
+                            }
                             Overlap::NoOverlap => {
                                 Err(ExecError::BadRead("Attempted to fetch instruction from default memory"))
                             }
