@@ -530,6 +530,7 @@ impl<B: BV> Memory<B> {
                                     generator.as_ref(),
                                     read_kind,
                                     concrete_addr.lower_u64(),
+                                    address,
                                     bytes,
                                     solver,
                                     tag,
@@ -567,6 +568,7 @@ impl<B: BV> Memory<B> {
                                     contents,
                                     read_kind,
                                     concrete_addr.lower_u64(),
+                                    address,
                                     bytes,
                                     solver,
                                     tag,
@@ -619,6 +621,7 @@ impl<B: BV> Memory<B> {
                                                 generator.as_ref(),
                                                 read_kind,
                                                 concrete_addr,
+                                                address,
                                                 bytes,
                                                 solver,
                                                 tag,
@@ -644,6 +647,7 @@ impl<B: BV> Memory<B> {
                                                 contents,
                                                 read_kind,
                                                 concrete_addr,
+                                                address,
                                                 bytes,
                                                 solver,
                                                 tag,
@@ -661,50 +665,44 @@ impl<B: BV> Memory<B> {
                             Overlap::NoOverlap => {}
                         }
                     }
-                    if opts.is_ifetch {
-                        let info = SourceLoc::unknown();
-                        let width = solver.length(symbolic_addr).expect("取指地址必须是位向量");
-                        let cmp_width = 64;
-                        let addr_exp = if width > cmp_width {
-                            Exp::Extract(63, 0, Box::new(Exp::Var(symbolic_addr)))
-                        } else if width < cmp_width {
-                            Exp::ZeroExtend(cmp_width - width, Box::new(Exp::Var(symbolic_addr)))
-                        } else {
-                            Exp::Var(symbolic_addr)
-                        };
-                        let mut unmatched = Exp::Bool(true);
-                        for region in &self.regions {
-                            if matches!(region, Region::Excluded(_)) {
-                                continue;
-                            }
-                            let range = region.region_range();
-                            let in_region = Exp::And(
-                                Box::new(Exp::Bvule(
-                                    Box::new(bits64(range.start, cmp_width)),
-                                    Box::new(addr_exp.clone()),
-                                )),
-                                Box::new(Exp::Bvult(
-                                    Box::new(addr_exp.clone()),
-                                    Box::new(bits64(range.end, cmp_width)),
-                                )),
-                            );
-                            // 沿用具体地址的区域优先级，证明所有候选都由同一区域处理。
-                            let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
-                            if matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
-                                && solver.check_sat_with(&Exp::Not(Box::new(selected)), info).is_unsat()?
-                            {
-                                return self.read_symbolic(
-                                    read_kind,
-                                    address,
-                                    bytes,
-                                    solver,
-                                    tag,
-                                    opts,
-                                    region.region_name(),
-                                );
-                            }
-                            unmatched = Exp::And(Box::new(unmatched), Box::new(Exp::Not(Box::new(in_region))));
+                    let info = SourceLoc::unknown();
+                    let width = solver.length(symbolic_addr).expect("读地址必须是位向量");
+                    let cmp_width = 64;
+                    let addr_exp = if width > cmp_width {
+                        Exp::Extract(63, 0, Box::new(Exp::Var(symbolic_addr)))
+                    } else if width < cmp_width {
+                        Exp::ZeroExtend(cmp_width - width, Box::new(Exp::Var(symbolic_addr)))
+                    } else {
+                        Exp::Var(symbolic_addr)
+                    };
+                    let mut unmatched = Exp::Bool(true);
+                    for region in &self.regions {
+                        if matches!(region, Region::Excluded(_)) {
+                            continue;
                         }
+                        let range = region.region_range();
+                        let in_region = Exp::And(
+                            Box::new(Exp::Bvule(Box::new(bits64(range.start, cmp_width)), Box::new(addr_exp.clone()))),
+                            Box::new(Exp::Bvult(Box::new(addr_exp.clone()), Box::new(bits64(range.end, cmp_width)))),
+                        );
+                        // 沿用具体地址的区域优先级，证明所有候选都由同一区域处理。
+                        let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
+                        if matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
+                            && solver.check_sat_with(&Exp::Not(Box::new(selected)), info).is_unsat()?
+                        {
+                            return self.read_symbolic(
+                                read_kind,
+                                address,
+                                bytes,
+                                solver,
+                                tag,
+                                opts,
+                                region.region_name(),
+                            );
+                        }
+                        unmatched = Exp::And(Box::new(unmatched), Box::new(Exp::Not(Box::new(in_region))));
+                    }
+                    if opts.is_ifetch {
                         // 跨区域候选复用地址拆分重试；唯一低位投影用于区域分派。
                         // 自约束回调也必须经过这一步，不能把合法代码区当成默认内存。
                         match self.check_concrete_overlap(
@@ -726,6 +724,7 @@ impl<B: BV> Memory<B> {
                                                 generator.as_ref(),
                                                 read_kind,
                                                 concrete_addr,
+                                                address,
                                                 bytes,
                                                 solver,
                                                 tag,
@@ -751,6 +750,7 @@ impl<B: BV> Memory<B> {
                                                 contents,
                                                 read_kind,
                                                 concrete_addr,
+                                                address,
                                                 bytes,
                                                 solver,
                                                 tag,
@@ -1174,6 +1174,7 @@ fn read_constrained<B: BV>(
     generator: &dyn Fn(&mut Solver<B>) -> Sym,
     read_kind: Val<B>,
     address: Address,
+    event_address: Val<B>,
     bytes: u32,
     solver: &mut Solver<B>,
     tag: bool,
@@ -1186,7 +1187,7 @@ fn read_constrained<B: BV>(
         solver.add_event(Event::ReadMem {
             value: Val::Symbolic(constrained),
             read_kind,
-            address: Val::Bits(B::from_u64(address)),
+            address: event_address,
             bytes,
             tag_value: None,
             opts,
@@ -1206,6 +1207,7 @@ fn read_concrete<B: BV>(
     memory: &HashMap<Address, u8>,
     read_kind: Val<B>,
     address: Address,
+    event_address: Val<B>,
     bytes: u32,
     solver: &mut Solver<B>,
     tag: bool,
@@ -1226,7 +1228,7 @@ fn read_concrete<B: BV>(
         solver.add_event(Event::ReadMem {
             value,
             read_kind,
-            address: Val::Bits(B::from_u64(address)),
+            address: event_address,
             bytes,
             tag_value: None,
             opts,

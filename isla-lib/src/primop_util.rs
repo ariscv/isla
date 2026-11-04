@@ -32,7 +32,7 @@
 //! primitive operations, including converting IR values into SMT
 //! equivalents.
 
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::bitvector::b64::B64;
 use crate::bitvector::BV;
@@ -270,7 +270,7 @@ fn build_ite_with<B: BV>(
     if merge_bit_width(lhs, solver, info)? != merge_bit_width(rhs, solver, info)? {
         return Err(ExecError::IncompatibleMerge);
     }
-    if lhs == rhs {
+    if lhs == rhs && !matches!(lhs, Val::SymbolicCtor(..)) {
         return Ok(lhs.clone());
     }
     match (lhs, rhs) {
@@ -296,58 +296,13 @@ fn build_ite_with<B: BV>(
             Ok(Val::Struct(fields?))
         }
 
-        (Val::Ctor(l_id, lhs), Val::Ctor(r_id, rhs)) => {
-            if l_id == r_id {
-                Ok(Val::Ctor(*l_id, Box::new(merge_payload(b, lhs, rhs, solver, info)?)))
-            } else {
-                use smtlib::Exp::*;
-                let sym_id =
-                    solver.define_const(Ite(Box::new(Var(b)), Box::new(l_id.to_smt()), Box::new(r_id.to_smt())), info);
-
-                let mut possibilities = HashMap::default();
-                possibilities.insert(*l_id, lhs.as_ref().clone());
-                possibilities.insert(*r_id, rhs.as_ref().clone());
-                Ok(Val::SymbolicCtor(sym_id, possibilities))
-            }
+        (Val::Ctor(l_id, lhs), Val::Ctor(r_id, rhs)) if l_id == r_id => {
+            Ok(Val::Ctor(*l_id, Box::new(merge_payload(b, lhs, rhs, solver, info)?)))
         }
 
-        (Val::Ctor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
-            use smtlib::Exp::*;
-            let sym_id =
-                solver.define_const(Ite(Box::new(Var(b)), Box::new(l_id.to_smt()), Box::new(Var(*r_id))), info);
-
-            let mut possibilities = rhs.clone();
-            match possibilities.entry(*l_id) {
-                Entry::Occupied(o) => *o.into_mut() = merge_payload(b, lhs, o.get(), solver, info)?,
-                Entry::Vacant(v) => {
-                    v.insert(lhs.as_ref().clone());
-                }
-            }
-
-            Ok(Val::SymbolicCtor(sym_id, possibilities))
-        }
-
-        (Val::SymbolicCtor(_, _), Val::Ctor(_, _)) => {
-            use smtlib::Exp::*;
-            let not_b = solver.define_const(Not(Box::new(Var(b))), info);
-            build_ite_with(not_b, rhs, lhs, solver, info, merge_payload)
-        }
-
-        (Val::SymbolicCtor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
-            use smtlib::Exp::*;
-            let sym_id = solver.define_const(Ite(Box::new(Var(b)), Box::new(Var(*l_id)), Box::new(Var(*r_id))), info);
-
-            let mut possibilities = lhs.clone();
-            for (ctor, rhs_val) in rhs.iter() {
-                match possibilities.entry(*ctor) {
-                    Entry::Occupied(o) => *o.into_mut() = merge_payload(b, o.get(), rhs_val, solver, info)?,
-                    Entry::Vacant(v) => {
-                        v.insert(rhs_val.clone());
-                    }
-                }
-            }
-
-            Ok(Val::SymbolicCtor(sym_id, possibilities))
+        (Val::Ctor(_, _), Val::Ctor(_, _)) | (Val::SymbolicCtor(_, _), _) | (_, Val::SymbolicCtor(_, _)) => {
+            // 与路径合流一致，保留不同标签解包时各自的成功路径和类型错误路径。
+            Err(ExecError::IncompatibleMerge)
         }
 
         _ => {
@@ -433,7 +388,14 @@ mod build_ite_tests {
                     merge_val(condition, left, right, &mut solver, info),
                     Err(ExecError::IncompatibleMerge)
                 ));
-                assert!(build_ite(condition, left, right, &mut solver, info).is_ok());
+                if matches!((left, right), (Val::Ctor(..), Val::Ctor(..))) {
+                    assert!(build_ite(condition, left, right, &mut solver, info).is_ok());
+                } else {
+                    assert!(matches!(
+                        build_ite(condition, left, right, &mut solver, info),
+                        Err(ExecError::IncompatibleMerge)
+                    ));
+                }
             }
         }
 
@@ -454,6 +416,34 @@ mod build_ite_tests {
         };
         assert_eq!(fields.get(&ctor), Some(&Val::Unit));
         assert!(matches!(fields.get(&Name::from_u32(92)), Some(Val::Symbolic(_))));
+    }
+
+    #[test]
+    fn 不同构造子标签和符号构造子必须拒绝合并() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let condition = solver.declare_const(smtlib::Ty::Bool, info);
+        let tag = solver.declare_const(Name::smt_ty(), info);
+        let a = Name::from_u32(91);
+        let b = Name::from_u32(92);
+        let values = [
+            Val::Ctor(a, Box::new(Val::Unit)),
+            Val::Ctor(b, Box::new(Val::Unit)),
+            Val::SymbolicCtor(tag, HashMap::from_iter([(a, Val::Unit), (b, Val::Unit)])),
+        ];
+        for (i, left) in values.iter().enumerate() {
+            for (j, right) in values.iter().enumerate() {
+                if i == j && i < 2 {
+                    assert_eq!(build_ite(condition, left, right, &mut solver, info).unwrap(), *left);
+                } else {
+                    assert!(matches!(
+                        build_ite(condition, left, right, &mut solver, info),
+                        Err(ExecError::IncompatibleMerge)
+                    ));
+                }
+            }
+        }
     }
 }
 

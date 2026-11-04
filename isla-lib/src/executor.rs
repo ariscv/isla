@@ -3926,6 +3926,7 @@ mod tests {
     mod review28_tests;
     mod review29_tests;
     mod review30_tests;
+    mod review31_tests;
     mod symbolic_ctor_unwrap_tests;
 
     mod review26_tests {
@@ -10295,15 +10296,7 @@ mod tests {
             );
             assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
             assert!(matches!(frame.vars()[&RETURN], UVal::Uninit(Ty::Unit)), "拒绝合流必须保留原始返回值");
-            // 通用 ITE 仍可构造有限的符号构造子选择，用于验证模型物化。
-            let value = crate::primop_util::build_ite(
-                cond,
-                &Val::Ctor(left, Box::new(Val::Unit)),
-                &Val::Ctor(right, Box::new(Val::Unit)),
-                &mut solver,
-                info(),
-            )
-            .unwrap();
+            let value = symbolic_ctor_choice(cond, (left, Val::Unit), (right, Val::Unit), &mut solver);
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
             let mut model = Model::new(&solver);
             model.set_complete_model(true);
@@ -11236,14 +11229,8 @@ mod tests {
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
             let a = test_name(180);
             let b = test_name(181);
-            let merged = crate::primop_util::build_ite(
-                cond,
-                &Val::Ctor(a, Box::new(Val::Bits(B64::new(1, 8)))),
-                &Val::Ctor(b, Box::new(Val::Bits(B64::new(2, 8)))),
-                &mut solver,
-                info(),
-            )
-            .unwrap();
+            let merged =
+                symbolic_ctor_choice(cond, (a, Val::Bits(B64::new(1, 8))), (b, Val::Bits(B64::new(2, 8))), &mut solver);
             for tag in [a, b, test_name(182)] {
                 for payload in [1, 2] {
                     let rhs = Val::Ctor(tag, Box::new(Val::Bits(B64::new(payload, 8))));
@@ -11894,6 +11881,25 @@ fn zspike_match(zaddr, zwidth) {
 
     fn test_name(id: u32) -> Name {
         Name::from_u32(id)
+    }
+
+    // 直接构造测试用符号标签，独立验证相等性与模型物化。
+    fn symbolic_ctor_choice(
+        condition: Sym,
+        left: (Name, Val<B64>),
+        right: (Name, Val<B64>),
+        solver: &mut Solver<B64>,
+    ) -> Val<B64> {
+        assert_ne!(left.0, right.0);
+        let tag = solver.define_const(
+            smtlib::Exp::Ite(
+                Box::new(smtlib::Exp::Var(condition)),
+                Box::new(left.0.to_smt()),
+                Box::new(right.0.to_smt()),
+            ),
+            info(),
+        );
+        Val::SymbolicCtor(tag, HashMap::from_iter([left, right]))
     }
 
     fn shared_state_from_defs<'ir>(defs: Vec<crate::ir::Def<Name, B64>>) -> SharedState<'ir, B64> {
@@ -13646,17 +13652,10 @@ fn zmemreadfork(zu) {
             let b = test_name(181);
             let left_cond = solver.declare_const(smtlib::Ty::Bool, info());
             let right_cond = solver.declare_const(smtlib::Ty::Bool, info());
-            let ctor = |tag, payload| Val::Ctor(tag, Box::new(Val::I128(payload)));
-            let left = crate::primop_util::build_ite(left_cond, &ctor(a, 1), &ctor(b, 2), &mut solver, info()).unwrap();
+            let left = symbolic_ctor_choice(left_cond, (a, Val::I128(1)), (b, Val::I128(2)), &mut solver);
             for (a_payload, b_payload) in [(1, 2), (3, 2), (3, 4)] {
-                let right = crate::primop_util::build_ite(
-                    right_cond,
-                    &ctor(a, a_payload),
-                    &ctor(b, b_payload),
-                    &mut solver,
-                    info(),
-                )
-                .unwrap();
+                let right =
+                    symbolic_ctor_choice(right_cond, (a, Val::I128(a_payload)), (b, Val::I128(b_payload)), &mut solver);
                 for unequal in [false, true] {
                     let f = if unequal { crate::primop::op_neq::<B64> } else { crate::primop::op_eq::<B64> };
                     let actual = f(left.clone(), right.clone(), &mut solver, info()).unwrap();
@@ -13686,14 +13685,12 @@ fn zmemreadfork(zu) {
                     assert_eq!(solver.check_sat_with(&wrong, info()), crate::smt::SmtResult::Unsat);
                 }
             }
-            let disjoint = crate::primop_util::build_ite(
+            let disjoint = symbolic_ctor_choice(
                 right_cond,
-                &ctor(test_name(182), 1),
-                &ctor(test_name(183), 2),
+                (test_name(182), Val::I128(1)),
+                (test_name(183), Val::I128(2)),
                 &mut solver,
-                info(),
-            )
-            .unwrap();
+            );
             assert_eq!(crate::primop::eq_anything(left, disjoint, &mut solver, info()).unwrap(), Val::Bool(false));
         }
 
@@ -13861,14 +13858,19 @@ fn zmemreadfork(zu) {
             let new_struct = Val::Struct(HashMap::from_iter([(field, Val::Bool(true))]));
             let old_ctor = Val::Ctor(test_name(181), Box::new(old_struct.clone()));
             let new_ctor = Val::Ctor(test_name(182), Box::new(new_struct.clone()));
-            for (old, new) in [
+            let matching_ctor = Val::Ctor(test_name(181), Box::new(new_struct.clone()));
+            for (case, (old, new)) in [
                 (old_struct, new_struct),
+                (old_ctor.clone(), matching_ctor),
                 (old_ctor.clone(), new_ctor.clone()),
                 (
                     Val::Struct(HashMap::from_iter([(field, old_ctor)])),
                     Val::Struct(HashMap::from_iter([(field, new_ctor)])),
                 ),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 for width in [64, 128] {
                     let index = solver.declare_const(smtlib::Ty::BitVec(width), info());
                     let actual = crate::primop::vector_update(
@@ -13876,8 +13878,32 @@ fn zmemreadfork(zu) {
                         &mut solver,
                         &mut frame,
                         info(),
-                    )
-                    .unwrap();
+                    );
+                    if case >= 2 {
+                        assert!(matches!(actual, Err(ExecError::SymbolicLength("vector_update", _))));
+                        // 不同标签要求拆分索引；每个唯一候选重试后保留正确的具体元素。
+                        for candidate in [0, 1] {
+                            let mut retry_solver = Solver::<B64>::new(&ctx);
+                            let retry_index = retry_solver.declare_const(smtlib::Ty::BitVec(width), info());
+                            retry_solver.assert_eq(smtlib::Exp::Var(retry_index), smtlib::bits64(candidate, width));
+                            let actual = crate::primop::vector_update(
+                                vec![
+                                    Val::Vector(vec![old.clone(), old.clone()]),
+                                    Val::Symbolic(retry_index),
+                                    new.clone(),
+                                ],
+                                &mut retry_solver,
+                                &mut frame,
+                                info(),
+                            )
+                            .unwrap();
+                            let mut expected = vec![old.clone(), old.clone()];
+                            expected[candidate as usize] = new.clone();
+                            assert_eq!(actual, Val::Vector(expected));
+                        }
+                        continue;
+                    }
+                    let actual = actual.unwrap();
                     let Val::Vector(items) = actual else { panic!("向量更新必须返回向量") };
                     for (i, item) in items.into_iter().enumerate() {
                         let selected = smtlib::Exp::Eq(
@@ -15384,67 +15410,48 @@ fn zmemreadfork(zu) {
         let b = solver.declare_const(smtlib::Ty::Bool, info());
         let tag_a = test_name(150);
         let tag_b = test_name(151);
-        // 通用 ITE 的构造子判别值和载荷仍须满足真值表；路径合并拒绝不同标签。
+        // 标签和载荷仍须满足真值表；通用 ITE 与路径合流均拒绝不同标签。
         let ca = Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(11, 64))));
         let cb = Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(22, 64))));
-        let sa = crate::primop_util::build_ite(
+        let sa = symbolic_ctor_choice(
             a,
-            &ca,
-            &Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(12, 64)))),
+            (tag_a, Val::Bits(B64::new(11, 64))),
+            (tag_b, Val::Bits(B64::new(12, 64))),
             &mut solver,
-            info(),
-        )
-        .unwrap();
-        let sb = crate::primop_util::build_ite(
+        );
+        let sb = symbolic_ctor_choice(
             b,
-            &Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(21, 64)))),
-            &cb,
+            (tag_a, Val::Bits(B64::new(21, 64))),
+            (tag_b, Val::Bits(B64::new(22, 64))),
             &mut solver,
-            info(),
-        )
-        .unwrap();
+        );
         for (lhs, rhs) in [(&ca, &cb), (&ca, &sb), (&sa, &cb), (&sa, &sb)] {
             assert!(matches!(
                 crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()),
                 Err(ExecError::IncompatibleMerge)
             ));
-            let merged = crate::primop_util::build_ite(c, lhs, rhs, &mut solver, info()).unwrap();
-            let Val::SymbolicCtor(discriminant, possibilities) = merged else { panic!("期望符号构造子") };
-            for cv in [false, true] {
-                for av in [false, true] {
-                    for bv in [false, true] {
-                        let (tag, payload) = match if cv { lhs } else { rhs } {
-                            Val::Ctor(tag, value) => (*tag, value.as_ref().clone()),
-                            Val::SymbolicCtor(sym, values) => {
-                                let flag = if matches!(lhs, Val::SymbolicCtor(l, _) if l == sym) { av } else { bv };
-                                let tag = if flag { tag_a } else { tag_b };
-                                (tag, values[&tag].clone())
-                            }
-                            _ => unreachable!(),
-                        };
-                        let mut assertion = SExp::Bool(true);
-                        for (sym, value) in [(c, cv), (a, av), (b, bv)] {
-                            assertion = SExp::And(
-                                Box::new(assertion),
-                                Box::new(SExp::Eq(Box::new(SExp::Var(sym)), Box::new(SExp::Bool(value)))),
-                            );
-                        }
-                        let wrong_tag = SExp::Neq(Box::new(SExp::Var(discriminant)), Box::new(tag.to_smt()));
-                        let wrong_payload = SExp::Neq(
-                            Box::new(crate::primop_util::smt_value(&possibilities[&tag], info()).unwrap()),
-                            Box::new(crate::primop_util::smt_value(&payload, info()).unwrap()),
-                        );
-                        let bad = SExp::And(
-                            Box::new(assertion),
-                            Box::new(SExp::Or(Box::new(wrong_tag), Box::new(wrong_payload))),
-                        );
-                        assert_eq!(
-                            solver.check_sat_with(&bad, info()),
-                            crate::smt::SmtResult::Unsat,
-                            "构造子判别值和载荷必须服从对应条件"
-                        );
-                    }
-                }
+            assert!(matches!(
+                crate::primop_util::build_ite(c, lhs, rhs, &mut solver, info()),
+                Err(ExecError::IncompatibleMerge)
+            ));
+        }
+        for (condition, value, left_payload, right_payload) in [(a, sa, 11, 12), (b, sb, 21, 22)] {
+            let Val::SymbolicCtor(discriminant, possibilities) = value else { panic!("期望符号构造子") };
+            for choice in [false, true] {
+                let (tag, payload) = if choice { (tag_a, left_payload) } else { (tag_b, right_payload) };
+                let assertion = SExp::Eq(Box::new(SExp::Var(condition)), Box::new(SExp::Bool(choice)));
+                let wrong_tag = SExp::Neq(Box::new(SExp::Var(discriminant)), Box::new(tag.to_smt()));
+                let wrong_payload = SExp::Neq(
+                    Box::new(crate::primop_util::smt_value(&possibilities[&tag], info()).unwrap()),
+                    Box::new(smtlib::bits64(payload, 64)),
+                );
+                let bad =
+                    SExp::And(Box::new(assertion), Box::new(SExp::Or(Box::new(wrong_tag), Box::new(wrong_payload))));
+                assert_eq!(
+                    solver.check_sat_with(&bad, info()),
+                    crate::smt::SmtResult::Unsat,
+                    "构造子判别值和载荷必须服从对应条件"
+                );
             }
         }
     }
