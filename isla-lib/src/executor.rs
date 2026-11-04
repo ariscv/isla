@@ -50,7 +50,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
 use crate::primop;
-use crate::primop_util::{build_ite, i128_from_bits, ite_phi, smt_value, symbolic};
+use crate::primop_util::{build_ite, build_vector_ite, i128_from_bits, ite_phi, smt_value, symbolic};
 use crate::probe;
 use crate::smt::smtlib::Def;
 use crate::smt::*;
@@ -312,9 +312,9 @@ fn read_register_from_vector<'ir, B: BV>(
                 });
                 let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap();
                 reg_values.push(value.clone());
-                chain = match solver
-                    .with_def_attrs(DefAttrs::uninteresting(), |solver| build_ite(choice, value, &chain, solver, info))
-                {
+                chain = match solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
+                    build_vector_ite(choice, value, &chain, solver, info)
+                }) {
                     Ok(value) => value,
                     Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
                         // 沿用向量访问的索引拆分；唯一候选必须执行具体寄存器读取并记录 ReadReg。
@@ -478,7 +478,7 @@ fn write_register_from_vector<'ir, B: BV>(
                     None => local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone(),
                 };
                 let updated = match solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
-                    build_ite(choice, &value, &current_value, solver, info)
+                    build_vector_ite(choice, &value, &current_value, solver, info)
                 }) {
                     Ok(updated) => updated,
                     Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
@@ -3928,6 +3928,7 @@ mod tests {
     mod review30_tests;
     mod review31_tests;
     mod review32_tests;
+    mod review33_tests;
     mod symbolic_ctor_unwrap_tests;
 
     mod review26_tests {

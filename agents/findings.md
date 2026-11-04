@@ -1,5 +1,10 @@
 # Findings
 
+## 寄存器向量选择与自约束符号读
+
+- `primop_util::build_vector_ite` 在递归合并时拒绝不同构造子标签及 `SymbolicCtor`，返回 `IncompatibleMerge`。寄存器向量读写与普通向量读写应使用此接口，以便沿用索引拆分并保留错误标签解包路径；通用 `build_ite` 仍用于允许符号构造子的寄存器历史选择等场景。
+- `Memory::read` 的符号地址普通读在回调声明 `constrains_symbolic_reads()` 时，地址约束和读值由 `read_symbolic` 调用回调处理。所有候选都属于同一优先符号区域时可保留该区域名称，其余候选须继续进入回调，不能经第二次具体区域检查改成静态具体读。取指仍执行区域检查；事件地址始终保留原始位宽。
+
 ## isarch 符号执行
 
 - `isarch_exec.rs` 的 `run_symbolic_execute(...)` 通过 `execute_ir_function_with_checkpoint(...)` 启动 `zexecute`，只注入 `regs/lets`，没有注入 `Memory`。

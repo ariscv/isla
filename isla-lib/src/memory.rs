@@ -702,8 +702,14 @@ impl<B: BV> Memory<B> {
                         }
                         unmatched = Exp::And(Box::new(unmatched), Box::new(Exp::Not(Box::new(in_region))));
                     }
+                    if !opts.is_ifetch
+                        && self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads())
+                    {
+                        // 普通读的地址与内容由自约束回调处理，具体区域不能截获符号写后读。
+                        return self.read_symbolic(read_kind, address, bytes, solver, tag, opts, DEFAULT_REGION_NAME);
+                    }
                     // 跨区域候选复用地址拆分重试；唯一低位投影用于区域分派。
-                    // 自约束回调也必须经过这一步，不能把合法代码区当成默认内存。
+                    // 取指仍须经过区域检查，不能把合法代码区当成默认内存。
                     match self.check_concrete_overlap(
                         symbolic_addr,
                         bytes,
@@ -1437,6 +1443,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn review33_自约束回调必须能够处理未收窄的普通读地址() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let mut mem = Memory::<B64>::new();
+        mem.add_zero_region(0x2000000..0x20c0000);
+        mem.set_client_info(Box::new(ConstrainingReads));
+        let address = solver.declare_bitvector(64, SourceLoc::unknown());
+        let result = mem.read(Val::Unit, Val::Symbolic(address), Val::I128(8), &mut solver, false, ReadOpts::default());
+        assert!(result.is_ok(), "自约束普通读不能在回调前被区域预检查拒绝：{result:?}");
+        assert!(solver.trace().to_vec().iter().any(|event| matches!(event, Event::ReadMem { bytes: 8, .. })));
     }
 
     #[test]

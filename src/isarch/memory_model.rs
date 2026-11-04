@@ -219,6 +219,24 @@ mod tests {
         Sym::from_u32(9000 + id)
     }
 
+    #[test]
+    fn review33_自约束数组在具体区域内必须保持符号写后读一致性() {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let mut memory = Memory::<B64>::new();
+        memory.add_zero_region(0x2000000..0x20c0000);
+        install_seq_memory(&mut memory, 64, &mut solver);
+        let address = solver.declare_const(Ty::BitVec(64), SourceLoc::unknown());
+        solver.assert_eq(Exp::Var(address), bits64(0x2000000, 64));
+        write_bytes(&mut memory, &mut solver, Val::Symbolic(address), B64::new(0xa5, 8));
+        let value = read_bytes(&memory, &mut solver, Val::Symbolic(address), 1);
+        expect_unsat(
+            &mut solver,
+            Exp::Neq(Box::new(smt_value(&value, SourceLoc::unknown()).unwrap()), Box::new(bits64(0xa5, 8))),
+            "自约束数组同址写入后必须读回 0xa5，不能绕过回调读到静态零值",
+        );
+    }
+
     fn declare_symbol(solver: &mut Solver<B64>, sym: Sym, bits: u32) {
         solver.add(Def::DeclareConst(sym, Ty::BitVec(bits)));
     }
@@ -832,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn 默认内存保留具体区域重叠写入错误() {
+    fn 默认内存具体区域重叠写入必须请求地址拆分且不提交事件() {
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut memory = Memory::<B64>::new();
@@ -849,7 +867,15 @@ mod tests {
             None,
             WriteOpts::default(),
         );
-        assert!(matches!(error, Err(isla_lib::error::ExecError::BadWrite("possible symbolic address overlap"))));
+        // 历史接口返回 BadWrite；地址拆分重试接口已改为 SymbolicLength，不能提前提交写事件。
+        assert!(
+            matches!(error, Err(isla_lib::error::ExecError::SymbolicLength("write_mem_address", _))),
+            "具体区域重叠必须请求写地址拆分：{error:?}"
+        );
+        assert!(
+            !solver.trace().to_vec().iter().any(|event| matches!(event, Event::WriteMem { .. })),
+            "地址拆分重试前不能提交写事件"
+        );
     }
 
     /// 数组内存模型下读地址的合法性由回调的区域 OR 链约束（`symbolic_read`），
