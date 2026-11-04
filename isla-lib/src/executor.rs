@@ -2107,7 +2107,7 @@ fn try_merge_diamond<'ir, B: BV>(
                 for reg in &ws_then.register_write_order {
                     let value = frame.regs().get_last_if_initialized(*reg).unwrap().clone();
                     let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
-                    if !symbol.contains("_TLB") {
+                    if symbol != "_TLB" {
                         solver.add_event(Event::WriteReg(*reg, Vec::new(), value));
                     }
                 }
@@ -3897,6 +3897,8 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review27_tests;
+
     mod review26_tests {
         use super::*;
 

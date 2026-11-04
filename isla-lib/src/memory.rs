@@ -423,9 +423,15 @@ impl<B: BV> Memory<B> {
         let mut region_constraints = Vec::new();
 
         let addr_size = solver.length(address).unwrap_or_else(|| panic!("address is not a bitvector"));
-        let cmp_size = addr_size.max(64);
-        let addr_exp =
-            if addr_size < cmp_size { ZeroExtend(cmp_size - addr_size, Box::new(Var(address))) } else { Var(address) };
+        let cmp_size = 64;
+        // 与具体地址的 lower_u64() 一致，区域始终在 u64 地址空间中分派。
+        let addr_exp = if addr_size > cmp_size {
+            Extract(63, 0, Box::new(Var(address)))
+        } else if addr_size < cmp_size {
+            ZeroExtend(cmp_size - addr_size, Box::new(Var(address)))
+        } else {
+            Var(address)
+        };
 
         for region in &self.regions {
             if !matches!(region, Region::Excluded(_))
@@ -442,6 +448,10 @@ impl<B: BV> Memory<B> {
 
         // 排除区域按完整访问区间检查，复用防止地址加法回绕的约束。
         if let Some(allowed) = smt_excluded_constraint(&self.regions, &Var(address), bytes, solver) {
+            // 无合法候选时无需拆分地址，交给符号读写追加排除约束并返回访问错误。
+            if self.client_info.is_none() && solver.check_sat_with(&allowed, SourceLoc::unknown()).is_unsat()? {
+                return Ok(Overlap::NoOverlap);
+            }
             region_constraints.push(Not(Box::new(allowed)));
         }
 
@@ -449,36 +459,19 @@ impl<B: BV> Memory<B> {
             let constraint = region_constraints.drain(..).fold(r, |r1, r2| Or(Box::new(r1), Box::new(r2)));
             match solver.check_sat_with(&constraint, SourceLoc::unknown()) {
                 Sat => {
-                    let sat_exp = {
+                    let sat_address = {
                         let mut model = Model::new(solver);
                         model.set_complete_model(true);
-                        let ModelVal::Exp(sat_exp @ (Bits64(_) | Bits(_))) = model.get_var(address)? else {
-                            return Err(ExecError::Z3Error(
-                                "No bitvector address variable found in model during check_concrete_overlap"
-                                    .to_string(),
-                            ));
+                        let ModelVal::Exp(Bits64(sat_address)) = model.get_exp(&addr_exp)? else {
+                            panic!("64 位地址投影的模型值必须是 Bits64");
                         };
-                        sat_exp
-                    };
-                    let sat_address = match &sat_exp {
-                        Bits64(sat_address) => sat_address.lower_u64(),
-                        Bits(sat_bits) => {
-                            if sat_bits.iter().skip(64).any(|bit| *bit) {
-                                return Err(ExecError::Z3Error("具体分派的模型地址超出 u64 范围".to_string()));
-                            }
-                            sat_bits
-                                .iter()
-                                .take(64)
-                                .enumerate()
-                                .fold(0u64, |address, (index, bit)| address | (u64::from(*bit) << index))
-                        }
-                        _ => unreachable!(),
+                        sat_address.lower_u64()
                     };
                     // Check if the satisifiable address in the
                     // concrete region is actually unique, in which
                     // case the caller could choose to treat it as a
                     // concrete value.
-                    let uniqueness_constraint = Neq(Box::new(Var(address)), Box::new(sat_exp));
+                    let uniqueness_constraint = Neq(Box::new(addr_exp), Box::new(bits64(sat_address, cmp_size)));
                     match solver.check_sat_with(&uniqueness_constraint, SourceLoc::unknown()) {
                         Unsat => Ok(Overlap::Unique(sat_address)),
                         Unknown => Err(ExecError::Z3Unknown),
@@ -633,8 +626,10 @@ impl<B: BV> Memory<B> {
                     if opts.is_ifetch {
                         let info = SourceLoc::unknown();
                         let width = solver.length(symbolic_addr).expect("取指地址必须是位向量");
-                        let cmp_width = width.max(64);
-                        let addr_exp = if width < cmp_width {
+                        let cmp_width = 64;
+                        let addr_exp = if width > cmp_width {
+                            Exp::Extract(63, 0, Box::new(Exp::Var(symbolic_addr)))
+                        } else if width < cmp_width {
                             Exp::ZeroExtend(cmp_width - width, Box::new(Exp::Var(symbolic_addr)))
                         } else {
                             Exp::Var(symbolic_addr)
@@ -809,6 +804,12 @@ impl<B: BV> Memory<B> {
                 &tag_ir_value,
                 &opts,
             )
+        } else if self.regions.iter().any(|region| matches!(region, Region::Excluded(_))) {
+            let addr_exp = crate::primop_util::smt_value(&address, SourceLoc::unknown())?;
+            let not_overlap = smt_excluded_constraint(&self.regions, &addr_exp, bytes, solver)
+                .expect("存在排除区域时必须生成排除约束");
+            solver.add(Def::Assert(not_overlap));
+            true
         } else {
             false
         };
@@ -863,6 +864,12 @@ impl<B: BV> Memory<B> {
         solver.add(Def::DeclareConst(value, Ty::Bool));
         let constrained = if let Some(c) = &mut self.client_info {
             c.symbolic_write(&self.regions, solver, value, &write_kind, &address, &data, bytes, &tag, &opts)
+        } else if self.regions.iter().any(|region| matches!(region, Region::Excluded(_))) {
+            let addr_exp = crate::primop_util::smt_value(&address, SourceLoc::unknown())?;
+            let not_overlap = smt_excluded_constraint(&self.regions, &addr_exp, bytes, solver)
+                .expect("存在排除区域时必须生成排除约束");
+            solver.add(Def::Assert(not_overlap));
+            true
         } else {
             false
         };
@@ -1012,7 +1019,7 @@ pub fn smt_address_constraint<B: BV>(
 
 /// 判死区域（`Region::Excluded`）的符号地址约束：NOT(访问区间与任一判死
 /// 区域重叠)。访问区间 `[addr, addr+bytes)` 与 `[start, end)` 重叠定义为
-/// `addr <u end && addr + bytes >u start`（加法在 max(addr_size, 64)+1 位上做，避免
+/// `addr <u end && addr + bytes >u start`（地址先投影到低 64 位，加法在 65 位上做，避免
 /// 回绕）。零判死区域返回 `None`——零约束零开销，与默认全符号化一致。
 /// 注意与白名单 OR 链（`smt_address_constraint`，W8 已从 solve-state 移除）
 /// 相反：这里任何与区域**重叠**（哪怕一字节）都判死，不要求访问完整落入
@@ -1033,9 +1040,14 @@ pub fn smt_excluded_constraint<B: BV>(
         }
     };
     let addr_size = solver.length(addr_var).unwrap_or_else(|| panic!("address is not a bitvector"));
-    let cmp_size = addr_size.max(64);
-    let addr_exp =
-        if addr_size < cmp_size { ZeroExtend(cmp_size - addr_size, Box::new(Var(addr_var))) } else { Var(addr_var) };
+    let cmp_size = 64;
+    let addr_exp = if addr_size > cmp_size {
+        Extract(63, 0, Box::new(Var(addr_var)))
+    } else if addr_size < cmp_size {
+        ZeroExtend(cmp_size - addr_size, Box::new(Var(addr_var)))
+    } else {
+        Var(addr_var)
+    };
     let mut overlap: Option<Exp<Sym>> = None;
     for region in regions {
         let Region::Excluded(range) = region else { continue };
@@ -1254,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn 宽地址高位非零不得静默截断() {
+    fn 宽地址高位非零按低64位分派() {
         let mut mem = Memory::<B64>::new();
         mem.add_zero_region(0x1000..0x1002);
         let ctx = Context::new(Config::new());
@@ -1266,8 +1278,77 @@ mod tests {
 
         assert!(matches!(
             mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
-            Ok(Overlap::NoOverlap)
+            Ok(Overlap::Unique(0x1001))
         ));
+    }
+
+    #[test]
+    fn 宽地址高位可变不影响低64位唯一性() {
+        for width in [65, 128, 129] {
+            let mut mem = Memory::<B64>::new();
+            mem.add_zero_region(0x1000..0x1002);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let addr = solver.declare_bitvector(width, SourceLoc::unknown());
+            solver.assert_eq(Exp::Extract(63, 0, Box::new(Exp::Var(addr))), bits64(0x1001, 64));
+
+            assert!(matches!(
+                mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
+                Ok(Overlap::Unique(0x1001))
+            ));
+        }
+    }
+
+    #[test]
+    fn 无回调符号读写必须添加排除区域约束() {
+        for write in [false, true] {
+            for excluded in [false, true] {
+                let mut mem = Memory::<B64>::new();
+                mem.add_excluded_region(0x1000..0x1002);
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let info = SourceLoc::unknown();
+                let addr = solver.declare_bitvector(65, info);
+                if excluded {
+                    solver.assert_eq(Exp::Extract(63, 0, Box::new(Exp::Var(addr))), bits64(0x1001, 64));
+                }
+                let result = if write {
+                    mem.write_symbolic(
+                        Val::Unit,
+                        Val::Symbolic(addr),
+                        Val::Bits(B64::new(42, 8)),
+                        &mut solver,
+                        None,
+                        WriteOpts::default(),
+                        DEFAULT_REGION_NAME,
+                    )
+                } else {
+                    mem.read_symbolic(
+                        Val::Unit,
+                        Val::Symbolic(addr),
+                        1,
+                        &mut solver,
+                        false,
+                        ReadOpts::default(),
+                        DEFAULT_REGION_NAME,
+                    )
+                };
+                if excluded {
+                    assert!(matches!(result, Err(ExecError::BadRead(_)) | Err(ExecError::BadWrite(_))));
+                    assert!(!solver
+                        .trace()
+                        .to_vec()
+                        .iter()
+                        .any(|event| { matches!(event, Event::ReadMem { .. } | Event::WriteMem { .. }) }));
+                } else {
+                    assert!(result.is_ok());
+                    assert!(solver.check_sat(info).is_sat().unwrap());
+                    let in_excluded =
+                        Exp::Eq(Box::new(Exp::Extract(63, 0, Box::new(Exp::Var(addr)))), Box::new(bits64(0x1001, 64)));
+                    assert!(solver.check_sat_with(&in_excluded, info).is_unsat().unwrap());
+                }
+            }
+        }
     }
 
     #[test]

@@ -220,9 +220,14 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         }
                     }
                     let width = solver.length(sym).expect("内存地址必须是位向量");
-                    let cmp_width = width.max(64);
-                    let addr_exp =
-                        if width < cmp_width { ZeroExtend(cmp_width - width, Box::new(Var(sym))) } else { Var(sym) };
+                    let cmp_width = 64;
+                    let addr_exp = if width > cmp_width {
+                        Extract(63, 0, Box::new(Var(sym)))
+                    } else if width < cmp_width {
+                        ZeroExtend(cmp_width - width, Box::new(Var(sym)))
+                    } else {
+                        Var(sym)
+                    };
                     // 逐区域拆分，保留区域内地址的符号覆盖及具体内存分派的优先级。
                     for region in frame.memory().regions() {
                         let range = region.region_range();
