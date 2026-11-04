@@ -635,7 +635,8 @@ pub fn merge_val<B: BV>(
         | (Val::Ctor(_, _), Val::SymbolicCtor(_, _))
         | (Val::SymbolicCtor(_, _), Val::Ctor(_, _))
         | (Val::SymbolicCtor(_, _), Val::SymbolicCtor(_, _)) => {
-            build_ite_with(cond, val_a, val_b, solver, info, merge_val)
+            // Unwrap 无法拆分符号标签的成功与失败路径，必须回滚合流并保留各自的错误域。
+            Err(ExecError::IncompatibleMerge)
         }
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),

@@ -605,13 +605,25 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
 
                 Owned(Val::Ctor(ctor_b, v)) if *ctor_a == ctor_b => Owned(*v),
 
-                Borrowed(Val::SymbolicCtor(_, possibilities)) => match possibilities.get(ctor_a) {
-                    Some(v) => Borrowed(v),
+                Borrowed(Val::SymbolicCtor(tag, possibilities)) => match possibilities.get(ctor_a) {
+                    Some(v) => {
+                        let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(*tag)), Box::new(ctor_a.to_smt()));
+                        if solver.check_sat_with(&matches_tag, info).is_unsat()? {
+                            return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
+                        }
+                        Borrowed(v)
+                    }
                     None => return Err(ExecError::Type("No possible value for constructor".to_string(), info)),
                 },
 
-                Owned(Val::SymbolicCtor(_, mut possibilities)) => match possibilities.remove(ctor_a) {
-                    Some(v) => Owned(v),
+                Owned(Val::SymbolicCtor(tag, mut possibilities)) => match possibilities.remove(ctor_a) {
+                    Some(v) => {
+                        let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
+                        if solver.check_sat_with(&matches_tag, info).is_unsat()? {
+                            return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
+                        }
+                        Owned(v)
+                    }
                     None => return Err(ExecError::Type("No possible value for constructor".to_string(), info)),
                 },
 
@@ -3913,6 +3925,8 @@ mod tests {
     mod review27_tests;
     mod review28_tests;
     mod review29_tests;
+    mod review30_tests;
+    mod symbolic_ctor_unwrap_tests;
 
     mod review26_tests {
         use super::*;
@@ -10279,12 +10293,17 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             );
-            assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
-                Some(4)
-            );
-            let value =
-                eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
+            assert!(matches!(frame.vars()[&RETURN], UVal::Uninit(Ty::Unit)), "拒绝合流必须保留原始返回值");
+            // 通用 ITE 仍可构造有限的符号构造子选择，用于验证模型物化。
+            let value = crate::primop_util::build_ite(
+                cond,
+                &Val::Ctor(left, Box::new(Val::Unit)),
+                &Val::Ctor(right, Box::new(Val::Unit)),
+                &mut solver,
+                info(),
+            )
+            .unwrap();
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
             let mut model = Model::new(&solver);
             model.set_complete_model(true);
@@ -11217,7 +11236,7 @@ mod tests {
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
             let a = test_name(180);
             let b = test_name(181);
-            let merged = crate::primop_util::merge_val(
+            let merged = crate::primop_util::build_ite(
                 cond,
                 &Val::Ctor(a, Box::new(Val::Bits(B64::new(1, 8)))),
                 &Val::Ctor(b, Box::new(Val::Bits(B64::new(2, 8)))),
@@ -15365,10 +15384,10 @@ fn zmemreadfork(zu) {
         let b = solver.declare_const(smtlib::Ty::Bool, info());
         let tag_a = test_name(150);
         let tag_b = test_name(151);
-        // 真值表验证使用可合并的位向量载荷；不同 I64 和 I128 整数均拒绝合并。
+        // 通用 ITE 的构造子判别值和载荷仍须满足真值表；路径合并拒绝不同标签。
         let ca = Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(11, 64))));
         let cb = Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(22, 64))));
-        let sa = crate::primop_util::merge_val(
+        let sa = crate::primop_util::build_ite(
             a,
             &ca,
             &Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(12, 64)))),
@@ -15376,7 +15395,7 @@ fn zmemreadfork(zu) {
             info(),
         )
         .unwrap();
-        let sb = crate::primop_util::merge_val(
+        let sb = crate::primop_util::build_ite(
             b,
             &Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(21, 64)))),
             &cb,
@@ -15385,7 +15404,11 @@ fn zmemreadfork(zu) {
         )
         .unwrap();
         for (lhs, rhs) in [(&ca, &cb), (&ca, &sb), (&sa, &cb), (&sa, &sb)] {
-            let merged = crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()).unwrap();
+            assert!(matches!(
+                crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()),
+                Err(ExecError::IncompatibleMerge)
+            ));
+            let merged = crate::primop_util::build_ite(c, lhs, rhs, &mut solver, info()).unwrap();
             let Val::SymbolicCtor(discriminant, possibilities) = merged else { panic!("期望符号构造子") };
             for cv in [false, true] {
                 for av in [false, true] {
