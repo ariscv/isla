@@ -449,24 +449,38 @@ impl<B: BV> Memory<B> {
             let constraint = region_constraints.drain(..).fold(r, |r1, r2| Or(Box::new(r1), Box::new(r2)));
             match solver.check_sat_with(&constraint, SourceLoc::unknown()) {
                 Sat => {
-                    let sat_address = {
+                    let sat_exp = {
                         let mut model = Model::new(solver);
                         model.set_complete_model(true);
-                        let ModelVal::Exp(Bits64(sat_address)) = model.get_var(address)? else {
+                        let ModelVal::Exp(sat_exp @ (Bits64(_) | Bits(_))) = model.get_var(address)? else {
                             return Err(ExecError::Z3Error(
                                 "No bitvector address variable found in model during check_concrete_overlap"
                                     .to_string(),
                             ));
                         };
-                        sat_address
+                        sat_exp
+                    };
+                    let sat_address = match &sat_exp {
+                        Bits64(sat_address) => sat_address.lower_u64(),
+                        Bits(sat_bits) => {
+                            if sat_bits.iter().skip(64).any(|bit| *bit) {
+                                return Err(ExecError::Z3Error("具体分派的模型地址超出 u64 范围".to_string()));
+                            }
+                            sat_bits
+                                .iter()
+                                .take(64)
+                                .enumerate()
+                                .fold(0u64, |address, (index, bit)| address | (u64::from(*bit) << index))
+                        }
+                        _ => unreachable!(),
                     };
                     // Check if the satisifiable address in the
                     // concrete region is actually unique, in which
                     // case the caller could choose to treat it as a
                     // concrete value.
-                    let uniqueness_constraint = Neq(Box::new(Var(address)), Box::new(Bits64(sat_address)));
+                    let uniqueness_constraint = Neq(Box::new(Var(address)), Box::new(sat_exp));
                     match solver.check_sat_with(&uniqueness_constraint, SourceLoc::unknown()) {
-                        Unsat => Ok(Overlap::Unique(sat_address.lower_u64())),
+                        Unsat => Ok(Overlap::Unique(sat_address)),
                         Unknown => Err(ExecError::Z3Unknown),
                         Error(error) => Err(ExecError::Smt(error)),
                         Sat => {
@@ -1220,6 +1234,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn 宽地址唯一值保持原始位宽() {
+        for width in [65, 128, 129] {
+            let mut mem = Memory::<B64>::new();
+            mem.add_zero_region(0x1000..0x1002);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let addr = solver.declare_bitvector(width, SourceLoc::unknown());
+            solver.assert_eq(Exp::Var(addr), bits64(0x1001, width));
+
+            assert!(matches!(
+                mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
+                Ok(Overlap::Unique(0x1001))
+            ));
+        }
+    }
+
+    #[test]
+    fn 宽地址高位非零不得静默截断() {
+        let mut mem = Memory::<B64>::new();
+        mem.add_zero_region(0x1000..0x1002);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let addr = solver.declare_bitvector(65, SourceLoc::unknown());
+        let Exp::Bits(mut bits) = bits64::<Sym>(0x1001, 65) else { unreachable!() };
+        bits[64] = true;
+        solver.assert_eq(Exp::Var(addr), Exp::Bits(bits));
+
+        assert!(matches!(
+            mem.check_concrete_overlap(addr, 1, ExecError::BadRead("test"), false, &mut solver),
+            Ok(Overlap::NoOverlap)
+        ));
     }
 
     #[test]

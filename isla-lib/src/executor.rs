@@ -2106,7 +2106,10 @@ fn try_merge_diamond<'ir, B: BV>(
                 *frame = merged_frame;
                 for reg in &ws_then.register_write_order {
                     let value = frame.regs().get_last_if_initialized(*reg).unwrap().clone();
-                    solver.add_event(Event::WriteReg(*reg, Vec::new(), value));
+                    let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
+                    if !symbol.contains("_TLB") {
+                        solver.add_event(Event::WriteReg(*reg, Vec::new(), value));
+                    }
                 }
                 // 保留合并条件的控制依赖；两种取值都可行，不添加选臂断言。
                 solver.add_event(Event::Fork(0, cond_sym, 0, info));
@@ -3894,6 +3897,242 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review26_tests {
+        use super::*;
+
+        #[test]
+        fn 合并写入必须保留特殊寄存器事件过滤() {
+            let mut observed = Vec::new();
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let encoded = zencode::encode("_TLB");
+                let reg = shared.symtab.intern(&encoded);
+                let cond = test_name(620);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Jump(Exp::Id(cond), 4, info()),
+                    Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+                    Instr::Goto(5),
+                    Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+                    Instr::End,
+                ]);
+                frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
+                    assert!(matches!(result, Ok((Run::Finished(_), _))));
+                    let events = solver.trace().to_vec();
+                    let writes =
+                        events.iter().filter(|event| matches!(event, Event::WriteReg(r, _, _) if *r == reg)).count();
+                    let merges = events.iter().filter(|event| matches!(event, Event::Merge(..))).count();
+                    out.lock().unwrap().push((writes, merges));
+                });
+                observed.push((enabled, out.into_inner().unwrap()));
+            }
+            eprintln!("特殊寄存器写轨迹：{observed:?}");
+            assert!(observed.iter().all(|(_, paths)| paths.iter().all(|(writes, _)| *writes == 0)));
+        }
+
+        #[test]
+        fn 宽地址合并不能丢弃具体区域读() {
+            use crate::bitvector::b129::B129;
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let mut memory = crate::memory::Memory::new();
+            memory.add_concrete_region(0x1000..0x1002, HashMap::from([(0x1000, 1), (0x1001, 2)]));
+            let left = Val::Bits(B129::new(0x1000, 65));
+            let right = Val::Bits(B129::new(0x1001, 65));
+            for address in [&left, &right] {
+                assert!(memory
+                    .read(Val::Unit, address.clone(), Val::I128(1), &mut solver, false, crate::smt::ReadOpts::default())
+                    .is_ok());
+            }
+            let condition = solver.declare_const(smtlib::Ty::Bool, info());
+            let merged = crate::primop_util::merge_val(condition, &left, &right, &mut solver, info()).unwrap();
+            let result =
+                memory.read(Val::Unit, merged, Val::I128(1), &mut solver, false, crate::smt::ReadOpts::default());
+            eprintln!("宽地址读取：{result:?}");
+            assert!(
+                matches!(result, Err(ExecError::SymbolicLength("read_mem_address", _))),
+                "应进入地址谓词拆分而不是丢弃合法读：{result:?}"
+            );
+        }
+
+        #[test]
+        fn 合并后位向量计算与具体执行一致() {
+            use crate::bitvector::b129::B129;
+            let mut failures = Vec::new();
+            for width in [1, 2, 8, 32, 64, 65, 127, 128, 129] {
+                for (left, right) in [(B129::zeros(width), B129::ones(width)), (B129::new(1, width), B129::ones(width))]
+                {
+                    for name in ["shiftl", "shiftr", "arith_shiftr"] {
+                        for shift in [-1, 0, 1, i128::from(width - 1), i128::from(width), i128::from(width + 1), 256] {
+                            for select in [false, true] {
+                                let ctx = Context::new(Config::new());
+                                let mut solver = Solver::<B129>::new(&ctx);
+                                let condition = solver.declare_const(smtlib::Ty::Bool, info());
+                                let input = crate::primop_util::merge_val(
+                                    condition,
+                                    &Val::Bits(left),
+                                    &Val::Bits(right),
+                                    &mut solver,
+                                    info(),
+                                )
+                                .unwrap();
+                                let op = primop::binary_primops()[name];
+                                let actual = op(input, Val::I128(shift), &mut solver, info()).unwrap();
+                                let expected = op(
+                                    Val::Bits(if select { left } else { right }),
+                                    Val::I128(shift),
+                                    &mut solver,
+                                    info(),
+                                )
+                                .unwrap();
+                                solver.assert(smtlib::Exp::Eq(
+                                    Box::new(smtlib::Exp::Var(condition)),
+                                    Box::new(smtlib::Exp::Bool(select)),
+                                ));
+                                let mismatch = smtlib::Exp::Neq(
+                                    Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
+                                    Box::new(crate::primop_util::smt_value(&expected, info()).unwrap()),
+                                );
+                                if solver.check_sat_with(&mismatch, info()).is_sat().unwrap() {
+                                    failures.push((name, width, shift, select, left, right, expected));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(failures.is_empty(), "合并后的移位计算发生差异：{failures:?}");
+        }
+
+        #[test]
+        fn 宽地址菱形必须保留合法访存路径() {
+            use crate::bitvector::b129::B129;
+            let mut observations = Vec::new();
+            for enabled in [false, true] {
+                let defs: &'static [crate::ir::Def<Name, B129>] = &[];
+                let shared = SharedState::new(
+                    Symtab::new(),
+                    defs,
+                    IRTypeInfo::new(defs),
+                    HashSet::new(),
+                    HashSet::new(),
+                    HashSet::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                );
+                let cond = test_name(620);
+                let address = test_name(621);
+                let operations = primop::binary_primops::<B129>();
+                let instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(address, Ty::Bits(65), info()),
+                    Instr::Jump(Exp::Id(cond), 5, info()),
+                    Instr::PrimopBinary(
+                        Loc::Id(address),
+                        operations["zero_extend"],
+                        Exp::Bits(B64::new(0x1000, 64)),
+                        Exp::I128(65),
+                        info(),
+                    ),
+                    Instr::Goto(6),
+                    Instr::PrimopBinary(
+                        Loc::Id(address),
+                        operations["zero_extend"],
+                        Exp::Bits(B64::new(0x1001, 64)),
+                        Exp::I128(65),
+                        info(),
+                    ),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primop::variadic_primops()["read_mem"],
+                        vec![Exp::Unit, Exp::I128(65), Exp::Id(address), Exp::I128(1)],
+                        info(),
+                    ),
+                    Instr::End,
+                ];
+                let mut frame =
+                    LocalFrame::new(test_name(25), &[], &Ty::Unit, None, Box::leak(instrs.into_boxed_slice()));
+                frame.memory_mut().add_concrete_region(0x1000..0x1002, HashMap::from([(0x1000, 1), (0x1001, 2)]));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
+                    let merged = solver.trace().to_vec().iter().any(|event| matches!(event, Event::Merge(..)));
+                    out.lock().unwrap().push((
+                        merged,
+                        result
+                            .map(|(run, _)| matches!(run, Run::Finished(_)))
+                            .map_err(|(error, _)| format!("{error:?}")),
+                    ));
+                });
+                observations.push((enabled, out.into_inner().unwrap()));
+            }
+            eprintln!("宽地址实际执行：{observations:?}");
+            assert!(observations.iter().all(|(_, paths)| paths.iter().any(|(_, result)| matches!(result, Ok(true)))));
+        }
+
+        #[test]
+        fn 合并后单态化不得采用任意默认值() {
+            for ty in [Ty::Bits(8), Ty::I64, Ty::I128] {
+                let cond = test_name(620);
+                let bits = test_name(621);
+                let value = test_name(622);
+                let mut instrs = vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(bits, Ty::Bits(8), info()),
+                    Instr::Decl(value, ty.clone(), info()),
+                    Instr::Jump(Exp::Id(cond), 6, info()),
+                    Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(2, 8)), info()),
+                ];
+                match ty {
+                    Ty::Bits(_) => instrs.push(Instr::Copy(Loc::Id(value), Exp::Id(bits), info())),
+                    Ty::I64 => instrs.push(Instr::Copy(
+                        Loc::Id(value),
+                        Exp::Call(Op::Unsigned(8), vec![Exp::Id(bits)]),
+                        info(),
+                    )),
+                    Ty::I128 => instrs.push(Instr::PrimopUnary(
+                        Loc::Id(value),
+                        primop::unary_primops()["sail_unsigned"],
+                        Exp::Id(bits),
+                        info(),
+                    )),
+                    _ => unreachable!(),
+                }
+                instrs.extend([
+                    Instr::Monomorphize(value, ty.clone(), info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(value), info()),
+                    Instr::End,
+                ]);
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default().with_path_merging(true),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                assert_eq!(results.len(), 2, "单态化必须保留两个值：{ty:?}");
+                let mut values = results
+                    .into_iter()
+                    .map(|result| match result.unwrap() {
+                        Run::Finished(Val::Bits(bits)) => bits.lower_u64(),
+                        Run::Finished(Val::I64(value)) => value as u64,
+                        Run::Finished(Val::I128(value)) => value as u64,
+                        _ => panic!("单态化未正常完成"),
+                    })
+                    .collect::<Vec<_>>();
+                values.sort();
+                assert_eq!(values, [1, 2], "不得物化为候选域之外的默认值：{ty:?}");
+            }
+        }
+    }
     mod review25_tests {
         use super::*;
 
