@@ -2407,7 +2407,7 @@ pub(crate) fn vector_access<B: BV>(
                     Exp::Eq(Box::new(Exp::Var(n)), Box::new(smt_u64_width(i.try_into().unwrap(), width))),
                     info,
                 );
-                result = match build_ite(cond, item, &result, solver, info) {
+                result = match build_vector_ite(cond, item, &result, solver, info) {
                     Ok(value) => value,
                     Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
                         // 具体结构不能用 ITE 表达时，只拆分索引；唯一索引直接返回原元素。
@@ -2750,7 +2750,7 @@ pub fn vector_update<B: BV>(
                         ),
                         info,
                     );
-                    *item = match build_ite(is_i, &args[2], item, solver, info) {
+                    *item = match build_vector_ite(is_i, &args[2], item, solver, info) {
                         Ok(value) => value,
                         Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
                             return match proven_symbolic_i128(n, solver, info)? {
