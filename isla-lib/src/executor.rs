@@ -251,6 +251,20 @@ fn read_register_from_vector<'ir, B: BV>(
                     }
                     ConcreteIndex(0)
                 } else {
+                    // 必须先按原始位宽检查边界，防止截断高位后访问错误寄存器。
+                    if !(len < 128 && (1u128 << len) <= regs.len() as u128) {
+                        let limit = smtlib::bits64(regs.len() as u64, len);
+                        let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
+                        let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
+                        let in_bounds_sat = !solver.check_sat_with(&in_bounds, info).is_unsat()?;
+                        let out_of_bounds_sat = !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
+                        if in_bounds_sat && out_of_bounds_sat {
+                            return Err(ExecError::SymbolicLength("read_register_from_vector", info));
+                        }
+                        if !in_bounds_sat {
+                            return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                        }
+                    }
                     let v = fix_index_length(v, len, rib, solver, info);
                     SymbolicIndex(v)
                 }
@@ -367,6 +381,20 @@ fn write_register_from_vector<'ir, B: BV>(
                     }
                     ConcreteIndex(0)
                 } else {
+                    // 必须先按原始位宽检查边界，防止截断高位后访问错误寄存器。
+                    if !(len < 128 && (1u128 << len) <= regs.len() as u128) {
+                        let limit = smtlib::bits64(regs.len() as u64, len);
+                        let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
+                        let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
+                        let in_bounds_sat = !solver.check_sat_with(&in_bounds, info).is_unsat()?;
+                        let out_of_bounds_sat = !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
+                        if in_bounds_sat && out_of_bounds_sat {
+                            return Err(ExecError::SymbolicLength("write_register_from_vector", info));
+                        }
+                        if !in_bounds_sat {
+                            return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                        }
+                    }
                     let v = fix_index_length(v, len, rib, solver, info);
                     SymbolicIndex(v)
                 }
@@ -3806,6 +3834,367 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+
+    mod review20_tests {
+        use super::*;
+        use crate::bitvector::b129::B129;
+
+        fn execute<B: BV>(
+            frame: LocalFrame<'static, B>,
+            shared: SharedState<'static, B>,
+            merge: bool,
+        ) -> Vec<Result<Val<B>, ExecError>> {
+            let state = TaskState::new()
+                .with_execution_limits(ExecutionLimits::default().with_path_merging(merge).with_max_forks_per_path(32));
+            let out = Mutex::new(Vec::new());
+            start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, mut solver, out| {
+                let result = match result {
+                    Ok((Run::Finished(value), _)) => {
+                        assert!(solver.check_sat(info()).is_sat().unwrap());
+                        Ok(Model::new(&solver).get_val(&value).unwrap())
+                    }
+                    Err((error, _)) => Err(error),
+                    Ok(_) => panic!("执行未完成"),
+                };
+                out.lock().unwrap().push(result);
+            });
+            out.into_inner().unwrap()
+        }
+
+        fn wide_conversion(merge: bool, signed: bool, width: u32) -> Vec<Result<Val<B129>, ExecError>> {
+            let mut shared = SharedState::<B129>::empty(Symtab::new());
+            let f = shared.symtab.intern("ztest");
+            let branch = shared.symtab.intern("zbranch");
+            let bits = shared.symtab.intern("zbits");
+            let a = shared.symtab.intern("za");
+            let b = shared.symtab.intern("zb");
+            let info = SourceLoc::unknown();
+            let op = if signed { Op::Signed(width) } else { Op::Unsigned(width) };
+            let instrs = Box::leak(
+                vec![
+                    Instr::Decl(branch, Ty::Bool, info),
+                    Instr::Decl(bits, Ty::Bits(width), info),
+                    Instr::Jump(Exp::Id(branch), 5, info),
+                    Instr::Copy(Loc::Id(bits), Exp::Id(a), info),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(bits), Exp::Id(b), info),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Call(op, vec![Exp::Id(bits)]), info),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame = LocalFrame::new(f, &[], &Ty::I64, None, instrs);
+            frame.lets_mut().insert(a, UVal::Init(Val::Bits(B129::new(1, width))));
+            frame.lets_mut().insert(b, UVal::Init(Val::Bits(B129::new(2, width))));
+            execute(frame, shared, merge)
+        }
+
+        fn register_vector(merge: bool, count: usize, write: bool) -> Vec<Result<Val<B64>, ExecError>> {
+            let mut shared = SharedState::<B64>::empty(Symtab::new());
+            let f = shared.symtab.intern("ztest");
+            let branch = shared.symtab.intern("zbranch");
+            let index = shared.symtab.intern("zindex");
+            let refs = shared.symtab.intern("zrefs");
+            let info = SourceLoc::unknown();
+            let regs: Vec<_> =
+                (0..count).map(|i| shared.symtab.intern(Box::leak(format!("zreg{i}").into_boxed_str()))).collect();
+            let instrs = Box::leak(
+                vec![
+                    Instr::Decl(branch, Ty::Bool, info),
+                    Instr::Decl(index, Ty::Bits(8), info),
+                    Instr::Jump(Exp::Id(branch), 5, info),
+                    Instr::Copy(Loc::Id(index), Exp::Bits(B64::new(0, 8)), info),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(index), Exp::Bits(B64::new(count as u64, 8)), info),
+                    Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        if write {
+                            crate::ir::WRITE_REGISTER_FROM_VECTOR
+                        } else {
+                            crate::ir::READ_REGISTER_FROM_VECTOR
+                        },
+                        if write {
+                            vec![Exp::Id(index), Exp::Bits(B64::new(7, 8)), Exp::Id(refs)]
+                        } else {
+                            vec![Exp::Id(index), Exp::Id(refs)]
+                        },
+                        info,
+                    ),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(regs[0]), info),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame = LocalFrame::new(f, &[], &Ty::Bits(8), None, instrs);
+            for (i, reg) in regs.iter().enumerate() {
+                frame.regs_mut().insert(*reg, false, UVal::Init(Val::Bits(B64::new(42 + i as u64, 8))));
+            }
+            frame.lets_mut().insert(refs, UVal::Init(Val::Vector(regs.into_iter().map(Val::Ref).collect())));
+            execute(frame, shared, merge)
+        }
+
+        fn singleton_free(width: u32, write: bool) -> Vec<Result<Val<B64>, ExecError>> {
+            let mut shared = SharedState::<B64>::empty(Symtab::new());
+            let f = shared.symtab.intern("ztest");
+            let index = shared.symtab.intern("zindex");
+            let refs = shared.symtab.intern("zrefs");
+            let reg = shared.symtab.intern("zreg");
+            let info = SourceLoc::unknown();
+            let instrs = Box::leak(
+                vec![
+                    Instr::Decl(index, Ty::Bits(width), info),
+                    Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        if write { WRITE_REGISTER_FROM_VECTOR } else { READ_REGISTER_FROM_VECTOR },
+                        if write {
+                            vec![Exp::Id(index), Exp::Bits(B64::new(7, 8)), Exp::Id(refs)]
+                        } else {
+                            vec![Exp::Id(index), Exp::Id(refs)]
+                        },
+                        info,
+                    ),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame = LocalFrame::new(f, &[], &Ty::Bits(8), None, instrs);
+            frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+            frame.lets_mut().insert(refs, UVal::Init(Val::Vector(vec![Val::Ref(reg)])));
+            execute(frame, shared, true)
+        }
+
+        fn wide_monomorphize(merge: bool, width: u32) -> Vec<Result<Val<B129>, ExecError>> {
+            let mut shared = SharedState::<B129>::empty(Symtab::new());
+            let f = shared.symtab.intern("ztest");
+            let branch = shared.symtab.intern("zbranch");
+            let bits = shared.symtab.intern("zbits");
+            let a = shared.symtab.intern("za");
+            let b = shared.symtab.intern("zb");
+            let info = SourceLoc::unknown();
+            let instrs = Box::leak(
+                vec![
+                    Instr::Decl(branch, Ty::Bool, info),
+                    Instr::Decl(bits, Ty::AnyBits, info),
+                    Instr::Jump(Exp::Id(branch), 5, info),
+                    Instr::Copy(Loc::Id(bits), Exp::Id(a), info),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(bits), Exp::Id(b), info),
+                    Instr::Monomorphize(bits, Ty::AnyBits, info),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(bits), info),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame = LocalFrame::new(f, &[], &Ty::AnyBits, None, instrs);
+            frame.lets_mut().insert(a, UVal::Init(Val::Bits(B129::new(1, width))));
+            frame.lets_mut().insert(b, UVal::Init(Val::Bits(B129::ones(width))));
+            execute(frame, shared, merge)
+        }
+
+        #[test]
+        fn 宽位转换在合并前后保留数值() {
+            for width in [64, 65, 128, 129] {
+                for signed in [false, true] {
+                    for merge in [false, true] {
+                        let results = wide_conversion(merge, signed, width);
+                        assert_eq!(results.len(), if merge { 1 } else { 2 });
+                        for result in results {
+                            let value = match result.unwrap() {
+                                Val::I64(value) => i128::from(value),
+                                Val::I128(value) => value,
+                                Val::Bits(bits) => bits.signed(),
+                                value => panic!("转换结果类型错误：{value:?}"),
+                            };
+                            assert!(
+                                [1, 2].contains(&value),
+                                "宽度={width}，signed={signed}，合并={merge}，结果={value}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn 寄存器向量读写保留非法索引路径() {
+            for count in [1, 2, 3, 4] {
+                for write in [false, true] {
+                    let results = register_vector(true, count, write);
+                    assert_eq!(results.len(), 2, "寄存器数={count}，写入={write}：{results:?}");
+                    assert_eq!(
+                        results.iter().filter(|result| matches!(result, Err(ExecError::Type(..)))).count(),
+                        1,
+                        "{results:?}"
+                    );
+                    let value = results.into_iter().find_map(Result::ok).unwrap();
+                    assert_eq!(value, Val::Bits(B64::new(if write { 7 } else { 42 }, 8)));
+                }
+            }
+        }
+
+        #[test]
+        fn 单元素自由索引保留零路径和非法路径() {
+            for width in [1, 8, 64, 128] {
+                for write in [false, true] {
+                    let results = singleton_free(width, write);
+                    assert_eq!(results.len(), 2, "宽度={width}，写入={write}：{results:?}");
+                    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+                    assert_eq!(results.iter().filter(|result| matches!(result, Err(ExecError::Type(..)))).count(), 1);
+                }
+            }
+        }
+
+        #[test]
+        fn 宽位_any_bits具化保留最高位和全部候选() {
+            for width in [65, 128, 129] {
+                for merge in [false, true] {
+                    let results = wide_monomorphize(merge, width);
+                    assert_eq!(results.len(), 2);
+                    let values: Vec<_> = results.into_iter().map(Result::unwrap).collect();
+                    assert!(values.contains(&Val::Bits(B129::new(1, width))));
+                    assert!(values.contains(&Val::Bits(B129::ones(width))));
+                }
+            }
+        }
+
+        #[test]
+        fn 具体宽位转换保持整数类型并检查溢出() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            for width in [64, 65, 128, 129] {
+                let expected = if width <= 64 { Val::I64(1) } else { Val::I128(1) };
+                assert_eq!(primop::op_unsigned(Val::Bits(B129::new(1, width)), &mut solver, info()).unwrap(), expected);
+                assert_eq!(primop::op_signed(Val::Bits(B129::new(1, width)), &mut solver, info()).unwrap(), expected);
+                let expected = if width <= 64 { Val::I64(-1) } else { Val::I128(-1) };
+                assert_eq!(primop::op_signed(Val::Bits(B129::ones(width)), &mut solver, info()).unwrap(), expected);
+            }
+            let high = B129::BIT_ONE.zero_extend(128) << B129::new(127, 128);
+            assert_eq!(primop::op_signed(Val::Bits(high), &mut solver, info()).unwrap(), Val::I128(i128::MIN));
+            for bits in [high, B129::ones(128), B129::ones(129)] {
+                assert!(matches!(primop::op_unsigned(Val::Bits(bits), &mut solver, info()), Err(ExecError::Overflow)));
+            }
+            let invalid_signed = B129::BIT_ONE.zero_extend(129) << B129::new(128, 129);
+            assert!(matches!(
+                primop::op_signed(Val::Bits(invalid_signed), &mut solver, info()),
+                Err(ExecError::Overflow)
+            ));
+        }
+
+        #[test]
+        fn 符号转换使用正确整数位宽和符号扩展() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            for width in [1, 63, 64, 65, 127, 128, 129] {
+                for signed in [false, true] {
+                    let bits = solver.define_const(primop::smt_ones(i128::from(width)), info());
+                    let value = if signed {
+                        primop::op_signed(Val::Symbolic(bits), &mut solver, info())
+                    } else {
+                        primop::op_unsigned(Val::Symbolic(bits), &mut solver, info())
+                    }
+                    .unwrap();
+                    let Val::Symbolic(result) = value else { panic!("符号转换必须返回符号整数") };
+                    let result_width = if width <= 64 { 64 } else { 128 };
+                    assert_eq!(solver.length(result), Some(result_width));
+                    assert!(solver.check_sat(info()).is_sat().unwrap());
+                    let materialized = Model::new(&solver).get_val(&value).unwrap();
+                    let expected = if signed || width >= result_width {
+                        B129::ones(result_width)
+                    } else {
+                        B129::ones(width).zero_extend(result_width)
+                    };
+                    assert_eq!(materialized, Val::Bits(expected), "宽度={width}，有符号={signed}");
+                }
+            }
+        }
+        #[test]
+        fn 多元素符号索引在原始位宽检查完整边界() {
+            for (count, width, range) in [
+                (2, 1, None),
+                (3, 1, None),
+                (3, 2, Some((0, 2))),
+                (2, 8, Some((0, 1))),
+                (2, 8, Some((2, 255))),
+                (3, 8, Some((3, 255))),
+                (2, 8, None),
+                (3, 8, None),
+                (2, 128, Some((0, 1))),
+                (2, 129, Some((2, 3))),
+            ] {
+                for write in [false, true] {
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::<B64>::new(&ctx);
+                    let mut shared = empty_shared_state();
+                    let mut frame = make_frame(vec![Instr::End]);
+                    let regs: Vec<_> = (0..count)
+                        .map(|index| shared.symtab.intern(Box::leak(format!("zreview20_reg{index}").into_boxed_str())))
+                        .collect();
+                    for reg in &regs {
+                        frame.regs_mut().insert(*reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+                    }
+                    let index = solver.declare_const(smtlib::Ty::BitVec(width), info());
+                    if let Some((lower, upper)) = range {
+                        solver.assert(smtlib::Exp::Bvuge(
+                            Box::new(smtlib::Exp::Var(index)),
+                            Box::new(smtlib::bits64(lower, width)),
+                        ));
+                        solver.assert(smtlib::Exp::Bvule(
+                            Box::new(smtlib::Exp::Var(index)),
+                            Box::new(smtlib::bits64(upper, width)),
+                        ));
+                    }
+                    let refs = Val::Vector(regs.iter().copied().map(Val::Ref).collect());
+                    let result = if write {
+                        write_register_from_vector(
+                            Val::Symbolic(index),
+                            Val::Bits(B64::new(7, 8)),
+                            refs,
+                            &mut frame.local_state,
+                            &shared,
+                            &mut solver,
+                            info(),
+                        )
+                    } else {
+                        read_register_from_vector(
+                            Val::Symbolic(index),
+                            refs,
+                            &mut frame.local_state,
+                            &shared,
+                            &mut solver,
+                            info(),
+                        )
+                        .map(|value| {
+                            assert_eq!(value, Val::Bits(B64::new(42, 8)));
+                        })
+                    };
+                    if range.is_some_and(|(lower, _)| lower >= count as u64) {
+                        assert!(matches!(result, Err(ExecError::Type(..))), "完全越界必须报错：{result:?}");
+                    } else if range.is_none() && width > 1 {
+                        assert!(matches!(result, Err(ExecError::SymbolicLength(..))), "混合索引必须分叉：{result:?}");
+                    } else {
+                        assert!(result.is_ok(), "确定在界内必须成功：{result:?}");
+                    }
+                    if result.is_err() {
+                        for reg in regs {
+                            assert_eq!(
+                                frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap(),
+                                &Val::Bits(B64::new(42, 8))
+                            );
+                        }
+                        assert!(
+                            !solver.trace().to_vec().iter().any(|event| matches!(
+                                event,
+                                Event::ReadReg(..) | Event::WriteReg(..) | Event::Abstract { .. }
+                            )),
+                            "边界检查失败前不得访问寄存器"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     mod review19_tests {
         use super::*;
