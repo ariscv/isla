@@ -1,5 +1,6 @@
 use isla::isarch::memory_model::install_seq_memory;
 use isla_lib::bitvector::{b129::B129, b64::B64, BV};
+use isla_lib::error::ExecError;
 use isla_lib::executor::LocalFrame;
 use isla_lib::ir::{Instr, Name, Ty, Val};
 use isla_lib::memory::{Memory, Region};
@@ -60,8 +61,8 @@ fn review37_abs_min_differential() {
         .check_sat_with(&Exp::Neq(Box::new(smt_value(&sym, info()).unwrap()), Box::new(smt_i128(i128::MIN))), info())
         .is_unsat()
         .unwrap());
-    let concrete = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(Val::I128(i128::MIN), &mut s, info())));
-    assert!(concrete.is_ok(), "符号MIN绝对值可执行，具体MIN却使宿主进程panic");
+    let concrete = f(Val::I128(i128::MIN), &mut s, info());
+    assert!(matches!(concrete, Err(ExecError::Overflow)), "具体 MIN 的绝对值不可表示，应返回 Overflow");
 }
 #[test]
 fn review37_b129_arithmetic_differential() {

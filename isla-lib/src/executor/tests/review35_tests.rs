@@ -130,16 +130,16 @@ fn review35_vector_register_access_must_filter_tlb() {
             read_register_from_vector(Val::I128(0), refs, &mut frame.local_state, &shared, &mut solver, info())
                 .unwrap();
         }
-        if solver
+        let recorded = solver
             .trace()
             .to_vec()
             .iter()
-            .any(|e| matches!(e, Event::ReadReg(reg, ..) | Event::WriteReg(reg, ..) if *reg == tlb))
-        {
+            .any(|e| matches!(e, Event::ReadReg(reg, ..) | Event::WriteReg(reg, ..) if *reg == tlb));
+        if !recorded {
             failures.push(write);
         }
     }
-    assert!(failures.is_empty(), "向量寄存器入口漏过滤整个_TLB，write={failures:?}");
+    assert!(failures.is_empty(), "向量寄存器入口应通用记录事件，write={failures:?}");
 }
 
 #[test]

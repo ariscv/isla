@@ -841,7 +841,10 @@ pub fn or_bool<B: BV>(lhs: Val<B>, rhs: Val<B>, solver: &mut Solver<B>, info: So
 
 fn abs_int<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match x {
-        Val::I128(x) => Ok(Val::I128(x.wrapping_abs())),
+        Val::I128(x) => match x.checked_abs() {
+            Some(x) => Ok(Val::I128(x)),
+            None => Err(ExecError::Overflow),
+        },
         Val::Symbolic(x) => {
             let y = solver.fresh();
             solver.add(Def::DefineConst(
@@ -1067,8 +1070,13 @@ fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<V
 }
 
 fn eq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    if length_bits(&x, solver, info)? != length_bits(&y, solver, info)? {
-        return Ok(Val::Bool(false));
+    let x_len = length_bits(&x, solver, info)?;
+    let y_len = length_bits(&y, solver, info)?;
+    if x_len != y_len {
+        return Err(ExecError::Type(
+            format!("eq_bits operands have different lengths: {} and {}", x_len, y_len),
+            info,
+        ));
     }
     let x = replace_mixed_bits(x, solver, info)?;
     let y = replace_mixed_bits(y, solver, info)?;

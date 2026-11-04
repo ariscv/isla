@@ -225,6 +225,9 @@ fn read_register_from_vector<'ir, B: BV>(
         }
         _ => return Err(ExecError::Type(bad_regs_argument.to_string(), info)),
     };
+    if regs.is_empty() {
+        return Err(ExecError::Type(bad_regs_argument.to_string(), info));
+    }
     let rib = required_index_bits(regs.len());
 
     let invalid_index_argument = "read_register_from_vector invalid index";
@@ -233,7 +236,7 @@ fn read_register_from_vector<'ir, B: BV>(
             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
-            let idx = bv.lower_u64() as usize;
+            let idx = usize::try_from(bv.lower_u64()).map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
             if idx >= regs.len() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
@@ -299,9 +302,7 @@ fn read_register_from_vector<'ir, B: BV>(
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
             let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap();
-            if zencode::decode(shared_state.symtab.to_str(regs[i])) != "_TLB" {
-                solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
-            }
+            solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
             Ok(value.clone())
         }
         SymbolicIndex(i) => {
@@ -374,6 +375,9 @@ fn write_register_from_vector<'ir, B: BV>(
         }
         _ => return Err(ExecError::Type(bad_regs_argument.to_string(), info)),
     };
+    if regs.is_empty() {
+        return Err(ExecError::Type(bad_regs_argument.to_string(), info));
+    }
     let rib = required_index_bits(regs.len());
 
     let invalid_index_argument = "write_register_from_vector invalid index";
@@ -382,7 +386,7 @@ fn write_register_from_vector<'ir, B: BV>(
             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
-            let idx = bv.lower_u64() as usize;
+            let idx = usize::try_from(bv.lower_u64()).map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
             if idx >= regs.len() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
@@ -450,9 +454,7 @@ fn write_register_from_vector<'ir, B: BV>(
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
             local_state.regs.assign(regs[i], value.clone(), shared_state);
-            if zencode::decode(shared_state.symtab.to_str(regs[i])) != "_TLB" {
-                solver.add_event(Event::WriteReg(regs[i], Vec::new(), value))
-            }
+            solver.add_event(Event::WriteReg(regs[i], Vec::new(), value));
         }
         SymbolicIndex(i) => {
             if regs.iter().any(|reg| local_state.regs.is_relaxed(*reg) || local_state.regs.has_old_writes(*reg)) {
@@ -576,8 +578,20 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Op::Or => primop::or_bool(args[0].clone(), args[1].clone(), solver, info),
                 Op::Slice(len) => primop::op_slice(args[0].clone(), args[1].clone(), *len, solver, info),
                 Op::SetSlice => primop::op_set_slice(args[0].clone(), args[1].clone(), args[2].clone(), solver, info),
-                Op::Unsigned(_) => primop::op_unsigned(args[0].clone(), solver, info),
-                Op::Signed(_) => primop::op_signed(args[0].clone(), solver, info),
+                Op::Unsigned(n) => {
+                    if *n != 64 {
+                        Err(ExecError::Type(format!("unsupported target width for @unsigned: {n}"), info))
+                    } else {
+                        primop::op_unsigned(args[0].clone(), solver, info)
+                    }
+                }
+                Op::Signed(n) => {
+                    if *n != 64 {
+                        Err(ExecError::Type(format!("unsupported target width for @signed: {n}"), info))
+                    } else {
+                        primop::op_signed(args[0].clone(), solver, info)
+                    }
+                }
                 Op::Head => primop::op_head(args[0].clone(), solver, info),
                 Op::Tail => primop::op_tail(args[0].clone(), solver, info),
                 Op::IsEmpty => primop::op_is_empty(args[0].clone(), solver, info),
@@ -1307,9 +1321,7 @@ fn run_special_primop<'ir, B: BV>(
         if let Val::Ref(reg) = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned() {
             match frame.regs_mut().get(reg, shared_state, solver, info)? {
                 Some(value) => {
-                    if zencode::decode(shared_state.symtab.to_str(reg)) != "_TLB" {
-                        solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
-                    }
+                    solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
                     assign(tid, loc, value.clone(), &mut frame.local_state, shared_state, solver, info)?
                 }
                 None => return Err(ExecError::Type(format!("reg_deref {:?}", &reg), info)),
@@ -9728,14 +9740,25 @@ mod tests {
                 let op = if name == "%neq" { crate::primop::op_neq::<B64> } else { *ops.get(name).unwrap() };
                 for left in [Val::Symbolic(a), Val::Bits(B64::zeros(8)), mixed.clone()] {
                     for right in [Val::Symbolic(b), Val::Bits(B64::zeros(16))] {
-                        assert_eq!(
-                            op(left.clone(), right.clone(), &mut solver, info()).unwrap(),
-                            Val::Bool(name.contains("neq"))
-                        );
-                        assert_eq!(
-                            op(right, left.clone(), &mut solver, info()).unwrap(),
-                            Val::Bool(name.contains("neq"))
-                        );
+                        if name == "eq_bits" || name == "neq_bits" {
+                            assert!(matches!(
+                                op(left.clone(), right.clone(), &mut solver, info()),
+                                Err(ExecError::Type(..))
+                            ));
+                            assert!(matches!(
+                                op(right, left.clone(), &mut solver, info()),
+                                Err(ExecError::Type(..))
+                            ));
+                        } else {
+                            assert_eq!(
+                                op(left.clone(), right.clone(), &mut solver, info()).unwrap(),
+                                Val::Bool(name.contains("neq"))
+                            );
+                            assert_eq!(
+                                op(right, left.clone(), &mut solver, info()).unwrap(),
+                                Val::Bool(name.contains("neq"))
+                            );
+                        }
                     }
                 }
             }

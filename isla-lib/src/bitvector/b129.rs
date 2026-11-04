@@ -405,11 +405,6 @@ impl BV for B129 {
         }
     }
 
-    fn sub_i128(self, op: i128) -> Self {
-        // 直接减去符号扩展后的操作数，避免对 i128::MIN 取负溢出。
-        self - bzhi(B129 { len: self.len, tag: op < 0, bits: op as u128 }, self.len)
-    }
-
     fn set_slice(self, n: u32, update: Self) -> Self {
         let mask = (ALL_ONES_129 << shift_u32(n, 129)).slice(0, n + update.len).unwrap().zero_extend(self.len);
         let update = update.zero_extend(self.len) << shift_u32(n, self.len);
