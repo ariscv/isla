@@ -229,12 +229,29 @@ fn read_register_from_vector<'ir, B: BV>(
 
     let invalid_index_argument = "read_register_from_vector invalid index";
     let index = match n {
-        Val::Bits(bv) => ConcreteIndex(bv.lower_u64() as usize),
+        Val::Bits(bv) => {
+            if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            let idx = bv.lower_u64() as usize;
+            if idx >= regs.len() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            ConcreteIndex(idx)
+        }
         Val::I64(n) => {
-            ConcreteIndex(n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?)
+            let idx: usize = n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+            if idx >= regs.len() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            ConcreteIndex(idx)
         }
         Val::I128(n) => {
-            ConcreteIndex(n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?)
+            let idx: usize = n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+            if idx >= regs.len() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            ConcreteIndex(idx)
         }
         Val::Symbolic(v) => {
             if let Some(len) = solver.length(v) {
@@ -359,12 +376,29 @@ fn write_register_from_vector<'ir, B: BV>(
 
     let invalid_index_argument = "write_register_from_vector invalid index";
     let index = match n {
-        Val::Bits(bv) => ConcreteIndex(bv.lower_u64() as usize),
+        Val::Bits(bv) => {
+            if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            let idx = bv.lower_u64() as usize;
+            if idx >= regs.len() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            ConcreteIndex(idx)
+        }
         Val::I64(n) => {
-            ConcreteIndex(n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?)
+            let idx: usize = n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+            if idx >= regs.len() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            ConcreteIndex(idx)
         }
         Val::I128(n) => {
-            ConcreteIndex(n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?)
+            let idx: usize = n.try_into().map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+            if idx >= regs.len() {
+                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+            }
+            ConcreteIndex(idx)
         }
         Val::Symbolic(v) => {
             if let Some(len) = solver.length(v) {
@@ -3835,6 +3869,443 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 #[cfg(test)]
 mod tests {
 
+    mod review21_tests {
+        use super::*;
+        use crate::bitvector::b129::B129;
+
+        #[test]
+        fn 机器整数转换的具体符号边界一致() {
+            for width in [1, 63, 64, 65, 127, 128, 129] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B129>::new(&ctx);
+                // 显式列出边界预期，避免用被测的截断和扩展算法推导预期结果。
+                let unsigned_ones = if width < 64 {
+                    Some(((1u64 << width) - 1) as i64)
+                } else if width == 64 {
+                    Some(-1)
+                } else {
+                    None
+                };
+                let mut cases = vec![
+                    (B129::new(0, width), Some(0), Some(0)),
+                    (B129::new(1, width), Some(1), Some(if width == 1 { -1 } else { 1 })),
+                    (B129::ones(width), unsigned_ones, Some(-1)),
+                ];
+                if width >= 64 {
+                    cases.extend([
+                        (B129::new(i64::MAX as u64, 64).zero_extend(width), Some(i64::MAX), Some(i64::MAX)),
+                        (
+                            B129::new(1 << 63, 64).zero_extend(width),
+                            Some(i64::MIN),
+                            if width == 64 { Some(i64::MIN) } else { None },
+                        ),
+                        (
+                            B129::new(1 << 63, 64).sign_extend(width),
+                            if width == 64 { Some(i64::MIN) } else { None },
+                            Some(i64::MIN),
+                        ),
+                        (B129::ones(64).zero_extend(width), Some(-1), if width == 64 { Some(-1) } else { None }),
+                    ]);
+                }
+                if width > 64 {
+                    cases.push((B129::BIT_ONE.zero_extend(width) << B129::new(64, width), None, None));
+                    // -2^63 - 1：低 64 位为正数，高位为 1，不是合法的符号扩展。
+                    cases.push((!B129::new(1 << 63, 64).zero_extend(width), None, None));
+                }
+                for (bits, unsigned_expected, signed_expected) in cases {
+                    for signed in [false, true] {
+                        let op = if signed { primop::op_signed::<B129> } else { primop::op_unsigned::<B129> };
+                        let expected = if signed { signed_expected } else { unsigned_expected };
+                        let concrete = op(Val::Bits(bits), &mut solver, info());
+                        let sym = solver
+                            .define_bitvector(crate::primop_util::smt_value(&Val::Bits(bits), info()).unwrap(), info());
+                        let symbolic = op(Val::Symbolic(sym), &mut solver, info());
+                        let Some(expected) = expected else {
+                            assert!(matches!(concrete, Err(ExecError::Overflow)), "{bits:?}，有符号={signed}");
+                            assert!(matches!(symbolic, Err(ExecError::Overflow)), "{bits:?}，有符号={signed}");
+                            continue;
+                        };
+                        assert_eq!(concrete.unwrap(), Val::I64(expected));
+                        let symbolic = symbolic.unwrap();
+                        let Val::Symbolic(result) = symbolic else { panic!("必须返回符号机器整数") };
+                        assert_eq!(solver.length(result), Some(64));
+                        assert!(solver.check_sat(info()).is_sat().unwrap());
+                        assert_eq!(
+                            Model::new(&solver).get_val(&symbolic).unwrap(),
+                            Val::Bits(B129::new(expected as u64, 64)),
+                            "{bits:?}，有符号={signed}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn 具体寄存器索引完整校验且错误无副作用() {
+            for count in [0, 1, 2] {
+                for write in [false, true] {
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::<B129>::new(&ctx);
+                    let mut shared = SharedState::<B129>::empty(Symtab::new());
+                    let f = shared.symtab.intern("zreview21_indices");
+                    let regs = [shared.symtab.intern("zr0"), shared.symtab.intern("zr1")];
+                    let instrs = Box::leak(vec![Instr::End].into_boxed_slice());
+                    let mut frame = LocalFrame::new(f, &[], &Ty::Unit, None, instrs);
+                    let mut indices = vec![Val::I64(-1), Val::I128(-1), Val::I64(i64::MAX), Val::I128(i128::MAX)];
+                    for index in [0, 1, 2] {
+                        indices.extend([Val::I64(index), Val::I128(i128::from(index))]);
+                        for width in [8, 64, 65, 128, 129] {
+                            indices.push(Val::Bits(B129::new(index as u64, width)));
+                        }
+                    }
+                    for width in [65, 128, 129] {
+                        indices.push(Val::Bits(
+                            B129::BIT_ONE.zero_extend(width) << B129::new(u64::from(width - 1), width),
+                        ));
+                        indices.push(Val::Bits(B129::ones(width)));
+                    }
+                    indices.push(Val::I128(1i128 << 64));
+                    for index in indices {
+                        for reg in regs {
+                            frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B129::new(42, 8))));
+                        }
+                        let valid = match index {
+                            Val::I64(n) => n >= 0 && n < count as i64,
+                            Val::I128(n) => n >= 0 && n < count as i128,
+                            Val::Bits(bits) => {
+                                bits.leading_zeros() == bits.len()
+                                    || (bits.len() - bits.leading_zeros() <= 64 && bits.lower_u64() < count as u64)
+                            }
+                            _ => unreachable!(),
+                        } && count > 0;
+                        let refs = Val::Vector(regs[..count].iter().copied().map(Val::Ref).collect());
+                        let events_before = solver.trace().to_vec().len();
+                        let result = if write {
+                            write_register_from_vector(
+                                index.clone(),
+                                Val::Bits(B129::new(7, 8)),
+                                refs,
+                                &mut frame.local_state,
+                                &shared,
+                                &mut solver,
+                                info(),
+                            )
+                        } else {
+                            read_register_from_vector(
+                                index.clone(),
+                                refs,
+                                &mut frame.local_state,
+                                &shared,
+                                &mut solver,
+                                info(),
+                            )
+                            .map(|value| assert_eq!(value, Val::Bits(B129::new(42, 8))))
+                        };
+                        if valid {
+                            result.unwrap();
+                        } else {
+                            assert!(matches!(result, Err(ExecError::Type(..))), "数量={count}，索引={index:?}");
+                        }
+                        let events = solver.trace().to_vec();
+                        assert_eq!(events.len() - events_before, usize::from(valid));
+                        for (position, reg) in regs.iter().enumerate() {
+                            let selected = match index {
+                                Val::I64(n) => n == position as i64,
+                                Val::I128(n) => n == position as i128,
+                                Val::Bits(bits) => bits.lower_u64() == position as u64,
+                                _ => unreachable!(),
+                            };
+                            assert_eq!(
+                                frame.regs().get_last_if_initialized(*reg).unwrap(),
+                                &Val::Bits(B129::new(if valid && write && selected { 7 } else { 42 }, 8)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn review21_symbolic_unsigned_overflow() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let mut accepted = Vec::new();
+            for width in [128, 129] {
+                let value = Val::Bits(B129::ones(width));
+                assert!(matches!(primop::op_unsigned(value.clone(), &mut solver, info()), Err(ExecError::Overflow)));
+                let sym = solver.define_bitvector(crate::primop_util::smt_value(&value, info()).unwrap(), info());
+                let result = primop::op_unsigned(Val::Symbolic(sym), &mut solver, info());
+                if let Ok(value) = &result {
+                    assert!(solver.check_sat(info()).is_sat().unwrap());
+                    let actual = Model::new(&solver).get_val(value).unwrap();
+                    eprintln!("无符号溢出值宽度={width}，物化结果={actual:?}");
+                    accepted.push(width);
+                }
+                assert!(matches!(result, Err(ExecError::Overflow)), "宽度={width}，结果={result:?}");
+            }
+            assert!(accepted.is_empty(), "接受了溢出的符号输入：{accepted:?}");
+        }
+
+        #[test]
+        fn review21_symbolic_signed_overflow() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            let value = Val::Bits(B129::BIT_ONE.zero_extend(129) << B129::new(128, 129));
+            assert!(matches!(primop::op_signed(value.clone(), &mut solver, info()), Err(ExecError::Overflow)));
+            let sym = solver.define_bitvector(crate::primop_util::smt_value(&value, info()).unwrap(), info());
+            let result = primop::op_signed(Val::Symbolic(sym), &mut solver, info());
+            if let Ok(value) = &result {
+                assert!(solver.check_sat(info()).is_sat().unwrap());
+                let actual = Model::new(&solver).get_val(value).unwrap();
+                eprintln!("有符号129位最高位为1、其余为0，物化结果={actual:?}");
+            }
+            assert!(matches!(result, Err(ExecError::Overflow)), "结果={result:?}");
+        }
+
+        #[test]
+        fn review21_merged_overflow_path() {
+            for width in [65, 128, 129] {
+                for signed in [false, true] {
+                    for merge in [false, true] {
+                        let mut shared = SharedState::<B129>::empty(Symtab::new());
+                        let f = shared.symtab.intern("zreview21");
+                        let cond = shared.symtab.intern("zcond");
+                        let bits = shared.symtab.intern("zbits");
+                        let left = shared.symtab.intern("zleft");
+                        let right = shared.symtab.intern("zright");
+                        let op = if signed { Op::Signed(width) } else { Op::Unsigned(width) };
+                        let instrs = Box::leak(
+                            vec![
+                                Instr::Decl(cond, Ty::Bool, info()),
+                                Instr::Decl(bits, Ty::Bits(width), info()),
+                                Instr::Jump(Exp::Id(cond), 5, info()),
+                                Instr::Copy(Loc::Id(bits), Exp::Id(left), info()),
+                                Instr::Goto(6),
+                                Instr::Copy(Loc::Id(bits), Exp::Id(right), info()),
+                                Instr::Copy(Loc::Id(RETURN), Exp::Call(op, vec![Exp::Id(bits)]), info()),
+                                Instr::End,
+                            ]
+                            .into_boxed_slice(),
+                        );
+                        let mut frame = LocalFrame::new(f, &[], &Ty::I64, None, instrs);
+                        frame.lets_mut().insert(left, UVal::Init(Val::Bits(B129::new(1, width))));
+                        let overflow = if signed {
+                            B129::BIT_ONE.zero_extend(width) << B129::new(63, width)
+                        } else {
+                            B129::ones(width)
+                        };
+                        frame.lets_mut().insert(right, UVal::Init(Val::Bits(overflow)));
+                        let state =
+                            TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
+                        let out = Mutex::new(Vec::new());
+                        start_single(
+                            frame.task(TaskId::fresh(), &state),
+                            &shared,
+                            &out,
+                            &|_, _, result, _, mut solver, out| {
+                                let result = match result {
+                                    Ok((Run::Finished(value), _)) => {
+                                        match value {
+                                            Val::I64(n) => assert_eq!(n, 1),
+                                            Val::Symbolic(sym) => assert_eq!(solver.length(sym), Some(64)),
+                                            _ => panic!("机器整数类型错误：{value:?}"),
+                                        }
+                                        assert!(solver.check_sat(info()).is_sat().unwrap());
+                                        let materialized = Model::new(&solver).get_val(&value).unwrap();
+                                        assert!(
+                                            matches!(materialized, Val::I64(1))
+                                                || materialized == Val::Bits(B129::new(1, 64))
+                                        );
+                                        Ok(())
+                                    }
+                                    Err((error, _)) => Err(error),
+                                    Ok(_) => panic!("执行未完成"),
+                                };
+                                out.lock().unwrap().push(result);
+                            },
+                        );
+                        let results = out.into_inner().unwrap();
+                        assert_eq!(results.len(), 2, "宽度={width}，有符号={signed}，合并={merge}，结果={results:?}");
+                        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1, "{results:?}");
+                        assert_eq!(
+                            results.iter().filter(|result| matches!(result, Err(ExecError::Overflow))).count(),
+                            1,
+                            "宽度={width}，有符号={signed}，合并={merge}，结果={results:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn review21_concrete_register_index_out_of_bounds() {
+            let mut bad = Vec::new();
+            for write in [false, true] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let mut shared = empty_shared_state();
+                let regs = [shared.symtab.intern("zr0"), shared.symtab.intern("zr1")];
+                let mut frame = make_frame(vec![Instr::End]);
+                for reg in regs {
+                    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+                }
+                let refs = Val::Vector(regs.into_iter().map(Val::Ref).collect());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if write {
+                        write_register_from_vector(
+                            Val::I64(2),
+                            Val::Bits(B64::new(7, 8)),
+                            refs,
+                            &mut frame.local_state,
+                            &shared,
+                            &mut solver,
+                            info(),
+                        )
+                    } else {
+                        read_register_from_vector(
+                            Val::I64(2),
+                            refs,
+                            &mut frame.local_state,
+                            &shared,
+                            &mut solver,
+                            info(),
+                        )
+                        .map(|_| ())
+                    }
+                }));
+                if !matches!(result, Ok(Err(ExecError::Type(..)))) {
+                    eprintln!("具体索引2越界，写入={write}，发生panic={}", result.is_err());
+                    bad.push(write);
+                }
+            }
+            assert!(bad.is_empty(), "越界未返回Type：{bad:?}");
+        }
+
+        #[test]
+        fn review21_wide_concrete_register_index() {
+            let mut bad = Vec::new();
+            for write in [false, true] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B129>::new(&ctx);
+                let mut shared = SharedState::<B129>::empty(Symtab::new());
+                let f = shared.symtab.intern("zreview21");
+                let regs = [shared.symtab.intern("zr0"), shared.symtab.intern("zr1")];
+                let instrs = Box::leak(vec![Instr::End].into_boxed_slice());
+                let mut frame = LocalFrame::new(f, &[], &Ty::Unit, None, instrs);
+                for reg in regs {
+                    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B129::new(42, 8))));
+                }
+                let refs = Val::Vector(regs.into_iter().map(Val::Ref).collect());
+                let index = Val::Bits(B129::BIT_ONE.zero_extend(65) << B129::new(64, 65));
+                let result = if write {
+                    write_register_from_vector(
+                        index,
+                        Val::Bits(B129::new(7, 8)),
+                        refs,
+                        &mut frame.local_state,
+                        &shared,
+                        &mut solver,
+                        info(),
+                    )
+                } else {
+                    read_register_from_vector(index, refs, &mut frame.local_state, &shared, &mut solver, info())
+                        .map(|_| ())
+                };
+                eprintln!("具体65位索引2^64，写入={write}，结果={result:?}");
+                if write {
+                    eprintln!("错误写入后的r0={:?}", frame.regs().get_last_if_initialized(regs[0]));
+                }
+                if !matches!(result, Err(ExecError::Type(..))) {
+                    bad.push(write);
+                }
+            }
+            assert!(bad.is_empty(), "宽索引高位被丢弃：{bad:?}");
+        }
+
+        #[test]
+        fn review21_wide_conversion_equality() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            for width in [65, 128, 129] {
+                let value = primop::op_unsigned(Val::Bits(B129::new(1, width)), &mut solver, info()).unwrap();
+                let actual = primop::op_eq(value, Val::I64(1), &mut solver, info()).unwrap();
+                assert_eq!(actual, Val::Bool(true), "宽度={width}，整数1与机器整数1应相等");
+            }
+        }
+
+        #[test]
+        fn review21_free_multi_register_index() {
+            let mut shared = empty_shared_state();
+            let f = shared.symtab.intern("zreview21_free");
+            let index = shared.symtab.intern("zindex");
+            let refs = shared.symtab.intern("zrefs");
+            let regs = [shared.symtab.intern("zr0"), shared.symtab.intern("zr1")];
+            let instrs = Box::leak(
+                vec![
+                    Instr::Decl(index, Ty::Bits(128), info()),
+                    Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        READ_REGISTER_FROM_VECTOR,
+                        vec![Exp::Id(index), Exp::Id(refs)],
+                        info(),
+                    ),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            );
+            let mut frame = LocalFrame::new(f, &[], &Ty::Bits(8), None, instrs);
+            for reg in regs {
+                frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+            }
+            frame.lets_mut().insert(refs, UVal::Init(Val::Vector(regs.into_iter().map(Val::Ref).collect())));
+            let state = TaskState::new()
+                .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_max_forks_per_path(32));
+            let out = Mutex::new(Vec::new());
+            start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, _, out| {
+                out.lock()
+                    .unwrap()
+                    .push(result.map(|(run, _)| matches!(run, Run::Finished(_))).map_err(|(error, _)| error));
+            });
+            let results = out.into_inner().unwrap();
+            eprintln!("自由128位索引两元素寄存器向量：{results:?}");
+            assert!(results.iter().any(Result::is_ok), "必须找到合法索引路径");
+            assert!(
+                !results.iter().any(|result| matches!(result, Err(ExecError::BranchLimitReached(..)))),
+                "合法有限索引不应在非法值上耗尽分叉预算"
+            );
+        }
+
+        #[test]
+        fn review21_wide_conversion_consumer() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B129>::new(&ctx);
+            for width in [1, 63, 64, 65, 128, 129] {
+                for signed in [false, true] {
+                    let sym = solver.define_bitvector(primop::smt_zeros(i128::from(width)), info());
+                    let value = if signed {
+                        primop::op_signed(Val::Symbolic(sym), &mut solver, info())
+                    } else {
+                        primop::op_unsigned(Val::Symbolic(sym), &mut solver, info())
+                    }
+                    .unwrap();
+                    let Val::Symbolic(result) = value else { panic!("转换必须返回符号机器整数") };
+                    assert_eq!(solver.length(result), Some(64));
+                    let add = primop::op_add(value.clone(), Val::I64(1), &mut solver, info()).unwrap();
+                    let sub = primop::op_sub(value.clone(), Val::I64(1), &mut solver, info()).unwrap();
+                    let lt = primop::op_lt(value.clone(), Val::I64(1), &mut solver, info()).unwrap();
+                    let eq = primop::op_eq(value, Val::I64(0), &mut solver, info()).unwrap();
+                    assert!(solver.check_sat(info()).is_sat().unwrap());
+                    let mut model = Model::new(&solver);
+                    assert_eq!(model.get_val(&add).unwrap(), Val::Bits(B129::new(1, 64)));
+                    assert_eq!(model.get_val(&sub).unwrap(), Val::Bits(B129::ones(64)));
+                    assert_eq!(model.get_val(&lt).unwrap(), Val::Bool(true));
+                    assert_eq!(model.get_val(&eq).unwrap(), Val::Bool(true));
+                }
+            }
+        }
+    }
+
     mod review20_tests {
         use super::*;
         use crate::bitvector::b129::B129;
@@ -4003,8 +4474,7 @@ mod tests {
                         for result in results {
                             let value = match result.unwrap() {
                                 Val::I64(value) => i128::from(value),
-                                Val::I128(value) => value,
-                                Val::Bits(bits) => bits.signed(),
+                                Val::Bits(bits) if bits.len() == 64 => bits.signed(),
                                 value => panic!("转换结果类型错误：{value:?}"),
                             };
                             assert!(
@@ -4064,14 +4534,14 @@ mod tests {
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for width in [64, 65, 128, 129] {
-                let expected = if width <= 64 { Val::I64(1) } else { Val::I128(1) };
+                let expected = Val::I64(1);
                 assert_eq!(primop::op_unsigned(Val::Bits(B129::new(1, width)), &mut solver, info()).unwrap(), expected);
                 assert_eq!(primop::op_signed(Val::Bits(B129::new(1, width)), &mut solver, info()).unwrap(), expected);
-                let expected = if width <= 64 { Val::I64(-1) } else { Val::I128(-1) };
+                let expected = Val::I64(-1);
                 assert_eq!(primop::op_signed(Val::Bits(B129::ones(width)), &mut solver, info()).unwrap(), expected);
             }
             let high = B129::BIT_ONE.zero_extend(128) << B129::new(127, 128);
-            assert_eq!(primop::op_signed(Val::Bits(high), &mut solver, info()).unwrap(), Val::I128(i128::MIN));
+            assert!(matches!(primop::op_signed(Val::Bits(high), &mut solver, info()), Err(ExecError::Overflow)));
             for bits in [high, B129::ones(128), B129::ones(129)] {
                 assert!(matches!(primop::op_unsigned(Val::Bits(bits), &mut solver, info()), Err(ExecError::Overflow)));
             }
@@ -4093,10 +4563,14 @@ mod tests {
                         primop::op_signed(Val::Symbolic(bits), &mut solver, info())
                     } else {
                         primop::op_unsigned(Val::Symbolic(bits), &mut solver, info())
+                    };
+                    if !signed && width > 64 {
+                        assert!(matches!(value, Err(ExecError::Overflow)), "宽度={width}：{value:?}");
+                        continue;
                     }
-                    .unwrap();
+                    let value = value.unwrap();
                     let Val::Symbolic(result) = value else { panic!("符号转换必须返回符号整数") };
-                    let result_width = if width <= 64 { 64 } else { 128 };
+                    let result_width = 64;
                     assert_eq!(solver.length(result), Some(result_width));
                     assert!(solver.check_sat(info()).is_sat().unwrap());
                     let materialized = Model::new(&solver).get_val(&value).unwrap();

@@ -394,7 +394,9 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
     let narrow = std::ptr::fn_addr_eq(f, i128_to_i64::<B> as Unary<B>);
     let signed = std::ptr::fn_addr_eq(f, sail_signed::<B> as Unary<B>);
     let unsigned = std::ptr::fn_addr_eq(f, sail_unsigned::<B> as Unary<B>);
-    if !narrow && !signed && !unsigned {
+    let op_u = std::ptr::fn_addr_eq(f, op_unsigned::<B> as Unary<B>);
+    let op_s = std::ptr::fn_addr_eq(f, op_signed::<B> as Unary<B>);
+    if !narrow && !signed && !unsigned && !op_u && !op_s {
         return Ok(None);
     }
     let value = replace_mixed_bits(value.clone(), solver, info)?;
@@ -405,6 +407,17 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
         Exp::Eq(
             Box::new(Exp::Var(sym)),
             Box::new(Exp::SignExtend(64, Box::new(Exp::Extract(63, 0, Box::new(Exp::Var(sym)))))),
+        )
+    } else if op_u && width > 64 {
+        // 无符号机器整数允许全部 64 位模式，高位必须为零。
+        Exp::Eq(
+            Box::new(Exp::Extract(width - 1, 64, Box::new(Exp::Var(sym)))),
+            Box::new(smt_zeros(i128::from(width - 64))),
+        )
+    } else if op_s && width > 64 {
+        Exp::Eq(
+            Box::new(Exp::SignExtend(width - 64, Box::new(Exp::Extract(63, 0, Box::new(Exp::Var(sym)))))),
+            Box::new(Exp::Var(sym)),
         )
     } else if unsigned && width >= 128 {
         // i128 的无符号可表示值最大为 2^127 - 1。
@@ -554,26 +567,21 @@ pub(crate) fn bool_to_bit<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: So
 
 pub(crate) fn op_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
+    check_integer_conversion(op_unsigned::<B>, &bits, solver, info)?;
     match bits {
         Val::Bits(bits) if bits.len() <= 64 => Ok(Val::I64(bits.unsigned() as i64)),
         Val::Bits(bits) => {
-            if bits.len() - bits.leading_zeros() > 127 {
+            if bits.len() - bits.leading_zeros() > 64 {
                 return Err(ExecError::Overflow);
             }
-            Ok(Val::I128(bits.unsigned()))
+            Ok(Val::I64(bits.slice(0, 64).unwrap().unsigned() as i64))
         }
         Val::Symbolic(bits) => match solver.length(bits) {
-            Some(length) if length <= 64 => {
-                let exp =
-                    if length < 64 { Exp::ZeroExtend(64 - length, Box::new(Exp::Var(bits))) } else { Exp::Var(bits) };
-                solver.define_const(exp, info).into()
+            Some(length) if length < 64 => {
+                solver.define_const(Exp::ZeroExtend(64 - length, Box::new(Exp::Var(bits))), info).into()
             }
-            Some(length) if length <= 128 => {
-                let exp =
-                    if length < 128 { Exp::ZeroExtend(128 - length, Box::new(Exp::Var(bits))) } else { Exp::Var(bits) };
-                solver.define_const(exp, info).into()
-            }
-            Some(_) => solver.define_const(Exp::Extract(127, 0, Box::new(Exp::Var(bits))), info).into(),
+            Some(64) => Ok(Val::Symbolic(bits)),
+            Some(_) => solver.define_const(Exp::Extract(63, 0, Box::new(Exp::Var(bits))), info).into(),
             None => Err(ExecError::Type(format!("op_unsigned {:?}", &bits), info)),
         },
         _ => Err(ExecError::Type(format!("op_unsigned {:?}", &bits), info)),
@@ -582,30 +590,22 @@ pub(crate) fn op_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: Sou
 
 pub(crate) fn op_signed<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
+    check_integer_conversion(op_signed::<B>, &bits, solver, info)?;
     match bits {
         Val::Bits(bits) if bits.len() <= 64 => Ok(Val::I64(bits.signed() as i64)),
         Val::Bits(bits) => {
-            if bits.len() > 128 {
-                let low = bits.slice(0, 128).unwrap();
-                if low.sign_extend(bits.len()) != bits {
-                    return Err(ExecError::Overflow);
-                }
-                return Ok(Val::I128(low.signed()));
+            let low = bits.slice(0, 64).unwrap();
+            if low.sign_extend(bits.len()) != bits {
+                return Err(ExecError::Overflow);
             }
-            Ok(Val::I128(bits.signed()))
+            Ok(Val::I64(low.signed() as i64))
         }
         Val::Symbolic(bits) => match solver.length(bits) {
-            Some(length) if length <= 64 => {
-                let exp =
-                    if length < 64 { Exp::SignExtend(64 - length, Box::new(Exp::Var(bits))) } else { Exp::Var(bits) };
-                solver.define_const(exp, info).into()
+            Some(length) if length < 64 => {
+                solver.define_const(Exp::SignExtend(64 - length, Box::new(Exp::Var(bits))), info).into()
             }
-            Some(length) if length <= 128 => {
-                let exp =
-                    if length < 128 { Exp::SignExtend(128 - length, Box::new(Exp::Var(bits))) } else { Exp::Var(bits) };
-                solver.define_const(exp, info).into()
-            }
-            Some(_) => solver.define_const(Exp::Extract(127, 0, Box::new(Exp::Var(bits))), info).into(),
+            Some(64) => Ok(Val::Symbolic(bits)),
+            Some(_) => solver.define_const(Exp::Extract(63, 0, Box::new(Exp::Var(bits))), info).into(),
             None => Err(ExecError::Type(format!("op_signed {:?}", &bits), info)),
         },
         _ => Err(ExecError::Type(format!("op_signed {:?}", &bits), info)),
