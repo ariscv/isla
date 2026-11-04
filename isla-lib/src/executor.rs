@@ -528,6 +528,10 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
     use Cow::*;
     use Exp::*;
 
+    if let Some(value) = local_state.expression_values.get(&(exp as *const Exp<Name> as usize)) {
+        return Ok(Owned(value.clone()));
+    }
+
     Ok(match exp {
         Id(id) => get_id_and_initialize(*id, local_state, shared_state, solver, accessor, info, false)?,
 
@@ -544,7 +548,7 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
         Call(op, unevaluated_args) => {
             let mut args: Vec<Val<B>> = Vec::new();
             for arg in unevaluated_args {
-                args.push(eval_exp(arg, local_state, shared_state, solver, info)?.into_owned())
+                args.push(eval_exp(arg, local_state, shared_state, solver, info)?.into_owned());
             }
             let result = match op {
                 Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info),
@@ -576,9 +580,6 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Op::ZeroExtend(len) => primop::op_zero_extend(args[0].clone(), *len, solver, info),
             };
             if matches!(result, Err(ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..))) {
-                for (exp, value) in unevaluated_args.iter().zip(&args) {
-                    local_state.expression_values.insert(exp as *const Exp<Name> as usize, value.clone());
-                }
                 local_state.expression_retry_operands = Some(args);
             }
             Owned(result?)
@@ -674,12 +675,10 @@ fn eval_exp<'state, 'ir, B: BV>(
     if let Some(value) = local_state.expression_values.get(&key) {
         return Ok(Cow::Owned(value.clone()));
     }
-    if matches!(exp, Exp::Undefined(_)) {
-        let value = eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)?.into_owned();
-        local_state.expression_values.insert(key, value.clone());
-        return Ok(Cow::Owned(value));
-    }
-    eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)
+    let value = eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)?.into_owned();
+    // 任一后续子表达式或操作数都可能要求重试，成功求值的读取副作用只执行一次。
+    local_state.expression_values.insert(key, value.clone());
+    Ok(Cow::Owned(value))
 }
 
 fn assign_with_accessor<'ir, B: BV>(
@@ -3868,6 +3867,322 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+
+    mod review22_tests {
+        use super::*;
+
+        #[test]
+        fn 指令推进后必须清理表达式缓存() {
+            let shared = empty_shared_state();
+            let reg = test_name(554);
+            let mut frame = make_frame(vec![
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+                Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+                Instr::Jump(Exp::Id(RETURN), 0, info()),
+                Instr::End,
+            ]);
+            frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(true)));
+            let state = TaskState::new();
+            let out = Mutex::new(Vec::new());
+            start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
+                let Ok((Run::Finished(Val::Bool(value)), frame)) = result else {
+                    panic!("回跳后必须读到寄存器的新值并正常结束")
+                };
+                assert!(!value);
+                assert!(frame.local_state.expression_values.is_empty(), "指令成功后不得保留表达式缓存");
+                let reads = solver
+                    .trace()
+                    .to_vec()
+                    .iter()
+                    .filter(|event| matches!(event, Event::ReadReg(r, _, _) if *r == reg))
+                    .count();
+                out.lock().unwrap().push(reads);
+            });
+            assert_eq!(out.into_inner().unwrap(), vec![2], "回跳执行相同表达式必须重新读取寄存器");
+        }
+
+        #[test]
+        fn 操作数重试必须缓存已经读取的寄存器() {
+            let shared = empty_shared_state();
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let index = solver.declare_const(smtlib::Ty::BitVec(128), info());
+            solver.add(Def::Assert(smtlib::Exp::Bvult(
+                Box::new(smtlib::Exp::Var(index)),
+                Box::new(smtlib::bits64(2, 128)),
+            )));
+            let reg = test_name(551);
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.regs_mut().insert(reg, true, UVal::Init(Val::Bool(true)));
+            frame
+                .lets_mut()
+                .insert(test_name(552), UVal::Init(Val::Vector(vec![Val::List(vec![]), Val::List(vec![Val::Unit])])));
+            frame.lets_mut().insert(test_name(553), UVal::Init(Val::Symbolic(index)));
+            let operands =
+                vec![Exp::Id(reg), Exp::Call(Op::Bvaccess, vec![Exp::Id(test_name(552)), Exp::Id(test_name(553))])];
+            assert!(matches!(
+                symbolic_length::eval_operands(&operands, &mut frame, &shared, &mut solver, info()),
+                Err(ExecError::SymbolicLength("vector_access", _))
+            ));
+            solver
+                .add(Def::Assert(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(index)), Box::new(smtlib::bits64(0, 128)))));
+            let values = symbolic_length::eval_operands(&operands, &mut frame, &shared, &mut solver, info()).unwrap();
+            assert!(matches!(values.as_slice(), [Val::Bool(true), Val::List(values)] if values.is_empty()));
+            assert_eq!(
+                solver
+                    .trace()
+                    .to_vec()
+                    .iter()
+                    .filter(|event| matches!(event, Event::ReadReg(r, _, _) if *r == reg))
+                    .count(),
+                1,
+                "后续操作数重试不能重复读取前序寄存器"
+            );
+        }
+
+        #[test]
+        fn 嵌套重试必须保留前序寄存器读取次数() {
+            let mut failures = Vec::new();
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let cond = shared.symtab.intern("zcond22");
+                let bits = shared.symtab.intern("zbits22");
+                let index = shared.symtab.intern("zindex22");
+                let lists = shared.symtab.intern("zlists22");
+                let reg = shared.symtab.intern("zreg22");
+                let mut frame = make_frame(vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(bits, Ty::Bits(8), info()),
+                    Instr::Decl(index, Ty::I128, info()),
+                    Instr::Jump(Exp::Id(cond), 6, info()),
+                    Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(0, 8)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::PrimopUnary(Loc::Id(index), primop::unary_primops()["sail_unsigned"], Exp::Id(bits), info()),
+                    Instr::Copy(
+                        Loc::Id(RETURN),
+                        Exp::Call(
+                            Op::And,
+                            vec![
+                                Exp::Id(reg),
+                                Exp::Call(
+                                    Op::IsEmpty,
+                                    vec![Exp::Call(Op::Bvaccess, vec![Exp::Id(lists), Exp::Id(index)])],
+                                ),
+                            ],
+                        ),
+                        info(),
+                    ),
+                    Instr::End,
+                ]);
+                frame.regs_mut().insert(reg, true, UVal::Init(Val::Bool(true)));
+                frame
+                    .lets_mut()
+                    .insert(lists, UVal::Init(Val::Vector(vec![Val::List(vec![]), Val::List(vec![Val::Unit])])));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
+                    assert!(matches!(result, Ok((Run::Finished(_), _))));
+                    let count = solver
+                        .trace()
+                        .to_vec()
+                        .iter()
+                        .filter(|event| matches!(event, Event::ReadReg(r, _, _) if *r == reg))
+                        .count();
+                    out.lock().unwrap().push(count);
+                });
+                let counts = out.into_inner().unwrap();
+                eprintln!("合并={enabled}，各路径寄存器读取次数={counts:?}");
+                if counts != vec![1, 1] {
+                    failures.push((enabled, counts));
+                }
+            }
+            assert!(failures.is_empty(), "单条表达式中的一次寄存器读取不能因重试重复：{failures:?}");
+        }
+
+        #[test]
+        fn 寄存器索引必须按边界拆分而不是枚举非法值() {
+            use crate::bitvector::b129::B129;
+            let mut failures = Vec::new();
+            for count in [1, 2] {
+                for write in [false, true] {
+                    for reverse in [false, true] {
+                        for enabled in [false, true] {
+                            let mut shared = SharedState::<B129>::empty(Symtab::new());
+                            let function = shared.symtab.intern("zreview22_idx");
+                            let cond = shared.symtab.intern("zcond22");
+                            let index = shared.symtab.intern("zindex22");
+                            let regs = [shared.symtab.intern("zr0_22"), shared.symtab.intern("zr1_22")];
+                            let invalid =
+                                Exp::Call(Op::Concat, vec![Exp::Bits(B64::new(1, 64)), Exp::Undefined(Ty::Bits(64))]);
+                            let valid =
+                                Exp::Call(Op::Concat, vec![Exp::Bits(B64::zeros(64)), Exp::Bits(B64::zeros(64))]);
+                            let (left, right) = if reverse { (invalid, valid) } else { (valid, invalid) };
+                            let instrs = vec![
+                                Instr::Decl(cond, Ty::Bool, info()),
+                                Instr::Decl(index, Ty::Bits(128), info()),
+                                Instr::Jump(Exp::Id(cond), 5, info()),
+                                Instr::Copy(Loc::Id(index), left, info()),
+                                Instr::Goto(6),
+                                Instr::Copy(Loc::Id(index), right, info()),
+                                Instr::Call(
+                                    Loc::Id(RETURN),
+                                    false,
+                                    if write { WRITE_REGISTER_FROM_VECTOR } else { READ_REGISTER_FROM_VECTOR },
+                                    if write {
+                                        vec![Exp::Id(index), Exp::Bits(B64::new(7, 8)), Exp::Id(test_name(550))]
+                                    } else {
+                                        vec![Exp::Id(index), Exp::Id(test_name(550))]
+                                    },
+                                    info(),
+                                ),
+                                Instr::End,
+                            ];
+                            let mut frame = LocalFrame::new(function, &[], &Ty::Bits(8), None, &instrs);
+                            frame.lets_mut().insert(
+                                test_name(550),
+                                UVal::Init(Val::Vector(regs[..count].iter().copied().map(Val::Ref).collect())),
+                            );
+                            for reg in regs {
+                                frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B129::new(42, 8))));
+                            }
+                            let state = TaskState::new().with_execution_limits(
+                                ExecutionLimits::default().with_path_merging(enabled).with_max_forks_per_path(1),
+                            );
+                            let out = Mutex::new(Vec::new());
+                            start_single(
+                                frame.task(TaskId::fresh(), &state),
+                                &shared,
+                                &out,
+                                &|_, _, result, _, _, out| {
+                                    out.lock().unwrap().push(
+                                        result
+                                            .map(|(run, _)| matches!(run, Run::Finished(_)))
+                                            .map_err(|(error, _)| error),
+                                    );
+                                },
+                            );
+                            let results = out.into_inner().unwrap();
+                            eprintln!(
+                                "索引边界：数量={count}，写={write}，反转={reverse}，合并={enabled}，结果={results:?}"
+                            );
+                            if results.iter().any(|r| matches!(r, Err(ExecError::BranchLimitReached(..))))
+                                || !results.iter().any(Result::is_ok)
+                            {
+                                failures.push((count, write, reverse, enabled));
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(failures.is_empty(), "非法索引集合不应耗尽预算或丢弃合法路径：{failures:?}");
+        }
+
+        #[test]
+        fn 内存区域拆分不能枚举整个符号区域() {
+            let mut failures = Vec::new();
+            for operation in [
+                "read_mem",
+                "read_mem_exclusive",
+                "write_mem",
+                "write_mem_exclusive",
+                "platform_read_memt",
+                "platform_write_memt",
+            ] {
+                for reverse in [false, true] {
+                    for enabled in [false, true] {
+                        let mut shared = empty_shared_state();
+                        let cond = shared.symtab.intern("zcond22");
+                        let address = shared.symtab.intern("zaddress22");
+                        let symbolic =
+                            Exp::Call(Op::Concat, vec![Exp::Bits(B64::new(1, 32)), Exp::Undefined(Ty::Bits(32))]);
+                        let concrete = Exp::Bits(B64::zeros(64));
+                        let (left, right) = if reverse { (symbolic, concrete) } else { (concrete, symbolic) };
+                        let instrs = vec![
+                            Instr::Decl(cond, Ty::Bool, info()),
+                            Instr::Decl(address, Ty::Bits(64), info()),
+                            Instr::Jump(Exp::Id(cond), 5, info()),
+                            Instr::Copy(Loc::Id(address), left, info()),
+                            Instr::Goto(6),
+                            Instr::Copy(Loc::Id(address), right, info()),
+                            Instr::PrimopVariadic(
+                                Loc::Id(RETURN),
+                                primop::variadic_primops()[operation],
+                                if operation == "platform_read_memt" {
+                                    vec![Exp::Unit, Exp::Id(address), Exp::I128(1)]
+                                } else if operation == "platform_write_memt" {
+                                    vec![
+                                        Exp::Unit,
+                                        Exp::Id(address),
+                                        Exp::I128(1),
+                                        Exp::Bits(B64::new(7, 8)),
+                                        Exp::Bits(B64::zeros(1)),
+                                    ]
+                                } else if operation.starts_with("write") {
+                                    vec![
+                                        Exp::Unit,
+                                        Exp::I128(64),
+                                        Exp::Id(address),
+                                        Exp::I128(1),
+                                        Exp::Bits(B64::new(7, 8)),
+                                    ]
+                                } else {
+                                    vec![Exp::Unit, Exp::I128(64), Exp::Id(address), Exp::I128(1)]
+                                },
+                                info(),
+                            ),
+                            Instr::End,
+                        ];
+                        let mut frame = make_frame(instrs);
+                        frame.memory_mut().add_concrete_region(0..1, HashMap::from_iter([(0, 42)]));
+                        let state = TaskState::new().with_execution_limits(
+                            ExecutionLimits::default().with_path_merging(enabled).with_max_forks_per_path(1),
+                        );
+                        let out = Mutex::new(Vec::new());
+                        start_single(
+                            frame.task(TaskId::fresh(), &state),
+                            &shared,
+                            &out,
+                            &|_, _, result, _, mut solver, out| {
+                                let address = solver.trace().to_vec().iter().find_map(|event| match event {
+                                    Event::ReadMem { address, .. } | Event::WriteMem { address, .. } => {
+                                        Some(address.clone())
+                                    }
+                                    _ => None,
+                                });
+                                let mut coverage = [false, false];
+                                if let Some(address) = address {
+                                    for (position, target) in [0, (1u64 << 32) + 1].into_iter().enumerate() {
+                                        let condition = smtlib::Exp::Eq(
+                                            Box::new(crate::primop_util::smt_value(&address, info()).unwrap()),
+                                            Box::new(smtlib::bits64(target, 64)),
+                                        );
+                                        coverage[position] =
+                                            solver.check_sat_with(&condition, info()).is_sat().unwrap();
+                                    }
+                                }
+                                out.lock().unwrap().push((
+                                    result.map(|(run, _)| matches!(run, Run::Finished(_))).map_err(|(error, _)| error),
+                                    coverage,
+                                ));
+                            },
+                        );
+                        let results = out.into_inner().unwrap();
+                        eprintln!("内存区域：操作={operation}，反转={reverse}，合并={enabled}，结果={results:?}");
+                        if !results.iter().all(|(result, _)| result.is_ok())
+                            || !(0..2).all(|position| {
+                                results.iter().any(|(result, coverage)| result.is_ok() && coverage[position])
+                            })
+                        {
+                            failures.push((operation, reverse, enabled));
+                        }
+                    }
+                }
+            }
+            assert!(failures.is_empty(), "两个地址类别均应保留为合法路径：{failures:?}");
+        }
+    }
 
     mod review21_tests {
         use super::*;

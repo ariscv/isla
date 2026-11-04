@@ -136,6 +136,67 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             }
         }
         for sym in symbols {
+            let partition = match op {
+                "read_register_from_vector" | "write_register_from_vector" => {
+                    let regs_index = if op == "read_register_from_vector" { 1 } else { 2 };
+                    let Val::Vector(regs) = &operands[regs_index] else {
+                        panic!("寄存器索引重试必须携带寄存器向量")
+                    };
+                    let width = solver.length(sym).expect("寄存器索引必须是位向量");
+                    // 索引域全在合法范围内时，边界不能截断到索引位宽。
+                    if width < 128 && (1u128 << width) <= regs.len() as u128 {
+                        None
+                    } else {
+                        let limit = smtlib::bits64(regs.len() as u64, width);
+                        Some((
+                            Bvult(Box::new(Var(sym)), Box::new(limit.clone())),
+                            Bvuge(Box::new(Var(sym)), Box::new(limit)),
+                        ))
+                    }
+                }
+                "read_mem_address" | "write_mem_address" | "read_memt_address" | "write_memt_address" => {
+                    let width = solver.length(sym).expect("内存地址必须是位向量");
+                    // 与具体内存分派一致，按起始地址构造各具体区域的覆盖谓词。
+                    let in_concrete = frame
+                        .memory()
+                        .regions()
+                        .iter()
+                        .filter_map(|region| match region {
+                            crate::memory::Region::Concrete(range, _) => Some(And(
+                                Box::new(Bvule(Box::new(smtlib::bits64(range.start, width)), Box::new(Var(sym)))),
+                                Box::new(Bvult(Box::new(Var(sym)), Box::new(smtlib::bits64(range.end, width)))),
+                            )),
+                            _ => None,
+                        })
+                        .reduce(|left, right| Or(Box::new(left), Box::new(right)));
+                    in_concrete.map(|condition| (condition.clone(), Not(Box::new(condition))))
+                }
+                _ => None,
+            };
+            if let Some((selected, remainder)) = partition {
+                if solver.check_sat_with(&selected, info).is_sat()?
+                    && solver.check_sat_with(&remainder, info).is_sat()?
+                {
+                    // 先完整分离两类候选，再由消费者拒绝非法索引或处理默认符号内存。
+                    fork_retry_operand(
+                        sym,
+                        selected,
+                        remainder,
+                        operands,
+                        info,
+                        task_id,
+                        task_fraction,
+                        stop_conditions,
+                        fork_sink,
+                        frame,
+                        task_state,
+                        solver,
+                    )?;
+                    return Ok(true);
+                }
+                // 不可满足的探测会使当前模型失效，单值枚举前须重新建立前缀模型。
+                assert!(solver.check_sat(info).is_sat()?, "边界探测不得改变路径可满足性");
+            }
             if fork_symbolic_value(
                 sym,
                 operands,
