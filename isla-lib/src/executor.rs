@@ -3894,6 +3894,250 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review25_tests {
+        use super::*;
+
+        #[test]
+        fn 地址重试必须先拆分未固定的符号长度() {
+            for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let address = solver.declare_bitvector(64, info());
+                solver.assert(smtlib::Exp::Bvult(Box::new(smtlib::Exp::Var(address)), Box::new(smtlib::bits64(8, 64))));
+                let condition = solver.declare_const(smtlib::Ty::Bool, info());
+                let bytes = solver.define_const(
+                    smtlib::Exp::Ite(
+                        Box::new(smtlib::Exp::Var(condition)),
+                        Box::new(crate::primop_util::smt_i128(4)),
+                        Box::new(crate::primop_util::smt_i128(8)),
+                    ),
+                    info(),
+                );
+                let index = if matches!(op, "read_memt_address" | "write_memt_address") { 1 } else { 2 };
+                let mut operands = vec![Val::Unit; index + 2];
+                operands[index] = Val::Symbolic(address);
+                operands[index + 1] = Val::Symbolic(bytes);
+                let mut frame = make_frame(vec![Instr::End]);
+                frame.memory_mut().add_excluded_region(8..16);
+                let state = TaskState::new();
+                let queue = Worker::new_lifo();
+                let mut fraction = Fraction::one();
+                assert!(symbolic_length::retry_symbolic_length(
+                    ExecError::SymbolicLength(op, info()),
+                    &operands,
+                    TaskId::fresh(),
+                    &mut fraction,
+                    None,
+                    &SingleForkSink { queue: &queue },
+                    &mut frame,
+                    &state,
+                    &mut solver,
+                )
+                .unwrap());
+                let child = queue.pop().expect("未固定长度必须拆为当前候选与剩余候选");
+                assert!(queue.is_empty());
+                let Some((Def::Assert(remainder), _)) = child.fork_cond else {
+                    panic!("剩余长度必须携带分叉谓词")
+                };
+                let mut replay = Solver::from_checkpoint(&ctx, child.checkpoint);
+                replay.assert(remainder);
+                let selected = primop::proven_symbolic_i128(bytes, &mut solver, info()).unwrap().unwrap();
+                let remaining = primop::proven_symbolic_i128(bytes, &mut replay, info()).unwrap().unwrap();
+                assert!(matches!((selected, remaining), (4, 8) | (8, 4)), "{op} 必须保留两种长度");
+                for candidate in 0..8 {
+                    let equal =
+                        smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(address)), Box::new(smtlib::bits64(candidate, 64)));
+                    assert!(solver.check_sat_with(&equal, info()).is_sat().unwrap(), "{op} 不得提前收窄地址");
+                    assert!(replay.check_sat_with(&equal, info()).is_sat().unwrap(), "{op} 不得丢弃剩余地址");
+                }
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "内存访问重试必须提供长度或待写入数据")]
+        fn 缺少长度和数据时禁止假定单字节访问() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let address = solver.declare_bitvector(64, info());
+            let operands = vec![Val::Unit, Val::I128(64), Val::Symbolic(address)];
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.memory_mut().add_excluded_region(8..16);
+            let state = TaskState::new();
+            let queue = Worker::new_lifo();
+            let mut fraction = Fraction::one();
+            symbolic_length::retry_symbolic_length(
+                ExecError::SymbolicLength("read_mem_address", info()),
+                &operands,
+                TaskId::fresh(),
+                &mut fraction,
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &mut solver,
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn 窄地址排除区域上界不能导致崩溃() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let address = solver.declare_bitvector(8, info());
+            let mut memory = crate::memory::Memory::new();
+            memory.add_excluded_region(8..256);
+            let result = memory.read(
+                Val::Unit,
+                Val::Symbolic(address),
+                Val::I128(4),
+                &mut solver,
+                false,
+                crate::smt::ReadOpts::default(),
+            );
+            assert!(matches!(result, Err(ExecError::SymbolicLength("read_mem_address", _))));
+        }
+
+        #[test]
+        fn 窄地址符号代码区上界不能导致崩溃() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let address = solver.declare_bitvector(8, info());
+            let mut memory = crate::memory::Memory::new();
+            memory.add_symbolic_code_region(0..256);
+            let result = memory.read(
+                Val::Unit,
+                Val::Symbolic(address),
+                Val::I128(1),
+                &mut solver,
+                false,
+                crate::smt::ReadOpts::ifetch(),
+            );
+            assert!(result.is_ok(), "全部地址都属于代码区：{result:?}");
+        }
+
+        #[test]
+        fn 已证明符号长度的排除区域拆分必须保留合法路径() {
+            let mut failures = Vec::new();
+            for op in [
+                "read_mem",
+                "read_mem_ifetch",
+                "read_mem_exclusive",
+                "platform_read_memt",
+                "write_mem",
+                "write_mem_exclusive",
+                "platform_write_memt",
+            ] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let address = solver.declare_bitvector(64, info());
+                solver.assert(smtlib::Exp::Bvult(Box::new(smtlib::Exp::Var(address)), Box::new(smtlib::bits64(8, 64))));
+                let bytes = solver.define_const(crate::primop_util::smt_i128(4), info());
+                let address_name = test_name(580);
+                let bytes_name = test_name(581);
+                let args = match op {
+                    "platform_read_memt" => vec![Exp::Unit, Exp::Id(address_name), Exp::Id(bytes_name)],
+                    "platform_write_memt" => vec![
+                        Exp::Unit,
+                        Exp::Id(address_name),
+                        Exp::Id(bytes_name),
+                        Exp::Bits(B64::zeros(32)),
+                        Exp::Bits(B64::zeros(1)),
+                    ],
+                    "write_mem" | "write_mem_exclusive" => vec![
+                        Exp::Unit,
+                        Exp::I128(64),
+                        Exp::Id(address_name),
+                        Exp::Id(bytes_name),
+                        Exp::Bits(B64::zeros(32)),
+                    ],
+                    _ => vec![Exp::Unit, Exp::I128(64), Exp::Id(address_name), Exp::Id(bytes_name)],
+                };
+                let mut frame = make_frame(vec![
+                    Instr::PrimopVariadic(Loc::Id(RETURN), primop::variadic_primops()[op], args, info()),
+                    Instr::End,
+                ]);
+                frame.vars_mut().insert(address_name, UVal::Init(Val::Symbolic(address)));
+                frame.vars_mut().insert(bytes_name, UVal::Init(Val::Symbolic(bytes)));
+                frame.memory_mut().add_excluded_region(8..16);
+                if op == "read_mem_ifetch" {
+                    frame.memory_mut().add_symbolic_code_region(0..8);
+                }
+                let state = TaskState::new();
+                let out = Mutex::new(Vec::new());
+                start_single(
+                    frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+                    &empty_shared_state(),
+                    &out,
+                    &|_, _, result, _, _, out| {
+                        out.lock().unwrap().push(
+                            result
+                                .map(|(run, _)| matches!(run, Run::Finished(_)))
+                                .map_err(|(error, _)| format!("{error:?}")),
+                        );
+                    },
+                );
+                let results = out.into_inner().unwrap();
+                eprintln!("{op}：{results:?}");
+                if !results.iter().any(|result| matches!(result, Ok(true))) {
+                    failures.push(op);
+                }
+            }
+            assert!(failures.is_empty(), "地址 0..=4 的合法四字节访问被丢弃：{failures:?}");
+        }
+
+        #[test]
+        fn 菱形合并后的访存长度不能丢失合法路径() {
+            let mut observed = Vec::new();
+            for enabled in [false, true] {
+                let condition = test_name(580);
+                let length_bits = test_name(581);
+                let length = test_name(582);
+                let address = Exp::Call(Op::Concat, vec![Exp::Bits(B64::zeros(61)), Exp::Undefined(Ty::Bits(3))]);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(condition, Ty::Bool, info()),
+                    Instr::Decl(length_bits, Ty::Bits(8), info()),
+                    Instr::Decl(length, Ty::I128, info()),
+                    Instr::Jump(Exp::Id(condition), 6, info()),
+                    Instr::Copy(Loc::Id(length_bits), Exp::Bits(B64::new(4, 8)), info()),
+                    Instr::Goto(7),
+                    Instr::Copy(Loc::Id(length_bits), Exp::Bits(B64::new(8, 8)), info()),
+                    Instr::PrimopUnary(
+                        Loc::Id(length),
+                        primop::unary_primops()["sail_unsigned"],
+                        Exp::Id(length_bits),
+                        info(),
+                    ),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primop::variadic_primops()["read_mem"],
+                        vec![Exp::Unit, Exp::I128(64), address, Exp::Id(length)],
+                        info(),
+                    ),
+                    Instr::End,
+                ]);
+                frame.memory_mut().add_excluded_region(8..16);
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::fresh(), &state),
+                    &empty_shared_state(),
+                    &out,
+                    &|_, _, result, _, _, out| {
+                        out.lock().unwrap().push(
+                            result
+                                .map(|(run, _)| matches!(run, Run::Finished(_)))
+                                .map_err(|(error, _)| format!("{error:?}")),
+                        );
+                    },
+                );
+                let results = out.into_inner().unwrap();
+                eprintln!("合并={enabled}：{results:?}");
+                observed.push((enabled, results.iter().filter(|result| matches!(result, Ok(true))).count()));
+            }
+            assert!(observed.iter().all(|(_, count)| *count > 0), "合法访存路径因合并丢失：{observed:?}");
+        }
+    }
     mod review24_tests {
         use super::*;
 
@@ -4190,8 +4434,9 @@ mod tests {
                     let mut frame = make_frame(vec![Instr::End]);
                     frame.memory_mut().add_region(region.clone());
                     let index = if matches!(op, "read_memt_address" | "write_memt_address") { 1 } else { 2 };
-                    let mut operands = vec![Val::Unit; 3];
+                    let mut operands = vec![Val::Unit; index + 2];
                     operands[index] = Val::Symbolic(address);
+                    operands[index + 1] = Val::I128(1);
                     let state =
                         TaskState::new().with_execution_limits(ExecutionLimits::default().with_max_forks_per_path(1));
                     let queue = Worker::new_lifo();

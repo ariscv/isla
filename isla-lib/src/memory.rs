@@ -619,6 +619,12 @@ impl<B: BV> Memory<B> {
                     if opts.is_ifetch {
                         let info = SourceLoc::unknown();
                         let width = solver.length(symbolic_addr).expect("取指地址必须是位向量");
+                        let cmp_width = width.max(64);
+                        let addr_exp = if width < cmp_width {
+                            Exp::ZeroExtend(cmp_width - width, Box::new(Exp::Var(symbolic_addr)))
+                        } else {
+                            Exp::Var(symbolic_addr)
+                        };
                         let mut unmatched = Exp::Bool(true);
                         for region in &self.regions {
                             if matches!(region, Region::Excluded(_)) {
@@ -627,12 +633,12 @@ impl<B: BV> Memory<B> {
                             let range = region.region_range();
                             let in_region = Exp::And(
                                 Box::new(Exp::Bvule(
-                                    Box::new(bits64(range.start, width)),
-                                    Box::new(Exp::Var(symbolic_addr)),
+                                    Box::new(bits64(range.start, cmp_width)),
+                                    Box::new(addr_exp.clone()),
                                 )),
                                 Box::new(Exp::Bvult(
-                                    Box::new(Exp::Var(symbolic_addr)),
-                                    Box::new(bits64(range.end, width)),
+                                    Box::new(addr_exp.clone()),
+                                    Box::new(bits64(range.end, cmp_width)),
                                 )),
                             );
                             // 沿用具体地址的区域优先级，证明所有候选都由同一区域处理。
@@ -992,7 +998,7 @@ pub fn smt_address_constraint<B: BV>(
 
 /// 判死区域（`Region::Excluded`）的符号地址约束：NOT(访问区间与任一判死
 /// 区域重叠)。访问区间 `[addr, addr+bytes)` 与 `[start, end)` 重叠定义为
-/// `addr <u end && addr + bytes >u start`（加法在 addr_size+1 位上做，避免
+/// `addr <u end && addr + bytes >u start`（加法在 max(addr_size, 64)+1 位上做，避免
 /// 回绕）。零判死区域返回 `None`——零约束零开销，与默认全符号化一致。
 /// 注意与白名单 OR 链（`smt_address_constraint`，W8 已从 solve-state 移除）
 /// 相反：这里任何与区域**重叠**（哪怕一字节）都判死，不要求访问完整落入
@@ -1013,18 +1019,21 @@ pub fn smt_excluded_constraint<B: BV>(
         }
     };
     let addr_size = solver.length(addr_var).unwrap_or_else(|| panic!("address is not a bitvector"));
+    let cmp_size = addr_size.max(64);
+    let addr_exp =
+        if addr_size < cmp_size { ZeroExtend(cmp_size - addr_size, Box::new(Var(addr_var))) } else { Var(addr_var) };
     let mut overlap: Option<Exp<Sym>> = None;
     for region in regions {
         let Region::Excluded(range) = region else { continue };
         let in_range = And(
-            Box::new(Bvult(Box::new(Var(addr_var)), Box::new(bits64(range.end, addr_size)))),
+            Box::new(Bvult(Box::new(addr_exp.clone()), Box::new(bits64(range.end, cmp_size)))),
             // 多一位加法防止 addr+bytes 回绕成小值
             Box::new(Bvugt(
                 Box::new(Bvadd(
-                    Box::new(ZeroExtend(1, Box::new(Var(addr_var)))),
-                    Box::new(ZeroExtend(1, Box::new(bits64(u64::from(bytes), addr_size)))),
+                    Box::new(ZeroExtend(1, Box::new(addr_exp.clone()))),
+                    Box::new(ZeroExtend(1, Box::new(bits64(u64::from(bytes), cmp_size)))),
                 )),
-                Box::new(ZeroExtend(1, Box::new(bits64(range.start, addr_size)))),
+                Box::new(ZeroExtend(1, Box::new(bits64(range.start, cmp_size)))),
             )),
         );
         overlap = match overlap {

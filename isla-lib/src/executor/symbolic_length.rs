@@ -11,6 +11,7 @@ use crate::bitvector::BV;
 use crate::error::ExecError;
 use crate::fraction::Fraction;
 use crate::ir::{Exp, Name, SharedState, Val};
+use crate::primop;
 use crate::smt::{checkpoint, smtlib, Event, Model, ModelVal, Solver};
 use crate::source_loc::SourceLoc;
 
@@ -155,14 +156,43 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     }
                 }
                 "read_mem_address" | "write_mem_address" | "read_memt_address" | "write_memt_address" => {
-                    // 长度参数紧跟地址；缺少可提取的长度时按一字节探测。
+                    // 必须先确定完整访问长度，未固定时优先拆分长度，避免丢失跨边界的合法地址。
                     let bytes = match operands.get(index + 1) {
                         Some(Val::I128(bytes)) => u32::try_from(*bytes).expect("内存访问字节数必须能用 u32 表示"),
                         Some(Val::I64(bytes)) => u32::try_from(*bytes).expect("内存访问字节数必须能用 u32 表示"),
                         Some(Val::Bits(bytes)) => {
                             u32::try_from(bytes.unsigned()).expect("内存访问字节数必须能用 u32 表示")
                         }
-                        _ => 1,
+                        Some(Val::Symbolic(bytes_sym)) => {
+                            if let Some(bytes) = primop::proven_symbolic_i128(*bytes_sym, solver, info)? {
+                                u32::try_from(bytes).expect("内存访问字节数必须能用 u32 表示")
+                            } else {
+                                assert!(
+                                    fork_symbolic_value(
+                                        *bytes_sym,
+                                        operands,
+                                        info,
+                                        task_id,
+                                        task_fraction,
+                                        stop_conditions,
+                                        fork_sink,
+                                        frame,
+                                        task_state,
+                                        solver,
+                                    )?,
+                                    "无法证明的内存访问长度必须能够分叉"
+                                );
+                                return Ok(true);
+                            }
+                        }
+                        _ => {
+                            // 无长度参数的写操作从数据位宽提取，无法确定时直接暴露内部错误。
+                            let data = operands.get(index + 2).expect("内存访问重试必须提供长度或待写入数据");
+                            let bits =
+                                crate::primop_util::length_bits(data, solver, info).expect("待写入数据必须有确定位宽");
+                            assert_eq!(bits % 8, 0, "待写入数据必须按字节对齐");
+                            bits / 8
+                        }
                     };
                     // 先按完整访问区间分离排除子域，再按起始地址分派区域。
                     if let Some(allowed) =
