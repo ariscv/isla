@@ -841,7 +841,7 @@ pub fn or_bool<B: BV>(lhs: Val<B>, rhs: Val<B>, solver: &mut Solver<B>, info: So
 
 fn abs_int<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match x {
-        Val::I128(x) => Ok(Val::I128(x.abs())),
+        Val::I128(x) => Ok(Val::I128(x.wrapping_abs())),
         Val::Symbolic(x) => {
             let y = solver.fresh();
             solver.add(Def::DefineConst(

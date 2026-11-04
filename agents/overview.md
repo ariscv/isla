@@ -1,5 +1,7 @@
 # 议题入口
 
+- [Review 37 修复](review37/status.md)：Constrained 数组一致性、区域遮蔽分派、整数绝对值边界及浮点转换格式。
+
 - [Review 36 修复](review36/status.md)：设备写分派、Constrained 生成器、整数边界与回绕排除检查。
 
 

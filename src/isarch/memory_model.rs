@@ -5,9 +5,9 @@
 //!   sail-riscv RV64 小端一致）；
 //! - 写：对写数据逐字节 `Extract` 构造 `Store` 链；普通写发出事件即提交，
 //!   独占写按返回 Bool 条件提交，之后同一路径的读写都基于新数组；
-//! - 具体区域：按需约束初始数组中被读取的字节，未列出的内容字节为零；
+//! - Concrete／Constrained 区域：按需将具体内容或生成器约束接入初始数组；
 //!   普通具体读与符号读共享当前数组，后续写入可以覆盖初值；
-//! - Custom 与 Constrained 由 Memory 保留设备／生成器分派，多候选地址先拆分；
+//! - Custom 由 Memory 保留设备分派；Constrained 保留整区域读取合同，读值查询当前数组；
 //! - **默认（W9 语义）：全符号化**。符号读写地址全域自由、读值/写效来自
 //!   字节数组，`[[memory_regions]]` 的 symbolic 声明只是"这一段是 RAM、
 //!   内容未知"的**纯声明**，不产生任何约束；可访问性/trap 完全交给模型
@@ -135,8 +135,10 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
         let array_addr = self.array_address(address, solver);
 
         // 只约束本次查询涉及的初始字节；Store 链仍可覆盖初值，不能钉死当前数组。
-        // 沿用 Memory 的区域优先级，较早的符号或自定义区域会遮蔽后面的具体区域。
-        if regions.iter().any(|region| matches!(region, Region::Concrete(..))) {
+        // 沿用 Memory 的区域优先级，前序区域遮蔽后续区域的初值。
+        if regions.iter().any(|region| matches!(region, Region::Concrete(..) | Region::Constrained(..))) {
+            // 同次多字节读取只调用每个生成器一次，保留区域内各字节的关联。
+            let mut generated = vec![None; regions.len()];
             for i in 0..bytes {
                 let byte_addr = solver.define_const(
                     Exp::Bvadd(Box::new(array_addr.clone()), Box::new(bits64(u64::from(i), self.addr_size))),
@@ -150,7 +152,7 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
                     Exp::Var(byte_addr)
                 };
                 let mut unmatched = Exp::Bool(true);
-                for region in regions {
+                for (region_index, region) in regions.iter().enumerate() {
                     if matches!(region, Region::Excluded(_)) {
                         continue;
                     }
@@ -159,7 +161,8 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
                         Box::new(Exp::Bvule(Box::new(bits64(range.start, 64)), Box::new(region_addr.clone()))),
                         Box::new(Exp::Bvult(Box::new(region_addr.clone()), Box::new(bits64(range.end, 64)))),
                     );
-                    if let Region::Concrete(_, contents) = region {
+                    let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
+                    let initial_byte = if let Region::Concrete(_, contents) = region {
                         let mut initial_byte = bits64(0, 8);
                         let mut entries: Vec<_> = contents.iter().collect();
                         entries.sort_unstable_by_key(|(address, _)| **address);
@@ -170,7 +173,48 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
                                 Box::new(initial_byte),
                             );
                         }
-                        let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
+                        Some(initial_byte)
+                    } else if let Region::Constrained(range, generator) = region {
+                        if solver
+                            .check_sat_with(&selected, SourceLoc::unknown())
+                            .is_unsat()
+                            .expect("生成器初值的区域可达性检查必须成功")
+                        {
+                            None
+                        } else {
+                            let width = u32::try_from(range.end - range.start)
+                                .unwrap()
+                                .checked_mul(8)
+                                .expect("生成器区域位宽必须能用 u32 表示");
+                            assert!(width >= 8, "生成器区域不能为空");
+                            let generated = *generated[region_index].get_or_insert_with(|| {
+                                let value = generator(solver);
+                                assert_eq!(solver.length(value), Some(width), "生成器位宽必须匹配整个区域");
+                                solver.mark_bitvector(value);
+                                value
+                            });
+                            // 生成器低字节对应区域起点，与读值的小端拼接一致。
+                            let offset = Exp::Bvmul(
+                                Box::new(Exp::Bvsub(Box::new(region_addr.clone()), Box::new(bits64(range.start, 64)))),
+                                Box::new(bits64(8, 64)),
+                            );
+                            let shift = if width > 64 {
+                                Exp::ZeroExtend(width - 64, Box::new(offset))
+                            } else if width < 64 {
+                                Exp::Extract(width - 1, 0, Box::new(offset))
+                            } else {
+                                offset
+                            };
+                            Some(Exp::Extract(
+                                7,
+                                0,
+                                Box::new(Exp::Bvlshr(Box::new(Exp::Var(generated)), Box::new(shift))),
+                            ))
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(initial_byte) = initial_byte {
                         let initial =
                             Exp::Select(Box::new(Exp::Var(self.initial_memory_var)), Box::new(Exp::Var(byte_addr)));
                         solver.assert(Exp::Or(

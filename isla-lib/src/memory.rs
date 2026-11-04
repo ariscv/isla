@@ -183,14 +183,14 @@ pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync
     }
 
     /// 回调能自行处理符号读地址约束时，可直接处理尚未收窄的符号地址。
-    /// 回调须保留具体区域的已知内容；Custom/Constrained 始终经专属分派。
+    /// 回调须保留已知初值；Custom 始终经专属分派，Constrained 保留整区域读取检查。
     /// 需要接管普通具体读时另启用 handles_concrete_reads。
     /// 默认仍由 Memory 先检查具体区域重叠，必要时请求地址拆分。
     fn constrains_symbolic_reads(&self) -> bool {
         false
     }
 
-    /// 回调维护具体区域的初值和更新时，普通具体读也必须经过同一份内存状态。
+    /// 回调维护 Concrete／Constrained 初值和更新时，普通具体读也经过同一份内存状态。
     fn handles_concrete_reads(&self) -> bool {
         false
     }
@@ -440,15 +440,21 @@ impl<B: BV> Memory<B> {
             Var(address)
         };
 
+        let mut unmatched = Bool(true);
         for region in &self.regions {
-            if !matches!(region, Region::Excluded(_)) && include_region(region) {
-                let Range { start, end } = region.region_range();
-
-                region_constraints.push(And(
-                    Box::new(Bvule(Box::new(bits64(*start, cmp_size)), Box::new(addr_exp.clone()))),
-                    Box::new(Bvult(Box::new(addr_exp.clone()), Box::new(bits64(*end, cmp_size)))),
-                ))
+            if matches!(region, Region::Excluded(_)) {
+                continue;
             }
+            let Range { start, end } = region.region_range();
+            let in_region = And(
+                Box::new(Bvule(Box::new(bits64(*start, cmp_size)), Box::new(addr_exp.clone()))),
+                Box::new(Bvult(Box::new(addr_exp.clone()), Box::new(bits64(*end, cmp_size)))),
+            );
+            if include_region(region) {
+                region_constraints.push(And(Box::new(unmatched.clone()), Box::new(in_region.clone())));
+            }
+            // 所有前序区域都参与遮蔽，不能只累计需要专属分派的区域。
+            unmatched = And(Box::new(unmatched), Box::new(Not(Box::new(in_region))));
         }
 
         // 自约束回调负责排除区域时不请求拆分；其余调用方检查全部实际访问字节。
@@ -532,6 +538,26 @@ impl<B: BV> Memory<B> {
                     for region in &self.regions {
                         match region {
                             Region::Constrained(range, generator) if range.contains(&concrete_addr.lower_u64()) => {
+                                if !opts.is_ifetch
+                                    && self.client_info.as_ref().is_some_and(|client| client.handles_concrete_reads())
+                                {
+                                    if concrete_addr.lower_u64() != range.start
+                                        || u64::from(bytes) != range.end - range.start
+                                    {
+                                        return Err(ExecError::BadRead(
+                                            "Constrained read address is not within bounds",
+                                        ));
+                                    }
+                                    return self.read_symbolic(
+                                        read_kind,
+                                        address,
+                                        bytes,
+                                        solver,
+                                        tag,
+                                        opts,
+                                        region.region_name(),
+                                    );
+                                }
                                 return read_constrained(
                                     range,
                                     generator.as_ref(),
@@ -543,7 +569,7 @@ impl<B: BV> Memory<B> {
                                     tag,
                                     opts,
                                     region.region_name(),
-                                )
+                                );
                             }
 
                             Region::Symbolic(range) if range.contains(&concrete_addr.lower_u64()) => {
@@ -613,7 +639,7 @@ impl<B: BV> Memory<B> {
                 }
 
                 Val::Symbolic(symbolic_addr) => {
-                    // 自约束回调可接管普通数据读，Custom/Constrained 始终保留专属分派。
+                    // 自约束回调接管普通读；设备独立分派，Constrained 保留整区域读取合同。
                     let callback_reads = !opts.is_ifetch
                         && self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_reads());
                     // 低 64 位投影只用于区域分派，符号读事件保留完整的原始地址。
@@ -626,7 +652,9 @@ impl<B: BV> Memory<B> {
                         ),
                         |region| {
                             if callback_reads {
-                                matches!(region, Region::Custom(..) | Region::Constrained(..))
+                                matches!(region, Region::Custom(..))
+                                    || matches!(region, Region::Constrained(..))
+                                        && !self.client_info.as_ref().unwrap().handles_concrete_reads()
                             } else {
                                 !matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
                             }
@@ -640,6 +668,29 @@ impl<B: BV> Memory<B> {
                             for region in &self.regions {
                                 match region {
                                     Region::Constrained(range, generator) if range.contains(&concrete_addr) => {
+                                        if !opts.is_ifetch
+                                            && self
+                                                .client_info
+                                                .as_ref()
+                                                .is_some_and(|client| client.handles_concrete_reads())
+                                        {
+                                            if concrete_addr != range.start
+                                                || u64::from(bytes) != range.end - range.start
+                                            {
+                                                return Err(ExecError::BadRead(
+                                                    "Constrained read address is not within bounds",
+                                                ));
+                                            }
+                                            return self.read_symbolic(
+                                                read_kind,
+                                                address,
+                                                bytes,
+                                                solver,
+                                                tag,
+                                                opts,
+                                                region.region_name(),
+                                            );
+                                        }
                                         return read_constrained(
                                             range,
                                             generator.as_ref(),
@@ -651,7 +702,7 @@ impl<B: BV> Memory<B> {
                                             tag,
                                             opts,
                                             region.region_name(),
-                                        )
+                                        );
                                     }
                                     Region::Symbolic(range) | Region::SymbolicCode(range)
                                         if range.contains(&concrete_addr) =>
@@ -727,7 +778,27 @@ impl<B: BV> Memory<B> {
                         );
                         // 沿用具体地址的区域优先级，证明所有候选都由同一区域处理。
                         let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
-                        if (matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
+                        let array_constrained = matches!(region, Region::Constrained(..))
+                            && callback_reads
+                            && self.client_info.as_ref().unwrap().handles_concrete_reads();
+                        if array_constrained {
+                            let valid = Exp::And(
+                                Box::new(Exp::Bool(u64::from(bytes) == range.end - range.start)),
+                                Box::new(Exp::Eq(Box::new(addr_exp.clone()), Box::new(bits64(range.start, 64)))),
+                            );
+                            let invalid = Exp::And(Box::new(selected.clone()), Box::new(Exp::Not(Box::new(valid))));
+                            if solver.check_sat_with(&invalid, info).is_sat()? {
+                                if solver.check_sat_with(&Exp::Not(Box::new(invalid)), info).is_unsat()? {
+                                    return Err(ExecError::BadRead("Constrained read address is not within bounds"));
+                                }
+                                return Err(ExecError::SymbolicLength(
+                                    if tag { "read_memt_address" } else { "read_mem_address" },
+                                    info,
+                                ));
+                            }
+                        }
+                        if (array_constrained
+                            || matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
                             || matches!(region, Region::Concrete(..))
                                 && !opts.is_ifetch
                                 && self.client_info.as_ref().is_some_and(|client| client.handles_concrete_reads()))
@@ -855,6 +926,8 @@ impl<B: BV> Memory<B> {
                             return contents.write(write_kind, concrete_addr.lower_u64(), data, solver, tag)
                         }
 
+                        Region::Excluded(_) => continue,
+                        _ if region.region_range().contains(&concrete_addr.lower_u64()) => break,
                         _ => continue,
                     }
                 }
@@ -891,6 +964,8 @@ impl<B: BV> Memory<B> {
                                 Region::Custom(range, contents) if range.contains(&concrete_addr) => {
                                     return contents.write(write_kind, concrete_addr, data, solver, tag)
                                 }
+                                Region::Excluded(_) => continue,
+                                _ if region.region_range().contains(&concrete_addr) => break,
                                 _ => continue,
                             }
                         }

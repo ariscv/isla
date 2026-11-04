@@ -206,15 +206,15 @@ fp_rounding_unary_primop!(fp16_from_signed, {
     FPRoundingUnary::FromSigned(ty.exponent_width(), ty.significand_width())
 });
 fp_rounding_unary_primop!(fp32_from_signed, {
-    let ty = FPTy::fp16();
+    let ty = FPTy::fp32();
     FPRoundingUnary::FromSigned(ty.exponent_width(), ty.significand_width())
 });
 fp_rounding_unary_primop!(fp64_from_signed, {
-    let ty = FPTy::fp16();
+    let ty = FPTy::fp64();
     FPRoundingUnary::FromSigned(ty.exponent_width(), ty.significand_width())
 });
 fp_rounding_unary_primop!(fp128_from_signed, {
-    let ty = FPTy::fp16();
+    let ty = FPTy::fp128();
     FPRoundingUnary::FromSigned(ty.exponent_width(), ty.significand_width())
 });
 
@@ -223,15 +223,15 @@ fp_rounding_unary_primop!(fp16_from_unsigned, {
     FPRoundingUnary::FromUnsigned(ty.exponent_width(), ty.significand_width())
 });
 fp_rounding_unary_primop!(fp32_from_unsigned, {
-    let ty = FPTy::fp16();
+    let ty = FPTy::fp32();
     FPRoundingUnary::FromUnsigned(ty.exponent_width(), ty.significand_width())
 });
 fp_rounding_unary_primop!(fp64_from_unsigned, {
-    let ty = FPTy::fp16();
+    let ty = FPTy::fp64();
     FPRoundingUnary::FromUnsigned(ty.exponent_width(), ty.significand_width())
 });
 fp_rounding_unary_primop!(fp128_from_unsigned, {
-    let ty = FPTy::fp16();
+    let ty = FPTy::fp128();
     FPRoundingUnary::FromUnsigned(ty.exponent_width(), ty.significand_width())
 });
 
