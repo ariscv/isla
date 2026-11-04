@@ -734,9 +734,10 @@ impl<B: BV> Memory<B> {
 
             Val::Symbolic(symbolic_addr) => {
                 if !self.client_info.as_ref().is_some_and(|client| client.constrains_symbolic_writes()) {
+                    let bytes = data_bytes(&data, solver)?;
                     match self.check_concrete_overlap(
                         symbolic_addr,
-                        data_bytes(&data, solver)?,
+                        bytes,
                         ExecError::SymbolicLength(
                             if tag.is_some() { "write_memt_address" } else { "write_mem_address" },
                             SourceLoc::unknown(),
@@ -745,14 +746,18 @@ impl<B: BV> Memory<B> {
                         solver,
                     )? {
                         Overlap::Unique(concrete_addr) => {
-                            return self.write(
-                                write_kind,
-                                Val::Bits(B::new(concrete_addr, 64)),
-                                data,
-                                solver,
-                                tag,
-                                opts,
-                            )
+                            if excluded_concrete_hit(&self.regions, concrete_addr, bytes) {
+                                return Err(ExecError::BadWrite("excluded memory region"));
+                            }
+                            for region in self.regions.iter_mut() {
+                                match region {
+                                    Region::Custom(range, contents) if range.contains(&concrete_addr) => {
+                                        return contents.write(write_kind, concrete_addr, data, solver, tag)
+                                    }
+                                    _ => continue,
+                                }
+                            }
+                            // 低 64 位投影只用于区域分派，写事件必须保留完整符号地址。
                         }
                         Overlap::NoOverlap => {}
                     }

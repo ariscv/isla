@@ -1356,10 +1356,23 @@ fn run_special_primop<'ir, B: BV>(
                         }
                     }
                     Val::Symbolic(sym) => {
-                        let value = primop::proven_symbolic_i128(*sym, solver, info)?
-                            .expect("指令公告前必须将符号 PC 拆分为唯一候选");
-                        let width = solver.length(*sym).expect("PC 必须是位向量");
-                        let bv = B::get_slice_int(width, value, 0);
+                        assert!(solver.check_sat(info).is_sat()?, "指令公告前的 PC 路径必须可满足");
+                        let bv = {
+                            let mut model = Model::new(solver);
+                            model.set_complete_model(true);
+                            match model.get_var(*sym)? {
+                                ModelVal::Exp(smtlib::Exp::Bits64(b64)) => B::new(b64.lower_u64(), b64.len()),
+                                ModelVal::Exp(smtlib::Exp::Bits(bits)) => crate::smt::model_bits_to_bv(&bits)?,
+                                _ => panic!("PC 模型值必须是位向量"),
+                            }
+                        };
+                        let uniqueness = smtlib::Exp::Neq(
+                            Box::new(smtlib::Exp::Var(*sym)),
+                            Box::new(crate::primop_util::smt_sbits(bv)),
+                        );
+                        if solver.check_sat_with(&uniqueness, info).is_sat()? {
+                            panic!("指令公告前必须将符号 PC 拆分为唯一候选");
+                        }
                         let count = frame.pc_counts.entry(bv).or_insert(0);
                         *count += 1;
                         if *count > limit {
@@ -3898,6 +3911,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 #[cfg(test)]
 mod tests {
     mod review27_tests;
+    mod review28_tests;
 
     mod review26_tests {
         use super::*;
