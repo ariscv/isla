@@ -423,6 +423,9 @@ impl<B: BV> Memory<B> {
         let mut region_constraints = Vec::new();
 
         let addr_size = solver.length(address).unwrap_or_else(|| panic!("address is not a bitvector"));
+        let cmp_size = addr_size.max(64);
+        let addr_exp =
+            if addr_size < cmp_size { ZeroExtend(cmp_size - addr_size, Box::new(Var(address))) } else { Var(address) };
 
         for region in &self.regions {
             if !matches!(region, Region::Excluded(_))
@@ -431,8 +434,8 @@ impl<B: BV> Memory<B> {
                 let Range { start, end } = region.region_range();
 
                 region_constraints.push(And(
-                    Box::new(Bvule(Box::new(bits64(*start, addr_size)), Box::new(Var(address)))),
-                    Box::new(Bvult(Box::new(Var(address)), Box::new(bits64(*end, addr_size)))),
+                    Box::new(Bvule(Box::new(bits64(*start, cmp_size)), Box::new(addr_exp.clone()))),
+                    Box::new(Bvult(Box::new(addr_exp.clone()), Box::new(bits64(*end, cmp_size)))),
                 ))
             }
         }

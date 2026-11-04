@@ -132,7 +132,7 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
                 }
                 let symbol = zencode::decode(shared_state.symtab.to_str(id));
                 // HACK: Don't store the entire TLB in the trace
-                if !for_write && symbol != "_TLB" {
+                if !for_write && !symbol.contains("_TLB") {
                     solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
                 }
                 Borrowed(value)
@@ -2097,7 +2097,10 @@ fn try_merge_diamond<'ir, B: BV>(
                     } else {
                         build_ite(cond_sym, val_then, val_else, solver, info)?
                     };
-                    solver.add_event(Event::ReadReg(*reg, accessor.clone(), val));
+                    let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
+                    if !symbol.contains("_TLB") {
+                        solver.add_event(Event::ReadReg(*reg, accessor.clone(), val));
+                    }
                 }
                 solver.order_transaction_register_reads(tx);
                 *frame = merged_frame;
@@ -3891,6 +3894,279 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review24_tests {
+        use super::*;
+
+        #[test]
+        fn 排除区间拆分必须保留完整合法地址域() {
+            for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
+                for bytes in [Val::I128(4), Val::I64(4), Val::Bits(B64::new(4, 8))] {
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::<B64>::new(&ctx);
+                    let address = solver.declare_const(smtlib::Ty::BitVec(64), info());
+                    solver.add(Def::Assert(smtlib::Exp::Bvult(
+                        Box::new(smtlib::Exp::Var(address)),
+                        Box::new(smtlib::bits64(8, 64)),
+                    )));
+                    let mut frame = make_frame(vec![Instr::End]);
+                    frame.memory_mut().add_excluded_region(8..16);
+                    let index = if matches!(op, "read_memt_address" | "write_memt_address") { 1 } else { 2 };
+                    let mut operands = vec![Val::Unit; index + 2];
+                    operands[index] = Val::Symbolic(address);
+                    operands[index + 1] = bytes.clone();
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_max_forks_per_path(1));
+                    let queue = Worker::new_lifo();
+                    let mut fraction = Fraction::one();
+                    assert!(symbolic_length::retry_symbolic_length(
+                        ExecError::SymbolicLength(op, info()),
+                        &operands,
+                        TaskId::fresh(),
+                        &mut fraction,
+                        None,
+                        &SingleForkSink { queue: &queue },
+                        &mut frame,
+                        &state,
+                        &mut solver,
+                    )
+                    .unwrap());
+                    let child = queue.pop().expect("合法与排除子域必须一次拆开");
+                    assert!(queue.is_empty(), "不得逐个枚举地址");
+                    let Some((Def::Assert(excluded), _)) = child.fork_cond else {
+                        panic!("排除路径必须携带分叉谓词")
+                    };
+                    let mut replay = Solver::from_checkpoint(&ctx, child.checkpoint);
+                    replay.add(Def::Assert(excluded));
+                    for candidate in 0..8 {
+                        let equal = smtlib::Exp::Eq(
+                            Box::new(smtlib::Exp::Var(address)),
+                            Box::new(smtlib::bits64(candidate, 64)),
+                        );
+                        assert_eq!(
+                            solver.check_sat_with(&equal, info()).is_sat().unwrap(),
+                            candidate <= 4,
+                            "{op}，{bytes:?} 必须保留每个合法地址"
+                        );
+                        assert_eq!(
+                            replay.check_sat_with(&equal, info()).is_sat().unwrap(),
+                            candidate > 4,
+                            "{op}，{bytes:?} 的剩余路径只能包含跨入排除区域的地址"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn 窄地址重试必须用扩展位宽比较区域上界() {
+            for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let address = solver.declare_const(smtlib::Ty::BitVec(8), info());
+                let mut frame = make_frame(vec![Instr::End]);
+                frame.memory_mut().add_concrete_region(1..256, HashMap::new());
+                let index = if matches!(op, "read_memt_address" | "write_memt_address") { 1 } else { 2 };
+                let mut operands = vec![Val::Unit; index + 2];
+                operands[index] = Val::Symbolic(address);
+                operands[index + 1] = Val::I128(1);
+                let state = TaskState::new();
+                let queue = Worker::new_lifo();
+                let mut fraction = Fraction::one();
+                assert!(symbolic_length::retry_symbolic_length(
+                    ExecError::SymbolicLength(op, info()),
+                    &operands,
+                    TaskId::fresh(),
+                    &mut fraction,
+                    None,
+                    &SingleForkSink { queue: &queue },
+                    &mut frame,
+                    &state,
+                    &mut solver,
+                )
+                .unwrap());
+                let child = queue.pop().expect("地址零必须留在区域外路径");
+                assert!(queue.is_empty());
+                let Some((Def::Assert(outside), _)) = child.fork_cond else {
+                    panic!("区域外路径必须携带分叉谓词")
+                };
+                let mut replay = Solver::from_checkpoint(&ctx, child.checkpoint);
+                replay.add(Def::Assert(outside));
+                for candidate in 0..256 {
+                    let equal =
+                        smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(address)), Box::new(smtlib::bits64(candidate, 8)));
+                    assert_eq!(solver.check_sat_with(&equal, info()).is_sat().unwrap(), candidate != 0);
+                    assert_eq!(replay.check_sat_with(&equal, info()).is_sat().unwrap(), candidate == 0);
+                }
+            }
+        }
+
+        #[test]
+        fn 窄地址覆盖整个地址域时不能绕过具体区域() {
+            let mut observations = Vec::new();
+            for enabled in [false, true] {
+                let shared = empty_shared_state();
+                let cond = test_name(580);
+                let address = test_name(581);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(address, Ty::Bits(8), info()),
+                    Instr::Jump(Exp::Id(cond), 5, info()),
+                    Instr::Copy(Loc::Id(address), Exp::Bits(B64::new(1, 8)), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(address), Exp::Bits(B64::new(2, 8)), info()),
+                    Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primop::variadic_primops()["read_mem"],
+                        vec![Exp::Unit, Exp::I128(8), Exp::Id(address), Exp::I128(1)],
+                        info(),
+                    ),
+                    Instr::End,
+                ]);
+                frame.memory_mut().add_concrete_region(0..256, HashMap::from([(1, 42), (2, 42)]));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(
+                    frame.task(TaskId::fresh(), &state),
+                    &shared,
+                    &out,
+                    &|_, _, result, _, mut solver, out| {
+                        let Ok((Run::Finished(value), _)) = result else { panic!("合法读必须完成") };
+                        let wrong = primop::eq_anything(value, Val::Bits(B64::new(0, 8)), &mut solver, info()).unwrap();
+                        let possible_zero = solver
+                            .check_sat_with(&crate::primop_util::smt_value(&wrong, info()).unwrap(), info())
+                            .is_sat()
+                            .unwrap();
+                        out.lock().unwrap().push(possible_zero);
+                    },
+                );
+                let results = out.into_inner().unwrap();
+                eprintln!("窄地址：合并={enabled}，允许错误值={results:?}");
+                observations.push((enabled, results));
+            }
+            eprintln!("窄地址具体内存：{observations:?}");
+            assert!(
+                observations.iter().all(|(_, wrong)| wrong.iter().all(|value| !value)),
+                "内存只能返回 42，但合并后允许返回 0"
+            );
+        }
+
+        #[test]
+        fn 排除区域之前的合法跨界候选必须保留() {
+            let mut observations = Vec::new();
+            for enabled in [false, true] {
+                for op in [
+                    "read_mem",
+                    "read_mem_exclusive",
+                    "read_mem_ifetch",
+                    "platform_read_memt",
+                    "write_mem",
+                    "write_mem_exclusive",
+                    "platform_write_memt",
+                ] {
+                    let shared = empty_shared_state();
+                    let address = Exp::Call(Op::Concat, vec![Exp::Bits(B64::zeros(61)), Exp::Undefined(Ty::Bits(3))]);
+                    let args = match op {
+                        "platform_read_memt" => vec![Exp::Unit, address, Exp::I128(4)],
+                        "platform_write_memt" => {
+                            vec![Exp::Unit, address, Exp::I128(4), Exp::Bits(B64::zeros(32)), Exp::Bits(B64::zeros(1))]
+                        }
+                        "write_mem" | "write_mem_exclusive" => {
+                            vec![Exp::Unit, Exp::I128(64), address, Exp::I128(4), Exp::Bits(B64::zeros(32))]
+                        }
+                        _ => vec![Exp::Unit, Exp::I128(64), address, Exp::I128(4)],
+                    };
+                    let mut frame = make_frame(vec![
+                        Instr::PrimopVariadic(Loc::Id(RETURN), primop::variadic_primops()[op], args, info()),
+                        Instr::End,
+                    ]);
+                    frame.memory_mut().add_excluded_region(8..16);
+                    if op == "read_mem_ifetch" {
+                        frame.memory_mut().add_symbolic_code_region(0..8);
+                    }
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                    let out = Mutex::new(Vec::new());
+                    start_single(
+                        frame.task(TaskId::fresh(), &state),
+                        &shared,
+                        &out,
+                        &|_, _, result, _, solver, out| {
+                            let ok = matches!(result, Ok((Run::Finished(_), _)));
+                            let description = format!(
+                                "{:?}",
+                                result.map(|(run, _)| matches!(run, Run::Finished(_))).map_err(|(error, _)| error)
+                            );
+                            let events = solver.trace().to_vec();
+                            let exclusive = events.iter().any(|event| {
+                                matches!(event, Event::ReadMem{ opts, .. } if opts.is_exclusive)
+                                    || matches!(event, Event::WriteMem{ opts, .. } if opts.is_exclusive())
+                            });
+                            out.lock().unwrap().push((ok, description, exclusive));
+                        },
+                    );
+                    observations.push((enabled, op, out.into_inner().unwrap()));
+                }
+            }
+            eprintln!("跨界排除区域：{observations:?}");
+            assert!(
+                observations.iter().all(|(_, _, results)| results.iter().any(|(ok, _, _)| *ok)),
+                "地址 0..=4 的合法四字节访问全部丢失"
+            );
+        }
+
+        #[test]
+        fn 合并必须沿用特殊寄存器轨迹过滤() {
+            let mut observations = Vec::new();
+            for enabled in [false, true] {
+                for name in ["_TLB", "core_TLB", "_TLB_cache", "ordinary_reg"] {
+                    let mut shared = empty_shared_state();
+                    let encoded = zencode::encode(name);
+                    let reg = shared.symtab.intern(&encoded);
+                    let cond = test_name(580);
+                    let value = test_name(581);
+                    let mut frame = make_frame(vec![
+                        Instr::Decl(cond, Ty::Bool, info()),
+                        Instr::Decl(value, Ty::Bool, info()),
+                        Instr::Jump(Exp::Id(cond), 5, info()),
+                        Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Id(value), info()),
+                        Instr::End,
+                    ]);
+                    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(true)));
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                    let out = Mutex::new(Vec::new());
+                    start_single(
+                        frame.task(TaskId::fresh(), &state),
+                        &shared,
+                        &out,
+                        &|_, _, result, _, solver, out| {
+                            assert!(matches!(result, Ok((Run::Finished(_), _))));
+                            let reads = solver
+                                .trace()
+                                .to_vec()
+                                .iter()
+                                .filter(|event| matches!(event, Event::ReadReg(r, _, _) if *r == reg))
+                                .count();
+                            out.lock().unwrap().push(reads);
+                        },
+                    );
+                    let counts = out.into_inner().unwrap();
+                    assert_eq!(counts.len(), if enabled { 1 } else { 2 }, "开启合并时必须确实合流");
+                    let expected = usize::from(!name.contains("_TLB"));
+                    assert!(
+                        counts.iter().all(|count| *count == expected),
+                        "{name}，合并={enabled}，读取次数={counts:?}"
+                    );
+                    observations.push((enabled, name, counts));
+                }
+            }
+            eprintln!("特殊寄存器轨迹：{observations:?}");
+        }
+    }
     mod review23_tests {
         use super::*;
 
@@ -3937,9 +4213,15 @@ mod tests {
                     let Some((Def::Assert(outside), _)) = child.fork_cond else {
                         panic!("{op}，{region:?} 必须保留区域外谓词")
                     };
+                    let excluded = matches!(region, Region::Excluded(_));
                     assert!(
-                        matches!(&outside, smtlib::Exp::Not(predicate) if matches!(predicate.as_ref(), smtlib::Exp::And(..))),
-                        "区域拆分不得使用地址相等谓词"
+                        matches!(&outside, smtlib::Exp::Not(predicate) if
+                        if excluded {
+                            matches!(predicate.as_ref(), smtlib::Exp::Not(allowed) if matches!(allowed.as_ref(), smtlib::Exp::And(..)))
+                        } else {
+                            matches!(predicate.as_ref(), smtlib::Exp::And(..))
+                        }),
+                        "区域拆分必须使用完整区域谓词，不得使用地址相等谓词"
                     );
                     let mut replay = Solver::from_checkpoint(&ctx, child.checkpoint);
                     replay.add(Def::Assert(outside));
@@ -3955,8 +4237,8 @@ mod tests {
                                 )
                                 .is_sat()
                                 .unwrap(),
-                            expected,
-                            "区域外路径必须保留全部符号地址"
+                            if excluded { !expected } else { expected },
+                            "分叉路径必须保留所选子域的全部符号地址"
                         );
                     }
                 }

@@ -155,13 +155,53 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     }
                 }
                 "read_mem_address" | "write_mem_address" | "read_memt_address" | "write_memt_address" => {
+                    // 长度参数紧跟地址；缺少可提取的长度时按一字节探测。
+                    let bytes = match operands.get(index + 1) {
+                        Some(Val::I128(bytes)) => u32::try_from(*bytes).expect("内存访问字节数必须能用 u32 表示"),
+                        Some(Val::I64(bytes)) => u32::try_from(*bytes).expect("内存访问字节数必须能用 u32 表示"),
+                        Some(Val::Bits(bytes)) => {
+                            u32::try_from(bytes.unsigned()).expect("内存访问字节数必须能用 u32 表示")
+                        }
+                        _ => 1,
+                    };
+                    // 先按完整访问区间分离排除子域，再按起始地址分派区域。
+                    if let Some(allowed) =
+                        crate::memory::smt_excluded_constraint(frame.memory().regions(), &Var(sym), bytes, solver)
+                    {
+                        let excluded = Not(Box::new(allowed.clone()));
+                        if solver.check_sat_with(&allowed, info).is_sat()?
+                            && solver.check_sat_with(&excluded, info).is_sat()?
+                        {
+                            fork_retry_operand(
+                                sym,
+                                allowed,
+                                excluded,
+                                operands,
+                                info,
+                                task_id,
+                                task_fraction,
+                                stop_conditions,
+                                fork_sink,
+                                frame,
+                                task_state,
+                                solver,
+                            )?;
+                            return Ok(true);
+                        }
+                    }
                     let width = solver.length(sym).expect("内存地址必须是位向量");
+                    let cmp_width = width.max(64);
+                    let addr_exp =
+                        if width < cmp_width { ZeroExtend(cmp_width - width, Box::new(Var(sym))) } else { Var(sym) };
                     // 逐区域拆分，保留区域内地址的符号覆盖及具体内存分派的优先级。
                     for region in frame.memory().regions() {
                         let range = region.region_range();
                         let in_region = And(
-                            Box::new(Bvule(Box::new(smtlib::bits64(range.start, width)), Box::new(Var(sym)))),
-                            Box::new(Bvult(Box::new(Var(sym)), Box::new(smtlib::bits64(range.end, width)))),
+                            Box::new(Bvule(
+                                Box::new(smtlib::bits64(range.start, cmp_width)),
+                                Box::new(addr_exp.clone()),
+                            )),
+                            Box::new(Bvult(Box::new(addr_exp.clone()), Box::new(smtlib::bits64(range.end, cmp_width)))),
                         );
                         let outside_region = Not(Box::new(in_region.clone()));
                         if solver.check_sat_with(&in_region, info).is_sat()?
