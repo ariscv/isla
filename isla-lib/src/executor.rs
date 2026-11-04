@@ -2002,11 +2002,18 @@ fn try_merge_diamond<'ir, B: BV>(
                     continue;
                 }
             };
+        // 两臂读取同一个尚未初始化的普通寄存器时，必须复用首次读取的符号。
+        let mut then_frame = frame.clone();
+        for (reg, _, value) in arm_else.local_state.register_reads.as_ref().unwrap() {
+            if frame.regs().get_last_if_initialized(*reg).is_none() && !frame.regs().is_relaxed(*reg) {
+                then_frame.regs_mut().assign(*reg, value.clone(), shared_state);
+            }
+        }
         let arm_then = match simulate_diamond_arm(
             target,
             join_pc.saturating_sub(1),
             join_pc,
-            frame.clone(),
+            then_frame,
             shared_state,
             solver,
             limit_handler,
@@ -2076,6 +2083,23 @@ fn try_merge_diamond<'ir, B: BV>(
                 for equal in equalities {
                     solver.add(smtlib::Def::Assert(equal));
                 }
+                // 两臂的寄存器及访问器序列已经验证对齐，每个位置保留一次读取。
+                for ((reg, accessor, val_then), (_, _, val_else)) in arm_then
+                    .local_state
+                    .register_reads
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .zip(arm_else.local_state.register_reads.as_ref().unwrap())
+                {
+                    let val = if val_then == val_else {
+                        val_then.clone()
+                    } else {
+                        build_ite(cond_sym, val_then, val_else, solver, info)?
+                    };
+                    solver.add_event(Event::ReadReg(*reg, accessor.clone(), val));
+                }
+                solver.order_transaction_register_reads(tx);
                 *frame = merged_frame;
                 for reg in &ws_then.register_write_order {
                     let value = frame.regs().get_last_if_initialized(*reg).unwrap().clone();
@@ -3867,6 +3891,369 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    mod review23_tests {
+        use super::*;
+
+        #[test]
+        fn 四种地址重试必须逐区域拆分所有区域类型() {
+            use crate::memory::Region;
+
+            let regions = [
+                Region::Concrete(0..1, HashMap::from([(0, 42)])),
+                Region::Excluded(0..1),
+                Region::Constrained(0..1, Arc::new(|solver| solver.define_bitvector(smtlib::bits64(42, 8), info()))),
+                Region::Custom(0..1, Box::new(super::review15_tests::AuditDevice { value: 42 })),
+                Region::SymbolicCode(0..1),
+                Region::Symbolic(0..1),
+            ];
+            for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
+                for region in &regions {
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::<B64>::new(&ctx);
+                    let address = solver.declare_const(smtlib::Ty::BitVec(64), info());
+                    let mut frame = make_frame(vec![Instr::End]);
+                    frame.memory_mut().add_region(region.clone());
+                    let index = if matches!(op, "read_memt_address" | "write_memt_address") { 1 } else { 2 };
+                    let mut operands = vec![Val::Unit; 3];
+                    operands[index] = Val::Symbolic(address);
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_max_forks_per_path(1));
+                    let queue = Worker::new_lifo();
+                    let mut fraction = Fraction::one();
+                    assert!(symbolic_length::retry_symbolic_length(
+                        ExecError::SymbolicLength(op, info()),
+                        &operands,
+                        TaskId::fresh(),
+                        &mut fraction,
+                        None,
+                        &SingleForkSink { queue: &queue },
+                        &mut frame,
+                        &state,
+                        &mut solver,
+                    )
+                    .unwrap());
+                    let child = queue.pop().unwrap();
+                    assert!(queue.is_empty(), "{op}，{region:?} 只应分叉一次");
+                    let Some((Def::Assert(outside), _)) = child.fork_cond else {
+                        panic!("{op}，{region:?} 必须保留区域外谓词")
+                    };
+                    assert!(
+                        matches!(&outside, smtlib::Exp::Not(predicate) if matches!(predicate.as_ref(), smtlib::Exp::And(..))),
+                        "区域拆分不得使用地址相等谓词"
+                    );
+                    let mut replay = Solver::from_checkpoint(&ctx, child.checkpoint);
+                    replay.add(Def::Assert(outside));
+                    for (candidate, expected) in [(0, false), (1, true), ((1u64 << 32) + 1, true)] {
+                        assert_eq!(
+                            replay
+                                .check_sat_with(
+                                    &smtlib::Exp::Eq(
+                                        Box::new(smtlib::Exp::Var(address)),
+                                        Box::new(smtlib::bits64(candidate, 64)),
+                                    ),
+                                    info(),
+                                )
+                                .is_sat()
+                                .unwrap(),
+                            expected,
+                            "区域外路径必须保留全部符号地址"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn 单一区域无拆分谓词时必须明确报错而非枚举地址() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let address = solver.declare_const(smtlib::Ty::BitVec(64), info());
+            solver.add(Def::Assert(smtlib::Exp::Bvult(
+                Box::new(smtlib::Exp::Var(address)),
+                Box::new(smtlib::bits64(16, 64)),
+            )));
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.memory_mut().add_concrete_region(0..16, HashMap::from_iter((0..16).map(|address| (address, 42))));
+            let state = TaskState::new();
+            let queue = Worker::new_lifo();
+            let mut fraction = Fraction::one();
+            let result = symbolic_length::retry_symbolic_length(
+                ExecError::SymbolicLength("read_mem_address", info()),
+                &[Val::Unit, Val::I128(64), Val::Symbolic(address), Val::I128(1)],
+                TaskId::fresh(),
+                &mut fraction,
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &mut solver,
+            );
+            assert!(matches!(result, Err(ExecError::SymbolicLength("read_mem_address", _))));
+            assert!(queue.is_empty(), "不支持的符号区域内部访问不得启动单点枚举");
+        }
+
+        #[test]
+        fn 合并必须保留重复读取次数() {
+            let mut observations = Vec::new();
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let reg = shared.symtab.intern("zreview23_reg");
+                let cond = test_name(580);
+                let value = test_name(581);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(value, Ty::Bits(8), info()),
+                    Instr::Jump(Exp::Id(cond), 6, info()),
+                    Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                    Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                    Instr::Goto(8),
+                    Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                    Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(value), info()),
+                    Instr::End,
+                ]);
+                frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
+                    assert!(matches!(result, Ok((Run::Finished(_), _))));
+                    let events = solver.trace().to_vec();
+                    let reads =
+                        events.iter().filter(|event| matches!(event, Event::ReadReg(r, _, _) if *r == reg)).count();
+                    out.lock().unwrap().push(reads);
+                });
+                let counts = out.into_inner().unwrap();
+                assert_eq!(counts.len(), if enabled { 1 } else { 2 }, "开启合并时必须确实合流");
+                observations.push((enabled, counts));
+            }
+            eprintln!("真实重复读取次数：{observations:?}");
+            assert!(observations.iter().all(|(_, counts)| counts.iter().all(|count| *count == 2)));
+        }
+
+        #[test]
+        fn 合并首次读取不能增加轨迹事件() {
+            let mut observations = Vec::new();
+            for enabled in [false, true] {
+                let mut shared = empty_shared_state();
+                let reg = shared.symtab.intern("zreview23_fresh");
+                let cond = test_name(580);
+                let value = test_name(581);
+                let mut frame = make_frame(vec![
+                    Instr::Decl(cond, Ty::Bool, info()),
+                    Instr::Decl(value, Ty::Bits(8), info()),
+                    Instr::Jump(Exp::Id(cond), 5, info()),
+                    Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                    Instr::Goto(6),
+                    Instr::Copy(Loc::Id(value), Exp::Id(reg), info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(value), info()),
+                    Instr::End,
+                ]);
+                frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::Bits(8)));
+                let state =
+                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let out = Mutex::new(Vec::new());
+                start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
+                    assert!(matches!(result, Ok((Run::Finished(_), _))));
+                    let reads = solver
+                        .trace()
+                        .to_vec()
+                        .iter()
+                        .filter(|event| matches!(event, Event::ReadReg(r, _, _) if *r == reg))
+                        .count();
+                    out.lock().unwrap().push(reads);
+                });
+                let counts = out.into_inner().unwrap();
+                assert_eq!(counts.len(), if enabled { 1 } else { 2 }, "开启合并时必须确实合流");
+                observations.push((enabled, counts));
+            }
+            eprintln!("首次读取次数：{observations:?}");
+            assert!(observations.iter().all(|(_, counts)| counts.iter().all(|count| *count == 1)));
+        }
+
+        #[test]
+        fn 排除区域和符号默认区域必须按类别拆分() {
+            let mut failures = Vec::new();
+            for enabled in [false, true] {
+                for reverse in [false, true] {
+                    let shared = empty_shared_state();
+                    let cond = test_name(580);
+                    let address = test_name(581);
+                    let outside = Exp::Call(Op::Concat, vec![Exp::Bits(B64::new(1, 32)), Exp::Undefined(Ty::Bits(32))]);
+                    let excluded = Exp::Bits(B64::zeros(64));
+                    let (left, right) = if reverse { (excluded, outside) } else { (outside, excluded) };
+                    let mut frame = make_frame(vec![
+                        Instr::Decl(cond, Ty::Bool, info()),
+                        Instr::Decl(address, Ty::Bits(64), info()),
+                        Instr::Jump(Exp::Id(cond), 5, info()),
+                        Instr::Copy(Loc::Id(address), left, info()),
+                        Instr::Goto(6),
+                        Instr::Copy(Loc::Id(address), right, info()),
+                        Instr::PrimopVariadic(
+                            Loc::Id(RETURN),
+                            primop::variadic_primops()["read_mem"],
+                            vec![Exp::Unit, Exp::I128(64), Exp::Id(address), Exp::I128(1)],
+                            info(),
+                        ),
+                        Instr::End,
+                    ]);
+                    frame.memory_mut().add_excluded_region(0..1);
+                    let state = TaskState::new().with_execution_limits(
+                        ExecutionLimits::default().with_path_merging(enabled).with_max_forks_per_path(1),
+                    );
+                    let out = Mutex::new(Vec::new());
+                    start_single(
+                        frame.task(TaskId::fresh(), &state),
+                        &shared,
+                        &out,
+                        &|_, _, result, _, mut solver, out| {
+                            let ok = matches!(result, Ok((Run::Finished(_), _)));
+                            let coverage = if ok {
+                                let address = solver
+                                    .trace()
+                                    .to_vec()
+                                    .iter()
+                                    .find_map(|event| match event {
+                                        Event::ReadMem { address, .. } => Some(address.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap();
+                                solver
+                                    .check_sat_with(
+                                        &smtlib::Exp::Eq(
+                                            Box::new(crate::primop_util::smt_value(&address, info()).unwrap()),
+                                            Box::new(smtlib::bits64((1u64 << 32) + 1, 64)),
+                                        ),
+                                        info(),
+                                    )
+                                    .is_sat()
+                                    .unwrap()
+                            } else {
+                                false
+                            };
+                            out.lock().unwrap().push((
+                                format!(
+                                    "{:?}",
+                                    result.map(|(run, _)| matches!(run, Run::Finished(_))).map_err(|(error, _)| error)
+                                ),
+                                coverage,
+                            ));
+                        },
+                    );
+                    let results = out.into_inner().unwrap();
+                    eprintln!("排除区域：合并={enabled}，反转={reverse}，结果={results:?}");
+                    if !results.iter().any(|(_, coverage)| *coverage)
+                        || results.iter().any(|(result, _)| result.contains("BranchLimitReached"))
+                    {
+                        failures.push((enabled, reverse));
+                    }
+                }
+            }
+            assert!(failures.is_empty(), "合法符号地址覆盖不能因枚举耗尽预算而丢失：{failures:?}");
+        }
+
+        #[test]
+        fn 受约束区和符号代码区不能退回地址单点枚举() {
+            let mut failures = Vec::new();
+            for code in [false, true] {
+                for enabled in [false, true] {
+                    for reverse in [false, true] {
+                        let shared = empty_shared_state();
+                        let cond = test_name(580);
+                        let address = test_name(581);
+                        let symbolic = |upper| {
+                            Exp::Call(Op::Concat, vec![Exp::Bits(B64::new(upper, 32)), Exp::Undefined(Ty::Bits(32))])
+                        };
+                        let inside = if code { symbolic(1) } else { Exp::Bits(B64::zeros(64)) };
+                        let outside = symbolic(if code { 2 } else { 1 });
+                        let (left, right) = if reverse { (inside, outside) } else { (outside, inside) };
+                        let mut frame = make_frame(vec![
+                            Instr::Decl(cond, Ty::Bool, info()),
+                            Instr::Decl(address, Ty::Bits(64), info()),
+                            Instr::Jump(Exp::Id(cond), 5, info()),
+                            Instr::Copy(Loc::Id(address), left, info()),
+                            Instr::Goto(6),
+                            Instr::Copy(Loc::Id(address), right, info()),
+                            Instr::PrimopVariadic(
+                                Loc::Id(RETURN),
+                                primop::variadic_primops()[if code { "read_mem_ifetch" } else { "read_mem_exclusive" }],
+                                vec![Exp::Unit, Exp::I128(64), Exp::Id(address), Exp::I128(1)],
+                                info(),
+                            ),
+                            Instr::End,
+                        ]);
+                        if code {
+                            frame.memory_mut().add_symbolic_code_region((1u64 << 32)..(2u64 << 32));
+                            frame.memory_mut().add_symbolic_code_region((2u64 << 32)..(3u64 << 32));
+                        } else {
+                            frame.memory_mut().add_region(crate::memory::Region::Constrained(
+                                0..1,
+                                Arc::new(|solver| solver.define_bitvector(smtlib::bits64(42, 8), info())),
+                            ));
+                        }
+                        let state = TaskState::new().with_execution_limits(
+                            ExecutionLimits::default().with_path_merging(enabled).with_max_forks_per_path(1),
+                        );
+                        let out = Mutex::new(Vec::new());
+                        start_single(
+                            frame.task(TaskId::fresh(), &state),
+                            &shared,
+                            &out,
+                            &|_, _, result, _, mut solver, out| {
+                                let mut coverage = [false; 2];
+                                if matches!(result, Ok((Run::Finished(_), _))) {
+                                    let address = solver
+                                        .trace()
+                                        .to_vec()
+                                        .iter()
+                                        .find_map(|event| match event {
+                                            Event::ReadMem { address, opts, .. } => {
+                                                assert_eq!(opts.is_ifetch, code);
+                                                assert_eq!(opts.is_exclusive, !code);
+                                                Some(address.clone())
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let targets =
+                                        if code { [(1u64 << 32) + 1, (2u64 << 32) + 1] } else { [0, (1u64 << 32) + 1] };
+                                    for (position, target) in targets.into_iter().enumerate() {
+                                        coverage[position] = solver
+                                            .check_sat_with(
+                                                &smtlib::Exp::Eq(
+                                                    Box::new(crate::primop_util::smt_value(&address, info()).unwrap()),
+                                                    Box::new(smtlib::bits64(target, 64)),
+                                                ),
+                                                info(),
+                                            )
+                                            .is_sat()
+                                            .unwrap();
+                                    }
+                                }
+                                out.lock().unwrap().push((
+                                    format!(
+                                        "{:?}",
+                                        result
+                                            .map(|(run, _)| matches!(run, Run::Finished(_)))
+                                            .map_err(|(error, _)| error)
+                                    ),
+                                    coverage,
+                                ));
+                            },
+                        );
+                        let results = out.into_inner().unwrap();
+                        eprintln!("其他区域：代码={code}，合并={enabled}，反转={reverse}，结果={results:?}");
+                        if results.iter().any(|(result, _)| result.contains("BranchLimitReached"))
+                            || !(0..2).all(|position| results.iter().any(|(_, coverage)| coverage[position]))
+                        {
+                            failures.push((code, enabled, reverse));
+                        }
+                    }
+                }
+            }
+            assert!(failures.is_empty(), "区域外符号地址与其他符号代码区必须完整覆盖：{failures:?}");
+        }
+    }
 
     mod review22_tests {
         use super::*;
@@ -6426,8 +6813,8 @@ mod tests {
         use super::*;
 
         #[derive(Clone)]
-        struct AuditDevice {
-            value: u8,
+        pub(super) struct AuditDevice {
+            pub(super) value: u8,
         }
 
         impl crate::memory::CustomRegion<B64> for AuditDevice {
@@ -9806,15 +10193,17 @@ mod tests {
                 })
                 .collect();
             eprintln!("两臂均只读一次同一寄存器，合流后读事件：{reads:?}");
-            assert_eq!(reads.len(), 2);
+            assert_eq!(reads.len(), 1, "懒初始化只能提交一次合并读取");
             let inconsistent = smtlib::Exp::Neq(
                 Box::new(crate::primop_util::smt_value(&reads[0], info()).unwrap()),
-                Box::new(crate::primop_util::smt_value(&reads[1], info()).unwrap()),
+                Box::new(
+                    crate::primop_util::smt_value(frame.regs().get_last_if_initialized(reg).unwrap(), info()).unwrap(),
+                ),
             );
             assert_eq!(
                 solver.check_sat_with(&inconsistent, info()),
                 crate::smt::SmtResult::Unsat,
-                "没有写入的同一寄存器不能连续读出不同值"
+                "合并读取必须与没有写入的寄存器值一致"
             );
         }
 

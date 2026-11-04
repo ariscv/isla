@@ -156,20 +156,72 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 }
                 "read_mem_address" | "write_mem_address" | "read_memt_address" | "write_memt_address" => {
                     let width = solver.length(sym).expect("内存地址必须是位向量");
-                    // 与具体内存分派一致，按起始地址构造各具体区域的覆盖谓词。
-                    let in_concrete = frame
-                        .memory()
-                        .regions()
+                    // 逐区域拆分，保留区域内地址的符号覆盖及具体内存分派的优先级。
+                    for region in frame.memory().regions() {
+                        let range = region.region_range();
+                        let in_region = And(
+                            Box::new(Bvule(Box::new(smtlib::bits64(range.start, width)), Box::new(Var(sym)))),
+                            Box::new(Bvult(Box::new(Var(sym)), Box::new(smtlib::bits64(range.end, width)))),
+                        );
+                        let outside_region = Not(Box::new(in_region.clone()));
+                        if solver.check_sat_with(&in_region, info).is_sat()?
+                            && solver.check_sat_with(&outside_region, info).is_sat()?
+                        {
+                            fork_retry_operand(
+                                sym,
+                                in_region,
+                                outside_region,
+                                operands,
+                                info,
+                                task_id,
+                                task_fraction,
+                                stop_conditions,
+                                fork_sink,
+                                frame,
+                                task_state,
+                                solver,
+                            )?;
+                            return Ok(true);
+                        }
+                    }
+                    // 同一区域中的有限合并地址沿原 ITE 条件拆分，不选择地址模型值。
+                    let definitions = solver.trace().to_vec();
+                    let dependencies = crate::simplify::EventReferences::from_events(&definitions).dependencies(sym);
+                    let conditions: Vec<_> = definitions
                         .iter()
-                        .filter_map(|region| match region {
-                            crate::memory::Region::Concrete(range, _) => Some(And(
-                                Box::new(Bvule(Box::new(smtlib::bits64(range.start, width)), Box::new(Var(sym)))),
-                                Box::new(Bvult(Box::new(Var(sym)), Box::new(smtlib::bits64(range.end, width)))),
-                            )),
+                        .filter_map(|event| match event {
+                            Event::Smt(smtlib::Def::DefineConst(id, Ite(condition, _, _)), _, _)
+                                if dependencies.contains(id) =>
+                            {
+                                Some(condition.as_ref().clone())
+                            }
                             _ => None,
                         })
-                        .reduce(|left, right| Or(Box::new(left), Box::new(right)));
-                    in_concrete.map(|condition| (condition.clone(), Not(Box::new(condition))))
+                        .collect();
+                    for condition in conditions {
+                        let opposite = Not(Box::new(condition.clone()));
+                        if solver.check_sat_with(&condition, info).is_sat()?
+                            && solver.check_sat_with(&opposite, info).is_sat()?
+                        {
+                            fork_retry_operand(
+                                sym,
+                                condition,
+                                opposite,
+                                operands,
+                                info,
+                                task_id,
+                                task_fraction,
+                                stop_conditions,
+                                fork_sink,
+                                frame,
+                                task_state,
+                                solver,
+                            )?;
+                            return Ok(true);
+                        }
+                    }
+                    // 无法继续按区域拆分时保留原错误，禁止退回地址单点枚举。
+                    return Err(error);
                 }
                 _ => None,
             };

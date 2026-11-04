@@ -2613,13 +2613,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             } else if let Event::Smt(def, attrs, info) = &event {
                 self.with_def_attrs(*attrs, |solver| solver.add_internal(def, *info));
                 self.transaction_defs.push(event);
-            } else if let Event::ReadReg(reg, accessor, value) = &event {
-                if !self.transaction_defs.iter().any(
-                    |existing| matches!(existing, Event::ReadReg(r, a, v) if r == reg && a == accessor && v == value),
-                ) {
-                    self.transaction_defs.push(event);
-                }
             }
+            // 推测读取由执行器按两臂的读取序列合并，不能直接提交到轨迹。
             return;
         }
         self.add_event_internal(&event);
@@ -2957,6 +2952,35 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.trace.head.append(&mut self.transaction_defs);
         self.in_transaction = false;
     }
+
+    /// 合并读取保留序列顺序，并排在其符号定义之后、使用这些符号的计算之前。
+    pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+        assert!(!self.in_transaction, "只能调整已提交事务的读取顺序");
+        let events = self.trace.head.split_off(tx.head_len);
+        let mut reads = Vec::new();
+        for event in events {
+            if matches!(&event, Event::ReadReg(..)) {
+                reads.push(event);
+            } else {
+                assert!(matches!(&event, Event::Smt(..)), "合并读取之前只能提交 SMT 定义");
+                self.trace.head.push(event);
+            }
+        }
+        let mut position = tx.head_len;
+        for event in reads {
+            let Event::ReadReg(_, _, value) = &event else { unreachable!() };
+            let symbols = value.symbolic_variables();
+            for (index, definition) in self.trace.head.iter().enumerate().skip(position) {
+                if let Event::Smt(Def::DeclareConst(sym, _) | Def::DefineConst(sym, _), _, _) = definition {
+                    if symbols.contains(sym) {
+                        position = index + 1;
+                    }
+                }
+            }
+            self.trace.head.insert(position, event);
+            position += 1;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3106,6 +3130,8 @@ mod tests {
         let tx = solver.start_transaction();
         let symbol = solver.declare_const(Ty::Bool, SourceLoc::unknown());
         solver.add_event(Event::Cycle);
+        solver.add_event(Event::ReadReg(Name::from_u32(0), Vec::new(), Val::Symbolic(symbol)));
+        solver.add_event(Event::ReadReg(Name::from_u32(0), Vec::new(), Val::Symbolic(symbol)));
         assert_eq!(solver.trace.head.len(), tx.head_len);
         solver.commit_transaction();
         assert_eq!(solver.trace.head.len(), tx.head_len + 1);
