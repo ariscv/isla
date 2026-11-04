@@ -138,6 +138,22 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         }
         for sym in symbols {
             let partition = match op {
+                "vector_access" => {
+                    let len = match &operands[0] {
+                        Val::Vector(values) => u64::try_from(values.len()).unwrap(),
+                        bits => u64::from(crate::primop_util::length_bits(bits, solver, info)?),
+                    };
+                    let width = solver.length(sym).expect("向量索引必须是位向量");
+                    if width < 64 && (1u64 << width) <= len {
+                        None
+                    } else {
+                        let limit = smtlib::bits64(len, width);
+                        Some((
+                            Bvult(Box::new(Var(sym)), Box::new(limit.clone())),
+                            Bvuge(Box::new(Var(sym)), Box::new(limit)),
+                        ))
+                    }
+                }
                 "read_register_from_vector" | "write_register_from_vector" => {
                     let regs_index = if op == "read_register_from_vector" { 1 } else { 2 };
                     let Val::Vector(regs) = &operands[regs_index] else {

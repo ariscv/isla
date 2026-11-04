@@ -2309,7 +2309,7 @@ pub(crate) fn vector_access<B: BV>(
                     if !solver.check_sat_with(&in_bounds, info).is_sat()? {
                         return Err(ExecError::OutOfBounds("vector_access"));
                     }
-                    solver.assert(in_bounds);
+                    return Err(ExecError::SymbolicLength("vector_access", info));
                 }
             }
             _ => (),
@@ -2397,7 +2397,7 @@ pub(crate) fn vector_access<B: BV>(
                 if !solver.check_sat_with(&in_bounds, info).is_sat()? {
                     return Err(ExecError::OutOfBounds("vector_access"));
                 }
-                solver.assert(in_bounds);
+                return Err(ExecError::SymbolicLength("vector_access", info));
             }
             let candidates = bitvec_value_count(width).map_or(vec.len(), |count| vec.len().min(count));
             let mut it = vec[..candidates].iter().enumerate().rev();

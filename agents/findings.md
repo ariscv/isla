@@ -3,7 +3,13 @@
 ## 寄存器向量选择与自约束符号读
 
 - `primop_util::build_vector_ite` 在递归合并时拒绝不同构造子标签及 `SymbolicCtor`，返回 `IncompatibleMerge`。寄存器向量读写与普通向量读写应使用此接口，以便沿用索引拆分并保留错误标签解包路径；通用 `build_ite` 仍用于允许符号构造子的寄存器历史选择等场景。
-- `Memory::read` 的符号地址普通读在回调声明 `constrains_symbolic_reads()` 时，地址约束和读值由 `read_symbolic` 调用回调处理。所有候选都属于同一优先符号区域时可保留该区域名称，其余候选须继续进入回调，不能经第二次具体区域检查改成静态具体读。取指仍执行区域检查；事件地址始终保留原始位宽。
+- Review 33（`e88842f`）的 `Memory::read` 在回调声明 `constrains_symbolic_reads()` 时将普通符号读交给回调；这能保留写后读，但该版本未将具体区域初值导入数组。Review 34 在 `SeqMemory::symbolic_read` 中按区域优先级约束初始数组的被读字节；当前数组仍由 `Store` 链更新。`handles_concrete_reads()` 让普通具体读也查询当前数组，避免地址表示改变读值。取指保留原区域分派，事件地址保留原始位宽。
+
+## 菱形推测的条件与错误路径
+
+- `Solver::with_transaction_condition` 在现有推测事务内临时压入 Z3 作用域并加入臂条件，返回时弹出作用域并清除模型缓存。臂条件不进入可提交的 SMT 定义；普通推测断言仍使事务无效。`try_merge_diamond` 分别使用 `!cond` 与 `cond` 推测两臂。
+- `LocalState::register_reads` 只在菱形推测期间启用。表达式求值器据此要求符号构造子解包的标签在当前臂条件下必然匹配；否则返回 `IncompatibleMerge`，由合流入口回滚并保留原生执行。
+- `vector_access` 对普通向量和位向量的混合合法／越界索引返回 `SymbolicLength`。`executor/symbolic_length.rs` 按无符号索引边界拆分，合法侧继续使用符号索引，非法侧由消费者产生 `OutOfBounds`；不使用断言静默过滤非法候选。
 
 ## isarch 符号执行
 

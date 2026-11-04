@@ -5,6 +5,8 @@
 //!   sail-riscv RV64 小端一致）；
 //! - 写：对写数据逐字节 `Extract` 构造 `Store` 链；普通写发出事件即提交，
 //!   独占写按返回 Bool 条件提交，之后同一路径的读写都基于新数组；
+//! - 具体区域：按需约束初始数组中被读取的字节，未列出的内容字节为零；
+//!   普通具体读与符号读共享当前数组，后续写入可以覆盖初值；
 //! - **默认（W9 语义）：全符号化**。符号读写地址全域自由、读值/写效来自
 //!   字节数组，`[[memory_regions]]` 的 symbolic 声明只是"这一段是 RAM、
 //!   内容未知"的**纯声明**，不产生任何约束；可访问性/trap 完全交给模型
@@ -38,6 +40,7 @@ use isla_lib::source_loc::SourceLoc;
 /// 读路径只读，依赖 `Clone` 快照与执行路径的 fork 语义保持各路径独立。
 #[derive(Debug, Clone)]
 pub struct SeqMemory {
+    initial_memory_var: Sym,
     memory_var: Sym,
     addr_size: u32,
 }
@@ -62,7 +65,7 @@ pub fn array_model_enabled() -> bool {
 pub fn install_seq_memory<B: BV>(memory: &mut Memory<B>, addr_size: u32, solver: &mut Solver<B>) {
     let memory_var = solver.fresh();
     solver.add(Def::DeclareConst(memory_var, Ty::Array(Box::new(Ty::BitVec(addr_size)), Box::new(Ty::BitVec(8)))));
-    memory.set_client_info(Box::new(SeqMemory { memory_var, addr_size }));
+    memory.set_client_info(Box::new(SeqMemory { initial_memory_var: memory_var, memory_var, addr_size }));
     log!(log::MEMORY, &format!("数组内存模型已启用: memory_var={} addr_size={}", memory_var, addr_size));
 }
 
@@ -90,6 +93,10 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
         true
     }
 
+    fn handles_concrete_reads(&self) -> bool {
+        true
+    }
+
     fn symbolic_read(
         &self,
         regions: &[Region<B>],
@@ -110,6 +117,55 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
             .unwrap_or_else(|err| panic!("符号读值不是位向量 {:?}: {}", value, err));
         let addr_exp = smt_value(address, SourceLoc::unknown())
             .unwrap_or_else(|err| panic!("符号读地址不是位向量 {:?}: {}", address, err));
+
+        // 只约束本次查询涉及的初始字节；Store 链仍可覆盖初值，不能钉死当前数组。
+        // 沿用 Memory 的区域优先级，较早的符号或自定义区域会遮蔽后面的具体区域。
+        if regions.iter().any(|region| matches!(region, Region::Concrete(..))) {
+            for i in 0..bytes {
+                let byte_addr = solver.define_const(
+                    Exp::Bvadd(Box::new(addr_exp.clone()), Box::new(bits64(u64::from(i), self.addr_size))),
+                    SourceLoc::unknown(),
+                );
+                let region_addr = if self.addr_size > 64 {
+                    Exp::Extract(63, 0, Box::new(Exp::Var(byte_addr)))
+                } else if self.addr_size < 64 {
+                    Exp::ZeroExtend(64 - self.addr_size, Box::new(Exp::Var(byte_addr)))
+                } else {
+                    Exp::Var(byte_addr)
+                };
+                let mut unmatched = Exp::Bool(true);
+                for region in regions {
+                    if matches!(region, Region::Excluded(_)) {
+                        continue;
+                    }
+                    let range = region.region_range();
+                    let in_region = Exp::And(
+                        Box::new(Exp::Bvule(Box::new(bits64(range.start, 64)), Box::new(region_addr.clone()))),
+                        Box::new(Exp::Bvult(Box::new(region_addr.clone()), Box::new(bits64(range.end, 64)))),
+                    );
+                    if let Region::Concrete(_, contents) = region {
+                        let mut initial_byte = bits64(0, 8);
+                        let mut entries: Vec<_> = contents.iter().collect();
+                        entries.sort_unstable_by_key(|(address, _)| **address);
+                        for (&address, &value) in entries {
+                            initial_byte = Exp::Ite(
+                                Box::new(Exp::Eq(Box::new(region_addr.clone()), Box::new(bits64(address, 64)))),
+                                Box::new(bits64(u64::from(value), 8)),
+                                Box::new(initial_byte),
+                            );
+                        }
+                        let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
+                        let initial =
+                            Exp::Select(Box::new(Exp::Var(self.initial_memory_var)), Box::new(Exp::Var(byte_addr)));
+                        solver.assert(Exp::Or(
+                            Box::new(Exp::Not(Box::new(selected))),
+                            Box::new(Exp::Eq(Box::new(initial), Box::new(initial_byte))),
+                        ));
+                    }
+                    unmatched = Exp::And(Box::new(unmatched), Box::new(Exp::Not(Box::new(in_region))));
+                }
+            }
+        }
 
         // 读值逐字节等于数组内容（小端拼接）
         let read_prop = Exp::Eq(
@@ -235,6 +291,43 @@ mod tests {
             Exp::Neq(Box::new(smt_value(&value, SourceLoc::unknown()).unwrap()), Box::new(bits64(0xa5, 8))),
             "自约束数组同址写入后必须读回 0xa5，不能绕过回调读到静态零值",
         );
+    }
+
+    #[test]
+    fn review34_具体内容初值与两种地址表示的写后读必须一致() {
+        for concrete_read in [false, true] {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut memory = Memory::<B64>::new();
+            memory.add_concrete_region(0x1000..0x1004, std::collections::HashMap::from([(0x1001, 0x42)]));
+            install_seq_memory(&mut memory, 64, &mut solver);
+            let address = solver.declare_const(Ty::BitVec(64), SourceLoc::unknown());
+            solver.assert(Exp::Or(
+                Box::new(Exp::Eq(Box::new(Exp::Var(address)), Box::new(bits64(0x1000, 64)))),
+                Box::new(Exp::Eq(Box::new(Exp::Var(address)), Box::new(bits64(0x1001, 64)))),
+            ));
+            let initial = read_bytes(&memory, &mut solver, Val::Symbolic(address), 1);
+            let expected = Exp::Ite(
+                Box::new(Exp::Eq(Box::new(Exp::Var(address)), Box::new(bits64(0x1001, 64)))),
+                Box::new(bits64(0x42, 8)),
+                Box::new(bits64(0, 8)),
+            );
+            expect_unsat(
+                &mut solver,
+                Exp::Neq(Box::new(smt_value(&initial, SourceLoc::unknown()).unwrap()), Box::new(expected)),
+                "符号地址必须保留具体内容和缺省零字节",
+            );
+            solver.assert_eq(Exp::Var(address), bits64(0x1001, 64));
+            write_bytes(&mut memory, &mut solver, Val::Symbolic(address), B64::new(0xa5, 8));
+            let read_address = if concrete_read { Val::Bits(B64::new(0x1001, 64)) } else { Val::Symbolic(address) };
+            let value = read_bytes(&memory, &mut solver, read_address, 1);
+            expect_unsat(
+                &mut solver,
+                Exp::Neq(Box::new(smt_value(&value, SourceLoc::unknown()).unwrap()), Box::new(bits64(0xa5, 8))),
+                "具体和符号地址必须读取同一次数组更新",
+            );
+            assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap(), "初值不得覆盖写后值导致路径矛盾");
+        }
     }
 
     fn declare_symbol(solver: &mut Solver<B64>, sym: Sym, bits: u32) {
@@ -736,7 +829,11 @@ mod tests {
                 ReadOpts::default(),
             )
             .expect("concrete 区域内的具体读不受判死区域影响");
-        assert_eq!(value, Val::Bits(B64::new(0, 32)), "零快照 concrete 区域读回应为 0");
+        expect_unsat(
+            &mut solver,
+            Exp::Neq(Box::new(smt_value(&value, SourceLoc::unknown()).unwrap()), Box::new(bits64(0, 32))),
+            "零快照 concrete 区域读回应为 0",
+        );
         assert!(
             solver.trace().to_vec().iter().any(|event| matches!(event, Event::ReadMem { bytes, .. } if *bytes == 4)),
             "concrete 具体读应发出 ReadMem 事件"

@@ -181,10 +181,15 @@ pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync
         false
     }
 
-    /// 回调若会用区域约束收窄符号读地址（如数组内存模型的 OR 链），可直接处理
-    /// 尚未收窄的符号地址。默认仍由 Memory 先做具体区域重叠检查，可能因符号
-    /// 地址尚可落入具体区域而以 BadRead 拒绝。
+    /// 回调能自行处理符号读地址约束时，可直接处理尚未收窄的符号地址。
+    /// 回调须保留具体区域的已知内容；需要接管普通具体读时另启用 handles_concrete_reads。
+    /// 默认仍由 Memory 先检查具体区域重叠，必要时请求地址拆分。
     fn constrains_symbolic_reads(&self) -> bool {
+        false
+    }
+
+    /// 回调维护具体区域的初值和更新时，普通具体读也必须经过同一份内存状态。
+    fn handles_concrete_reads(&self) -> bool {
         false
     }
 
@@ -564,6 +569,19 @@ impl<B: BV> Memory<B> {
                             }
 
                             Region::Concrete(range, contents) if range.contains(&concrete_addr.lower_u64()) => {
+                                if !opts.is_ifetch
+                                    && self.client_info.as_ref().is_some_and(|client| client.handles_concrete_reads())
+                                {
+                                    return self.read_symbolic(
+                                        read_kind,
+                                        address,
+                                        bytes,
+                                        solver,
+                                        tag,
+                                        opts,
+                                        region.region_name(),
+                                    );
+                                }
                                 return read_concrete(
                                     contents,
                                     read_kind,
@@ -574,7 +592,7 @@ impl<B: BV> Memory<B> {
                                     tag,
                                     opts,
                                     region.region_name(),
-                                )
+                                );
                             }
 
                             Region::Custom(range, contents) if range.contains(&concrete_addr.lower_u64()) => {
@@ -687,7 +705,10 @@ impl<B: BV> Memory<B> {
                         );
                         // 沿用具体地址的区域优先级，证明所有候选都由同一区域处理。
                         let selected = Exp::And(Box::new(unmatched.clone()), Box::new(in_region.clone()));
-                        if matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
+                        if (matches!(region, Region::Symbolic(_) | Region::SymbolicCode(_))
+                            || matches!(region, Region::Concrete(..))
+                                && !opts.is_ifetch
+                                && self.client_info.as_ref().is_some_and(|client| client.handles_concrete_reads()))
                             && solver.check_sat_with(&Exp::Not(Box::new(selected)), info).is_unsat()?
                         {
                             return self.read_symbolic(

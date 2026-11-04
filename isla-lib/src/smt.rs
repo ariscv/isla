@@ -2947,6 +2947,20 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.transaction_invalid
     }
 
+    /// 臂条件只在推测期间生效，不进入可提交的定义和最终路径断言。
+    pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+        assert!(self.in_transaction, "推测臂条件必须位于事务中");
+        self.clear_stashed_model();
+        self.last_check_sat = false;
+        unsafe { Z3_solver_push(self.ctx.z3_ctx, self.z3_solver) };
+        self.z3_assert(condition);
+        let result = f(self);
+        unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
+        self.clear_stashed_model();
+        self.last_check_sat = false;
+        result
+    }
+
     pub fn commit_transaction(&mut self) {
         assert!(self.in_transaction && !self.transaction_invalid);
         self.trace.head.append(&mut self.transaction_defs);
@@ -3136,6 +3150,38 @@ mod tests {
         solver.commit_transaction();
         assert_eq!(solver.trace.head.len(), tx.head_len + 1);
         assert!(matches!(&solver.trace.head[tx.head_len], Event::Smt(Def::DeclareConst(v, _), _, _) if *v == symbol));
+    }
+
+    #[test]
+    fn review34_推测臂条件必须隔离且不得进入提交或回滚后的路径() {
+        let ctx = Context::new(Config::new());
+        for commit in [false, true] {
+            let mut solver = Solver::<B64>::new(&ctx);
+            let flag = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+            let before = solver.trace.head.len();
+            let tx = solver.start_transaction();
+            for condition in [Var(flag), Not(Box::new(Var(flag)))] {
+                solver.with_transaction_condition(&condition, |solver| {
+                    assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+                    assert_eq!(solver.check_sat_with(&Not(Box::new(condition.clone())), SourceLoc::unknown()), Unsat);
+                    assert_eq!(solver.check_sat_with(&condition, SourceLoc::unknown()), Sat);
+                });
+                assert!(!solver.has_stashed_model(), "臂模型不能泄漏到前缀");
+                assert!(!solver.transaction_invalid());
+            }
+            if commit {
+                solver.commit_transaction();
+            } else {
+                solver.rollback_transaction(tx);
+            }
+            assert_eq!(solver.trace.head.len(), before);
+            assert_eq!(solver.check_sat_with(&Var(flag), SourceLoc::unknown()), Sat);
+            assert_eq!(solver.check_sat_with(&Not(Box::new(Var(flag))), SourceLoc::unknown()), Sat);
+            let point = checkpoint(&mut solver);
+            let mut replayed = Solver::from_checkpoint(&ctx, point);
+            assert_eq!(replayed.check_sat_with(&Var(flag), SourceLoc::unknown()), Sat);
+            assert_eq!(replayed.check_sat_with(&Not(Box::new(Var(flag))), SourceLoc::unknown()), Sat);
+        }
     }
 
     macro_rules! bv {

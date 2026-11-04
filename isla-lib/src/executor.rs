@@ -599,6 +599,7 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
         }
 
         Unwrap(ctor_a, exp) => {
+            let speculative = local_state.register_reads.is_some();
             let v = eval_exp(exp, local_state, shared_state, solver, info)?;
             match v {
                 Borrowed(Val::Ctor(ctor_b, v)) if *ctor_a == *ctor_b => Borrowed(v),
@@ -608,6 +609,13 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Borrowed(Val::SymbolicCtor(tag, possibilities)) => match possibilities.get(ctor_a) {
                     Some(v) => {
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(*tag)), Box::new(ctor_a.to_smt()));
+                        if speculative
+                            && !solver
+                                .check_sat_with(&smtlib::Exp::Not(Box::new(matches_tag.clone())), info)
+                                .is_unsat()?
+                        {
+                            return Err(ExecError::IncompatibleMerge);
+                        }
                         if solver.check_sat_with(&matches_tag, info).is_unsat()? {
                             return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
                         }
@@ -619,6 +627,13 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Owned(Val::SymbolicCtor(tag, mut possibilities)) => match possibilities.remove(ctor_a) {
                     Some(v) => {
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
+                        if speculative
+                            && !solver
+                                .check_sat_with(&smtlib::Exp::Not(Box::new(matches_tag.clone())), info)
+                                .is_unsat()?
+                        {
+                            return Err(ExecError::IncompatibleMerge);
+                        }
                         if solver.check_sat_with(&matches_tag, info).is_unsat()? {
                             return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
                         }
@@ -2019,8 +2034,9 @@ fn try_merge_diamond<'ir, B: BV>(
         let tx = solver.start_transaction();
 
         let arm_else =
-            match simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver, limit_handler)
-            {
+            match solver.with_transaction_condition(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond_sym))), |solver| {
+                simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver, limit_handler)
+            }) {
                 Ok(Some(a)) if !solver.transaction_invalid() => a,
                 _ => {
                     solver.rollback_transaction(tx);
@@ -2034,15 +2050,17 @@ fn try_merge_diamond<'ir, B: BV>(
                 then_frame.regs_mut().assign(*reg, value.clone(), shared_state);
             }
         }
-        let arm_then = match simulate_diamond_arm(
-            target,
-            join_pc.saturating_sub(1),
-            join_pc,
-            then_frame,
-            shared_state,
-            solver,
-            limit_handler,
-        ) {
+        let arm_then = match solver.with_transaction_condition(&smtlib::Exp::Var(cond_sym), |solver| {
+            simulate_diamond_arm(
+                target,
+                join_pc.saturating_sub(1),
+                join_pc,
+                then_frame,
+                shared_state,
+                solver,
+                limit_handler,
+            )
+        }) {
             Ok(Some(a)) if !solver.transaction_invalid() => a,
             _ => {
                 solver.rollback_transaction(tx);
@@ -10568,16 +10586,15 @@ mod tests {
             let vec = Val::Vector(vec![Val::I128(10), Val::I128(20)]);
             let access = *crate::primop::binary_primops::<B64>().get("vector_access").unwrap();
             assert!(access(vec.clone(), Val::I128(2), &mut solver, info()).is_err());
-            let result = access(vec, index, &mut solver, info()).unwrap();
-            let bad = smtlib::Exp::And(
-                Box::new(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond)))),
-                Box::new(smtlib::Exp::Eq(
-                    Box::new(crate::primop_util::smt_value(&result, info()).unwrap()),
-                    Box::new(crate::primop_util::smt_i128(20)),
-                )),
+            assert!(matches!(
+                access(vec, index, &mut solver, info()),
+                Err(ExecError::SymbolicLength("vector_access", _))
+            ));
+            assert_eq!(
+                solver.check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))), info()),
+                crate::smt::SmtResult::Sat,
+                "消费者必须请求边界拆分，不能静默过滤越界候选"
             );
-            eprintln!("越界读取却正常返回最后元素：{:?}", solver.check_sat_with(&bad, info()));
-            assert_eq!(solver.check_sat_with(&bad, info()), crate::smt::SmtResult::Unsat);
         }
 
         #[test]
@@ -13780,6 +13797,12 @@ fn zmemreadfork(zu) {
                 let data = solver.define_const(crate::primop_util::smt_sbits(bits), info());
                 for index_width in [8, 64, 128, 129, 256] {
                     let index = solver.declare_const(smtlib::Ty::BitVec(index_width), info());
+                    // 此测试只验证合法索引的宽度调整；混合越界域由边界拆分测试覆盖。
+                    let in_range = smtlib::Exp::Bvult(
+                        Box::new(smtlib::Exp::Var(index)),
+                        Box::new(smtlib::bits64(u64::from(data_width), index_width)),
+                    );
+                    solver.assert(in_range.clone());
                     for input in [Val::Bits(bits), Val::Symbolic(data)] {
                         let actual =
                             crate::primop::vector_access(input, Val::Symbolic(index), &mut solver, info()).unwrap();
@@ -13792,12 +13815,8 @@ fn zmemreadfork(zu) {
                             Box::new(smtlib::Exp::Bits64(B64::new(0, 1))),
                         );
                         // 索引只取合法位置，独立验证宽度调整与取位结果。
-                        let in_range = smtlib::Exp::Bvult(
-                            Box::new(smtlib::Exp::Var(index)),
-                            Box::new(smtlib::bits64(u64::from(data_width), index_width)),
-                        );
                         let wrong = smtlib::Exp::And(
-                            Box::new(in_range),
+                            Box::new(in_range.clone()),
                             Box::new(smtlib::Exp::Neq(
                                 Box::new(crate::primop_util::smt_value(&actual, info()).unwrap()),
                                 Box::new(expected),
@@ -14281,17 +14300,21 @@ fn zmemreadfork(zu) {
                 RegisterBindings::new(),
                 lets,
             );
-            let mut widths: Vec<_> = results
-                .into_iter()
-                .map(|result| match result.unwrap() {
-                    Run::Finished(Val::Vector(values)) => values.len() as u32,
-                    Run::Finished(Val::Bits(bits)) => bits.len(),
-                    Run::Finished(value) => panic!("长度消费者 {consumer} 返回了错误类型：{value:?}"),
-                    Run::Dead | Run::Exit | Run::Suspended => panic!("长度消费者 {consumer} 未正常完成"),
-                })
-                .collect();
+            let mut widths = Vec::new();
+            let mut out_of_bounds = 0;
+            for result in results {
+                match result {
+                    Ok(Run::Finished(Val::Vector(values))) => widths.push(values.len() as u32),
+                    Ok(Run::Finished(Val::Bits(bits))) => widths.push(bits.len()),
+                    Err(ExecError::OutOfBounds("vector_access")) => out_of_bounds += 1,
+                    Err(error) => panic!("长度消费者 {consumer} 的重试错误异常：{error:?}"),
+                    Ok(Run::Finished(value)) => panic!("长度消费者 {consumer} 返回了错误类型：{value:?}"),
+                    Ok(Run::Dead | Run::Exit | Run::Suspended) => panic!("长度消费者 {consumer} 未正常完成"),
+                }
+            }
             widths.sort_unstable();
             assert_eq!(widths, vec![8, 16], "{consumer} 必须复用拆分前的操作数");
+            assert_eq!(out_of_bounds, 1, "未约束索引的越界候选也必须保留为错误路径");
         }
     }
 

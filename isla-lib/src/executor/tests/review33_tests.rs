@@ -163,3 +163,257 @@ fn 寄存器向量的合并索引必须保留错误构造子解包路径() {
         "索引 1 的 B 构造子不能被成功解包为 A"
     );
 }
+
+fn review34_检查符号构造子解包(through_field: bool) {
+    let mut observations = Vec::new();
+    for enabled in [false, true] {
+        let mut shared = empty_shared_state();
+        let a = shared.symtab.intern("zreview34_A");
+        let b = shared.symtab.intern("zreview34_B");
+        let value = test_name(850);
+        let field = test_name(851);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let flag = solver.declare_const(smtlib::Ty::Bool, info());
+        let ctor =
+            symbolic_ctor_choice(flag, (a, Val::Bits(B64::new(11, 8))), (b, Val::Bits(B64::new(22, 8))), &mut solver);
+        let expr = if through_field { Exp::Field(Box::new(Exp::Id(value)), field) } else { Exp::Id(value) };
+        let unwrap = Exp::Unwrap(a, Box::new(expr.clone()));
+        let mut frame = make_frame(vec![
+            Instr::Jump(Exp::Kind(a, Box::new(expr)), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), unwrap.clone(), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), unwrap, info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(
+            value,
+            UVal::Init(if through_field { Val::Struct(HashMap::from_iter([(field, ctor)])) } else { ctor }),
+        );
+        let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+        let out = Mutex::new((0, 0, false, 0));
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+            &shared,
+            &out,
+            &|_, _, result, _, mut solver, out| {
+                let mut actual = out.lock().unwrap();
+                actual.3 += solver.trace().to_vec().iter().filter(|ev| matches!(ev, Event::Merge(..))).count();
+                match result {
+                    Ok((Run::Finished(_), _)) => {
+                        actual.0 += 1;
+                        actual.2 |= solver
+                            .check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(flag))), info())
+                            .is_sat()
+                            .unwrap();
+                    }
+                    Err((ExecError::Type(..), _)) => actual.1 += 1,
+                    _ => panic!("只能正常结束或报告标签错误"),
+                }
+            },
+        );
+        observations.push((enabled, out.into_inner().unwrap()));
+    }
+    eprintln!("字段访问={through_field}，合并开关及(完成,类型错误,错误标签可成功,合流次数)：{observations:?}");
+    assert_eq!(observations[0].1, (1, 1, false, 0));
+    assert_eq!(observations[1].1 .1, 1, "合流不能吞掉标签 B 的错误路径");
+    assert!(!observations[1].1 .2, "成功路径不得允许标签 B");
+}
+
+#[test]
+fn review34_菱形推测必须保留直接解包的错误标签路径() {
+    review34_检查符号构造子解包(false);
+}
+
+#[test]
+fn review34_菱形推测必须保留字段解包的错误标签路径() {
+    review34_检查符号构造子解包(true);
+}
+
+#[test]
+fn review34_臂条件能证明标签正确时允许合流且不得泄漏条件() {
+    let mut shared = empty_shared_state();
+    let a = shared.symtab.intern("zreview34_safe_A");
+    let b = shared.symtab.intern("zreview34_safe_B");
+    let value = test_name(852);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let flag = solver.declare_const(smtlib::Ty::Bool, info());
+    let ctor =
+        symbolic_ctor_choice(flag, (a, Val::Bits(B64::new(11, 8))), (b, Val::Bits(B64::new(22, 8))), &mut solver);
+    let mut frame = make_frame(vec![
+        Instr::Jump(Exp::Bool(true), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Unwrap(b, Box::new(Exp::Id(value))), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Unwrap(a, Box::new(Exp::Id(value))), info()),
+        Instr::End,
+    ]);
+    frame.vars_mut().insert(value, UVal::Init(ctor));
+    assert_eq!(try_merge_diamond(flag, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
+    let result = eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+    for (condition, expected) in
+        [(smtlib::Exp::Var(flag), 11), (smtlib::Exp::Not(Box::new(smtlib::Exp::Var(flag))), 22)]
+    {
+        let bad = smtlib::Exp::And(
+            Box::new(condition.clone()),
+            Box::new(smtlib::Exp::Neq(
+                Box::new(smt_value(&result, info()).unwrap()),
+                Box::new(smtlib::bits64(expected, 8)),
+            )),
+        );
+        assert!(solver.check_sat_with(&condition, info()).is_sat().unwrap());
+        assert!(solver.check_sat_with(&bad, info()).is_unsat().unwrap());
+    }
+}
+
+#[test]
+fn review34_位向量访问也必须保留混合索引的越界路径() {
+    for enabled in [false, true] {
+        let condition = test_name(864);
+        let bits = test_name(865);
+        let index = test_name(866);
+        let vector = test_name(867);
+        let mut frame = make_frame(vec![
+            Instr::Decl(condition, Ty::Bool, info()),
+            Instr::Decl(bits, Ty::Bits(8), info()),
+            Instr::Decl(index, Ty::I128, info()),
+            Instr::Jump(Exp::Id(condition), 6, info()),
+            Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(0, 8)), info()),
+            Instr::Goto(7),
+            Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(2, 8)), info()),
+            Instr::PrimopUnary(Loc::Id(index), primop::unary_primops()["sail_unsigned"], Exp::Id(bits), info()),
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_access"],
+                Exp::Id(vector),
+                Exp::Id(index),
+                info(),
+            ),
+            Instr::End,
+        ]);
+        frame.lets_mut().insert(vector, UVal::Init(Val::Bits(B64::new(2, 2))));
+        let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+        let out = Mutex::new((0, 0));
+        start_single(
+            frame.task(TaskId::fresh(), &state),
+            &empty_shared_state(),
+            &out,
+            &|_, _, result, _, mut solver, out| {
+                let mut actual = out.lock().unwrap();
+                match result {
+                    Ok((Run::Finished(value), _)) => {
+                        let nonzero = smtlib::Exp::Neq(
+                            Box::new(smt_value(&value, info()).unwrap()),
+                            Box::new(smtlib::bits64(0, 1)),
+                        );
+                        assert!(solver.check_sat_with(&nonzero, info()).is_unsat().unwrap());
+                        actual.0 += 1;
+                    }
+                    Err((ExecError::OutOfBounds("vector_access"), _)) => actual.1 += 1,
+                    _ => panic!("位向量访问只能正常结束或报告越界"),
+                }
+            },
+        );
+        assert_eq!(out.into_inner().unwrap(), (1, 1));
+    }
+}
+
+#[test]
+fn review34_臂内标签仍有正确与错误候选时必须拒绝合流并回滚() {
+    for owned in [false, true] {
+        let mut shared = empty_shared_state();
+        let a = shared.symtab.intern("zreview34_mixed_A");
+        let b = shared.symtab.intern("zreview34_mixed_B");
+        let value = test_name(868);
+        let field = test_name(869);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let flag = solver.declare_const(smtlib::Ty::Bool, info());
+        let ctor =
+            symbolic_ctor_choice(flag, (a, Val::Bits(B64::new(11, 8))), (b, Val::Bits(B64::new(22, 8))), &mut solver);
+        let expr = if owned {
+            Exp::Field(Box::new(Exp::Struct(test_name(870), vec![(field, Exp::Id(value))])), field)
+        } else {
+            Exp::Id(value)
+        };
+        let unwrap = Exp::Unwrap(a, Box::new(expr));
+        let mut frame = make_frame(vec![
+            Instr::Jump(Exp::Bool(true), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), unwrap.clone(), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), unwrap, info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(value, UVal::Init(ctor));
+        let before = solver.trace().to_vec().len();
+        assert_eq!(
+            try_merge_diamond(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            None
+        );
+        assert_eq!(solver.trace().to_vec().len(), before);
+        assert_eq!(frame.pc, 0);
+        for arm in [true, false] {
+            for tag in [true, false] {
+                let choice = |sym, selected| {
+                    if selected {
+                        smtlib::Exp::Var(sym)
+                    } else {
+                        smtlib::Exp::Not(Box::new(smtlib::Exp::Var(sym)))
+                    }
+                };
+                assert!(solver
+                    .check_sat_with(
+                        &smtlib::Exp::And(Box::new(choice(condition, arm)), Box::new(choice(flag, tag))),
+                        info()
+                    )
+                    .is_sat()
+                    .unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn review34_普通向量访问必须保留合并后索引的越界错误路径() {
+    let mut observations = Vec::new();
+    for enabled in [false, true] {
+        let condition = test_name(860);
+        let bits = test_name(861);
+        let index = test_name(862);
+        let vector = test_name(863);
+        let mut frame = make_frame(vec![
+            Instr::Decl(condition, Ty::Bool, info()),
+            Instr::Decl(bits, Ty::Bits(8), info()),
+            Instr::Decl(index, Ty::I128, info()),
+            Instr::Jump(Exp::Id(condition), 6, info()),
+            Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(0, 8)), info()),
+            Instr::Goto(7),
+            Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(2, 8)), info()),
+            Instr::PrimopUnary(Loc::Id(index), primop::unary_primops()["sail_unsigned"], Exp::Id(bits), info()),
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_access"],
+                Exp::Id(vector),
+                Exp::Id(index),
+                info(),
+            ),
+            Instr::End,
+        ]);
+        frame.lets_mut().insert(vector, UVal::Init(Val::Vector(vec![Val::I128(10), Val::I128(20)])));
+        let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+        let out = Mutex::new((0, 0));
+        start_single(frame.task(TaskId::fresh(), &state), &empty_shared_state(), &out, &|_, _, result, _, _, out| {
+            let mut actual = out.lock().unwrap();
+            match result {
+                Ok((Run::Finished(_), _)) => actual.0 += 1,
+                Err((ExecError::OutOfBounds("vector_access"), _)) => actual.1 += 1,
+                _ => panic!("只能正常结束或报告越界错误"),
+            }
+        });
+        observations.push((enabled, out.into_inner().unwrap()));
+    }
+    eprintln!("合并开关及(成功路径,越界错误路径)：{observations:?}");
+    assert_eq!(observations[0].1, (1, 1));
+    assert_eq!(observations[1].1, (1, 1), "合流不能通过追加边界断言静默删除索引 2 的错误路径");
+}
