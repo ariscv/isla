@@ -1133,6 +1133,8 @@ pub struct IRTypeInfo {
 /// [SharedState] provides each worker that is performing symbolic
 /// evaluation with a convenient view into that IR.
 pub struct SharedState<'ir, B> {
+    /// 按函数惰性分析与缓存，所有执行线程共享。
+    pub(crate) function_regions: std::sync::Mutex<HashMap<Name, regions::FunctionRegions<B>>>,
     /// 可选执行统计；不随路径快照复制。
     pub execution_stats: std::sync::Arc<crate::executor::stats::ExecutionStats>,
     /// A map from function identifers to function bodies and parameter lists
@@ -1220,6 +1222,7 @@ impl IRTypeInfo {
 impl<'ir, B: BV> SharedState<'ir, B> {
     pub fn empty(symtab: Symtab<'ir>) -> Self {
         SharedState {
+            function_regions: std::sync::Mutex::new(HashMap::new()),
             execution_stats: std::sync::Arc::new(crate::executor::stats::ExecutionStats::default()),
             functions: HashMap::default(),
             externs: HashMap::default(),
@@ -1287,6 +1290,7 @@ impl<'ir, B: BV> SharedState<'ir, B> {
         }
 
         SharedState {
+            function_regions: std::sync::Mutex::new(HashMap::new()),
             execution_stats: std::sync::Arc::new(crate::executor::stats::ExecutionStats::default()),
             functions,
             externs,

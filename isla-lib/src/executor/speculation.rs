@@ -1,4 +1,4 @@
-//! 推演的分支拒绝标签与统计。C1 只建立入口，不执行推演合并。
+//! 推演的拒绝标签、统计与强制失败诊断；区域边界负责捕获拒绝并回滚。
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,6 +19,27 @@ pub enum SpeculationMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpeculativeRejectReason {
+    SolverUnknown,
+    NoJoin,
+    HasBackEdge,
+    ExceptionCheck,
+    RegionEscaped,
+    StackEscaped,
+    StepBudget,
+    NestingLimit,
+    StateEffect,
+    RecursiveEffect,
+    CalleeStateWrite,
+    RegisterReadAfterWrite,
+    RepeatedRegisterWrite,
+    RegisterReadWrite,
+    RegisterSequence,
+    RelaxedRegister,
+    IncompatibleState,
+    DepthMismatch,
+    LoopHistoryMismatch,
+    SamplingState,
+    PolicyOff,
     SymbolicJump,
     Monomorphize,
     ExpressionRetry,
@@ -119,4 +140,66 @@ mod tests {
         stats.reset();
         assert_eq!(stats.reject_json(), json!({"total": 0, "reason_counts": {}}));
     }
+}
+
+/// 强制合并失败必须终止整个运行，不能只终止某个 worker。
+pub const FORCE_MERGE_EXIT_CODE: i32 = 86;
+
+pub(super) fn force_diagnostic(
+    rule: Option<usize>,
+    function: &str,
+    pc: usize,
+    location: crate::source_loc::SourceLoc,
+    error: &crate::error::ExecError,
+    origin: Option<(String, usize, crate::source_loc::SourceLoc)>,
+) -> String {
+    let crate::error::ExecError::SpeculativeReject {
+        reason,
+        function: rejected_function,
+        pc: rejected_pc,
+        location: rejected_location,
+    } = error
+    else {
+        panic!("强制合并诊断只接受推演拒绝");
+    };
+    json!({"kind":"force_region_merge_failure", "rule":rule, "function":function,
+        "branch_pc":pc, "source_loc":location, "reason":reason,
+        "rejected_function_id":rejected_function, "rejected_pc":rejected_pc,
+        "rejected_source_loc":rejected_location, "force_origin":origin})
+    .to_string()
+}
+
+pub(super) fn force_failure<B: crate::bitvector::BV>(
+    frame: &super::LocalFrame<B>,
+    state: &super::TaskState<B>,
+    shared: &crate::ir::SharedState<B>,
+    location: crate::source_loc::SourceLoc,
+    error: &crate::error::ExecError,
+) -> ! {
+    let rule = state
+        .execution_limits
+        .as_ref()
+        .and_then(|limits| {
+            limits.merge_rule(frame.function_name, location).or_else(|| {
+                frame
+                    .region_execution
+                    .as_ref()
+                    .and_then(|execution| limits.merge_rule(execution.origin.0, execution.origin.2))
+            })
+        })
+        .map(|(index, _)| index);
+    let origin = frame.region_execution.as_ref().map(|execution| {
+        let (function, pc, location) = execution.origin;
+        (crate::zencode::decode(shared.symtab.to_str(function)), pc, location)
+    });
+    let diagnostic = force_diagnostic(
+        rule,
+        &crate::zencode::decode(shared.symtab.to_str(frame.function_name)),
+        frame.pc,
+        location,
+        error,
+        origin,
+    );
+    eprintln!("{}", diagnostic);
+    std::process::exit(FORCE_MERGE_EXIT_CODE)
 }

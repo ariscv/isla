@@ -1,0 +1,1157 @@
+//! 区域合并集成的差分判据。旧菱形实现必须不能通过带调用和真实嵌套的用例。
+use super::*;
+
+type Formula = smtlib::Exp<Sym>;
+
+struct Path {
+    records: Vec<RegionMergeRecord<B64>>,
+    value: Val<B64>,
+    events: Vec<Event<B64>>,
+}
+
+fn paths(instrs: Vec<Instr<Name, B64>>, shared: &SharedState<'static, B64>, inputs: usize, merge: bool) -> Vec<Path> {
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let mut frame = make_frame(instrs);
+    frame.function_name = TOP_LEVEL_LET;
+    for (name, ty) in &shared.registers {
+        frame.regs_mut().insert(*name, false, UVal::Uninit(Box::leak(Box::new(ty.clone()))));
+    }
+    for index in 0..inputs {
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
+    }
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
+    let output = Mutex::new(Vec::new());
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+        shared,
+        &output,
+        &|_, _, result, _, mut solver, output| match result {
+            Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
+                SmtResult::Sat => output.lock().unwrap().push(Path {
+                    records: frame.region_merge_records().to_vec(),
+                    value,
+                    events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
+                }),
+                SmtResult::Unsat => (),
+                result => panic!("完成路径的可满足性查询失败：{result:?}"),
+            },
+            Ok((Run::Dead, _)) | Err((ExecError::AssertionFailure(..), _)) => (),
+            Err((error, _)) => panic!("差分执行失败：{error:?}"),
+            _ => panic!("差分执行未正常返回"),
+        },
+    );
+    output.into_inner().unwrap()
+}
+
+fn import(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>) -> (Formula, Formula) {
+    use smtlib::Exp::*;
+    // 确定性的辅助等式可无条件定义：辅助变量只在对应 guard 内使用。
+    // 先消去这些变量再检查覆盖，避免把路径局部的新鲜量误当成外部输入。
+    let mut definitions = HashMap::new();
+    fn auxiliary(exp: &Formula, input_count: usize) -> Option<(Sym, Formula)> {
+        match exp {
+            Eq(a, b) => match a.as_ref() {
+                Var(symbol) if symbol.id as usize >= input_count && !b.variables().contains(symbol) => {
+                    Some((*symbol, b.as_ref().clone()))
+                }
+                _ => match b.as_ref() {
+                    Var(symbol) if symbol.id as usize >= input_count && !a.variables().contains(symbol) => {
+                        Some((*symbol, a.as_ref().clone()))
+                    }
+                    _ => None,
+                },
+            },
+            Or(a, b) if matches!(a.as_ref(), Not(_)) => auxiliary(b, input_count),
+            _ => None,
+        }
+    }
+    for event in &path.events {
+        match event {
+            Event::Smt(Def::DefineConst(symbol, exp), _, _) => {
+                definitions.insert(*symbol, exp.clone());
+            }
+            Event::Smt(Def::Assert(exp), _, _) => {
+                if let Some((symbol, value)) = auxiliary(exp, inputs.len()) {
+                    definitions.insert(symbol, value);
+                }
+            }
+            _ => (),
+        }
+    }
+    fn expand(
+        exp: &Formula,
+        definitions: &HashMap<Sym, Formula>,
+        names: &HashMap<Sym, Sym>,
+        active: &mut HashSet<Sym>,
+    ) -> Formula {
+        exp.map_var(&mut |symbol| {
+            Ok::<_, ()>(if let Some(value) = definitions.get(symbol) {
+                assert!(active.insert(*symbol), "定义依赖不得成环");
+                let value = expand(value, definitions, names, active);
+                active.remove(symbol);
+                value
+            } else {
+                Var(*names.get(symbol).expect("未定义的外部符号"))
+            })
+        })
+        .unwrap()
+    }
+    let mut names = HashMap::new();
+    for event in &path.events {
+        if let Event::Smt(Def::DeclareConst(original, ty), _, location) = event {
+            if definitions.contains_key(original) {
+                continue;
+            }
+            let index = original.id as usize;
+            let target = if index < inputs.len() { inputs[index] } else { solver.declare_const(ty.clone(), *location) };
+            assert!(names.insert(*original, target).is_none());
+        }
+    }
+    let translate = |exp: &Formula| expand(exp, &definitions, &names, &mut HashSet::new());
+    let mut conditions = Bool(true);
+    for event in &path.events {
+        if let Event::Smt(Def::Assert(exp), _, _) = event {
+            conditions = And(Box::new(conditions), Box::new(translate(exp)));
+        }
+    }
+    (conditions, translate(&smt_value(&path.value, info()).unwrap()))
+}
+
+/// 同一组输入符号分别导入全部分叉迹和合并迹；Z3 同时检查返回关系与路径覆盖。
+fn differential(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    complete: bool,
+) -> (usize, usize) {
+    use smtlib::Exp::*;
+    let forked = paths(instrs.clone(), shared, inputs, false);
+    let merged = paths(instrs, shared, inputs, true);
+    if merged.len() == 1 {
+        assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并，不能仅普通剪枝");
+    }
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let input_symbols: Vec<_> = (0..inputs).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
+    let relation = |paths: &[Path], solver: &mut Solver<B64>| {
+        let mut coverage = Bool(false);
+        let mut returned = Bool(false);
+        for path in paths {
+            let (condition, value) = import(path, &input_symbols, solver);
+            coverage = Or(Box::new(coverage), Box::new(condition.clone()));
+            returned = Or(Box::new(returned), Box::new(And(Box::new(condition), Box::new(value))));
+        }
+        (coverage, returned)
+    };
+    let (fork_coverage, fork_result) = relation(&forked, &mut solver);
+    let (merge_coverage, merge_result) = relation(&merged, &mut solver);
+    assert!(
+        solver.check_sat_with(&Neq(Box::new(fork_result), Box::new(merge_result)), info()).is_unsat().unwrap(),
+        "合并返回值必须等价于各路径条件与返回值的合取之析取"
+    );
+    assert!(
+        solver
+            .check_sat_with(&Neq(Box::new(fork_coverage.clone()), Box::new(merge_coverage)), info())
+            .is_unsat()
+            .unwrap(),
+        "合并不得改变覆盖"
+    );
+    if complete {
+        assert!(
+            solver.check_sat_with(&Not(Box::new(fork_coverage)), info()).is_unsat().unwrap(),
+            "无 assume 的用例必须覆盖全部输入"
+        );
+    }
+    (forked.len(), merged.len())
+}
+
+fn input(index: u32) -> Exp<Name> {
+    Exp::Id(test_name(900 + index))
+}
+
+fn helper(shared: &mut SharedState<'static, B64>) -> Name {
+    let function = shared.symtab.intern("zregion_pure_helper");
+    let argument = shared.symtab.intern("zregion_helper_argument");
+    let ty = Box::leak(Box::new(Ty::Bool));
+    let params = vec![(argument, &*ty)];
+    let body = Box::leak(
+        vec![Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Not, vec![Exp::Id(argument)]), info()), Instr::End]
+            .into_boxed_slice(),
+    );
+    shared.functions.insert(function, (params, ty, body));
+    function
+}
+
+#[test]
+fn region_merge_pure_call_and_short_circuit() {
+    let mut shared = empty_shared_state();
+    let function = helper(&mut shared);
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Call(Loc::Id(RETURN), false, function, vec![input(1)], info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, true), (2, 1));
+}
+
+/// 多个 End 共享虚拟出口，覆盖函数返回边界。
+#[test]
+fn region_merge_multiple_returns_common_virtual_exit() {
+    let shared = empty_shared_state();
+    let mut program = Vec::new();
+    for index in 0..4 {
+        let pc = program.len();
+        program.push(Instr::Jump(input(index), pc + 3, info()));
+        program.push(Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()));
+        program.push(Instr::End);
+    }
+    program.push(Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()));
+    program.push(Instr::End);
+    assert_eq!(differential(program, &shared, 4, true), (5, 1));
+}
+
+#[test]
+fn region_merge_nested_same_join_and_single_feasible_jump() {
+    let shared = empty_shared_state();
+    let program = vec![
+        Instr::Jump(input(0), 4, info()),
+        Instr::Jump(input(0), 4, info()),
+        Instr::Copy(Loc::Id(RETURN), input(1), info()),
+        Instr::Goto(8),
+        Instr::Jump(input(1), 7, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, true), (3, 1));
+}
+
+#[test]
+pub(super) fn region_merge_dead_arm_and_guarded_assume() {
+    let shared = empty_shared_state();
+    let assume = primop::unary_primops()["assume"];
+    let program = vec![
+        Instr::Jump(input(0), 4, info()),
+        Instr::PrimopUnary(Loc::Id(RETURN), assume, Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(5),
+        Instr::Copy(Loc::Id(RETURN), input(1), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, false), (1, 1));
+}
+
+#[test]
+fn region_merge_four_item_or_chain_differential() {
+    fn emit(index: u32, program: &mut Vec<Instr<Name, B64>>) {
+        let branch = program.len();
+        program.push(Instr::Jump(input(index), 0, info()));
+        if index < 3 {
+            emit(index + 1, program);
+        } else {
+            program.push(Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()));
+        }
+        let goto = program.len();
+        program.push(Instr::Goto(0));
+        let taken = program.len();
+        program.push(Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()));
+        let join = program.len();
+        program[branch] = Instr::Jump(input(index), taken, info());
+        program[goto] = Instr::Goto(join);
+    }
+    let mut program = Vec::new();
+    emit(0, &mut program);
+    program.push(Instr::End);
+    let mut analysis = crate::ir::regions::FunctionRegions::new(&program, HAVE_EXCEPTION);
+    let branches: Vec<_> =
+        program.iter().enumerate().filter_map(|(pc, instr)| matches!(instr, Instr::Jump(..)).then_some(pc)).collect();
+    let joins: HashSet<_> = branches.iter().map(|pc| analysis.region(*pc).unwrap().join).collect();
+    assert_eq!(joins.len(), 4, "四层 OR 必须有四个不同汇合点");
+    let shared = empty_shared_state();
+    assert_eq!(differential(program, &shared, 4, true), (5, 1));
+}
+
+#[test]
+fn region_merge_seeded_random_pure_ir() {
+    fn emit(depth: u32, seed: &mut u64, function: Name, program: &mut Vec<Instr<Name, B64>>) {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let index = (*seed >> 32) as u32 % 4;
+        if depth == 0 {
+            program.push(Instr::Call(Loc::Id(RETURN), false, function, vec![input(index)], info()));
+            if *seed & 1 != 0 {
+                program.push(Instr::PrimopUnary(
+                    Loc::Id(RETURN),
+                    primop::unary_primops()["not"],
+                    Exp::Id(RETURN),
+                    info(),
+                ));
+            }
+            if *seed & 7 == 0 {
+                let temporary = test_name(1000 + program.len() as u32);
+                program.push(Instr::Decl(temporary, Ty::Unit, info()));
+                program.push(Instr::PrimopUnary(
+                    Loc::Id(temporary),
+                    primop::unary_primops()["assume"],
+                    input((*seed >> 16) as u32 % 4),
+                    info(),
+                ));
+            }
+            return;
+        }
+        let branch = program.len();
+        program.push(Instr::Jump(input(index), 0, info()));
+        emit(depth - 1, seed, function, program);
+        let goto = program.len();
+        program.push(Instr::Goto(0));
+        let taken = program.len();
+        emit(depth - 1, seed, function, program);
+        let join = program.len();
+        program[branch] = Instr::Jump(input(index), taken, info());
+        program[goto] = Instr::Goto(join);
+    }
+    for initial in [1, 7, 42, 123, 0x5eed, 0xcafe, 0xdeadbeef, u64::MAX] {
+        let mut shared = empty_shared_state();
+        let function = helper(&mut shared);
+        let mut seed = initial;
+        let mut program = Vec::new();
+        emit(3, &mut seed, function, &mut program);
+        program.push(Instr::End);
+        let counts = differential(program, &shared, 4, false);
+        assert_eq!(counts.1, 1, "种子 {initial} 必须合并成单路径");
+    }
+}
+
+#[test]
+fn region_merge_single_arm_register_read_union_and_guard() {
+    let mut shared = empty_shared_state();
+    let register = shared.symtab.intern(Box::leak(zencode::encode("region_lazy_register").into_boxed_str()));
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(register), info()),
+        Instr::End,
+    ]);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    frame.regs_mut().insert(register, false, UVal::Uninit(Box::leak(Box::new(Ty::Bool))));
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let output = Mutex::new(0);
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+        &shared,
+        &output,
+        &move |_, _, result, _, solver, output| {
+            let Ok((Run::Finished(_), frame)) = result else {
+                panic!("单臂读取必须成功");
+            };
+            *output.lock().unwrap() += 1;
+            assert!(frame.regs().get_last_if_initialized(register).is_some());
+            let records = frame.region_merge_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].single_arm_reads.len(), 1);
+            assert_eq!(records[0].single_arm_reads[0].guard, smtlib::Exp::Var(condition));
+            assert_eq!(
+                solver
+                    .trace()
+                    .to_vec()
+                    .iter()
+                    .filter(|event| matches!(event, Event::ReadReg(reg, _, _) if *reg == register))
+                    .count(),
+                1
+            );
+        },
+    );
+    assert_eq!(*output.lock().unwrap(), 1);
+}
+
+#[test]
+fn region_merge_pow_int_fresh_equations_and_local_variable() {
+    let shared = empty_shared_state();
+    let base = test_name(960);
+    let temporary = test_name(961);
+    let program = vec![
+        Instr::Decl(base, Ty::I128, info()),
+        Instr::PrimopUnary(Loc::Id(base), primop::unary_primops()["isla_bool_to_bit"], input(1), info()),
+        Instr::PrimopBinary(
+            Loc::Id(base),
+            primop::binary_primops()["zero_extend"],
+            Exp::Id(base),
+            Exp::I128(128),
+            info(),
+        ),
+        Instr::Jump(input(0), 7, info()),
+        Instr::Init(temporary, Ty::I128, Exp::I128(2), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(10),
+        Instr::PrimopBinary(Loc::Id(base), primop::binary_primops()["pow_int"], Exp::Id(base), Exp::I128(3), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(base), Exp::I128(1)]), info()),
+        Instr::Goto(10),
+        Instr::End,
+    ];
+    let merged_paths = paths(program.clone(), &shared, 2, true);
+    assert_eq!(merged_paths.len(), 1);
+    assert!(
+        merged_paths[0].records.iter().all(|record| record.input_symbols.iter().all(|symbol| symbol.id < 2)),
+        "纯原语的新鲜中间定义不是自由输入"
+    );
+    assert_eq!(differential(program, &shared, 2, true), (2, 1));
+}
+
+pub(super) fn check_region_effect_rejection_and_negative_cache() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::PrimopVariadic(
+            Loc::Id(RETURN),
+            primop::variadic_primops()["platform_read_mem"],
+            Vec::new(),
+            SourceLoc::new(0, 17, 1, 17, 8),
+        ),
+        Instr::End,
+    ]);
+    shared.symtab.set_files(vec!["region.sail"]);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let queue = Worker::new_lifo();
+    let sink = SingleForkSink { queue: &queue };
+    let before = solver.trace().to_vec().len();
+    for _ in 0..2 {
+        let outcome = region_merge::try_region(
+            condition,
+            3,
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &sink,
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver,
+            info(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, region_merge::RegionResult::Rejected));
+        assert_eq!(solver.transaction_depth(), 0);
+        assert_eq!(solver.trace().to_vec().len(), before);
+    }
+    assert!(queue.is_empty());
+    let report = shared.execution_stats.merge_json();
+    assert_eq!(report["negative_cache_hits"], 1);
+    let detail = shared.execution_stats.arm_unsupported_json(&shared.symtab);
+    assert_eq!(detail["top"][0]["reason"], "state_effect");
+    assert_eq!(detail["top"][0]["target_pc"], 3);
+    assert_eq!(detail["top"][0]["location"], "region.sail 17:1 - 17:8");
+}
+
+pub(super) fn check_region_rejection_locations_and_budget() {
+    let shared = empty_shared_state();
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ]);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    let state = TaskState::new()
+        .with_execution_limits(ExecutionLimits::default().with_path_merging(true))
+        .with_region_step_budget(0);
+    let queue = Worker::new_lifo();
+    assert!(matches!(
+        region_merge::try_region(
+            condition,
+            3,
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver,
+            info()
+        )
+        .unwrap(),
+        region_merge::RegionResult::Rejected
+    ));
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(frame.pc, 0);
+    assert!(state.region_negative_cache.lock().unwrap().is_empty(), "动态预算拒绝不能缓存");
+    let loop_body: Vec<Instr<Name, B64>> =
+        vec![Instr::Jump(input(0), 3, info()), Instr::Goto(0), Instr::End, Instr::End];
+    let mut regions = crate::ir::regions::FunctionRegions::new(&loop_body, HAVE_EXCEPTION);
+    assert_eq!(regions.region(0), Err(crate::ir::regions::RegionRejection::HasBackEdge));
+}
+
+pub(super) fn check_region_read_after_write_location() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    shared.symtab.set_files(vec!["region.sail"]);
+    let reg = shared.symtab.intern("zregister");
+    let source = SourceLoc::new(0, 23, 1, 23, 10);
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(5),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), source),
+        Instr::End,
+    ]);
+    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    assert!(merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None)
+        .unwrap()
+        .is_none());
+    let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
+    assert_eq!(report["top"][0]["reason"], "register_read_after_write");
+    assert_eq!(report["top"][0]["source_loc"], serde_json::json!(source));
+}
+
+#[test]
+fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let asserted = shared.symtab.intern("zasserted");
+    let parameter = test_name(971);
+    let body = Box::leak(
+        vec![
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["optimistic_assert"],
+                Exp::Id(parameter),
+                Exp::String("条件".into()),
+                info(),
+            ),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]
+        .into_boxed_slice(),
+    );
+    shared.functions.insert(asserted, (vec![(parameter, &Ty::Bool)], &Ty::Bool, body));
+    let reg = shared.symtab.intern("zregister");
+    shared.registers.insert(reg, Ty::Bool);
+    let unit = test_name(970);
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(11),
+        Instr::Jump(input(1), 7, info()),
+        Instr::Decl(unit, Ty::Unit, info()),
+        Instr::Call(Loc::Id(RETURN), false, asserted, vec![input(2)], info()),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+        Instr::Goto(11),
+        Instr::End,
+    ];
+    // 寄存器由入口初始化；外层的写后读只能在内层已提交之后触发拒绝。
+    // 此处先用真实执行直接检查拒绝不会泄漏到调度边界。
+    assert_eq!(differential(program.clone(), &shared, 3, false), (3, 2));
+    let mut frame = make_frame(program);
+    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    for index in 0..3 {
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(symbol)));
+    }
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let output = Mutex::new(0);
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+        &shared,
+        &output,
+        &|_, _, result, _, solver, output| {
+            assert_eq!(solver.transaction_depth(), 0);
+            match result {
+                Ok((Run::Finished(_), _)) => *output.lock().unwrap() += 1,
+                Err((ExecError::AssertionFailure(..), _)) => (),
+                _ => panic!("拒绝必须在区域边界回滚"),
+            }
+        },
+    );
+    assert_eq!(*output.lock().unwrap(), 2);
+    assert!(shared.execution_stats.merge_json()["failure_reasons"]["register_read_after_write"].as_u64().unwrap() > 0);
+}
+
+fn policy_limits(shared: &SharedState<B64>, rules: Vec<(Name, crate::config::MergeMode)>) -> ExecutionLimits {
+    use crate::config::{ExecutionLimitsConfig, MergePolicyConfig, MergePolicySelectorConfig};
+    let config = ExecutionLimitsConfig {
+        merge_policy: Some(
+            rules
+                .into_iter()
+                .map(|(name, mode)| MergePolicyConfig {
+                    mode,
+                    selector: MergePolicySelectorConfig::Function(shared.symtab.to_str(name).to_owned()),
+                })
+                .collect(),
+        ),
+        ..ExecutionLimitsConfig::default()
+    };
+    ExecutionLimits::default().with_config(&config, &shared.symtab)
+}
+
+#[test]
+fn region_merge_force_process_failure_and_off_conflict() {
+    use crate::config::MergeMode;
+    if let Ok(case) = std::env::var("ISLA_I2_FORCE_CHILD") {
+        let mut shared = empty_shared_state();
+        let root = shared.symtab.intern("zroot");
+        let callee = helper(&mut shared);
+        let argument = test_name(980);
+        shared.functions.insert(
+            callee,
+            (
+                vec![(argument, &Ty::Bool)],
+                &Ty::Bool,
+                Box::leak(
+                    vec![
+                        Instr::Jump(Exp::Id(argument), 3, info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                        Instr::Goto(4),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                        Instr::End,
+                    ]
+                    .into_boxed_slice(),
+                ),
+            ),
+        );
+        let program = if case == "off" {
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(4),
+                Instr::Call(Loc::Id(RETURN), false, callee, vec![input(1)], info()),
+                Instr::End,
+            ]
+        } else if case == "static" {
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(4),
+                Instr::PrimopVariadic(
+                    Loc::Id(RETURN),
+                    primop::variadic_primops()["platform_read_mem"],
+                    Vec::new(),
+                    info(),
+                ),
+                Instr::End,
+            ]
+        } else {
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(4),
+                Instr::Exit(ExitCause::Explicit, info()),
+                Instr::End,
+            ]
+        };
+        let rules = if case == "off" {
+            vec![(root, MergeMode::Force), (callee, MergeMode::Off)]
+        } else {
+            vec![(root, MergeMode::Force)]
+        };
+        let state = TaskState::new().with_execution_limits(policy_limits(&shared, rules));
+        let mut frame = make_frame(program);
+        frame.function_name = root;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        for index in 0..2 {
+            let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+            frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(symbol)));
+        }
+        let queue = Worker::new_lifo();
+        let result = run_loop(
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver,
+        );
+        panic!("强制失败必须退出进程：{}", result.is_ok());
+    }
+    for case in ["static", "dynamic", "off"] {
+        let started = Instant::now();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("executor::tests::region_merge_tests::region_merge_force_process_failure_and_off_conflict")
+            .arg("--nocapture")
+            .env("ISLA_I2_FORCE_CHILD", case)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(speculation::FORCE_MERGE_EXIT_CODE),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let diagnostic: serde_json::Value = String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .find_map(|line| serde_json::from_str(line).ok())
+            .expect("必须输出结构化诊断");
+        assert_eq!(diagnostic["kind"], "force_region_merge_failure");
+        assert!(diagnostic["rule"].is_u64());
+        if case == "off" {
+            assert_eq!(diagnostic["reason"], "policy_off");
+            assert!(!diagnostic["force_origin"].is_null());
+        }
+    }
+}
+
+#[test]
+fn region_merge_policy_inheritance_and_global_off() {
+    use crate::config::MergeMode;
+    for (outer, inner, expected) in
+        [(MergeMode::Adaptive, Some(MergeMode::Off), 3), (MergeMode::Adaptive, None, 1), (MergeMode::Force, None, 1)]
+    {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let root = shared.symtab.intern("zroot");
+        let callee = helper(&mut shared);
+        let argument = test_name(981);
+        shared.functions.insert(
+            callee,
+            (
+                vec![(argument, &Ty::Bool)],
+                &Ty::Bool,
+                Box::leak(
+                    vec![
+                        Instr::Jump(Exp::Id(argument), 3, info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                        Instr::Goto(4),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                        Instr::End,
+                    ]
+                    .into_boxed_slice(),
+                ),
+            ),
+        );
+        let mut rules = vec![(root, outer)];
+        if let Some(inner) = inner {
+            rules.push((callee, inner));
+        }
+        let state = TaskState::new().with_execution_limits(policy_limits(&shared, rules));
+        let mut frame = make_frame(vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Call(Loc::Id(RETURN), false, callee, vec![input(1)], info()),
+            Instr::End,
+        ]);
+        frame.function_name = root;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        for index in 0..2 {
+            let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+            frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(symbol)));
+        }
+        let output = Mutex::new(0);
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+            &shared,
+            &output,
+            &|_, _, result, _, _, output| {
+                assert!(matches!(result, Ok((Run::Finished(_), _))));
+                *output.lock().unwrap() += 1;
+            },
+        );
+        assert_eq!(*output.lock().unwrap(), expected);
+        assert!(shared.execution_stats.merge_json()["rules"]["0"]["attempts"].as_u64().unwrap() > 0);
+    }
+}
+
+#[test]
+fn region_merge_callee_have_exception_write_rejects() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let function = helper(&mut shared);
+    shared.functions.get_mut(&function).unwrap().2 = Box::leak(
+        vec![
+            Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(false), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]
+        .into_boxed_slice(),
+    );
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Call(Loc::Id(RETURN), false, function, vec![input(1)], info()),
+        Instr::End,
+    ]);
+    frame.lets_mut().insert(HAVE_EXCEPTION, UVal::Init(Val::Bool(false)));
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(test_name(901), UVal::Init(Val::Bool(true)));
+    assert!(merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None)
+        .unwrap()
+        .is_none());
+    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["callee_state_write"], 1);
+}
+
+#[test]
+fn region_merge_unique_monomorphize_and_retry_in_real_arms() {
+    let shared = empty_shared_state();
+    let result = test_name(990);
+    let temporary = test_name(991);
+    let program = vec![
+        Instr::Decl(result, Ty::Bits(128), info()),
+        Instr::PrimopUnary(Loc::Id(result), primop::unary_primops()["isla_bool_to_bit"], input(0), info()),
+        Instr::PrimopBinary(
+            Loc::Id(result),
+            primop::binary_primops()["zero_extend"],
+            Exp::Id(result),
+            Exp::I128(128),
+            info(),
+        ),
+        Instr::Jump(input(0), 9, info()),
+        Instr::Monomorphize(test_name(900), Ty::Bool, info()),
+        Instr::Decl(temporary, Ty::I128, info()),
+        Instr::PrimopBinary(
+            Loc::Id(temporary),
+            primop::binary_primops()["pow_int"],
+            Exp::I128(3),
+            Exp::Id(result),
+            info(),
+        ),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(temporary), Exp::I128(3)]), info()),
+        Instr::Goto(13),
+        Instr::Monomorphize(test_name(900), Ty::Bool, info()),
+        Instr::Decl(temporary, Ty::I128, info()),
+        Instr::PrimopBinary(
+            Loc::Id(temporary),
+            primop::binary_primops()["pow_int"],
+            Exp::I128(3),
+            Exp::Id(result),
+            info(),
+        ),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(temporary), Exp::I128(3)]), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 1, true), (2, 1));
+}
+
+#[test]
+fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
+    let shared = empty_shared_state();
+    let mut frame = make_frame(vec![Instr::Jump(input(0), 1, info()), Instr::End]);
+    frame.speculation_mode = SpeculationMode::On;
+    frame.region_execution = Some(region_merge::RegionExecution {
+        region: Arc::new(crate::ir::regions::Region {
+            branch_pc: 0,
+            join: crate::ir::regions::RegionPoint::Instruction(1),
+            nodes: Default::default(),
+            kind: crate::ir::regions::RegionKind::Reconvergent,
+            local_variables: Default::default(),
+        }),
+        entry_depth: 0,
+        write_depth: 0,
+        depth: 1,
+        remaining: Arc::new(AtomicUsize::new(10)),
+        mode: crate::config::MergeMode::Adaptive,
+        origin: (frame.function_name, 0, info()),
+    });
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+    let tx = solver.start_transaction_with_guard(Some(smtlib::Exp::Var(symbol)));
+    let state = TaskState::new();
+    let queue = Worker::new_lifo();
+    let mut fraction = Fraction::one();
+    symbolic_length::fork_retry_operand(
+        symbol,
+        smtlib::Exp::Var(symbol),
+        smtlib::Exp::Not(Box::new(smtlib::Exp::Var(symbol))),
+        &[Val::Symbolic(symbol)],
+        info(),
+        TaskId::fresh(),
+        &mut fraction,
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &mut solver,
+    )
+    .unwrap();
+    assert!(queue.is_empty());
+    assert!(fraction.is_one());
+    assert_eq!(solver.transaction_depth(), 1);
+    solver.rollback_transaction(tx);
+    assert!(solver.check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(symbol))), info()).is_sat().unwrap());
+    assert!(shared.function_regions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn region_merge_nested_single_read_keeps_complete_guard() {
+    let mut shared = empty_shared_state();
+    let register = shared.symtab.intern("zregister");
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(7),
+        Instr::Jump(input(1), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(7),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(register), info()),
+        Instr::End,
+    ]);
+    frame.regs_mut().insert(register, false, UVal::Uninit(&Ty::Bool));
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let g = solver.declare_const(smtlib::Ty::Bool, info());
+    let h = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(g)));
+    frame.vars_mut().insert(test_name(901), UVal::Init(Val::Symbolic(h)));
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+        &shared,
+        &(),
+        &move |_, _, result, _, mut solver, _| {
+            let Ok((Run::Finished(_), frame)) = result else {
+                panic!("嵌套读取必须成功合并");
+            };
+            let exact = smtlib::Exp::And(Box::new(smtlib::Exp::Var(g)), Box::new(smtlib::Exp::Var(h)));
+            for record in frame.region_merge_records() {
+                for read in &record.single_arm_reads {
+                    assert!(
+                        solver
+                            .check_sat_with(
+                                &smtlib::Exp::Neq(Box::new(read.guard.clone()), Box::new(exact.clone())),
+                                info()
+                            )
+                            .is_unsat()
+                            .unwrap(),
+                        "外层不得把嵌套读取的 guard 弱化"
+                    );
+                }
+            }
+        },
+    );
+}
+
+#[test]
+fn region_merge_partial_register_write_reuses_original_unwritten_fields() {
+    let mut shared = empty_shared_state();
+    let register = shared.symtab.intern("zregister");
+    let structure = shared.symtab.intern("zstructure");
+    let x = shared.symtab.intern("zx");
+    let y = shared.symtab.intern("zy");
+    shared.type_info.structs.insert(structure, std::collections::BTreeMap::from([(x, Ty::Bool), (y, Ty::Bool)]));
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Field(Box::new(Exp::Id(register)), y), info()),
+        Instr::Goto(5),
+        Instr::Copy(Loc::Field(Box::new(Loc::Id(register)), x), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::End,
+    ]);
+    frame.regs_mut().insert(register, false, UVal::Uninit(Box::leak(Box::new(Ty::Struct(structure)))));
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let count = Mutex::new(0);
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+        &shared,
+        &count,
+        &move |_, _, result, _, mut solver, count| {
+            let Ok((Run::Finished(_), frame)) = result else {
+                panic!("部分字段写与另一臂读取必须合并成功");
+            };
+            *count.lock().unwrap() += 1;
+            let Val::Struct(merged) = frame.regs().get_last_if_initialized(register).unwrap() else {
+                panic!("必须保留结构寄存器");
+            };
+            let events = solver.trace().to_vec();
+            let original = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::ReadReg(reg, _, Val::Struct(fields)) if *reg == register => Some(&fields[&y]),
+                    _ => None,
+                })
+                .expect("另一臂读取必须保存前置值");
+            let unequal = smtlib::Exp::Neq(
+                Box::new(smt_value(&merged[&y], info()).unwrap()),
+                Box::new(smt_value(original, info()).unwrap()),
+            );
+            assert!(
+                solver.check_sat_with(&unequal, info()).is_unsat().unwrap(),
+                "未写字段在全部分支中必须等于同一前置值"
+            );
+        },
+    );
+    assert_eq!(*count.lock().unwrap(), 1);
+}
+
+#[test]
+fn region_merge_repeated_pure_calls_keep_distinct_local_initial_values() {
+    let mut shared = empty_shared_state();
+    let function = helper(&mut shared);
+    let argument = test_name(1010);
+    let local = test_name(1011);
+    let first = test_name(1012);
+    let second = test_name(1013);
+    shared.functions.insert(
+        function,
+        (
+            vec![(argument, &Ty::Bool)],
+            &Ty::Bool,
+            Box::leak(
+                vec![
+                    Instr::Decl(local, Ty::Bool, info()),
+                    Instr::Jump(Exp::Id(argument), 4, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(local), info()),
+                    Instr::Goto(5),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(local), info()),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            ),
+        ),
+    );
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(8),
+        Instr::Decl(first, Ty::Bool, info()),
+        Instr::Decl(second, Ty::Bool, info()),
+        Instr::Call(Loc::Id(first), false, function, vec![input(1)], info()),
+        Instr::Call(Loc::Id(second), false, function, vec![input(1)], info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Neq, vec![Exp::Id(first), Exp::Id(second)]), info()),
+        Instr::End,
+    ]);
+    frame.function_name = TOP_LEVEL_LET;
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let outer = solver.declare_const(smtlib::Ty::Bool, info());
+    let inner = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(outer)));
+    frame.vars_mut().insert(test_name(901), UVal::Init(Val::Symbolic(inner)));
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+        &shared,
+        &(),
+        &move |_, _, result, _, mut solver, _| {
+            let Ok((Run::Finished(value), frame)) = result else {
+                panic!("两次纯调用必须完成");
+            };
+            assert!(!frame.region_merge_records().is_empty());
+            for selected in [true, false] {
+                let guard = smtlib::Exp::And(
+                    Box::new(smtlib::Exp::Var(outer)),
+                    Box::new(if selected {
+                        smtlib::Exp::Var(inner)
+                    } else {
+                        smtlib::Exp::Not(Box::new(smtlib::Exp::Var(inner)))
+                    }),
+                );
+                assert!(
+                    solver
+                        .check_sat_with(
+                            &smtlib::Exp::And(Box::new(guard), Box::new(smt_value(&value, info()).unwrap())),
+                            info()
+                        )
+                        .is_sat()
+                        .unwrap(),
+                    "每次调用的未初始化局部值必须保持相互独立"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn region_merge_prior_fresh_definitions_remain_dependencies_after_next_merge() {
+    let shared = empty_shared_state();
+    let base = test_name(1020);
+    let program = vec![
+        Instr::Decl(base, Ty::I128, info()),
+        Instr::PrimopUnary(Loc::Id(base), primop::unary_primops()["isla_bool_to_bit"], input(1), info()),
+        Instr::PrimopBinary(
+            Loc::Id(base),
+            primop::binary_primops()["zero_extend"],
+            Exp::Id(base),
+            Exp::I128(128),
+            info(),
+        ),
+        Instr::Jump(input(0), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(8),
+        Instr::PrimopBinary(Loc::Id(base), primop::binary_primops()["pow_int"], Exp::Id(base), Exp::I128(3), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(base), Exp::I128(1)]), info()),
+        Instr::Jump(input(1), 11, info()),
+        Instr::Copy(Loc::Id(RETURN), input(0), info()),
+        Instr::Goto(12),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Not, vec![input(0)]), info()),
+        Instr::End,
+    ];
+    let merged = paths(program, &shared, 2, true);
+    assert_eq!(merged.len(), 1);
+    assert!(merged[0].records.len() >= 2);
+    for record in &merged[0].records {
+        assert!(
+            record.input_symbols.iter().all(|symbol| symbol.id < 2),
+            "历史纯原语的新鲜定义不能在后续区域提交后重新变成自由输入"
+        );
+    }
+}
+
+#[test]
+fn region_merge_force_static_validation_before_execution() {
+    let mut shared = empty_shared_state();
+    let function = shared.symtab.intern("zloop");
+    shared.functions.insert(
+        function,
+        (
+            Vec::new(),
+            &Ty::Bool,
+            Box::leak(
+                vec![Instr::Jump(Exp::Bool(true), 3, info()), Instr::Goto(0), Instr::End, Instr::End]
+                    .into_boxed_slice(),
+            ),
+        ),
+    );
+    let limits = policy_limits(&shared, vec![(function, crate::config::MergeMode::Force)]);
+    let diagnostic = validate_force_regions(&shared, &limits).unwrap_err();
+    let diagnostic: serde_json::Value =
+        serde_json::from_str(&diagnostic).expect("加载期 Force 拒绝也必须给出结构化诊断");
+    assert_eq!(diagnostic["rule"], 0);
+    assert_eq!(diagnostic["function"], "loop");
+    assert_eq!(diagnostic["branch_pc"], 0);
+    assert_eq!(diagnostic["reason"], "has_back_edge");
+}

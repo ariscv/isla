@@ -50,7 +50,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
 use crate::primop;
-use crate::primop_util::{build_ite, build_vector_ite, i128_from_bits, ite_phi, smt_value, symbolic};
+use crate::primop_util::{build_vector_ite, i128_from_bits, ite_phi, smt_value, symbolic};
 use crate::probe;
 use crate::smt::smtlib::Def;
 use crate::smt::*;
@@ -61,6 +61,8 @@ use crate::zencode;
 mod execution_limits;
 mod frame;
 mod path_timing;
+mod region_merge;
+pub use region_merge::{validate_force_regions, GuardedRegisterRead, RegionMergeRecord};
 mod speculation;
 pub mod stats;
 mod symbolic_length;
@@ -74,8 +76,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
-pub use speculation::{SpeculationMode, SpeculationStats, SpeculativeRejectReason};
-use stats::{ArmControlFlowSite, ArmUnsupported, MergeFailure};
+pub use speculation::{SpeculationMode, SpeculationStats, SpeculativeRejectReason, FORCE_MERGE_EXIT_CODE};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
@@ -93,6 +94,8 @@ pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskStat
 fn get_and_initialize<'state, 'ir, B: BV>(
     v: Name,
     vars: &'state mut Bindings<'ir, B>,
+    access: Option<&mut region_merge::AccessLog<B>>,
+    is_let: bool,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
@@ -101,6 +104,16 @@ fn get_and_initialize<'state, 'ir, B: BV>(
         Some(uval) => match uval {
             UVal::Uninit(ty) => {
                 let sym = symbolic(ty, shared_state, solver, info)?;
+                if let Some(access) = access {
+                    if is_let {
+                        access.initial_lets.entry(v).or_insert_with(|| sym.clone());
+                    } else {
+                        access
+                            .initial_variables
+                            .entry((access.call_scope, access.function, v))
+                            .or_insert_with(|| sym.clone());
+                    }
+                }
                 *uval = UVal::Init(sym);
                 if let UVal::Init(value) = uval {
                     Some(value)
@@ -125,36 +138,65 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
 ) -> Result<Cow<'state, Val<B>>, ExecError> {
     use Cow::*;
 
-    Ok(match get_and_initialize(id, &mut local_state.vars, shared_state, solver, info)? {
-        Some(value) => Borrowed(value),
-        None => match local_state.regs.get(id, shared_state, solver, info)? {
-            Some(value) => {
-                if !for_write {
-                    if let Some(reads) = local_state.register_reads.as_mut() {
-                        reads.push((id, accessor.to_vec(), value.clone()));
+    Ok(
+        match get_and_initialize(
+            id,
+            &mut local_state.vars,
+            local_state.speculative_access.as_mut(),
+            false,
+            shared_state,
+            solver,
+            info,
+        )? {
+            Some(value) => Borrowed(value),
+            None => match local_state.regs.get(id, shared_state, solver, info)? {
+                Some(value) => {
+                    if let Some(access) = &mut local_state.speculative_access {
+                        if !access.writes.modified_regs.contains(&id) {
+                            access.initial_registers.entry(id).or_insert_with(|| value.clone());
+                        }
                     }
+                    let publish_read = if !for_write {
+                        match &mut local_state.speculative_access {
+                            Some(access) => access.record_read(id, accessor.to_vec(), value.clone())?,
+                            None => true,
+                        }
+                    } else {
+                        false
+                    };
+                    let symbol = zencode::decode(shared_state.symtab.to_str(id));
+                    // HACK: Don't store the entire TLB in the trace
+                    if publish_read && symbol != "_TLB" {
+                        solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
+                    }
+                    Borrowed(value)
                 }
-                let symbol = zencode::decode(shared_state.symtab.to_str(id));
-                // HACK: Don't store the entire TLB in the trace
-                if !for_write && symbol != "_TLB" {
-                    solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
-                }
-                Borrowed(value)
-            }
-            None => match get_and_initialize(id, &mut local_state.lets, shared_state, solver, info)? {
-                Some(value) => Borrowed(value),
-                None => match shared_state.type_info.enum_members.get(&id) {
-                    Some((member, enum_size, enum_id)) => {
-                        let enum_id = solver.get_enum(*enum_id, *enum_size);
-                        Owned(Val::Enum(EnumMember { enum_id, member: *member }))
-                    }
-                    None => {
-                        return Err(ExecError::VariableNotFound(zencode::decode(shared_state.symtab.to_str(id)), info))
-                    }
+                None => match get_and_initialize(
+                    id,
+                    &mut local_state.lets,
+                    local_state.speculative_access.as_mut(),
+                    true,
+                    shared_state,
+                    solver,
+                    info,
+                )? {
+                    Some(value) => Borrowed(value),
+                    None => match shared_state.type_info.enum_members.get(&id) {
+                        Some((member, enum_size, enum_id)) => {
+                            let enum_id = solver.get_enum(*enum_id, *enum_size);
+                            Owned(Val::Enum(EnumMember { enum_id, member: *member }))
+                        }
+                        None => {
+                            return Err(ExecError::VariableNotFound(
+                                zencode::decode(shared_state.symtab.to_str(id)),
+                                info,
+                            ))
+                        }
+                    },
                 },
             },
         },
-    })
+    )
 }
 
 fn get_loc_and_initialize<'ir, B: BV>(
@@ -306,22 +348,35 @@ fn read_register_from_vector<'ir, B: BV>(
     match index {
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
-            let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap();
-            solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
-            Ok(value.clone())
+            let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap().clone();
+            let publish = region_merge::record_read(local_state, regs[i], Vec::new(), value.clone())?;
+            if publish {
+                solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
+            }
+            Ok(value)
         }
         SymbolicIndex(i) => {
             // See above case for unwrap safety
             let mut chain = local_state.regs.get(regs[0], shared_state, solver, info)?.unwrap().clone();
+            if local_state.speculative_access.is_some()
+                && region_merge::record_read(local_state, regs[0], Vec::new(), chain.clone())?
+            {
+                solver.add_event(Event::ReadReg(regs[0], Vec::new(), chain.clone()));
+            }
             let mut reg_values = vec![chain.clone()];
             for (j, reg) in regs[1..].iter().enumerate() {
                 let choice = solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
                     solver.define_const(Eq(Box::new(Var(i)), Box::new(Bits64(B64::new((j + 1) as u64, rib)))), info)
                 });
-                let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap();
+                let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone();
+                if local_state.speculative_access.is_some()
+                    && region_merge::record_read(local_state, *reg, Vec::new(), value.clone())?
+                {
+                    solver.add_event(Event::ReadReg(*reg, Vec::new(), value.clone()));
+                }
                 reg_values.push(value.clone());
                 chain = match solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
-                    build_vector_ite(choice, value, &chain, solver, info)
+                    build_vector_ite(choice, &value, &chain, solver, info)
                 }) {
                     Ok(value) => value,
                     Err(ExecError::NoSymbolicType | ExecError::IncompatibleMerge) => {
@@ -341,6 +396,9 @@ fn read_register_from_vector<'ir, B: BV>(
                     }
                     Err(error) => return Err(error),
                 }
+            }
+            if local_state.speculative_access.is_some() {
+                return Ok(chain);
             }
             solver.add_event(Event::Abstract {
                 name: READ_REGISTER_FROM_VECTOR,
@@ -459,8 +517,11 @@ fn write_register_from_vector<'ir, B: BV>(
     match index {
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
+            region_merge::record_write(local_state, regs[i], true)?;
             local_state.regs.assign(regs[i], value.clone(), shared_state);
-            solver.add_event(Event::WriteReg(regs[i], Vec::new(), value));
+            if local_state.speculative_access.is_none() {
+                solver.add_event(Event::WriteReg(regs[i], Vec::new(), value));
+            }
         }
         SymbolicIndex(i) => {
             if regs.iter().any(|reg| local_state.regs.is_relaxed(*reg) || local_state.regs.has_old_writes(*reg)) {
@@ -489,6 +550,9 @@ fn write_register_from_vector<'ir, B: BV>(
                     Some(value) => value.clone(),
                     None => local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone(),
                 };
+                if let Some(access) = &mut local_state.speculative_access {
+                    access.initial_registers.entry(*reg).or_insert_with(|| current_value.clone());
+                }
                 let updated = match solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
                     build_vector_ite(choice, &value, &current_value, solver, info)
                 }) {
@@ -515,7 +579,11 @@ fn write_register_from_vector<'ir, B: BV>(
                 reg_values.push(current_value);
             }
             for (reg, updated) in updates {
+                region_merge::record_write(local_state, reg, true)?;
                 local_state.regs.assign(reg, updated, shared_state);
+            }
+            if local_state.speculative_access.is_some() {
+                return Ok(());
             }
             solver.add_event(Event::Abstract {
                 name: WRITE_REGISTER_FROM_VECTOR,
@@ -626,7 +694,7 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
         }
 
         Unwrap(ctor_a, exp) => {
-            let speculative = local_state.register_reads.is_some();
+            let speculative = local_state.speculative_access.is_some();
             let v = eval_exp(exp, local_state, shared_state, solver, info)?.into_owned();
             match v {
                 Val::Ctor(ctor_b, v) if *ctor_a == ctor_b => Owned(*v),
@@ -726,6 +794,11 @@ fn assign_with_accessor<'ir, B: BV>(
 ) -> Result<(), ExecError> {
     match loc {
         Loc::Id(id) => {
+            region_merge::record_write(
+                local_state,
+                *id,
+                !local_state.vars.contains_key(id) && !local_state.lets.contains_key(id),
+            )?;
             if local_state.vars.contains_key(id) {
                 local_state.vars.insert(*id, UVal::Init(v));
             } else if local_state.lets.contains_key(id) {
@@ -733,7 +806,7 @@ fn assign_with_accessor<'ir, B: BV>(
             } else {
                 let symbol = zencode::decode(shared_state.symtab.to_str(*id));
                 // HACK: Don't store the entire TLB in the trace
-                if symbol != "_TLB" {
+                if symbol != "_TLB" && local_state.speculative_access.is_none() {
                     solver.add_event(Event::WriteReg(*id, accessor.to_vec(), v.clone()))
                 }
                 local_state.regs.assign(*id, v, shared_state);
@@ -996,7 +1069,7 @@ pub fn reset_registers<'ir, B: BV>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
@@ -1008,6 +1081,14 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)> {
+    task_state.force_regions_validated.get_or_init(|| {
+        if let Some(limits) = &task_state.execution_limits {
+            if let Err(diagnostic) = validate_force_regions(shared_state, limits) {
+                eprintln!("{}", diagnostic);
+                std::process::exit(FORCE_MERGE_EXIT_CODE);
+            }
+        }
+    });
     let mut frame = unfreeze_frame(frame);
     frame.path_timing.start_active();
     let result = run_loop(
@@ -1326,13 +1407,16 @@ fn run_special_primop<'ir, B: BV>(
         frame.pc += 1
     } else if f == REG_DEREF && args.len() == 1 {
         if let Val::Ref(reg) = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned() {
-            match frame.regs_mut().get(reg, shared_state, solver, info)? {
-                Some(value) => {
-                    solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
-                    assign(tid, loc, value.clone(), &mut frame.local_state, shared_state, solver, info)?
-                }
-                None => return Err(ExecError::Type(format!("reg_deref {:?}", &reg), info)),
+            let value = frame
+                .regs_mut()
+                .get(reg, shared_state, solver, info)?
+                .cloned()
+                .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
+            let publish = region_merge::record_read(&mut frame.local_state, reg, Vec::new(), value.clone())?;
+            if publish {
+                solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
             }
+            assign(tid, loc, value, &mut frame.local_state, shared_state, solver, info)?;
         } else {
             return Err(ExecError::Type(format!("reg_deref (not a register) {:?}", &f), info));
         };
@@ -1669,660 +1753,6 @@ fn loop_limit_target(reason: ExecutionLimitReason) -> Option<usize> {
     }
 }
 
-fn record_loc_write<B: BV>(loc: &Loc<Name>, frame: &mut LocalFrame<B>) {
-    if let Some(ws) = frame.write_set.as_mut() {
-        let id = loc.id();
-        if frame.local_state.vars.contains_key(&id) || frame.local_state.lets.contains_key(&id) {
-            ws.modified_vars.insert(id);
-        } else {
-            ws.register_write_order.push(id);
-            if !ws.modified_regs.insert(id) {
-                ws.multiple_written_regs.insert(id);
-            }
-            if matches!(loc, Loc::Field(_, _)) {
-                ws.read_regs.insert(id);
-            }
-        }
-    }
-}
-
-fn detect_diamond_joins<B: BV>(instrs: &[Instr<Name, B>], pc: usize, target: usize) -> Vec<usize> {
-    let mut joins = Vec::new();
-    if target > pc + 1 && target <= instrs.len() {
-        if target > 0 {
-            if let Instr::Goto(join) = instrs[target - 1] {
-                if join >= target && join <= pc + 64 && join <= instrs.len() {
-                    joins.push(join);
-                }
-            }
-        }
-        if target <= pc + 64 {
-            joins.push(target);
-        }
-    }
-    joins
-}
-
-fn simulate_assign<'ir, B: BV>(
-    loc: &Loc<Name>,
-    v: Val<B>,
-    local_state: &mut LocalState<'ir, B>,
-    shared_state: &SharedState<'ir, B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-) -> Result<(), ExecError> {
-    let mut base_loc = loc;
-    while let Loc::Field(inner, _) = base_loc {
-        base_loc = inner;
-    }
-    if matches!(base_loc, Loc::Addr(_)) {
-        return Err(ExecError::IncompatibleMerge);
-    }
-    match loc {
-        Loc::Id(id) => {
-            if local_state.vars.contains_key(id) {
-                local_state.vars.insert(*id, UVal::Init(v));
-            } else if local_state.lets.contains_key(id) {
-                local_state.lets.insert(*id, UVal::Init(v));
-            } else {
-                local_state.regs.assign(*id, v, shared_state);
-            }
-            Ok(())
-        }
-        Loc::Field(sub_loc, field) => {
-            let mut accessor = Vec::new();
-            if let Val::Struct(field_values) =
-                get_loc_and_initialize(sub_loc, local_state, shared_state, solver, &mut accessor, info, false)?
-            {
-                let mut field_values = field_values.clone();
-                field_values.insert(*field, v);
-                simulate_assign(sub_loc, Val::Struct(field_values), local_state, shared_state, solver, info)
-            } else {
-                Err(ExecError::Type(format!("Assign to field of non-struct {:?}", loc), info))
-            }
-        }
-        Loc::Addr(_) => Err(ExecError::IncompatibleMerge),
-    }
-}
-
-fn simulate_diamond_arm<'ir, B: BV>(
-    start_pc: usize,
-    end_pc: usize,
-    join_pc: usize,
-    mut arm: LocalFrame<'ir, B>,
-    shared_state: &SharedState<'ir, B>,
-    solver: &mut Solver<B>,
-    limit_handler: Option<&ExecutionLimitHandler<'_>>,
-) -> Result<Option<LocalFrame<'ir, B>>, ExecError> {
-    let stats = &shared_state.execution_stats;
-    arm.pc = start_pc;
-    arm.write_set = Some(WriteSet::default());
-    arm.local_state.register_reads = Some(Vec::new());
-    let mut steps = 0;
-    let mut prev_instr_location = None;
-    while arm.pc != join_pc {
-        if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc || arm.pc > end_pc {
-            if stats.enabled() {
-                let reason = if steps >= 64 {
-                    ArmUnsupported::StepLimit
-                } else if arm.pc >= arm.instrs.len() {
-                    ArmUnsupported::PcPastInstrs
-                } else if arm.pc < start_pc {
-                    ArmUnsupported::PcBeforeStart
-                } else {
-                    ArmUnsupported::PcAfterEnd
-                };
-                stats.record_arm_control_flow(
-                    reason,
-                    ArmControlFlowSite { function: arm.function_name, start_pc, end_pc, join_pc, target_pc: arm.pc },
-                    prev_instr_location,
-                );
-            }
-            return Ok(None);
-        }
-        steps += 1;
-        let had_register_write = !arm.write_set.as_ref().unwrap().register_write_order.is_empty();
-        let read_count = arm.local_state.register_reads.as_ref().unwrap().len();
-        let instr = &arm.instrs[arm.pc];
-        match instr {
-            Instr::Decl(v, ty, _) => {
-                arm.vars_mut().insert(*v, UVal::Uninit(ty));
-                if let Some(ws) = arm.write_set.as_mut() {
-                    ws.modified_vars.insert(*v);
-                }
-                arm.pc += 1;
-            }
-            Instr::Init(var, _, exp, info) => {
-                let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
-                arm.vars_mut().insert(*var, UVal::Init(value));
-                if let Some(ws) = arm.write_set.as_mut() {
-                    ws.modified_vars.insert(*var);
-                }
-                arm.pc += 1;
-            }
-            Instr::Copy(loc, exp, info) => {
-                let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
-                record_loc_write(loc, &mut arm);
-                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
-                arm.pc += 1;
-            }
-            Instr::PrimopUnary(loc, f, arg, info) => {
-                if !crate::primop::is_pure_unary(*f) {
-                    if stats.enabled() {
-                        stats.record_arm_unsupported(ArmUnsupported::ImpureUnary, arm.function_name, Some(instr));
-                    }
-                    return Ok(None);
-                }
-                let arg = eval_exp(arg, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
-                let value = f(arg, solver, *info)?;
-                record_loc_write(loc, &mut arm);
-                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
-                arm.pc += 1;
-            }
-            Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
-                if !crate::primop::is_pure_binary(*f) {
-                    if stats.enabled() {
-                        stats.record_arm_unsupported(ArmUnsupported::ImpureBinary, arm.function_name, Some(instr));
-                    }
-                    return Ok(None);
-                }
-                let arg1 = eval_exp(arg1, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
-                let arg2 = eval_exp(arg2, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
-                let value = f(arg1, arg2, solver, *info)?;
-                record_loc_write(loc, &mut arm);
-                simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
-                arm.pc += 1;
-            }
-            Instr::PrimopVariadic(..) => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::PrimopVariadic, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-            Instr::Goto(target) => {
-                if (*target != join_pc && (*target < start_pc || *target > end_pc)) || *target > arm.instrs.len() {
-                    if stats.enabled() {
-                        stats.record_arm_control_flow(
-                            ArmUnsupported::GotoOutOfRange,
-                            ArmControlFlowSite {
-                                function: arm.function_name,
-                                start_pc,
-                                end_pc,
-                                join_pc,
-                                target_pc: *target,
-                            },
-                            prev_instr_location,
-                        );
-                    }
-                    return Ok(None);
-                }
-                let decision = match limit_handler {
-                    Some(handler) => handler.on_goto(
-                        &mut arm.execution_limit_state,
-                        arm.function_name,
-                        arm.pc,
-                        *target,
-                        &arm.backtrace,
-                    ),
-                    None => {
-                        arm.execution_limit_state.advance_control_flow();
-                        ExecutionLimitDecision::Continue
-                    }
-                };
-                if !matches!(decision, ExecutionLimitDecision::Continue) {
-                    if stats.enabled() {
-                        stats.record_arm_unsupported(ArmUnsupported::GotoLimit, arm.function_name, Some(instr));
-                    }
-                    return Ok(None);
-                }
-                arm.pc = *target;
-            }
-            Instr::Jump(exp, target, info) => {
-                let value = eval_exp(exp, &mut arm.local_state, shared_state, solver, *info)?;
-                let decision = match limit_handler {
-                    Some(handler) => handler.on_conditional_jump(
-                        &mut arm.execution_limit_state,
-                        arm.function_name,
-                        arm.pc,
-                        *target,
-                        &arm.backtrace,
-                        *info,
-                    ),
-                    None => {
-                        arm.execution_limit_state.advance_control_flow();
-                        ExecutionLimitDecision::Continue
-                    }
-                };
-                if !matches!(decision, ExecutionLimitDecision::Continue) {
-                    if stats.enabled() {
-                        stats.record_arm_unsupported(ArmUnsupported::JumpLimit, arm.function_name, Some(instr));
-                    }
-                    return Ok(None);
-                }
-                match *value.as_ref() {
-                    Val::Bool(true) => {
-                        if (*target != join_pc && (*target < start_pc || *target > end_pc))
-                            || *target > arm.instrs.len()
-                        {
-                            if stats.enabled() {
-                                stats.record_arm_unsupported(
-                                    ArmUnsupported::JumpTargetOutOfRange,
-                                    arm.function_name,
-                                    Some(instr),
-                                );
-                            }
-                            return Ok(None);
-                        }
-                        arm.pc = *target;
-                    }
-                    Val::Bool(false) => {
-                        if arm.pc + 1 != join_pc && arm.pc + 1 > end_pc {
-                            if stats.enabled() {
-                                stats.record_arm_unsupported(
-                                    ArmUnsupported::JumpFallthroughOutOfRange,
-                                    arm.function_name,
-                                    Some(instr),
-                                );
-                            }
-                            return Ok(None);
-                        }
-                        arm.pc += 1;
-                    }
-                    _ => {
-                        if stats.enabled() {
-                            stats.record_arm_unsupported(
-                                ArmUnsupported::JumpNonConcrete,
-                                arm.function_name,
-                                Some(instr),
-                            );
-                        }
-                        return Ok(None);
-                    }
-                }
-            }
-            Instr::Monomorphize(..) => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::Monomorphize, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-            Instr::Call(..) => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::Call, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-            Instr::PrimopReset(..) => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::PrimopReset, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-            Instr::Exit(..) => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::Exit, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-            Instr::Arbitrary => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::Arbitrary, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-            Instr::End => {
-                if stats.enabled() {
-                    stats.record_arm_unsupported(ArmUnsupported::End, arm.function_name, Some(instr));
-                }
-                return Ok(None);
-            }
-        }
-        if stats.enabled() {
-            prev_instr_location = stats::instr_source_loc(instr);
-        }
-        arm.local_state.expression_values.clear();
-        if had_register_write && arm.local_state.register_reads.as_ref().unwrap().len() > read_count {
-            // 当前事务先提交读取再提交写入，无法保留写后读的原始顺序。
-            if stats.enabled() {
-                stats.record_arm_unsupported(ArmUnsupported::RegisterReadAfterWrite, arm.function_name, Some(instr));
-            }
-            return Ok(None);
-        }
-    }
-    arm.write_set
-        .as_mut()
-        .unwrap()
-        .read_regs
-        .extend(arm.local_state.register_reads.as_ref().unwrap().iter().map(|(reg, _, _)| *reg));
-    Ok(Some(arm))
-}
-
-fn merge_two_frames<'ir, B: BV>(
-    cond_sym: Sym,
-    frame: &mut LocalFrame<'ir, B>,
-    arm_then: &LocalFrame<'ir, B>,
-    arm_else: &LocalFrame<'ir, B>,
-    shared_state: &SharedState<'ir, B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-) -> Result<bool, ExecError> {
-    let ws_then = match arm_then.write_set.as_ref() {
-        Some(ws) => ws,
-        None => return Ok(false),
-    };
-    let ws_else = match arm_else.write_set.as_ref() {
-        Some(ws) => ws,
-        None => return Ok(false),
-    };
-    if ws_then.memory_modified || ws_else.memory_modified {
-        return Ok(false);
-    }
-    if ws_then.read_regs != ws_else.read_regs
-        || ws_then.register_write_order != ws_else.register_write_order
-        || !arm_then
-            .local_state
-            .register_reads
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|(reg, accessor, _)| (reg, accessor))
-            .eq(arm_else.local_state.register_reads.as_ref().unwrap().iter().map(|(reg, accessor, _)| (reg, accessor)))
-    {
-        return Ok(false);
-    }
-    if ws_then.modified_regs != ws_else.modified_regs {
-        return Err(ExecError::IncompatibleMerge);
-    }
-
-    let mut modified_vars = HashSet::new();
-    let mut modified_regs = HashSet::new();
-    modified_vars.extend(ws_then.modified_vars.iter().copied());
-    modified_vars.extend(ws_else.modified_vars.iter().copied());
-    modified_regs.extend(ws_then.modified_regs.iter().copied());
-    modified_regs.extend(ws_else.modified_regs.iter().copied());
-    modified_vars
-        .extend(frame.vars().iter().filter_map(|(name, value)| matches!(value, UVal::Uninit(_)).then_some(*name)));
-    modified_vars
-        .extend(frame.lets().iter().filter_map(|(name, value)| matches!(value, UVal::Uninit(_)).then_some(*name)));
-    for reg in ws_then.read_regs.union(&ws_else.read_regs) {
-        if frame.regs().is_relaxed(*reg) {
-            return Ok(false);
-        }
-        if frame.regs().get_last_if_initialized(*reg).is_none() {
-            modified_regs.insert(*reg);
-        }
-    }
-
-    for var in &modified_vars {
-        // 新变量只存在于单臂时，不能在汇合后丢弃其作用域。
-        if arm_then.vars().contains_key(var) != arm_else.vars().contains_key(var) {
-            return Ok(false);
-        }
-        let v_then = arm_then.vars().get(var).and_then(|u| match u {
-            UVal::Init(v) => Some(v),
-            _ => None,
-        });
-        let v_else = arm_else.vars().get(var).and_then(|u| match u {
-            UVal::Init(v) => Some(v),
-            _ => None,
-        });
-        if v_then.is_some() != v_else.is_some() {
-            return Ok(false);
-        }
-
-        if matches!(frame.vars().get(var), Some(UVal::Uninit(_))) && v_then.is_none() && v_else.is_none() {
-            continue;
-        }
-        if frame.vars().contains_key(var) || (arm_then.vars().contains_key(var) && arm_else.vars().contains_key(var)) {
-            match (v_then, v_else) {
-                (Some(vt), Some(ve)) => {
-                    let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
-                        Ok(m) => m,
-                        Err(_) => return Ok(false),
-                    };
-                    frame.vars_mut().insert(*var, UVal::Init(merged));
-                }
-                _ => return Ok(false),
-            }
-        } else if frame.lets().contains_key(var) {
-            let l_then = arm_then.lets().get(var).and_then(|u| match u {
-                UVal::Init(v) => Some(v),
-                _ => None,
-            });
-            let l_else = arm_else.lets().get(var).and_then(|u| match u {
-                UVal::Init(v) => Some(v),
-                _ => None,
-            });
-            if matches!(frame.lets().get(var), Some(UVal::Uninit(_))) && l_then.is_none() && l_else.is_none() {
-                continue;
-            }
-            match (l_then, l_else) {
-                (Some(vt), Some(ve)) => {
-                    let merged = match crate::primop_util::merge_val(cond_sym, vt, ve, solver, info) {
-                        Ok(m) => m,
-                        Err(_) => return Ok(false),
-                    };
-                    frame.lets_mut().insert(*var, UVal::Init(merged));
-                }
-                _ => return Ok(false),
-            }
-        }
-    }
-
-    for reg in &modified_regs {
-        if frame.regs().is_relaxed(*reg)
-            || ws_then.multiple_written_regs.contains(reg)
-            || ws_else.multiple_written_regs.contains(reg)
-            || arm_then.regs().has_old_writes(*reg)
-            || arm_else.regs().has_old_writes(*reg)
-            || (ws_then.modified_regs.contains(reg) || ws_else.modified_regs.contains(reg))
-                && (ws_then.read_regs.contains(reg) || ws_else.read_regs.contains(reg))
-        {
-            return Ok(false);
-        }
-        let r_then = arm_then.regs().get_last_if_initialized(*reg);
-        let r_else = arm_else.regs().get_last_if_initialized(*reg);
-        match (r_then, r_else) {
-            (Some(rt), Some(re)) => {
-                let merged = match crate::primop_util::merge_val(cond_sym, rt, re, solver, info) {
-                    Ok(m) => m,
-                    Err(_) => return Ok(false),
-                };
-                frame.regs_mut().assign(*reg, merged.clone(), shared_state);
-            }
-            _ => return Ok(false),
-        }
-    }
-
-    Ok(true)
-}
-
-fn try_merge_diamond<'ir, B: BV>(
-    cond_sym: Sym,
-    target: usize,
-    frame: &mut LocalFrame<'ir, B>,
-    shared_state: &SharedState<'ir, B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-    limit_handler: Option<&ExecutionLimitHandler<'_>>,
-    limited_pc: Option<Name>,
-) -> Result<Option<usize>, ExecError> {
-    let stats = &shared_state.execution_stats;
-    stats.merge_attempt();
-    let pc = frame.pc;
-    let candidate_joins = detect_diamond_joins(frame.instrs, pc, target);
-    if candidate_joins.is_empty() {
-        stats.merge_rejected(MergeFailure::NoJoin);
-    }
-    for join_pc in candidate_joins {
-        stats.merge_candidate();
-        let tx = solver.start_transaction();
-
-        let arm_else =
-            match solver.with_transaction_condition(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond_sym))), |solver| {
-                simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver, limit_handler)
-            }) {
-                Ok(Some(a)) if !solver.transaction_invalid() => a,
-                result => {
-                    stats.merge_rejected(match result {
-                        Ok(Some(_)) => MergeFailure::ElseTransactionInvalid,
-                        Ok(None) => MergeFailure::ElseArmUnsupported,
-                        Err(_) => MergeFailure::ElseArmError,
-                    });
-                    solver.rollback_transaction(tx);
-                    continue;
-                }
-            };
-        // 两臂读取同一个尚未初始化的普通寄存器时，必须复用首次读取的符号。
-        let mut then_frame = frame.clone();
-        for (reg, _, value) in arm_else.local_state.register_reads.as_ref().unwrap() {
-            if frame.regs().get_last_if_initialized(*reg).is_none() && !frame.regs().is_relaxed(*reg) {
-                then_frame.regs_mut().assign(*reg, value.clone(), shared_state);
-            }
-        }
-        let arm_then = match solver.with_transaction_condition(&smtlib::Exp::Var(cond_sym), |solver| {
-            simulate_diamond_arm(
-                target,
-                join_pc.saturating_sub(1),
-                join_pc,
-                then_frame,
-                shared_state,
-                solver,
-                limit_handler,
-            )
-        }) {
-            Ok(Some(a)) if !solver.transaction_invalid() => a,
-            result => {
-                stats.merge_rejected(match result {
-                    Ok(Some(_)) => MergeFailure::ThenTransactionInvalid,
-                    Ok(None) => MergeFailure::ThenArmUnsupported,
-                    Err(_) => MergeFailure::ThenArmError,
-                });
-                solver.rollback_transaction(tx);
-                continue;
-            }
-        };
-
-        if let Some(pc) = limited_pc {
-            if arm_then.write_set.as_ref().unwrap().modified_regs.contains(&pc)
-                || arm_else.write_set.as_ref().unwrap().modified_regs.contains(&pc)
-            {
-                stats.merge_rejected(MergeFailure::LimitedPcModified);
-                solver.rollback_transaction(tx);
-                continue;
-            }
-        }
-        let mut merged_frame = frame.clone();
-        // 有深度预算时，不等深度的两臂不能共享最大步数，否则会提前截断短路径。
-        if limit_handler.map_or(false, |handler| handler.config.max_path_depth.is_some())
-            && arm_then.execution_limit_state.control_flow_steps()
-                != arm_else.execution_limit_state.control_flow_steps()
-        {
-            stats.merge_rejected(MergeFailure::DepthMismatch);
-            solver.rollback_transaction(tx);
-            continue;
-        }
-        // 有回跳预算时，两臂必须保留相同的循环计数历史。
-        if limit_handler.map_or(false, |handler| handler.config.max_backjumps_per_loop.is_some())
-            && arm_then.execution_limit_state.loop_counts != arm_else.execution_limit_state.loop_counts
-        {
-            stats.merge_rejected(MergeFailure::LoopHistoryMismatch);
-            solver.rollback_transaction(tx);
-            continue;
-        }
-        match merge_two_frames(cond_sym, &mut merged_frame, &arm_then, &arm_else, shared_state, solver, info) {
-            Ok(true) if !solver.transaction_invalid() => {
-                merged_frame.execution_limit_state = if arm_then.execution_limit_state.control_flow_steps()
-                    >= arm_else.execution_limit_state.control_flow_steps()
-                {
-                    arm_then.execution_limit_state.clone()
-                } else {
-                    arm_else.execution_limit_state.clone()
-                };
-                let ws_then = arm_then.write_set.as_ref().unwrap();
-                let ws_else = arm_else.write_set.as_ref().unwrap();
-                // 在事务中检查能否表达相等关系，提交后才加入断言。
-                let equalities: Result<Vec<_>, ExecError> = ws_then
-                    .read_regs
-                    .intersection(&ws_else.read_regs)
-                    .filter(|reg| !ws_then.modified_regs.contains(reg))
-                    .map(|reg| {
-                        let rt = arm_then.regs().get_last_if_initialized(*reg).unwrap();
-                        let re = arm_else.regs().get_last_if_initialized(*reg).unwrap();
-                        let equal = primop::eq_anything(rt.clone(), re.clone(), solver, info)?;
-                        crate::primop_util::smt_value(&equal, info)
-                    })
-                    .collect();
-                let equalities = match equalities {
-                    Ok(equalities) if !solver.transaction_invalid() => equalities,
-                    result => {
-                        stats.merge_rejected(match result {
-                            Ok(_) => MergeFailure::EqualityTransactionInvalid,
-                            Err(_) => MergeFailure::EqualityError,
-                        });
-                        solver.rollback_transaction(tx);
-                        continue;
-                    }
-                };
-                solver.commit_transaction();
-                for equal in equalities {
-                    solver.add(smtlib::Def::Assert(equal));
-                }
-                // 两臂的寄存器及访问器序列已经验证对齐，每个位置保留一次读取。
-                for ((reg, accessor, val_then), (_, _, val_else)) in arm_then
-                    .local_state
-                    .register_reads
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .zip(arm_else.local_state.register_reads.as_ref().unwrap())
-                {
-                    let val = if val_then == val_else {
-                        val_then.clone()
-                    } else {
-                        match build_ite(cond_sym, val_then, val_else, solver, info) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                stats.merge_rejected(MergeFailure::RegisterReadMergeError);
-                                stats.merge_finished(false);
-                                return Err(error);
-                            }
-                        }
-                    };
-                    let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
-                    if symbol != "_TLB" {
-                        solver.add_event(Event::ReadReg(*reg, accessor.clone(), val));
-                    }
-                }
-                solver.order_transaction_register_reads(tx);
-                *frame = merged_frame;
-                for reg in &ws_then.register_write_order {
-                    let value = frame.regs().get_last_if_initialized(*reg).unwrap().clone();
-                    let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
-                    if symbol != "_TLB" {
-                        solver.add_event(Event::WriteReg(*reg, Vec::new(), value));
-                    }
-                }
-                // 保留合并条件的控制依赖；两种取值都可行，不添加选臂断言。
-                solver.add_event(Event::Fork(0, cond_sym, 0, info));
-                solver.add_event(Event::Merge(0, 2, info));
-                stats.merge_finished(true);
-                return Ok(Some(join_pc));
-            }
-            result => {
-                stats.merge_rejected(match result {
-                    Ok(true) => MergeFailure::FrameTransactionInvalid,
-                    Ok(false) => MergeFailure::FrameMergeRejected,
-                    Err(_) => MergeFailure::FrameMergeError,
-                });
-                solver.rollback_transaction(tx);
-            }
-        }
-    }
-    stats.merge_finished(false);
-    Ok(None)
-}
-
 pub enum Run<B> {
     /// Returned when the model finishes executing
     Finished(Val<B>),
@@ -2339,7 +1769,7 @@ pub enum Run<B> {
 
 /// 所有分支来源在检查点、份额拆分和任务提交前经过此入口。
 /// Off 不改变限额、求解器或统计；On 仅记录一次拒绝并向外传播。
-/// 后续集成的推演边界负责捕获此控制信号并回滚；普通 run/collector 收到它必须 panic。
+/// 区域推演边界捕获此控制信号并回滚；普通 run/collector 收到它必须 panic。
 /// End 的正常返回、Exit/Arbitrary 的异常终止与此处的推演拒绝是不同结果。
 fn branch_decision<B: BV>(
     frame: &LocalFrame<'_, B>,
@@ -2370,7 +1800,7 @@ fn branch_decision<B: BV>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
@@ -2382,7 +1812,8 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<Run<B>, ExecError> {
-    let fork_sink = &stats::StatsForkSink { inner: fork_sink, stats: &shared_state.execution_stats };
+    let fork_sink: &dyn ForkSink<'ir, 'task, B> =
+        &stats::StatsForkSink { inner: fork_sink, stats: &shared_state.execution_stats };
     // 路径级 SMT 调用本身以线程局部方式计时；调度器会在 fork 时把累计值冻结在 Frame，
     // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
     crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
@@ -2408,7 +1839,9 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             &error,
             ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..) | ExecError::RetryCondition(..)
         ) {
-            branch_decision(frame, task_state, SpeculativeRejectReason::ExpressionRetry)?;
+            if frame.region_execution.is_none() {
+                branch_decision(frame, task_state, SpeculativeRejectReason::ExpressionRetry)?;
+            }
         }
         if !symbolic_length::retry_symbolic_length(
             error,
@@ -2427,7 +1860,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
@@ -2443,6 +1876,12 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        if region_merge::step(frame)? {
+            return Ok(Run::Suspended);
+        }
+        if frame.pc < frame.instrs.len() {
+            region_merge::preflight(frame, task_state, shared_state)?;
+        }
         if matches!(&frame.pending_retry_operand, Some((pc, Val::Unit)) if *pc != frame.pc) {
             frame.pending_retry_operand = None;
             frame.local_state.expression_values.clear();
@@ -2478,12 +1917,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
+                if let Some(access) = &mut frame.local_state.speculative_access {
+                    access.initial_variables.remove(&(access.call_scope, frame.function_name, *v));
+                }
                 frame.vars_mut().insert(*v, UVal::Uninit(ty));
                 frame.pc += 1;
             }
 
             Instr::Init(var, _, exp, info) => {
                 let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                region_merge::record_write(&mut frame.local_state, *var, false)?;
                 frame.vars_mut().insert(*var, UVal::Init(value));
                 frame.pc += 1;
             }
@@ -2569,30 +2012,52 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         use smtlib::Def::*;
                         use smtlib::Exp::*;
 
-                        branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicJump)?;
+                        if frame.region_execution.is_none() {
+                            branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicJump)?;
+                        }
 
                         let test_true = Var(v);
                         let test_false = Not(Box::new(Var(v)));
 
-                        let can_be_true = solver.check_sat_with(&test_true, *info).is_sat()?;
-                        let can_be_false = solver.check_sat_with(&test_false, *info).is_sat()?;
+                        let can_be_true = if frame.region_execution.is_some() {
+                            region_merge::feasible(frame, solver, &test_true, *info)?
+                        } else {
+                            solver.check_sat_with(&test_true, *info).is_sat()?
+                        };
+                        let can_be_false = if frame.region_execution.is_some() {
+                            region_merge::feasible(frame, solver, &test_false, *info)?
+                        } else {
+                            solver.check_sat_with(&test_false, *info).is_sat()?
+                        };
 
                         if can_be_true && can_be_false {
-                            let path_merging =
-                                task_state.execution_limits.as_ref().map(|l| l.path_merging).unwrap_or(false);
-                            if path_merging {
-                                if let Ok(Some(new_pc)) = try_merge_diamond(
+                            let mode = region_merge::policy(frame, task_state, *info);
+                            if mode == crate::config::MergeMode::Off && frame.region_execution.is_some() {
+                                let error = region_merge::reject(frame, SpeculativeRejectReason::PolicyOff);
+                                if frame.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Force {
+                                    speculation::force_failure(frame, task_state, shared_state, *info, &error);
+                                }
+                                return Err(error);
+                            }
+                            if mode != crate::config::MergeMode::Off {
+                                match region_merge::try_region(
                                     v,
                                     *target,
+                                    tid,
+                                    task_id,
+                                    task_fraction,
+                                    timeout,
+                                    stop_conditions,
+                                    fork_sink,
                                     frame,
+                                    task_state,
                                     shared_state,
                                     solver,
                                     *info,
-                                    limit_handler.as_ref(),
-                                    task_state.pc_limit.map(|(pc, _)| pc),
-                                ) {
-                                    frame.pc = new_pc;
-                                    continue 'main_loop;
+                                )? {
+                                    region_merge::RegionResult::Merged => continue 'main_loop,
+                                    region_merge::RegionResult::Dead => return Ok(Run::Dead),
+                                    region_merge::RegionResult::Rejected => (),
                                 }
                             }
 
@@ -2726,6 +2191,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
             Instr::PrimopUnary(loc, f, arg, info) => {
                 if frame.speculation_mode == SpeculationMode::On
+                    && frame.region_execution.is_none()
                     && std::ptr::fn_addr_eq(*f, primop::assume::<B> as primop::Unary<B>)
                 {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Assume)?;
@@ -2733,7 +2199,19 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
-                let value = match f(arg.clone(), solver, *info) {
+                let value = match region_merge::evaluate_primop(
+                    frame,
+                    solver,
+                    if frame.region_execution.is_some() {
+                        primop::unary_effect(*f).expect("原语必须分类")
+                    } else {
+                        primop::Effect::WritesState
+                    },
+                    |solver, frame| {
+                        let _ = frame;
+                        f(arg.clone(), solver, *info)
+                    },
+                ) {
                     Ok(value) => value,
                     Err(error) => {
                         if matches!(
@@ -2742,7 +2220,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 | ExecError::IntegerConversion(..)
                                 | ExecError::RetryCondition(..)
                         ) {
-                            branch_decision(frame, task_state, SpeculativeRejectReason::UnaryRetry)?;
+                            if frame.region_execution.is_none() {
+                                branch_decision(frame, task_state, SpeculativeRejectReason::UnaryRetry)?;
+                            }
                         }
                         if symbolic_length::retry_symbolic_length(
                             error,
@@ -2767,6 +2247,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
                 if frame.speculation_mode == SpeculationMode::On
+                    && frame.region_execution.is_none()
                     && [
                         primop::optimistic_assert::<B> as primop::Binary<B>,
                         primop::pessimistic_assert::<B> as primop::Binary<B>,
@@ -2780,7 +2261,19 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
                 let arg1 = args.pop().unwrap();
-                let value = match f(arg1.clone(), arg2.clone(), solver, *info) {
+                let value = match region_merge::evaluate_primop(
+                    frame,
+                    solver,
+                    if frame.region_execution.is_some() {
+                        primop::binary_effect(*f).expect("原语必须分类")
+                    } else {
+                        primop::Effect::WritesState
+                    },
+                    |solver, frame| {
+                        let _ = frame;
+                        f(arg1.clone(), arg2.clone(), solver, *info)
+                    },
+                ) {
                     Ok(value) => value,
                     Err(error) => {
                         if matches!(
@@ -2789,7 +2282,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 | ExecError::IntegerConversion(..)
                                 | ExecError::RetryCondition(..)
                         ) {
-                            branch_decision(frame, task_state, SpeculativeRejectReason::BinaryRetry)?;
+                            if frame.region_execution.is_none() {
+                                branch_decision(frame, task_state, SpeculativeRejectReason::BinaryRetry)?;
+                            }
                         }
                         if symbolic_length::retry_symbolic_length(
                             error,
@@ -2814,7 +2309,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
             Instr::PrimopVariadic(loc, f, args, info) => {
                 let args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
-                let value = match f(args.clone(), solver, frame, *info) {
+                let value = match region_merge::evaluate_primop(
+                    frame,
+                    solver,
+                    if frame.region_execution.is_some() {
+                        primop::variadic_effect(*f).expect("原语必须分类")
+                    } else {
+                        primop::Effect::WritesState
+                    },
+                    |solver, frame| f(args.clone(), solver, frame, *info),
+                ) {
                     Ok(value) => value,
                     Err(error) => {
                         if matches!(
@@ -2823,7 +2327,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 | ExecError::IntegerConversion(..)
                                 | ExecError::RetryCondition(..)
                         ) {
-                            branch_decision(frame, task_state, SpeculativeRejectReason::VariadicRetry)?;
+                            if frame.region_execution.is_none() {
+                                branch_decision(frame, task_state, SpeculativeRejectReason::VariadicRetry)?;
+                            }
                         }
                         if symbolic_length::retry_symbolic_length(
                             error,
@@ -3024,7 +2530,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                         | ExecError::IntegerConversion(..)
                                         | ExecError::RetryCondition(..)
                                 ) {
-                                    branch_decision(frame, task_state, SpeculativeRejectReason::SpecialCallRetry)?;
+                                    if frame.region_execution.is_none() {
+                                        branch_decision(frame, task_state, SpeculativeRejectReason::SpecialCallRetry)?;
+                                    }
                                 }
                                 if symbolic_length::retry_symbolic_length(
                                     error,
@@ -3129,6 +2637,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             }
                         }
 
+                        let caller_scope = frame.local_state.speculative_access.as_mut().map(|access| {
+                            let caller = access.call_scope;
+                            access.call_scope = region_merge::fresh_call_scope();
+                            caller
+                        });
                         let caller_pc = frame.pc;
                         let caller_instrs = frame.instrs;
                         let caller_stack_call = frame.stack_call.clone();
@@ -3149,6 +2662,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             frame.pc = caller_pc + 1;
                             frame.instrs = caller_instrs;
                             frame.stack_call = caller_stack_call.clone();
+                            if let Some(execution) = &frame.region_execution {
+                                let access = frame.local_state.speculative_access.as_mut().unwrap();
+                                access.call_scope = caller_scope.expect("推演返回必须恢复调用作用域");
+                                access.writes_allowed = frame.backtrace.len() == execution.write_depth;
+                                access.function = frame.function_name;
+                                access.pc = caller_pc;
+                                access.location = *info;
+                            }
                             assign(tid, &loc.clone(), ret, &mut frame.local_state, shared_state, solver, *info)
                         }));
 
@@ -3213,8 +2734,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
 
-                    branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
-                    let point = checkpoint(solver);
+                    if frame.region_execution.is_none() {
+                        branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
+                    }
+                    let point = if frame.region_execution.is_none() { Some(checkpoint(solver)) } else { None };
 
                     match ty {
                         Ty::Bits(len) => {
@@ -3249,6 +2772,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
 
                     let (result_exp, result_val) = {
                         let mut model = Model::new(solver);
+                        if frame.region_execution.is_some() {
+                            model.set_complete_model(true);
+                        }
                         log_from!(tid, log::FORK, format!("Model: {:?}", model));
                         match model.get_var(v) {
                             Ok(ModelVal::Exp(Bits64(bv))) => match ty {
@@ -3300,7 +2826,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     };
 
                     let remainder = Neq(Box::new(Var(v)), Box::new(result_exp.clone()));
-                    if solver.check_sat_with(&remainder, *info).is_sat()? {
+                    let has_remainder = if frame.region_execution.is_some() {
+                        region_merge::feasible(frame, solver, &remainder, *info)?
+                    } else {
+                        solver.check_sat_with(&remainder, *info).is_sat()?
+                    };
+                    if has_remainder {
+                        branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
                         let decision = match limit_handler.as_ref() {
                             Some(handler) => handler.on_monomorphize_fork_at(
                                 &mut frame.execution_limit_state,
@@ -3344,7 +2876,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 id: task_id,
                                 fraction: child_frac,
                                 frame: child_frame,
-                                checkpoint: point,
+                                checkpoint: point.expect("普通分叉必须有检查点"),
                                 fork_cond: Some((Assert(remainder), Event::Fork(fork_id, v, 1, *info))),
                                 state: task_state,
                                 stop_conditions,
@@ -4204,6 +3736,7 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 #[cfg(test)]
 mod tests {
     mod boundary_regression_tests;
+    mod region_merge_tests;
     mod review27_tests;
     mod review28_tests;
     mod review29_tests;
@@ -10328,7 +9861,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(written, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(read, false, UVal::Init(Val::Bits(B64::new(3, 8))));
-            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
+            let merged = merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             if merged.is_none() {
                 assert!(!solver
                     .trace()
@@ -10507,7 +10040,10 @@ mod tests {
             for reg in [left, right] {
                 frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(true)));
             }
-            assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
+            assert_eq!(
+                merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                None
+            );
             assert!(
                 !solver.trace().to_vec().iter().any(|event| matches!(event, Event::ReadReg(..))),
                 "拒绝合并必须回滚读取事件"
@@ -10587,7 +10123,10 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             );
-            assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
+            assert_eq!(
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                None
+            );
             assert!(matches!(frame.vars()[&RETURN], UVal::Uninit(Ty::Unit)), "拒绝合流必须保留原始返回值");
             let value = symbolic_ctor_choice(cond, (left, Val::Unit), (right, Val::Unit), &mut solver);
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
@@ -10637,7 +10176,7 @@ mod tests {
                 assert!(add(Val::Bits(bits), Val::I128(1), &mut solver, info()).is_ok());
             }
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
             let value =
@@ -10696,7 +10235,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(left, false, UVal::Init(Val::Bits(B64::new(1, 8))));
             frame.regs_mut().insert(right, false, UVal::Init(Val::Bits(B64::new(2, 8))));
-            let merged = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
+            let merged = merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             let events = solver.trace().to_vec();
             let reads: Vec<_> = events
                 .iter()
@@ -10707,7 +10246,10 @@ mod tests {
                 })
                 .collect();
             eprintln!("互斥读取：合并={merged:?}，读取={reads:?}");
-            assert!(merged.is_none() || reads.len() == 1, "每条原始路径恰好读一个寄存器");
+            // 迁移：区域合并采用访问足迹并集，记录保留互斥读取的 guard。
+            assert_eq!(merged, Some(4));
+            assert_eq!(reads.iter().copied().collect::<HashSet<_>>(), HashSet::from([left, right]));
+            assert_eq!(frame.region_merge_records()[0].single_arm_reads.len(), 2);
         }
 
         #[test]
@@ -10729,7 +10271,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(left, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(right, false, UVal::Init(Val::Bits(B64::new(0, 8))));
-            let merged = try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
+            let merged = merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             let events = solver.trace().to_vec();
             let writes: Vec<_> = events
                 .iter()
@@ -10761,7 +10303,7 @@ mod tests {
                 Instr::End,
             ]);
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
             let value =
@@ -10793,7 +10335,7 @@ mod tests {
                 eval_exp(&Exp::Id(reg), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
             let Val::Symbolic(cond) = cond_value else { panic!("条件必须是符号布尔值") };
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
             solver.add_event(Event::Branch { address: Val::Bits(B64::new(0x1000, 64)) });
@@ -10887,7 +10429,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::Bool));
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
             let result =
@@ -11037,7 +10579,7 @@ mod tests {
                 Instr::End,
             ]);
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
             let value =
@@ -11268,7 +10810,7 @@ mod tests {
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
             let events = solver.trace().to_vec();
@@ -11312,9 +10854,9 @@ mod tests {
             frame.regs_mut().insert(a, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(b, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             assert_eq!(
-                try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
-                None,
-                "不同写集合必须保留分叉"
+                merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                Some(4),
+                "迁移：不同写集合以条件值保留"
             );
             let events = solver.trace().to_vec();
             let writes: Vec<_> = events
@@ -11325,7 +10867,20 @@ mod tests {
                 })
                 .collect();
             eprintln!("每条分支仅写一个寄存器，合流后写事件：{writes:?}");
-            assert!(writes.is_empty(), "拒绝合流必须回滚推测产生的写事件");
+            assert_eq!(writes.iter().copied().collect::<HashSet<_>>(), HashSet::from([a, b]));
+            for (selected, reg, expected) in [(true, a, 0), (true, b, 1), (false, a, 1), (false, b, 0)] {
+                let guard =
+                    if selected { smtlib::Exp::Var(cond) } else { smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))) };
+                let value = frame.regs().get_last_if_initialized(reg).unwrap();
+                let mismatch = smtlib::Exp::And(
+                    Box::new(guard),
+                    Box::new(smtlib::Exp::Neq(
+                        Box::new(smt_value(value, info()).unwrap()),
+                        Box::new(smtlib::bits64(expected, 8)),
+                    )),
+                );
+                assert!(solver.check_sat_with(&mismatch, info()).is_unsat().unwrap(), "未选中臂的寄存器必须保持原值");
+            }
 
             let branch = shared.symtab.intern("zbranch");
             let mut frame = make_frame(vec![
@@ -11372,8 +10927,8 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert_eq!(writes.len(), 1, "每条实际路径只有一个写事件");
-                written.push(writes[0]);
+                assert_eq!(writes.len(), 2, "迁移：合并迹包含两项条件写入");
+                written.extend(writes);
             }
             assert_eq!(written.len(), 2);
             assert!(written.contains(&a) && written.contains(&b));
@@ -12579,6 +12134,49 @@ fn zcaller(za, zb) {
             Instr::End,
         ];
         (instrs, shared_state, regs, lets)
+    }
+
+    /// 迁移旧菱形单元测试：给定条件符号，直接调用区域边界，检查真实主循环与回滚。
+    fn merge_region_for_test<'ir, B: BV>(
+        condition: Sym,
+        target: usize,
+        frame: &mut LocalFrame<'ir, B>,
+        shared: &SharedState<'ir, B>,
+        solver: &mut Solver<B>,
+        info: SourceLoc,
+        handler: Option<&ExecutionLimitHandler<'_>>,
+        limited_pc: Option<Name>,
+    ) -> Result<Option<usize>, ExecError> {
+        shared.function_regions.lock().unwrap().clear();
+        let limits =
+            handler.map_or_else(ExecutionLimits::default, |handler| handler.config.clone()).with_path_merging(true);
+        let mut state = TaskState::new().with_execution_limits(limits);
+        state.pc_limit = limited_pc.map(|pc| (pc, usize::MAX));
+        let queue = Worker::new_lifo();
+        let sink = SingleForkSink { queue: &queue };
+        let mut fraction = Fraction::one();
+        let result = region_merge::try_region(
+            condition,
+            target,
+            0,
+            TaskId::fresh(),
+            &mut fraction,
+            PathTimeout::unlimited(),
+            None,
+            &sink,
+            frame,
+            &state,
+            shared,
+            solver,
+            info,
+        )?;
+        shared.function_regions.lock().unwrap().clear();
+        assert!(queue.is_empty(), "推演不得提交子任务");
+        assert!(fraction.is_one(), "推演不得修改份额");
+        Ok(match result {
+            region_merge::RegionResult::Merged => Some(frame.pc),
+            region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
+        })
     }
 
     fn make_frame_with_bindings<'ir>(
@@ -14866,7 +14464,7 @@ fn zmemreadfork(zu) {
                 ]);
                 frame.vars_mut().insert(x, UVal::Uninit(&Ty::Bits(8)));
                 assert_eq!(
-                    try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                    merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                     Some(4)
                 );
                 let f = *crate::primop::binary_primops::<B64>().get(op).unwrap();
@@ -15728,7 +15326,10 @@ fn zmemreadfork(zu) {
         ]);
         frame.vars_mut().insert(x, UVal::Uninit(&Ty::I64));
         frame.vars_mut().insert(y, UVal::Uninit(&Ty::I64));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
+        assert_eq!(
+            merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            Some(4)
+        );
         let xv = eval_exp(&Exp::Id(x), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let yv = eval_exp(&Exp::Id(y), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let unequal = smtlib::Exp::Neq(
@@ -15788,7 +15389,7 @@ fn zmemreadfork(zu) {
             Instr::End,
         ]);
         frame.vars_mut().insert(result, UVal::Uninit(Box::leak(Box::new(Ty::Enum(enum_name)))));
-        let result = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None);
+        let result = merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None);
         assert!(result.is_ok(), "不支持的枚举推测应回退");
     }
 
@@ -15809,7 +15410,10 @@ fn zmemreadfork(zu) {
         ]);
         frame.vars_mut().insert(result, UVal::Uninit(&Ty::I64));
         frame.regs_mut().insert(reg, false, UVal::Init(Val::I64(1)));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
+        assert_eq!(
+            merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            Some(4)
+        );
         assert!(
             solver.trace().to_vec().iter().any(|e| matches!(e, Event::ReadReg(r, _, _) if *r == reg)),
             "两臂必读的寄存器应出现在成功合并后的 Trace 中"
@@ -15833,8 +15437,23 @@ fn zmemreadfork(zu) {
             Instr::End,
         ]);
         frame.regs_mut().insert(reg, true, UVal::Init(Val::I64(0)));
-        assert_eq!(try_merge_diamond(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
-        let mut frame = simulate_diamond_arm(4, 5, 6, frame, &shared, &mut solver, None).unwrap().unwrap();
+        assert_eq!(merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), None);
+        frame.pc = 4;
+        let state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let result = run_loop(
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(_))));
         frame.regs_mut().forget_last_reads();
         let value = frame.regs_mut().get(reg, &shared, &mut solver, info()).unwrap().unwrap().clone();
         let can_read_intermediate = smtlib::Exp::And(
@@ -15925,19 +15544,19 @@ fn zmemreadfork(zu) {
     }
 
     #[test]
-    fn path_merging_rejects_branch_local_declaration() {
+    fn path_merging_discards_region_local_declaration() {
         let cond = test_name(110);
         let result = test_name(111);
         let temporary = test_name(112);
         let instrs = vec![
             Instr::Decl(cond, Ty::Bool, info()),
-            Instr::Decl(result, Ty::I64, info()),
+            Instr::Decl(result, Ty::Bits(64), info()),
             Instr::Jump(Exp::Id(cond), 5, info()),
-            Instr::Copy(Loc::Id(result), Exp::I64(10), info()),
+            Instr::Copy(Loc::Id(result), Exp::Bits(B64::new(10, 64)), info()),
             Instr::Goto(8),
-            Instr::Decl(temporary, Ty::I64, info()),
-            Instr::Copy(Loc::Id(temporary), Exp::I64(99), info()),
-            Instr::Copy(Loc::Id(result), Exp::I64(20), info()),
+            Instr::Decl(temporary, Ty::Bits(64), info()),
+            Instr::Copy(Loc::Id(temporary), Exp::Bits(B64::new(99, 64)), info()),
+            Instr::Copy(Loc::Id(result), Exp::Bits(B64::new(20, 64)), info()),
             Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
             Instr::End,
         ];
@@ -15951,18 +15570,18 @@ fn zmemreadfork(zu) {
             RegisterBindings::new(),
             HashMap::default(),
         );
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 1);
         assert!(results.iter().all(|result| matches!(result, Ok(Run::Finished(_)))));
         let merge = stats.merge_json();
+
         assert_eq!(merge["attempts"], 1);
-        assert_eq!(merge["successes"], 0);
-        assert_eq!(merge["failures"], 1);
-        assert!(merge["failure_reasons"]["frame_merge_rejected"].as_u64().unwrap() > 0);
-        assert_eq!(stats.fork_count(), 1);
+        assert_eq!(merge["successes"], 1);
+        assert_eq!(merge["failures"], 0);
+        assert_eq!(stats.fork_count(), 0);
     }
 
     #[test]
-    fn path_merging_rejects_cross_arm_jump() {
+    fn path_merging_accepts_cross_arm_jump_with_static_join() {
         let cond = test_name(113);
         let result = test_name(114);
         let instrs = vec![
@@ -15984,143 +15603,32 @@ fn zmemreadfork(zu) {
             RegisterBindings::new(),
             HashMap::default(),
         );
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn diamond_unsupported_stats_control_flow_preserves_previous_location_and_bounds() {
-        for enabled in [false, true] {
-            let mut shared = empty_shared_state();
-            shared.execution_stats = Arc::new(stats::ExecutionStats::new(enabled));
-            shared.symtab.set_files(vec!["model.sail"]);
-            let function = shared.symtab.intern("zpte_is_invalid");
-            let source = SourceLoc::new(0, 7, 0, 7, 10);
-            let next_source = SourceLoc::new(0, 8, 0, 8, 10);
-            let ctx = Context::new(Config::new());
-            let mut solver = Solver::<B64>::new(&ctx);
-            let programs = [
-                (vec![Instr::Jump(Exp::Bool(true), 0, source)], 0, 1, "step_limit", 0, true),
-                (vec![Instr::Decl(RETURN, Ty::Unit, source)], 1, 2, "pc_past_instrs", 1, true),
-                (
-                    vec![Instr::Decl(RETURN, Ty::Unit, source), Instr::Decl(RETURN, Ty::Unit, next_source)],
-                    0,
-                    2,
-                    "pc_after_end",
-                    1,
-                    true,
-                ),
-                (vec![], 0, 1, "pc_past_instrs", 0, false),
-                (vec![Instr::Decl(RETURN, Ty::Unit, source), Instr::Goto(5)], 1, 2, "goto_out_of_range", 5, true),
-            ];
-            for (instrs, end_pc, join_pc, reason, target_pc, has_previous) in &programs {
-                shared.execution_stats.reset();
-                let frame = LocalFrame::new(function, &[], &Ty::Unit, None, instrs);
-                assert!(simulate_diamond_arm(0, *end_pc, *join_pc, frame, &shared, &mut solver, None)
-                    .unwrap()
-                    .is_none());
-                let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
-                assert_eq!(report["total"], usize::from(enabled));
-                if enabled {
-                    let entry = &report["top"][0];
-                    assert_eq!(entry["reason"], *reason);
-                    assert_eq!(entry["function"], "pte_is_invalid");
-                    assert_eq!(entry["start_pc"], 0);
-                    assert_eq!(entry["end_pc"], *end_pc);
-                    assert_eq!(entry["join_pc"], *join_pc);
-                    assert_eq!(entry["target_pc"], *target_pc);
-                    if *has_previous {
-                        assert_eq!(entry["prev_instr_location"], "model.sail 7:0 - 7:10");
-                    } else {
-                        assert!(entry["prev_instr_location"].is_null());
-                    }
-                }
-            }
-        }
+        // 迁移：旧数值窗口作废；区域分析拒绝回边，动态预算单独覆盖。
+        region_merge_tests::check_region_rejection_locations_and_budget();
     }
 
     #[test]
     fn diamond_unsupported_stats_preserve_call_and_instruction_locations() {
-        for enabled in [false, true] {
-            let mut shared = empty_shared_state();
-            shared.execution_stats = Arc::new(stats::ExecutionStats::new(enabled));
-            shared.symtab.set_files(vec!["model.sail"]);
-            let function = shared.symtab.intern("ztest");
-            let callee = shared.symtab.intern("zcurrentlyEnabled");
-            let source = SourceLoc::new(0, 7, 0, 7, 10);
-            let ctx = Context::new(Config::new());
-            let mut solver = Solver::<B64>::new(&ctx);
-            let programs = [
-                (vec![Instr::Call(Loc::Id(RETURN), false, callee, vec![], source)], "call"),
-                (vec![Instr::Monomorphize(RETURN, Ty::Bool, source)], "monomorphize"),
-                (vec![Instr::Exit(ExitCause::Explicit, source)], "exit"),
-                (vec![Instr::Arbitrary], "arbitrary"),
-                (vec![Instr::End], "end"),
-                (vec![Instr::Goto(2)], "goto_out_of_range"),
-                (vec![Instr::Jump(Exp::Bool(true), 2, source)], "jump_target_out_of_range"),
-                (vec![Instr::Jump(Exp::Bool(false), 2, source), Instr::End], "jump_fallthrough_out_of_range"),
-                (vec![Instr::Jump(Exp::I64(0), 1, source)], "jump_non_concrete"),
-            ];
-            for (instrs, reason) in &programs {
-                shared.execution_stats.reset();
-                let frame = LocalFrame::new(function, &[], &Ty::Unit, None, instrs);
-                // 两条指令的用例让假分支越过 end_pc，但尚未抵达 join_pc。
-                let join = instrs.len();
-                assert!(simulate_diamond_arm(0, 0, join, frame, &shared, &mut solver, None).unwrap().is_none());
-                let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
-                assert_eq!(report["total"], usize::from(enabled));
-                if enabled {
-                    assert_eq!(report["reason_counts"][reason], 1);
-                    assert_eq!(report["top"][0]["reason"], *reason);
-                    if *reason == "call" {
-                        assert_eq!(report["top"][0]["callee"], "currentlyEnabled");
-                        assert_eq!(report["top"][0]["function"], "test");
-                        assert_eq!(report["top"][0]["source_loc"], serde_json::json!(source));
-                    }
-                }
-            }
-        }
+        // 迁移：纯调用允许；副作用调用的静态拒绝仍须报告真实指令位置。
+        region_merge_tests::check_region_effect_rejection_and_negative_cache();
     }
 
     #[test]
     fn diamond_unsupported_stats_read_after_write_uses_executed_instruction() {
-        let mut shared = empty_shared_state();
-        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
-        shared.symtab.set_files(vec!["model.sail"]);
-        let function = shared.symtab.intern("ztest");
-        let reg = shared.symtab.intern("zreg");
-        let source = SourceLoc::new(0, 9, 0, 9, 10);
-        let instrs =
-            vec![Instr::Copy(Loc::Id(reg), Exp::I64(1), info()), Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), source)];
-        let mut frame = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
-        frame.vars_mut().insert(RETURN, UVal::Uninit(&Ty::I64));
-        frame.regs_mut().insert(reg, false, UVal::Init(Val::I64(0)));
-        let ctx = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&ctx);
-        assert!(simulate_diamond_arm(0, 1, 2, frame, &shared, &mut solver, None).unwrap().is_none());
-        let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
-        assert_eq!(report["total"], 1);
-        assert_eq!(report["top"][0]["reason"], "register_read_after_write");
-        assert_eq!(report["top"][0]["source_loc"], serde_json::json!(source));
+        // 迁移：集中访问记录必须保留触发写后读拒绝的指令位置。
+        region_merge_tests::check_region_read_after_write_location();
     }
 
     #[test]
     fn diamond_simulation_rejects_memory_and_assertion_primops_before_execution() {
-        let shared_state = empty_shared_state();
-        let ctx = crate::smt::Context::new(crate::smt::Config::new());
-        let mut solver = Solver::<B64>::new(&ctx);
-        let result = test_name(115);
-        let read_mem = *crate::primop::variadic_primops::<B64>().get("platform_read_mem").unwrap();
-        let programs = [
-            vec![Instr::PrimopVariadic(Loc::Id(result), read_mem, Vec::new(), info()), Instr::End],
-            vec![Instr::PrimopUnary(Loc::Id(result), crate::primop::assume, Exp::Bool(false), info()), Instr::End],
-        ];
-        for instrs in &programs {
-            let frame = LocalFrame::new(test_name(116), &[], &Ty::Unit, None, instrs);
-            let tx = solver.start_transaction();
-            assert!(simulate_diamond_arm(0, 0, 1, frame, &shared_state, &mut solver, None).unwrap().is_none());
-            assert!(!solver.transaction_invalid());
-            solver.rollback_transaction(tx);
-        }
+        // 迁移：内存继续预拒绝；assume/assert 由 guarded constraints 放行。
+        region_merge_tests::check_region_effect_rejection_and_negative_cache();
+        region_merge_tests::region_merge_dead_arm_and_guarded_assume();
     }
 
     #[test]
@@ -16253,7 +15761,10 @@ fn zmemreadfork(zu) {
         let mut fields = HashMap::default();
         fields.insert(field, Val::I64(1));
         frame.regs_mut().insert(reg, false, UVal::Init(Val::Struct(fields)));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
+        assert_eq!(
+            merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            Some(4)
+        );
         let trace = solver.trace().to_vec();
         let accessors: Vec<_> = trace
             .iter()
@@ -16281,7 +15792,10 @@ fn zmemreadfork(zu) {
             Instr::End,
         ]);
         frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
-        assert_eq!(try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
+        assert_eq!(
+            merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            Some(4)
+        );
         let result =
             eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
         let trace = solver.trace().to_vec();
@@ -16307,7 +15821,7 @@ fn zmemreadfork(zu) {
                 Instr::End,
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::I64));
-            let merged = try_merge_diamond(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
+            let merged = merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             if symmetric {
                 assert_eq!(merged, Some(4));
                 let value = eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info())
@@ -16320,8 +15834,10 @@ fn zmemreadfork(zu) {
                 );
                 assert_eq!(solver.check_sat_with(&unequal, info()), crate::smt::SmtResult::Unsat);
             } else {
-                assert_eq!(merged, None);
-                assert!(frame.regs().get_last_if_initialized(reg).is_none());
+                // 迁移：单臂惰性读取上提，不与未初始化值合并。
+                assert_eq!(merged, Some(4));
+                assert!(frame.regs().get_last_if_initialized(reg).is_some());
+                assert_eq!(frame.region_merge_records()[0].single_arm_reads.len(), 1);
             }
         }
     }
@@ -16447,7 +15963,7 @@ fn zmemreadfork(zu) {
             assert_eq!(unsigned(Val::Bits(B129::new(n, 128)), &mut solver, info()).unwrap(), Val::I128(n as i128));
         }
         assert_eq!(
-            try_merge_diamond(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
             Some(4)
         );
         let merged =

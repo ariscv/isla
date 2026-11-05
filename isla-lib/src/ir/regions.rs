@@ -300,22 +300,23 @@ struct FunctionAnalysis {
 
 /// 调用者持有的函数缓存。借用不可变指令序列，避免函数改写后复用陈旧结果。
 /// CFG、后支配树及活跃性在首次查询时计算；每个 Jump 的结果（含拒绝）单独缓存。
-pub struct FunctionRegions<'ir, B> {
-    instrs: &'ir [Instr<Name, B>],
+pub struct FunctionRegions<B> {
+    // 拥有函数指令副本，使 SharedState 的并发缓存不引入生命周期不变性。
+    instrs: Arc<[Instr<Name, B>]>,
     have_exception: Option<Name>,
     terminal_calls: Vec<Name>,
     analysis: OnceLock<FunctionAnalysis>,
     regions: HashMap<usize, Result<Arc<Region>, RegionRejection>>,
 }
 
-impl<'ir, B: BV> FunctionRegions<'ir, B> {
-    pub fn new(instrs: &'ir [Instr<Name, B>], have_exception: Name) -> Self {
+impl<B: BV> FunctionRegions<B> {
+    pub fn new(instrs: &[Instr<Name, B>], have_exception: Name) -> Self {
         Self::with_options(instrs, RegionOptions { have_exception: Some(have_exception), terminal_calls: &[] })
     }
 
-    pub fn with_options(instrs: &'ir [Instr<Name, B>], options: RegionOptions<'_>) -> Self {
+    pub fn with_options(instrs: &[Instr<Name, B>], options: RegionOptions<'_>) -> Self {
         Self {
-            instrs,
+            instrs: Arc::from(instrs),
             have_exception: options.have_exception,
             terminal_calls: options.terminal_calls.to_vec(),
             analysis: OnceLock::new(),
@@ -336,12 +337,12 @@ impl<'ir, B: BV> FunctionRegions<'ir, B> {
     fn analysis(&self) -> &FunctionAnalysis {
         self.analysis.get_or_init(|| {
             let cfg = RegionCfg::new(
-                self.instrs,
+                &self.instrs,
                 RegionOptions { have_exception: self.have_exception, terminal_calls: &self.terminal_calls },
             );
             // 活跃性保留异常边；异常路径和绕行中的读也不能被误判为已死亡。
             let full_cfg = RegionCfg::new(
-                self.instrs,
+                &self.instrs,
                 RegionOptions { have_exception: None, terminal_calls: &self.terminal_calls },
             );
             let mut reads = vec![HashSet::new(); self.instrs.len() + 1];

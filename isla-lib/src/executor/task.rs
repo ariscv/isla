@@ -86,6 +86,10 @@ impl<B> TaskInterrupt<B> {
 }
 
 pub struct TaskState<B> {
+    pub(super) force_regions_validated: std::sync::OnceLock<()>,
+    pub(super) region_effect_summaries: std::sync::Mutex<HashMap<Name, Option<super::region_merge::CachedReject>>>,
+    pub(super) region_step_budget: usize,
+    pub(super) region_negative_cache: std::sync::Mutex<HashMap<(Name, usize), super::region_merge::CachedReject>>,
     pub(super) speculation_stats: SpeculationStats,
     pub(super) reset_registers: HashMap<Loc<Name>, Reset<B>>,
     // We might want to avoid loops in the assembly by requiring that
@@ -100,12 +104,21 @@ pub struct TaskState<B> {
 }
 
 impl<B> TaskState<B> {
+    /// 全部嵌套区域与调用共享该步数预算；零预算明确表示立即拒绝推演。
+    pub fn with_region_step_budget(self, region_step_budget: usize) -> Self {
+        Self { region_step_budget, ..self }
+    }
+
     pub fn speculation_stats(&self) -> &SpeculationStats {
         &self.speculation_stats
     }
 
     pub fn new() -> Self {
         TaskState {
+            force_regions_validated: std::sync::OnceLock::new(),
+            region_effect_summaries: std::sync::Mutex::new(HashMap::new()),
+            region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
+            region_negative_cache: std::sync::Mutex::new(HashMap::new()),
             speculation_stats: SpeculationStats::default(),
             reset_registers: HashMap::new(),
             pc_limit: None,

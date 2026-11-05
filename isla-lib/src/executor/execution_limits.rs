@@ -300,30 +300,35 @@ impl ExecutionLimits {
     /// 多个区域命中时按行列坐标跨度选最小者；同跨度的交叉区域按起止坐标稳定排序。
     /// 此查询只描述策略，不启用合并；执行前须调用配置的 validate_merge_policy。
     pub fn merge_mode(&self, function: Name, location: SourceLoc, inherited: Option<MergeMode>) -> MergeMode {
-        let region_mode = self
-            .merge_policy
+        self.merge_rule(function, location).map(|(_, mode)| mode).or(inherited).unwrap_or(if self.path_merging {
+            MergeMode::Adaptive
+        } else {
+            MergeMode::Off
+        })
+    }
+
+    /// 返回显式命中规则的序号及策略，供继承冲突和致命诊断读取。
+    pub fn merge_rule(&self, function: Name, location: SourceLoc) -> Option<(usize, MergeMode)> {
+        self.merge_policy
             .iter()
-            .filter_map(|rule| {
+            .enumerate()
+            .filter_map(|(index, rule)| {
                 let MergePolicySelector::Region(region) = rule.selector else { return None };
                 if !region.selects_ir_location(location) {
                     return None;
                 }
-                // 列号为 u16，打包坐标后相减使同行及跨行区域使用同一套精度顺序。
                 let start = (u64::from(region.start().0) << 16) | u64::from(region.start().1);
                 let end = (u64::from(region.end().0) << 16) | u64::from(region.end().1);
-                Some(((end - start, region.start(), region.end()), rule.mode))
+                Some(((end - start, region.start(), region.end()), (index, rule.mode)))
             })
             .min_by_key(|entry| entry.0)
-            .map(|entry| entry.1);
-        region_mode
+            .map(|entry| entry.1)
             .or_else(|| {
-                self.merge_policy.iter().find_map(|rule| match rule.selector {
-                    MergePolicySelector::Function(Some(name)) if name == function => Some(rule.mode),
+                self.merge_policy.iter().enumerate().find_map(|(index, rule)| match rule.selector {
+                    MergePolicySelector::Function(Some(name)) if name == function => Some((index, rule.mode)),
                     _ => None,
                 })
             })
-            .or(inherited)
-            .unwrap_or(if self.path_merging { MergeMode::Adaptive } else { MergeMode::Off })
     }
 
     pub fn with_call_context_depth(self, call_context_depth: impl Into<Option<usize>>) -> Self {

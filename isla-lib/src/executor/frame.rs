@@ -45,7 +45,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
-use crate::smt::{Accessor, Checkpoint, Solver, Sym};
+use crate::smt::{Checkpoint, Solver, Sym};
 use crate::timeout::{SmtCallStats, SmtDumpNames};
 #[cfg(feature = "tracetool")]
 use crate::tracetool::itrace::ItracePerPath;
@@ -61,8 +61,7 @@ pub struct LocalState<'ir, B> {
     pub(super) regs: RegisterBindings<'ir, B>,
     pub(super) lets: Bindings<'ir, B>,
     pub(super) probes: LocalDebugProbes,
-    // 仅在菱形推测期间启用，保留求值器实际读取的访问路径和值，以便提交符号依赖。
-    pub(super) register_reads: Option<Vec<(Name, Vec<Accessor>, Val<B>)>>,
+    pub(super) speculative_access: Option<super::region_merge::AccessLog<B>>,
     // 表达式地址在 IR 生命周期内稳定；缓存只跨同一条指令的分叉重试。
     pub(super) expression_values: HashMap<usize, Val<B>>,
     pub(super) expression_retry_operands: Option<Vec<Val<B>>>,
@@ -127,6 +126,8 @@ pub struct Frame<'ir, B> {
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) speculation_mode: SpeculationMode,
+    pub(super) region_execution: Option<super::region_merge::RegionExecution>,
+    pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -138,7 +139,6 @@ pub struct Frame<'ir, B> {
     pub(super) function_assumptions: Arc<HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>>,
     pub(super) pc_counts: Arc<HashMap<B, usize>>,
     pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
-    pub(super) write_set: Option<WriteSet>,
     /*
      * ATTENTION git-block:
      * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
@@ -163,6 +163,8 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         function_name: frame.function_name,
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
+        region_execution: frame.region_execution.clone(),
+        region_merge_records: frame.region_merge_records.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: (*frame.execution_limit_state).clone(),
         local_state: (*frame.local_state).clone(),
@@ -174,7 +176,6 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         function_assumptions: (*frame.function_assumptions).clone(),
         pc_counts: (*frame.pc_counts).clone(),
         taken_interrupts: (*frame.taken_interrupts).clone(),
-        write_set: frame.write_set.clone(),
         #[cfg(feature = "tracetool")]
         itrace_path: (*frame.itrace_path).clone(),
     }
@@ -190,6 +191,8 @@ pub struct LocalFrame<'ir, B> {
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) speculation_mode: SpeculationMode,
+    pub(super) region_execution: Option<super::region_merge::RegionExecution>,
+    pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
     // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: ExecutionLimitPathState,
@@ -202,7 +205,6 @@ pub struct LocalFrame<'ir, B> {
     pub(super) function_assumptions: HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>,
     pub(super) pc_counts: HashMap<B, usize>,
     pub(super) taken_interrupts: Vec<(TaskId, u8)>,
-    pub(super) write_set: Option<WriteSet>,
     /*
      * ATTENTION git-block:
      * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
@@ -227,6 +229,8 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         function_name: frame.function_name,
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
+        region_execution: frame.region_execution.clone(),
+        region_merge_records: frame.region_merge_records.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
         local_state: Arc::new(frame.local_state.clone()),
@@ -238,13 +242,16 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         function_assumptions: Arc::new(frame.function_assumptions.clone()),
         pc_counts: Arc::new(frame.pc_counts.clone()),
         taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
-        write_set: frame.write_set.clone(),
         #[cfg(feature = "tracetool")]
         itrace_path: Arc::new(frame.itrace_path.clone()),
     }
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    pub fn region_merge_records(&self) -> &[super::RegionMergeRecord<B>] {
+        &self.region_merge_records
+    }
+
     pub fn speculation_mode(&self) -> SpeculationMode {
         self.speculation_mode
     }
@@ -443,6 +450,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             function_name: name,
             pc: 0,
             speculation_mode: SpeculationMode::Off,
+            region_execution: None,
+            region_merge_records: Vec::new(),
             pending_retry_operand: None,
             execution_limit_state: ExecutionLimitPathState::default(),
             local_state: LocalState {
@@ -450,7 +459,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 regs,
                 lets,
                 probes,
-                register_reads: None,
+                speculative_access: None,
                 expression_values: HashMap::new(),
                 expression_retry_operands: None,
             },
@@ -462,18 +471,17 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             function_assumptions: HashMap::new(),
             pc_counts: HashMap::new(),
             taken_interrupts: Vec::new(),
-            write_set: None,
             #[cfg(feature = "tracetool")]
             itrace_path: ItracePerPath::default(),
         }
     }
 
     pub fn write_set_mut(&mut self) -> Option<&mut WriteSet> {
-        self.write_set.as_mut()
+        self.local_state.speculative_access.as_mut().map(|access| &mut access.writes)
     }
 
     pub fn write_set(&self) -> Option<&WriteSet> {
-        self.write_set.as_ref()
+        self.local_state.speculative_access.as_ref().map(|access| &access.writes)
     }
 
     pub fn new_call(
@@ -486,13 +494,15 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
         new_frame.speculation_mode = self.speculation_mode;
+        new_frame.region_execution = self.region_execution.clone();
+        new_frame.region_merge_records = self.region_merge_records.clone();
+        new_frame.local_state.speculative_access = self.local_state.speculative_access.clone();
         new_frame.path_timing = self.path_timing.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
         new_frame.local_state.regs = self.local_state.regs.clone();
         new_frame.local_state.lets = self.local_state.lets.clone();
         new_frame.memory = self.memory.clone();
-        new_frame.write_set = self.write_set.clone();
         #[cfg(feature = "tracetool")]
         {
             new_frame.itrace_path = self.itrace_path.clone();

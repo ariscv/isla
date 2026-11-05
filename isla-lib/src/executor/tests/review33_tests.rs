@@ -249,7 +249,7 @@ fn review34_臂条件能证明标签正确时允许合流且不得泄漏条件()
         Instr::End,
     ]);
     frame.vars_mut().insert(value, UVal::Init(ctor));
-    assert_eq!(try_merge_diamond(flag, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
+    assert_eq!(merge_region_for_test(flag, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
     let result = eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
     for (condition, expected) in
         [(smtlib::Exp::Var(flag), 11), (smtlib::Exp::Not(Box::new(smtlib::Exp::Var(flag))), 22)]
@@ -348,7 +348,7 @@ fn review34_臂内标签仍有正确与错误候选时必须拒绝合流并回�
         frame.vars_mut().insert(value, UVal::Init(ctor));
         let before = solver.trace().to_vec().len();
         assert_eq!(
-            try_merge_diamond(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+            merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
             None
         );
         assert_eq!(solver.trace().to_vec().len(), before);

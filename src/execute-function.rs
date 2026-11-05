@@ -39,8 +39,10 @@ use std::time::Instant;
 
 use isla_lib::bitvector::b129::B129;
 use isla_lib::bitvector::BV;
+use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::ExecError;
 use isla_lib::executor;
+use isla_lib::executor::ExecutionLimits;
 use isla_lib::executor::{reset_registers, LocalFrame, Run, StopAction, StopConditions, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, Initialized};
 use isla_lib::ir::*;
@@ -66,6 +68,8 @@ fn main() {
 #[allow(clippy::mutex_atomic)]
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
+    opts.optflag("", "path-merging", "启用自适应区域路径合并");
+    opts.optopt("", "execution-limits-config", "加载含 merge_policy 的独立执行限制 TOML", "<path>");
     opts.optflag("", "optimistic", "assume assertions succeed");
     opts.optflag("", "traces", "print execution traces for successful executions");
     opts.optflag("t", "tree", "combine traces into tree");
@@ -90,8 +94,37 @@ fn isla_main() -> i32 {
 
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
-    let CommonOpts { num_threads, mut arch, mut symtab, type_info, isa_config, source_path: _ } =
+    let CommonOpts { num_threads, mut arch, mut symtab, type_info, mut isa_config, source_path: _ } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
+
+    if let Some(path) = matches.opt_str("execution-limits-config") {
+        isa_config.execution_limits = match ExecutionLimitsConfig::from_file(&path) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                eprintln!("{}", error);
+                return 1;
+            }
+        };
+    }
+    if matches.opt_present("path-merging") {
+        isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merging = Some(true);
+    }
+    if let Some(config) = &isa_config.execution_limits {
+        if config.strict {
+            let arch_path = matches.opt_str("arch").expect("必须指定 IR 文件");
+            let contents = match std::fs::read(&arch_path) {
+                Ok(contents) => contents,
+                Err(error) => {
+                    eprintln!("无法读取 IR：{}", error);
+                    return 1;
+                }
+            };
+            if let Err(error) = config.validate_ir_sha256(&format!("{:x}", Sha256::digest(&contents))) {
+                eprintln!("{}", error);
+                return 1;
+            }
+        }
+    }
 
     let timeout: Option<u64> = match matches.opt_get("timeout") {
         Ok(timeout) => timeout,
@@ -159,7 +192,31 @@ fn isla_main() -> i32 {
     let smt_ctx = smt::Context::new(smt_cfg);
     let mut solver = Solver::new(&smt_ctx);
 
-    let task_state = TaskState::new();
+    let limits = isa_config.execution_limits.as_ref().map_or_else(ExecutionLimits::default, |config| {
+        ExecutionLimits::default().with_config(config, &shared_state.symtab)
+    });
+    if let Some(config) = &isa_config.execution_limits {
+        let functions = shared_state.functions.keys().copied().collect();
+        let locations: Vec<_> = shared_state
+            .functions
+            .values()
+            .flat_map(|(_, _, body)| {
+                body.iter().filter_map(|instr| match instr {
+                    Instr::Jump(_, _, info) => Some(*info),
+                    _ => None,
+                })
+            })
+            .collect();
+        if let Err(error) = config.validate_merge_policy(&shared_state.symtab, &functions, &locations) {
+            eprintln!("{}", error);
+            return 1;
+        }
+    }
+    if let Err(error) = executor::validate_force_regions(&shared_state, &limits) {
+        eprintln!("{}", error);
+        return executor::FORCE_MERGE_EXIT_CODE;
+    }
+    let task_state = TaskState::new().with_execution_limits(limits);
 
     frame.add_lets(&lets).add_regs(&regs);
 
@@ -179,6 +236,14 @@ fn isla_main() -> i32 {
     executor::start_multi(num_threads, timeout, vec![task], &shared_state, collecting.clone(), &model_collector);
 
     eprintln!("Execution took: {}ms", now.elapsed().as_millis());
+    if shared_state.execution_stats.enabled() {
+        eprintln!("[MERGE_STATS] {}", shared_state.execution_stats.merge_json());
+        eprintln!("[FORK_STATS] {}", shared_state.execution_stats.fork_json(&shared_state.symtab));
+        eprintln!(
+            "[SPECULATION_REJECT_STATS] {}",
+            shared_state.execution_stats.arm_unsupported_json(&shared_state.symtab)
+        );
+    }
 
     let (queue, _, _) = collecting.as_ref();
 

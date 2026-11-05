@@ -41,7 +41,7 @@ pub(super) fn eval_operands<'exp, 'ir, B: BV>(
 
 /// 返回 true 时保持当前 pc 重试，false 表示当前约束不可满足。
 #[allow(clippy::too_many_arguments)]
-pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     error: ExecError,
     operands: &[Val<B>],
     task_id: TaskId,
@@ -56,9 +56,15 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
 
     match &error {
         ExecError::IntegerConversion(..) => {
-            branch_decision(frame, task_state, SpeculativeRejectReason::IntegerConversion)?
+            if frame.region_execution.is_none() {
+                branch_decision(frame, task_state, SpeculativeRejectReason::IntegerConversion)?;
+            }
         }
-        ExecError::RetryCondition(..) => branch_decision(frame, task_state, SpeculativeRejectReason::RetryCondition)?,
+        ExecError::RetryCondition(..) => {
+            if frame.region_execution.is_none() {
+                branch_decision(frame, task_state, SpeculativeRejectReason::RetryCondition)?;
+            }
+        }
         _ => (),
     }
     if let ExecError::IntegerConversion(in_range, info) | ExecError::RetryCondition(in_range, info) = error {
@@ -369,7 +375,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
 
 /// 将符号值拆为当前候选和剩余候选；唯一值不需要分叉。
 #[allow(clippy::too_many_arguments)]
-pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
     operands: &[Val<B>],
     info: SourceLoc,
@@ -382,7 +388,9 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>
     solver: &mut Solver<B>,
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
-    branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicValueEnumeration)?;
+    if frame.region_execution.is_none() {
+        branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicValueEnumeration)?;
+    };
     let width = solver.length(sym).expect("长度参数必须是位向量");
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
     let candidate = {
@@ -396,7 +404,12 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>
     let equal = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
     let remainder = Neq(Box::new(Var(sym)), Box::new(candidate));
     assert!(solver.check_sat_with(&equal, info).is_sat()?, "模型中的长度候选必须可满足");
-    if !solver.check_sat_with(&remainder, info).is_sat()? {
+    let has_remainder = if frame.region_execution.is_some() {
+        super::region_merge::feasible(frame, solver, &remainder, info)?
+    } else {
+        solver.check_sat_with(&remainder, info).is_sat()?
+    };
+    if !has_remainder {
         assert!(solver.check_sat(info).is_sat()?, "探测不应改变路径可满足性");
         return Ok(false);
     }
@@ -420,7 +433,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>
 
 /// 两种重试都必须保存操作数，并沿用同一套执行限制和检查点语义。
 #[allow(clippy::too_many_arguments)]
-pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
+pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
     equal: smtlib::Exp<crate::smt::Sym>,
     remainder: smtlib::Exp<crate::smt::Sym>,
@@ -435,6 +448,25 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     solver: &mut Solver<B>,
 ) -> Result<(), ExecError> {
     use smtlib::Def::Assert;
+    if frame.region_execution.is_some() {
+        let selected = super::region_merge::feasible(frame, solver, &equal, info)?;
+        let other = super::region_merge::feasible(frame, solver, &remainder, info)?;
+        if selected && other {
+            return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
+        }
+        if !selected && !other {
+            solver.assert(smtlib::Exp::Bool(false));
+            return Ok(());
+        }
+        let cached = if frame.local_state.expression_retry_operands.is_some() {
+            Val::Unit
+        } else {
+            Val::Vector(operands.to_vec())
+        };
+        frame.pending_retry_operand = Some((frame.pc, cached));
+        solver.assert(if selected { equal } else { remainder });
+        return Ok(());
+    }
     branch_decision(frame, task_state, SpeculativeRejectReason::RetryOperand)?;
     let decision = match task_state.execution_limits.as_ref() {
         Some(limits) => ExecutionLimitHandler::new(limits).on_monomorphize_fork_at(
