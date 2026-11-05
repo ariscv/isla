@@ -59,7 +59,9 @@ const MERGE_FAILURES: [MergeFailure; 16] = [
 #[serde(rename_all = "snake_case")]
 pub(super) enum ArmUnsupported {
     StepLimit,
-    PcOutOfRange,
+    PcPastInstrs,
+    PcBeforeStart,
+    PcAfterEnd,
     ImpureUnary,
     ImpureBinary,
     PrimopVariadic,
@@ -83,6 +85,33 @@ struct ArmUnsupportedSite {
     reason: ArmUnsupported,
     location: Option<(Name, SourceLoc)>,
     callee: Option<Name>,
+    control_flow: Option<ArmControlFlowSite>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct ArmControlFlowSite {
+    pub(super) function: Name,
+    pub(super) start_pc: usize,
+    pub(super) end_pc: usize,
+    pub(super) join_pc: usize,
+    pub(super) target_pc: usize,
+}
+
+pub(super) fn instr_source_loc<B>(instr: &Instr<Name, B>) -> Option<SourceLoc> {
+    match instr {
+        Instr::Decl(_, _, info)
+        | Instr::Init(_, _, _, info)
+        | Instr::Copy(_, _, info)
+        | Instr::Jump(_, _, info)
+        | Instr::Monomorphize(_, _, info)
+        | Instr::Call(_, _, _, _, info)
+        | Instr::PrimopUnary(_, _, _, info)
+        | Instr::PrimopBinary(_, _, _, _, info)
+        | Instr::PrimopVariadic(_, _, _, info)
+        | Instr::PrimopReset(_, _, info)
+        | Instr::Exit(_, info) => Some(*info),
+        Instr::Goto(_) | Instr::Arbitrary | Instr::End => None,
+    }
 }
 
 #[derive(Serialize)]
@@ -111,7 +140,8 @@ pub struct ExecutionStats {
     enabled: bool,
     merge: Mutex<MergeStats>,
     forks: Mutex<HashMap<(Name, SourceLoc), usize>>,
-    arm_unsupported: Mutex<HashMap<ArmUnsupportedSite, usize>>,
+    // 源码位置只保留首次记录的值，不参与控制流出口的聚合。
+    arm_unsupported: Mutex<HashMap<ArmUnsupportedSite, (usize, Option<SourceLoc>)>>,
 }
 
 impl Default for ExecutionStats {
@@ -185,33 +215,34 @@ impl ExecutionStats {
         instr: Option<&Instr<Name, B>>,
     ) {
         if self.enabled {
-            let info = match instr {
-                Some(
-                    Instr::Decl(_, _, info)
-                    | Instr::Init(_, _, _, info)
-                    | Instr::Copy(_, _, info)
-                    | Instr::Jump(_, _, info)
-                    | Instr::Monomorphize(_, _, info)
-                    | Instr::Call(_, _, _, _, info)
-                    | Instr::PrimopUnary(_, _, _, info)
-                    | Instr::PrimopBinary(_, _, _, _, info)
-                    | Instr::PrimopVariadic(_, _, _, info)
-                    | Instr::PrimopReset(_, _, info)
-                    | Instr::Exit(_, info),
-                ) => Some(*info),
-                Some(Instr::Goto(_) | Instr::Arbitrary | Instr::End) | None => None,
-            };
+            let info = instr.and_then(instr_source_loc);
             let location = info.filter(|info| !info.is_unknown()).map(|info| (function, info));
             let callee = match instr {
                 Some(Instr::Call(_, _, callee, _, _)) => Some(*callee),
                 _ => None,
             };
-            *self
-                .arm_unsupported
+            self.arm_unsupported
                 .lock()
                 .unwrap()
-                .entry(ArmUnsupportedSite { reason, location, callee })
-                .or_default() += 1;
+                .entry(ArmUnsupportedSite { reason, location, callee, control_flow: None })
+                .or_default()
+                .0 += 1;
+        }
+    }
+
+    pub(super) fn record_arm_control_flow(
+        &self,
+        reason: ArmUnsupported,
+        control_flow: ArmControlFlowSite,
+        prev_instr_location: Option<SourceLoc>,
+    ) {
+        if self.enabled {
+            self.arm_unsupported
+                .lock()
+                .unwrap()
+                .entry(ArmUnsupportedSite { reason, location: None, callee: None, control_flow: Some(control_flow) })
+                .or_insert((0, prev_instr_location))
+                .0 += 1;
         }
     }
 
@@ -247,19 +278,24 @@ impl ExecutionStats {
 
     pub fn arm_unsupported_json(&self, symtab: &Symtab<'_>) -> Value {
         let unsupported = self.arm_unsupported.lock().unwrap();
-        let total: usize = unsupported.values().sum();
+        let total: usize = unsupported.values().map(|(count, _)| count).sum();
         let mut reason_counts = BTreeMap::new();
         let mut locations: Vec<_> = unsupported
             .iter()
-            .map(|(site, count)| {
+            .map(|(site, (count, prev_instr_location))| {
                 *reason_counts.entry(site.reason).or_insert(0) += count;
                 (
                     site.reason,
-                    site.location.map(|(function, _)| zencode::decode(symtab.to_str(function))),
+                    site.control_flow
+                        .map(|flow| flow.function)
+                        .or_else(|| site.location.map(|(function, _)| function))
+                        .map(|function| zencode::decode(symtab.to_str(function))),
                     site.location.map(|(_, info)| info.location_string(symtab.files())),
                     site.location.map(|(_, info)| info),
                     site.callee.map(|callee| zencode::decode(symtab.to_str(callee))),
                     *count,
+                    site.control_flow,
+                    *prev_instr_location,
                 )
             })
             .collect();
@@ -269,13 +305,24 @@ impl ExecutionStats {
                 .then_with(|| a.1.cmp(&b.1))
                 .then_with(|| a.2.cmp(&b.2))
                 .then_with(|| a.4.cmp(&b.4))
+                .then_with(|| a.6.cmp(&b.6))
         });
         let top: Vec<_> = locations
             .into_iter()
             .take(30)
-            .map(|(reason, function, location, source_loc, callee, count)| {
-                json!({"reason": reason, "function": function, "location": location,
-                    "source_loc": source_loc, "callee": callee, "count": count})
+            .map(|(reason, function, location, source_loc, callee, count, control_flow, prev_instr_location)| {
+                let mut entry = json!({"reason": reason, "function": function, "location": location,
+                    "source_loc": source_loc, "callee": callee, "count": count});
+                if let Some(flow) = control_flow {
+                    entry["start_pc"] = json!(flow.start_pc);
+                    entry["end_pc"] = json!(flow.end_pc);
+                    entry["join_pc"] = json!(flow.join_pc);
+                    entry["target_pc"] = json!(flow.target_pc);
+                    entry["prev_instr_location"] = json!(prev_instr_location
+                        .filter(|info| !info.is_unknown())
+                        .map(|info| info.location_string(symtab.files())));
+                }
+                entry
             })
             .collect();
         json!({"total": total, "unique_locations": unsupported.len(), "reason_counts": reason_counts, "top": top})
@@ -315,6 +362,76 @@ mod tests {
         assert_eq!(report["total"], 0);
         assert_eq!(report["reason_counts"], json!({}));
         assert!(report["top"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn arm_unsupported_control_flow_disabled_does_not_count() {
+        let stats = ExecutionStats::new(false);
+        for reason in [
+            ArmUnsupported::StepLimit,
+            ArmUnsupported::PcPastInstrs,
+            ArmUnsupported::PcBeforeStart,
+            ArmUnsupported::PcAfterEnd,
+            ArmUnsupported::GotoOutOfRange,
+        ] {
+            stats.record_arm_control_flow(
+                reason,
+                ArmControlFlowSite { function: Name::from_u32(0), start_pc: 1, end_pc: 4, join_pc: 5, target_pc: 6 },
+                Some(SourceLoc::new(0, 12, 3, 12, 9)),
+            );
+        }
+        let report = stats.arm_unsupported_json(&Symtab::new());
+        assert_eq!(report["total"], 0);
+        assert_eq!(report["reason_counts"], json!({}));
+        assert!(report["top"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn arm_unsupported_control_flow_aggregates_reason_function_and_pcs() {
+        let stats = ExecutionStats::new(true);
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let function = symtab.intern("zpte_is_invalid");
+        let other_function = symtab.intern("zhave_exception");
+        let site = ArmControlFlowSite { function, start_pc: 1, end_pc: 4, join_pc: 5, target_pc: 6 };
+        let prev = SourceLoc::new(0, 12, 3, 12, 9);
+        let reasons = [
+            (ArmUnsupported::StepLimit, "step_limit"),
+            (ArmUnsupported::PcPastInstrs, "pc_past_instrs"),
+            (ArmUnsupported::PcBeforeStart, "pc_before_start"),
+            (ArmUnsupported::PcAfterEnd, "pc_after_end"),
+            (ArmUnsupported::GotoOutOfRange, "goto_out_of_range"),
+        ];
+        for (reason, label) in reasons {
+            stats.record_arm_control_flow(reason, site, Some(prev));
+            // 上一条指令的位置只用于展示，不加入聚合键。
+            stats.record_arm_control_flow(reason, site, Some(SourceLoc::new(0, 20, 0, 20, 1)));
+            for other_site in [
+                ArmControlFlowSite { function: other_function, ..site },
+                ArmControlFlowSite { start_pc: 0, ..site },
+                ArmControlFlowSite { end_pc: 3, ..site },
+                ArmControlFlowSite { join_pc: 7, ..site },
+                ArmControlFlowSite { target_pc: 8, ..site },
+            ] {
+                stats.record_arm_control_flow(reason, other_site, None);
+            }
+            let report = stats.arm_unsupported_json(&symtab);
+            assert_eq!(report["reason_counts"][label], 7);
+            let top = report["top"].as_array().unwrap();
+            let entry = top.iter().find(|entry| entry["reason"] == label && entry["count"] == 2).unwrap();
+            assert_eq!(entry["function"], "pte_is_invalid");
+            assert_eq!(entry["start_pc"], 1);
+            assert_eq!(entry["end_pc"], 4);
+            assert_eq!(entry["join_pc"], 5);
+            assert_eq!(entry["target_pc"], 6);
+            assert_eq!(entry["prev_instr_location"], "model.sail 12:3 - 12:9");
+            assert!(top.iter().filter(|entry| entry["count"] == 1).all(|entry| entry["prev_instr_location"].is_null()));
+        }
+        let report = stats.arm_unsupported_json(&symtab);
+        assert_eq!(report["total"], 35);
+        assert_eq!(report["unique_locations"], 30);
+        stats.reset();
+        assert_eq!(stats.arm_unsupported_json(&symtab)["total"], 0);
     }
 
     #[test]

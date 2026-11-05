@@ -73,7 +73,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
-use stats::{ArmUnsupported, MergeFailure};
+use stats::{ArmControlFlowSite, ArmUnsupported, MergeFailure};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
@@ -1754,11 +1754,24 @@ fn simulate_diamond_arm<'ir, B: BV>(
     arm.write_set = Some(WriteSet::default());
     arm.local_state.register_reads = Some(Vec::new());
     let mut steps = 0;
+    let mut prev_instr_location = None;
     while arm.pc != join_pc {
         if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc || arm.pc > end_pc {
             if stats.enabled() {
-                let reason = if steps >= 64 { ArmUnsupported::StepLimit } else { ArmUnsupported::PcOutOfRange };
-                stats.record_arm_unsupported(reason, arm.function_name, arm.instrs.get(arm.pc));
+                let reason = if steps >= 64 {
+                    ArmUnsupported::StepLimit
+                } else if arm.pc >= arm.instrs.len() {
+                    ArmUnsupported::PcPastInstrs
+                } else if arm.pc < start_pc {
+                    ArmUnsupported::PcBeforeStart
+                } else {
+                    ArmUnsupported::PcAfterEnd
+                };
+                stats.record_arm_control_flow(
+                    reason,
+                    ArmControlFlowSite { function: arm.function_name, start_pc, end_pc, join_pc, target_pc: arm.pc },
+                    prev_instr_location,
+                );
             }
             return Ok(None);
         }
@@ -1824,7 +1837,17 @@ fn simulate_diamond_arm<'ir, B: BV>(
             Instr::Goto(target) => {
                 if (*target != join_pc && (*target < start_pc || *target > end_pc)) || *target > arm.instrs.len() {
                     if stats.enabled() {
-                        stats.record_arm_unsupported(ArmUnsupported::GotoOutOfRange, arm.function_name, Some(instr));
+                        stats.record_arm_control_flow(
+                            ArmUnsupported::GotoOutOfRange,
+                            ArmControlFlowSite {
+                                function: arm.function_name,
+                                start_pc,
+                                end_pc,
+                                join_pc,
+                                target_pc: *target,
+                            },
+                            prev_instr_location,
+                        );
                     }
                     return Ok(None);
                 }
@@ -1948,6 +1971,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 }
                 return Ok(None);
             }
+        }
+        if stats.enabled() {
+            prev_instr_location = stats::instr_source_loc(instr);
         }
         arm.local_state.expression_values.clear();
         if had_register_write && arm.local_state.register_reads.as_ref().unwrap().len() > read_count {
@@ -15260,6 +15286,57 @@ fn zmemreadfork(zu) {
             HashMap::default(),
         );
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn diamond_unsupported_stats_control_flow_preserves_previous_location_and_bounds() {
+        for enabled in [false, true] {
+            let mut shared = empty_shared_state();
+            shared.execution_stats = Arc::new(stats::ExecutionStats::new(enabled));
+            shared.symtab.set_files(vec!["model.sail"]);
+            let function = shared.symtab.intern("zpte_is_invalid");
+            let source = SourceLoc::new(0, 7, 0, 7, 10);
+            let next_source = SourceLoc::new(0, 8, 0, 8, 10);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let programs = [
+                (vec![Instr::Jump(Exp::Bool(true), 0, source)], 0, 1, "step_limit", 0, true),
+                (vec![Instr::Decl(RETURN, Ty::Unit, source)], 1, 2, "pc_past_instrs", 1, true),
+                (
+                    vec![Instr::Decl(RETURN, Ty::Unit, source), Instr::Decl(RETURN, Ty::Unit, next_source)],
+                    0,
+                    2,
+                    "pc_after_end",
+                    1,
+                    true,
+                ),
+                (vec![], 0, 1, "pc_past_instrs", 0, false),
+                (vec![Instr::Decl(RETURN, Ty::Unit, source), Instr::Goto(5)], 1, 2, "goto_out_of_range", 5, true),
+            ];
+            for (instrs, end_pc, join_pc, reason, target_pc, has_previous) in &programs {
+                shared.execution_stats.reset();
+                let frame = LocalFrame::new(function, &[], &Ty::Unit, None, instrs);
+                assert!(simulate_diamond_arm(0, *end_pc, *join_pc, frame, &shared, &mut solver, None)
+                    .unwrap()
+                    .is_none());
+                let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
+                assert_eq!(report["total"], usize::from(enabled));
+                if enabled {
+                    let entry = &report["top"][0];
+                    assert_eq!(entry["reason"], *reason);
+                    assert_eq!(entry["function"], "pte_is_invalid");
+                    assert_eq!(entry["start_pc"], 0);
+                    assert_eq!(entry["end_pc"], *end_pc);
+                    assert_eq!(entry["join_pc"], *join_pc);
+                    assert_eq!(entry["target_pc"], *target_pc);
+                    if *has_previous {
+                        assert_eq!(entry["prev_instr_location"], "model.sail 7:0 - 7:10");
+                    } else {
+                        assert!(entry["prev_instr_location"].is_null());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
