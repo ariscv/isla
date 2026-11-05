@@ -226,6 +226,18 @@ pub(super) fn preflight<B: BV>(
         // 此调用是静态 CFG 的异常出口，推演必须在执行其任何效应之前离开区域。
         return Err(reject(frame, SpeculativeRejectReason::RegionEscaped));
     }
+    // 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
+    // Custom 可执行设备 IO，Constrained 是任意闭包，均不能靠 solver 回滚外部效应。
+    if matches!(&frame.instrs[frame.pc], Instr::PrimopVariadic(_, f, _, _)
+        if primop::variadic_effect(*f) == Some(primop::Effect::ReadsMemory))
+        && frame
+            .memory()
+            .regions()
+            .iter()
+            .any(|region| matches!(region, crate::memory::Region::Custom(..) | crate::memory::Region::Constrained(..)))
+    {
+        return Err(reject(frame, SpeculativeRejectReason::StateEffect));
+    }
     if let Some(rejection) =
         instruction_effect(frame.function_name, frame.pc, &frame.instrs[frame.pc], shared, summaries)
     {
@@ -373,7 +385,35 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         solver.commit_transaction();
                         if !nested {
-                            super::samples::assert_unconditional_reads(solver);
+                            // 注意（ATTENTION）：主迹保留两臂 ReadMem 的并集，不能作为精确读序列。
+                            // 保存完整 guard 与主迹访存序号，供样本检查过滤另一臂的读取。
+                            let events = solver.committed_transaction_events();
+                            let memory_count =
+                                events.iter().filter(|(_, event)| event.is_memory_read_or_write()).count();
+                            if memory_count != 0 {
+                                let offset = solver
+                                    .trace()
+                                    .to_vec()
+                                    .iter()
+                                    .filter(|event| event.is_memory_read_or_write())
+                                    .count()
+                                    .checked_sub(memory_count)
+                                    .expect("提交事件必须属于主迹后缀");
+                                let root = frame.region_merge_records.last_mut().expect("提交必须有根记录");
+                                assert!(root.parent_record.is_none());
+                                root.memory_reads = events
+                                    .iter()
+                                    .filter(|(_, event)| event.is_memory_read_or_write())
+                                    .enumerate()
+                                    .filter_map(|(index, (guard, event))| {
+                                        if event.is_memory_read() {
+                                            guard.as_ref().map(|guard| (offset + index, guard.clone(), event.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                            }
                             super::merge_record::publish(
                                 &mut frame.region_merge_records[record_start..],
                                 &frame.local_state.pure_definitions,
@@ -611,6 +651,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 value_symbols: HashSet::from([condition]),
                 input_symbols: HashSet::new(),
                 single_arm_reads: Vec::new(),
+                memory_reads: Vec::new(),
             });
             return Ok(RegionResult::Dead);
         }
@@ -642,6 +683,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 value_symbols: HashSet::new(),
                 input_symbols: HashSet::new(),
                 single_arm_reads,
+                memory_reads: Vec::new(),
             });
             arm
         }
@@ -777,6 +819,7 @@ fn merge_states<'ir, B: BV>(
             let value =
                 crate::primop_util::merge_val(condition, &a, &b, solver, info).map_err(|error| match error {
                     ExecError::Smt(_) | ExecError::Timeout => error,
+                    ExecError::IncompatibleUnionPayload => reject(base, SpeculativeRejectReason::UnionPayload),
                     _ => incompatible(),
                 })?;
             if lets {
@@ -806,7 +849,11 @@ fn merge_states<'ir, B: BV>(
                 solver,
                 info,
             )
-            .map_err(|_| incompatible())?
+            .map_err(|error| match error {
+                ExecError::Smt(_) | ExecError::Timeout => error,
+                ExecError::IncompatibleUnionPayload => reject(base, SpeculativeRejectReason::UnionPayload),
+                _ => incompatible(),
+            })?
         } else {
             a.or(b).expect("已读取寄存器必须初始化").clone()
         };
@@ -901,6 +948,7 @@ fn merge_states<'ir, B: BV>(
         value_symbols: HashSet::new(),
         input_symbols: HashSet::new(),
         single_arm_reads,
+        memory_reads: Vec::new(),
     });
     Ok(merged)
 }

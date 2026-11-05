@@ -1536,6 +1536,11 @@ fn run_special_primop<'ir, B: BV>(
         assign(tid, loc, Val::Ctor(f, Box::new(arg)), &mut frame.local_state, shared_state, solver, info)?;
         frame.pc += 1
     } else {
+        // 配置常量和已注册原语在加载期已改写为 Primop；函数体和特殊调用
+        // 均已在此前处理。到达这里必然无实现，推演须回滚，普通执行保留报错。
+        if frame.speculation_mode == SpeculationMode::On {
+            return Err(region_merge::reject(frame, SpeculativeRejectReason::UnknownExtern));
+        }
         let symbol = zencode::decode(shared_state.symtab.to_str(f));
         return Err(ExecError::NoFunction(symbol, info));
     }
@@ -10138,10 +10143,10 @@ mod tests {
             );
             assert_eq!(
                 merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
-                None
+                Some(4)
             );
-            assert!(matches!(frame.vars()[&RETURN], UVal::Uninit(Ty::Unit)), "拒绝合流必须保留原始返回值");
-            let value = symbolic_ctor_choice(cond, (left, Val::Unit), (right, Val::Unit), &mut solver);
+            // F4：实际区域合并后的 SymbolicCtor 必须能按模型具体化。
+            let UVal::Init(value) = &frame.vars()[&RETURN] else { panic!("合并返回值必须已初始化") };
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
             let mut model = Model::new(&solver);
             model.set_complete_model(true);
@@ -15996,7 +16001,7 @@ fn zmemreadfork(zu) {
         let b = solver.declare_const(smtlib::Ty::Bool, info());
         let tag_a = test_name(150);
         let tag_b = test_name(151);
-        // 通用 ITE 的构造子判别值和载荷仍须满足真值表；路径合并拒绝不同标签。
+        // F4：路径合并复用既有构造子编码，判别值和载荷必须满足真值表。
         let ca = Val::Ctor(tag_a, Box::new(Val::Bits(B64::new(11, 64))));
         let cb = Val::Ctor(tag_b, Box::new(Val::Bits(B64::new(22, 64))));
         let sa = crate::primop_util::build_ite(
@@ -16016,11 +16021,7 @@ fn zmemreadfork(zu) {
         )
         .unwrap();
         for (lhs, rhs) in [(&ca, &cb), (&ca, &sb), (&sa, &cb), (&sa, &sb)] {
-            assert!(matches!(
-                crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()),
-                Err(ExecError::IncompatibleMerge)
-            ));
-            let merged = crate::primop_util::build_ite(c, lhs, rhs, &mut solver, info()).unwrap();
+            let merged = crate::primop_util::merge_val(c, lhs, rhs, &mut solver, info()).unwrap();
             let Val::SymbolicCtor(discriminant, possibilities) = merged else { panic!("期望符号构造子") };
             for cv in [false, true] {
                 for av in [false, true] {

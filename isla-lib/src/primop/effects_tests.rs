@@ -39,7 +39,7 @@ fn effect_representatives_and_conservative_cases() {
         ("assume", Effect::WritesState),
         ("mark_register", Effect::WritesState),
         ("platform_write_mem", Effect::WritesState),
-        ("read_mem", Effect::WritesState),
+        ("read_mem", Effect::ReadsMemory),
         ("undefined_nat", Effect::WritesState),
         ("internal_pick", Effect::WritesState),
         ("isla_fixed_rounding_incr", Effect::WritesState),

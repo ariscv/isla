@@ -8,7 +8,7 @@
 | 测量 | 命令要点 | 结果 |
 | --- | --- | --- |
 | 函数级 `pte_is_invalid` | `isla-execute-function`，带常量配置 `agents/path_merge_call_support/baseline_config_const.toml`，开关合并各一次 | 分叉 10 条 → 合并 1 条；23 项 Z3 检查通过；投影枚举 10 类 |
-| Sv39 LOAD 开合并 | `isarch -T 1 --instruction-bits 0x0000b103 … --path-merging solve-state --clause=LOAD` | 20 秒（最近一次）完整结束，52 条路径，状态 finished，错误/超时/未完成均 0；合并 226 次尝试、175 次成功，51 次 `state_effect` 拒绝；合并记录 175 行 |
+| Sv39 LOAD 开合并 | `isarch -T 1 --instruction-bits 0x0000b103 … --path-merging solve-state --clause=LOAD` | 20 秒（最近一次）完整结束，52 条路径，状态 finished，错误/超时/未完成均 0；合并 226 次尝试、175 次成功，51 次 `state_effect` 拒绝（经核对为联合类型构造子调用与列表模式匹配被静态摘要保守拒绝，不是访存；2026-11-06 更正）；合并记录 175 行 |
 | Sv39 LOAD 不合并 | 同上去掉 `--path-merging`，外层 `timeout 1800` | 1800 秒未结束（退出码 124），已输出 8705 条路径，累计分叉 46085 次 |
 | 单元测试 | `cargo test -p isla-lib --offline --features smt-thread-interrupt` | 682 通过、12 失败（与 HEAD 基线逐名相同）、2 忽略 |
 

@@ -48,6 +48,9 @@ pub struct RegionMergeRecord<B> {
     /// 仅输出开启时计算；关闭时保留空集，避免扫描完整执行迹。
     pub input_symbols: HashSet<Sym>,
     pub single_arm_reads: Vec<GuardedRegisterRead<B>>,
+    /// (主迹访存序号, 完整保护条件, ReadMem)。仅最外层记录保存，包含嵌套条件。
+    /// 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
+    pub memory_reads: Vec<(usize, smtlib::Exp<Sym>, Event<B>)>,
 }
 
 pub(super) fn publish<B: BV>(
@@ -205,12 +208,30 @@ fn emit_records<B: BV>(records: &[RegionMergeRecord<B>], task_id: TaskId, shared
             RegionPoint::Instruction(pc) => json!({"instruction":pc}),
             RegionPoint::FunctionExit => json!({"function_exit":true}),
         };
+        let memory_reads: Vec<_> = record
+            .memory_reads
+            .iter()
+            .map(|(index, guard, event)| {
+                let mut text = Vec::new();
+                crate::simplify::write_events_with_opts(
+                    &mut text,
+                    &[
+                        Event::<B>::Smt(Def::Assert(guard.clone()), DefAttrs::default(), record.source_loc),
+                        event.clone(),
+                    ],
+                    shared,
+                    &crate::simplify::WriteOpts::default(),
+                )
+                .expect("带条件内存读必须可写为迹");
+                json!({"memory_index":index,"guard_and_event":String::from_utf8(text).unwrap()})
+            })
+            .collect();
         let record_id = record.record_id;
         let value = json!({"schema_version":2, "record_id":record_id, "parent_record":record.parent_record, "arm":record.arm, "task_id":task_id.as_usize(),
             "function":zencode::decode(shared.symtab.to_str(record.function)), "branch_pc":record.branch_pc, "join":join,
             "source_loc":record.source_loc, "location":record.source_loc.location_string(shared.symtab.files()),
             "condition":symbol_json(record.condition, &smtlib::Ty::Bool), "input_symbols":inputs,
-            "single_arm_reads":reads, "depth":record.depth, "outcome":if record.dead { "dead" } else { "merged" }});
+            "single_arm_reads":reads, "memory_reads":memory_reads, "depth":record.depth, "outcome":if record.dead { "dead" } else { "merged" }});
         let mut line = serde_json::to_vec(&value).expect("合并记录必须可序列化");
         line.push(b'\n');
         output.lock().unwrap().write_all(&line).expect("写入 ISLA_MERGE_RECORDS 失败");

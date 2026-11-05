@@ -90,7 +90,15 @@ pub fn path<B: BV>(
         })
         .collect();
     pre.insert("$instruction".into(), instruction.clone());
-    SamplePath { pre, post, result: result.clone(), memory }
+    // 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
+    // 样本按保存的 guard 过滤未执行臂；实际发生的每次读仍绑定 pre_memory，
+    // 沿用既有初始内存规则及“写后读不同值”限制。原始主迹本身仍是并集。
+    let memory_guards = frame
+        .region_merge_records()
+        .iter()
+        .flat_map(|record| record.memory_reads.iter().map(|(index, guard, _)| (*index, guard.clone())))
+        .collect();
+    SamplePath { pre, post, result: result.clone(), memory, memory_guards }
 }
 
 #[cfg(test)]
@@ -117,5 +125,51 @@ mod tests {
         }
         .validate()
         .is_ok());
+    }
+    #[test]
+    fn samples_f4_array_reads_keep_constraints_under_arm_guard() {
+        use isla_lib::bitvector::b64::B64;
+        use isla_lib::memory::Memory;
+        use isla_lib::primop_util::smt_value;
+        use isla_lib::smt::smtlib::{bits64, Exp, Ty};
+        use isla_lib::smt::{Config, Context, ReadOpts, Solver};
+        use isla_lib::source_loc::SourceLoc;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let mut memory = Memory::new();
+        memory.add_symbolic_region(0x1000..0x1010);
+        super::super::memory_model::install_seq_memory(&mut memory, 64, &mut solver);
+        let g = solver.declare_const(Ty::Bool, info);
+        solver.start_transaction();
+        let mut values = Vec::new();
+        for (guard, byte) in [(Exp::Var(g), 7), (Exp::Not(Box::new(Exp::Var(g))), 9)] {
+            solver.start_transaction_with_guard(Some(guard));
+            let value = memory
+                .read(Val::Unit, Val::Bits(B64::new(0x1000, 64)), Val::I128(1), &mut solver, false, ReadOpts::default())
+                .unwrap();
+            solver.assert(Exp::Eq(Box::new(smt_value(&value, info).unwrap()), Box::new(bits64(byte, 8))));
+            values.push(value);
+            solver.commit_transaction();
+        }
+        solver.commit_transaction();
+        // 同址两臂要求不同内容，只有各自 guard 生效；无条件提交会使整个路径 Unsat。
+        for (direction, byte) in [(true, 7), (false, 9)] {
+            let guard = Exp::Eq(Box::new(Exp::Var(g)), Box::new(Exp::Bool(direction)));
+            assert!(solver.check_sat_with(&guard, info).is_sat().unwrap());
+            let tx = solver.start_transaction_with_guard(Some(guard));
+            let current = memory
+                .read(Val::Unit, Val::Bits(B64::new(0x1000, 64)), Val::I128(1), &mut solver, false, ReadOpts::default())
+                .unwrap();
+            assert!(solver
+                .check_sat_with(
+                    &Exp::Neq(Box::new(smt_value(&current, info).unwrap()), Box::new(bits64(byte, 8))),
+                    info
+                )
+                .is_unsat()
+                .unwrap());
+            solver.rollback_transaction(tx);
+        }
+        assert_ne!(values[0], values[1], "两次读取必须使用不同的新鲜符号");
     }
 }

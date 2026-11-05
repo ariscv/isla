@@ -40,11 +40,18 @@ fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effe
         Instr::PrimopReset(_, _, effect, _) => *effect,
         Instr::Call(_, _, function, _, _) if !shared.functions.contains_key(function) => match *function {
             REG_DEREF | READ_REGISTER_FROM_VECTOR => Effect::ReadsState,
-            WRITE_REGISTER_FROM_VECTOR => Effect::WritesState,
+            WRITE_REGISTER_FROM_VECTOR
+            | RESET_REGISTERS
+            | INTERRUPT_PENDING
+            | INSTR_ANNOUNCE
+            | ABSTRACT_CALL
+            | ABSTRACT_PRIMOP => Effect::WritesState,
             INTERNAL_VECTOR_INIT | INTERNAL_VECTOR_UPDATE | ITE_PHI => Effect::Pure,
+            // 与执行器 special_primop 的构造子路径一致：只构造载荷值，不调用不透明实现。
+            _ if shared.type_info.union_ctors.contains(function) => Effect::Pure,
             _ => match shared.externs.get(function) {
-                Some((_, _, name)) => effects::effect(name).unwrap_or(Effect::MayFork),
-                None => effects::effect(&zencode::decode(shared.symtab.to_str(*function))).unwrap_or(Effect::MayFork),
+                Some((_, _, name)) => effects::effect(name).unwrap_or(Effect::Unknown),
+                None => effects::effect(&zencode::decode(shared.symtab.to_str(*function))).unwrap_or(Effect::Unknown),
             },
         },
         _ => Effect::Pure,
@@ -242,11 +249,14 @@ pub(super) fn instruction_effect<B: BV>(
         ) => return None,
         _ => (),
     }
-    (direct_effect(instr, shared) != Effect::Pure).then(|| CachedReject {
-        reason: SpeculativeRejectReason::StateEffect,
-        function: function_name,
-        pc,
-        location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
+    // Unknown 没有可执行实现；保留摘要等级，只有实际到达时才拒绝推演。
+    (!matches!(direct_effect(instr, shared), Effect::Pure | Effect::Unknown | Effect::ReadsMemory)).then(|| {
+        CachedReject {
+            reason: SpeculativeRejectReason::StateEffect,
+            function: function_name,
+            pc,
+            location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
+        }
     })
 }
 

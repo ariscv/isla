@@ -446,12 +446,25 @@ mod build_ite_tests {
             for right in &right_values {
                 assert!(matches!(
                     merge_val(condition, left, right, &mut solver, info),
-                    Err(ExecError::IncompatibleMerge)
+                    Err(ExecError::IncompatibleUnionPayload)
                 ));
                 assert!(build_ite(condition, left, right, &mut solver, info).is_ok());
             }
         }
 
+        // F4：同一标签必须保持载荷类型与位宽，不能借标签 ITE 隐藏不兼容值。
+        for (left, right) in [(Val::Unit, Val::Bool(true)), (Val::Bits(B64::new(1, 8)), Val::Bits(B64::new(1, 16)))] {
+            assert!(matches!(
+                merge_val(
+                    condition,
+                    &Val::Ctor(ctor, Box::new(left)),
+                    &Val::Ctor(ctor, Box::new(right)),
+                    &mut solver,
+                    info
+                ),
+                Err(ExecError::IncompatibleUnionPayload)
+            ));
+        }
         let mut left_fields = ahash::HashMap::default();
         left_fields.insert(ctor, Val::Unit);
         left_fields.insert(Name::from_u32(92), Val::Bool(false));
@@ -472,7 +485,7 @@ mod build_ite_tests {
     }
 
     #[test]
-    fn 通用构造子选择必须支持符号标签且路径合流仍拒绝() {
+    fn 通用选择与路径合流均支持符号构造子标签() {
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -496,8 +509,8 @@ mod build_ite_tests {
                         Val::SymbolicCtor(..)
                     ));
                     assert!(matches!(
-                        merge_val(condition, left, right, &mut solver, info),
-                        Err(ExecError::IncompatibleMerge)
+                        merge_val(condition, left, right, &mut solver, info).unwrap(),
+                        Val::SymbolicCtor(..)
                     ));
                 }
             }
@@ -675,16 +688,16 @@ pub fn merge_val<B: BV>(
             Ok(Val::Struct(fields?))
         }
 
-        (Val::Ctor(a_id, a_val), Val::Ctor(b_id, b_val)) if a_id == b_id => {
-            Ok(Val::Ctor(*a_id, Box::new(merge_val(cond, a_val, b_val, solver, info)?)))
-        }
-
         (Val::Ctor(_, _), Val::Ctor(_, _))
         | (Val::Ctor(_, _), Val::SymbolicCtor(_, _))
         | (Val::SymbolicCtor(_, _), Val::Ctor(_, _))
         | (Val::SymbolicCtor(_, _), Val::SymbolicCtor(_, _)) => {
-            // Unwrap 无法拆分符号标签的成功与失败路径，必须回滚合流并保留各自的错误域。
-            Err(ExecError::IncompatibleMerge)
+            // 沿用联合值的既有标签 ITE 与 possibilities 编码；重叠标签的载荷仍
+            // 递归走严格合并，不把不同类型、机器整数等不可表示的载荷强行合并。
+            build_ite_with(cond, val_a, val_b, solver, info, merge_val).map_err(|error| match error {
+                ExecError::Smt(_) | ExecError::Timeout => error,
+                _ => ExecError::IncompatibleUnionPayload,
+            })
         }
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),

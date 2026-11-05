@@ -142,6 +142,8 @@ pub struct SamplePath<B: BV> {
     pub post: BTreeMap<String, Val<B>>,
     pub result: Val<B>,
     pub memory: Vec<Event<B>>,
+    /// 主迹访存序号对应的读条件；主迹保留并集，导出/成员检查仅绑定实际臂。
+    pub memory_guards: BTreeMap<usize, Exp<Sym>>,
 }
 
 fn sat<B: BV>(solver: &mut Solver<B>) -> Result<bool, ExecError> {
@@ -233,6 +235,28 @@ fn bytes<B: BV>(event: &Event<B>) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
 }
 
 impl<B: BV> SamplePath<B> {
+    fn accesses(&self) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
+        for index in self.memory_guards.keys() {
+            assert!(self.memory.get(*index).expect("读取条件的访存序号必须存在").is_memory_read());
+        }
+        self.memory
+            .iter()
+            .enumerate()
+            .flat_map(|(index, event)| {
+                bytes(event).into_iter().map(move |(address, value, commit, read)| {
+                    let commit = match self.memory_guards.get(&index) {
+                        Some(guard) => {
+                            assert!(read, "带条件的访存必须是读取");
+                            Exp::And(Box::new(guard.clone()), Box::new(commit))
+                        }
+                        None => commit,
+                    };
+                    (address, value, commit, read)
+                })
+            })
+            .collect()
+    }
+
     pub fn materialize(
         &self,
         model: &mut Model<B>,
@@ -249,22 +273,20 @@ impl<B: BV> SamplePath<B> {
         let post_registers = registers(&self.post)?;
         let mut pre = BTreeMap::new();
         let mut post = BTreeMap::new();
-        for event in &self.memory {
-            for (address, value, commit, read) in bytes(event) {
-                if !matches!(model.get_exp(&commit)?.unwrap_exp(), Exp::Bool(true)) {
-                    continue;
-                }
-                let address = match model.get_exp(&address)?.unwrap_exp() {
-                    Exp::Bits64(value) => value.lower_u64(),
-                    value => panic!("地址必须为64位：{value:?}"),
-                };
-                let value = match model.get_exp(&value)?.unwrap_exp() {
-                    Exp::Bits64(value) => value.lower_u64() as u8,
-                    value => panic!("内存必须为字节：{value:?}"),
-                };
-                pre.entry(address).or_insert(if read { Some(value) } else { None });
-                post.insert(address, Some(value));
+        for (address, value, commit, read) in self.accesses() {
+            if !matches!(model.get_exp(&commit)?.unwrap_exp(), Exp::Bool(true)) {
+                continue;
             }
+            let address = match model.get_exp(&address)?.unwrap_exp() {
+                Exp::Bits64(value) => value.lower_u64(),
+                value => panic!("地址必须为64位：{value:?}"),
+            };
+            let value = match model.get_exp(&value)?.unwrap_exp() {
+                Exp::Bits64(value) => value.lower_u64() as u8,
+                value => panic!("内存必须为字节：{value:?}"),
+            };
+            pre.entry(address).or_insert(if read { Some(value) } else { None });
+            post.insert(address, Some(value));
         }
         let cells = |map: BTreeMap<u64, Option<u8>>| {
             map.into_iter().map(|(address, value)| MemoryCell { address, value, bytes: 1 }).collect()
@@ -294,7 +316,6 @@ impl<B: BV> SamplePath<B> {
         sample: &Sample,
     ) -> Result<Option<bool>, ExecError> {
         assert_eq!(solver.transaction_depth(), 0, "成员检查必须在路径结束后运行");
-        assert_unconditional_reads(solver);
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let outcome = (|| {
             for (name, value) in &sample.pre_registers {
@@ -305,8 +326,8 @@ impl<B: BV> SamplePath<B> {
                     expr => solver.assert(expr),
                 }
             }
-            let accesses: Vec<_> = self.memory.iter().flat_map(bytes).collect();
-            for (address, value, _, read) in &accesses {
+            let accesses = self.accesses();
+            for (address, value, commit, read) in &accesses {
                 if !read {
                     continue;
                 }
@@ -329,7 +350,7 @@ impl<B: BV> SamplePath<B> {
                         )
                     },
                 );
-                solver.assert(condition);
+                solver.assert(Exp::Or(Box::new(Exp::Not(Box::new(commit.clone()))), Box::new(condition)));
             }
             if !sat(solver)? {
                 return Ok(None);
@@ -475,13 +496,6 @@ impl SampleChecker {
     }
 }
 
-/// 事件提交后 guard 即将被扁平化；每次最外层提交及成员检查都验证此不变量。
-pub fn assert_unconditional_reads<B: BV>(solver: &Solver<B>) {
-    for (guard, event) in solver.committed_transaction_events() {
-        assert!(guard.is_none() || !event.is_memory_read(), "成员检查不支持带条件的内存读事件");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +513,7 @@ mod tests {
             post: BTreeMap::new(),
             result: Val::Symbolic(input),
             memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
         };
         let shared = crate::ir::SharedState::empty(crate::ir::Symtab::new());
         assert!(sat(&mut solver).unwrap());
@@ -532,6 +547,7 @@ mod tests {
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Unit,
+            memory_guards: BTreeMap::new(),
             memory: vec![
                 Event::ReadMem {
                     value: Val::Symbolic(value),
@@ -607,6 +623,7 @@ mod tests {
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Unit,
+            memory_guards: BTreeMap::new(),
             memory: vec![
                 read(0),
                 Event::WriteMem {
@@ -631,22 +648,38 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "带条件的内存读")]
-    fn samples_guarded_memory_read_is_rejected() {
+    fn samples_guarded_memory_reads_bind_only_active_arm() {
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let guard = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
-        solver.start_transaction_with_guard(Some(Exp::Var(guard)));
-        solver.add_event(Event::ReadMem {
-            value: Val::Bits(B64::new(0, 8)),
+        let read = |address, value| Event::ReadMem {
+            value: Val::Bits(B64::new(value, 8)),
             read_kind: Val::Unit,
-            address: Val::Bits(B64::new(0, 64)),
+            address: Val::Bits(B64::new(address, 64)),
             bytes: 1,
             tag_value: None,
             opts: Default::default(),
             region: "mem",
-        });
-        solver.commit_transaction();
-        assert_unconditional_reads(&solver);
+        };
+        let path = SamplePath {
+            pre: BTreeMap::from([("g".into(), Val::Symbolic(guard))]),
+            post: BTreeMap::new(),
+            result: Val::Bool(true),
+            memory: vec![read(0x1000, 7), read(0x1008, 9)],
+            memory_guards: BTreeMap::from([(0, Exp::Var(guard)), (1, Exp::Not(Box::new(Exp::Var(guard))))]),
+        };
+        let shared = crate::ir::SharedState::empty(crate::ir::Symtab::new());
+        for direction in [false, true] {
+            let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
+            solver.assert(Exp::Eq(Box::new(Exp::Var(guard)), Box::new(Exp::Bool(direction))));
+            assert!(sat(&mut solver).unwrap());
+            let mut model = Model::new(&mut solver);
+            let sample = path.materialize(&mut model, &shared, "merge", 1, None).unwrap();
+            drop(model);
+            assert_eq!(sample.pre_memory.len(), 1);
+            assert_eq!(sample.pre_memory[0].address, if direction { 0x1000 } else { 0x1008 });
+            solver.rollback_transaction(tx);
+            assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
+        }
     }
 }

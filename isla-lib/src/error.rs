@@ -143,6 +143,7 @@ pub enum ExecError {
     InconsistentRegisterReset,
     BadInterrupt(&'static str),
     IncompatibleMerge,
+    IncompatibleUnionPayload,
 }
 
 impl IslaError for ExecError {
@@ -177,7 +178,8 @@ impl IslaError for ExecError {
             | PCLimitReached(_)
             | InconsistentRegisterReset
             | BadInterrupt(_)
-            | IncompatibleMerge => SourceLoc::unknown(),
+            | IncompatibleMerge
+            | IncompatibleUnionPayload => SourceLoc::unknown(),
         }
     }
 }
@@ -233,6 +235,7 @@ impl fmt::Display for ExecError {
             InconsistentRegisterReset => write!(f, "Inconsistent register reset constraints"),
             BadInterrupt(msg) => write!(f, "Bad task interrupt: {}", msg),
             IncompatibleMerge => write!(f, "Incompatible merge"),
+            IncompatibleUnionPayload => write!(f, "联合标签的载荷无法合并"),
         }
     }
 }

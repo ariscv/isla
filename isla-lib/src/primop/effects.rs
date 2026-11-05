@@ -18,8 +18,14 @@ use crate::bitvector::BV;
 pub enum Effect {
     /// 只读输入，不访问寄存器、内存、配置等外部状态，也不写外部状态。
     Pure,
+    /// 没有可执行实现；静态保留未知等级，推演到达时报错并回滚。
+    Unknown,
     /// 读取寄存器、内存、配置、周期数等外部状态。
     ReadsState,
+    /// 读取内存并发布 ReadMem；与普通状态读分开，推演还需检查设备区域。
+    /// 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
+    /// 仅适用于本项目可审计的 RAM / 顺序数组内存回调；约束必须经 solver 带条件提交。
+    ReadsMemory,
     /// 写寄存器、内存、约束、事件、IO，或无法证明安全的不透明实现。
     WritesState,
     /// 仅用于原语内部直接分叉/建检查点，且不经过执行器操作数重试路径的实现。
@@ -255,14 +261,14 @@ pub fn effect(name: &str) -> Option<Effect> {
         "isla_fixed_rounding_incr" | "isla_mask_from_low_bits" => Some(Effect::WritesState),
         // 非法索引类型分支会 eprintln 输出；有效分支仅更新返回的向量，仍按 IO 保守分类。
         "vector_update" => Some(Effect::WritesState),
-        // 内存读还发布 ReadMem 事件，且可调用设备/回调；含读取与事件写入，取保守类别。
+        // RAM 读取在推演中按并集发布；设备区域在运行时预检拒绝，写和 IO 仍拒绝。
         "platform_read_mem"
         | "platform_read_mem_ifetch"
         | "platform_read_mem_exclusive"
         | "platform_read_memt"
         | "read_mem"
         | "read_mem_ifetch"
-        | "read_mem_exclusive" => Some(Effect::WritesState),
+        | "read_mem_exclusive" => Some(Effect::ReadsMemory),
         // 写内存/标签或同步寄存器。
         "platform_write_mem"
         | "platform_write_mem_exclusive"
@@ -285,7 +291,7 @@ pub fn effect(name: &str) -> Option<Effect> {
 }
 
 // 三种函数指针接口复用同一分类表。优化器可能合并契约不同的相同函数体，
-// 故同地址取 Pure < ReadsState < WritesState < MayFork 的最大值，与遍历顺序无关。
+// 故同地址取 Pure < Unknown < ReadsState < ReadsMemory < WritesState < MayFork 的最大值，与遍历顺序无关。
 macro_rules! pointer_effect {
     ($query:ident, $kind:ident, $registry:ident) => {
         /// 按实现指针查询副作用；未注册的指针返回 `None`。
