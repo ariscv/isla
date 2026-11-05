@@ -68,8 +68,17 @@ fn main() {
 #[allow(clippy::mutex_atomic)]
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
-    opts.optflag("", "path-merging", "启用自适应区域路径合并");
-    opts.optopt("", "execution-limits-config", "加载含 merge_policy 的独立执行限制 TOML", "<path>");
+    opts.optflag(
+        "",
+        "path-merging",
+        "启用自适应区域路径合并；ISLA_MERGE_RECORDS=<路径> 输出 JSON Lines，ISLA_STATS=1 输出规则统计",
+    );
+    opts.optopt(
+        "",
+        "execution-limits-config",
+        "加载含 merge_policy 的独立执行限制 TOML；Force 合并失败立即以退出码 86 终止",
+        "<path>",
+    );
     opts.optflag("", "optimistic", "assume assertions succeed");
     opts.optflag("", "traces", "print execution traces for successful executions");
     opts.optflag("t", "tree", "combine traces into tree");
@@ -196,18 +205,7 @@ fn isla_main() -> i32 {
         ExecutionLimits::default().with_config(config, &shared_state.symtab)
     });
     if let Some(config) = &isa_config.execution_limits {
-        let functions = shared_state.functions.keys().copied().collect();
-        let locations: Vec<_> = shared_state
-            .functions
-            .values()
-            .flat_map(|(_, _, body)| {
-                body.iter().filter_map(|instr| match instr {
-                    Instr::Jump(_, _, info) => Some(*info),
-                    _ => None,
-                })
-            })
-            .collect();
-        if let Err(error) = config.validate_merge_policy(&shared_state.symtab, &functions, &locations) {
+        if let Err(error) = shared_state.validate_merge_policy(config) {
             eprintln!("{}", error);
             return 1;
         }
@@ -236,14 +234,7 @@ fn isla_main() -> i32 {
     executor::start_multi(num_threads, timeout, vec![task], &shared_state, collecting.clone(), &model_collector);
 
     eprintln!("Execution took: {}ms", now.elapsed().as_millis());
-    if shared_state.execution_stats.enabled() {
-        eprintln!("[MERGE_STATS] {}", shared_state.execution_stats.merge_json());
-        eprintln!("[FORK_STATS] {}", shared_state.execution_stats.fork_json(&shared_state.symtab));
-        eprintln!(
-            "[SPECULATION_REJECT_STATS] {}",
-            shared_state.execution_stats.arm_unsupported_json(&shared_state.symtab)
-        );
-    }
+    shared_state.execution_stats.print(&shared_state);
 
     let (queue, _, _) = collecting.as_ref();
 

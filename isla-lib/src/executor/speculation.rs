@@ -192,6 +192,20 @@ pub(super) fn force_failure<B: crate::bitvector::BV>(
         let (function, pc, location) = execution.origin;
         (crate::zencode::decode(shared.symtab.to_str(function)), pc, location)
     });
+    // 显式 Off 在分支入口直接触发强退，尚未经过 try_region 的失败记账。
+    if matches!(error, crate::error::ExecError::SpeculativeReject { reason: SpeculativeRejectReason::PolicyOff, .. }) {
+        let execution = frame.region_execution.as_ref().expect("Off 冲突必须发生在 Force 推演中");
+        let (function, pc, location) = execution.origin;
+        let rule = state
+            .execution_limits
+            .as_ref()
+            .and_then(|limits| limits.merge_rule(function, location))
+            .map(|(index, _)| index);
+        shared.execution_stats.merge_rejected(function, pc, error);
+        shared.execution_stats.merge_finished(false);
+        shared.execution_stats.rule_finished(rule, Some(SpeculativeRejectReason::PolicyOff));
+        state.speculation_stats.record_reject(SpeculativeRejectReason::PolicyOff);
+    }
     let diagnostic = force_diagnostic(
         rule,
         &crate::zencode::decode(shared.symtab.to_str(frame.function_name)),
@@ -201,5 +215,6 @@ pub(super) fn force_failure<B: crate::bitvector::BV>(
         origin,
     );
     eprintln!("{}", diagnostic);
+    shared.execution_stats.print(shared);
     std::process::exit(FORCE_MERGE_EXIT_CODE)
 }

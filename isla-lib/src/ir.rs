@@ -1220,6 +1220,23 @@ impl IRTypeInfo {
 }
 
 impl<'ir, B: BV> SharedState<'ir, B> {
+    /// 两个命令入口共用的加载期策略校验；源码区域只匹配真实 Jump。
+    pub fn validate_merge_policy(&self, config: &crate::config::ExecutionLimitsConfig) -> Result<(), String> {
+        self.execution_stats.prepare_merge_rules(config.merge_policy.as_ref().map_or(0, Vec::len));
+        let functions = self.functions.keys().copied().collect();
+        let locations: Vec<_> = self
+            .functions
+            .values()
+            .flat_map(|(_, _, body)| {
+                body.iter().filter_map(|instr| match instr {
+                    Instr::Jump(_, _, info) => Some(*info),
+                    _ => None,
+                })
+            })
+            .collect();
+        config.validate_merge_policy(&self.symtab, &functions, &locations)
+    }
+
     pub fn empty(symtab: Symtab<'ir>) -> Self {
         SharedState {
             function_regions: std::sync::Mutex::new(HashMap::new()),

@@ -704,6 +704,7 @@ fn region_merge_force_process_failure_and_off_conflict() {
             .arg("executor::tests::region_merge_tests::region_merge_force_process_failure_and_off_conflict")
             .arg("--nocapture")
             .env("ISLA_I2_FORCE_CHILD", case)
+            .env("ISLA_STATS", "1")
             .output()
             .unwrap();
         assert_eq!(
@@ -713,11 +714,17 @@ fn region_merge_force_process_failure_and_off_conflict() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(started.elapsed() < Duration::from_secs(10));
-        let diagnostic: serde_json::Value = String::from_utf8(output.stderr)
-            .unwrap()
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostic: serde_json::Value =
+            stderr.lines().find_map(|line| serde_json::from_str(line).ok()).expect("必须输出结构化诊断");
+        let stats: serde_json::Value = stderr
             .lines()
-            .find_map(|line| serde_json::from_str(line).ok())
-            .expect("必须输出结构化诊断");
+            .find_map(|line| line.strip_prefix("[MERGE_STATS] "))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .expect("强退前必须报告规则统计");
+        if case == "off" {
+            assert_eq!(stats["rules"]["0"]["failure_reasons"]["policy_off"], 1);
+        }
         assert_eq!(diagnostic["kind"], "force_region_merge_failure");
         assert!(diagnostic["rule"].is_u64());
         if case == "off" {
@@ -1154,4 +1161,286 @@ fn region_merge_force_static_validation_before_execution() {
     assert_eq!(diagnostic["function"], "loop");
     assert_eq!(diagnostic["branch_pc"], 0);
     assert_eq!(diagnostic["reason"], "has_back_edge");
+}
+
+#[test]
+fn region_merge_recursive_effect_least_fixed_point() {
+    use primop::Effect;
+    let mut shared = empty_shared_state();
+    let a = shared.symtab.intern("zrecursive_a");
+    let b = shared.symtab.intern("zrecursive_b");
+    let reg = shared.symtab.intern("zrecursive_register");
+    shared.registers.insert(reg, Ty::Bool);
+    for (body_a, body_b, expected) in [
+        (vec![Instr::Call(Loc::Id(RETURN), false, a, Vec::new(), info()), Instr::End], vec![Instr::End], Effect::Pure),
+        (
+            vec![Instr::Call(Loc::Id(RETURN), false, b, Vec::new(), info()), Instr::End],
+            vec![
+                Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+                Instr::Call(Loc::Id(RETURN), false, a, Vec::new(), info()),
+                Instr::End,
+            ],
+            Effect::WritesState,
+        ),
+        (
+            vec![Instr::Call(Loc::Id(RETURN), false, b, Vec::new(), info()), Instr::End],
+            vec![
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+                Instr::Call(Loc::Id(RETURN), false, a, Vec::new(), info()),
+                Instr::End,
+            ],
+            Effect::ReadsState,
+        ),
+    ] {
+        shared.functions.insert(a, (Vec::new(), &Ty::Bool, Box::leak(body_a.into_boxed_slice())));
+        shared.functions.insert(b, (Vec::new(), &Ty::Bool, Box::leak(body_b.into_boxed_slice())));
+        let summaries = region_merge::function_effect_summaries(&shared);
+        assert_eq!(summaries[&a].effect, expected);
+        if expected != Effect::Pure {
+            assert_eq!(summaries[&b].effect, expected);
+        }
+    }
+}
+
+/// ISLA_REGIONS_IR=/绝对路径/rv64d.ir cargo test -p isla-lib region_merge_real_ir_effects --offline --features smt-thread-interrupt -- --ignored --nocapture
+#[test]
+#[ignore = "需要外部 rv64d.ir；用 ISLA_REGIONS_IR 指定路径"]
+fn region_merge_real_ir_effects() {
+    let text = Box::leak(std::fs::read_to_string(std::env::var("ISLA_REGIONS_IR").unwrap()).unwrap().into_boxed_str());
+    let mut symtab = Symtab::new();
+    let mut definitions =
+        crate::ir_parser::IrParser::new().parse(&mut symtab, crate::ir_lexer::new_ir_lexer(text)).unwrap();
+    crate::ir::insert_primops(&mut definitions, &symtab, AssertionMode::Optimistic, &empty_isa_config());
+    let definitions = Box::leak(definitions.into_boxed_slice());
+    let types = IRTypeInfo::new(definitions);
+    let shared = SharedState::new(
+        symtab,
+        definitions,
+        types,
+        HashSet::new(),
+        HashSet::new(),
+        HashSet::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let summaries = region_merge::function_effect_summaries(&shared);
+    // 基线配置未注册 sys_enable_experimental_extensions；未知调用必须传播 MayFork。
+    for (function, expected) in [
+        ("zcurrentlyEnabled", primop::Effect::MayFork),
+        ("zhartSupports", primop::Effect::MayFork),
+        ("zpte_is_invalid", primop::Effect::MayFork),
+        ("zpte_is_non_leaf", primop::Effect::Pure),
+    ] {
+        let summary = &summaries[&shared.symtab.lookup(function)];
+        eprintln!("{function}: {:?}", summary.effect);
+        assert_eq!(summary.effect, expected, "{function}");
+    }
+}
+
+#[test]
+fn region_merge_records_json_lines_and_parallel_writes() {
+    const CHILD: &str = "ISLA_I3_RECORD_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let mut shared = empty_shared_state();
+        let register = shared.symtab.intern("zrecord_register");
+        shared.registers.insert(register, Ty::Bool);
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(register), info()),
+            Instr::End,
+        ];
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let shared = &shared;
+                let program = program.clone();
+                scope.spawn(move || {
+                    for _ in 0..4 {
+                        assert_eq!(paths(program.clone(), shared, 1, true).len(), 1);
+                    }
+                });
+            }
+        });
+        let assume = primop::unary_primops()["assume"];
+        assert!(paths(
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::PrimopUnary(Loc::Id(RETURN), assume, Exp::Bool(false), info()),
+                Instr::Goto(4),
+                Instr::PrimopUnary(Loc::Id(RETURN), assume, Exp::Bool(false), info()),
+                Instr::End,
+            ],
+            &shared,
+            1,
+            true
+        )
+        .is_empty());
+        assert_eq!(
+            paths(
+                vec![
+                    Instr::Jump(input(0), 3, info()),
+                    Instr::PrimopUnary(Loc::Id(RETURN), assume, Exp::Bool(false), info()),
+                    Instr::Goto(4),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(register), info()),
+                    Instr::End,
+                ],
+                &shared,
+                1,
+                true
+            )
+            .len(),
+            1
+        );
+        return;
+    }
+    let path = std::env::temp_dir().join(format!("isla-i3-records-{}.jsonl", std::process::id()));
+    let file = std::fs::File::create(&path).unwrap();
+    drop(file);
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "executor::tests::region_merge_tests::region_merge_records_json_lines_and_parallel_writes",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("ISLA_MERGE_RECORDS", &path)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(text.ends_with('\n'));
+    let mut records: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(records.len(), 34, "每次成功提交只写一行，含死亡臂剪枝");
+    let surviving = records.pop().unwrap();
+    assert_eq!(surviving["single_arm_reads"].as_array().unwrap().len(), 1);
+    assert_eq!(surviving["single_arm_reads"][0]["guard"]["expression"], "v0");
+    let dead = records.pop().unwrap();
+    assert_eq!(dead["outcome"], "dead");
+    assert_eq!(dead["input_symbols"].as_array().unwrap().len(), 1);
+    assert_eq!(dead["single_arm_reads"], serde_json::json!([]));
+    let mut ids = HashSet::new();
+    for record in records {
+        assert!(ids.insert(record["record_id"].as_u64().unwrap()));
+        assert_eq!(record["schema_version"], 1);
+        assert!(record["function"].is_string());
+        assert_eq!(record["branch_pc"], 0);
+        assert_eq!(record["join"], serde_json::json!({"instruction":4}));
+        assert!(record["source_loc"].is_object());
+        assert_eq!(record["condition"]["name"], "v0");
+        assert_eq!(record["condition"]["smt_id"], 0);
+        assert_eq!(record["depth"], 1);
+        let inputs = record["input_symbols"].as_array().unwrap();
+        assert_eq!(inputs.len(), 2);
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(input["smt_id"], index);
+            assert_eq!(input["type"], serde_json::json!({"kind":"bool"}));
+        }
+        let reads = record["single_arm_reads"].as_array().unwrap();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0]["register"], "record_register");
+        assert_eq!(reads[0]["guard"]["expression"], "v0");
+        assert_eq!(reads[0]["guard"]["symbols"][0]["smt_id"], 0);
+    }
+}
+
+#[test]
+fn region_merge_force_toml_exits_with_rule_stats() {
+    const CHILD: &str = "ISLA_I3_FORCE_TOML";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let mut shared = empty_shared_state();
+        let root = shared.symtab.intern("zforce_rejected");
+        let reg = shared.symtab.intern("zforce_register");
+        shared.registers.insert(reg, Ty::Bool);
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(5),
+            Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::End,
+        ];
+        shared.functions.insert(root, (Vec::new(), &Ty::Bool, Box::leak(program.clone().into_boxed_slice())));
+        let config = crate::config::ExecutionLimitsConfig::from_file(path).unwrap();
+        shared.validate_merge_policy(&config).unwrap();
+        let state =
+            TaskState::new().with_execution_limits(ExecutionLimits::default().with_config(&config, &shared.symtab));
+        let mut frame = make_frame(program);
+        frame.function_name = root;
+        frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(symbol)));
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+            &shared,
+            &(),
+            &|_, _, _, _, _, _| panic!("Force 拒绝必须终止整个进程"),
+        );
+        panic!("Force 拒绝不能正常返回");
+    }
+    let path = std::env::temp_dir().join(format!("isla-i3-force-{}.toml", std::process::id()));
+    std::fs::write(
+        &path,
+        "[execution_limits]\n[[execution_limits.merge_policy]]\nmode = \"force\"\nfunction = \"force_rejected\"\n",
+    )
+    .unwrap();
+    let started = Instant::now();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "executor::tests::region_merge_tests::region_merge_force_toml_exits_with_rule_stats",
+            "--nocapture",
+        ])
+        .env(CHILD, &path)
+        .env("ISLA_STATS", "1")
+        .output()
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(output.status.code(), Some(FORCE_MERGE_EXIT_CODE));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let diagnostic: serde_json::Value = stderr.lines().find_map(|line| serde_json::from_str(line).ok()).unwrap();
+    assert_eq!(diagnostic["rule"], 0);
+    assert_eq!(diagnostic["reason"], "register_read_after_write");
+    let report: serde_json::Value = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("[MERGE_STATS] "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .expect("Force 强退前必须输出统计");
+    assert_eq!(report["rules"]["0"]["attempts"], 1);
+    assert_eq!(report["rules"]["0"]["successes"], 0);
+    assert_eq!(report["rules"]["0"]["failure_reasons"]["register_read_after_write"], 1);
+}
+
+#[test]
+fn region_merge_effects_use_external_binding_and_reject_callee_vector_writes() {
+    let mut shared = empty_shared_state();
+    let caller = helper(&mut shared);
+    // IR 名称碰巧叫 not，但外部绑定未知时不能借用同名原语的 Pure 分类。
+    let alias = shared.symtab.intern("znot");
+    shared.externs.insert(alias, (&[], &Ty::Bool, "unregistered_effect"));
+    shared.functions.get_mut(&caller).unwrap().2 =
+        Box::leak(vec![Instr::Call(Loc::Id(RETURN), false, alias, Vec::new(), info()), Instr::End].into_boxed_slice());
+    assert_eq!(region_merge::function_effect_summaries(&shared)[&caller].effect, primop::Effect::MayFork);
+    shared.functions.get_mut(&caller).unwrap().2 = Box::leak(
+        vec![Instr::Call(Loc::Id(RETURN), false, WRITE_REGISTER_FROM_VECTOR, Vec::new(), info()), Instr::End]
+            .into_boxed_slice(),
+    );
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Call(Loc::Id(RETURN), false, caller, vec![Exp::Bool(true)], info()),
+        Instr::End,
+    ]);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+    assert!(merge_region_for_test(symbol, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap().is_none());
+    assert_eq!(shared.execution_stats.merge_json()["candidate_attempts"], 0, "被调函数写状态应在推演前拒绝");
 }

@@ -96,8 +96,27 @@ impl ExecutionStats {
         }
         (self.merge_json(), self.fork_json(&symtab), self.arm_unsupported_json(&symtab))
     }
+    /// 加载时登记全部规则，包括从未尝试及显式 Off 的规则。
+    pub fn prepare_merge_rules(&self, count: usize) {
+        if self.enabled {
+            let mut merge = self.merge.lock().unwrap();
+            for index in 0..count {
+                merge.rules.entry(index).or_default();
+            }
+        }
+    }
+    /// 正常收尾与 Force 强退共用，确保强退不依赖析构或 worker panic。
+    pub fn print<B>(&self, shared: &crate::ir::SharedState<B>) {
+        if self.enabled {
+            eprintln!("[MERGE_STATS] {}", self.merge_json());
+            eprintln!("[FORK_STATS] {}", self.fork_json(&shared.symtab));
+            eprintln!("[SPECULATION_REJECT_STATS] {}", self.arm_unsupported_json(&shared.symtab));
+        }
+    }
     pub fn reset(&self) {
-        *self.merge.lock().unwrap() = MergeStats::default();
+        let mut merge = self.merge.lock().unwrap();
+        let rules = merge.rules.keys().map(|index| (*index, RuleStats::default())).collect();
+        *merge = MergeStats { rules, ..MergeStats::default() };
         self.forks.lock().unwrap().clear();
         self.rejections.lock().unwrap().clear();
     }
@@ -323,5 +342,24 @@ mod tests {
         let report = stats.arm_unsupported_json(&symtab);
         assert_eq!(report["top"].as_array().unwrap().len(), 30);
         assert_eq!(report["top"][0]["count"], 40);
+    }
+}
+
+#[cfg(test)]
+mod merge_rule_tests {
+    use super::*;
+
+    #[test]
+    fn stats_include_unattempted_rules_after_reset() {
+        let stats = ExecutionStats::new(true);
+        stats.prepare_merge_rules(3);
+        stats.rule_attempt(Some(1));
+        stats.rule_finished(Some(1), None);
+        assert_eq!(stats.merge_json()["rules"]["0"]["attempts"], 0);
+        assert_eq!(stats.merge_json()["rules"]["1"]["successes"], 1);
+        stats.reset();
+        for index in 0..3 {
+            assert_eq!(stats.merge_json()["rules"][index.to_string()]["attempts"], 0);
+        }
     }
 }

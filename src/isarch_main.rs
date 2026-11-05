@@ -377,7 +377,12 @@ fn isla_main() -> i32 {
     opts.optopt("", "smt-timeout", "单次 Z3 operation 的 soft interrupt 超时时间", "<n[s|m|h]>");
     opts.optopt("", "timeout-smt-output", "timeout SMT2 输出目标，逗号分隔：file,stdout,itrace", "<destinations>");
     opts.optopt("", "timeout-smt-dir", "timeout SMT2 文件输出目录", "<path>");
-    opts.optopt("", "execution-limits-config", "加载独立的执行限制 TOML 配置", "<path>");
+    opts.optopt(
+        "",
+        "execution-limits-config",
+        "加载独立的执行限制 TOML 配置；Force 合并失败立即以退出码 86 终止",
+        "<path>",
+    );
     opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
@@ -385,7 +390,11 @@ fn isla_main() -> i32 {
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
-    opts.optflag("", "path-merging", "启用运行时动态路径合并 (Veritesting)");
+    opts.optflag(
+        "",
+        "path-merging",
+        "启用自适应区域路径合并；ISLA_MERGE_RECORDS=<路径> 输出 JSON Lines，ISLA_STATS=1 输出规则统计",
+    );
     opts.optopt("", "itrace", "把指令执行轨迹写入文件", "<path>");
 
     let mut hasher = Sha256::new();
@@ -525,6 +534,18 @@ fn isla_main() -> i32 {
     let regs = &iarch.regs;
     let lets = &iarch.lets;
     let shared_state = &&iarch.shared_state;
+
+    if let Some(config) = &isa_config.execution_limits {
+        if let Err(error) = shared_state.validate_merge_policy(config) {
+            eprintln!("{}", error);
+            return 1;
+        }
+        let limits = isla_lib::executor::ExecutionLimits::default().with_config(config, &shared_state.symtab);
+        if let Err(error) = isla_lib::executor::validate_force_regions(shared_state, &limits) {
+            eprintln!("{}", error);
+            return isla_lib::executor::FORCE_MERGE_EXIT_CODE;
+        }
+    }
 
     set_global_shared_state(*shared_state);
 
@@ -703,6 +724,53 @@ mod tests {
         opts.optmulti("", "instruction-name", "", "<name>");
         opts.optflag("", "all", "");
         opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn loaded_merge_policy_rejects_missing_function_and_unmatched_strict_region() {
+        use isla_lib::ir::{Def, IRTypeInfo, Instr, Name, Symtab};
+        use isla_lib::source_loc::SourceLoc;
+        use std::collections::HashSet;
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["merge.sail"]);
+        let function = symtab.intern("zpresent");
+        // 名字存在于符号表但不是 IR 函数，也必须拒绝。
+        symtab.intern("zmissing");
+        let definitions: Vec<Def<Name, B129>> = vec![
+            Def::Val(function, Vec::new(), isla_lib::ir::Ty::Bool),
+            Def::Fn(
+                function,
+                Vec::new(),
+                vec![Instr::Jump(isla_lib::ir::Exp::Bool(true), 1, SourceLoc::new(0, 3, 0, 3, 8)), Instr::End],
+            ),
+        ];
+        let types = IRTypeInfo::new(&definitions);
+        let shared = SharedState::new(
+            symtab,
+            &definitions,
+            types,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        for (rule, expected) in [
+            (r#"function = "missing""#, "不存在"),
+            (
+                "file = \"merge.sail\"\nstart_line = 20\nstart_column = 0\nend_line = 21\nend_column = 0",
+                "未匹配任何 IR 分支",
+            ),
+        ] {
+            let text = format!("[execution_limits]\nstrict = true\nir_sha256 = \"{}\"\n[[execution_limits.merge_policy]]\nmode = \"adaptive\"\n{}", "0".repeat(64), rule);
+            let path = std::env::temp_dir().join(format!("i3-loaded-policy-{}.toml", std::process::id()));
+            std::fs::write(&path, text).unwrap();
+            let config = ExecutionLimitsConfig::from_file(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            let error = shared.validate_merge_policy(&config).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

@@ -76,6 +76,8 @@ enum MergePolicySelector {
 
 #[derive(Clone, Debug)]
 struct MergePolicy {
+    /// 保留 TOML 原始序号，未解析区域不能压缩后续规则的诊断/统计编号。
+    index: usize,
     mode: MergeMode,
     selector: MergePolicySelector,
 }
@@ -279,7 +281,8 @@ impl ExecutionLimits {
         if let Some(rules) = &config.merge_policy {
             self.merge_policy = rules
                 .iter()
-                .filter_map(|rule| {
+                .enumerate()
+                .filter_map(|(index, rule)| {
                     let selector = match &rule.selector {
                         MergePolicySelectorConfig::Function(function) => {
                             MergePolicySelector::Function(symtab.get(function))
@@ -288,7 +291,7 @@ impl ExecutionLimits {
                             MergePolicySelector::Region(spec.resolve(symtab.files())?)
                         }
                     };
-                    Some(MergePolicy { mode: rule.mode, selector })
+                    Some(MergePolicy { index, mode: rule.mode, selector })
                 })
                 .collect();
         }
@@ -311,21 +314,20 @@ impl ExecutionLimits {
     pub fn merge_rule(&self, function: Name, location: SourceLoc) -> Option<(usize, MergeMode)> {
         self.merge_policy
             .iter()
-            .enumerate()
-            .filter_map(|(index, rule)| {
+            .filter_map(|rule| {
                 let MergePolicySelector::Region(region) = rule.selector else { return None };
                 if !region.selects_ir_location(location) {
                     return None;
                 }
                 let start = (u64::from(region.start().0) << 16) | u64::from(region.start().1);
                 let end = (u64::from(region.end().0) << 16) | u64::from(region.end().1);
-                Some(((end - start, region.start(), region.end()), (index, rule.mode)))
+                Some(((end - start, region.start(), region.end()), (rule.index, rule.mode)))
             })
             .min_by_key(|entry| entry.0)
             .map(|entry| entry.1)
             .or_else(|| {
-                self.merge_policy.iter().enumerate().find_map(|(index, rule)| match rule.selector {
-                    MergePolicySelector::Function(Some(name)) if name == function => Some((index, rule.mode)),
+                self.merge_policy.iter().find_map(|rule| match rule.selector {
+                    MergePolicySelector::Function(Some(name)) if name == function => Some((rule.index, rule.mode)),
                     _ => None,
                 })
             })
@@ -928,6 +930,28 @@ mod tests {
             let limits = state.execution_limits.expect("全局 off 时也必须保留局部 merge_policy");
             assert_eq!(limits.merge_mode(function, SourceLoc::unknown(), None), mode);
         }
+    }
+
+    #[test]
+    fn path_merging_rule_indices_keep_toml_order_after_unmatched_region() {
+        use crate::config::MergePolicyConfig;
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zf");
+        let config = ExecutionLimitsConfig {
+            merge_policy: Some(vec![
+                MergePolicyConfig {
+                    mode: MergeMode::Off,
+                    selector: MergePolicySelectorConfig::Region(SourceRegionSpec::new("missing.sail", (1, 0), (2, 0))),
+                },
+                MergePolicyConfig {
+                    mode: MergeMode::Force,
+                    selector: MergePolicySelectorConfig::Function("zf".into()),
+                },
+            ]),
+            ..ExecutionLimitsConfig::default()
+        };
+        let limits = ExecutionLimits::default().with_config(&config, &symtab);
+        assert_eq!(limits.merge_rule(function, SourceLoc::unknown()), Some((1, MergeMode::Force)));
     }
 
     #[test]

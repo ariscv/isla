@@ -85,6 +85,10 @@ pub struct RegionMergeRecord<B> {
     pub branch_pc: usize,
     pub join: RegionPoint,
     pub condition: Sym,
+    pub source_loc: SourceLoc,
+    pub depth: usize,
+    /// 两臂都死亡时没有存活合并值，但剪枝本身仍是一次成功提交。
+    pub dead: bool,
     /// 合并值中的符号；最外层提交后展开 DefineConst 依赖，得到自由输入。
     pub value_symbols: HashSet<Sym>,
     pub input_symbols: HashSet<Sym>,
@@ -202,84 +206,173 @@ fn constraint_binary<B: BV>(f: primop::Binary<B>) -> bool {
         .any(|assertion| std::ptr::fn_addr_eq(f, *assertion))
 }
 
+/// 效应等级与静态拒绝证据分别保存：寄存器读可以推演，带条件约束也可重放。
+/// 因此 C4 的 WritesState（例如 assume）不必然带有静态拒绝证据。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FunctionEffect {
+    pub effect: Effect,
+    rejection: Option<CachedReject>,
+}
+impl FunctionEffect {
+    fn join(&mut self, other: Self) -> bool {
+        let changed = other.effect > self.effect || (self.rejection.is_none() && other.rejection.is_some());
+        if other.rejection.is_some() && (other.effect > self.effect || self.rejection.is_none()) {
+            self.rejection = other.rejection;
+        }
+        self.effect = self.effect.max(other.effect);
+        changed
+    }
+}
+
+/// 已加载的原语调用通常已改写为 Primop；特殊内建仍保留 Call 形态。
+fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effect {
+    match instr {
+        Instr::PrimopUnary(_, f, _, _) => effects::unary_effect(*f).expect("一元原语必须分类"),
+        Instr::PrimopBinary(_, f, _, _, _) => effects::binary_effect(*f).expect("二元原语必须分类"),
+        Instr::PrimopVariadic(_, f, _, _) => effects::variadic_effect(*f).expect("多元原语必须分类"),
+        Instr::PrimopReset(_, reset, _) => effects::reset_effect(reset),
+        Instr::Call(_, _, function, _, _) if !shared.functions.contains_key(function) => match *function {
+            REG_DEREF | READ_REGISTER_FROM_VECTOR => Effect::ReadsState,
+            WRITE_REGISTER_FROM_VECTOR => Effect::WritesState,
+            INTERNAL_VECTOR_INIT | INTERNAL_VECTOR_UPDATE | ITE_PHI => Effect::Pure,
+            _ => match shared.externs.get(function) {
+                Some((_, _, name)) => effects::effect(name).unwrap_or(Effect::MayFork),
+                None => effects::effect(&zencode::decode(shared.symtab.to_str(*function))).unwrap_or(Effect::MayFork),
+            },
+        },
+        _ => Effect::Pure,
+    }
+}
+
+/// 从格底 Pure 开始，按调用图的 SCC 逆拓扑序处理；分量内迭代到最小不动点。
+/// 递归边只传播已知效应，不凭空增加效应；实际递归仍受共享推演步数预算约束。
+pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashMap<Name, FunctionEffect> {
+    let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
+    let nodes: HashMap<_, _> = shared.functions.keys().map(|function| (*function, graph.add_node(*function))).collect();
+    let mut summaries = HashMap::new();
+    for (function, (params, _, body)) in &shared.functions {
+        let locals: HashSet<_> = params
+            .iter()
+            .map(|(name, _)| *name)
+            .chain([RETURN])
+            .chain(body.iter().filter_map(|instr| match instr {
+                Instr::Decl(name, ..) | Instr::Init(name, ..) => Some(*name),
+                _ => None,
+            }))
+            .collect();
+        let mut summary = FunctionEffect { effect: Effect::Pure, rejection: None };
+        for (pc, instr) in body.iter().enumerate() {
+            let mut effect = direct_effect(instr, shared);
+            let mut rejection = if matches!(instr, Instr::Call(_, _, callee, _, _) if shared.functions.contains_key(callee))
+            {
+                None
+            } else {
+                instruction_effect(*function, pc, instr, shared, &HashMap::new())
+            };
+            let mut reads = HashSet::new();
+            let mut destination = None;
+            match instr {
+                Instr::Copy(loc, exp, _) => {
+                    destination = Some(loc);
+                    exp.collect_ids(&mut reads);
+                }
+                Instr::Init(_, _, exp, _) | Instr::Jump(exp, _, _) => exp.collect_ids(&mut reads),
+                Instr::PrimopUnary(loc, _, exp, _) => {
+                    destination = Some(loc);
+                    exp.collect_ids(&mut reads);
+                }
+                Instr::PrimopBinary(loc, _, a, b, _) => {
+                    destination = Some(loc);
+                    a.collect_ids(&mut reads);
+                    b.collect_ids(&mut reads);
+                }
+                Instr::PrimopVariadic(loc, _, args, _) | Instr::Call(loc, _, _, args, _) => {
+                    destination = Some(loc);
+                    for arg in args {
+                        arg.collect_ids(&mut reads);
+                    }
+                }
+                Instr::PrimopReset(loc, ..) => destination = Some(loc),
+                Instr::Monomorphize(name, ..) => {
+                    reads.insert(*name);
+                }
+                _ => (),
+            }
+            if reads.iter().any(|name| !locals.contains(name) && !shared.type_info.enum_members.contains_key(name)) {
+                effect = effect.max(Effect::ReadsState);
+            }
+            if matches!(instr, Instr::Call(_, _, WRITE_REGISTER_FROM_VECTOR, _, _))
+                || destination.map_or(false, |loc| !locals.contains(&loc.id()) || matches!(loc, Loc::Addr(_)))
+            {
+                effect = effect.max(Effect::WritesState);
+                rejection = Some(CachedReject {
+                    reason: SpeculativeRejectReason::CalleeStateWrite,
+                    function: *function,
+                    pc,
+                    location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
+                });
+            }
+            summary.join(FunctionEffect { effect, rejection });
+            if let Instr::Call(_, _, callee, _, _) = instr {
+                if let Some(callee) = nodes.get(callee) {
+                    graph.update_edge(nodes[function], *callee, ());
+                }
+            }
+        }
+        summaries.insert(*function, summary);
+    }
+    // kosaraju_scc 返回汇点优先的逆拓扑序，因此分量外的被调函数已收敛。
+    for component in petgraph::algo::kosaraju_scc(&graph) {
+        loop {
+            let mut changed = false;
+            for node in &component {
+                let function = graph[*node];
+                for callee in graph.neighbors(*node) {
+                    let effect = summaries[&graph[callee]];
+                    changed |= summaries.get_mut(&function).unwrap().join(effect);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    summaries
+}
+
 fn instruction_effect<B: BV>(
     function_name: Name,
     pc: usize,
     instr: &Instr<Name, B>,
     shared: &SharedState<B>,
-    active: &mut HashSet<Name>,
-    summaries: &mut HashMap<Name, Option<CachedReject>>,
+    summaries: &HashMap<Name, FunctionEffect>,
 ) -> Option<CachedReject> {
-    let at = |reason| CachedReject {
-        reason,
+    match instr {
+        Instr::PrimopUnary(_, f, _, _) if constraint_unary(*f) => return None,
+        Instr::PrimopBinary(_, f, _, _, _) if constraint_binary(*f) => return None,
+        Instr::Call(_, _, function, _, _) if shared.functions.contains_key(function) => {
+            return summaries.get(function).expect("IR 函数必须有收敛的效应摘要").rejection;
+        }
+        Instr::Call(
+            _,
+            _,
+            REG_DEREF
+            | READ_REGISTER_FROM_VECTOR
+            | WRITE_REGISTER_FROM_VECTOR
+            | INTERNAL_VECTOR_INIT
+            | INTERNAL_VECTOR_UPDATE
+            | ITE_PHI,
+            _,
+            _,
+        ) => return None,
+        _ => (),
+    }
+    (direct_effect(instr, shared) != Effect::Pure).then(|| CachedReject {
+        reason: SpeculativeRejectReason::StateEffect,
         function: function_name,
         pc,
         location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
-    };
-    let effect = match instr {
-        Instr::PrimopUnary(_, f, _, _) if constraint_unary(*f) => return None,
-        Instr::PrimopBinary(_, f, _, _, _) if constraint_binary(*f) => return None,
-        Instr::PrimopUnary(_, f, _, _) => effects::unary_effect(*f).expect("一元原语必须分类"),
-        Instr::PrimopBinary(_, f, _, _, _) => effects::binary_effect(*f).expect("二元原语必须分类"),
-        Instr::PrimopVariadic(_, f, _, _) => effects::variadic_effect(*f).expect("多元原语必须分类"),
-        Instr::PrimopReset(_, reset, _) => effects::reset_effect(reset),
-        Instr::Call(_, _, function, _, _) => {
-            if let Some((params, _, body)) = shared.functions.get(function) {
-                if let Some(summary) = summaries.get(function) {
-                    return *summary;
-                }
-                if !active.insert(*function) {
-                    return Some(at(SpeculativeRejectReason::RecursiveEffect));
-                }
-                let locals: HashSet<_> = params
-                    .iter()
-                    .map(|(name, _)| *name)
-                    .chain([RETURN])
-                    .chain(body.iter().filter_map(|instr| match instr {
-                        Instr::Decl(name, ..) | Instr::Init(name, ..) => Some(*name),
-                        _ => None,
-                    }))
-                    .collect();
-                let effect = body.iter().enumerate().find_map(|(pc, instr)| {
-                    let destination = match instr {
-                        Instr::Copy(loc, ..)
-                        | Instr::PrimopUnary(loc, ..)
-                        | Instr::PrimopBinary(loc, ..)
-                        | Instr::PrimopVariadic(loc, ..)
-                        | Instr::PrimopReset(loc, ..)
-                        | Instr::Call(loc, ..) => Some(loc),
-                        _ => None,
-                    };
-                    if destination.map_or(false, |loc| !locals.contains(&loc.id()) || matches!(loc, Loc::Addr(_))) {
-                        return Some(CachedReject {
-                            reason: SpeculativeRejectReason::CalleeStateWrite,
-                            function: *function,
-                            pc,
-                            location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
-                        });
-                    }
-                    instruction_effect(*function, pc, instr, shared, active, summaries)
-                });
-                active.remove(function);
-                summaries.insert(*function, effect);
-                return effect;
-            }
-            return match *function {
-                REG_DEREF
-                | READ_REGISTER_FROM_VECTOR
-                | WRITE_REGISTER_FROM_VECTOR
-                | INTERNAL_VECTOR_INIT
-                | INTERNAL_VECTOR_UPDATE
-                | ITE_PHI => None,
-                _ => Some(at(SpeculativeRejectReason::StateEffect)),
-            };
-        }
-        _ => return None,
-    };
-    match effect {
-        Effect::Pure => None,
-        Effect::ReadsState | Effect::WritesState | Effect::MayFork => Some(at(SpeculativeRejectReason::StateEffect)),
-    }
+    })
 }
 
 pub(super) fn preflight<B: BV>(
@@ -295,8 +388,7 @@ pub(super) fn preflight<B: BV>(
         frame.pc,
         &frame.instrs[frame.pc],
         shared,
-        &mut HashSet::new(),
-        &mut state.region_effect_summaries.lock().unwrap(),
+        state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)),
     ) {
         return Err(rejection.error());
     }
@@ -403,8 +495,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         *pc,
                         &frame.instrs[*pc],
                         shared,
-                        &mut HashSet::new(),
-                        &mut state.region_effect_summaries.lock().unwrap(),
+                        state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)),
                     ) {
                         return Err(rejection.error());
                     }
@@ -434,6 +525,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             if depth > MAX_REGION_MERGE_DEPTH {
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
+                let record_start = frame.region_merge_records.len();
                 let tx = solver.start_transaction();
                 let result = execute_region(
                     condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame, state,
@@ -506,6 +598,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                     .filter(|symbol| declared.contains(symbol) && !derived.contains(symbol))
                                     .collect();
                             }
+                            // 只在最外层提交后发布本次新增记录，内层回滚不会留下幽灵记录。
+                            emit_records(&frame.region_merge_records[record_start..], task_id, shared, solver);
                         }
                     }
                     Err(_) => solver.rollback_transaction(tx),
@@ -679,17 +773,48 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let right = arms.pop().unwrap();
     let left = arms.pop().unwrap();
     let mut merged = match (left, right) {
-        (None, None) => return Ok(RegionResult::Dead),
+        (None, None) => {
+            frame.region_merge_records.push(RegionMergeRecord {
+                function: frame.function_name,
+                branch_pc: region.branch_pc,
+                join: region.join,
+                condition,
+                source_loc: info,
+                depth,
+                dead: true,
+                value_symbols: HashSet::from([condition]),
+                input_symbols: HashSet::new(),
+                pure_definitions: Vec::new(),
+                single_arm_reads: Vec::new(),
+            });
+            return Ok(RegionResult::Dead);
+        }
         (Some(mut arm), None) | (None, Some(mut arm)) => {
+            let access = arm.local_state.speculative_access.as_ref().unwrap();
+            let single_arm_reads = access
+                .reads
+                .iter()
+                .zip(&access.read_guards)
+                .skip(base.local_state.speculative_access.as_ref().unwrap().reads.len())
+                .map(|((register, accessor, value), guard)| GuardedRegisterRead {
+                    register: *register,
+                    accessor: accessor.clone(),
+                    value: value.clone(),
+                    guard: guard.clone(),
+                })
+                .collect();
             arm.region_merge_records.push(RegionMergeRecord {
                 function: frame.function_name,
                 branch_pc: region.branch_pc,
                 join: region.join,
                 condition,
+                source_loc: info,
+                depth,
+                dead: false,
                 value_symbols: HashSet::new(),
                 input_symbols: HashSet::new(),
                 pure_definitions: Vec::new(),
-                single_arm_reads: Vec::new(),
+                single_arm_reads,
             });
             arm
         }
@@ -934,6 +1059,9 @@ fn merge_states<'ir, B: BV>(
         branch_pc: region.branch_pc,
         join: region.join,
         condition,
+        source_loc: info,
+        depth: base.region_execution.as_ref().unwrap().depth,
+        dead: false,
         value_symbols: HashSet::new(),
         input_symbols: HashSet::new(),
         pure_definitions: Vec::new(),
@@ -965,6 +1093,7 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
                             };
                             let error =
                                 ExecError::SpeculativeReject { reason, function: *function, pc, location: *info };
+                            shared.execution_stats.print(shared);
                             return Err(speculation::force_diagnostic(
                                 limits.merge_rule(*function, *info).map(|(rule, _)| rule),
                                 &zencode::decode(shared.symtab.to_str(*function)),
@@ -997,4 +1126,98 @@ pub(super) fn evaluate_primop<'ir, B: BV>(
         frame.local_state.speculative_access.as_mut().unwrap().pure_definitions.push((start.id, end.id));
     }
     result
+}
+
+/// 进程内唯一写端：先完整序列化，再持锁追加整行；不依赖进程退出时析构刷新。
+/// 两个入口共用真实执行器，因此环境变量在两处均生效。
+fn emit_records<B: BV>(records: &[RegionMergeRecord<B>], task_id: TaskId, shared: &SharedState<B>, solver: &Solver<B>) {
+    use serde_json::json;
+    use std::io::Write;
+    static OUTPUT: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
+    let output = OUTPUT.get_or_init(|| {
+        std::env::var_os("ISLA_MERGE_RECORDS").map(|path| {
+            Mutex::new(
+                std::fs::OpenOptions::new().create(true).append(true).open(path).expect("打开 ISLA_MERGE_RECORDS 失败"),
+            )
+        })
+    });
+    let Some(output) = output else { return };
+    let types: HashMap<_, _> = solver
+        .trace()
+        .to_vec()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Smt(Def::DeclareConst(symbol, ty), _, _) => Some((*symbol, ty.clone())),
+            _ => None,
+        })
+        .collect();
+    fn type_json(ty: &smtlib::Ty, symtab: &Symtab) -> serde_json::Value {
+        match ty {
+            smtlib::Ty::Bool => json!({"kind":"bool"}),
+            smtlib::Ty::BitVec(width) => json!({"kind":"bitvector", "width":width}),
+            smtlib::Ty::Enum(id) => json!({"kind":"enum", "name":zencode::decode(symtab.to_str(id.to_name()))}),
+            smtlib::Ty::Array(domain, range) => {
+                json!({"kind":"array", "domain":type_json(domain, symtab), "range":type_json(range, symtab)})
+            }
+            smtlib::Ty::Float(exponent, significand) => {
+                json!({"kind":"float", "exponent":exponent, "significand":significand})
+            }
+            smtlib::Ty::RoundingMode => json!({"kind":"rounding_mode"}),
+        }
+    }
+    let symbol_json = |symbol: Sym, ty: &smtlib::Ty| {
+        json!({
+            "name":format!("v{}", symbol.id), "smt_id":symbol.id, "type":type_json(ty, &shared.symtab)
+        })
+    };
+    for record in records {
+        let mut inputs: Vec<_> = record.input_symbols.iter().copied().collect();
+        inputs.sort_by_key(|symbol| symbol.id);
+        let inputs: Vec<_> = inputs
+            .into_iter()
+            .map(|symbol| symbol_json(symbol, types.get(&symbol).expect("自由输入必须有声明类型")))
+            .collect();
+        let reads: Vec<_> = record
+            .single_arm_reads
+            .iter()
+            .map(|read| {
+                let mut symbols: Vec<_> = read.guard.variables().into_iter().collect();
+                symbols.sort_by_key(|symbol| symbol.id);
+                let symbols: Vec<_> =
+                    symbols.into_iter().map(|symbol| symbol_json(symbol, &smtlib::Ty::Bool)).collect();
+                let accessor: Vec<_> =
+                    read.accessor.iter().map(|accessor| accessor.to_string(&shared.symtab)).collect();
+                // 复用现有 SMT-LIB 输出器，变量名与记录中的 vN 一致，不能使用 Z3 的 k!N 内部名。
+                let event = Event::<B>::Smt(Def::Assert(read.guard.clone()), DefAttrs::default(), record.source_loc);
+                let mut expression = Vec::new();
+                crate::simplify::write_events_with_opts(
+                    &mut expression,
+                    &[event],
+                    shared,
+                    &crate::simplify::WriteOpts::smtlib(),
+                )
+                .expect("保护条件必须可写为 SMT-LIB");
+                let expression = String::from_utf8(expression).expect("SMT-LIB 必须是 UTF-8");
+                let expression = expression.trim().strip_prefix("(assert ").unwrap().strip_suffix(')').unwrap();
+                json!({"register":zencode::decode(shared.symtab.to_str(read.register)), "accessor":accessor,
+                "value":read.value.to_string(shared), "guard":{"expression":expression, "symbols":symbols}})
+            })
+            .collect();
+        let join = match record.join {
+            RegionPoint::Instruction(pc) => json!({"instruction":pc}),
+            RegionPoint::FunctionExit => json!({"function_exit":true}),
+        };
+        let record_id = NEXT_RECORD
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("合并记录编号溢出");
+        let value = json!({"schema_version":1, "record_id":record_id, "task_id":task_id.as_usize(),
+            "function":zencode::decode(shared.symtab.to_str(record.function)), "branch_pc":record.branch_pc, "join":join,
+            "source_loc":record.source_loc, "location":record.source_loc.location_string(shared.symtab.files()),
+            "condition":symbol_json(record.condition, &smtlib::Ty::Bool), "input_symbols":inputs,
+            "single_arm_reads":reads, "depth":record.depth, "outcome":if record.dead { "dead" } else { "merged" }});
+        let mut line = serde_json::to_vec(&value).expect("合并记录必须可序列化");
+        line.push(b'\n');
+        output.lock().unwrap().write_all(&line).expect("写入 ISLA_MERGE_RECORDS 失败");
+    }
 }
