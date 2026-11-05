@@ -63,6 +63,7 @@ use crate::zencode;
 
 pub mod linearize;
 pub mod partial_linearize;
+pub mod regions;
 pub mod serialize;
 pub mod ssa;
 
