@@ -64,70 +64,17 @@ pub mod memory;
 pub type Unary<B> = fn(Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 pub type Binary<B> = fn(Val<B>, Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 
+pub use effects::{binary_effect, effect, reset_effect, unary_effect, variadic_effect, Effect};
+mod effects;
+
+/// 保留执行器使用的函数指针接口；纯度只由副作用分类表决定。
 pub fn is_pure_unary<B: BV>(f: Unary<B>) -> bool {
-    let primops = unary_primops::<B>();
-    [
-        "%i64->%i",
-        "%i->%i64",
-        "bit_to_bool",
-        "isla_bool_to_bit",
-        "not",
-        "neg_int",
-        "abs_int",
-        "pow2",
-        "not_bits",
-        "length",
-        "count_leading_zeros",
-        "count_trailing_zeros",
-    ]
-    .iter()
-    .any(|name| primops.get(*name).is_some_and(|pure| std::ptr::fn_addr_eq(*pure, f)))
+    unary_effect(f) == Some(Effect::Pure)
 }
 
+/// 保留执行器使用的函数指针接口；未知函数仍不接受为纯原语。
 pub fn is_pure_binary<B: BV>(f: Binary<B>) -> bool {
-    let primops = binary_primops::<B>();
-    [
-        "and_bool",
-        "or_bool",
-        "eq_int",
-        "eq_bool",
-        "lteq",
-        "gteq",
-        "lt",
-        "gt",
-        "add_int",
-        "sub_int",
-        "sub_nat",
-        "mult_int",
-        "tdiv_int",
-        "tmod_int",
-        "ediv_int",
-        "emod_int",
-        "pow_int",
-        "shl_int",
-        "shr_int",
-        "eq_bit",
-        "eq_bits",
-        "neq_bits",
-        "xor_bits",
-        "or_bits",
-        "and_bits",
-        "add_bits",
-        "sub_bits",
-        "add_bits_int",
-        "sub_bits_int",
-        "zero_extend",
-        "sign_extend",
-        "sail_truncate",
-        "replicate_bits",
-        "shiftr",
-        "shiftl",
-        "arith_shiftr",
-        "append",
-        "eq_anything",
-    ]
-    .iter()
-    .any(|name| primops.get(*name).is_some_and(|pure| std::ptr::fn_addr_eq(*pure, f)))
+    binary_effect(f) == Some(Effect::Pure)
 }
 pub type Variadic<B> =
     fn(Vec<Val<B>>, solver: &mut Solver<B>, frame: &mut LocalFrame<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
@@ -1073,10 +1020,7 @@ fn eq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
     let x_len = length_bits(&x, solver, info)?;
     let y_len = length_bits(&y, solver, info)?;
     if x_len != y_len {
-        return Err(ExecError::Type(
-            format!("eq_bits operands have different lengths: {} and {}", x_len, y_len),
-            info,
-        ));
+        return Err(ExecError::Type(format!("eq_bits operands have different lengths: {} and {}", x_len, y_len), info));
     }
     let x = replace_mixed_bits(x, solver, info)?;
     let y = replace_mixed_bits(y, solver, info)?;
@@ -5496,6 +5440,15 @@ pub fn binary_primops<B: BV>() -> HashMap<String, Binary<B>> {
     primops.insert("isla_clmulr".to_string(), isla_clmulr as Binary<B>);
     primops.insert("isla_xperm4".to_string(), isla_xperm4 as Binary<B>);
     primops.insert("isla_xperm8".to_string(), isla_xperm8 as Binary<B>);
+    // ir.rs 的 Sail 比较算子重写直接引用这些函数；也注册其名字供统一查询。
+    primops.insert("lt_bits_u".to_string(), lt_bits_u as Binary<B>);
+    primops.insert("lteq_bits_u".to_string(), lteq_bits_u as Binary<B>);
+    primops.insert("gt_bits_u".to_string(), gt_bits_u as Binary<B>);
+    primops.insert("gteq_bits_u".to_string(), gteq_bits_u as Binary<B>);
+    primops.insert("lt_bits_s".to_string(), lt_bits_s as Binary<B>);
+    primops.insert("lteq_bits_s".to_string(), lteq_bits_s as Binary<B>);
+    primops.insert("gt_bits_s".to_string(), gt_bits_s as Binary<B>);
+    primops.insert("gteq_bits_s".to_string(), gteq_bits_s as Binary<B>);
     primops.extend(float::binary_primops());
     primops
 }
@@ -7351,3 +7304,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "primop/effects_tests.rs"]
+mod effects_tests;
