@@ -89,5 +89,6 @@ pub(super) fn print_execution_stats<B>(shared_state: &isla_lib::ir::SharedState<
     if stats.enabled() {
         eprintln!("[MERGE_STATS] {}", stats.merge_json());
         eprintln!("[FORK_STATS] {}", stats.fork_json(&shared_state.symtab));
+        eprintln!("[ARM_UNSUPPORTED_STATS] {}", stats.arm_unsupported_json(&shared_state.symtab));
     }
 }

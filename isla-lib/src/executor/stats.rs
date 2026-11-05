@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use super::{ForkSink, Task};
 use crate::bitvector::BV;
-use crate::ir::{Name, Symtab};
+use crate::ir::{Instr, Name, Symtab};
 use crate::smt::Event;
 use crate::source_loc::SourceLoc;
 use crate::zencode;
@@ -54,6 +54,37 @@ const MERGE_FAILURES: [MergeFailure; 16] = [
     MergeFailure::RegisterReadMergeError,
 ];
 
+/// 分支臂模拟中的具体拒绝出口；Call 表示所有调用均不支持，不推断其纯度。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ArmUnsupported {
+    StepLimit,
+    PcOutOfRange,
+    ImpureUnary,
+    ImpureBinary,
+    PrimopVariadic,
+    GotoOutOfRange,
+    GotoLimit,
+    JumpLimit,
+    JumpTargetOutOfRange,
+    JumpFallthroughOutOfRange,
+    JumpNonConcrete,
+    Monomorphize,
+    Call,
+    PrimopReset,
+    Exit,
+    Arbitrary,
+    End,
+    RegisterReadAfterWrite,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct ArmUnsupportedSite {
+    reason: ArmUnsupported,
+    location: Option<(Name, SourceLoc)>,
+    callee: Option<Name>,
+}
+
 #[derive(Serialize)]
 struct MergeStats {
     attempts: usize,
@@ -80,6 +111,7 @@ pub struct ExecutionStats {
     enabled: bool,
     merge: Mutex<MergeStats>,
     forks: Mutex<HashMap<(Name, SourceLoc), usize>>,
+    arm_unsupported: Mutex<HashMap<ArmUnsupportedSite, usize>>,
 }
 
 impl Default for ExecutionStats {
@@ -90,7 +122,12 @@ impl Default for ExecutionStats {
 
 impl ExecutionStats {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled, merge: Mutex::new(MergeStats::default()), forks: Mutex::new(HashMap::new()) }
+        Self {
+            enabled,
+            merge: Mutex::new(MergeStats::default()),
+            forks: Mutex::new(HashMap::new()),
+            arm_unsupported: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn enabled(&self) -> bool {
@@ -102,6 +139,7 @@ impl ExecutionStats {
         if self.enabled {
             *self.merge.lock().unwrap() = MergeStats::default();
             self.forks.lock().unwrap().clear();
+            self.arm_unsupported.lock().unwrap().clear();
         }
     }
 
@@ -140,6 +178,43 @@ impl ExecutionStats {
         }
     }
 
+    pub(super) fn record_arm_unsupported<B>(
+        &self,
+        reason: ArmUnsupported,
+        function: Name,
+        instr: Option<&Instr<Name, B>>,
+    ) {
+        if self.enabled {
+            let info = match instr {
+                Some(
+                    Instr::Decl(_, _, info)
+                    | Instr::Init(_, _, _, info)
+                    | Instr::Copy(_, _, info)
+                    | Instr::Jump(_, _, info)
+                    | Instr::Monomorphize(_, _, info)
+                    | Instr::Call(_, _, _, _, info)
+                    | Instr::PrimopUnary(_, _, _, info)
+                    | Instr::PrimopBinary(_, _, _, _, info)
+                    | Instr::PrimopVariadic(_, _, _, info)
+                    | Instr::PrimopReset(_, _, info)
+                    | Instr::Exit(_, info),
+                ) => Some(*info),
+                Some(Instr::Goto(_) | Instr::Arbitrary | Instr::End) | None => None,
+            };
+            let location = info.filter(|info| !info.is_unknown()).map(|info| (function, info));
+            let callee = match instr {
+                Some(Instr::Call(_, _, callee, _, _)) => Some(*callee),
+                _ => None,
+            };
+            *self
+                .arm_unsupported
+                .lock()
+                .unwrap()
+                .entry(ArmUnsupportedSite { reason, location, callee })
+                .or_default() += 1;
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn fork_count(&self) -> usize {
         self.forks.lock().unwrap().values().sum()
@@ -169,6 +244,42 @@ impl ExecutionStats {
             .collect();
         json!({"total": total, "unique_locations": forks.len(), "top": top})
     }
+
+    pub fn arm_unsupported_json(&self, symtab: &Symtab<'_>) -> Value {
+        let unsupported = self.arm_unsupported.lock().unwrap();
+        let total: usize = unsupported.values().sum();
+        let mut reason_counts = BTreeMap::new();
+        let mut locations: Vec<_> = unsupported
+            .iter()
+            .map(|(site, count)| {
+                *reason_counts.entry(site.reason).or_insert(0) += count;
+                (
+                    site.reason,
+                    site.location.map(|(function, _)| zencode::decode(symtab.to_str(function))),
+                    site.location.map(|(_, info)| info.location_string(symtab.files())),
+                    site.location.map(|(_, info)| info),
+                    site.callee.map(|callee| zencode::decode(symtab.to_str(callee))),
+                    *count,
+                )
+            })
+            .collect();
+        locations.sort_by(|a, b| {
+            b.5.cmp(&a.5)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.4.cmp(&b.4))
+        });
+        let top: Vec<_> = locations
+            .into_iter()
+            .take(30)
+            .map(|(reason, function, location, source_loc, callee, count)| {
+                json!({"reason": reason, "function": function, "location": location,
+                    "source_loc": source_loc, "callee": callee, "count": count})
+            })
+            .collect();
+        json!({"total": total, "unique_locations": unsupported.len(), "reason_counts": reason_counts, "top": top})
+    }
 }
 
 /// 复用实际的 fork 提交入口，覆盖 Jump、Monomorphize 和操作数重试。
@@ -193,6 +304,77 @@ impl<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>> ForkSink<'ir, 'task, B> for 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::ir::{Instr, Loc};
+
+    #[test]
+    fn arm_unsupported_disabled_does_not_count() {
+        let stats = ExecutionStats::new(false);
+        stats.record_arm_unsupported::<B64>(ArmUnsupported::StepLimit, Name::from_u32(0), None);
+        let report = stats.arm_unsupported_json(&Symtab::new());
+        assert_eq!(report["total"], 0);
+        assert_eq!(report["reason_counts"], json!({}));
+        assert!(report["top"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn arm_unsupported_counts_reasons_locations_and_decoded_callees() {
+        let stats = ExecutionStats::new(true);
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let function = symtab.intern("ztest");
+        let callee = symtab.intern("zcurrentlyEnabled");
+        let other_callee = symtab.intern("zother");
+        let info = SourceLoc::new(0, 12, 3, 12, 9);
+        let call = Instr::<_, B64>::Call(Loc::Id(function), false, callee, vec![], info);
+        let other_call = Instr::<_, B64>::Call(Loc::Id(function), false, other_callee, vec![], info);
+        for _ in 0..2 {
+            stats.record_arm_unsupported(ArmUnsupported::Call, function, Some(&call));
+        }
+        stats.record_arm_unsupported(ArmUnsupported::Call, function, Some(&other_call));
+        stats.record_arm_unsupported::<B64>(ArmUnsupported::StepLimit, function, None);
+        stats.record_arm_unsupported(ArmUnsupported::End, function, Some(&Instr::<_, B64>::End));
+        let report = stats.arm_unsupported_json(&symtab);
+        assert_eq!(report["total"], 5);
+        assert_eq!(report["unique_locations"], 4);
+        assert_eq!(report["reason_counts"], json!({"call": 3, "step_limit": 1, "end": 1}));
+        let top = report["top"].as_array().unwrap();
+        assert_eq!(top[0]["reason"], "call");
+        assert_eq!(top[0]["function"], "test");
+        assert_eq!(top[0]["callee"], "currentlyEnabled");
+        assert_eq!(top[0]["location"], "model.sail 12:3 - 12:9");
+        assert_eq!(top[0]["source_loc"], json!(info));
+        assert_eq!(top[0]["count"], 2);
+        let no_location = top.iter().find(|entry| entry["reason"] == "step_limit").unwrap();
+        assert!(no_location["function"].is_null());
+        assert!(no_location["source_loc"].is_null());
+        assert!(no_location["callee"].is_null());
+        stats.reset();
+        assert_eq!(stats.arm_unsupported_json(&symtab)["total"], 0);
+    }
+
+    #[test]
+    fn arm_unsupported_top_is_sorted_and_limited() {
+        let stats = ExecutionStats::new(true);
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let function = symtab.intern("ztest");
+        for line in 1..=40 {
+            let instr = Instr::<_, B64>::Exit(super::super::ExitCause::Explicit, SourceLoc::new(0, line, 0, line, 1));
+            for _ in 0..line {
+                stats.record_arm_unsupported(ArmUnsupported::Exit, function, Some(&instr));
+            }
+        }
+        let report = stats.arm_unsupported_json(&symtab);
+        assert_eq!(report["total"], 820);
+        assert_eq!(report["unique_locations"], 40);
+        let top = report["top"].as_array().unwrap();
+        assert_eq!(top.len(), 30);
+        for (index, entry) in top.iter().enumerate() {
+            assert_eq!(entry["count"], 40 - index);
+            assert_eq!(entry["source_loc"]["line1"], 40 - index);
+        }
+    }
 
     #[test]
     fn execution_stats_threads_and_top_locations() {

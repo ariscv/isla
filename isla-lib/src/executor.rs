@@ -73,7 +73,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
-use stats::MergeFailure;
+use stats::{ArmUnsupported, MergeFailure};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
@@ -1749,18 +1749,24 @@ fn simulate_diamond_arm<'ir, B: BV>(
     solver: &mut Solver<B>,
     limit_handler: Option<&ExecutionLimitHandler<'_>>,
 ) -> Result<Option<LocalFrame<'ir, B>>, ExecError> {
+    let stats = &shared_state.execution_stats;
     arm.pc = start_pc;
     arm.write_set = Some(WriteSet::default());
     arm.local_state.register_reads = Some(Vec::new());
     let mut steps = 0;
     while arm.pc != join_pc {
         if steps >= 64 || arm.pc >= arm.instrs.len() || arm.pc < start_pc || arm.pc > end_pc {
+            if stats.enabled() {
+                let reason = if steps >= 64 { ArmUnsupported::StepLimit } else { ArmUnsupported::PcOutOfRange };
+                stats.record_arm_unsupported(reason, arm.function_name, arm.instrs.get(arm.pc));
+            }
             return Ok(None);
         }
         steps += 1;
         let had_register_write = !arm.write_set.as_ref().unwrap().register_write_order.is_empty();
         let read_count = arm.local_state.register_reads.as_ref().unwrap().len();
-        match &arm.instrs[arm.pc] {
+        let instr = &arm.instrs[arm.pc];
+        match instr {
             Instr::Decl(v, ty, _) => {
                 arm.vars_mut().insert(*v, UVal::Uninit(ty));
                 if let Some(ws) = arm.write_set.as_mut() {
@@ -1784,6 +1790,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
             }
             Instr::PrimopUnary(loc, f, arg, info) => {
                 if !crate::primop::is_pure_unary(*f) {
+                    if stats.enabled() {
+                        stats.record_arm_unsupported(ArmUnsupported::ImpureUnary, arm.function_name, Some(instr));
+                    }
                     return Ok(None);
                 }
                 let arg = eval_exp(arg, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
@@ -1794,6 +1803,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
             }
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
                 if !crate::primop::is_pure_binary(*f) {
+                    if stats.enabled() {
+                        stats.record_arm_unsupported(ArmUnsupported::ImpureBinary, arm.function_name, Some(instr));
+                    }
                     return Ok(None);
                 }
                 let arg1 = eval_exp(arg1, &mut arm.local_state, shared_state, solver, *info)?.into_owned();
@@ -1803,9 +1815,17 @@ fn simulate_diamond_arm<'ir, B: BV>(
                 simulate_assign(loc, value, &mut arm.local_state, shared_state, solver, *info)?;
                 arm.pc += 1;
             }
-            Instr::PrimopVariadic(..) => return Ok(None),
+            Instr::PrimopVariadic(..) => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::PrimopVariadic, arm.function_name, Some(instr));
+                }
+                return Ok(None);
+            }
             Instr::Goto(target) => {
                 if (*target != join_pc && (*target < start_pc || *target > end_pc)) || *target > arm.instrs.len() {
+                    if stats.enabled() {
+                        stats.record_arm_unsupported(ArmUnsupported::GotoOutOfRange, arm.function_name, Some(instr));
+                    }
                     return Ok(None);
                 }
                 let decision = match limit_handler {
@@ -1822,6 +1842,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
                     }
                 };
                 if !matches!(decision, ExecutionLimitDecision::Continue) {
+                    if stats.enabled() {
+                        stats.record_arm_unsupported(ArmUnsupported::GotoLimit, arm.function_name, Some(instr));
+                    }
                     return Ok(None);
                 }
                 arm.pc = *target;
@@ -1843,6 +1866,9 @@ fn simulate_diamond_arm<'ir, B: BV>(
                     }
                 };
                 if !matches!(decision, ExecutionLimitDecision::Continue) {
+                    if stats.enabled() {
+                        stats.record_arm_unsupported(ArmUnsupported::JumpLimit, arm.function_name, Some(instr));
+                    }
                     return Ok(None);
                 }
                 match *value.as_ref() {
@@ -1850,26 +1876,85 @@ fn simulate_diamond_arm<'ir, B: BV>(
                         if (*target != join_pc && (*target < start_pc || *target > end_pc))
                             || *target > arm.instrs.len()
                         {
+                            if stats.enabled() {
+                                stats.record_arm_unsupported(
+                                    ArmUnsupported::JumpTargetOutOfRange,
+                                    arm.function_name,
+                                    Some(instr),
+                                );
+                            }
                             return Ok(None);
                         }
                         arm.pc = *target;
                     }
                     Val::Bool(false) => {
                         if arm.pc + 1 != join_pc && arm.pc + 1 > end_pc {
+                            if stats.enabled() {
+                                stats.record_arm_unsupported(
+                                    ArmUnsupported::JumpFallthroughOutOfRange,
+                                    arm.function_name,
+                                    Some(instr),
+                                );
+                            }
                             return Ok(None);
                         }
                         arm.pc += 1;
                     }
-                    _ => return Ok(None),
+                    _ => {
+                        if stats.enabled() {
+                            stats.record_arm_unsupported(
+                                ArmUnsupported::JumpNonConcrete,
+                                arm.function_name,
+                                Some(instr),
+                            );
+                        }
+                        return Ok(None);
+                    }
                 }
             }
-            _ => {
+            Instr::Monomorphize(..) => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::Monomorphize, arm.function_name, Some(instr));
+                }
+                return Ok(None);
+            }
+            Instr::Call(..) => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::Call, arm.function_name, Some(instr));
+                }
+                return Ok(None);
+            }
+            Instr::PrimopReset(..) => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::PrimopReset, arm.function_name, Some(instr));
+                }
+                return Ok(None);
+            }
+            Instr::Exit(..) => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::Exit, arm.function_name, Some(instr));
+                }
+                return Ok(None);
+            }
+            Instr::Arbitrary => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::Arbitrary, arm.function_name, Some(instr));
+                }
+                return Ok(None);
+            }
+            Instr::End => {
+                if stats.enabled() {
+                    stats.record_arm_unsupported(ArmUnsupported::End, arm.function_name, Some(instr));
+                }
                 return Ok(None);
             }
         }
         arm.local_state.expression_values.clear();
         if had_register_write && arm.local_state.register_reads.as_ref().unwrap().len() > read_count {
             // 当前事务先提交读取再提交写入，无法保留写后读的原始顺序。
+            if stats.enabled() {
+                stats.record_arm_unsupported(ArmUnsupported::RegisterReadAfterWrite, arm.function_name, Some(instr));
+            }
             return Ok(None);
         }
     }
@@ -15175,6 +15260,71 @@ fn zmemreadfork(zu) {
             HashMap::default(),
         );
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn diamond_unsupported_stats_preserve_call_and_instruction_locations() {
+        for enabled in [false, true] {
+            let mut shared = empty_shared_state();
+            shared.execution_stats = Arc::new(stats::ExecutionStats::new(enabled));
+            shared.symtab.set_files(vec!["model.sail"]);
+            let function = shared.symtab.intern("ztest");
+            let callee = shared.symtab.intern("zcurrentlyEnabled");
+            let source = SourceLoc::new(0, 7, 0, 7, 10);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let programs = [
+                (vec![Instr::Call(Loc::Id(RETURN), false, callee, vec![], source)], "call"),
+                (vec![Instr::Monomorphize(RETURN, Ty::Bool, source)], "monomorphize"),
+                (vec![Instr::Exit(ExitCause::Explicit, source)], "exit"),
+                (vec![Instr::Arbitrary], "arbitrary"),
+                (vec![Instr::End], "end"),
+                (vec![Instr::Goto(2)], "goto_out_of_range"),
+                (vec![Instr::Jump(Exp::Bool(true), 2, source)], "jump_target_out_of_range"),
+                (vec![Instr::Jump(Exp::Bool(false), 2, source), Instr::End], "jump_fallthrough_out_of_range"),
+                (vec![Instr::Jump(Exp::I64(0), 1, source)], "jump_non_concrete"),
+            ];
+            for (instrs, reason) in &programs {
+                shared.execution_stats.reset();
+                let frame = LocalFrame::new(function, &[], &Ty::Unit, None, instrs);
+                // 两条指令的用例让假分支越过 end_pc，但尚未抵达 join_pc。
+                let join = instrs.len();
+                assert!(simulate_diamond_arm(0, 0, join, frame, &shared, &mut solver, None).unwrap().is_none());
+                let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
+                assert_eq!(report["total"], usize::from(enabled));
+                if enabled {
+                    assert_eq!(report["reason_counts"][reason], 1);
+                    assert_eq!(report["top"][0]["reason"], *reason);
+                    if *reason == "call" {
+                        assert_eq!(report["top"][0]["callee"], "currentlyEnabled");
+                        assert_eq!(report["top"][0]["function"], "test");
+                        assert_eq!(report["top"][0]["source_loc"], serde_json::json!(source));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diamond_unsupported_stats_read_after_write_uses_executed_instruction() {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        shared.symtab.set_files(vec!["model.sail"]);
+        let function = shared.symtab.intern("ztest");
+        let reg = shared.symtab.intern("zreg");
+        let source = SourceLoc::new(0, 9, 0, 9, 10);
+        let instrs =
+            vec![Instr::Copy(Loc::Id(reg), Exp::I64(1), info()), Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), source)];
+        let mut frame = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
+        frame.vars_mut().insert(RETURN, UVal::Uninit(&Ty::I64));
+        frame.regs_mut().insert(reg, false, UVal::Init(Val::I64(0)));
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        assert!(simulate_diamond_arm(0, 1, 2, frame, &shared, &mut solver, None).unwrap().is_none());
+        let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
+        assert_eq!(report["total"], 1);
+        assert_eq!(report["top"][0]["reason"], "register_read_after_write");
+        assert_eq!(report["top"][0]["source_loc"], serde_json::json!(source));
     }
 
     #[test]

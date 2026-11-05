@@ -1178,6 +1178,7 @@ pub fn solve_state_main<'ir, B: BV>(
             std::thread::sleep(std::time::Duration::from_secs(15));
             eprintln!("[MERGE_STATS_SNAPSHOT] {}", stats.merge_json());
             eprintln!("[FORK_STATS_SNAPSHOT] {}", stats.fork_json(symtab));
+            eprintln!("[ARM_UNSUPPORTED_SNAPSHOT] {}", stats.arm_unsupported_json(symtab));
         });
     }
     let num_clauses = clause_set.len();
