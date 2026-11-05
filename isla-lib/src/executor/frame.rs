@@ -40,6 +40,7 @@ use crate::error::{ExecError, SmtError};
 use crate::executor::execution_limits::ExecutionLimitPathState;
 use crate::executor::path_timing::{PathTimeTotals, PathTiming};
 use crate::executor::task::{Task, TaskId, TaskState, WriteSet};
+use crate::executor::SpeculationMode;
 use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
@@ -125,6 +126,7 @@ pub struct Frame<'ir, B> {
     pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,
     pub(super) pc: usize,
+    pub(super) speculation_mode: SpeculationMode,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -160,6 +162,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
+        speculation_mode: frame.speculation_mode,
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: (*frame.execution_limit_state).clone(),
         local_state: (*frame.local_state).clone(),
@@ -186,6 +189,7 @@ pub struct LocalFrame<'ir, B> {
     pub(super) path_smt_stats: SmtCallStats,
     pub(super) function_name: Name,
     pub(super) pc: usize,
+    pub(super) speculation_mode: SpeculationMode,
     // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: ExecutionLimitPathState,
@@ -222,6 +226,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
+        speculation_mode: frame.speculation_mode,
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
         local_state: Arc::new(frame.local_state.clone()),
@@ -240,6 +245,15 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    pub fn speculation_mode(&self) -> SpeculationMode {
+        self.speculation_mode
+    }
+
+    pub fn set_speculation_mode(&mut self, mode: SpeculationMode) -> &mut Self {
+        self.speculation_mode = mode;
+        self
+    }
+
     /// 在把当前路径交给调度器前，固定它已累计的 SMT 调用统计。
     pub(super) fn capture_path_smt_stats(&mut self) {
         self.path_smt_stats = crate::smt::path_smt_stats();
@@ -428,6 +442,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             path_smt_stats: SmtCallStats::empty(),
             function_name: name,
             pc: 0,
+            speculation_mode: SpeculationMode::Off,
             pending_retry_operand: None,
             execution_limit_state: ExecutionLimitPathState::default(),
             local_state: LocalState {
@@ -470,6 +485,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         instrs: &'ir [Instr<Name, B>],
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
+        new_frame.speculation_mode = self.speculation_mode;
         new_frame.path_timing = self.path_timing.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();

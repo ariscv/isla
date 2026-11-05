@@ -93,6 +93,8 @@ impl Error for SmtError {}
 
 #[derive(Debug)]
 pub enum ExecError {
+    /// 推演在分支决策口被拒绝，由推演调用者决定回滚。
+    SpeculativeReject(crate::executor::SpeculativeRejectReason),
     Type(String, SourceLoc),
     VariableNotFound(String, SourceLoc),
     Unimplemented,
@@ -163,6 +165,7 @@ impl fmt::Display for ExecError {
             Type(msg, _) => write!(f, "Type error: {}", msg),
             VariableNotFound(v, _) => write!(f, "Variable {} not found", v),
             Unimplemented => write!(f, "Unimplemented"),
+            SpeculativeReject(reason) => write!(f, "拒绝推演: {}", reason),
             AssertionFailure(None, _) => write!(f, "Assertion failure"),
             AssertionFailure(Some(msg), _) => write!(f, "Assertion failure: {}", msg),
             NoFunction(func, _) => write!(f, "Function {} does not exist", func),

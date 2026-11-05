@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use super::execution_limits::{ExecutionLimitDecision, ExecutionLimitHandler};
 use super::{
-    execution_limit_error, freeze_frame, itrace_fork_frame_with_branch_condition, itrace_push_branch_condition,
-    record_execution_limit, ForkSink, Frame, LocalFrame, StopConditions, Task, TaskId, TaskState,
+    branch_decision, execution_limit_error, freeze_frame, itrace_fork_frame_with_branch_condition,
+    itrace_push_branch_condition, record_execution_limit, ForkSink, Frame, LocalFrame, SpeculativeRejectReason,
+    StopConditions, Task, TaskId, TaskState,
 };
 use crate::bitvector::BV;
 use crate::error::ExecError;
@@ -53,6 +54,13 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
 
+    match &error {
+        ExecError::IntegerConversion(..) => {
+            branch_decision(frame, task_state, SpeculativeRejectReason::IntegerConversion)?
+        }
+        ExecError::RetryCondition(..) => branch_decision(frame, task_state, SpeculativeRejectReason::RetryCondition)?,
+        _ => (),
+    }
     if let ExecError::IntegerConversion(in_range, info) | ExecError::RetryCondition(in_range, info) = error {
         let cond = solver.define_const(in_range, info);
         fork_retry_operand(
@@ -374,6 +382,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>
     solver: &mut Solver<B>,
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
+    branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicValueEnumeration)?;
     let width = solver.length(sym).expect("长度参数必须是位向量");
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
     let candidate = {
@@ -426,6 +435,7 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     solver: &mut Solver<B>,
 ) -> Result<(), ExecError> {
     use smtlib::Def::Assert;
+    branch_decision(frame, task_state, SpeculativeRejectReason::RetryOperand)?;
     let decision = match task_state.execution_limits.as_ref() {
         Some(limits) => ExecutionLimitHandler::new(limits).on_monomorphize_fork_at(
             &mut frame.execution_limit_state,

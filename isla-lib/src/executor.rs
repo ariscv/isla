@@ -61,6 +61,7 @@ use crate::zencode;
 mod execution_limits;
 mod frame;
 mod path_timing;
+mod speculation;
 pub mod stats;
 mod symbolic_length;
 mod task;
@@ -73,6 +74,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
+pub use speculation::{SpeculationMode, SpeculationStats, SpeculativeRejectReason};
 use stats::{ArmControlFlowSite, ArmUnsupported, MergeFailure};
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
@@ -238,7 +240,8 @@ fn read_register_from_vector<'ir, B: BV>(
             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
-            let idx = usize::try_from(bv.lower_u64()).map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+            let idx = usize::try_from(bv.lower_u64())
+                .map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
             if idx >= regs.len() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
@@ -388,7 +391,8 @@ fn write_register_from_vector<'ir, B: BV>(
             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
-            let idx = usize::try_from(bv.lower_u64()).map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+            let idx = usize::try_from(bv.lower_u64())
+                .map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
             if idx >= regs.len() {
                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
             }
@@ -2332,6 +2336,22 @@ pub enum Run<B> {
     Suspended,
 }
 
+/// 所有分支来源在检查点、份额拆分和任务提交前经过此入口。
+/// Off 不改变限额、求解器或统计；On 仅记录一次拒绝并向外传播。
+fn branch_decision<B: BV>(
+    frame: &LocalFrame<'_, B>,
+    task_state: &TaskState<B>,
+    reason: SpeculativeRejectReason,
+) -> Result<(), ExecError> {
+    match frame.speculation_mode {
+        SpeculationMode::Off => Ok(()),
+        SpeculationMode::On => {
+            task_state.speculation_stats.record_reject(reason);
+            Err(ExecError::SpeculativeReject(reason))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     tid: usize,
@@ -2367,6 +2387,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             Err(error) => error,
         };
         let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
+        if matches!(
+            &error,
+            ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..) | ExecError::RetryCondition(..)
+        ) {
+            branch_decision(frame, task_state, SpeculativeRejectReason::ExpressionRetry)?;
+        }
         if !symbolic_length::retry_symbolic_length(
             error,
             &operands,
@@ -2468,6 +2494,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 match decision {
                     ExecutionLimitDecision::Continue => {}
                     ExecutionLimitDecision::Truncate(reason) => {
+                        branch_decision(frame, task_state, SpeculativeRejectReason::LimitTruncation)?;
                         record_execution_limit(frame, reason, "truncate");
                         return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                     }
@@ -2476,6 +2503,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             use smtlib::Exp::*;
 
                             let handler = limit_handler.as_ref().expect("limit decision requires active handler");
+                            branch_decision(frame, task_state, SpeculativeRejectReason::LimitSampling)?;
                             handler.commit_sample(&mut frame.execution_limit_state, &sample);
                             record_execution_limit(frame, reason, "sample_branch_condition");
                             let concrete_bool = if loop_limit_target(reason).is_some() {
@@ -2501,6 +2529,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                         }
                         Val::Bool(jump) => {
                             if loop_limit_target(reason).is_some() && jump {
+                                branch_decision(frame, task_state, SpeculativeRejectReason::LimitTruncation)?;
                                 record_execution_limit(frame, reason, "truncate_concrete_backjump");
                                 return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                             }
@@ -2522,6 +2551,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     Val::Symbolic(v) => {
                         use smtlib::Def::*;
                         use smtlib::Exp::*;
+
+                        branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicJump)?;
 
                         let test_true = Var(v);
                         let test_false = Not(Box::new(Var(v)));
@@ -2563,12 +2594,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             let fork_id = match decision {
                                 ExecutionLimitDecision::Fork { fork_id } => fork_id,
                                 ExecutionLimitDecision::Truncate(reason) => {
+                                    branch_decision(frame, task_state, SpeculativeRejectReason::LimitTruncation)?;
                                     record_execution_limit(frame, reason, "truncate");
                                     return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                                 }
                                 ExecutionLimitDecision::ConcretizeBranch { reason, sample } => {
                                     let handler =
                                         limit_handler.as_ref().expect("limit decision requires active handler");
+                                    branch_decision(frame, task_state, SpeculativeRejectReason::LimitSampling)?;
                                     handler.commit_sample(&mut frame.execution_limit_state, &sample);
                                     record_execution_limit(frame, reason, "sample_branch_condition");
                                     let concrete_bool = concretize_branch_with_sampling(v, solver, *info, &sample)?;
@@ -2656,6 +2689,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 match decision {
                     ExecutionLimitDecision::Continue => {}
                     ExecutionLimitDecision::Truncate(reason) => {
+                        branch_decision(frame, task_state, SpeculativeRejectReason::LimitTruncation)?;
                         record_execution_limit(frame, reason, "truncate_unconditional_control_flow");
                         return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                     }
@@ -2680,6 +2714,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 let value = match f(arg.clone(), solver, *info) {
                     Ok(value) => value,
                     Err(error) => {
+                        if matches!(
+                            &error,
+                            ExecError::SymbolicLength(..)
+                                | ExecError::IntegerConversion(..)
+                                | ExecError::RetryCondition(..)
+                        ) {
+                            branch_decision(frame, task_state, SpeculativeRejectReason::UnaryRetry)?;
+                        }
                         if symbolic_length::retry_symbolic_length(
                             error,
                             &[arg],
@@ -2709,6 +2751,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 let value = match f(arg1.clone(), arg2.clone(), solver, *info) {
                     Ok(value) => value,
                     Err(error) => {
+                        if matches!(
+                            &error,
+                            ExecError::SymbolicLength(..)
+                                | ExecError::IntegerConversion(..)
+                                | ExecError::RetryCondition(..)
+                        ) {
+                            branch_decision(frame, task_state, SpeculativeRejectReason::BinaryRetry)?;
+                        }
                         if symbolic_length::retry_symbolic_length(
                             error,
                             &[arg1, arg2],
@@ -2735,6 +2785,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 let value = match f(args.clone(), solver, frame, *info) {
                     Ok(value) => value,
                     Err(error) => {
+                        if matches!(
+                            &error,
+                            ExecError::SymbolicLength(..)
+                                | ExecError::IntegerConversion(..)
+                                | ExecError::RetryCondition(..)
+                        ) {
+                            branch_decision(frame, task_state, SpeculativeRejectReason::VariadicRetry)?;
+                        }
                         if symbolic_length::retry_symbolic_length(
                             error,
                             &args,
@@ -2779,6 +2837,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                 match decision {
                     ExecutionLimitDecision::Continue => {}
                     ExecutionLimitDecision::Truncate(reason) => {
+                        branch_decision(frame, task_state, SpeculativeRejectReason::LimitTruncation)?;
                         record_execution_limit(frame, reason, "truncate_call_depth_limit");
                         return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                     }
@@ -2811,6 +2870,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                     if solver.check_sat(*info).is_unsat()? {
                                         return Ok(Run::Dead);
                                     }
+                                    branch_decision(frame, task_state, SpeculativeRejectReason::AnnouncePc)?;
                                     if symbolic_length::fork_symbolic_value(
                                         sym,
                                         operands.as_ref().unwrap(),
@@ -2853,6 +2913,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                         .check_sat_with(&smtlib::Exp::Not(Box::new(equal.clone())), *info)
                                         .is_sat()?
                                     {
+                                        branch_decision(frame, task_state, SpeculativeRejectReason::Interrupt)?;
                                         let cond = solver.define_const(equal, *info);
                                         symbolic_length::fork_retry_operand(
                                             cond,
@@ -2886,6 +2947,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                         .check_sat_with(&smtlib::Exp::Not(Box::new(zero.clone())), *info)
                                         .is_sat()?
                                 {
+                                    branch_decision(frame, task_state, SpeculativeRejectReason::ZeroInstruction)?;
                                     let cond = solver.define_const(zero, *info);
                                     symbolic_length::fork_retry_operand(
                                         cond,
@@ -2924,6 +2986,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                             Ok(SpecialResult::Exit) => return Ok(Run::Exit),
                             Err(error) => {
                                 let Some(operands) = operands else { return Err(error) };
+                                if matches!(
+                                    &error,
+                                    ExecError::SymbolicLength(..)
+                                        | ExecError::IntegerConversion(..)
+                                        | ExecError::RetryCondition(..)
+                                ) {
+                                    branch_decision(frame, task_state, SpeculativeRejectReason::SpecialCallRetry)?;
+                                }
                                 if symbolic_length::retry_symbolic_length(
                                     error,
                                     &operands,
@@ -3111,6 +3181,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
 
+                    branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
                     let point = checkpoint(solver);
 
                     match ty {
@@ -3216,6 +3287,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
                                 None
                             }
                             ExecutionLimitDecision::Truncate(reason) => {
+                                branch_decision(frame, task_state, SpeculativeRejectReason::LimitTruncation)?;
                                 record_execution_limit(frame, reason, "truncate_monomorphize");
                                 return Err(execution_limit_error(reason, frame.function_name, frame.pc));
                             }
@@ -9896,10 +9968,7 @@ mod tests {
                                 op(left.clone(), right.clone(), &mut solver, info()),
                                 Err(ExecError::Type(..))
                             ));
-                            assert!(matches!(
-                                op(right, left.clone(), &mut solver, info()),
-                                Err(ExecError::Type(..))
-                            ));
+                            assert!(matches!(op(right, left.clone(), &mut solver, info()), Err(ExecError::Type(..))));
                         } else {
                             assert_eq!(
                                 op(left.clone(), right.clone(), &mut solver, info()).unwrap(),
@@ -12533,6 +12602,416 @@ fn zcaller(za, zb) {
         let instrs: &'ir [Instr<Name, B64>] = Box::leak(instrs.into_boxed_slice());
         let ret_ty: &'ir Ty<Name> = Box::leak(Box::new(Ty::Unit));
         LocalFrame::new(test_name(25), &[], ret_ty, None, instrs)
+    }
+
+    mod speculation_tests {
+        use super::*;
+
+        #[derive(Default)]
+        struct CountingSink(AtomicUsize, Mutex<Vec<Fraction>>);
+
+        impl<'ir, 'task> ForkSink<'ir, 'task, B64> for CountingSink {
+            fn submit(&self, task: Task<'ir, 'task, B64>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                assert!(task.checkpoint.trace().is_some(), "子任务必须携带检查点");
+                self.1.lock().unwrap().push(task.fraction);
+            }
+        }
+
+        fn assert_rejected(
+            result: Result<Run<B64>, ExecError>,
+            reason: SpeculativeRejectReason,
+            sink: &CountingSink,
+            fraction: &Fraction,
+            solver: &Solver<B64>,
+        ) {
+            assert!(
+                matches!(result, Err(ExecError::SpeculativeReject(actual)) if actual == reason),
+                "预期推演拒绝 {reason:?}"
+            );
+            assert_eq!(sink.0.load(Ordering::Relaxed), 0, "拒绝前不能提交任务");
+            assert!(fraction.is_one(), "拒绝前不能拆分份额");
+            // Trace 的公开 Debug 包含检查点序号；不为测试修改 smt.rs 的接口。
+            assert!(
+                format!("{:?}", solver.trace()).starts_with("Trace { checkpoints: 0,"),
+                "拒绝前不能建立检查点：{:?}",
+                solver.trace()
+            );
+            assert!(!solver.trace().to_vec().iter().any(|event| matches!(event, Event::Fork(..))));
+        }
+
+        #[test]
+        fn speculation_ir_rejects_all_branch_sources_before_side_effects() {
+            use SpeculativeRejectReason::*;
+            for reason in [
+                SymbolicJump,
+                Monomorphize,
+                ExpressionRetry,
+                UnaryRetry,
+                BinaryRetry,
+                VariadicRetry,
+                SpecialCallRetry,
+                AnnouncePc,
+                Interrupt,
+                ZeroInstruction,
+                LimitSampling,
+                LimitTruncation,
+            ] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let mut shared = empty_shared_state();
+                let input = shared.symtab.intern("zspeculation_input");
+                let vector = shared.symtab.intern("zspeculation_vector");
+                let reg = shared.symtab.intern("zspeculation_register");
+                let cond = solver.declare_const(smtlib::Ty::Bool, info());
+                let index = solver.define_const(
+                    smtlib::Exp::Ite(
+                        Box::new(smtlib::Exp::Var(cond)),
+                        Box::new(crate::primop_util::smt_i128(1)),
+                        Box::new(crate::primop_util::smt_i128(2)),
+                    ),
+                    info(),
+                );
+                let bits = solver.declare_bitvector(2, info());
+                let mut state = TaskState::new();
+                let instr = match reason {
+                    SymbolicJump | LimitSampling => Instr::Jump(Exp::Id(input), 1, info()),
+                    Monomorphize => Instr::Monomorphize(input, Ty::Bits(2), info()),
+                    ExpressionRetry => Instr::Copy(
+                        Loc::Id(RETURN),
+                        Exp::Call(Op::Bvaccess, vec![Exp::Id(vector), Exp::Id(input)]),
+                        info(),
+                    ),
+                    UnaryRetry => {
+                        Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], Exp::Id(input), info())
+                    }
+                    BinaryRetry => Instr::PrimopBinary(
+                        Loc::Id(RETURN),
+                        primop::binary_primops()["vector_access"],
+                        Exp::Id(vector),
+                        Exp::Id(input),
+                        info(),
+                    ),
+                    VariadicRetry => Instr::PrimopVariadic(
+                        Loc::Id(RETURN),
+                        primop::variadic_primops()["vector_update"],
+                        vec![Exp::Id(vector), Exp::Id(input), Exp::String("新".into())],
+                        info(),
+                    ),
+                    SpecialCallRetry => {
+                        Instr::Call(Loc::Id(RETURN), false, INTERNAL_VECTOR_INIT, vec![Exp::Id(input)], info())
+                    }
+                    AnnouncePc | ZeroInstruction => Instr::Call(
+                        Loc::Id(RETURN),
+                        false,
+                        INSTR_ANNOUNCE,
+                        vec![if reason == AnnouncePc { Exp::Bits(B64::new(0x13, 32)) } else { Exp::Id(input) }],
+                        info(),
+                    ),
+                    Interrupt => Instr::Call(Loc::Id(RETURN), false, INTERRUPT_PENDING, vec![], info()),
+                    LimitTruncation => Instr::Goto(0),
+                    _ => panic!("测试位置未覆盖"),
+                };
+                let mut frame = make_frame(vec![instr, Instr::End]);
+                frame.set_speculation_mode(SpeculationMode::On);
+                let value = match reason {
+                    SymbolicJump | LimitSampling => cond,
+                    Monomorphize | ZeroInstruction => bits,
+                    _ => index,
+                };
+                frame.vars_mut().insert(input, UVal::Init(Val::Symbolic(value)));
+                frame.vars_mut().insert(
+                    vector,
+                    UVal::Init(Val::Vector(vec![
+                        Val::String("甲".into()),
+                        Val::String("乙".into()),
+                        Val::String("丙".into()),
+                    ])),
+                );
+                frame.regs_mut().insert(reg, false, UVal::Init(Val::Symbolic(bits)));
+                if reason == AnnouncePc {
+                    state = state.with_pc_limit(reg, 1);
+                }
+                if reason == Interrupt {
+                    state.add_interrupt(TaskInterrupt::new(1, reg, B64::new(1, 2), HashMap::new()));
+                }
+                if matches!(reason, LimitSampling | LimitTruncation) {
+                    let mut limits = ExecutionLimits::default().with_max_path_depth(0);
+                    limits.on_limit_reached =
+                        if reason == LimitSampling { LimitBehavior::Concretize } else { LimitBehavior::Truncate };
+                    state = state.with_execution_limits(limits);
+                }
+                state.speculation_stats = SpeculationStats::new(true);
+                let sink = CountingSink::default();
+                let mut fraction = Fraction::one();
+                let result = run_loop(
+                    0,
+                    TaskId::fresh(),
+                    &mut fraction,
+                    PathTimeout::unlimited(),
+                    None,
+                    &sink,
+                    &mut frame,
+                    &state,
+                    &shared,
+                    &mut solver,
+                );
+                assert_rejected(result, reason, &sink, &fraction, &solver);
+                assert_eq!(frame.forks(), 0, "拒绝前不能准入真实分叉");
+                assert_eq!(
+                    state.speculation_stats().reject_json(),
+                    serde_json::json!({
+                        "total": 1, "reason_counts": {reason.to_string(): 1}
+                    })
+                );
+            }
+        }
+
+        #[test]
+        fn speculation_symbolic_helpers_reject_before_checkpoint_or_cache() {
+            use SpeculativeRejectReason::*;
+            for reason in [IntegerConversion, RetryCondition, SymbolicValueEnumeration, RetryOperand] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::<B64>::new(&ctx);
+                let sym = solver.declare_bitvector(2, info());
+                assert!(solver.check_sat(info()).is_sat().unwrap());
+                let mut frame = make_frame(vec![Instr::End]);
+                frame.set_speculation_mode(SpeculationMode::On);
+                let mut state = TaskState::new();
+                state.speculation_stats = SpeculationStats::new(true);
+                let sink = CountingSink::default();
+                let mut fraction = Fraction::one();
+                let condition = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(sym)), Box::new(smtlib::bits64(1, 2)));
+                let result = match reason {
+                    IntegerConversion | RetryCondition => symbolic_length::retry_symbolic_length(
+                        if reason == IntegerConversion {
+                            ExecError::IntegerConversion(condition, info())
+                        } else {
+                            ExecError::RetryCondition(condition, info())
+                        },
+                        &[],
+                        TaskId::fresh(),
+                        &mut fraction,
+                        None,
+                        &sink,
+                        &mut frame,
+                        &state,
+                        &mut solver,
+                    ),
+                    SymbolicValueEnumeration => symbolic_length::fork_symbolic_value(
+                        sym,
+                        &[],
+                        info(),
+                        TaskId::fresh(),
+                        &mut fraction,
+                        None,
+                        &sink,
+                        &mut frame,
+                        &state,
+                        &mut solver,
+                    ),
+                    RetryOperand => symbolic_length::fork_retry_operand(
+                        sym,
+                        condition.clone(),
+                        smtlib::Exp::Not(Box::new(condition)),
+                        &[],
+                        info(),
+                        TaskId::fresh(),
+                        &mut fraction,
+                        None,
+                        &sink,
+                        &mut frame,
+                        &state,
+                        &mut solver,
+                    )
+                    .map(|()| true),
+                    _ => panic!("测试位置未覆盖"),
+                };
+                assert_rejected(
+                    result.map(|alive| if alive { Run::Suspended } else { Run::Dead }),
+                    reason,
+                    &sink,
+                    &fraction,
+                    &solver,
+                );
+                assert!(frame.pending_retry_operand.is_none());
+                assert_eq!(frame.forks(), 0);
+                assert_eq!(state.speculation_stats().reject_json()["total"], 1);
+            }
+        }
+
+        #[test]
+        fn speculation_mode_survives_calls_and_checkpoint_frames() {
+            let mut frame = make_frame(vec![Instr::End]);
+            assert_eq!(frame.speculation_mode(), SpeculationMode::Off);
+            frame.set_speculation_mode(SpeculationMode::On);
+            assert_eq!(unfreeze_frame(&freeze_frame(&frame)).speculation_mode(), SpeculationMode::On);
+            let callee = frame.new_call(test_name(30), &[], &Ty::Unit, None, frame.instrs);
+            assert_eq!(callee.speculation_mode(), SpeculationMode::On);
+            let state = TaskState::new();
+            assert_eq!(
+                unfreeze_frame(&frame.task(TaskId::fresh(), &state).frame).speculation_mode(),
+                SpeculationMode::On
+            );
+        }
+
+        #[test]
+        fn speculation_off_keeps_forks_checkpoints_and_fraction() {
+            let input = test_name(700);
+            for monomorphize in [false, true] {
+                let instrs = vec![
+                    Instr::Decl(input, if monomorphize { Ty::Bits(1) } else { Ty::Bool }, info()),
+                    if monomorphize {
+                        Instr::Monomorphize(input, Ty::Bits(1), info())
+                    } else {
+                        Instr::Jump(Exp::Id(input), 2, info())
+                    },
+                    Instr::Copy(Loc::Id(RETURN), Exp::Id(input), info()),
+                    Instr::End,
+                ];
+                let results = run_all_with_bindings(
+                    instrs,
+                    ExecutionLimits::default(),
+                    empty_shared_state(),
+                    RegisterBindings::new(),
+                    HashMap::default(),
+                );
+                assert_eq!(results.len(), 2);
+                assert!(results.iter().all(|result| matches!(result, Ok(Run::Finished(_)))));
+            }
+        }
+        #[test]
+        fn speculation_rejects_concrete_loop_truncation_and_call_limits() {
+            for call in [false, true] {
+                let mut limits = if call {
+                    ExecutionLimits::default().with_max_path_depth(0)
+                } else {
+                    ExecutionLimits::default().with_max_backjumps_per_loop(0)
+                };
+                limits.on_limit_reached = LimitBehavior::Concretize;
+                let state = TaskState::new().with_execution_limits(limits);
+                let instr = if call {
+                    Instr::Call(Loc::Id(RETURN), false, INTERNAL_VECTOR_INIT, vec![Exp::I64(1)], info())
+                } else {
+                    Instr::Jump(Exp::Bool(true), 0, info())
+                };
+                let mut frame = make_frame(vec![instr]);
+                frame.set_speculation_mode(SpeculationMode::On);
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::new(&ctx);
+                let sink = CountingSink::default();
+                let mut fraction = Fraction::one();
+                let result = run_loop(
+                    0,
+                    TaskId::fresh(),
+                    &mut fraction,
+                    PathTimeout::unlimited(),
+                    None,
+                    &sink,
+                    &mut frame,
+                    &state,
+                    &empty_shared_state(),
+                    &mut solver,
+                );
+                assert_rejected(result, SpeculativeRejectReason::LimitTruncation, &sink, &fraction, &solver);
+            }
+        }
+
+        #[test]
+        fn speculation_rejects_single_sided_jump_and_unique_monomorphize() {
+            for monomorphize in [false, true] {
+                for value in [false, true] {
+                    let ctx = Context::new(Config::new());
+                    let mut solver = Solver::new(&ctx);
+                    let sym = solver.declare_const(smtlib::Ty::Bool, info());
+                    solver.assert_eq(smtlib::Exp::Var(sym), smtlib::Exp::Bool(value));
+                    let input = test_name(700);
+                    let instr = if monomorphize {
+                        Instr::Monomorphize(input, Ty::Bool, info())
+                    } else {
+                        Instr::Jump(Exp::Id(input), 1, info())
+                    };
+                    let mut frame = make_frame(vec![instr, Instr::End]);
+                    frame.vars_mut().insert(input, UVal::Init(Val::Symbolic(sym)));
+                    frame.set_speculation_mode(SpeculationMode::On);
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+                    let sink = CountingSink::default();
+                    let mut fraction = Fraction::one();
+                    let before = format!("{:?}", solver.trace());
+                    let result = run_loop(
+                        0,
+                        TaskId::fresh(),
+                        &mut fraction,
+                        PathTimeout::unlimited(),
+                        None,
+                        &sink,
+                        &mut frame,
+                        &state,
+                        &empty_shared_state(),
+                        &mut solver,
+                    );
+                    assert_rejected(
+                        result,
+                        if monomorphize {
+                            SpeculativeRejectReason::Monomorphize
+                        } else {
+                            SpeculativeRejectReason::SymbolicJump
+                        },
+                        &sink,
+                        &fraction,
+                        &solver,
+                    );
+                    assert_eq!(format!("{:?}", solver.trace()), before, "拒绝不能补充单边断言");
+                }
+            }
+        }
+
+        #[test]
+        fn speculation_off_preserves_exact_fraction_and_checkpoint() {
+            for monomorphize in [false, true] {
+                let ctx = Context::new(Config::new());
+                let mut solver = Solver::new(&ctx);
+                let sym = solver.declare_const(smtlib::Ty::Bool, info());
+                let input = test_name(700);
+                let instr = if monomorphize {
+                    Instr::Monomorphize(input, Ty::Bool, info())
+                } else {
+                    Instr::Jump(Exp::Id(input), 1, info())
+                };
+                let mut frame = make_frame(vec![instr, Instr::End]);
+                frame.vars_mut().insert(input, UVal::Init(Val::Symbolic(sym)));
+                let state = TaskState::new();
+                let sink = CountingSink::default();
+                let mut fraction = Fraction::one();
+                let result = run_loop(
+                    0,
+                    TaskId::fresh(),
+                    &mut fraction,
+                    PathTimeout::unlimited(),
+                    None,
+                    &sink,
+                    &mut frame,
+                    &state,
+                    &empty_shared_state(),
+                    &mut solver,
+                );
+                assert!(matches!(result, Ok(Run::Finished(_))));
+                assert_eq!(sink.0.load(Ordering::Relaxed), 1);
+                assert_eq!(frame.forks(), 1);
+                assert!(format!("{:?}", solver.trace()).starts_with("Trace { checkpoints: 1,"));
+                let mut expected = Fraction::one();
+                if monomorphize {
+                    expected.min_split(6);
+                } else {
+                    expected.halve();
+                }
+                assert_eq!(format!("{fraction:?}"), format!("{expected:?}"));
+                let mut total = fraction;
+                total += sink.1.lock().unwrap().pop().unwrap();
+                assert!(total.is_one(), "父子份额之和必须仍为 1");
+            }
+        }
     }
 
     fn run_with_limits(instrs: Vec<Instr<Name, B64>>, limits: ExecutionLimits) -> Result<Run<B64>, ExecError> {

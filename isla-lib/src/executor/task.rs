@@ -39,6 +39,7 @@ use crate::smt::{smtlib, Checkpoint, Event};
 use crate::zencode;
 
 use super::execution_limits::ExecutionLimits;
+use super::SpeculationStats;
 
 static TASK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -85,6 +86,7 @@ impl<B> TaskInterrupt<B> {
 }
 
 pub struct TaskState<B> {
+    pub(super) speculation_stats: SpeculationStats,
     pub(super) reset_registers: HashMap<Loc<Name>, Reset<B>>,
     // We might want to avoid loops in the assembly by requiring that
     // any unique program counter (pc) is only visited a fixed number
@@ -98,8 +100,13 @@ pub struct TaskState<B> {
 }
 
 impl<B> TaskState<B> {
+    pub fn speculation_stats(&self) -> &SpeculationStats {
+        &self.speculation_stats
+    }
+
     pub fn new() -> Self {
         TaskState {
+            speculation_stats: SpeculationStats::default(),
             reset_registers: HashMap::new(),
             pc_limit: None,
             execution_limits: None,
