@@ -1168,6 +1168,18 @@ pub fn solve_state_main<'ir, B: BV>(
     }
 
     shared_state.execution_stats.reset();
+    if shared_state.execution_stats.enabled() {
+        // 限时场景下进程可能被外层强杀，收尾打印不会执行；ISLA_STATS=1 时周期性输出快照。
+        let stats = shared_state.execution_stats.clone();
+        // 仅用于实验：快照线程只读符号表，且不会在 shared_state 释放后被唤醒再访问到有意义的数据；
+        // 进程退出前线程随之终止。
+        let symtab: &'static isla_lib::ir::Symtab<'static> = unsafe { std::mem::transmute(&shared_state.symtab) };
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            eprintln!("[MERGE_STATS_SNAPSHOT] {}", stats.merge_json());
+            eprintln!("[FORK_STATS_SNAPSHOT] {}", stats.fork_json(symtab));
+        });
+    }
     let num_clauses = clause_set.len();
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
     let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
