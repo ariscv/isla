@@ -20,6 +20,9 @@ pub enum SpeculationMode {
 #[serde(rename_all = "snake_case")]
 pub enum SpeculativeRejectReason {
     SolverUnknown,
+    SymbolicAssertion,
+    SmtError,
+    Timeout,
     NoJoin,
     HasBackEdge,
     ExceptionCheck,
@@ -153,19 +156,17 @@ pub(super) fn force_diagnostic(
     error: &crate::error::ExecError,
     origin: Option<(String, usize, crate::source_loc::SourceLoc)>,
 ) -> String {
-    let crate::error::ExecError::SpeculativeReject {
-        reason,
-        function: rejected_function,
-        pc: rejected_pc,
-        location: rejected_location,
-    } = error
-    else {
-        panic!("强制合并诊断只接受推演拒绝");
+    use crate::error::ExecError;
+    let (reason, rejected_function, rejected_pc, rejected_location) = match error {
+        ExecError::SpeculativeReject { reason, function, pc, location } => (*reason, Some(*function), *pc, *location),
+        ExecError::Smt(error) => (SpeculativeRejectReason::SmtError, None, pc, error.source_loc()),
+        ExecError::Timeout => (SpeculativeRejectReason::Timeout, None, pc, location),
+        _ => (SpeculativeRejectReason::IncompatibleState, None, pc, location),
     };
     json!({"kind":"force_region_merge_failure", "rule":rule, "function":function,
         "branch_pc":pc, "source_loc":location, "reason":reason,
         "rejected_function_id":rejected_function, "rejected_pc":rejected_pc,
-        "rejected_source_loc":rejected_location, "force_origin":origin})
+        "rejected_source_loc":rejected_location, "force_origin":origin, "error":error.to_string()})
     .to_string()
 }
 

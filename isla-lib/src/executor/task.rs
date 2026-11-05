@@ -87,9 +87,9 @@ impl<B> TaskInterrupt<B> {
 
 pub struct TaskState<B> {
     pub(super) force_regions_validated: std::sync::OnceLock<()>,
-    pub(super) region_effect_summaries: std::sync::OnceLock<HashMap<Name, super::region_merge::FunctionEffect>>,
+    pub(super) region_effect_summaries: std::sync::OnceLock<HashMap<Name, super::region_summary::FunctionEffect>>,
     pub(super) region_step_budget: usize,
-    pub(super) region_negative_cache: std::sync::Mutex<HashMap<(Name, usize), super::region_merge::CachedReject>>,
+    pub(super) region_negative_cache: std::sync::Mutex<HashMap<(Name, usize), super::region_summary::CachedReject>>,
     pub(super) speculation_stats: SpeculationStats,
     pub(super) reset_registers: HashMap<Loc<Name>, Reset<B>>,
     // We might want to avoid loops in the assembly by requiring that
@@ -114,6 +114,7 @@ impl<B> TaskState<B> {
     }
 
     pub fn new() -> Self {
+        super::merge_record::initialize();
         TaskState {
             force_regions_validated: std::sync::OnceLock::new(),
             region_effect_summaries: std::sync::OnceLock::new(),

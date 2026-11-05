@@ -61,6 +61,8 @@ pub struct LocalState<'ir, B> {
     pub(super) regs: RegisterBindings<'ir, B>,
     pub(super) lets: Bindings<'ir, B>,
     pub(super) probes: LocalDebugProbes,
+    // 仅记录输出开启时保存路径上纯计算的符号区间，随分叉、调用和保存点一起复制。
+    pub(super) pure_definitions: Vec<(u32, u32)>,
     pub(super) speculative_access: Option<super::region_merge::AccessLog<B>>,
     // 表达式地址在 IR 生命周期内稳定；缓存只跨同一条指令的分叉重试。
     pub(super) expression_values: HashMap<usize, Val<B>>,
@@ -126,6 +128,8 @@ pub struct Frame<'ir, B> {
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) speculation_mode: SpeculationMode,
+    // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
+    pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
@@ -164,6 +168,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
         region_execution: frame.region_execution.clone(),
+        region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: (*frame.execution_limit_state).clone(),
@@ -191,6 +196,8 @@ pub struct LocalFrame<'ir, B> {
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) speculation_mode: SpeculationMode,
+    // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
+    pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
     // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
@@ -230,6 +237,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
         region_execution: frame.region_execution.clone(),
+        region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
@@ -451,6 +459,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc: 0,
             speculation_mode: SpeculationMode::Off,
             region_execution: None,
+            region_replay: None,
             region_merge_records: Vec::new(),
             pending_retry_operand: None,
             execution_limit_state: ExecutionLimitPathState::default(),
@@ -460,6 +469,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 lets,
                 probes,
                 speculative_access: None,
+                pure_definitions: Vec::new(),
                 expression_values: HashMap::new(),
                 expression_retry_operands: None,
             },
@@ -495,8 +505,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
         new_frame.speculation_mode = self.speculation_mode;
         new_frame.region_execution = self.region_execution.clone();
+        new_frame.region_replay = self.region_replay;
         new_frame.region_merge_records = self.region_merge_records.clone();
         new_frame.local_state.speculative_access = self.local_state.speculative_access.clone();
+        new_frame.local_state.pure_definitions = self.local_state.pure_definitions.clone();
         new_frame.path_timing = self.path_timing.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();

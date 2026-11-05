@@ -60,9 +60,12 @@ use crate::zencode;
 
 mod execution_limits;
 mod frame;
+mod merge_record;
 mod path_timing;
 mod region_merge;
-pub use region_merge::{validate_force_regions, GuardedRegisterRead, RegionMergeRecord};
+mod region_summary;
+pub use merge_record::{GuardedRegisterRead, RegionMergeRecord};
+pub use region_merge::validate_force_regions;
 mod speculation;
 pub mod stats;
 mod symbolic_length;
@@ -2199,14 +2202,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
-                let value = match region_merge::evaluate_primop(
+                let value = match merge_record::evaluate_primop(
                     frame,
                     solver,
-                    if frame.region_execution.is_some() {
-                        primop::unary_effect(*f).expect("原语必须分类")
-                    } else {
-                        primop::Effect::WritesState
-                    },
+                    if merge_record::enabled() { primop::unary_effect(*f) } else { None },
                     |solver, frame| {
                         let _ = frame;
                         f(arg.clone(), solver, *info)
@@ -2261,14 +2260,17 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
                 let arg1 = args.pop().unwrap();
-                let value = match region_merge::evaluate_primop(
+                // 悲观断言的错误只表示存在失败输入，不能据此删除整个推演臂。
+                if frame.region_execution.is_some()
+                    && std::ptr::fn_addr_eq(*f, primop::pessimistic_assert::<B> as primop::Binary<B>)
+                    && matches!(arg1, Val::Symbolic(_))
+                {
+                    return Err(region_merge::reject(frame, SpeculativeRejectReason::SymbolicAssertion));
+                }
+                let value = match merge_record::evaluate_primop(
                     frame,
                     solver,
-                    if frame.region_execution.is_some() {
-                        primop::binary_effect(*f).expect("原语必须分类")
-                    } else {
-                        primop::Effect::WritesState
-                    },
+                    if merge_record::enabled() { primop::binary_effect(*f) } else { None },
                     |solver, frame| {
                         let _ = frame;
                         f(arg1.clone(), arg2.clone(), solver, *info)
@@ -2276,6 +2278,18 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 ) {
                     Ok(value) => value,
                     Err(error) => {
+                        if frame.region_execution.is_some() && matches!(&error, ExecError::AssertionFailure(..)) {
+                            let false_for_arm = match &arg1 {
+                                Val::Bool(value) => !value,
+                                Val::Symbolic(symbol) => {
+                                    !region_merge::feasible(frame, solver, &smtlib::Exp::Var(*symbol), *info)?
+                                }
+                                _ => false,
+                            };
+                            if !false_for_arm {
+                                return Err(region_merge::reject(frame, SpeculativeRejectReason::SymbolicAssertion));
+                            }
+                        }
                         if matches!(
                             &error,
                             ExecError::SymbolicLength(..)
@@ -2309,14 +2323,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
             Instr::PrimopVariadic(loc, f, args, info) => {
                 let args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
-                let value = match region_merge::evaluate_primop(
+                let value = match merge_record::evaluate_primop(
                     frame,
                     solver,
-                    if frame.region_execution.is_some() {
-                        primop::variadic_effect(*f).expect("原语必须分类")
-                    } else {
-                        primop::Effect::WritesState
-                    },
+                    if merge_record::enabled() { primop::variadic_effect(*f) } else { None },
                     |solver, frame| f(args.clone(), solver, frame, *info),
                 ) {
                     Ok(value) => value,
@@ -2352,8 +2362,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 frame.pc += 1;
             }
 
-            Instr::PrimopReset(loc, reset, _, info) => {
-                let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
+            Instr::PrimopReset(loc, reset, effect, info) => {
+                let value = merge_record::evaluate_primop(frame, solver, Some(*effect), |solver, frame| {
+                    reset(&frame.memory, shared_state.typedefs(), solver)
+                })?;
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
             }
@@ -15626,7 +15638,8 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn diamond_simulation_rejects_memory_and_assertion_primops_before_execution() {
-        // 迁移：内存继续预拒绝；assume/assert 由 guarded constraints 放行。
+        // 迁移：内存继续预拒绝；assume/乐观断言按条件提交。
+        // 具体悲观断言与嵌套符号悲观断言的成功域见 region_merge_f2_* 对照测试。
         region_merge_tests::check_region_effect_rejection_and_negative_cache();
         region_merge_tests::region_merge_dead_arm_and_guarded_assume();
     }

@@ -1,8 +1,8 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
+use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
 use super::*;
 use crate::config::MergeMode;
-use crate::ir::regions::{FunctionRegions, Region, RegionCfg, RegionOptions, RegionPoint, RegionRejection};
-use crate::primop::{self as effects, Effect};
+use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
 /// 共享两臂、调用与所有嵌套区域的预算，覆盖 141 条指令的谓词链并限制递归调用。
 pub const DEFAULT_REGION_STEP_BUDGET: usize = 4096;
@@ -41,7 +41,6 @@ pub(super) struct AccessLog<B> {
     pub pc: usize,
     pub location: SourceLoc,
     pub writes_allowed: bool,
-    pub pure_definitions: Vec<(u32, u32)>,
 }
 
 impl<B: BV> AccessLog<B> {
@@ -69,31 +68,33 @@ impl<B: BV> AccessLog<B> {
     }
 }
 
-/// 主迹的寄存器读取只保证前置状态/访问足迹可信；需要逐条精确读写顺序时不可信。
-/// 单臂读取保留其条件，后续记录输出可据此恢复精确路径。
-#[derive(Clone, Debug)]
-pub struct GuardedRegisterRead<B> {
-    pub register: Name,
-    pub accessor: Vec<Accessor>,
-    pub value: Val<B>,
-    pub guard: smtlib::Exp<Sym>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RegionMergeRecord<B> {
-    pub function: Name,
-    pub branch_pc: usize,
-    pub join: RegionPoint,
-    pub condition: Sym,
-    pub source_loc: SourceLoc,
-    pub depth: usize,
-    /// 两臂都死亡时没有存活合并值，但剪枝本身仍是一次成功提交。
-    pub dead: bool,
-    /// 合并值中的符号；最外层提交后展开 DefineConst 依赖，得到自由输入。
-    pub value_symbols: HashSet<Sym>,
-    pub input_symbols: HashSet<Sym>,
-    pure_definitions: Vec<(u32, u32)>,
-    pub single_arm_reads: Vec<GuardedRegisterRead<B>>,
+/// 初值提升跨过一层臂条件时，同步提升类型约束。当前 symbolic 唯一的显式
+/// 合法性约束来自 union 标签；复合值的每个候选载荷也由 symbolic 无条件初始化。
+fn assert_initial_type<B: BV>(value: &Val<B>, solver: &mut Solver<B>) {
+    use smtlib::Exp::{Bool, Eq, Or, Var};
+    match value {
+        Val::SymbolicCtor(tag, possibilities) => {
+            let valid = possibilities.keys().fold(Bool(false), |valid, ctor| {
+                Or(Box::new(valid), Box::new(Eq(Box::new(Var(*tag)), Box::new(ctor.to_smt()))))
+            });
+            solver.assert(valid);
+            for value in possibilities.values() {
+                assert_initial_type(value, solver);
+            }
+        }
+        Val::Ctor(_, value) => assert_initial_type(value, solver),
+        Val::Struct(fields) => {
+            for value in fields.values() {
+                assert_initial_type(value, solver);
+            }
+        }
+        Val::Vector(values) | Val::List(values) => {
+            for value in values {
+                assert_initial_type(value, solver);
+            }
+        }
+        _ => (),
+    }
 }
 
 pub(super) fn reject<B: BV>(frame: &LocalFrame<B>, reason: SpeculativeRejectReason) -> ExecError {
@@ -156,14 +157,28 @@ pub(super) fn record_write<B: BV>(state: &mut LocalState<B>, id: Name, register:
 
 pub(super) fn policy<B: BV>(frame: &LocalFrame<B>, state: &TaskState<B>, info: SourceLoc) -> MergeMode {
     let inherited = frame.region_execution.as_ref().map(|region| region.mode);
-    state
+    let mode = state
         .execution_limits
         .as_ref()
-        .map_or(MergeMode::Off, |limits| limits.merge_mode(frame.function_name, info, inherited))
+        .map_or(MergeMode::Off, |limits| limits.merge_mode(frame.function_name, info, inherited));
+    if frame.region_replay.is_some() && mode == MergeMode::Adaptive {
+        MergeMode::Off
+    } else {
+        mode
+    }
 }
 
 /// 本地校验每一步的真实栈深度；调用不会重新授予入口层的写许可。
 pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> {
+    if let Some((depth, join)) = frame.region_replay {
+        if frame.backtrace.len() < depth
+            || (frame.backtrace.len() == depth
+                && (join == RegionPoint::Instruction(frame.pc)
+                    || (join == RegionPoint::FunctionExit && matches!(frame.instrs.get(frame.pc), Some(Instr::End)))))
+        {
+            frame.region_replay = None;
+        }
+    }
     let Some(execution) = &frame.region_execution else { return Ok(false) };
     let depth = frame.backtrace.len();
     if depth < execution.entry_depth {
@@ -197,253 +212,6 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
     Ok(false)
 }
 
-fn constraint_unary<B: BV>(f: primop::Unary<B>) -> bool {
-    std::ptr::fn_addr_eq(f, primop::assume::<B> as primop::Unary<B>)
-}
-fn constraint_binary<B: BV>(f: primop::Binary<B>) -> bool {
-    [primop::optimistic_assert::<B> as primop::Binary<B>, primop::pessimistic_assert::<B> as primop::Binary<B>]
-        .iter()
-        .any(|assertion| std::ptr::fn_addr_eq(f, *assertion))
-}
-
-/// 效应等级与静态拒绝证据分别保存：寄存器读可以推演，带条件约束也可重放。
-/// 因此 C4 的 WritesState（例如 assume）不必然带有静态拒绝证据。
-#[derive(Clone, Copy, Debug)]
-pub(super) struct FunctionEffect {
-    pub effect: Effect,
-    pub non_returning: bool,
-    rejection: Option<CachedReject>,
-}
-impl FunctionEffect {
-    fn join(&mut self, other: Self) -> bool {
-        let changed = other.effect > self.effect || (self.rejection.is_none() && other.rejection.is_some());
-        if other.rejection.is_some() && (other.effect > self.effect || self.rejection.is_none()) {
-            self.rejection = other.rejection;
-        }
-        self.effect = self.effect.max(other.effect);
-        changed
-    }
-}
-
-/// 已加载的原语调用通常已改写为 Primop；特殊内建仍保留 Call 形态。
-fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effect {
-    match instr {
-        Instr::PrimopUnary(_, f, _, _) => effects::unary_effect(*f).expect("一元原语必须分类"),
-        Instr::PrimopBinary(_, f, _, _, _) => effects::binary_effect(*f).expect("二元原语必须分类"),
-        Instr::PrimopVariadic(_, f, _, _) => effects::variadic_effect(*f).expect("多元原语必须分类"),
-        Instr::PrimopReset(_, _, effect, _) => *effect,
-        Instr::Call(_, _, function, _, _) if !shared.functions.contains_key(function) => match *function {
-            REG_DEREF | READ_REGISTER_FROM_VECTOR => Effect::ReadsState,
-            WRITE_REGISTER_FROM_VECTOR => Effect::WritesState,
-            INTERNAL_VECTOR_INIT | INTERNAL_VECTOR_UPDATE | ITE_PHI => Effect::Pure,
-            _ => match shared.externs.get(function) {
-                Some((_, _, name)) => effects::effect(name).unwrap_or(Effect::MayFork),
-                None => effects::effect(&zencode::decode(shared.symtab.to_str(*function))).unwrap_or(Effect::MayFork),
-            },
-        },
-        _ => Effect::Pure,
-    }
-}
-
-/// 从格底 Pure 开始，按调用图的 SCC 逆拓扑序处理；分量内迭代到最小不动点。
-/// 递归边只传播已知效应，不凭空增加效应；实际递归仍受共享推演步数预算约束。
-pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashMap<Name, FunctionEffect> {
-    let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
-    let nodes: HashMap<_, _> = shared.functions.keys().map(|function| (*function, graph.add_node(*function))).collect();
-    for (function, (_, _, body)) in &shared.functions {
-        for instr in *body {
-            if let Instr::Call(_, _, callee, _, _) = instr {
-                if let Some(callee) = nodes.get(callee) {
-                    graph.update_edge(nodes[function], *callee, ());
-                }
-            }
-        }
-    }
-    let components = petgraph::algo::kosaraju_scc(&graph);
-    let mut non_returning = HashSet::new();
-    let mut terminating: HashMap<_, _> = shared.functions.keys().map(|function| (*function, false)).collect();
-    for component in &components {
-        let cfgs: Vec<_> = component
-            .iter()
-            .map(|node| {
-                let function = graph[*node];
-                (
-                    function,
-                    RegionCfg::new(
-                        shared.functions[&function].2,
-                        RegionOptions { have_exception: None, terminal_calls: &[] },
-                    ),
-                )
-            })
-            .collect();
-        loop {
-            let mut changed = false;
-            for (function, cfg) in &cfgs {
-                if !terminating[function]
-                    && cfg.always_terminates(
-                        shared.functions[function].2,
-                        HAVE_EXCEPTION,
-                        &non_returning,
-                        &terminating,
-                        true,
-                    )
-                {
-                    *terminating.get_mut(function).unwrap() = true;
-                    changed = true;
-                }
-                if !non_returning.contains(function)
-                    && cfg.always_terminates(
-                        shared.functions[function].2,
-                        HAVE_EXCEPTION,
-                        &non_returning,
-                        &terminating,
-                        false,
-                    )
-                {
-                    changed |= non_returning.insert(*function);
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-    }
-    let terminal_calls: Vec<_> = non_returning.iter().copied().collect();
-    // 效应只沿能继续执行的调用边传播；终止调用与其后的不可达指令不贡献效应。
-    graph.clear_edges();
-    let mut summaries = HashMap::new();
-    for (function, (params, _, body)) in &shared.functions {
-        let locals: HashSet<_> = params
-            .iter()
-            .map(|(name, _)| *name)
-            .chain([RETURN])
-            .chain(body.iter().filter_map(|instr| match instr {
-                Instr::Decl(name, ..) | Instr::Init(name, ..) => Some(*name),
-                _ => None,
-            }))
-            .collect();
-        let mut summary =
-            FunctionEffect { effect: Effect::Pure, non_returning: non_returning.contains(function), rejection: None };
-        let cfg = RegionCfg::new(body, RegionOptions { have_exception: None, terminal_calls: &terminal_calls });
-        for pc in cfg.reachable_instructions() {
-            let instr = &body[pc];
-            if matches!(instr, Instr::Call(_, _, callee, _, _) if non_returning.contains(callee)) {
-                continue;
-            }
-            let mut effect = direct_effect(instr, shared);
-            let mut rejection = if matches!(instr, Instr::Call(_, _, callee, _, _) if shared.functions.contains_key(callee))
-            {
-                None
-            } else {
-                instruction_effect(*function, pc, instr, shared, &HashMap::new())
-            };
-            let mut reads = HashSet::new();
-            let mut destination = None;
-            match instr {
-                Instr::Copy(loc, exp, _) => {
-                    destination = Some(loc);
-                    exp.collect_ids(&mut reads);
-                }
-                Instr::Init(_, _, exp, _) | Instr::Jump(exp, _, _) => exp.collect_ids(&mut reads),
-                Instr::PrimopUnary(loc, _, exp, _) => {
-                    destination = Some(loc);
-                    exp.collect_ids(&mut reads);
-                }
-                Instr::PrimopBinary(loc, _, a, b, _) => {
-                    destination = Some(loc);
-                    a.collect_ids(&mut reads);
-                    b.collect_ids(&mut reads);
-                }
-                Instr::PrimopVariadic(loc, _, args, _) | Instr::Call(loc, _, _, args, _) => {
-                    destination = Some(loc);
-                    for arg in args {
-                        arg.collect_ids(&mut reads);
-                    }
-                }
-                Instr::PrimopReset(loc, ..) => destination = Some(loc),
-                Instr::Monomorphize(name, ..) => {
-                    reads.insert(*name);
-                }
-                _ => (),
-            }
-            if reads.iter().any(|name| !locals.contains(name) && !shared.type_info.enum_members.contains_key(name)) {
-                effect = effect.max(Effect::ReadsState);
-            }
-            if matches!(instr, Instr::Call(_, _, WRITE_REGISTER_FROM_VECTOR, _, _))
-                || destination.map_or(false, |loc| !locals.contains(&loc.id()) || matches!(loc, Loc::Addr(_)))
-            {
-                effect = effect.max(Effect::WritesState);
-                rejection = Some(CachedReject {
-                    reason: SpeculativeRejectReason::CalleeStateWrite,
-                    function: *function,
-                    pc,
-                    location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
-                });
-            }
-            summary.join(FunctionEffect { effect, non_returning: false, rejection });
-            if let Instr::Call(_, _, callee, _, _) = instr {
-                if let Some(callee) = nodes.get(callee) {
-                    graph.update_edge(nodes[function], *callee, ());
-                }
-            }
-        }
-        summaries.insert(*function, summary);
-    }
-    // kosaraju_scc 返回汇点优先的逆拓扑序，因此分量外的被调函数已收敛。
-    for component in components {
-        loop {
-            let mut changed = false;
-            for node in &component {
-                let function = graph[*node];
-                for callee in graph.neighbors(*node) {
-                    let effect = summaries[&graph[callee]];
-                    changed |= summaries.get_mut(&function).unwrap().join(effect);
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-    }
-    summaries
-}
-
-fn instruction_effect<B: BV>(
-    function_name: Name,
-    pc: usize,
-    instr: &Instr<Name, B>,
-    shared: &SharedState<B>,
-    summaries: &HashMap<Name, FunctionEffect>,
-) -> Option<CachedReject> {
-    match instr {
-        Instr::PrimopUnary(_, f, _, _) if constraint_unary(*f) => return None,
-        Instr::PrimopBinary(_, f, _, _, _) if constraint_binary(*f) => return None,
-        Instr::Call(_, _, function, _, _) if shared.functions.contains_key(function) => {
-            let summary = summaries.get(function).expect("IR 函数必须有收敛的效应摘要");
-            return if summary.non_returning { None } else { summary.rejection };
-        }
-        Instr::Call(
-            _,
-            _,
-            REG_DEREF
-            | READ_REGISTER_FROM_VECTOR
-            | WRITE_REGISTER_FROM_VECTOR
-            | INTERNAL_VECTOR_INIT
-            | INTERNAL_VECTOR_UPDATE
-            | ITE_PHI,
-            _,
-            _,
-        ) => return None,
-        _ => (),
-    }
-    (direct_effect(instr, shared) != Effect::Pure).then(|| CachedReject {
-        reason: SpeculativeRejectReason::StateEffect,
-        function: function_name,
-        pc,
-        location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
-    })
-}
-
 pub(super) fn preflight<B: BV>(
     frame: &LocalFrame<B>,
     state: &TaskState<B>,
@@ -464,24 +232,6 @@ pub(super) fn preflight<B: BV>(
         return Err(rejection.error());
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct CachedReject {
-    pub reason: SpeculativeRejectReason,
-    pub function: Name,
-    pub pc: usize,
-    pub location: SourceLoc,
-}
-impl CachedReject {
-    fn error(self) -> ExecError {
-        ExecError::SpeculativeReject {
-            reason: self.reason,
-            function: self.function,
-            pc: self.pc,
-            location: self.location,
-        }
-    }
 }
 
 fn region<'ir, B: BV>(
@@ -558,7 +308,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     shared.execution_stats.rule_attempt(rule);
     let key = (frame.function_name, frame.pc);
     let cached = state.region_negative_cache.lock().unwrap().get(&key).copied();
-    let candidate = if frame.execution_limit_state.has_sampled_branch() {
+    let candidate = if frame.region_replay.is_some() {
+        Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
+    } else if frame.execution_limit_state.has_sampled_branch() {
         Err(reject(frame, SpeculativeRejectReason::SamplingState))
     } else {
         match cached {
@@ -585,10 +337,14 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
         }
     };
+    let replay_join = candidate.as_ref().ok().map(|region| region.join);
     let result = match candidate {
         Err(error) => {
             if let ExecError::SpeculativeReject { reason, function, pc, location } = error {
-                if reason != SpeculativeRejectReason::SamplingState {
+                if !matches!(
+                    reason,
+                    SpeculativeRejectReason::SamplingState | SpeculativeRejectReason::SymbolicAssertion
+                ) {
                     state
                         .region_negative_cache
                         .lock()
@@ -614,73 +370,16 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 );
                 match &result {
                     Ok(_) => {
+                        assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         solver.commit_transaction();
                         if !nested {
-                            let mut events = solver.trace().to_vec();
-                            let fresh: HashSet<_> = events
-                                .iter()
-                                .filter_map(|event| match event {
-                                    Event::Smt(Def::DeclareConst(symbol, _), _, _) => Some(*symbol),
-                                    _ => None,
-                                })
-                                .collect();
-                            // pow_int 等纯计算用 DeclareConst + 等式共享中间结果；按 I1 协议
-                            // 解开 guard 后把定义依赖交给已有 EventReferences 展开。
-                            let pure_ranges: Vec<_> = frame
-                                .region_merge_records
-                                .iter()
-                                .flat_map(|record| record.pure_definitions.iter().copied())
-                                .collect();
-                            let mut equations = Vec::new();
-                            let mut derived = HashSet::new();
-                            for event in &events {
-                                if let Event::Smt(Def::Assert(exp), attributes, location) = event {
-                                    let mut exp = exp;
-                                    while let smtlib::Exp::Or(left, right) = exp {
-                                        if matches!(left.as_ref(), smtlib::Exp::Not(_)) {
-                                            exp = right;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    if let smtlib::Exp::Eq(left, right) = exp {
-                                        if let smtlib::Exp::Var(symbol) = left.as_ref() {
-                                            if fresh.contains(symbol)
-                                                && pure_ranges
-                                                    .iter()
-                                                    .any(|(start, end)| *start < symbol.id && symbol.id < *end)
-                                                && !right.variables().contains(symbol)
-                                            {
-                                                derived.insert(*symbol);
-                                                equations.push(Event::Smt(
-                                                    Def::DefineConst(*symbol, right.as_ref().clone()),
-                                                    *attributes,
-                                                    *location,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            events.extend(equations.iter());
-                            let references = crate::simplify::EventReferences::from_events(&events);
-                            let declared: HashSet<_> = events
-                                .iter()
-                                .filter_map(|event| match event {
-                                    Event::Smt(Def::DeclareConst(symbol, _), _, _) => Some(*symbol),
-                                    _ => None,
-                                })
-                                .collect();
-                            for record in &mut frame.region_merge_records {
-                                record.input_symbols = record
-                                    .value_symbols
-                                    .iter()
-                                    .flat_map(|symbol| references.dependencies(*symbol))
-                                    .filter(|symbol| declared.contains(symbol) && !derived.contains(symbol))
-                                    .collect();
-                            }
-                            // 只在最外层提交后发布本次新增记录，内层回滚不会留下幽灵记录。
-                            emit_records(&frame.region_merge_records[record_start..], task_id, shared, solver);
+                            super::merge_record::publish(
+                                &mut frame.region_merge_records[record_start..],
+                                &frame.local_state.pure_definitions,
+                                task_id,
+                                shared,
+                                solver,
+                            );
                         }
                     }
                     Err(_) => solver.rollback_transaction(tx),
@@ -695,12 +394,23 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             shared.execution_stats.rule_finished(rule, None);
             Ok(result)
         }
-        Err(error @ ExecError::SpeculativeReject { .. }) => {
-            if let ExecError::SpeculativeReject { reason, .. } = &error {
-                shared.execution_stats.merge_rejected(key.0, key.1, &error);
-                state.speculation_stats.record_reject(*reason);
-                shared.execution_stats.rule_finished(rule, Some(*reason));
-            }
+        Err(error) => {
+            let reason = match &error {
+                ExecError::SpeculativeReject { reason, .. } => *reason,
+                ExecError::Smt(_) => SpeculativeRejectReason::SmtError,
+                ExecError::Timeout => SpeculativeRejectReason::Timeout,
+                _ => SpeculativeRejectReason::IncompatibleState,
+            };
+            let site;
+            let rejection = if matches!(&error, ExecError::SpeculativeReject { .. }) {
+                &error
+            } else {
+                site = reject(frame, reason);
+                &site
+            };
+            shared.execution_stats.merge_rejected(key.0, key.1, rejection);
+            state.speculation_stats.record_reject(reason);
+            shared.execution_stats.rule_finished(rule, Some(reason));
             shared.execution_stats.merge_finished(false);
             if mode == MergeMode::Force {
                 speculation::force_failure(frame, state, shared, info, &error);
@@ -708,13 +418,13 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             if nested {
                 Err(error)
             } else {
+                if reason == SpeculativeRejectReason::SymbolicAssertion {
+                    // 重新合并内层返回值会再次触发悲观断言的存在性失败。
+                    // 本次区域按普通分叉回放，到汇合点恢复其后的合并。
+                    frame.region_replay = Some((frame.backtrace.len(), replay_join.expect("动态拒绝必须有区域")));
+                }
                 Ok(RegionResult::Rejected)
             }
-        }
-        Err(error) => {
-            shared.execution_stats.merge_finished(false);
-            shared.execution_stats.rule_finished(rule, Some(SpeculativeRejectReason::IncompatibleState));
-            Err(error)
         }
     }
 }
@@ -777,7 +487,6 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             pc: frame.pc,
             location: info,
             writes_allowed: true,
-            pure_definitions: Vec::new(),
         });
     }
     let mut arms = Vec::new();
@@ -809,12 +518,14 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                     SmtResult::Sat => (),
                 }
+                assert!(!solver.transaction_invalid(), "臂提交前保存点必须有效");
                 solver.commit_transaction();
                 // 首臂惰性初始化的前置寄存器在另臂复用；无读事件的提升不扩大足迹。
                 let access = arm.local_state.speculative_access.as_ref().unwrap();
                 base.local_state.speculative_access.as_mut().unwrap().published_reads = access.published_reads.clone();
                 for (reg, initial) in &access.initial_registers {
                     if base.regs().get_last_if_initialized(*reg).is_none() {
+                        assert_initial_type(initial, solver);
                         base.regs_mut().assign(*reg, initial.clone(), shared);
                     }
                 }
@@ -823,15 +534,30 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         && *function == base.function_name
                         && matches!(base.vars().get(name), Some(UVal::Uninit(_)))
                     {
+                        assert_initial_type(value, solver);
                         base.vars_mut().insert(*name, UVal::Init(value.clone()));
                     }
                 }
                 for (name, value) in &access.initial_lets {
                     if matches!(base.lets().get(name), Some(UVal::Uninit(_))) {
+                        assert_initial_type(value, solver);
                         base.lets_mut().insert(*name, UVal::Init(value.clone()));
                     }
                 }
                 arms.push(Some(arm));
+            }
+            Err(ExecError::AssertionFailure(..))
+                if !match &arm.instrs[arm.pc] {
+                    Instr::Exit(ExitCause::AssertionFailure, _) => true,
+                    Instr::PrimopBinary(_, f, _, _, _) => {
+                        std::ptr::fn_addr_eq(*f, primop::optimistic_assert::<B> as primop::Binary<B>)
+                            || std::ptr::fn_addr_eq(*f, primop::pessimistic_assert::<B> as primop::Binary<B>)
+                    }
+                    _ => false,
+                } =>
+            {
+                solver.rollback_transaction(tx);
+                return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
             }
             Ok(Run::Dead) | Err(ExecError::AssertionFailure(..)) => {
                 solver.commit_dead_transaction();
@@ -865,7 +591,6 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 dead: true,
                 value_symbols: HashSet::from([condition]),
                 input_symbols: HashSet::new(),
-                pure_definitions: Vec::new(),
                 single_arm_reads: Vec::new(),
             });
             return Ok(RegionResult::Dead);
@@ -894,7 +619,6 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 dead: false,
                 value_symbols: HashSet::new(),
                 input_symbols: HashSet::new(),
-                pure_definitions: Vec::new(),
                 single_arm_reads,
             });
             arm
@@ -902,7 +626,6 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         (Some(left), Some(right)) => merge_states(condition, &base, left, right, &region, state, shared, solver, info)?,
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
-    record.pure_definitions = merged.local_state.speculative_access.as_ref().unwrap().pure_definitions.clone();
     record.value_symbols.insert(condition);
     for (bindings, original) in
         [(&merged.local_state.vars, &frame.local_state.vars), (&merged.local_state.lets, &frame.local_state.lets)]
@@ -1095,7 +818,11 @@ fn merge_states<'ir, B: BV>(
         petgraph::algo::toposort(&graph, None).map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?;
     let mut access = lhs.clone();
     access.published_reads = rhs.published_reads.clone();
-    access.pure_definitions.extend(&rhs.pure_definitions);
+    merged.local_state.pure_definitions = left.local_state.pure_definitions.clone();
+    merged
+        .local_state
+        .pure_definitions
+        .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
     for source in [lhs, rhs] {
         for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
@@ -1145,7 +872,6 @@ fn merge_states<'ir, B: BV>(
         dead: false,
         value_symbols: HashSet::new(),
         input_symbols: HashSet::new(),
-        pure_definitions: Vec::new(),
         single_arm_reads,
     });
     Ok(merged)
@@ -1201,115 +927,4 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
         }
     }
     Ok(())
-}
-
-/// 给纯原语生成的声明划定符号区间，区分定义等式和 assume 对已有输入的约束。
-/// fresh 只预留编号，不声明变量；因此不会改变 SMT 状态，也无需新的求解器接口。
-pub(super) fn evaluate_primop<'ir, B: BV>(
-    frame: &mut LocalFrame<'ir, B>,
-    solver: &mut Solver<B>,
-    effect: Effect,
-    evaluate: impl FnOnce(&mut Solver<B>, &mut LocalFrame<'ir, B>) -> Result<Val<B>, ExecError>,
-) -> Result<Val<B>, ExecError> {
-    let start = if frame.region_execution.is_some() && effect == Effect::Pure { Some(solver.fresh()) } else { None };
-    let result = evaluate(solver, frame);
-    if let Some(start) = start {
-        let end = solver.fresh();
-        frame.local_state.speculative_access.as_mut().unwrap().pure_definitions.push((start.id, end.id));
-    }
-    result
-}
-
-/// 进程内唯一写端：先完整序列化，再持锁追加整行；不依赖进程退出时析构刷新。
-/// 两个入口共用真实执行器，因此环境变量在两处均生效。
-fn emit_records<B: BV>(records: &[RegionMergeRecord<B>], task_id: TaskId, shared: &SharedState<B>, solver: &Solver<B>) {
-    use serde_json::json;
-    use std::io::Write;
-    static OUTPUT: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
-    static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
-    let output = OUTPUT.get_or_init(|| {
-        std::env::var_os("ISLA_MERGE_RECORDS").map(|path| {
-            Mutex::new(
-                std::fs::OpenOptions::new().create(true).append(true).open(path).expect("打开 ISLA_MERGE_RECORDS 失败"),
-            )
-        })
-    });
-    let Some(output) = output else { return };
-    let types: HashMap<_, _> = solver
-        .trace()
-        .to_vec()
-        .iter()
-        .filter_map(|event| match event {
-            Event::Smt(Def::DeclareConst(symbol, ty), _, _) => Some((*symbol, ty.clone())),
-            _ => None,
-        })
-        .collect();
-    fn type_json(ty: &smtlib::Ty, symtab: &Symtab) -> serde_json::Value {
-        match ty {
-            smtlib::Ty::Bool => json!({"kind":"bool"}),
-            smtlib::Ty::BitVec(width) => json!({"kind":"bitvector", "width":width}),
-            smtlib::Ty::Enum(id) => json!({"kind":"enum", "name":zencode::decode(symtab.to_str(id.to_name()))}),
-            smtlib::Ty::Array(domain, range) => {
-                json!({"kind":"array", "domain":type_json(domain, symtab), "range":type_json(range, symtab)})
-            }
-            smtlib::Ty::Float(exponent, significand) => {
-                json!({"kind":"float", "exponent":exponent, "significand":significand})
-            }
-            smtlib::Ty::RoundingMode => json!({"kind":"rounding_mode"}),
-        }
-    }
-    let symbol_json = |symbol: Sym, ty: &smtlib::Ty| {
-        json!({
-            "name":format!("v{}", symbol.id), "smt_id":symbol.id, "type":type_json(ty, &shared.symtab)
-        })
-    };
-    for record in records {
-        let mut inputs: Vec<_> = record.input_symbols.iter().copied().collect();
-        inputs.sort_by_key(|symbol| symbol.id);
-        let inputs: Vec<_> = inputs
-            .into_iter()
-            .map(|symbol| symbol_json(symbol, types.get(&symbol).expect("自由输入必须有声明类型")))
-            .collect();
-        let reads: Vec<_> = record
-            .single_arm_reads
-            .iter()
-            .map(|read| {
-                let mut symbols: Vec<_> = read.guard.variables().into_iter().collect();
-                symbols.sort_by_key(|symbol| symbol.id);
-                let symbols: Vec<_> =
-                    symbols.into_iter().map(|symbol| symbol_json(symbol, &smtlib::Ty::Bool)).collect();
-                let accessor: Vec<_> =
-                    read.accessor.iter().map(|accessor| accessor.to_string(&shared.symtab)).collect();
-                // 复用现有 SMT-LIB 输出器，变量名与记录中的 vN 一致，不能使用 Z3 的 k!N 内部名。
-                let event = Event::<B>::Smt(Def::Assert(read.guard.clone()), DefAttrs::default(), record.source_loc);
-                let mut expression = Vec::new();
-                crate::simplify::write_events_with_opts(
-                    &mut expression,
-                    &[event],
-                    shared,
-                    &crate::simplify::WriteOpts::smtlib(),
-                )
-                .expect("保护条件必须可写为 SMT-LIB");
-                let expression = String::from_utf8(expression).expect("SMT-LIB 必须是 UTF-8");
-                let expression = expression.trim().strip_prefix("(assert ").unwrap().strip_suffix(')').unwrap();
-                json!({"register":zencode::decode(shared.symtab.to_str(read.register)), "accessor":accessor,
-                "value":read.value.to_string(shared), "guard":{"expression":expression, "symbols":symbols}})
-            })
-            .collect();
-        let join = match record.join {
-            RegionPoint::Instruction(pc) => json!({"instruction":pc}),
-            RegionPoint::FunctionExit => json!({"function_exit":true}),
-        };
-        let record_id = NEXT_RECORD
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("合并记录编号溢出");
-        let value = json!({"schema_version":1, "record_id":record_id, "task_id":task_id.as_usize(),
-            "function":zencode::decode(shared.symtab.to_str(record.function)), "branch_pc":record.branch_pc, "join":join,
-            "source_loc":record.source_loc, "location":record.source_loc.location_string(shared.symtab.files()),
-            "condition":symbol_json(record.condition, &smtlib::Ty::Bool), "input_symbols":inputs,
-            "single_arm_reads":reads, "depth":record.depth, "outcome":if record.dead { "dead" } else { "merged" }});
-        let mut line = serde_json::to_vec(&value).expect("合并记录必须可序列化");
-        line.push(b'\n');
-        output.lock().unwrap().write_all(&line).expect("写入 ISLA_MERGE_RECORDS 失败");
-    }
 }

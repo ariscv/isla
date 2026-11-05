@@ -1,5 +1,44 @@
 # 区域合并记录（I3 / I4）
 
+## F2 评审修复（2026-11-05，基于 2f3de84）
+
+当前 const 配置下的真实 IR 结果仍为 **10 → 1**，23 项 Z3 等价与覆盖检查通过，投影枚举仍为 10 类（8 类固定 true、2 类符号返回）。下文 I3/I4 的 10 → 6 保留为对应版本的历史结果。
+
+本次行为与记录语义变化：
+
+- 惰性初值跨臂提升时，同步提升 union 合法标签约束，递归覆盖复合值，适用于寄存器、局部变量和 let；嵌套提升在每个父层重复这一规则。
+- 推演中符号参数的悲观断言以 `symbolic_assertion` 拒绝；具体 false 仍为死臂、具体 true 继续。其他二元断言错误须证明参数在当前臂条件下不可能为真，才可提交为死臂。不透明实现的断言错误拒绝推演。`assume` 的带条件提交协议保持原样。
+- 仅拒绝外层仍不足以保留成功输入：普通执行若马上重新合并内层，悲观断言仍会失败。因此拒绝区域在普通分叉回放期间暂停 adaptive 合并，离开其汇合点后恢复。显式 Force 不会被这一暂停静默覆盖，而是报告同一拒绝并退出。
+- Force 中所有合并失败共用运行级诊断、规则失败记账、统计收尾和退出码 86，覆盖 SMT 错误、路径超时及推演预算耗尽。Adaptive 中错误逐层回滚到最外层后恢复普通分叉。诊断新增 `error` 文本；原始 SMT 错误保留，非推演拒绝错误的 `rejected_function_id` 为 null。
+- 纯计算定义区间随执行帧保存，覆盖区域前的 `pow_int`，不再依附已成功合并的记录。只为本次新增的记录展开输入，不重算历史记录。输出关闭时跳过全部依赖扫描；配置读取时机见下文。
+- 静态效应与调用图摘要移至 [region_summary.rs](../../isla-lib/src/executor/region_summary.rs)，记录、依赖分析和 JSON 输出移至 [merge_record.rs](../../isla-lib/src/executor/merge_record.rs)。保留既有 CFG、值合并和统计接口。
+
+新增测试在 [region_merge_tests.rs](../../isla-lib/src/executor/tests/region_merge_tests.rs)，名称统一以 `region_merge_f2_` 开头：
+
+| 评审项 | HEAD 反例结果与修复后的验证 |
+| --- | --- |
+| 1 / 5 | `union_initial_value_constraints` 在 HEAD 可得到非法标签，确认为红；修复后寄存器/变量/let × 单层/嵌套 × union/结构体全部通过，分叉与合并中“既非 A 又非 B”均为 Unsat。 |
+| 2 / 5 | `nested_pessimistic_assert_success_domain` 在 HEAD 丢失成功输入，确认为红；修复后成功域等价，并验证退出回放区域后恢复合并。`concrete_pessimistic_assert` 在 HEAD 已通过，修复后继续通过；既有 `assume(false)` 对照也通过。 |
+| 3 | `force_and_adaptive_errors` 在 HEAD 的 Force 超时未退出 86，确认为红；早期 Adaptive 红测也证实错误直接终止路径。修复后对子进程注入 Timeout、SMT 超时错误、预算耗尽及不透明断言错误，分别核对 Force 的 86、诊断和统计，以及 Adaptive 回滚后的两条正常路径。注入是确定性错误出口测试，不声称发生了真实 SMT 超时。 |
+| 4 | `pow_before_region_inputs` 在 HEAD 把中间乘积记为输入，确认为红；修复后自由输入为分支条件与原始 n，覆盖布尔派生整数及独立 128 位整数两种来源。 |
+| 6 | `records_disabled_skips_scan` 在 HEAD 扫描计数增加，确认为红；修复后为零，并验证启动后修改环境变量仍不启用输出。 |
+| 7 | 无行为反例；职责迁移由全部既有区域、策略、记录并发输出和真实 IR 测试验证。同步修订 `pow_int`、原语效应表及旧测试迁移注释。 |
+| 8 | 未证实现有原语的可达反例。逐项核查 `mark_bitvector`：加减位向量、切片、切片更新均先 fresh/define 再标记；内存调用在区域中预拒绝。HEAD 的 `commit_transaction` 和 `commit_dead_transaction` 已断言 invalid 为 false，故“失效保存点可能无检查提交”的担忧不成立。本次在臂及区域调用提交前再显式断言；`invalid_savepoint_panics_before_arm_commit` 人工注入对父层符号属性的修改并验证 panic，未将它冒充现有原语的可达反例。 |
+
+验证参数统一使用 `cargo test -j 4 --offline --features smt-thread-interrupt`，测试并发最多 4；每条命令限时 590 秒。仅构建 debug，未执行 Git 写操作，也未修改 `smt/`。
+
+| 验证 | 结果 |
+| --- | --- |
+| F2 新增测试 | 7/7 通过；HEAD 上 5 红、2 已通过。 |
+| region_merge / speculation / regions / path_merging / stats | 分别 34 / 14 / 28 / 6 / 12 通过；区域两组各有同一项默认忽略的外部 IR 测试。 |
+| primop 筛选 | 91 通过、1 失败；失败仅为给定基线的 `special_primop_retry_counts_call_once`。 |
+| 两个 debug 二进制 cargo check、cargo fmt | 通过。 |
+| 真实 IR 静态摘要回归 | 显式执行默认忽略测试，通过。 |
+| 完整 isla-lib 与现场 HEAD 对照 | F2 为 681 通过、13 失败、2 忽略；HEAD 为 674 通过、相同 13 失败、2 忽略。新增失败为零。 |
+
+全量结果与给定“12 项失败”的差别必须保留：本机额外复现 `smt::tests::deadline到期中断check返回超时错误`，其 1ms 查询提前得到 Sat。未改动 HEAD 在相同构建参数和 4 测试线程下同样失败；历史 I3 也记录过此时序问题。本次没有修改或跳过该测试，也不把现场 13 项报告成仅 12 项。
+
+
 I4 已完成固定配置值的原语效应分类与新旧配置对照：两种配置均为 **10 → 6**，两组各 23 项 Z3 检查及 10 类投影枚举通过。新配置的剩余拒绝来自 `internal_error<o>` 异常路径。详见 [I4 完整记录](i4-const-primops.md)。以下保留 I3 历史记录。
 
 I3 已接入调用图最小不动点摘要、两个入口的加载期校验、JSON Lines 输出，以及正常结束和 Force 强退前的按规则统计。真实基线配置下，`pte_is_invalid` 的路径数为 **10 → 6**；23 项 Z3 检查及 10 类投影枚举通过。剩余拒绝来自未知原语调用，详见下文。
@@ -15,7 +54,7 @@ export ISLA_STATS=1
 # --path-merging 开启全局 adaptive；也可仅通过 merge_policy 开启局部规则。
 ```
 
-`ISLA_MERGE_RECORDS` 在首次成功提交时读取，进程内固定该路径。以追加方式打开，已有文件不会截断；新实验应使用新路径或先自行清空。每条记录是一个 UTF-8 JSON 对象，末尾有换行；进程内所有执行线程共用互斥写端，完整序列化后持锁写入，行不会交错。文件不经用户态缓冲，不依赖正常退出时析构刷新。不同进程应使用不同文件。
+`ISLA_MERGE_RECORDS` 在首次创建执行任务状态（`TaskState::new`）时读取并缓存，进程内固定该路径；之后改变环境变量不影响该进程。关闭输出时不划定纯计算符号区间，也不扫描执行迹或展开输入依赖，帧内记录的 `input_symbols` 保持空集。文件仍在首次发布记录时打开。以追加方式打开，已有文件不会截断；新实验应使用新路径或先自行清空。每条记录是一个 UTF-8 JSON 对象，末尾有换行；进程内所有执行线程共用互斥写端，完整序列化后持锁写入，行不会交错。文件不经用户态缓冲，不依赖正常退出时析构刷新。不同进程应使用不同文件。
 
 内层记录先随帧和求解器事务保留，最外层提交成功后统一发布。外层回滚时不会输出其已丢弃的内层记录；后续普通分叉重新完成的合并会输出新记录。只发布本次新增的记录，冻结、恢复或后续区域提交不会重复输出历史记录。两臂都死亡的剪枝也记一条 `outcome = "dead"`，与成功提交统计对应；失败尝试不输出记录。
 
@@ -34,7 +73,7 @@ export ISLA_STATS=1
 | `source_loc` | 对象 | 原始 SourceLoc：`file/line1/char1/line2/char2`；`file = -1` 表示未知 |
 | `location` | 字符串 | 经 IR 文件表解析的源码位置，便于阅读 |
 | `condition` | 符号对象 | 本区域的布尔条件符号 |
-| `input_symbols` | 符号对象数组 | 合并值及条件的自由输入；展开 `DefineConst` 与纯计算新鲜等式依赖后，仅保留自由声明，按变量号排序 |
+| `input_symbols` | 符号对象数组 | 合并值及条件的自由输入；展开 `DefineConst` 与区域前后纯计算新鲜等式依赖后，仅保留自由声明，按变量号排序。只在输出开启时计算 |
 | `single_arm_reads` | 数组 | 单臂寄存器读取及完整外层保护条件 |
 | `depth` | 整数 | 合并嵌套深度，从 `1` 开始；普通函数调用不单独增加此值 |
 | `outcome` | 字符串 | `merged` 或 `dead` |

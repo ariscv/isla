@@ -860,7 +860,7 @@ fn region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit()
         ]
         .into_boxed_slice(),
     );
-    let summaries = region_merge::function_effect_summaries(&shared);
+    let summaries = region_summary::function_effect_summaries(&shared);
     assert!(summaries[&throwing].non_returning);
     assert!(!summaries[&wrapper].non_returning);
     assert_eq!(summaries[&wrapper].effect, primop::Effect::Pure);
@@ -925,7 +925,7 @@ fn region_merge_non_returning_requires_all_paths_and_preserves_normal_writes() {
         ]
         .into_boxed_slice(),
     );
-    let summaries = region_merge::function_effect_summaries(&shared);
+    let summaries = region_summary::function_effect_summaries(&shared);
     assert!(!summaries[&function].non_returning);
     assert_eq!(summaries[&function].effect, primop::Effect::WritesState);
     let mut frame = make_frame(vec![
@@ -1002,7 +1002,7 @@ fn region_merge_non_returning_fixed_point_is_conservative_for_recursion_and_exce
     ] {
         shared.functions.insert(a, (Vec::new(), &Ty::Bool, Box::leak(body_a.into_boxed_slice())));
         shared.functions.insert(b, (Vec::new(), &Ty::Bool, Box::leak(body_b.into_boxed_slice())));
-        let summaries = region_merge::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared);
         assert_eq!(summaries[&a].non_returning, expected_a);
         assert_eq!(summaries[&b].non_returning, expected_b);
     }
@@ -1375,7 +1375,7 @@ fn region_merge_recursive_effect_least_fixed_point() {
     ] {
         shared.functions.insert(a, (Vec::new(), &Ty::Bool, Box::leak(body_a.into_boxed_slice())));
         shared.functions.insert(b, (Vec::new(), &Ty::Bool, Box::leak(body_b.into_boxed_slice())));
-        let summaries = region_merge::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared);
         assert_eq!(summaries[&a].effect, expected);
         if expected != Effect::Pure {
             assert_eq!(summaries[&b].effect, expected);
@@ -1427,7 +1427,7 @@ fn region_merge_real_ir_effects() {
             Vec::new(),
             Vec::new(),
         );
-        let summaries = region_merge::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared);
         for function in [
             "zinternal_errorzIozK",
             "zget_xLPE",
@@ -1646,7 +1646,7 @@ fn region_merge_effects_use_external_binding_and_reject_callee_vector_writes() {
     shared.externs.insert(alias, (&[], &Ty::Bool, "unregistered_effect"));
     shared.functions.get_mut(&caller).unwrap().2 =
         Box::leak(vec![Instr::Call(Loc::Id(RETURN), false, alias, Vec::new(), info()), Instr::End].into_boxed_slice());
-    assert_eq!(region_merge::function_effect_summaries(&shared)[&caller].effect, primop::Effect::MayFork);
+    assert_eq!(region_summary::function_effect_summaries(&shared)[&caller].effect, primop::Effect::MayFork);
     shared.functions.get_mut(&caller).unwrap().2 = Box::leak(
         vec![Instr::Call(Loc::Id(RETURN), false, WRITE_REGISTER_FROM_VECTOR, Vec::new(), info()), Instr::End]
             .into_boxed_slice(),
@@ -1706,7 +1706,7 @@ fn zcaller(zunit) {
             Vec::new(),
             Vec::new(),
         );
-        let summaries = region_merge::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared);
         assert_eq!(summaries[&shared.symtab.lookup("zcaller")].effect, expected, "配置条目：{entry}");
         if expected != primop::Effect::MayFork {
             let program = vec![
@@ -1725,4 +1725,433 @@ fn zcaller(zunit) {
             }
         }
     }
+}
+
+#[test]
+fn region_merge_f2_union_initial_value_constraints() {
+    for nested in [false, true] {
+        for composite in [false, true] {
+            for binding in ["register", "variable", "let"] {
+                for merge in [false, true] {
+                    let mut shared = empty_shared_state();
+                    let union = shared.symtab.intern("zf2union");
+                    let a = shared.symtab.intern("zf2A");
+                    let b = shared.symtab.intern("zf2B");
+                    let name = shared.symtab.intern("zf2initial");
+                    shared.type_info.unions.insert(union, vec![(a, Ty::Unit), (b, Ty::Unit)]);
+                    let pair = shared.symtab.intern("zf2pair");
+                    let field = shared.symtab.intern("zf2field");
+                    shared
+                        .type_info
+                        .structs
+                        .insert(pair, std::collections::BTreeMap::from([(field, Ty::Union(union))]));
+                    let ty = Box::leak(Box::new(if composite { Ty::Struct(pair) } else { Ty::Union(union) }));
+                    let read = if composite { Exp::Field(Box::new(Exp::Id(name)), field) } else { Exp::Id(name) };
+                    let mut program = vec![
+                        Instr::Jump(input(0), 3, info()),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                        Instr::Goto(4),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Kind(a, Box::new(read.clone())), info()),
+                        Instr::Copy(
+                            Loc::Id(RETURN),
+                            Exp::Call(
+                                Op::And,
+                                vec![Exp::Kind(a, Box::new(read.clone())), Exp::Kind(b, Box::new(read.clone()))],
+                            ),
+                            info(),
+                        ),
+                        Instr::End,
+                    ];
+                    if nested {
+                        // 在外层真臂内再次分支；仅内层真臂首次读取 union。
+                        program = vec![
+                            Instr::Jump(input(0), 3, info()),
+                            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                            Instr::Goto(8),
+                            Instr::Jump(input(1), 6, info()),
+                            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                            Instr::Goto(7),
+                            Instr::Copy(Loc::Id(RETURN), Exp::Kind(a, Box::new(read.clone())), info()),
+                            Instr::Goto(8),
+                            program[4].clone(),
+                            Instr::End,
+                        ];
+                    }
+                    let mut frame = make_frame(program);
+                    match binding {
+                        "register" => frame.regs_mut().insert(name, false, UVal::Uninit(ty)),
+                        "variable" => {
+                            frame.vars_mut().insert(name, UVal::Uninit(ty));
+                        }
+                        "let" => {
+                            frame.lets_mut().insert(name, UVal::Uninit(ty));
+                        }
+                        _ => unreachable!(),
+                    }
+                    let context = Context::new(Config::new());
+                    let mut solver = Solver::new(&context);
+                    let g = solver.declare_const(smtlib::Ty::Bool, info());
+                    let h = solver.declare_const(smtlib::Ty::Bool, info());
+                    frame.vars_mut().insert(test_name(901), UVal::Init(Val::Symbolic(h)));
+                    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(g)));
+                    let state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
+                    let count = Mutex::new(0);
+                    start_single(
+                        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+                        &shared,
+                        &count,
+                        &|_, _, result, _, mut solver, count| {
+                            let Ok((Run::Finished(value), frame)) = result else {
+                                panic!("union 用例必须完成");
+                            };
+                            assert!(
+                                solver.check_sat_with(&smt_value(&value, info()).unwrap(), info()).is_unsat().unwrap(),
+                                "{binding}, merge={merge}: union 初值不得既非 A 又非 B"
+                            );
+                            if merge {
+                                assert!(!frame.region_merge_records().is_empty());
+                            }
+                            *count.lock().unwrap() += 1;
+                        },
+                    );
+                    assert_eq!(
+                        *count.lock().unwrap(),
+                        if merge {
+                            1
+                        } else if nested {
+                            3
+                        } else {
+                            2
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn region_merge_f2_nested_pessimistic_assert_success_domain() {
+    let mut shared = empty_shared_state();
+    let function = helper(&mut shared);
+    let arg = test_name(980);
+    shared.functions.insert(
+        function,
+        (
+            vec![(arg, &Ty::Bool)],
+            &Ty::Bool,
+            Box::leak(
+                vec![
+                    Instr::Jump(Exp::Id(arg), 3, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                    Instr::Goto(4),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                    Instr::End,
+                ]
+                .into_boxed_slice(),
+            ),
+        ),
+    );
+    let x = test_name(981);
+    let unit = test_name(982);
+    let program = vec![
+        Instr::Decl(x, Ty::Bool, info()),
+        Instr::Decl(unit, Ty::Unit, info()),
+        Instr::Jump(input(0), 5, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(8),
+        Instr::Call(Loc::Id(x), false, function, vec![input(1)], info()),
+        Instr::PrimopBinary(
+            Loc::Id(unit),
+            primop::binary_primops()["pessimistic_assert"],
+            Exp::Id(x),
+            Exp::String("f2".into()),
+            info(),
+        ),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program.clone(), &shared, 2, false), (2, 2));
+    shared.function_regions.lock().unwrap().clear();
+    let wrapper = shared.symtab.intern("zf2wrapper");
+    shared.functions.insert(
+        wrapper,
+        (
+            vec![(test_name(900), &Ty::Bool), (test_name(901), &Ty::Bool)],
+            &Ty::Bool,
+            Box::leak(program.into_boxed_slice()),
+        ),
+    );
+    let resumed = vec![
+        Instr::Call(Loc::Id(RETURN), false, wrapper, vec![input(0), input(1)], info()),
+        Instr::Jump(input(2), 4, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(5),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(resumed, &shared, 3, false), (4, 2), "回放离开函数出口区域后恢复合并");
+}
+
+#[test]
+fn region_merge_f2_concrete_pessimistic_assert() {
+    for value in [false, true] {
+        let shared = empty_shared_state();
+        let unit = test_name(982);
+        let program = vec![
+            Instr::Decl(unit, Ty::Unit, info()),
+            Instr::Jump(input(0), 4, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::Goto(6),
+            Instr::PrimopBinary(
+                Loc::Id(unit),
+                primop::binary_primops()["pessimistic_assert"],
+                Exp::Bool(value),
+                Exp::String("f2".into()),
+                info(),
+            ),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        let result = differential(program, &shared, 1, value);
+        assert_eq!(result, (if value { 2 } else { 1 }, 1));
+    }
+}
+
+#[test]
+fn region_merge_f2_pow_before_region_inputs() {
+    if std::env::var_os("ISLA_F2_INPUT_CHILD").is_none() {
+        let path = std::env::temp_dir().join(format!("isla-f2-inputs-{}.jsonl", std::process::id()));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_merge_tests::region_merge_f2_pow_before_region_inputs",
+                "--nocapture",
+            ])
+            .env("ISLA_F2_INPUT_CHILD", "1")
+            .env("ISLA_MERGE_RECORDS", &path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        std::fs::remove_file(path).unwrap();
+        return;
+    }
+    let shared = empty_shared_state();
+    let n = test_name(990);
+    let x = test_name(991);
+    let program = vec![
+        Instr::Decl(n, Ty::I128, info()),
+        Instr::Decl(x, Ty::I128, info()),
+        Instr::PrimopUnary(Loc::Id(n), primop::unary_primops()["isla_bool_to_bit"], input(1), info()),
+        Instr::PrimopBinary(Loc::Id(n), primop::binary_primops()["zero_extend"], Exp::Id(n), Exp::I128(128), info()),
+        Instr::PrimopBinary(Loc::Id(x), primop::binary_primops()["pow_int"], Exp::Id(n), Exp::I128(2), info()),
+        Instr::Jump(input(0), 8, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(x), Exp::I128(0)]), info()),
+        Instr::Goto(9),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(x), Exp::I128(1)]), info()),
+        Instr::End,
+    ];
+    let merged = paths(program.clone(), &shared, 2, true);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].records[0].input_symbols,
+        HashSet::from([Sym { id: 0 }, Sym { id: 1 }]),
+        "区域前纯计算也必须展开到原始输入"
+    );
+    assert_eq!(differential(program, &shared, 2, true), (2, 1));
+    let shared = empty_shared_state();
+    let program = vec![
+        Instr::Decl(n, Ty::I128, info()),
+        Instr::Decl(x, Ty::I128, info()),
+        Instr::PrimopBinary(Loc::Id(x), primop::binary_primops()["pow_int"], Exp::Id(n), Exp::I128(2), info()),
+        Instr::Jump(input(0), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(x), Exp::I128(0)]), info()),
+        Instr::Goto(7),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(x), Exp::I128(1)]), info()),
+        Instr::End,
+    ];
+    let merged = paths(program, &shared, 1, true);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].records[0].input_symbols, HashSet::from([Sym { id: 0 }, Sym { id: 1 }]));
+}
+
+fn f2_error(case: &str) -> ExecError {
+    if case == "timeout" {
+        return ExecError::Timeout;
+    }
+    if case == "assertion" {
+        return ExecError::AssertionFailure(None, info());
+    }
+    struct Dump;
+    impl crate::timeout::SmtDumpSource for Dump {
+        fn materialize(&self) -> Result<String, String> {
+            Ok("(check-sat)".into())
+        }
+    }
+    ExecError::Smt(crate::error::SmtError::Timeout(Arc::new(crate::timeout::SmtTimeout {
+        source_loc: info(),
+        operation: crate::timeout::SmtOperation::CheckSat,
+        limit: Duration::from_millis(1),
+        operation_wall: Duration::from_millis(1),
+        dump: Arc::new(crate::timeout::TimeoutSmtDump::new(Arc::new(Dump))),
+    })))
+}
+
+#[test]
+fn region_merge_f2_force_and_adaptive_errors() {
+    if let Ok(case) = std::env::var("ISLA_F2_ERROR_CHILD") {
+        let mut shared = empty_shared_state();
+        let root = shared.symtab.intern("zf2errors");
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let error_case = case.clone();
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::PrimopReset(
+                Loc::Id(RETURN),
+                Arc::new(move |_, _, solver| {
+                    if solver.transaction_depth() != 0 {
+                        Err(f2_error(&error_case))
+                    } else {
+                        Ok(Val::Bool(true))
+                    }
+                }),
+                primop::Effect::Pure,
+                info(),
+            ),
+            Instr::End,
+        ];
+        let force = std::env::var_os("ISLA_F2_FORCE").is_some();
+        let mut state = TaskState::new().with_execution_limits(policy_limits(
+            &shared,
+            vec![(root, if force { crate::config::MergeMode::Force } else { crate::config::MergeMode::Adaptive })],
+        ));
+        if case == "budget" {
+            state = state.with_region_step_budget(0);
+        }
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut frame = make_frame(program);
+        frame.function_name = root;
+        frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+        let count = Mutex::new(0);
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+            &shared,
+            &count,
+            &|_, _, result, _, solver, count| {
+                assert!(!force, "Force 错误必须进程退出");
+                let Ok((Run::Finished(_), frame)) = result else {
+                    panic!("adaptive 错误必须普通分叉重跑");
+                };
+                assert_eq!(solver.transaction_depth(), 0);
+                assert!(frame.region_merge_records().is_empty());
+                *count.lock().unwrap() += 1;
+            },
+        );
+        assert_eq!(*count.lock().unwrap(), 2);
+        return;
+    }
+    for force in [true, false] {
+        for case in ["timeout", "smt", "budget", "assertion"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "executor::tests::region_merge_tests::region_merge_f2_force_and_adaptive_errors",
+                    "--nocapture",
+                ])
+                .env("ISLA_F2_ERROR_CHILD", case)
+                .env("ISLA_STATS", "1")
+                .env_remove("ISLA_F2_FORCE");
+            if force {
+                command.env("ISLA_F2_FORCE", "1");
+            }
+            let started = Instant::now();
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(output.status.code(), Some(if force { 86 } else { 0 }), "force={force}, case={case}: {stderr}");
+            assert!(started.elapsed() < Duration::from_secs(10));
+            if force {
+                let diagnostic: serde_json::Value =
+                    stderr.lines().find_map(|line| serde_json::from_str(line).ok()).unwrap();
+                let reason = match case {
+                    "timeout" => "timeout",
+                    "smt" => "smt_error",
+                    "assertion" => "symbolic_assertion",
+                    _ => "step_budget",
+                };
+                assert_eq!(diagnostic["reason"], reason);
+                assert!(stderr.contains("[MERGE_STATS]"));
+                assert!(stderr.contains("[FORK_STATS]"));
+                assert!(stderr.contains("[SPECULATION_REJECT_STATS]"));
+            }
+        }
+    }
+}
+
+#[test]
+fn region_merge_f2_records_disabled_skips_scan() {
+    if std::env::var_os("ISLA_F2_NO_RECORDS_CHILD").is_some() {
+        assert!(std::env::var_os("ISLA_MERGE_RECORDS").is_none());
+        let shared = empty_shared_state();
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        let state = TaskState::<B64>::new();
+        assert!(state.execution_limits.is_none());
+        let ignored = std::env::temp_dir().join(format!("isla-f2-ignored-{}.jsonl", std::process::id()));
+        std::env::set_var("ISLA_MERGE_RECORDS", &ignored);
+        let before = merge_record::DEPENDENCY_SCANS.load(Ordering::Relaxed);
+        assert_eq!(paths(program, &shared, 1, true).len(), 1);
+        assert_eq!(merge_record::DEPENDENCY_SCANS.load(Ordering::Relaxed), before, "关闭记录不得扫描迹");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "executor::tests::region_merge_tests::region_merge_f2_records_disabled_skips_scan",
+            "--nocapture",
+        ])
+        .env("ISLA_F2_NO_RECORDS_CHILD", "1")
+        .env_remove("ISLA_MERGE_RECORDS")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// 人工注入内部不变量违反：不是某个现有原语的可达反例。
+#[test]
+#[should_panic(expected = "臂提交前保存点必须有效")]
+fn region_merge_f2_invalid_savepoint_panics_before_arm_commit() {
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let g = solver.declare_const(smtlib::Ty::Bool, info());
+    let old = solver.declare_const(smtlib::Ty::BitVec(64), info());
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::PrimopReset(
+            Loc::Id(RETURN),
+            Arc::new(move |_, _, solver| {
+                solver.mark_bitvector(old);
+                Ok(Val::Bool(true))
+            }),
+            primop::Effect::Pure,
+            info(),
+        ),
+        Instr::End,
+    ]);
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(g)));
+    let result = merge_region_for_test(g, 3, &mut frame, &shared, &mut solver, info(), None, None);
+    assert!(result.is_ok(), "不变量违反必须直接 panic");
 }

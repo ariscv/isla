@@ -948,7 +948,7 @@ fn pow_int<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
             }
             let mut exponent = exp;
             // 使用声明与等式保持 Z3 中间乘积共享，不能用会被内联化简的 DefineConst。
-            // 这些断言在推测事务中会使事务无效，由执行器拒绝该次合并。
+            // 推演保存点提交时给等式补臂条件；记录输出按纯计算区间展开依赖。
             let mut power = base;
             let mut acc = None;
             while exponent > 0 {

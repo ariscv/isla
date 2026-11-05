@@ -230,7 +230,7 @@ pub fn effect(name: &str) -> Option<Effect> {
         "get_cycle_count" | "elf_entry" => Some(Effect::ReadsState),
         // 当前是常量/错误桩；保守保留配置、睡眠、标签和读失败的状态访问契约。
         "sail_get_verbosity" | "sleeping" | "read_tag_bool" | "bad_read" => Some(Effect::ReadsState),
-        // assume/乐观断言修改路径条件；悲观断言也属于不可推演的断言契约。
+        // assume/乐观断言修改路径条件；推演按条件提交。悲观断言仅放行具体布尔参数。
         "assume" | "optimistic_assert" | "pessimistic_assert" => Some(Effect::WritesState),
         // 递增周期数或发布迹事件。
         "cycle_count"
