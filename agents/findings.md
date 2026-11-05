@@ -393,3 +393,14 @@ timeout --signal=TERM --kill-after=5s 590s \
 ```
 
 主机可见 128 个 CPU，本轮构建限为 8 路，测试串行，每条外层最多 595 秒。复跑脚本、完整输出、精确命令与退出码位于 [函数基线目录](path_merge_call_support/baseline.md)、[复跑脚本](path_merge_call_support/run_failed_tests.py) 和 [结果索引](path_merge_call_support/logs/failed_tests.json)。逐项日志为该目录 `logs/review12_tests.log`、`review13_tests.log`、`review14_tests.log`、`review21_tests.log`、`review8_tests.log`。
+
+## 路径合并分支 HEAD 即失败的测试：完整基线为 12 个（2026-11-05 修订）
+
+上一节只列了 5 个 `merge` 过滤下的失败；对 `isla-lib` 全量测试（`cargo test -p isla-lib --offline --features smt-thread-interrupt`）的完整复跑显示，提交 6819246（含 `merge_policy` 配置层，尚无推演模式）上就有 12 个失败，它们与后续推演模式相关改动无关：
+
+- `internal_vector_init_after_merge`、`monomorphize_machine_integer_after_merge_does_not_crash`、`internal_vector_update_retries_merged_index`、`review21_merged_overflow_path`、`adversarial_merge_machine_index_width`（上一节的 5 个）；
+- `special_primop_retry_counts_call_once`（该测试默认关闭路径合并，实际结果数 1、预期 2）；
+- `machine_integer_models_preserve_negative_i64_and_i128`、`read_register_vector_retries_strings`、`review17_hex_machine_integer_width`；
+- 三个中文命名测试：`寄存器解引用与向量单项符号索引必须精确过滤`、`宽位转换在合并前后保留数值`、`合并后单态化不得采用任意默认值`。
+
+适用提交：6819246 及其后的 C1–C4 合并（47e0cfc、677d21f、6809968、e828b0b），合并后全量为 626 通过、12 失败，失败集合与基线逐个相同。根因尚未调查；改动这些测试之前不应把它们算作新改动造成的回归。
