@@ -449,6 +449,10 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
     use smtlib::Exp::{Not, Var};
+    static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
+    let record_id = NEXT_RECORD
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("合并记录编号溢出");
     let parent = frame.region_execution.clone();
     let execution = RegionExecution {
         region: region.clone(),
@@ -577,11 +581,25 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
         }
     }
+    // 只修改本次推演产生的根记录。历史前缀和已连接的后代保持原上下文。
+    for (index, arm) in arms.iter_mut().enumerate() {
+        if let Some(arm) = arm {
+            for record in &mut arm.region_merge_records[frame.region_merge_records.len()..] {
+                if record.parent_record.is_none() {
+                    record.parent_record = Some(record_id);
+                    record.arm = if index == 0 { "then" } else { "else" };
+                }
+            }
+        }
+    }
     let right = arms.pop().unwrap();
     let left = arms.pop().unwrap();
     let mut merged = match (left, right) {
         (None, None) => {
             frame.region_merge_records.push(RegionMergeRecord {
+                record_id,
+                parent_record: None,
+                arm: "root",
                 function: frame.function_name,
                 branch_pc: region.branch_pc,
                 join: region.join,
@@ -610,6 +628,9 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 })
                 .collect();
             arm.region_merge_records.push(RegionMergeRecord {
+                record_id,
+                parent_record: None,
+                arm: "root",
                 function: frame.function_name,
                 branch_pc: region.branch_pc,
                 join: region.join,
@@ -623,7 +644,9 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             });
             arm
         }
-        (Some(left), Some(right)) => merge_states(condition, &base, left, right, &region, state, shared, solver, info)?,
+        (Some(left), Some(right)) => {
+            merge_states(record_id, condition, &base, left, right, &region, state, shared, solver, info)?
+        }
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
     record.value_symbols.insert(condition);
@@ -670,6 +693,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
 #[allow(clippy::too_many_arguments)]
 fn merge_states<'ir, B: BV>(
+    record_id: usize,
     condition: Sym,
     base: &LocalFrame<'ir, B>,
     left: LocalFrame<'ir, B>,
@@ -863,6 +887,9 @@ fn merge_states<'ir, B: BV>(
     merged.region_merge_records.extend(left.region_merge_records[prefix..].iter().cloned());
     merged.region_merge_records.extend(right.region_merge_records[prefix..].iter().cloned());
     merged.region_merge_records.push(RegionMergeRecord {
+        record_id,
+        parent_record: None,
+        arm: "root",
         function: base.function_name,
         branch_pc: region.branch_pc,
         join: region.join,

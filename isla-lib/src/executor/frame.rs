@@ -61,8 +61,9 @@ pub struct LocalState<'ir, B> {
     pub(super) regs: RegisterBindings<'ir, B>,
     pub(super) lets: Bindings<'ir, B>,
     pub(super) probes: LocalDebugProbes,
-    // 仅记录输出开启时保存路径上纯计算的符号区间，随分叉、调用和保存点一起复制。
+    // 记录输出或枚举开启时保存路径上纯计算的符号区间，随分叉、调用和保存点一起复制。
     pub(super) pure_definitions: Vec<(u32, u32)>,
+    pub(super) enumerate_merges: bool,
     pub(super) speculative_access: Option<super::region_merge::AccessLog<B>>,
     // 表达式地址在 IR 生命周期内稳定；缓存只跨同一条指令的分叉重试。
     pub(super) expression_values: HashMap<usize, Val<B>>,
@@ -470,6 +471,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 probes,
                 speculative_access: None,
                 pure_definitions: Vec::new(),
+                enumerate_merges: false,
                 expression_values: HashMap::new(),
                 expression_retry_operands: None,
             },
@@ -494,6 +496,19 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         self.local_state.speculative_access.as_ref().map(|access| &access.writes)
     }
 
+    /// ExecuteAs 等以检查点重建帧的入口必须同时携带本路径合并历史。
+    pub fn merge_history(&self) -> (Vec<super::RegionMergeRecord<B>>, Vec<(u32, u32)>) {
+        (self.region_merge_records.clone(), self.local_state.pure_definitions.clone())
+    }
+
+    pub fn restore_merge_history(&mut self, history: (Vec<super::RegionMergeRecord<B>>, Vec<(u32, u32)>)) {
+        assert!(
+            self.region_merge_records.is_empty() && self.local_state.pure_definitions.is_empty(),
+            "只向新帧恢复合并历史"
+        );
+        (self.region_merge_records, self.local_state.pure_definitions) = history;
+    }
+
     pub fn new_call(
         &self,
         name: Name,
@@ -509,6 +524,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.region_merge_records = self.region_merge_records.clone();
         new_frame.local_state.speculative_access = self.local_state.speculative_access.clone();
         new_frame.local_state.pure_definitions = self.local_state.pure_definitions.clone();
+        new_frame.local_state.enumerate_merges = self.local_state.enumerate_merges;
         new_frame.path_timing = self.path_timing.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
@@ -528,10 +544,13 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         state: &'task TaskState<B>,
         checkpoint: Checkpoint<B>,
     ) -> Task<'ir, 'task, B> {
+        let mut frame = freeze_frame(self);
+        Arc::make_mut(&mut frame.local_state).enumerate_merges =
+            state.execution_limits.as_ref().is_some_and(|limits| limits.merge_enumeration.enabled);
         Task {
             id: task_id,
             fraction: Fraction::one(),
-            frame: freeze_frame(self),
+            frame,
             checkpoint,
             fork_cond: None,
             state,

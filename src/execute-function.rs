@@ -214,7 +214,7 @@ fn isla_main() -> i32 {
         eprintln!("{}", error);
         return executor::FORCE_MERGE_EXIT_CODE;
     }
-    let task_state = TaskState::new().with_execution_limits(limits);
+    let task_state = Arc::new(TaskState::new().with_execution_limits(limits));
 
     frame.add_lets(&lets).add_regs(&regs);
 
@@ -229,14 +229,14 @@ fn isla_main() -> i32 {
     let tree = matches.opt_present("tree");
     let error_traces = matches.opt_present("error-traces");
     let models = matches.opt_present("model");
-    let collecting = Arc::new((SegQueue::new(), tree | traces | error_traces, models));
+    let collecting = Arc::new((SegQueue::new(), tree | traces | error_traces, models, task_state.clone()));
     let now = Instant::now();
     executor::start_multi(num_threads, timeout, vec![task], &shared_state, collecting.clone(), &model_collector);
 
     eprintln!("Execution took: {}ms", now.elapsed().as_millis());
     shared_state.execution_stats.print(&shared_state);
 
-    let (queue, _, _) = collecting.as_ref();
+    let (queue, _, _, _) = collecting.as_ref();
 
     let write_events = |mut events, handle: &mut dyn Write| {
         if matches.opt_present("simplify") {
@@ -263,11 +263,14 @@ fn isla_main() -> i32 {
 
     loop {
         match queue.pop() {
-            Some(Ok((_, result, mut events))) if tree => {
+            Some(Ok((_, result, mut events, enumeration))) if tree => {
                 events.insert(0, Event::WriteReg(final_result_register, vec![], result.clone()));
                 let stdout = std::io::stdout();
                 let mut handle = stdout.lock();
                 writeln!(handle, "Result: {}", result.to_string(&shared_state)).unwrap();
+                if let Some(enumeration) = enumeration {
+                    writeln!(handle, "merge_enumeration: {}", enumeration).unwrap();
+                }
                 let events: Vec<Event<B129>> = events.drain(..).rev().collect();
                 if let Some(ref mut evtree) = evtree {
                     evtree.add_events(&events)
@@ -275,11 +278,14 @@ fn isla_main() -> i32 {
                     evtree = Some(EventTree::from_events(&events))
                 }
             }
-            Some(Ok((_, result, mut events))) => {
+            Some(Ok((_, result, mut events, enumeration))) => {
                 events.insert(0, Event::WriteReg(final_result_register, vec![], result.clone()));
                 let stdout = std::io::stdout();
                 let mut handle = stdout.lock();
                 writeln!(handle, "Result: {}", result.to_string(&shared_state)).unwrap();
+                if let Some(enumeration) = enumeration {
+                    writeln!(handle, "merge_enumeration: {}", enumeration).unwrap();
+                }
                 if traces {
                     write_events(events, &mut handle);
                 }
@@ -358,7 +364,8 @@ fn concrete_value<B: BV>(model: &mut Model<B>, val: &Val<B>) -> Result<Val<B>, E
     }
 }
 
-type AllTraceValueQueue<B> = SegQueue<Result<(TaskId, Val<B>, Vec<Event<B>>), (String, Vec<Event<B>>)>>;
+type AllTraceValueQueue<B> =
+    SegQueue<Result<(TaskId, Val<B>, Vec<Event<B>>, Option<serde_json::Value>), (String, Vec<Event<B>>)>>;
 
 fn model_collector<'ir, B: BV>(
     tid: usize,
@@ -366,12 +373,19 @@ fn model_collector<'ir, B: BV>(
     result: Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)>,
     shared_state: &SharedState<'ir, B>,
     mut solver: Solver<B>,
-    (collected, trace, models): &(AllTraceValueQueue<B>, bool, bool),
+    (collected, trace, models, state): &(AllTraceValueQueue<B>, bool, bool, Arc<TaskState<B>>),
 ) {
     let events: Vec<Event<B>> = if *trace { solver.trace().to_vec().drain(..).cloned().collect() } else { vec![] };
     match result {
-        Ok((Run::Finished(val), _)) => match solver.check_sat(SourceLoc::unknown()) {
+        Ok((Run::Finished(val), frame)) => match solver.check_sat(SourceLoc::unknown()) {
             SmtResult::Sat => {
+                let enumeration = match frame.enumerate_merges(&mut solver, state, shared_state, &val) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        collected.push(Err((error.to_string(), events)));
+                        return;
+                    }
+                };
                 let val = if *models {
                     let mut model = Model::new(&solver);
                     match concrete_value(&mut model, &val) {
@@ -384,7 +398,7 @@ fn model_collector<'ir, B: BV>(
                 } else {
                     val
                 };
-                collected.push(Ok((task_id, val, events)))
+                collected.push(Ok((task_id, val, events, enumeration)))
             }
             SmtResult::Error(error) => collected.push(Err((ExecError::Smt(error).to_string(), events))),
             SmtResult::Unsat | SmtResult::Unknown => {

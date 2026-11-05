@@ -1,0 +1,141 @@
+# E1：合并路径终态枚举
+
+合并路径在自己的求解器仍存活时进行两级投影枚举。一级按带上下文的守卫分出原始分叉叶子；二级在叶子内用阻断子句枚举实际被守卫测试的位片段组合。核心不包含 ISA 字段名、页表格式或页表遍历解码。
+
+## 配置与入口
+
+在 `--execution-limits-config` 指定的独立 TOML 中添加：
+
+```toml
+[execution_limits.merge_enumeration]
+enabled = true
+class_cap = 1024
+path_cap = 65536
+```
+
+三个字段均可省略，默认分别为 `false`、`1024`、`65536`。上限必须是正整数；未知字段、错误类型、零和负数会在加载时拒绝。`execution_limits.enabled=false` 仍沿用原有规则，不能同时配置其他限制字段。枚举开关与合并开关独立；还需用 `--path-merging` 或 `merge_policy` 开启希望合并的区域。
+
+isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isla-execute-function` 在该路径的 `Result:` 后输出单行 `merge_enumeration: {JSON}`，`--tree` 模式也保留此行。没有开启枚举时不查询模型、不扫描枚举依赖、不输出字段或附加行。旧 JSON 反序列化时缺少此字段仍有效。
+
+正常完成的处理器结果都参与枚举，包括 fault、page fault、access fault、非法指令等构造子。被路径条件排除、`Run::Dead`、执行器错误或未完成的路径不是正常处理器结果，不作为可行解输出。求解器返回 Unknown 或错误时明确报错，不替换成代表值，也不把它当作完整枚举或 UNSAT。
+
+## 前置核实
+
+| 核实项 | 结论与源码证据 |
+| --- | --- |
+| (a) 记录归属与回滚 | 原实现已经将记录保存在 `executor/frame.rs` 的 `Frame/LocalFrame.region_merge_records` 中；`freeze_frame`、`unfreeze_frame`、`new_call` 都复制历史。`region_merge.rs` 的 `execute_region` 在克隆帧中推演，`merge_states` 只拼接成功臂的新记录，最后才替换原帧。拒绝不替换原帧，求解器保存点同步回滚。记录不是按 task_id 收集的全局列表。E1 增加稳定编号和父子上下文，并让 isarch 的 ExecuteAs 检查点续执行同时携带帧内合并历史及纯定义区间。 |
+| (b) DefineConst 与阻断 | `smt.rs` 的 `add_internal(DefineConst)` 将表达式翻译、化简后存入 `decls`；`Model::get_exp/get_var` 复用该 AST，`Assert` 也经同一符号表翻译。E1 直接对 `Extract(hi, lo, Var(symbol))` 表达式取值并加不等式阻断，符号可以是派生定义。派生 XOR 符号的两位片段测试得到四个组合，证明没有把 DefineConst 当成自由声明或只枚举守卫真值。不修改求解器 API。 |
+| (c) 输出位置 | `src/isarch/exec.rs` 的完成路径 collector 在取得路径模型后物化 `AssemGenJsonItem`；E1 在释放该模型借用后、求解器销毁前调用枚举，并将结果写入可省略字段。代表状态继续沿用既有物化代码。函数入口在 `model_collector` 中枚举后入队，沿用既有输出队列。 |
+
+`ISLA_MERGE_RECORDS` 仍是合并提交时的独立 JSON Lines 观测输出，不是最终路径清单。E1 将其记录格式版本升级为 **2**：`record_id` 在推演前分配，新增 `parent_record` 和 `arm`。回滚尝试消耗的编号可以留下空洞，但不会留下记录；继承记录保持原编号。未启用枚举时，普通路径输出保持不变；显式开启旧记录日志时，该日志按新的记录协议输出上下文。
+
+## 枚举结果字段
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `schema_version` | 整数 | 枚举格式当前为 `1`，与独立记录日志的版本区分 |
+| `class_cap` / `path_cap` | 整数 | 本次实际使用的类内解数上限／路径总解数上限 |
+| `guard_records` | 数组 | 本路径保存的全部合并记录，包括嵌套记录 |
+| `guard_classes` | 数组 | 实际访问并枚举的可行叶子类 |
+| `enumerated_total` | 整数 | 已输出的解数，等于所有类的 `solution_count` 之和 |
+| `path_truncated` | 布尔 | 路径总上限阻止了尚存的可行解或后续叶子类输出 |
+
+`guard_records` 每项包含：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `record_id` | 整数 | 本进程唯一、随帧继承的合并记录编号，不是 SMT 符号编号 |
+| `parent_record` | 整数或 null | 外层记录编号；根为 null |
+| `arm` | 字符串 | 该记录位于父记录的 `then` / `else` 臂；根为 `root` |
+| `condition` | 对象 | `symbol` 为迹中的 `vN`，`smt_id` 为变量号 |
+| `function` / `branch_pc` | 字符串／整数 | Sail 解码函数名与原 IR 分支位置 |
+| `source_loc` | 对象 | 原始 `file/line1/char1/line2/char2`，不伪造未知位置 |
+
+`guard_classes` 每项包含：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `class_id` | 整数 | 此路径内的发现顺序，从 0 开始 |
+| `guard_assignment` | 对象 | 记录编号字符串 → **上下文与守卫合取的布尔值**；上下文不成立的记录规范化为 false，不声称其裸守卫为 false |
+| `tested_slices` | 数组 | 本路径全部守卫定义所测试的片段并集，保留记录归属 |
+| `solutions` | 数组 | 满足该类和真实路径条件的片段组合，每个组合只输出一个代表模型 |
+| `solution_count` | 整数 | 已输出的 `solutions` 数量，不是估算的完整域大小 |
+| `truncated` | 布尔 | 类上限或路径总上限阻止了本类尚存解的输出 |
+
+每个 `tested_slices` 项包含 `symbol`（`vN`）、`smt_id`、`hi`、`lo`、`source_loc`、`record_id`。位下标沿用 SMT Extract 的闭区间语义。源码位置来自对应定义事件；原始 IR 标为未知时保留未知位置。沿定义追踪别名，并折叠连续的 Extract；一般派生计算保留其符号，使用其真实 AST。相同片段被不同守卫引用时保留各自的记录归属，可能重复出现在数组中，但阻断仍联合约束，不会重复计算组合。
+
+每个解包含：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `slice_values` | 字符串数组 | 与 `tested_slices` 按下标对应的定宽 `#b…` 值，最高位在左 |
+| `representative.result` | 字符串 | 在这个解的模型下物化的函数／处理器返回值 |
+| `representative.inputs` | 数组 | 被选中片段所属的完整符号及其代表位向量；每项为 `symbol/smt_id/value`，未测试的位只保留该模型的一个取值 |
+
+顶层原有 `isa-state`、访存等字段仍代表原路径选出的一个模型；本次没有为每个解复制这些 ISA 输出。每解明确携带自己的返回结果和片段输入代表值。完整 SMT 定义仍来自对应路径迹；仅凭进程外另一条路径的同号 `vN` 不能解释本结果。
+
+下面是单条守卫 `v2 = (v0[0] == 0)` 为真时的简化输出示例：
+
+```json
+{
+  "schema_version": 1,
+  "class_cap": 1024,
+  "path_cap": 65536,
+  "guard_records": [{
+    "record_id": 0, "parent_record": null, "arm": "root",
+    "condition": {"symbol": "v2", "smt_id": 2},
+    "function": "example", "branch_pc": 0,
+    "source_loc": {"file": 0, "line1": 10, "char1": 0, "line2": 10, "char2": 8}
+  }],
+  "guard_classes": [{
+    "class_id": 0,
+    "guard_assignment": {"0": true},
+    "tested_slices": [{
+      "symbol": "v0", "smt_id": 0, "hi": 0, "lo": 0,
+      "source_loc": {"file": 0, "line1": 10, "char1": 0, "line2": 10, "char2": 8},
+      "record_id": 0
+    }],
+    "solutions": [{
+      "slice_values": ["#b0"],
+      "representative": {"result": "true", "inputs": [{"symbol": "v0", "smt_id": 0, "value": "#b00000000"}]}
+    }],
+    "solution_count": 1,
+    "truncated": false
+  }],
+  "path_truncated": false,
+  "enumerated_total": 1
+}
+```
+
+## 算法与上限语义
+
+1. 从终态帧取记录，按父链计算 `ctx(root)=true`；子记录的上下文为父上下文与父守卫对应极性的合取。记录编号必须唯一、父链必须完整且无环，违反时直接 panic。
+2. 定义一级投影 `p_r = ctx_r ∧ g_r`。查询真实路径求解器，将模型中的全部 `p_r` 真值组成叶子类。不能使用裸 `g_r`，否则外层不成立时的内层任意值会拆出虚假叶子类。
+3. 在类保存点内断言这组投影赋值，取本路径全部记录，沿守卫定义依赖收集 Extract 项。复用合并记录已有的纯计算等式依赖识别；仅开启枚举也会保存纯定义区间，不要求同时设置 `ISLA_MERGE_RECORDS`。
+4. 重复 `check-sat → 模型取全部片段的联合值 → 输出代表值和返回结果 → 断言至少一个片段不同`，直到 UNSAT 或上限。片段为空时仍保留一个代表解，再用 false 阻断。任何字段耦合均由真实求解器保留，例如 `¬(W∧¬R)` 只有三个二位组合，不能独立乘出四个组合。
+5. 回滚类保存点，阻断已访问的整组一级投影，继续下一类。最终回滚外层枚举保存点；错误返回也配对回滚，原路径约束、迹和模型缓存不被枚举污染。
+
+上限按**输出解数**计数。达到数值后额外查询一次：只有确有未输出可行解才设置截断，刚好完整时保持 false。类上限触发后仍尝试其他类；因此类 `truncated=true` 可以与 `path_truncated=false` 同时出现。路径上限触发后可能仍有未发现的类，不能把当前类数当作完整叶子数。类没有片段时每类只消耗一个解的预算。
+
+类顺序及代表值由 Z3 模型发现顺序决定，不保证跨运行相同；编号在进程内唯一，不保证跨运行稳定。上限生效时不声称得到均匀样本，也不声称完整覆盖。完整性须同时检查 `path_truncated=false` 和全部类的 `truncated=false`。这里的完整性只指选定守卫和片段的投影域；若未被守卫测试的位会影响返回值，一个代表结果不等于穷举了全部可能返回值。
+
+## 适用范围与验收
+
+**寄存器读取采用并集语义。** 只在一臂读取的寄存器，在合并路径主迹上也视为读过。枚举恢复叶子输入和返回结果，不恢复逐条精确寄存器读写顺序、事件因果关系或每臂精确迹。需要这些信息时仍须实现全消费方的 guarded events。含内存访问或被调函数写状态的区域继续按既有规则拒绝合并。RISC-V 字段名映射与页表遍历解码留给 `agents/` 下的薄后处理层；不应写入 isla-lib。
+
+函数级真实 IR 验证沿用 `baseline_config_const.toml`：分叉 **10** 条、合并 **1** 条，一级恢复 **10** 类；默认上限与实际不限额（测试中将两上限设为 `usize::MAX`）均输出 **256** 个二级解，无截断。`class_cap=2/path_cap=5` 输出 **3** 类、**5** 解，路径截断为 true。每个输出解均在原路径 Z3 求解器上复核片段约束。该函数末尾关于 reserved 的直接返回表达式未形成分叉守卫，因此其位保留代表值；这与原始叶子中存在符号返回值一致。
+
+显式运行真实 IR 测试：
+
+```sh
+export RUSTFLAGS="-L $HOME/.local/opt/z3-official-1fd1d3613/lib -C link-arg=-Wl,-rpath,$HOME/.local/opt/z3-official-1fd1d3613/lib"
+ISLA_REGIONS_IR=/data1/baiyifan/workplace/isla-runner/isla/.worktrees/memory-consistency/rv64d.ir \
+ISLA_ENUMERATION_TEST_OUTPUT=/tmp/e1 \
+  cargo test -j 8 -p isla-lib merge_enumeration_real_ir --offline --features smt-thread-interrupt -- --ignored --nocapture
+```
+
+本机现场全量基线为 681 通过、13 失败、2 忽略（新配置红测未计入基线）。除给定 12 项外，原版本也复现了 `smt::tests::deadline到期中断check返回超时错误`：1ms 内查询提前返回 Sat。E1 全量为 685 通过、相同 13 失败、3 忽略；没有修复、跳过或增加基线失败。原始日志和红测证据在 `/tmp/e1/`。函数入口关闭枚举的真实工作负载 stdout 前后均为 4555 字节，`cmp` 完全一致；计时 stderr 不属于稳定输出。
+
+最终验收还包括：`merge_enumeration` 4 通过、真实 IR 1 项显式通过；`region_merge` 37 通过、2 默认忽略；`path_merging` 6、`stats` 12、`execution_limits` 50 通过；isarch 旧字段逐字节序列化测试通过。两个二进制 `cargo check`、`cargo fmt` 和 release 构建通过，二进制保留在 `target/release/`。开启枚举的 `make -j1 solve-MRET THREADS=8` 冒烟产出 4 条用例，四条均包含枚举字段、各 1 解且无截断。构建并行度为 8，测试线程数为 4；每条验证命令外包 590 秒上限，没有单条超过 10 分钟。
+
+二级展开采用本路径全部守卫测试过的片段并集。某片段对应的守卫在当前类上下文不成立时，该片段也参与二级展开；其取值受真实路径约束。一级仍用上下文投影，绝不因此增加虚假叶子类。

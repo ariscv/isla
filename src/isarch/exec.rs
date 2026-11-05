@@ -583,6 +583,8 @@ struct AssemGenJsonItem {
     /// 保证无分片配置的 JSON 输出与既有逐项一致）
     #[serde(rename = "encoding-slice", skip_serializing_if = "Option::is_none")]
     encoding_slice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge_enumeration: Option<serde_json::Value>,
 }
 impl AssemGenJsonItem {
     pub fn new<B: BV>(
@@ -612,6 +614,7 @@ impl AssemGenJsonItem {
             post_memory,
             value_hint: None,
             encoding_slice: None,
+            merge_enumeration: None,
         }
     }
 
@@ -1450,6 +1453,7 @@ fn symbolic_args_from_types<B: BV>(
 struct ExecuteAsContinuation<B: BV> {
     instruction: Val<B>,
     checkpoint: isla_lib::smt::Checkpoint<B>,
+    merge_history: (Vec<isla_lib::executor::RegionMergeRecord<B>>, Vec<(u32, u32)>),
 }
 
 /// solve-state 路径收集的共享只读环境：首段闭包与续执行轮次的转发闭包共用，
@@ -1536,6 +1540,7 @@ fn solve_collect_path<'ir, B: BV>(
                     ctx.continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned").push(
                         ExecuteAsContinuation {
                             instruction: instruction.clone(),
+                            merge_history: frame.merge_history(),
                             checkpoint: isla_lib::smt::checkpoint(&mut solver),
                         },
                     );
@@ -2038,7 +2043,11 @@ fn solve_collect_path<'ir, B: BV>(
                     );
                     log!(log::PATH_RESULT, "3. ==============================");
                 }
-                let single_instruction_json = AssemGenJsonItem::new(
+                drop(model);
+                let merge_enumeration = frame
+                    .enumerate_merges(&mut solver, ctx.task_state, shared_state, ret_val)
+                    .expect("完成路径的合并枚举失败");
+                let mut single_instruction_json = AssemGenJsonItem::new(
                     ctx.target,
                     test_ins,
                     test_ins_encdec,
@@ -2050,6 +2059,7 @@ fn solve_collect_path<'ir, B: BV>(
                 )
                 .with_hint_label(ctx.hint_label)
                 .with_slice_label(ctx.slice_label);
+                single_instruction_json.merge_enumeration = merge_enumeration;
                 collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                     path_signature: frame.path_signature(),
                     item: single_instruction_json,
@@ -2299,6 +2309,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             // 等价于外层重新执行解码出的指令），checkpoint 携带前段全部 SMT 状态。
             let mut frame =
                 LocalFrame::new(execute_fn_id, func_args, ret_ty, Some(&[continuation.instruction]), instrs);
+            frame.restore_merge_history(continuation.merge_history);
             frame.add_regs(&symbolic_regs);
             frame.add_lets(lets);
             if let Some(memory) = round_memory.clone() {
@@ -3214,8 +3225,20 @@ mod tests {
                 post_memory: Vec::new(),
                 value_hint: None,
                 encoding_slice: None,
+                merge_enumeration: None,
             },
         }
+    }
+
+    #[test]
+    fn merge_enumeration_默认关闭时逐字节保持旧字段() {
+        let mut item = collected_case(7, "mret", "Retire_Success(())").item;
+        let expected = r#"{"path-signature":7,"arch":{},"test-ins":"mret","test-ins-encdec":"32'h0000_0000","isa-state":{},"ret_val":"Retire_Success(())","memory-events":[],"pre-memory":[],"post-memory":[]}"#;
+        assert_eq!(serde_json::to_string(&item).unwrap(), expected);
+        item.merge_enumeration = Some(serde_json::json!({"schema_version":1}));
+        assert!(serde_json::to_string(&item).unwrap().contains("merge_enumeration"));
+        let restored: AssemGenJsonItem = serde_json::from_str(expected).unwrap();
+        assert!(restored.merge_enumeration.is_none());
     }
 
     #[test]

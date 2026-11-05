@@ -1874,8 +1874,23 @@ pub struct ExecutionLimitsConfig {
     pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
     pub region_fork_limits: Option<Vec<RegionForkLimitConfig>>,
     pub merge_policy: Option<Vec<MergePolicyConfig>>,
+    pub merge_enumeration: Option<MergeEnumerationConfig>,
     /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
     pub case_quota: Option<BTreeMap<String, u32>>,
+}
+
+/// 合并路径结束后的两级投影枚举；上限只限制输出，不改变执行路径条件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeEnumerationConfig {
+    pub enabled: bool,
+    pub class_cap: usize,
+    pub path_cap: usize,
+}
+
+impl Default for MergeEnumerationConfig {
+    fn default() -> Self {
+        Self { enabled: false, class_cap: 1024, path_cap: 65536 }
+    }
 }
 
 /// 局部路径合并策略；这里只描述配置，不改变解释器行为。
@@ -2113,6 +2128,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "branch_region_limits",
             "region_fork_limits",
             "merge_policy",
+            "merge_enumeration",
             "case_quota",
         ],
     )?;
@@ -2289,6 +2305,28 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         })
         .transpose()?;
 
+    let merge_enumeration = table
+        .get("merge_enumeration")
+        .map(|value| {
+            let root = "execution_limits.merge_enumeration";
+            let sub = value.as_table().ok_or_else(|| format!("{root} 必须是 TOML table"))?;
+            allowed_table_keys(sub, root, &["enabled", "class_cap", "path_cap"])?;
+            let mut config = MergeEnumerationConfig::default();
+            if let Some(enabled) = optional_bool(sub, "enabled", root)? {
+                config.enabled = enabled;
+            }
+            for (name, cap) in [("class_cap", &mut config.class_cap), ("path_cap", &mut config.path_cap)] {
+                if let Some(value) = optional_u64(sub, name, root)? {
+                    if value == 0 {
+                        return Err(format!("{root}.{name} 必须大于零"));
+                    }
+                    *cap = usize::try_from(value).map_err(|error| format!("{root}.{name}: {error}"))?;
+                }
+            }
+            Ok(config)
+        })
+        .transpose()?;
+
     Ok(Some(ExecutionLimitsConfig {
         strict,
         ir_sha256,
@@ -2308,6 +2346,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         branch_region_limits,
         region_fork_limits,
         merge_policy,
+        merge_enumeration,
         case_quota: case_quota_table(table)?,
     }))
 }
@@ -2549,6 +2588,24 @@ mod tests {
 
     fn merge_config(text: &str) -> Result<ExecutionLimitsConfig, String> {
         get_execution_limits_config(&text.parse::<Value>().unwrap()).map(Option::unwrap)
+    }
+
+    #[test]
+    fn execution_limits_merge_enumeration_table() {
+        let config =
+            merge_config("[execution_limits.merge_enumeration]\nenabled = true\nclass_cap = 7\npath_cap = 11").unwrap();
+        assert_eq!(
+            config.merge_enumeration.unwrap(),
+            MergeEnumerationConfig { enabled: true, class_cap: 7, path_cap: 11 }
+        );
+        assert_eq!(
+            merge_config("[execution_limits.merge_enumeration]").unwrap().merge_enumeration.unwrap(),
+            MergeEnumerationConfig::default()
+        );
+        assert!(merge_config("[execution_limits]").unwrap().merge_enumeration.is_none());
+        for fields in ["enabled = 1", "class_cap = 0", "path_cap = -1", "unknown = true"] {
+            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\n{fields}")).is_err());
+        }
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! 合并记录与 JSON Lines 输出。未开启输出时不进行依赖分析。
 use super::*;
+#[path = "merge_enumeration.rs"]
+mod merge_enumeration;
 use crate::ir::regions::RegionPoint;
 use crate::primop::Effect;
 
@@ -29,6 +31,10 @@ pub struct GuardedRegisterRead<B> {
 
 #[derive(Clone, Debug)]
 pub struct RegionMergeRecord<B> {
+    pub record_id: usize,
+    pub parent_record: Option<usize>,
+    /// 自己所在的父区域臂；根记录为 root。
+    pub arm: &'static str,
     pub function: Name,
     pub branch_pc: usize,
     pub join: RegionPoint,
@@ -56,7 +62,29 @@ pub(super) fn publish<B: BV>(
     }
     #[cfg(test)]
     DEPENDENCY_SCANS.fetch_add(1, Ordering::Relaxed);
-    let mut events = solver.trace().to_vec();
+    let (events, derived) = definition_events(solver, pure_definitions);
+    let references = crate::simplify::EventReferences::from_events(&events);
+    let declared: HashSet<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Smt(Def::DeclareConst(symbol, _), _, _) => Some(*symbol),
+            _ => None,
+        })
+        .collect();
+    for record in records.iter_mut() {
+        record.input_symbols = record
+            .value_symbols
+            .iter()
+            .flat_map(|symbol| references.dependencies(*symbol))
+            .filter(|symbol| declared.contains(symbol) && !derived.contains(symbol))
+            .collect();
+    }
+    emit_records(records, task_id, shared, solver);
+}
+
+/// 复用记录依赖展开所需的纯计算等式；枚举也必须沿这些定义寻找被测试的片段。
+fn definition_events<B: BV>(solver: &Solver<B>, pure_definitions: &[(u32, u32)]) -> (Vec<Event<B>>, HashSet<Sym>) {
+    let mut events: Vec<_> = solver.trace().to_vec().into_iter().cloned().collect();
     let fresh: HashSet<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -96,24 +124,8 @@ pub(super) fn publish<B: BV>(
             }
         }
     }
-    events.extend(equations.iter());
-    let references = crate::simplify::EventReferences::from_events(&events);
-    let declared: HashSet<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Smt(Def::DeclareConst(symbol, _), _, _) => Some(*symbol),
-            _ => None,
-        })
-        .collect();
-    for record in records.iter_mut() {
-        record.input_symbols = record
-            .value_symbols
-            .iter()
-            .flat_map(|symbol| references.dependencies(*symbol))
-            .filter(|symbol| declared.contains(symbol) && !derived.contains(symbol))
-            .collect();
-    }
-    emit_records(records, task_id, shared, solver);
+    events.extend(equations);
+    (events, derived)
 }
 
 /// 进程内唯一写端：先完整序列化，再持锁追加整行；不依赖进程退出时析构刷新。
@@ -122,7 +134,6 @@ fn emit_records<B: BV>(records: &[RegionMergeRecord<B>], task_id: TaskId, shared
     use serde_json::json;
     use std::io::Write;
     static OUTPUT: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
-    static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
     let path = PATH.get().expect("任务启动时必须缓存记录配置").as_ref().expect("发布记录必须已开启输出");
     let output = OUTPUT.get_or_init(|| {
         Mutex::new(
@@ -194,10 +205,8 @@ fn emit_records<B: BV>(records: &[RegionMergeRecord<B>], task_id: TaskId, shared
             RegionPoint::Instruction(pc) => json!({"instruction":pc}),
             RegionPoint::FunctionExit => json!({"function_exit":true}),
         };
-        let record_id = NEXT_RECORD
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("合并记录编号溢出");
-        let value = json!({"schema_version":1, "record_id":record_id, "task_id":task_id.as_usize(),
+        let record_id = record.record_id;
+        let value = json!({"schema_version":2, "record_id":record_id, "parent_record":record.parent_record, "arm":record.arm, "task_id":task_id.as_usize(),
             "function":zencode::decode(shared.symtab.to_str(record.function)), "branch_pc":record.branch_pc, "join":join,
             "source_loc":record.source_loc, "location":record.source_loc.location_string(shared.symtab.files()),
             "condition":symbol_json(record.condition, &smtlib::Ty::Bool), "input_symbols":inputs,
@@ -217,7 +226,11 @@ pub(super) fn evaluate_primop<'ir, B: BV>(
     effect: Option<Effect>,
     evaluate: impl FnOnce(&mut Solver<B>, &mut LocalFrame<'ir, B>) -> Result<Val<B>, ExecError>,
 ) -> Result<Val<B>, ExecError> {
-    let start = if enabled() && effect == Some(Effect::Pure) { Some(solver.fresh()) } else { None };
+    let start = if (enabled() || frame.local_state.enumerate_merges) && effect == Some(Effect::Pure) {
+        Some(solver.fresh())
+    } else {
+        None
+    };
     let result = evaluate(solver, frame);
     if let Some(start) = start {
         let end = solver.fresh();

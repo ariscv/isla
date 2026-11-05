@@ -117,6 +117,7 @@ pub struct ExecutionLimits {
     /// 受限分支具体化时使用的可复现抽样 seed。
     pub branch_sampling_seed: u64,
     pub path_merging: bool,
+    pub merge_enumeration: crate::config::MergeEnumerationConfig,
     merge_policy: Vec<MergePolicy>,
     pub on_limit_reached: LimitBehavior,
 }
@@ -136,6 +137,7 @@ impl Default for ExecutionLimits {
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
+            merge_enumeration: Default::default(),
             merge_policy: Vec::new(),
             on_limit_reached: LimitBehavior::Truncate,
         }
@@ -278,6 +280,9 @@ impl ExecutionLimits {
             }));
         }
 
+        if let Some(config) = &config.merge_enumeration {
+            self.merge_enumeration = config.clone();
+        }
         if let Some(rules) = &config.merge_policy {
             self.merge_policy = rules
                 .iter()
@@ -394,6 +399,7 @@ impl ExecutionLimits {
             || !self.region_fork_limits.is_empty()
             || !self.merge_policy.is_empty()
             || self.path_merging
+            || self.merge_enumeration.enabled
     }
 }
 
