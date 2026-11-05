@@ -127,6 +127,13 @@ The `isla-axiomatic` tool has a seperate manual
 and a guide to its support for virtual memory and address translation
 [here](https://github.com/rems-project/isla/blob/master/doc/translation.adoc).
 
+## solve-state 执行统计
+
+设置 `ISLA_STATS=1` 时，solve-state 收尾向 stderr 输出一行 `[MERGE_STATS] {json}` 和一行 `[FORK_STATS] {json}`。
+前者记录菱形合并尝试、成功和拒绝原因，后者记录实际分叉次数最多的前 30 个函数／源码位置。
+不设置时不打印统计。计数覆盖本次求解的全部 clause、批次及续执行；合并关闭时尝试次数为零。
+字段及限定验证见 [执行统计记录](agents/execution_stats/status.md)。
+
 ## solve-state 内存符号化模型（isarch）
 
 `solve-state` 对符号内存的建模由环境变量 `ISLA_RISCV_MEMORY_MODEL` 控制：

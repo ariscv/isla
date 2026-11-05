@@ -82,3 +82,12 @@ pub(super) fn input_manifest() -> Value {
     }
     json!({"command":args, "inputs":inputs})
 }
+
+/// 与求解摘要一同收尾；保持默认日志不变，统计使用单行 JSON 便于机器读取。
+pub(super) fn print_execution_stats<B>(shared_state: &isla_lib::ir::SharedState<'_, B>) {
+    let stats = &shared_state.execution_stats;
+    if stats.enabled() {
+        eprintln!("[MERGE_STATS] {}", stats.merge_json());
+        eprintln!("[FORK_STATS] {}", stats.fork_json(&shared_state.symtab));
+    }
+}

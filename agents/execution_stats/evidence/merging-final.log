@@ -1,0 +1,18 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.06s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-c7d55d6e865adf98)
+
+running 4 tests
+test executor::tests::path_merging_fallback_when_arm_has_exit ... ok
+test executor::tests::path_merging_rejects_cross_arm_jump ... ok
+test executor::tests::path_merging_diamond_reduces_forks ... ok
+test executor::tests::path_merging_rejects_branch_local_declaration ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.05s
+
+     Running tests/test_itrace.rs (target/debug/deps/test_itrace-2a09df674d27960b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

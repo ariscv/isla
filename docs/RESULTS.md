@@ -1,5 +1,35 @@
 # 验证记录
 
+
+## 2026-11-05 可选执行统计
+
+受测版本：`feat/postprocess-enumeration`，基线 `dc76449` 加本轮统计及测试改动。起始工作树干净；rustc/Cargo 1.93.1。没有修改 IR 或模型，也没有运行 ISA 负载。
+
+全部构建和测试使用以下环境，沿用官方 Z3 的链接目录、rpath 及 thread-interrupt feature：
+
+```sh
+export Z3_PREFIX="$HOME/.local/opt/z3-official-1fd1d3613"
+export RUSTFLAGS="-L native=$Z3_PREFIX/lib -C link-arg=-Wl,-rpath,$Z3_PREFIX/lib"
+```
+
+每条构建或测试命令均用 `timeout 600` 限制。实际测试二进制经 ldd 核对链接到上述前缀中的 `libz3.so.5.3`。
+
+| 命令 | 结果 | 日志 |
+| --- | --- | --- |
+| `timeout 600 cargo test --offline -p isla-lib path_merging_diamond_reduces_forks --features smt-thread-interrupt`（仅新增测试时） | 预期失败，退出 101：统计接口尚未实现 | [red](../agents/execution_stats/evidence/red.log) |
+| 同上（实现后） | 通过，1/1 | [diamond](../agents/execution_stats/evidence/diamond.log) |
+| `timeout 600 cargo check --offline --features smt-thread-interrupt` | 通过，退出 0；有既有代码警告 | [check](../agents/execution_stats/evidence/check.log) |
+| `timeout 600 cargo test --offline -p isla-lib execution_stats --features smt-thread-interrupt` | 通过，2/2，覆盖禁用计数、多线程正确性及前 30 项 | [unit](../agents/execution_stats/evidence/unit.log) |
+| `timeout 600 cargo test --offline -p isla-lib path_merging --features smt-thread-interrupt`（首次） | 3 通过、1 失败：新增的拒绝原因断言分类错误，原行为断言均通过 | [merging](../agents/execution_stats/evidence/merging.log) |
+| 同上（修正断言） | 通过，4/4 | [merging-final](../agents/execution_stats/evidence/merging-final.log) |
+| `timeout 600 cargo test --offline -p isla-lib multi_thread_read_mem_event_survives_fork --features smt-thread-interrupt` | 通过，1/1，真实子任务及函数名计数正确 | [multi](../agents/execution_stats/evidence/multi.log) |
+| `timeout 600 cargo test --offline -p isla-lib monomorphize_enumerates_all_two_bit_models_with_three_path_forks --features smt-thread-interrupt` | 通过，1/1，四个模型对应三次实际分叉 | [monomorphize](../agents/execution_stats/evidence/monomorphize.log) |
+| `timeout 600 cargo test --offline -p isla-lib review7_retry_preserves_finite_operand --features smt-thread-interrupt` | 通过，1/1，操作数重试分叉计数正确 | [retry](../agents/execution_stats/evidence/retry.log) |
+
+`timeout 120 cargo fmt --all` 已执行；恢复了其对任务无关旧代码的排版，`git diff --check` 通过。最终共 9 个不同定向测试通过，没有全量测试。首次误分类依据：Decl 可在臂内模拟，单臂作用域差异在 `merge_two_frames` 返回 false，故应断言 `frame_merge_rejected`，不是 `then_arm_unsupported`。
+
+未测：CLI 两行输出的动态验收及未设环境变量时完整输出对照、全部失败枚举、Sv39、release、make solve、性能收益及额外 feature 组合。本次不回答真实页表遍历是否触发合并。输出字段和范围见 [状态](../agents/execution_stats/status.md)。
+
 ## 2026-11-04 Review 36
 
 受测基线：`985e0a93645367cdcb8fb10d5491adf494255802` 加本轮未提交修复。开始时目标工作树干净。审查补丁已成功应用，只新增 `tests/review36.rs`；补丁 SHA-256 为 `a4b612d09168d763f6ff5fbb05dcf66ef84683fe3af548a8869c942c830b783f`，测试文件 SHA-256 为 `e39a534c5f7ae6fcec14845878a54a9ff33a2386ae73004781398eb808f0c1a5`，与报告一致。范围见 [计划](../agents/review36/plan.md)。

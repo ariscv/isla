@@ -1167,6 +1167,7 @@ pub fn solve_state_main<'ir, B: BV>(
         return false;
     }
 
+    shared_state.execution_stats.reset();
     let num_clauses = clause_set.len();
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
     let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
@@ -1392,6 +1393,7 @@ pub fn solve_state_main<'ir, B: BV>(
         }
     }
 
+    super::solve_summary::print_execution_stats(shared_state);
     success
 }
 

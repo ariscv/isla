@@ -358,3 +358,9 @@
 - 区域优先级仍由 Memory 的顺序分派决定。若较早的 Concrete 遮蔽较后的专属区域，且回调接管具体读，唯一符号地址读取仍查询当前数组，不能改读 Concrete 的旧快照。
 - `smt_excluded_constraint` 以“起点在区域内，或到区域起点的模距离小于访问长度”表达逐字节重叠，约束规模不随访问长度增长；窄地址域先裁剪区域边界。回绕发生在传入地址的位宽上，区域仍按低 64 位匹配。SeqMemory 传入 `array_address` 投影后的数组索引，因此排除约束和实际 Select／Store 使用同一字节集合；事件仍保留原始地址。无排除区域返回 None，合法候选保留。
 - `BV::sub_i128` 可先通过同宽零值加法构造补码操作数，再直接进行位向量减法，避免对有符号最小整数取负。B129 的专用减法保留第 129 位；`get_slice_int` 在 129 位结果上将整数符号填入 tag，低 128 位按算术右移后截断。
+
+## 可选执行统计
+
+- `executor::run_loop` 用统计 ForkSink 包裹现有提交接口，统一观察 Jump、Monomorphize 和 `executor/symbolic_length.rs` 的重试分叉。统计使用子任务已有的 `frame.function_name` 和 `fork_cond` 中的 `Event::Fork` SourceLoc；合并仅追加事件，没有提交子任务，因此不会误计。
+- `try_merge_diamond` 可能依次尝试多个候选汇合点；调用失败数与候选拒绝原因计数是不同口径。两臂的 Decl 可以模拟，单臂新变量作用域不对称由 `merge_two_frames` 拒绝。
+- `SharedState::execution_stats` 共享线程安全计数，`ISLA_STATS=1` 启用；solve-state 在 clause 执行前清零，全部批次和续执行结束后由 `src/isarch/solve_summary.rs` 输出。字段口径见 [执行统计](execution_stats/status.md)。

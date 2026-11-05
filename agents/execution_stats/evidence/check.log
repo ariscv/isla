@@ -1,0 +1,432 @@
+    Blocking waiting for file lock on build directory
+   Compiling cfg-if v1.0.0
+   Compiling memchr v2.7.2
+   Compiling regex-syntax v0.8.3
+   Compiling equivalent v1.0.1
+   Compiling hashbrown v0.14.3
+   Compiling syn v1.0.109
+   Compiling byte-tools v0.3.1
+    Checking hashbrown v0.12.3
+   Compiling unicode-width v0.2.2
+   Compiling byteorder v1.5.0
+   Compiling itoa v1.0.17
+   Compiling smallvec v2.0.0-alpha.12
+   Compiling ryu v1.0.22
+    Checking unicode-width v0.1.11
+    Checking anstyle v1.0.13
+   Compiling arraydeque v0.5.1
+    Checking zerocopy v0.7.32
+    Checking once_cell v1.19.0
+   Compiling base64 v0.22.1
+   Compiling getrandom v0.1.16
+    Checking encoding_rs v0.8.35
+   Compiling block-padding v0.1.5
+    Checking fake-simd v0.1.2
+    Checking fixedbitset v0.2.0
+    Checking nohash-hasher v0.2.0
+   Compiling opaque-debug v0.2.3
+    Checking lazy_static v1.4.0
+    Checking log v0.4.21
+   Compiling z3-sys v0.5.0
+   Compiling id-arena v2.2.1
+    Checking plain v0.2.3
+    Checking ppv-lite86 v0.2.17
+    Checking stable_deref_trait v1.2.0
+    Checking fallible-iterator v0.2.0
+   Compiling isla v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate)
+    Checking typed-arena v2.0.2
+    Checking unicode-segmentation v1.11.0
+    Checking arrayvec v0.5.2
+   Compiling libc v0.2.153
+    Checking crossbeam-utils v0.8.19
+    Checking typenum v1.17.0
+   Compiling num-traits v0.2.18
+   Compiling zmij v1.0.16
+    Checking lexgen_util v0.15.0
+    Checking getopts v0.2.21
+   Compiling annotate-snippets v0.12.10
+   Compiling serde v1.0.198
+   Compiling thiserror v2.0.18
+   Compiling saphyr-parser-bw v0.0.605
+   Compiling aho-corasick v1.1.3
+    Checking indexmap v1.9.3
+   Compiling indexmap v2.2.6
+    Checking pretty v0.11.3
+    Checking crossbeam-epoch v0.9.18
+    Checking crossbeam-queue v0.3.11
+    Checking crossbeam-channel v0.5.12
+    Checking getrandom v0.2.14
+   Compiling dirs-sys-next v0.1.2
+   Compiling parking_lot_core v0.9.9
+    Checking petgraph v0.5.1
+    Checking gimli v0.26.2
+    Checking ahash v0.8.11
+    Checking crossbeam-deque v0.8.5
+    Checking rand_core v0.5.1
+   Compiling dirs-next v2.0.0
+    Checking generic-array v0.12.4
+   Compiling term v0.7.0
+   Compiling parking_lot v0.12.1
+    Checking encoding_rs_io v0.1.7
+   Compiling petgraph v0.6.4
+   Compiling crossbeam v0.8.4
+    Checking block-buffer v0.7.3
+    Checking digest v0.8.1
+    Checking rand_chacha v0.2.2
+   Compiling string_cache v0.8.7
+   Compiling num-integer v0.1.46
+    Checking sha2 v0.8.2
+   Compiling ascii-canvas v3.0.0
+   Compiling num-bigint v0.4.4
+   Compiling regex-automata v0.4.6
+    Checking rand v0.7.3
+    Checking serde_json v1.0.143
+    Checking toml v0.5.11
+    Checking bincode v1.3.3
+   Compiling scroll_derive v0.10.5
+    Checking regex v1.10.4
+    Checking lalrpop-util v0.20.2
+    Checking scroll v0.10.2
+    Checking serde-saphyr v0.0.16
+   Compiling lalrpop v0.20.2
+    Checking goblin v0.4.3
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib)
+   Compiling isla-mml v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-mml)
+   Compiling isla-cat v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-cat)
+   Compiling isla-axiomatic v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-axiomatic)
+    Checking isla-elf v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-elf)
+   Compiling isla-sexp v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-sexp)
+warning: eliding a lifetime that's named elsewhere is confusing
+   --> isla-axiomatic/src/graph/gv_backend.rs:460:77
+    |
+460 |     fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&GVGridChild<'a>> {
+    |                        --                                                   ^^^^^^^^^^^^^--^
+    |                        |                                                    |            |
+    |                        |                                                    |            the same lifetime is named here
+    |                        the lifetime is named here                           the same lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: consistently use `'a`
+    |
+460 |     fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&'a GVGridChild<'a>> {
+    |                                                                              ++
+
+warning: `isla-axiomatic` (lib) generated 1 warning (run `cargo fix --lib -p isla-axiomatic` to apply 1 suggestion)
+warning: unused import: `isla_lib::source_loc::SourceLoc`
+  --> src/isarch/encoding_slices.rs:16:5
+   |
+16 | use isla_lib::source_loc::SourceLoc;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `assembly_names`
+   --> src/isarch/args.rs:136:9
+    |
+136 |     let assembly_names = get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_assembly_names`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `out`
+   --> src/isarch/args.rs:153:9
+    |
+153 |     let out = ir_assembly_names_to_InstructionMap("zSTORE", shared_state, regs, lets);
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
+
+warning: unused variable: `vec`
+  --> src/isarch/args_yaml.rs:78:31
+   |
+78 |                     Exp::Bits(vec) => format!("{:?}", &exp),
+   |                               ^^^ help: if this is intentional, prefix it with an underscore: `_vec`
+
+warning: unused variable: `enum_member`
+  --> src/isarch/args_yaml.rs:80:31
+   |
+80 |                     Exp::Enum(enum_member) => format!("{:?}", &exp),
+   |                               ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enum_member`
+
+warning: unused variable: `b`
+  --> src/isarch/args_yaml.rs:81:31
+   |
+81 |                     Exp::Bool(b) => format!("{:?}", &exp),
+   |                               ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `sym`
+   --> src/isarch/args_yaml.rs:156:51
+    |
+156 | ...                   Val::Symbolic(sym) => val_sym_solve_str(v, &point, &shared_state),
+    |                                     ^^^ help: if this is intentional, prefix it with an underscore: `_sym`
+
+warning: unused variable: `clause_name`
+   --> src/isarch/args_yaml.rs:146:40
+    |
+146 |             let ArgStruct { arg_value, clause_name, checkpoint: point, shared_state } = arg_struct;
+    |                                        ^^^^^^^^^^^ help: try ignoring the field: `clause_name: _`
+
+warning: unused variable: `ty`
+   --> src/isarch/args_yaml.rs:230:13
+    |
+230 |     for (n, ty) in shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap().iter() {
+    |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: unused variable: `regs`
+    --> src/isarch/exec.rs:1404:5
+     |
+1404 |     regs: &RegisterBindings<B>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+    --> src/isarch/exec.rs:1405:5
+     |
+1405 |     lets: &Bindings<B>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `test`
+    --> src/isarch/exec.rs:1703:25
+     |
+1703 |                     let test = Sym::from_u32(6);
+     |                         ^^^^ help: if this is intentional, prefix it with an underscore: `_test`
+
+warning: value assigned to `test_ins` is never read
+    --> src/isarch/exec.rs:1561:36
+     |
+1561 |                 let mut test_ins = String::new();
+     |                                    ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `test_ins_encdec` is never read
+    --> src/isarch/exec.rs:1562:43
+     |
+1562 |                 let mut test_ins_encdec = String::new();
+     |                                           ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `pre_memory` is never read
+    --> src/isarch/exec.rs:1565:59
+     |
+1565 |                 let mut pre_memory: Vec<MemorySpanJson> = Vec::new();
+     |                                                           ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `post_memory` is never read
+    --> src/isarch/exec.rs:1566:60
+     |
+1566 |                 let mut post_memory: Vec<MemorySpanJson> = Vec::new();
+     |                                                            ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src/isarch/memory_builder.rs:152:18
+    |
+152 |     pub fn build(mut self) -> Result<Memory<B>, String> {
+    |                  ----^^^^
+    |                  |
+    |                  help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reg_name`
+   --> src/isarch/target.rs:263:36
+    |
+263 |     fn must_output_register(&self, reg_name: &str) -> bool {
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reg_name`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:213:5
+    |
+213 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:214:5
+    |
+214 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:509:5
+    |
+509 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:510:5
+    |
+510 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `instruction_name`
+   --> src/isarch/mod.rs:759:5
+    |
+759 |     instruction_name: &str,
+    |     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_instruction_name`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:761:5
+    |
+761 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:762:5
+    |
+762 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: associated function `new` is never used
+   --> src/isarch/exec.rs:696:8
+    |
+695 | impl SolveCollectorState {
+    | ------------------------ associated function in this implementation
+696 |     fn new() -> Self {
+    |        ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `task_state` is never read
+    --> src/isarch/exec.rs:1452:5
+     |
+1445 | struct SolvePathCtx<'a, 'ir, B: BV> {
+     |        ------------ field in this struct
+...
+1452 |     task_state: &'a TaskState<B>,
+     |     ^^^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/isarch/target.rs:49:17
+   |
+49 |     pub fn iter(&self) -> std::collections::hash_map::Iter<Name, Val<B>> {
+   |                 ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                 |
+   |                 the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+49 |     pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Name, Val<B>> {
+   |                                                            +++
+
+warning: `isla` (lib) generated 28 warnings (run `cargo fix --lib -p isla` to apply 22 suggestions)
+warning: fields `num_threads`, `type_info`, `isa_config`, and `source_path` are never read
+   --> src/opts.rs:157:9
+    |
+156 | pub struct CommonOpts<'ir, B> {
+    |            ---------- fields in this struct
+157 |     pub num_threads: usize,
+    |         ^^^^^^^^^^^
+...
+160 |     pub type_info: IRTypeInfo,
+    |         ^^^^^^^^^
+161 |     pub isa_config: ISAConfig<B>,
+    |         ^^^^^^^^^^
+162 |     pub source_path: Option<PathBuf>,
+    |         ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `source_path` is never read
+   --> src/opts.rs:162:9
+    |
+156 | pub struct CommonOpts<'ir, B> {
+    |            ---------- field in this struct
+...
+162 |     pub source_path: Option<PathBuf>,
+    |         ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla` (bin "isla-preprocess") generated 1 warning
+warning: `isla` (bin "isla-property") generated 1 warning
+warning: `isla` (bin "isla-preprocess129") generated 1 warning (1 duplicate)
+warning: unreachable statement
+   --> src/isarch_main.rs:613:21
+    |
+612 |                     panic!("RV32 solve-state 暂不支持");
+    |                     ----------------------------------- any code following this expression is unreachable
+613 |                     let mut target = RV32::default();
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla` (bin "isla-client") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-property129") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-execute-function") generated 1 warning (1 duplicate)
+warning: unused variable: `shared_state`
+   --> src/isarch_main.rs:157:5
+    |
+157 |     shared_state: &&isla_lib::ir::SharedState<B>,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shared_state`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `regs`
+   --> src/isarch_main.rs:158:5
+    |
+158 |     regs: &isla_lib::register::RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch_main.rs:159:5
+    |
+159 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `iarch_config`
+   --> src/isarch_main.rs:160:5
+    |
+160 |     iarch_config: isla_lib::init::InitArchWithConfig<B>,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_iarch_config`
+
+warning: unused variable: `source_path`
+   --> src/isarch_main.rs:161:5
+    |
+161 |     source_path: Option<std::path::PathBuf>,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_path`
+
+warning: unused variable: `graphviz`
+   --> src/isarch_main.rs:164:9
+    |
+164 |     let graphviz = matches.opt_present("graphviz");
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_graphviz`
+
+warning: unused variable: `iarch`
+   --> src/isarch_main.rs:233:5
+    |
+233 |     iarch: &isla_lib::init::Initialized<B>,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_iarch`
+
+warning: unused variable: `arch`
+   --> src/isarch_main.rs:234:5
+    |
+234 |     arch: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_arch`
+
+warning: unused variable: `isa_config`
+   --> src/isarch_main.rs:235:5
+    |
+235 |     isa_config: isla_lib::config::ISAConfig<B>,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_isa_config`
+
+warning: unused variable: `source_path`
+   --> src/isarch_main.rs:236:5
+    |
+236 |     source_path: Option<std::path::PathBuf>,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_path`
+
+warning: unused variable: `init_isa_with_config`
+   --> src/isarch_main.rs:239:9
+    |
+239 |     let init_isa_with_config = matches.opt_present("init-isa-with-config");
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_isa_with_config`
+
+warning: `isla` (bin "isarch") generated 12 warnings (run `cargo fix --bin "isarch" -p isla` to apply 11 suggestions)
+warning: `isla` (bin "isla-litmus-dump") generated 1 warning (1 duplicate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.50s

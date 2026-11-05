@@ -61,6 +61,7 @@ use crate::zencode;
 mod execution_limits;
 mod frame;
 mod path_timing;
+pub mod stats;
 mod symbolic_length;
 mod task;
 
@@ -72,6 +73,7 @@ pub use execution_limits::{ExecutionLimits, LimitBehavior, SampleBias};
 pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame, LocalFrame, LocalState};
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
+use stats::MergeFailure;
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
@@ -2029,9 +2031,15 @@ fn try_merge_diamond<'ir, B: BV>(
     limit_handler: Option<&ExecutionLimitHandler<'_>>,
     limited_pc: Option<Name>,
 ) -> Result<Option<usize>, ExecError> {
+    let stats = &shared_state.execution_stats;
+    stats.merge_attempt();
     let pc = frame.pc;
     let candidate_joins = detect_diamond_joins(frame.instrs, pc, target);
+    if candidate_joins.is_empty() {
+        stats.merge_rejected(MergeFailure::NoJoin);
+    }
     for join_pc in candidate_joins {
+        stats.merge_candidate();
         let tx = solver.start_transaction();
 
         let arm_else =
@@ -2039,7 +2047,12 @@ fn try_merge_diamond<'ir, B: BV>(
                 simulate_diamond_arm(pc + 1, target - 1, join_pc, frame.clone(), shared_state, solver, limit_handler)
             }) {
                 Ok(Some(a)) if !solver.transaction_invalid() => a,
-                _ => {
+                result => {
+                    stats.merge_rejected(match result {
+                        Ok(Some(_)) => MergeFailure::ElseTransactionInvalid,
+                        Ok(None) => MergeFailure::ElseArmUnsupported,
+                        Err(_) => MergeFailure::ElseArmError,
+                    });
                     solver.rollback_transaction(tx);
                     continue;
                 }
@@ -2063,7 +2076,12 @@ fn try_merge_diamond<'ir, B: BV>(
             )
         }) {
             Ok(Some(a)) if !solver.transaction_invalid() => a,
-            _ => {
+            result => {
+                stats.merge_rejected(match result {
+                    Ok(Some(_)) => MergeFailure::ThenTransactionInvalid,
+                    Ok(None) => MergeFailure::ThenArmUnsupported,
+                    Err(_) => MergeFailure::ThenArmError,
+                });
                 solver.rollback_transaction(tx);
                 continue;
             }
@@ -2073,6 +2091,7 @@ fn try_merge_diamond<'ir, B: BV>(
             if arm_then.write_set.as_ref().unwrap().modified_regs.contains(&pc)
                 || arm_else.write_set.as_ref().unwrap().modified_regs.contains(&pc)
             {
+                stats.merge_rejected(MergeFailure::LimitedPcModified);
                 solver.rollback_transaction(tx);
                 continue;
             }
@@ -2083,6 +2102,7 @@ fn try_merge_diamond<'ir, B: BV>(
             && arm_then.execution_limit_state.control_flow_steps()
                 != arm_else.execution_limit_state.control_flow_steps()
         {
+            stats.merge_rejected(MergeFailure::DepthMismatch);
             solver.rollback_transaction(tx);
             continue;
         }
@@ -2090,6 +2110,7 @@ fn try_merge_diamond<'ir, B: BV>(
         if limit_handler.map_or(false, |handler| handler.config.max_backjumps_per_loop.is_some())
             && arm_then.execution_limit_state.loop_counts != arm_else.execution_limit_state.loop_counts
         {
+            stats.merge_rejected(MergeFailure::LoopHistoryMismatch);
             solver.rollback_transaction(tx);
             continue;
         }
@@ -2118,7 +2139,11 @@ fn try_merge_diamond<'ir, B: BV>(
                     .collect();
                 let equalities = match equalities {
                     Ok(equalities) if !solver.transaction_invalid() => equalities,
-                    _ => {
+                    result => {
+                        stats.merge_rejected(match result {
+                            Ok(_) => MergeFailure::EqualityTransactionInvalid,
+                            Err(_) => MergeFailure::EqualityError,
+                        });
                         solver.rollback_transaction(tx);
                         continue;
                     }
@@ -2139,7 +2164,14 @@ fn try_merge_diamond<'ir, B: BV>(
                     let val = if val_then == val_else {
                         val_then.clone()
                     } else {
-                        build_ite(cond_sym, val_then, val_else, solver, info)?
+                        match build_ite(cond_sym, val_then, val_else, solver, info) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                stats.merge_rejected(MergeFailure::RegisterReadMergeError);
+                                stats.merge_finished(false);
+                                return Err(error);
+                            }
+                        }
                     };
                     let symbol = zencode::decode(shared_state.symtab.to_str(*reg));
                     if symbol != "_TLB" {
@@ -2158,13 +2190,20 @@ fn try_merge_diamond<'ir, B: BV>(
                 // 保留合并条件的控制依赖；两种取值都可行，不添加选臂断言。
                 solver.add_event(Event::Fork(0, cond_sym, 0, info));
                 solver.add_event(Event::Merge(0, 2, info));
+                stats.merge_finished(true);
                 return Ok(Some(join_pc));
             }
-            _ => {
+            result => {
+                stats.merge_rejected(match result {
+                    Ok(true) => MergeFailure::FrameTransactionInvalid,
+                    Ok(false) => MergeFailure::FrameMergeRejected,
+                    Err(_) => MergeFailure::FrameMergeError,
+                });
                 solver.rollback_transaction(tx);
             }
         }
     }
+    stats.merge_finished(false);
     Ok(None)
 }
 
@@ -2195,6 +2234,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<Run<B>, ExecError> {
+    let fork_sink = &stats::StatsForkSink { inner: fork_sink, stats: &shared_state.execution_stats };
     // 路径级 SMT 调用本身以线程局部方式计时；调度器会在 fork 时把累计值冻结在 Frame，
     // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
     crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
@@ -12779,7 +12819,8 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_enumerates_all_two_bit_models_with_three_path_forks() {
-        let shared_state = empty_shared_state();
+        let mut shared_state = empty_shared_state();
+        shared_state.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let var = test_name(100);
         let instrs: &'static [Instr<Name, B64>] = Box::leak(
             vec![
@@ -12830,6 +12871,7 @@ fn zcaller(za, zb) {
         let mut fork_counts = models.iter().map(|(_, forks)| *forks).collect::<Vec<_>>();
         fork_counts.sort();
         assert_eq!(fork_counts, vec![1, 2, 3, 3]);
+        assert_eq!(shared_state.execution_stats.fork_count(), 3);
     }
 
     #[cfg(feature = "tracetool")]
@@ -13385,7 +13427,8 @@ fn zmemreadfork(zu) {
   end;
 }
 "#;
-        let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(MEM_IR);
+        let (mut shared_state, regs, lets) = shared_state_and_bindings_from_ir(MEM_IR);
+        shared_state.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let task_state = TaskState::new();
         let mut mem = crate::memory::Memory::<B64>::new();
         mem.add_symbolic_region(0x1000..0x2000);
@@ -13428,6 +13471,10 @@ fn zmemreadfork(zu) {
             &task_state,
         );
 
+        let fork_stats = shared_state.execution_stats.fork_json(&shared_state.symtab);
+        assert_eq!(fork_stats["total"], 1);
+        assert_eq!(fork_stats["unique_locations"], 1);
+        assert_eq!(fork_stats["top"][0]["function"], "memreadfork");
         let (finished, event_hits) = *collected.lock().unwrap();
         assert!(finished >= 2, "期望符号分支 fork 出至少 2 条 Finished 路径，实际 {}", finished);
         assert!(
@@ -14271,6 +14318,8 @@ fn zmemreadfork(zu) {
         for stored in [true, false] {
             let zeros = *crate::primop::unary_primops::<B64>().get("zeros").unwrap();
             let mut shared = empty_shared_state();
+            shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+            let stats = shared.execution_stats.clone();
             let lengths = shared.symtab.intern("zlengths");
             let length = shared.symtab.intern("zlength");
             let mut lets = HashMap::default();
@@ -14294,6 +14343,8 @@ fn zmemreadfork(zu) {
                 RegisterBindings::new(),
                 lets,
             );
+            assert_eq!(stats.fork_count(), results.len() - 1);
+            assert!(stats.fork_count() > 0, "长度重试必须产生真实分叉");
             let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
             let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
             eprintln!("128 位有限长度 8/16：先存变量={stored}，完成={finished}，错误={errors:?}");
@@ -15035,26 +15086,32 @@ fn zmemreadfork(zu) {
             Instr::End,
         ];
 
-        let limits_no_merge = ExecutionLimits::default();
-        let results_no_merge = run_all_with_bindings(
-            instrs.clone(),
-            limits_no_merge,
-            empty_shared_state(),
-            RegisterBindings::new(),
-            HashMap::default(),
-        );
-        assert_eq!(results_no_merge.len(), 2);
-
-        let limits_merge = ExecutionLimits::default().with_path_merging(true);
-        let results_merge = run_all_with_bindings(
-            instrs,
-            limits_merge,
-            empty_shared_state(),
-            RegisterBindings::new(),
-            HashMap::default(),
-        );
-        assert_eq!(results_merge.len(), 1);
-        assert!(matches!(results_merge[0], Ok(Run::Finished(_))));
+        for enabled in [false, true] {
+            let mut shared = empty_shared_state();
+            shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+            let stats = shared.execution_stats.clone();
+            let results = run_all_with_bindings(
+                instrs.clone(),
+                ExecutionLimits::default().with_path_merging(enabled),
+                shared,
+                RegisterBindings::new(),
+                HashMap::default(),
+            );
+            let merge = stats.merge_json();
+            if enabled {
+                assert_eq!(results.len(), 1);
+                assert!(matches!(results[0], Ok(Run::Finished(_))));
+                assert!(merge["successes"].as_u64().unwrap() > 0);
+                assert_eq!(merge["attempts"], merge["successes"]);
+                assert_eq!(stats.fork_json(&Symtab::new())["total"], 0);
+            } else {
+                assert_eq!(results.len(), 2);
+                assert_eq!(merge["attempts"], 0);
+                assert_eq!(merge["successes"], 0);
+                // 此测试使用人工 Name，直方图在真实符号表测试中核对名称。
+                assert_eq!(stats.fork_count(), 1);
+            }
+        }
     }
 
     #[test]
@@ -15074,15 +15131,24 @@ fn zmemreadfork(zu) {
             Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
             Instr::End,
         ];
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let stats = shared.execution_stats.clone();
         let results = run_all_with_bindings(
             instrs,
             ExecutionLimits::default().with_path_merging(true),
-            empty_shared_state(),
+            shared,
             RegisterBindings::new(),
             HashMap::default(),
         );
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| matches!(result, Ok(Run::Finished(_)))));
+        let merge = stats.merge_json();
+        assert_eq!(merge["attempts"], 1);
+        assert_eq!(merge["successes"], 0);
+        assert_eq!(merge["failures"], 1);
+        assert!(merge["failure_reasons"]["frame_merge_rejected"].as_u64().unwrap() > 0);
+        assert_eq!(stats.fork_count(), 1);
     }
 
     #[test]

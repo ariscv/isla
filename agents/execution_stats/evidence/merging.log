@@ -1,0 +1,25 @@
+    Blocking waiting for file lock on artifact directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.57s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-c7d55d6e865adf98)
+
+running 4 tests
+test executor::tests::path_merging_rejects_cross_arm_jump ... ok
+test executor::tests::path_merging_fallback_when_arm_has_exit ... ok
+test executor::tests::path_merging_rejects_branch_local_declaration ... FAILED
+test executor::tests::path_merging_diamond_reduces_forks ... ok
+
+failures:
+
+---- executor::tests::path_merging_rejects_branch_local_declaration stdout ----
+
+thread 'executor::tests::path_merging_rejects_branch_local_declaration' (138) panicked at isla-lib/src/executor.rs:15145:9:
+assertion failed: merge["failure_reasons"]["then_arm_unsupported"].as_u64().unwrap() > 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    executor::tests::path_merging_rejects_branch_local_declaration
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p isla-lib --lib`
