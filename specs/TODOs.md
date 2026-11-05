@@ -1,5 +1,7 @@
 # 当前任务
 
+- 2026-11-05 [路径合并区域化推演](../agents/path_merge_call_support/status.md)：主体完成并提交（HEAD 36433cf）。函数级 `pte_is_invalid` 分叉 10 条→合并 1 条（Z3 等价检查 23/23）；Sv39 LOAD 合并 52 条路径完整结束，分叉模式 1800 秒未结束（8705 条已输出）。`isla-lib` 全量 682 通过、12 失败与 HEAD 基线相同。待办：Sv39 级覆盖等价性对照、后处理枚举实现。
+
 - 2026-11-05 [可选执行统计](../agents/execution_stats/status.md)：完成实现及限定验证；`ISLA_STATS=1` 输出合并统计与前 30 个分叉位置，cargo check、9 个定向测试通过。未跑 Sv39／完整 CLI 输出对照，改动未提交。
 
 - 2026-11-04 [Review 37 四组修复](../agents/review37/status.md)：进行中；完整复现补丁已应用，失败基线 3/8 通过，最终验证待执行。

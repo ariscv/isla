@@ -1,6 +1,20 @@
 # 验证记录
 
 
+## 2026-11-05 路径合并区域化推演（Sv39 LOAD 与函数级 pte_is_invalid）
+
+受测版本：`feat/postprocess-enumeration` HEAD 36433cf；IR 为 `isla/.worktrees/memory-consistency/rv64d.ir`；Sv39 配置为 `.worktree/mmu-symbolic-experiment/symbolic/config.toml`（含 45 键 `[const_primops]`）。单次测量，未重复。
+
+| 测量 | 命令要点 | 结果 |
+| --- | --- | --- |
+| 函数级 `pte_is_invalid` | `isla-execute-function`，带常量配置 `agents/path_merge_call_support/baseline_config_const.toml`，开关合并各一次 | 分叉 10 条 → 合并 1 条；23 项 Z3 检查通过；投影枚举 10 类 |
+| Sv39 LOAD 开合并 | `isarch -T 1 --instruction-bits 0x0000b103 … --path-merging solve-state --clause=LOAD` | 20 秒（最近一次）完整结束，52 条路径，状态 finished，错误/超时/未完成均 0；合并 226 次尝试、175 次成功，51 次 `state_effect` 拒绝；合并记录 175 行 |
+| Sv39 LOAD 不合并 | 同上去掉 `--path-merging`，外层 `timeout 1800` | 1800 秒未结束（退出码 124），已输出 8705 条路径，累计分叉 46085 次 |
+| 单元测试 | `cargo test -p isla-lib --offline --features smt-thread-interrupt` | 682 通过、12 失败（与 HEAD 基线逐名相同）、2 忽略 |
+
+限制：未做 Sv39 级覆盖等价性对照（分叉路径集合不完整）；耗时收益只有"能否跑完"的对比，没有同路径下的加速比；寄存器读取取并集，不适用于需要精确读写顺序的使用者。
+
+
 ## 2026-11-05 可选执行统计
 
 受测版本：`feat/postprocess-enumeration`，基线 `dc76449` 加本轮统计及测试改动。起始工作树干净；rustc/Cargo 1.93.1。没有修改 IR 或模型，也没有运行 ISA 负载。
