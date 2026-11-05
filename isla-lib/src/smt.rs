@@ -183,6 +183,9 @@ impl fmt::Debug for EnumMember {
     }
 }
 mod dump;
+mod transaction;
+use transaction::SolverSavepoint;
+pub use transaction::SolverTransaction;
 pub mod smtlib;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
@@ -843,6 +846,13 @@ impl<'ctx> FuncDecl<'ctx> {
     }
 }
 
+impl Clone for FuncDecl<'_> {
+    fn clone(&self) -> Self {
+        unsafe { Z3_inc_ref(self.ctx.z3_ctx, Z3_func_decl_to_ast(self.ctx.z3_ctx, self.z3_func_decl)) };
+        Self { z3_func_decl: self.z3_func_decl, ctx: self.ctx }
+    }
+}
+
 impl Drop for FuncDecl<'_> {
     fn drop(&mut self) {
         unsafe {
@@ -1405,9 +1415,11 @@ impl Drop for Ast<'_> {
 }
 
 #[cfg(not(feature = "smtperf"))]
+#[derive(Clone)]
 struct PerformanceInfo {}
 
 #[cfg(feature = "smtperf")]
+#[derive(Clone)]
 struct PerformanceInfo {
     vars: Graph<(Sym, SourceLoc), (), Directed>,
     var_nodes: HashMap<Sym, NodeIndex, ahash::RandomState>,
@@ -1599,9 +1611,10 @@ pub struct Solver<'ctx, B> {
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
     stashed_model: Option<Z3_model>,
-    in_transaction: bool,
-    transaction_invalid: bool,
-    transaction_defs: Vec<Event<B>>,
+    savepoints: Vec<SolverSavepoint<'ctx>>,
+    transaction_events: Vec<Event<B>>,
+    last_committed_transaction: Option<(SolverTransaction, usize)>,
+    condition_depth: usize,
 }
 
 impl<B> Drop for Solver<'_, B> {
@@ -2203,9 +2216,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 asserts_since_check: 0,
                 last_check_sat: false,
                 stashed_model: None,
-                in_transaction: false,
-                transaction_invalid: false,
-                transaction_defs: Vec::new(),
+                savepoints: Vec::new(),
+                transaction_events: Vec::new(),
+                last_committed_transaction: None,
+                condition_depth: 0,
             }
         }
     }
@@ -2381,8 +2395,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
-        if self.in_transaction && matches!(def, Def::Assert(_)) {
-            self.transaction_invalid = true;
+        if !self.savepoints.is_empty() && matches!(def, Def::Assert(_)) {
+            // 内层提交后补加的断言仍处于父层的推演中，不能无条件写入 Z3。
+            // 保守地使当前层失效；回滚该层可恢复父层，失效层禁止提交。
+            self.savepoints.last_mut().unwrap().invalid = true;
             return;
         }
         match &def {
@@ -2502,27 +2518,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn add(&mut self, def: Def) {
-        self.add_internal(&def, SourceLoc::unknown());
-        if !self.transaction_invalid || matches!(def, Def::DefineEnum(_, _)) {
-            let event = Event::Smt(def, self.def_attrs, SourceLoc::unknown());
-            if self.in_transaction {
-                self.transaction_defs.push(event)
-            } else {
-                self.trace.head.push(event)
-            }
-        }
+        self.add_with_location(def, SourceLoc::unknown());
     }
 
     pub fn add_with_location(&mut self, def: Def, info: SourceLoc) {
-        self.add_internal(&def, info);
-        if !self.transaction_invalid || matches!(def, Def::DefineEnum(_, _)) {
-            let event = Event::Smt(def, self.def_attrs, info);
-            if self.in_transaction {
-                self.transaction_defs.push(event)
-            } else {
-                self.trace.head.push(event)
-            }
-        }
+        self.add_event(Event::Smt(def, self.def_attrs, info));
     }
 
     pub fn declare_const(&mut self, ty: Ty, info: SourceLoc) -> Sym {
@@ -2552,13 +2552,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             return;
         }
         let defines_sym = |event: &&mut Event<B>| matches!(event, Event::Smt(Def::DefineConst(v, _) | Def::DeclareConst(v, _), _, _) if *v == sym);
-        if self.in_transaction {
-            if let Some(Event::Smt(_, attrs, _)) = self.transaction_defs.iter_mut().rev().find(defines_sym) {
+        if let Some(savepoint) = self.savepoints.last_mut() {
+            if let Some(Event::Smt(_, attrs, _)) =
+                self.transaction_events[savepoint.events_len..].iter_mut().rev().find(defines_sym)
+            {
                 *attrs = attrs.sail_bitvector();
                 self.sail_bitvectors.insert(sym);
             } else {
                 // 事务不能改变提交前已有符号的类别。
-                self.transaction_invalid = true;
+                savepoint.invalid = true;
             }
             return;
         }
@@ -2606,19 +2608,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         };
     }
 
+    /// 保存点内的全部事件共用缓冲出口；只有最外层提交才发布到迹。
     pub fn add_event(&mut self, event: Event<B>) {
-        if self.in_transaction {
-            if matches!(&event, Event::Smt(Def::Assert(_), _, _)) {
-                self.transaction_invalid = true;
-            } else if let Event::Smt(def, attrs, info) = &event {
-                self.with_def_attrs(*attrs, |solver| solver.add_internal(def, *info));
-                self.transaction_defs.push(event);
-            }
-            // 推测读取由执行器按两臂的读取序列合并，不能直接提交到轨迹。
-            return;
-        }
         self.add_event_internal(&event);
-        self.trace.head.push(event)
+        if self.savepoints.is_empty() {
+            self.trace.head.push(event);
+        } else if !matches!(&event, Event::Smt(..))
+            || !self.transaction_invalid()
+            || matches!(&event, Event::Smt(Def::DefineEnum(..), ..))
+        {
+            self.transaction_events.push(event);
+        }
     }
 
     pub fn trace_call(&mut self, name: Name) {
@@ -2898,112 +2898,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         cs.to_string_lossy().to_string()
     }
-
-    pub fn start_transaction(&mut self) -> SolverTransaction {
-        assert!(!self.in_transaction);
-        self.in_transaction = true;
-        self.transaction_invalid = false;
-        SolverTransaction {
-            head_len: self.trace.head.len(),
-            next_var: self.next_var,
-            asserts_since_check: self.asserts_since_check,
-            #[cfg(feature = "smtperf")]
-            performance_nodes: self.performance_info.vars.node_count(),
-        }
-    }
-
-    pub fn rollback_transaction(&mut self, tx: SolverTransaction) {
-        assert!(self.in_transaction);
-        self.clear_stashed_model();
-        self.trace.head.truncate(tx.head_len);
-        // 枚举 sort 属于 solver 的全局注册状态，无法随分支回滚；重放时也必须保留定义。
-        self.trace.head.extend(
-            self.transaction_defs
-                .iter()
-                .filter(|event| matches!(event, Event::Smt(Def::DefineEnum(_, _), _, _)))
-                .cloned(),
-        );
-        for var_id in tx.next_var..self.next_var {
-            let sym = Sym::from_u32(var_id);
-            self.decls.remove(&sym);
-            self.sail_bitvectors.remove(&sym);
-            self.func_decls.remove(&sym);
-        }
-        #[cfg(feature = "smtperf")]
-        while self.performance_info.vars.node_count() > tx.performance_nodes {
-            // 从末尾删除，避免 Graph 的 swap_remove 改变已有符号的 NodeIndex。
-            let index = NodeIndex::new(self.performance_info.vars.node_count() - 1);
-            let (sym, _) = self.performance_info.vars.remove_node(index).unwrap();
-            assert_eq!(self.performance_info.var_nodes.remove(&sym), Some(index));
-        }
-        self.asserts_since_check = tx.asserts_since_check;
-        self.last_check_sat = false;
-        self.transaction_defs.clear();
-        self.transaction_invalid = false;
-        self.in_transaction = false;
-    }
-
-    pub fn transaction_invalid(&self) -> bool {
-        self.transaction_invalid
-    }
-
-    /// 臂条件只在推测期间生效，不进入可提交的定义和最终路径断言。
-    pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
-        assert!(self.in_transaction, "推测臂条件必须位于事务中");
-        self.clear_stashed_model();
-        self.last_check_sat = false;
-        unsafe { Z3_solver_push(self.ctx.z3_ctx, self.z3_solver) };
-        self.z3_assert(condition);
-        let result = f(self);
-        unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
-        self.clear_stashed_model();
-        self.last_check_sat = false;
-        result
-    }
-
-    pub fn commit_transaction(&mut self) {
-        assert!(self.in_transaction && !self.transaction_invalid);
-        self.trace.head.append(&mut self.transaction_defs);
-        self.in_transaction = false;
-    }
-
-    /// 合并读取保留序列顺序，并排在其符号定义之后、使用这些符号的计算之前。
-    pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
-        assert!(!self.in_transaction, "只能调整已提交事务的读取顺序");
-        let events = self.trace.head.split_off(tx.head_len);
-        let mut reads = Vec::new();
-        for event in events {
-            if matches!(&event, Event::ReadReg(..)) {
-                reads.push(event);
-            } else {
-                assert!(matches!(&event, Event::Smt(..)), "合并读取之前只能提交 SMT 定义");
-                self.trace.head.push(event);
-            }
-        }
-        let mut position = tx.head_len;
-        for event in reads {
-            let Event::ReadReg(_, _, value) = &event else { unreachable!() };
-            let symbols = value.symbolic_variables();
-            for (index, definition) in self.trace.head.iter().enumerate().skip(position) {
-                if let Event::Smt(Def::DeclareConst(sym, _) | Def::DefineConst(sym, _), _, _) = definition {
-                    if symbols.contains(sym) {
-                        position = index + 1;
-                    }
-                }
-            }
-            self.trace.head.insert(position, event);
-            position += 1;
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct SolverTransaction {
-    #[cfg(feature = "smtperf")]
-    performance_nodes: usize,
-    head_len: usize,
-    next_var: u32,
-    asserts_since_check: usize,
 }
 
 /// 清空当前线程的路径级 SMT 统计。
@@ -3036,6 +2930,8 @@ pub(crate) fn take_smtperf_report() -> Option<String> {
 }
 
 pub fn checkpoint<B: BV>(solver: &mut Solver<B>) -> Checkpoint<B> {
+    assert_eq!(solver.transaction_depth(), 0, "保存点内不能发布检查点");
+    solver.last_committed_transaction = None;
     solver.trace.checkpoint(solver.next_var)
 }
 
@@ -3138,7 +3034,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_transaction_replays_only_smt_definitions() {
+    fn committed_transaction_replays_buffered_events() {
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let tx = solver.start_transaction();
@@ -3148,7 +3044,7 @@ mod tests {
         solver.add_event(Event::ReadReg(Name::from_u32(0), Vec::new(), Val::Symbolic(symbol)));
         assert_eq!(solver.trace.head.len(), tx.head_len);
         solver.commit_transaction();
-        assert_eq!(solver.trace.head.len(), tx.head_len + 1);
+        assert_eq!(solver.trace.head.len(), tx.head_len + 4);
         assert!(matches!(&solver.trace.head[tx.head_len], Event::Smt(Def::DeclareConst(v, _), _, _) if *v == symbol));
     }
 
@@ -3595,3 +3491,6 @@ mod tests {
 }
 
 pub use z3_timeout::configure_z3_timeout;
+
+#[cfg(test)]
+mod transaction_tests;
