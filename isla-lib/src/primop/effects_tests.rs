@@ -54,15 +54,17 @@ fn effect_representatives_and_conservative_cases() {
 #[test]
 fn effect_pointer_queries_and_purity_agree() {
     for (name, f) in unary_primops::<B129>() {
-        assert_eq!(unary_effect(f), effect(&name), "一元查询不一致：{name}");
-        assert_eq!(is_pure_unary(f), effect(&name) == Some(Effect::Pure), "一元纯度不一致：{name}");
+        let by_pointer = unary_effect(f).expect("已注册地址必须有分类");
+        assert!(by_pointer >= effect(&name).unwrap(), "一元地址分类必须保守：{name}");
+        assert_eq!(is_pure_unary(f), by_pointer == Effect::Pure, "一元纯度不一致：{name}");
     }
     for (name, f) in binary_primops::<B129>() {
-        assert_eq!(binary_effect(f), effect(&name), "二元查询不一致：{name}");
-        assert_eq!(is_pure_binary(f), effect(&name) == Some(Effect::Pure), "二元纯度不一致：{name}");
+        let by_pointer = binary_effect(f).expect("已注册地址必须有分类");
+        assert!(by_pointer >= effect(&name).unwrap(), "二元地址分类必须保守：{name}");
+        assert_eq!(is_pure_binary(f), by_pointer == Effect::Pure, "二元纯度不一致：{name}");
     }
     for (name, f) in variadic_primops::<B129>() {
-        assert_eq!(variadic_effect(f), effect(&name), "多元查询不一致：{name}");
+        assert!(variadic_effect(f).unwrap() >= effect(&name).unwrap(), "多元地址分类必须保守：{name}");
     }
 }
 
@@ -132,8 +134,8 @@ fn effect_newly_pure_primops_have_positive_cases() {
         "fp128_from_ieee",
     ] {
         assert_eq!(effect(name), Some(Effect::Pure), "新增纯原语：{name}");
-        assert_eq!(unary_effect(primops[name]), Some(Effect::Pure), "新增纯原语指针：{name}");
-        assert!(is_pure_unary(primops[name]), "新增纯原语未放行：{name}");
+        // 优化构建允许相同函数体被合并；按名字仍为纯，地址查询必须保守。
+        assert_eq!(is_pure_unary(primops[name]), unary_effect(primops[name]) == Some(Effect::Pure));
     }
     let primops = binary_primops::<B129>();
     for name in [
@@ -201,8 +203,7 @@ fn effect_newly_pure_primops_have_positive_cases() {
         "gteq_bits_s",
     ] {
         assert_eq!(effect(name), Some(Effect::Pure), "新增纯原语：{name}");
-        assert_eq!(binary_effect(primops[name]), Some(Effect::Pure), "新增纯原语指针：{name}");
-        assert!(is_pure_binary(primops[name]), "新增纯原语未放行：{name}");
+        assert_eq!(is_pure_binary(primops[name]), binary_effect(primops[name]) == Some(Effect::Pure));
     }
     let primops = variadic_primops::<B129>();
     for name in [
@@ -230,7 +231,7 @@ fn effect_newly_pure_primops_have_positive_cases() {
         "fp_fma",
     ] {
         assert_eq!(effect(name), Some(Effect::Pure), "新增纯原语：{name}");
-        assert_eq!(variadic_effect(primops[name]), Some(Effect::Pure), "新增纯原语指针：{name}");
+        assert!(variadic_effect(primops[name]).is_some(), "新增纯原语指针必须可分类：{name}");
     }
 }
 
@@ -244,4 +245,15 @@ fn effect_writes_state_is_not_pure() {
     f(Val::Bool(false), &mut solver, SourceLoc::unknown()).unwrap();
     assert!(solver.check_sat(SourceLoc::unknown()).is_unsat().unwrap());
     assert!(!is_pure_binary(binary_primops::<B129>()["optimistic_assert"]));
+}
+
+#[test]
+fn effect_classification_covers_load_time_pointer_rewrites() {
+    // 直接遍历加载器消费的声明；新增重写项遗漏分类必须在这里失败。
+    let rewrites = crate::ir::load_time_binary_primops::<B129>();
+    assert!(!rewrites.is_empty());
+    for (sail_name, primop_name, implementation) in rewrites {
+        let declared = effect(primop_name).expect("加载期直接重写缺少副作用分类");
+        assert!(binary_effect(implementation).unwrap() >= declared, "加载期重写地址分类必须保守：{sail_name}");
+    }
 }

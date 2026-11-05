@@ -93,8 +93,14 @@ impl Error for SmtError {}
 
 #[derive(Debug)]
 pub enum ExecError {
-    /// 推演在分支决策口被拒绝，由推演调用者决定回滚。
-    SpeculativeReject(crate::executor::SpeculativeRejectReason),
+    /// 推演控制信号，区别于正常返回和异常终止；不是普通路径错误。
+    /// 后续集成的推演边界必须捕获并回滚，禁止交给普通调度器或路径收尾。
+    SpeculativeReject {
+        reason: crate::executor::SpeculativeRejectReason,
+        function: Name,
+        pc: usize,
+        location: SourceLoc,
+    },
     Type(String, SourceLoc),
     VariableNotFound(String, SourceLoc),
     Unimplemented,
@@ -143,7 +149,8 @@ impl IslaError for ExecError {
     fn source_loc(&self) -> SourceLoc {
         use ExecError::*;
         match self {
-            Type(_, info)
+            SpeculativeReject { location: info, .. }
+            | Type(_, info)
             | AssertionFailure(_, info)
             | NoFunction(_, info)
             | RetryCondition(_, info)
@@ -153,7 +160,33 @@ impl IslaError for ExecError {
             | MatchFailure(info) => *info,
             Smt(error) => error.source_loc(),
             BranchLimitReached(_, _) | LoopLimitReached(_, _) | DepthLimitReached => SourceLoc::unknown(),
-            _ => SourceLoc::unknown(),
+            Unimplemented
+            | Overflow
+            | NoSymbolicType
+            | Unreachable(_)
+            | Unmapped
+            | BadRead(_)
+            | BadWrite(_)
+            | NoElfEntry
+            | OutOfBounds(_)
+            | Timeout
+            | NoModel
+            | Z3Error(_)
+            | Z3Unknown
+            | Stopped(_)
+            | PCLimitReached(_)
+            | InconsistentRegisterReset
+            | BadInterrupt(_)
+            | IncompatibleMerge => SourceLoc::unknown(),
+        }
+    }
+}
+
+impl ExecError {
+    /// 普通调度和路径收尾不能接收推演控制信号；必须在任何日志、求模或收集之前调用。
+    pub fn assert_normal_execution(&self) {
+        if let Self::SpeculativeReject { .. } = self {
+            panic!("推演拒绝泄漏到普通执行边界：{self:?}");
         }
     }
 }
@@ -165,7 +198,9 @@ impl fmt::Display for ExecError {
             Type(msg, _) => write!(f, "Type error: {}", msg),
             VariableNotFound(v, _) => write!(f, "Variable {} not found", v),
             Unimplemented => write!(f, "Unimplemented"),
-            SpeculativeReject(reason) => write!(f, "拒绝推演: {}", reason),
+            SpeculativeReject { reason, function, pc, location } => {
+                write!(f, "拒绝推演: {}，函数 {:?}，pc {}，位置 {:?}", reason, function, pc, location)
+            }
             AssertionFailure(None, _) => write!(f, "Assertion failure"),
             AssertionFailure(Some(msg), _) => write!(f, "Assertion failure: {}", msg),
             NoFunction(func, _) => write!(f, "Function {} does not exist", func),

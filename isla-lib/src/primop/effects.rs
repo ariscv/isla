@@ -14,7 +14,7 @@ use crate::bitvector::BV;
 /// 由执行器重试路径分叉，C1 推演模式的统一“分支决策口”负责拦截。
 /// 同样的操作数重试（含 `RetryCondition`、`IntegerConversion`）不另归 `MayFork`。
 /// 当前原语没有内部直接分叉或建检查点的实现，`MayFork` 的条目数为 0。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Effect {
     /// 只读输入，不访问寄存器、内存、配置等外部状态，也不写外部状态。
     Pure,
@@ -284,20 +284,34 @@ pub fn effect(name: &str) -> Option<Effect> {
     }
 }
 
-// 三种函数指针接口复用同一分类表；别名必须具有相同类别，由一致性测试检查。
+// 三种函数指针接口复用同一分类表。优化器可能合并契约不同的相同函数体，
+// 故同地址取 Pure < ReadsState < WritesState < MayFork 的最大值，与遍历顺序无关。
 macro_rules! pointer_effect {
     ($query:ident, $kind:ident, $registry:ident) => {
         /// 按实现指针查询副作用；未注册的指针返回 `None`。
         pub fn $query<B: BV>(f: $kind<B>) -> Option<Effect> {
-            $registry::<B>().into_iter().find_map(|(name, implementation)| {
-                std::ptr::fn_addr_eq(implementation, f).then(|| effect(&name).expect("已注册的原语必须有副作用分类"))
-            })
+            $registry::<B>()
+                .into_iter()
+                .filter_map(|(name, implementation)| {
+                    std::ptr::fn_addr_eq(implementation, f)
+                        .then(|| effect(&name).expect("已注册的原语必须有副作用分类"))
+                })
+                .max()
         }
     };
 }
 
 pointer_effect!(unary_effect, Unary, unary_primops);
-pointer_effect!(binary_effect, Binary, binary_primops);
+fn binary_effect_registry<B: BV>() -> impl Iterator<Item = (String, Binary<B>)> {
+    binary_primops::<B>().into_iter().chain(crate::ir::load_time_binary_primops::<B>().into_iter().map(
+        |(_, name, implementation)| {
+            effect(name).expect("加载期直接重写必须有副作用分类");
+            (name.into(), implementation)
+        },
+    ))
+}
+
+pointer_effect!(binary_effect, Binary, binary_effect_registry);
 pointer_effect!(variadic_effect, Variadic, variadic_primops);
 
 /// Reset 是配置注入的任意闭包，可读内存并通过 solver 写事件/约束，甚至捕获
@@ -306,4 +320,25 @@ pointer_effect!(variadic_effect, Variadic, variadic_primops);
 pub fn reset_effect<B>(reset: &Reset<B>) -> Effect {
     let _ = reset;
     Effect::WritesState
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+
+    fn collision_registry<B: BV>() -> std::collections::HashMap<String, Unary<B>> {
+        let implementation = unary_primops::<B>()["undefined_unit"];
+        ["undefined_unit", "get_cycle_count", "print"].into_iter().map(|name| (name.into(), implementation)).collect()
+    }
+    pointer_effect!(collision_effect, Unary, collision_registry);
+
+    #[test]
+    fn primop_effect_address_collision_is_conservative() {
+        let implementation = unary_primops::<B64>()["undefined_unit"];
+        // 每次重建 HashMap 的随机遍历顺序不得影响同地址冲突的结果。
+        for iteration in 0..64 {
+            assert_eq!(collision_effect(implementation), Some(Effect::WritesState), "第 {iteration} 次地址冲突分类");
+        }
+    }
 }

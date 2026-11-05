@@ -8,7 +8,7 @@
 //! 区域只说明控制流结构；它不证明调用纯度、没有递归或没有内存副作用。
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use petgraph::algo::dominators::{simple_fast, Dominators};
 use petgraph::graph::{Graph, NodeIndex};
@@ -51,7 +51,7 @@ pub struct Region {
     /// 入口 Jump 与 join 均不包含在内，按原始 pc 排序。
     pub nodes: BTreeSet<usize>,
     pub kind: RegionKind,
-    /// 区域内 Decl 且区域离开后不再读取的名字，可在提交处丢弃。
+    /// 区域内 Decl/Init 且区域离开后不再读取的名字，可在提交处丢弃。
     pub local_variables: BTreeSet<Name>,
 }
 
@@ -83,6 +83,7 @@ pub struct RegionCfg {
     pcs: Vec<NodeIndex>,
     exit: NodeIndex,
     postdominators: Dominators<NodeIndex>,
+    declarations: HashMap<Name, BTreeSet<usize>>,
     jump_pcs: HashSet<usize>,
     exception_pcs: HashSet<usize>,
 }
@@ -154,6 +155,15 @@ impl RegionCfg {
         normalized.push(LabeledInstr::Labeled(len, Instr::End));
         let cfg = CFG::new(&normalized);
         assert_eq!(cfg.graph.node_count(), len + 1, "SSA CFG 必须保留所有指令标签");
+        let mut declarations: HashMap<Name, BTreeSet<usize>> = HashMap::new();
+        for ix in cfg.graph.node_indices() {
+            let block = &cfg.graph[ix];
+            for instr in &block.instrs {
+                if let Some(name) = instr.declares() {
+                    declarations.entry(name).or_default().insert(block.label.expect("指令基本块必须有标签"));
+                }
+            }
+        }
         let mut graph = Graph::new();
         let pcs: Vec<_> = (0..len).map(|pc| graph.add_node(RegionPoint::Instruction(pc))).collect();
         let exit = graph.add_node(RegionPoint::FunctionExit);
@@ -201,7 +211,7 @@ impl RegionCfg {
             }
         }
         let postdominators = simple_fast(Reversed(&graph), exit);
-        Self { graph, pcs, exit, postdominators, jump_pcs, exception_pcs }
+        Self { graph, pcs, exit, postdominators, declarations, jump_pcs, exception_pcs }
     }
 
     pub fn instruction_count(&self) -> usize {
@@ -286,7 +296,6 @@ struct FunctionAnalysis {
     full_cfg: RegionCfg,
     future_reads: Vec<HashSet<Name>>,
     address_taken: HashSet<Name>,
-    declarations: HashMap<Name, BTreeSet<usize>>,
 }
 
 /// 调用者持有的函数缓存。借用不可变指令序列，避免函数改写后复用陈旧结果。
@@ -296,7 +305,7 @@ pub struct FunctionRegions<'ir, B> {
     have_exception: Option<Name>,
     terminal_calls: Vec<Name>,
     analysis: OnceLock<FunctionAnalysis>,
-    regions: HashMap<usize, Result<Region, RegionRejection>>,
+    regions: HashMap<usize, Result<Arc<Region>, RegionRejection>>,
 }
 
 impl<'ir, B: BV> FunctionRegions<'ir, B> {
@@ -337,14 +346,11 @@ impl<'ir, B: BV> FunctionRegions<'ir, B> {
             );
             let mut reads = vec![HashSet::new(); self.instrs.len() + 1];
             let mut address_taken = HashSet::new();
-            let mut declarations: HashMap<Name, BTreeSet<usize>> = HashMap::new();
             for (pc, instr) in self.instrs.iter().enumerate() {
                 let mut expressions = Vec::new();
                 let mut destination = None;
                 match instr {
-                    Instr::Decl(name, _, _) => {
-                        declarations.entry(*name).or_default().insert(pc);
-                    }
+                    Instr::Decl(..) => (),
                     Instr::Init(_, _, exp, _) | Instr::Jump(exp, _, _) => expressions.push(exp),
                     Instr::Copy(loc, exp, _) | Instr::PrimopUnary(loc, _, exp, _) => {
                         destination = Some(loc);
@@ -420,19 +426,20 @@ impl<'ir, B: BV> FunctionRegions<'ir, B> {
                     }
                 }
             }
-            FunctionAnalysis { cfg, full_cfg, future_reads: reads, address_taken, declarations }
+            FunctionAnalysis { cfg, full_cfg, future_reads: reads, address_taken }
         })
     }
 
     /// 对指定 Jump 求区域。pc 越界属于接口误用并 panic；非 Jump 等静态拒绝
     /// 用结构化错误返回。只识别结构，不判断该 Jump 在运行时是否为符号值。
-    pub fn region(&mut self, branch_pc: usize) -> Result<&Region, RegionRejection> {
+    /// 返回共享句柄，持有外层区域时仍可查询内层；不复制节点集和活跃性集合。
+    pub fn region(&mut self, branch_pc: usize) -> Result<Arc<Region>, RegionRejection> {
         assert!(branch_pc < self.instrs.len(), "区域入口 pc 越界");
         if !self.regions.contains_key(&branch_pc) {
-            let result = self.compute_region(branch_pc);
+            let result = self.compute_region(branch_pc).map(Arc::new);
             self.regions.insert(branch_pc, result);
         }
-        self.regions[&branch_pc].as_ref().map_err(|reason| *reason)
+        self.regions[&branch_pc].clone()
     }
 
     fn compute_region(&self, branch_pc: usize) -> Result<Region, RegionRejection> {
@@ -483,6 +490,7 @@ impl<'ir, B: BV> FunctionRegions<'ir, B> {
             live_after.extend(analysis.future_reads[ix.index()].iter().copied());
         }
         let local_variables = analysis
+            .full_cfg
             .declarations
             .iter()
             .filter_map(|(name, pcs)| {
@@ -527,6 +535,40 @@ mod tests {
     }
 
     #[test]
+    fn regions_keep_outer_handle_while_querying_inner() {
+        let body = vec![
+            jump(4),
+            jump(3),
+            copy(name(1), Exp::Bool(false)),
+            Instr::Goto(5),
+            copy(name(1), Exp::Bool(true)),
+            Instr::End,
+        ];
+        let mut regions = FunctionRegions::new(&body, HAVE_EXCEPTION);
+        let outer = regions.region(0).unwrap();
+        let inner = regions.region(1).unwrap();
+        assert!(outer.nodes.contains(&inner.branch_pc));
+        assert_eq!(outer.join, RegionPoint::Instruction(5));
+        assert_eq!(inner.join, RegionPoint::Instruction(3));
+        assert!(std::sync::Arc::ptr_eq(&outer, &regions.region(0).unwrap()));
+    }
+
+    #[test]
+    fn regions_init_only_locals_and_outside_same_name() {
+        let init = |id| Instr::Init(id, Ty::Bool, Exp::Bool(true), SourceLoc::unknown());
+        let body = vec![jump(3), init(name(1)), Instr::Goto(4), init(name(2)), Instr::End];
+        assert_eq!(
+            FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().local_variables,
+            [name(1), name(2)].into_iter().collect()
+        );
+        let body = vec![jump(3), init(name(1)), Instr::Goto(4), init(name(2)), init(name(1)), Instr::End];
+        assert_eq!(
+            FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().local_variables,
+            [name(2)].into_iter().collect()
+        );
+    }
+
+    #[test]
     fn regions_diamond_triangle_and_lazy_cache() {
         let body =
             vec![jump(3), copy(name(1), Exp::Bool(false)), Instr::Goto(4), copy(name(1), Exp::Bool(true)), Instr::End];
@@ -537,8 +579,8 @@ mod tests {
         assert_eq!(region.join, RegionPoint::Instruction(4));
         assert_eq!(region.nodes, [1, 2, 3].into_iter().collect());
         assert_eq!(region.kind, RegionKind::Reconvergent);
-        let address = region as *const Region;
-        assert_eq!(regions.region(0).unwrap() as *const Region, address);
+        let address = Arc::as_ptr(&region);
+        assert_eq!(Arc::as_ptr(&regions.region(0).unwrap()), address);
         assert_eq!(regions.cached_regions(), 1);
         let triangle = vec![jump(2), copy(name(1), Exp::Bool(true)), Instr::End];
         assert_eq!(FunctionRegions::new(&triangle, HAVE_EXCEPTION).region(0).unwrap().nodes, [1].into_iter().collect());

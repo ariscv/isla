@@ -185,7 +185,7 @@ impl fmt::Debug for EnumMember {
 mod dump;
 mod transaction;
 use transaction::SolverSavepoint;
-pub use transaction::SolverTransaction;
+pub use transaction::{SolverTransaction, MAX_TRANSACTION_DEPTH};
 pub mod smtlib;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
@@ -1722,9 +1722,14 @@ struct ModelEvalTimeoutContext {
 }
 
 impl<'ctx, B: BV> Model<'ctx, B> {
+    /// 借用当前断言集的缓存模型并持有独立引用，支持 Unsat 探测及保存点回滚后的取值。
+    /// 调用前须有 Sat 查询，且此后未新增断言、未通过 take_stashed_model 取走缓存。
+    /// 缺少模型是调用顺序错误，直接 panic，绝不向 Z3 索取可能已失效的最后模型。
     pub fn new(solver: &'ctx Solver<'ctx, B>) -> Self {
         unsafe {
-            let z3_model = Z3_solver_get_model(solver.ctx.z3_ctx, solver.z3_solver);
+            // 模型只能来自本侧缓存；Z3 的最后查询可能已被 Unsat 探测覆盖，
+            // 保存点回滚也只恢复本侧引用。没有有效模型属于调用顺序错误。
+            let z3_model = solver.stashed_model.expect("获取模型前必须完成 Sat 查询且未新增断言、未取走缓存");
             Z3_model_inc_ref(solver.ctx.z3_ctx, z3_model);
             Model { z3_model, solver, ctx: solver.ctx, complete_model: false }
         }

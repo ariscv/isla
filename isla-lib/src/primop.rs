@@ -256,7 +256,7 @@ pub(crate) fn assume<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) 
 }
 
 // If the assertion can succeed, it will
-fn optimistic_assert<B: BV>(
+pub(crate) fn optimistic_assert<B: BV>(
     x: Val<B>,
     message: Val<B>,
     solver: &mut Solver<B>,
@@ -289,7 +289,7 @@ fn optimistic_assert<B: BV>(
 }
 
 // If the assertion can fail, it will
-fn pessimistic_assert<B: BV>(
+pub(crate) fn pessimistic_assert<B: BV>(
     x: Val<B>,
     message: Val<B>,
     solver: &mut Solver<B>,

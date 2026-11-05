@@ -1391,6 +1391,21 @@ pub enum AssertionMode {
     Optimistic,
 }
 
+/// 加载期直接函数指针重写的唯一声明；加载器与分类完整性测试共享此表。
+/// 原语名用于分类，Sail 名用于匹配 IR，不能绕过此表增加指针重写。
+pub(crate) fn load_time_binary_primops<B: BV>() -> [(&'static str, &'static str, Binary<B>); 8] {
+    [
+        ("(operator <_u)", "lt_bits_u", primop::lt_bits_u),
+        ("(operator <=_u)", "lteq_bits_u", primop::lteq_bits_u),
+        ("(operator >_u)", "gt_bits_u", primop::gt_bits_u),
+        ("(operator >=_u)", "gteq_bits_u", primop::gteq_bits_u),
+        ("(operator <_s)", "lt_bits_s", primop::lt_bits_s),
+        ("(operator <=_s)", "lteq_bits_s", primop::lteq_bits_s),
+        ("(operator >_s)", "gt_bits_s", primop::gt_bits_s),
+        ("(operator >=_s)", "gteq_bits_s", primop::gteq_bits_s),
+    ]
+}
+
 /// Change Calls without implementations into Primops
 pub(crate) fn insert_primops<B: BV>(
     defs: &mut [Def<Name, B>],
@@ -1420,18 +1435,9 @@ pub(crate) fn insert_primops<B: BV>(
     // `zz8operatorz0zI_uz9`），函数体经 sail_unsigned/sail_signed 转 %i 再做整数
     // 比较。128 位无符号值无法用 %i（i128）表示，这些调用点统一改写为直接在
     // 位向量上比较的 primop（语义等价性见 primop.rs 的 BitsCmp）。
-    let comparison_primops: [(&str, Binary<B>); 8] = [
-        ("(operator <_u)", primop::lt_bits_u),
-        ("(operator <=_u)", primop::lteq_bits_u),
-        ("(operator >_u)", primop::gt_bits_u),
-        ("(operator >=_u)", primop::gteq_bits_u),
-        ("(operator <_s)", primop::lt_bits_s),
-        ("(operator <=_s)", primop::lteq_bits_s),
-        ("(operator >_s)", primop::gt_bits_s),
-        ("(operator >=_s)", primop::gteq_bits_s),
-    ];
     let mut comparison_fns: HashMap<Name, Binary<B>> = HashMap::new();
-    for (sail_name, comparison) in comparison_primops {
+    for (sail_name, primop_name, comparison) in load_time_binary_primops::<B>() {
+        primop::effect(primop_name).expect("加载期直接重写必须有副作用分类");
         if let Some(f) = symtab.get(&zencode::encode(sail_name)) {
             comparison_fns.insert(f, comparison);
         }

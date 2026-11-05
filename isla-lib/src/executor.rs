@@ -1027,6 +1027,7 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
     match result {
         Ok(run) => Ok((run, frame)),
         Err(err) => {
+            err.assert_normal_execution();
             frame.backtrace.push((frame.function_name, frame.pc));
             Err((err, frame))
         }
@@ -2338,6 +2339,8 @@ pub enum Run<B> {
 
 /// 所有分支来源在检查点、份额拆分和任务提交前经过此入口。
 /// Off 不改变限额、求解器或统计；On 仅记录一次拒绝并向外传播。
+/// 后续集成的推演边界负责捕获此控制信号并回滚；普通 run/collector 收到它必须 panic。
+/// End 的正常返回、Exit/Arbitrary 的异常终止与此处的推演拒绝是不同结果。
 fn branch_decision<B: BV>(
     frame: &LocalFrame<'_, B>,
     task_state: &TaskState<B>,
@@ -2347,7 +2350,21 @@ fn branch_decision<B: BV>(
         SpeculationMode::Off => Ok(()),
         SpeculationMode::On => {
             task_state.speculation_stats.record_reject(reason);
-            Err(ExecError::SpeculativeReject(reason))
+            let location = match frame.instrs.get(frame.pc).expect("拒绝推演时 pc 必须有效") {
+                Instr::Decl(_, _, info)
+                | Instr::Init(_, _, _, info)
+                | Instr::Jump(_, _, info)
+                | Instr::Copy(_, _, info)
+                | Instr::Monomorphize(_, _, info)
+                | Instr::Call(_, _, _, _, info)
+                | Instr::PrimopUnary(_, _, _, info)
+                | Instr::PrimopBinary(_, _, _, _, info)
+                | Instr::PrimopVariadic(_, _, _, info)
+                | Instr::PrimopReset(_, _, info)
+                | Instr::Exit(_, info) => *info,
+                Instr::Goto(_) | Instr::Arbitrary | Instr::End => SourceLoc::unknown(),
+            };
+            Err(ExecError::SpeculativeReject { reason, function: frame.function_name, pc: frame.pc, location })
         }
     }
 }
@@ -2708,6 +2725,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             }
 
             Instr::PrimopUnary(loc, f, arg, info) => {
+                if frame.speculation_mode == SpeculationMode::On
+                    && std::ptr::fn_addr_eq(*f, primop::assume::<B> as primop::Unary<B>)
+                {
+                    branch_decision(frame, task_state, SpeculativeRejectReason::Assume)?;
+                }
                 let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
@@ -2744,6 +2766,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             }
 
             Instr::PrimopBinary(loc, f, arg1, arg2, info) => {
+                if frame.speculation_mode == SpeculationMode::On
+                    && [
+                        primop::optimistic_assert::<B> as primop::Binary<B>,
+                        primop::pessimistic_assert::<B> as primop::Binary<B>,
+                    ]
+                    .iter()
+                    .any(|assertion| std::ptr::fn_addr_eq(*f, *assertion))
+                {
+                    branch_decision(frame, task_state, SpeculativeRejectReason::Assert)?;
+                }
                 let mut args = symbolic_length::eval_operands([arg1, arg2], frame, shared_state, solver, *info)?;
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
@@ -3335,6 +3367,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             // C++ compilers). The value should never be used, so we
             // return Val::Poison here.
             Instr::Arbitrary => {
+                branch_decision(frame, task_state, SpeculativeRejectReason::Arbitrary)?;
                 if frame.local_state.should_probe(shared_state, &frame.function_name) {
                     let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
                     log_from!(
@@ -3356,11 +3389,12 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B>>(
             }
 
             Instr::Exit(cause, info) => {
+                branch_decision(frame, task_state, SpeculativeRejectReason::Exit)?;
                 return match cause {
                     ExitCause::MatchFailure => Err(ExecError::MatchFailure(*info)),
                     ExitCause::AssertionFailure => Err(ExecError::AssertionFailure(None, *info)),
                     ExitCause::Explicit => Ok(Run::Exit),
-                }
+                };
             }
         }
         if matches!(&frame.pending_retry_operand, Some((_, Val::Unit))) {
@@ -3761,6 +3795,7 @@ pub fn all_unsat_collector<'ir, B: BV>(
             submit_itrace_for_local_frame(&frame, shared_state);
         }
         Err((err, frame)) => {
+            err.assert_normal_execution();
             if_logging!(log::VERBOSE, {
                 log_from!(tid, log::VERBOSE, &format!("Got error, {:?}", err));
                 for (f, pc) in frame.backtrace.iter().rev() {
@@ -3851,6 +3886,7 @@ pub fn trace_collector<'ir, B: BV>(
         }
         Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
+            err.assert_normal_execution();
             log_from!(tid, log::VERBOSE, format!("Error {:?}", err));
             for (f, pc) in frame.backtrace.iter().rev() {
                 log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
@@ -3889,6 +3925,7 @@ pub fn trace_value_collector<'ir, B: BV>(
         Ok((Run::Exit | Run::Suspended, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
+            err.assert_normal_execution();
             let backtrace = backtrace_string(&frame.backtrace, &shared_state.symtab);
             match solver.check_sat(SourceLoc::unknown()) {
                 SmtResult::Sat => {
@@ -3950,6 +3987,7 @@ pub fn trace_result_collector<'ir, B: BV>(
         }
         Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
+            err.assert_normal_execution();
             collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))));
             submit_itrace_for_local_frame(&frame, shared_state);
         }
@@ -4001,6 +4039,7 @@ pub fn footprint_collector<'ir, B: BV>(
         }
 
         Err((err, frame)) => {
+            err.assert_normal_execution();
             collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))));
             submit_itrace_for_local_frame(&frame, shared_state);
         }
@@ -12626,7 +12665,7 @@ fn zcaller(za, zb) {
             solver: &Solver<B64>,
         ) {
             assert!(
-                matches!(result, Err(ExecError::SpeculativeReject(actual)) if actual == reason),
+                matches!(result, Err(ExecError::SpeculativeReject { reason: actual, .. }) if actual == reason),
                 "预期推演拒绝 {reason:?}"
             );
             assert_eq!(sink.0.load(Ordering::Relaxed), 0, "拒绝前不能提交任务");
@@ -12638,6 +12677,187 @@ fn zcaller(za, zb) {
                 solver.trace()
             );
             assert!(!solver.trace().to_vec().iter().any(|event| matches!(event, Event::Fork(..))));
+        }
+
+        #[test]
+        fn speculation_rejects_assumptions_assertions_and_terminals_before_execution() {
+            for mode in [SpeculationMode::Off, SpeculationMode::On] {
+                for operation in [
+                    "assume",
+                    "optimistic_assert",
+                    "pessimistic_assert",
+                    "arbitrary",
+                    "exit",
+                    "match_failure",
+                    "assertion_failure",
+                ] {
+                    for condition in [Some(false), Some(true), None] {
+                        let ctx = Context::new(Config::new());
+                        let mut solver = Solver::<B64>::new(&ctx);
+                        let sym = solver.declare_const(smtlib::Ty::Bool, info());
+                        let arg = match condition {
+                            Some(value) => Exp::Bool(value),
+                            None => Exp::Id(test_name(0)),
+                        };
+                        let instr = match operation {
+                            "assume" => {
+                                Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()[operation], arg, info())
+                            }
+                            "optimistic_assert" | "pessimistic_assert" => Instr::PrimopBinary(
+                                Loc::Id(RETURN),
+                                primop::binary_primops()[operation],
+                                arg,
+                                Exp::String("断言".into()),
+                                info(),
+                            ),
+                            "arbitrary" => Instr::Arbitrary,
+                            "exit" => Instr::Exit(ExitCause::Explicit, info()),
+                            "match_failure" => Instr::Exit(ExitCause::MatchFailure, info()),
+                            "assertion_failure" => Instr::Exit(ExitCause::AssertionFailure, info()),
+                            _ => unreachable!(),
+                        };
+                        let mut frame = make_frame(vec![instr, Instr::End]);
+                        frame.set_speculation_mode(mode);
+                        frame.vars_mut().insert(test_name(0), UVal::Init(Val::Symbolic(sym)));
+                        let mut state = TaskState::new();
+                        state.speculation_stats = SpeculationStats::new(true);
+                        let sink = CountingSink::default();
+                        let mut fraction = Fraction::one();
+                        let result = run_loop(
+                            0,
+                            TaskId::fresh(),
+                            &mut fraction,
+                            PathTimeout::unlimited(),
+                            None,
+                            &sink,
+                            &mut frame,
+                            &state,
+                            &empty_shared_state(),
+                            &mut solver,
+                        );
+                        if mode == SpeculationMode::On {
+                            let reason = match operation {
+                                "assume" => SpeculativeRejectReason::Assume,
+                                "optimistic_assert" | "pessimistic_assert" => SpeculativeRejectReason::Assert,
+                                "arbitrary" => SpeculativeRejectReason::Arbitrary,
+                                "exit" | "match_failure" | "assertion_failure" => SpeculativeRejectReason::Exit,
+                                _ => unreachable!(),
+                            };
+                            assert_rejected(result, reason, &sink, &fraction, &solver);
+                            assert_eq!(state.speculation_stats.reject_json()["total"], 1);
+                            assert_eq!(state.speculation_stats.reject_json()["reason_counts"][reason.to_string()], 1);
+                            assert_eq!(solver.asserts_since_check(), 0);
+                            assert_eq!(frame.pc, 0);
+                            assert_eq!(sink.0.load(Ordering::Relaxed), 0);
+                            assert!(fraction.is_one());
+                        } else {
+                            match operation {
+                                "assume" => {
+                                    assert!(matches!(result, Ok(Run::Finished(_))));
+                                    assert_eq!(
+                                        solver.check_sat(info()),
+                                        if condition == Some(false) { SmtResult::Unsat } else { SmtResult::Sat }
+                                    );
+                                }
+                                "optimistic_assert" if condition != Some(false) => {
+                                    assert!(matches!(result, Ok(Run::Finished(_))))
+                                }
+                                "pessimistic_assert" if condition == Some(true) => {
+                                    assert!(matches!(result, Ok(Run::Finished(_))))
+                                }
+                                "optimistic_assert" | "pessimistic_assert" | "assertion_failure" => {
+                                    assert!(matches!(result, Err(ExecError::AssertionFailure(..))))
+                                }
+                                "match_failure" => assert!(matches!(result, Err(ExecError::MatchFailure(..)))),
+                                "arbitrary" => assert!(matches!(result, Ok(Run::Finished(Val::Poison)))),
+                                "exit" => assert!(matches!(result, Ok(Run::Exit))),
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn speculation_normal_return_is_not_exceptional_termination() {
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.set_speculation_mode(SpeculationMode::On);
+            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(true)));
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let result = run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &CountingSink::default(),
+                &mut frame,
+                &TaskState::new(),
+                &empty_shared_state(),
+                &mut solver,
+            );
+            assert!(matches!(result, Ok(Run::Finished(Val::Bool(true)))));
+        }
+
+        #[test]
+        fn speculation_rejection_preserves_source_location() {
+            use crate::error::IslaError;
+            let location = SourceLoc::new(0, 12, 1, 12, 8);
+            let mut frame = make_frame(vec![Instr::Jump(Exp::Bool(true), 0, location)]);
+            frame.set_speculation_mode(SpeculationMode::On);
+            let error = branch_decision(&frame, &TaskState::new(), SpeculativeRejectReason::SymbolicJump).unwrap_err();
+            assert_eq!(error.source_loc(), location);
+            assert!(
+                matches!(error, ExecError::SpeculativeReject { function, pc: 0, .. } if function == frame.function_name)
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "推演拒绝泄漏到普通")]
+        fn speculation_leak_panics_at_normal_scheduler_boundary() {
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let condition = solver.declare_const(smtlib::Ty::Bool, info());
+            let mut frame = make_frame(vec![Instr::Jump(Exp::Id(test_name(0)), 1, info()), Instr::End]);
+            frame.set_speculation_mode(SpeculationMode::On);
+            frame.vars_mut().insert(test_name(0), UVal::Init(Val::Symbolic(condition)));
+            let state = TaskState::new();
+            let _ = run(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &CountingSink::default(),
+                &freeze_frame(&frame),
+                &state,
+                &empty_shared_state(),
+                &mut solver,
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "推演拒绝泄漏到普通")]
+        fn speculation_leak_panics_at_path_collector_boundary() {
+            let mut frame = make_frame(vec![Instr::End]);
+            frame.set_speculation_mode(SpeculationMode::On);
+            let error = ExecError::SpeculativeReject {
+                reason: SpeculativeRejectReason::Exit,
+                function: frame.function_name,
+                pc: 0,
+                location: info(),
+            };
+            let ctx = Context::new(Config::new());
+            trace_value_collector(
+                0,
+                TaskId::fresh(),
+                Err((error, frame)),
+                &empty_shared_state(),
+                Solver::new(&ctx),
+                &SegQueue::new(),
+            );
         }
 
         #[test]

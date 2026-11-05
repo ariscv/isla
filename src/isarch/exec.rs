@@ -2066,6 +2066,7 @@ fn solve_collect_path<'ir, B: BV>(
             }
         },
         Err((error, frame)) => {
+            error.assert_normal_execution();
             match error {
                 ExecError::MatchFailure(_) => {
                     // 静默处理

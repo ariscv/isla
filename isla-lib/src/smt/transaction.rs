@@ -2,6 +2,9 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// 完整快照的显式资源上限；达到上限仍可提交/回滚，新增一层则 panic。
+pub const MAX_TRANSACTION_DEPTH: usize = 64;
+
 static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 事务句柄只用于定位保存点，必须按后进先出顺序回滚。
@@ -49,6 +52,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn start_transaction(&mut self) -> SolverTransaction {
+        assert!(
+            self.transaction_depth() < MAX_TRANSACTION_DEPTH,
+            "保存点嵌套深度超过上限 {}（当前 {}）",
+            MAX_TRANSACTION_DEPTH,
+            self.transaction_depth()
+        );
         let token = SolverTransaction {
             // 全局唯一编号也能拒绝已销毁求解器的旧句柄，且不引入裸指针的 Send/Sync 限制。
             id: NEXT_TRANSACTION_ID
@@ -68,6 +77,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 枚举 sort 是 Context 的全局注册状态，不能撤销；其定义在回滚时仍须可重放。
         // z3_solver/ctx/symbol_namer 不变，迹在活动保存点期间不发布也不能建检查点。
         // 完整复制符号表也覆盖对已有 Sym 的重定义，不能只删除新鲜编号区间。
+        // 每层复制符号表、函数表、位向量集合和性能图：时间/空间为当前状态规模，
+        // 总成本随路径规模和嵌套深度增长。后续可改为逐项记录旧值的增量撤销日志，
+        // 提交合并父层日志、回滚按逆序恢复；届时仍须处理已有 Sym 重定义和模型引用。
         self.savepoints.push(SolverSavepoint {
             token,
             events_len: self.transaction_events.len(),

@@ -35,6 +35,10 @@ pub enum SpeculativeRejectReason {
     ZeroInstruction,
     LimitSampling,
     LimitTruncation,
+    Assume,
+    Assert,
+    Arbitrary,
+    Exit,
 }
 
 impl fmt::Display for SpeculativeRejectReason {

@@ -434,3 +434,35 @@ fn smt_savepoint_legacy_token_remains_send_and_sync() {
     fn require_send_and_sync<T: Send + Sync>() {}
     require_send_and_sync::<SolverTransaction>();
 }
+
+#[test]
+fn smt_rollback_direct_model_single_and_nested() {
+    for nested in [false, true] {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        assert_eq!(solver.check_sat_with(&Var(sym), SourceLoc::unknown()), Sat);
+        let outer = solver.start_transaction();
+        if nested {
+            assert_eq!(solver.check_sat_with(&Not(Box::new(Var(sym))), SourceLoc::unknown()), Sat);
+            let inner = solver.start_transaction();
+            assert_eq!(solver.check_sat_with(&Bool(false), SourceLoc::unknown()), Unsat);
+            solver.rollback_transaction(inner);
+            assert_eq!(Model::new(&solver).get_var(sym).unwrap().unwrap_exp(), Bool(false));
+        }
+        assert_eq!(solver.check_sat_with(&Bool(false), SourceLoc::unknown()), Unsat);
+        solver.rollback_transaction(outer);
+        assert_eq!(Model::new(&solver).get_var(sym).unwrap().unwrap_exp(), Bool(true));
+    }
+}
+
+#[test]
+#[should_panic(expected = "保存点嵌套深度超过上限")]
+fn smt_savepoint_depth_limit_panics() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    for depth in 0..=transaction::MAX_TRANSACTION_DEPTH {
+        assert_eq!(solver.transaction_depth(), depth);
+        solver.start_transaction();
+    }
+}
