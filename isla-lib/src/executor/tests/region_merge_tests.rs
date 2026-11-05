@@ -828,6 +828,187 @@ fn region_merge_callee_have_exception_write_rejects() {
 }
 
 #[test]
+fn region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let throwing = shared.symtab.intern("zthrowing");
+    let wrapper = helper(&mut shared);
+    let argument = shared.functions[&wrapper].0[0].0;
+    shared.functions.insert(
+        throwing,
+        (
+            Vec::new(),
+            &Ty::Bool,
+            Box::leak(
+                vec![
+                    Instr::Copy(Loc::Id(CURRENT_EXCEPTION), Exp::Unit, info()),
+                    Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), info()),
+                    Instr::Arbitrary,
+                ]
+                .into_boxed_slice(),
+            ),
+        ),
+    );
+    shared.functions.get_mut(&wrapper).unwrap().2 = Box::leak(
+        vec![
+            Instr::Jump(Exp::Id(argument), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+            Instr::Call(Loc::Id(RETURN), false, throwing, Vec::new(), info()),
+            Instr::Copy(Loc::Id(CURRENT_EXCEPTION), Exp::Unit, info()),
+            Instr::End,
+        ]
+        .into_boxed_slice(),
+    );
+    let summaries = region_merge::function_effect_summaries(&shared);
+    assert!(summaries[&throwing].non_returning);
+    assert!(!summaries[&wrapper].non_returning);
+    assert_eq!(summaries[&wrapper].effect, primop::Effect::Pure);
+    assert_eq!(
+        differential(
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(4),
+                Instr::Call(Loc::Id(RETURN), false, wrapper, vec![Exp::Bool(false)], info()),
+                Instr::End,
+            ],
+            &shared,
+            1,
+            true
+        ),
+        (2, 1)
+    );
+    for execute_exception in [false, true] {
+        let mut frame = make_frame(vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Call(Loc::Id(RETURN), false, wrapper, vec![Exp::Bool(execute_exception)], info()),
+            Instr::End,
+        ]);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let result = merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
+        assert_eq!(result.is_some(), !execute_exception);
+        if execute_exception {
+            let stats = shared.execution_stats.arm_unsupported_json(&shared.symtab);
+            assert_eq!(stats["top"][0]["reason"], "region_escaped");
+            assert_eq!(stats["top"][0]["rejected_function"], "region_pure_helper");
+            assert_eq!(stats["top"][0]["target_pc"], 3);
+            assert!(frame.region_merge_records().is_empty(), "拒绝后必须回滚合并记录");
+            assert!(
+                matches!(frame.lets().get(&HAVE_EXCEPTION), Some(UVal::Init(Val::Bool(false)))),
+                "异常出口拒绝不得执行异常状态写入"
+            );
+        }
+    }
+}
+
+#[test]
+fn region_merge_non_returning_requires_all_paths_and_preserves_normal_writes() {
+    let mut shared = empty_shared_state();
+    let function = helper(&mut shared);
+    let argument = shared.functions[&function].0[0].0;
+    let register = shared.symtab.intern("znormal_write");
+    shared.registers.insert(register, Ty::Bool);
+    shared.functions.get_mut(&function).unwrap().2 = Box::leak(
+        vec![
+            Instr::Jump(Exp::Id(argument), 4, info()),
+            Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), info()),
+            Instr::Arbitrary,
+            Instr::End,
+            Instr::Copy(Loc::Id(register), Exp::Bool(true), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]
+        .into_boxed_slice(),
+    );
+    let summaries = region_merge::function_effect_summaries(&shared);
+    assert!(!summaries[&function].non_returning);
+    assert_eq!(summaries[&function].effect, primop::Effect::WritesState);
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Call(Loc::Id(RETURN), false, function, vec![Exp::Bool(true)], info()),
+        Instr::End,
+    ]);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    assert!(merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn region_merge_non_returning_fixed_point_is_conservative_for_recursion_and_exception_state() {
+    let mut shared = empty_shared_state();
+    let a = shared.symtab.intern("za");
+    let b = shared.symtab.intern("zb");
+    let call = |function| Instr::Call(Loc::Id(RETURN), false, function, Vec::new(), info());
+    let throwing = || vec![Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), info()), Instr::Arbitrary];
+    for (body_a, body_b, expected_a, expected_b) in [
+        (vec![call(b), Instr::End], throwing(), true, true),
+        (vec![call(a), Instr::End], throwing(), false, true),
+        (vec![call(b), Instr::End], vec![call(a), Instr::End], false, false),
+        (
+            vec![Instr::Jump(input(0), 2, info()), call(a), Instr::Exit(ExitCause::Explicit, info())],
+            throwing(),
+            false,
+            true,
+        ),
+        (vec![Instr::Exit(ExitCause::MatchFailure, info())], throwing(), true, true),
+        (vec![Instr::Arbitrary], throwing(), false, true),
+        (
+            vec![Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), info()), Instr::Goto(2), Instr::End],
+            throwing(),
+            true,
+            true,
+        ),
+        (
+            vec![
+                Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), info()),
+                Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(false), info()),
+                Instr::End,
+            ],
+            throwing(),
+            false,
+            true,
+        ),
+        (vec![Instr::Goto(0)], throwing(), false, true),
+        (vec![call(b), Instr::Exit(ExitCause::Explicit, info())], vec![Instr::Goto(0)], false, false),
+        (
+            vec![call(b), Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), info()), Instr::End],
+            vec![Instr::End],
+            true,
+            false,
+        ),
+        (
+            vec![
+                Instr::Copy(Loc::Id(HAVE_EXCEPTION), input(0), info()),
+                Instr::Jump(Exp::Id(HAVE_EXCEPTION), 3, info()),
+                Instr::Exit(ExitCause::Explicit, info()),
+                Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(false), info()),
+                Instr::End,
+            ],
+            throwing(),
+            false,
+            true,
+        ),
+        (vec![Instr::Jump(Exp::Id(HAVE_EXCEPTION), 2, info()), Instr::End, Instr::Arbitrary], throwing(), false, true),
+    ] {
+        shared.functions.insert(a, (Vec::new(), &Ty::Bool, Box::leak(body_a.into_boxed_slice())));
+        shared.functions.insert(b, (Vec::new(), &Ty::Bool, Box::leak(body_b.into_boxed_slice())));
+        let summaries = region_merge::function_effect_summaries(&shared);
+        assert_eq!(summaries[&a].non_returning, expected_a);
+        assert_eq!(summaries[&b].non_returning, expected_b);
+    }
+}
+
+#[test]
 fn region_merge_unique_monomorphize_and_retry_in_real_arms() {
     let shared = empty_shared_state();
     let result = test_name(990);
@@ -1247,20 +1428,33 @@ fn region_merge_real_ir_effects() {
             Vec::new(),
         );
         let summaries = region_merge::function_effect_summaries(&shared);
-        for function in ["zhartSupports", "zcurrentlyEnabled", "zpte_is_invalid", "zpte_is_non_leaf"] {
+        for function in [
+            "zinternal_errorzIozK",
+            "zget_xLPE",
+            "zhartSupports",
+            "zcurrentlyEnabled",
+            "zpte_is_invalid",
+            "zpte_is_non_leaf",
+        ] {
             eprintln!("诊断 const_primops={configured} {function}: {:?}", summaries[&shared.symtab.lookup(function)]);
         }
         for (function, expected) in [
+            ("zinternal_errorzIozK", primop::Effect::MayFork),
+            ("zget_xLPE", if configured { primop::Effect::ReadsState } else { primop::Effect::MayFork }),
             // hartSupports 还读取全局 let vector_support_level，因此不是 Pure。
             ("zhartSupports", if configured { primop::Effect::ReadsState } else { primop::Effect::MayFork }),
-            // 全函数摘要仍包含 internal_error<o> 的异常构造与写状态路径。
-            ("zcurrentlyEnabled", primop::Effect::MayFork),
-            ("zpte_is_invalid", primop::Effect::MayFork),
+            // 必然抛异常的调用不再污染其调用者，正常路径的读状态仍保留。
+            ("zcurrentlyEnabled", if configured { primop::Effect::ReadsState } else { primop::Effect::MayFork }),
+            ("zpte_is_invalid", if configured { primop::Effect::ReadsState } else { primop::Effect::MayFork }),
             ("zpte_is_non_leaf", primop::Effect::Pure),
         ] {
             let summary = &summaries[&shared.symtab.lookup(function)];
             eprintln!("const_primops={configured} {function}: {:?}", summary.effect);
             assert_eq!(summary.effect, expected, "const_primops={configured} {function}");
+            assert_eq!(summary.non_returning, function == "zinternal_errorzIozK");
+        }
+        for name in ["zinternal_errorzIozK", "zreserved_behaviorzIozK"] {
+            assert!(summaries[&shared.symtab.lookup(name)].non_returning);
         }
     }
 }

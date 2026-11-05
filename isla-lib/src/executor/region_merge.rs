@@ -1,7 +1,7 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
 use super::*;
 use crate::config::MergeMode;
-use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
+use crate::ir::regions::{FunctionRegions, Region, RegionCfg, RegionOptions, RegionPoint, RegionRejection};
 use crate::primop::{self as effects, Effect};
 
 /// 共享两臂、调用与所有嵌套区域的预算，覆盖 141 条指令的谓词链并限制递归调用。
@@ -211,6 +211,7 @@ fn constraint_binary<B: BV>(f: primop::Binary<B>) -> bool {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FunctionEffect {
     pub effect: Effect,
+    pub non_returning: bool,
     rejection: Option<CachedReject>,
 }
 impl FunctionEffect {
@@ -249,6 +250,67 @@ fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effe
 pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashMap<Name, FunctionEffect> {
     let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
     let nodes: HashMap<_, _> = shared.functions.keys().map(|function| (*function, graph.add_node(*function))).collect();
+    for (function, (_, _, body)) in &shared.functions {
+        for instr in *body {
+            if let Instr::Call(_, _, callee, _, _) = instr {
+                if let Some(callee) = nodes.get(callee) {
+                    graph.update_edge(nodes[function], *callee, ());
+                }
+            }
+        }
+    }
+    let components = petgraph::algo::kosaraju_scc(&graph);
+    let mut non_returning = HashSet::new();
+    let mut terminating: HashMap<_, _> = shared.functions.keys().map(|function| (*function, false)).collect();
+    for component in &components {
+        let cfgs: Vec<_> = component
+            .iter()
+            .map(|node| {
+                let function = graph[*node];
+                (
+                    function,
+                    RegionCfg::new(
+                        shared.functions[&function].2,
+                        RegionOptions { have_exception: None, terminal_calls: &[] },
+                    ),
+                )
+            })
+            .collect();
+        loop {
+            let mut changed = false;
+            for (function, cfg) in &cfgs {
+                if !terminating[function]
+                    && cfg.always_terminates(
+                        shared.functions[function].2,
+                        HAVE_EXCEPTION,
+                        &non_returning,
+                        &terminating,
+                        true,
+                    )
+                {
+                    *terminating.get_mut(function).unwrap() = true;
+                    changed = true;
+                }
+                if !non_returning.contains(function)
+                    && cfg.always_terminates(
+                        shared.functions[function].2,
+                        HAVE_EXCEPTION,
+                        &non_returning,
+                        &terminating,
+                        false,
+                    )
+                {
+                    changed |= non_returning.insert(*function);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    let terminal_calls: Vec<_> = non_returning.iter().copied().collect();
+    // 效应只沿能继续执行的调用边传播；终止调用与其后的不可达指令不贡献效应。
+    graph.clear_edges();
     let mut summaries = HashMap::new();
     for (function, (params, _, body)) in &shared.functions {
         let locals: HashSet<_> = params
@@ -260,8 +322,14 @@ pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashM
                 _ => None,
             }))
             .collect();
-        let mut summary = FunctionEffect { effect: Effect::Pure, rejection: None };
-        for (pc, instr) in body.iter().enumerate() {
+        let mut summary =
+            FunctionEffect { effect: Effect::Pure, non_returning: non_returning.contains(function), rejection: None };
+        let cfg = RegionCfg::new(body, RegionOptions { have_exception: None, terminal_calls: &terminal_calls });
+        for pc in cfg.reachable_instructions() {
+            let instr = &body[pc];
+            if matches!(instr, Instr::Call(_, _, callee, _, _) if non_returning.contains(callee)) {
+                continue;
+            }
             let mut effect = direct_effect(instr, shared);
             let mut rejection = if matches!(instr, Instr::Call(_, _, callee, _, _) if shared.functions.contains_key(callee))
             {
@@ -312,7 +380,7 @@ pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashM
                     location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
                 });
             }
-            summary.join(FunctionEffect { effect, rejection });
+            summary.join(FunctionEffect { effect, non_returning: false, rejection });
             if let Instr::Call(_, _, callee, _, _) = instr {
                 if let Some(callee) = nodes.get(callee) {
                     graph.update_edge(nodes[function], *callee, ());
@@ -322,7 +390,7 @@ pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashM
         summaries.insert(*function, summary);
     }
     // kosaraju_scc 返回汇点优先的逆拓扑序，因此分量外的被调函数已收敛。
-    for component in petgraph::algo::kosaraju_scc(&graph) {
+    for component in components {
         loop {
             let mut changed = false;
             for node in &component {
@@ -351,7 +419,8 @@ fn instruction_effect<B: BV>(
         Instr::PrimopUnary(_, f, _, _) if constraint_unary(*f) => return None,
         Instr::PrimopBinary(_, f, _, _, _) if constraint_binary(*f) => return None,
         Instr::Call(_, _, function, _, _) if shared.functions.contains_key(function) => {
-            return summaries.get(function).expect("IR 函数必须有收敛的效应摘要").rejection;
+            let summary = summaries.get(function).expect("IR 函数必须有收敛的效应摘要");
+            return if summary.non_returning { None } else { summary.rejection };
         }
         Instr::Call(
             _,
@@ -383,13 +452,15 @@ pub(super) fn preflight<B: BV>(
     if frame.region_execution.is_none() {
         return Ok(());
     }
-    if let Some(rejection) = instruction_effect(
-        frame.function_name,
-        frame.pc,
-        &frame.instrs[frame.pc],
-        shared,
-        state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)),
-    ) {
+    let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared));
+    if matches!(&frame.instrs[frame.pc], Instr::Call(_, _, callee, _, _) if summaries.get(callee).is_some_and(|summary| summary.non_returning))
+    {
+        // 此调用是静态 CFG 的异常出口，推演必须在执行其任何效应之前离开区域。
+        return Err(reject(frame, SpeculativeRejectReason::RegionEscaped));
+    }
+    if let Some(rejection) =
+        instruction_effect(frame.function_name, frame.pc, &frame.instrs[frame.pc], shared, summaries)
+    {
         return Err(rejection.error());
     }
     Ok(())
@@ -413,14 +484,21 @@ impl CachedReject {
     }
 }
 
-fn region<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared: &SharedState<'ir, B>) -> Result<Arc<Region>, ExecError> {
+fn region<'ir, B: BV>(
+    frame: &LocalFrame<'ir, B>,
+    shared: &SharedState<'ir, B>,
+    summaries: &HashMap<Name, FunctionEffect>,
+) -> Result<Arc<Region>, ExecError> {
     let mut cache = shared.function_regions.lock().unwrap();
     let analysis = cache.entry(frame.function_name).or_insert_with(|| {
         FunctionRegions::with_options(
             frame.instrs,
             RegionOptions {
                 have_exception: Some(shared.symtab.lookup(shared.symtab.to_str(HAVE_EXCEPTION))),
-                terminal_calls: &[],
+                terminal_calls: &summaries
+                    .iter()
+                    .filter_map(|(name, summary)| summary.non_returning.then_some(*name))
+                    .collect::<Vec<_>>(),
             },
         )
     });
@@ -488,20 +566,23 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 shared.execution_stats.merge_cache_hit();
                 Err(cached.error())
             }
-            None => region(frame, shared).and_then(|region| {
-                for pc in &region.nodes {
-                    if let Some(rejection) = instruction_effect(
-                        frame.function_name,
-                        *pc,
-                        &frame.instrs[*pc],
-                        shared,
-                        state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)),
-                    ) {
-                        return Err(rejection.error());
-                    }
-                }
-                Ok(region)
-            }),
+            None => {
+                region(frame, shared, state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)))
+                    .and_then(|region| {
+                        for pc in &region.nodes {
+                            if let Some(rejection) = instruction_effect(
+                                frame.function_name,
+                                *pc,
+                                &frame.instrs[*pc],
+                                shared,
+                                state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)),
+                            ) {
+                                return Err(rejection.error());
+                            }
+                        }
+                        Ok(region)
+                    })
+            }
         }
     };
     let result = match candidate {
@@ -1072,13 +1153,24 @@ fn merge_states<'ir, B: BV>(
 
 /// 执行前只校验显式 Force 命中的结构；调用方负责配置名称、源码范围和哈希校验。
 pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &ExecutionLimits) -> Result<(), String> {
+    let summaries = std::sync::OnceLock::new();
     for (function, (_, _, body)) in &shared.functions {
         for (pc, instr) in body.iter().enumerate() {
             if let Instr::Jump(_, _, info) = instr {
                 if limits.merge_mode(*function, *info, None) == MergeMode::Force {
                     let mut cache = shared.function_regions.lock().unwrap();
                     let regions = cache.entry(*function).or_insert_with(|| {
-                        FunctionRegions::new(body, shared.symtab.lookup(shared.symtab.to_str(HAVE_EXCEPTION)))
+                        let summaries = summaries.get_or_init(|| function_effect_summaries(shared));
+                        FunctionRegions::with_options(
+                            body,
+                            RegionOptions {
+                                have_exception: Some(HAVE_EXCEPTION),
+                                terminal_calls: &summaries
+                                    .iter()
+                                    .filter_map(|(name, summary)| summary.non_returning.then_some(*name))
+                                    .collect::<Vec<_>>(),
+                            },
+                        )
                     });
                     match regions.region(pc) {
                         Ok(_) | Err(RegionRejection::ExceptionCheck) => (),

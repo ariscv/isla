@@ -223,6 +223,130 @@ impl RegionCfg {
         self.graph.edges(self.pcs[pc]).map(|edge| (self.graph[edge.target()], *edge.weight()))
     }
 
+    /// 在完整 CFG 上证明每条路径有限终止；normal_return 决定是否允许正常返回。
+    /// 两个入口状态分别表示 have_exception 为假/真，不能依赖调用前已有异常。
+    /// 从未证明开始反向传播，环和未经证明的递归调用不会自行获得证明。
+    pub fn always_terminates<B: BV>(
+        &self,
+        instrs: &[Instr<Name, B>],
+        have_exception: Name,
+        terminal_calls: &HashSet<Name>,
+        terminating_calls: &HashMap<Name, bool>,
+        normal_return: bool,
+    ) -> bool {
+        assert_eq!(instrs.len(), self.pcs.len(), "终止分析必须使用建图时的指令");
+        if instrs.is_empty() {
+            return false;
+        }
+        assert!(self.exception_pcs.is_empty(), "终止证明不能剔除异常边");
+        let mut proven = vec![[false; 2]; instrs.len()];
+        let mut pending: VecDeque<_> = (0..instrs.len()).rev().collect();
+        let mut queued = vec![true; instrs.len()];
+        while let Some(pc) = pending.pop_front() {
+            queued[pc] = false;
+            for exception in [false, true] {
+                if proven[pc][exception as usize] {
+                    continue;
+                }
+                let mut next_exception = Some(exception);
+                let terminal = match &instrs[pc] {
+                    Instr::Exit(..) => Some(true),
+                    Instr::End | Instr::Arbitrary => Some(normal_return || exception),
+                    Instr::Call(_, _, callee, _, _) if terminal_calls.contains(callee) => Some(true),
+                    Instr::Call(_, _, callee, _, _) if terminating_calls.get(callee) == Some(&false) => Some(false),
+                    Instr::Call(..) => {
+                        // 未知调用可能设置或清除异常，两种后继都必须终止。
+                        next_exception = None;
+                        None
+                    }
+                    Instr::Copy(loc, exp, _) if loc.id() == have_exception => {
+                        next_exception = if let Exp::Bool(value) = exp { Some(*value) } else { None };
+                        None
+                    }
+                    Instr::Init(name, _, exp, _) if *name == have_exception => {
+                        next_exception = if let Exp::Bool(value) = exp { Some(*value) } else { None };
+                        None
+                    }
+                    Instr::Decl(name, ..) | Instr::Monomorphize(name, ..) if *name == have_exception => {
+                        next_exception = None;
+                        None
+                    }
+                    Instr::PrimopUnary(loc, ..)
+                    | Instr::PrimopBinary(loc, ..)
+                    | Instr::PrimopVariadic(loc, ..)
+                    | Instr::PrimopReset(loc, ..)
+                        if loc.id() == have_exception =>
+                    {
+                        next_exception = None;
+                        None
+                    }
+                    // 间接赋值可能覆盖异常状态，不能保留先前的证明。
+                    Instr::Copy(Loc::Addr(_), ..)
+                    | Instr::PrimopUnary(Loc::Addr(_), ..)
+                    | Instr::PrimopBinary(Loc::Addr(_), ..)
+                    | Instr::PrimopVariadic(Loc::Addr(_), ..)
+                    | Instr::PrimopReset(Loc::Addr(_), ..) => {
+                        next_exception = None;
+                        None
+                    }
+                    _ => None,
+                };
+                let succeeds = terminal.unwrap_or_else(|| {
+                    let condition = match &instrs[pc] {
+                        Instr::Jump(Exp::Bool(value), ..) => Some(*value),
+                        Instr::Jump(exp, ..) => {
+                            exception_polarity(exp, have_exception)
+                                .map(|positive| if positive { exception } else { !exception })
+                        }
+                        _ => None,
+                    };
+                    self.successors(pc).all(|(target, kind)| {
+                        if matches!(kind, EdgeKind::Jump(polarity) if condition.is_some_and(|value| value != polarity))
+                        {
+                            return true;
+                        }
+                        match target {
+                            RegionPoint::Instruction(next) => next_exception
+                                .map_or(proven[next] == [true, true], |value| proven[next][value as usize]),
+                            // 除已单独处理的 End/Arbitrary 外，虚拟出口来自断言失败等终止。
+                            RegionPoint::FunctionExit => {
+                                matches!(kind, EdgeKind::AssertionFailure | EdgeKind::Terminate)
+                            }
+                        }
+                    })
+                });
+                if succeeds {
+                    proven[pc][exception as usize] = true;
+                    for predecessor in self.graph.neighbors_directed(self.pcs[pc], Direction::Incoming) {
+                        let RegionPoint::Instruction(previous) = self.graph[predecessor] else {
+                            panic!("虚拟出口不能有出边")
+                        };
+                        if !queued[previous] {
+                            queued[previous] = true;
+                            pending.push_back(previous);
+                        }
+                    }
+                }
+            }
+        }
+        proven[0] == [true, true]
+    }
+
+    /// 从函数入口可达的真实指令；终止调用后的指令不会进入传递效应上界。
+    pub fn reachable_instructions(&self) -> BTreeSet<usize> {
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![RegionPoint::Instruction(0)];
+        while let Some(RegionPoint::Instruction(pc)) = pending.pop() {
+            if pc < self.pcs.len() && reachable.insert(pc) {
+                pending.extend(self.successors(pc).filter_map(|(point, _)| match point {
+                    RegionPoint::Instruction(_) => Some(point),
+                    RegionPoint::FunctionExit => None,
+                }));
+            }
+        }
+        reachable
+    }
+
     pub fn immediate_postdominator(&self, pc: usize) -> Result<RegionPoint, RegionRejection> {
         self.postdominators.immediate_dominator(self.pcs[pc]).map(|ix| self.graph[ix]).ok_or(RegionRejection::NoJoin)
     }
@@ -702,6 +826,34 @@ mod tests {
         assert_eq!(FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().join, RegionPoint::Instruction(5));
         let body = vec![jump(3), copy(RETURN, Exp::Bool(false)), Instr::End, copy(RETURN, Exp::Bool(true)), Instr::End];
         assert_eq!(FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().join, RegionPoint::FunctionExit);
+    }
+
+    #[test]
+    fn regions_non_returning_call_has_only_virtual_exit_and_keeps_full_liveness() {
+        let info = SourceLoc::unknown();
+        let callee = name(9);
+        let body = vec![
+            jump(3),
+            copy(RETURN, Exp::Bool(false)),
+            Instr::Goto(6),
+            Instr::Call(Loc::Id(RETURN), false, callee, vec![], info),
+            copy(name(1), Exp::Bool(true)),
+            Instr::Goto(6),
+            Instr::End,
+        ];
+        let mut regions = FunctionRegions::with_options(
+            &body,
+            RegionOptions { have_exception: Some(HAVE_EXCEPTION), terminal_calls: &[callee] },
+        );
+        let region = regions.region(0).unwrap();
+        assert_eq!(region.join, RegionPoint::FunctionExit);
+        assert!(region.nodes.contains(&3));
+        assert!(!region.nodes.contains(&4));
+        assert!(!region.nodes.contains(&5));
+        assert_eq!(
+            regions.cfg().successors(3).collect::<Vec<_>>(),
+            vec![(RegionPoint::FunctionExit, EdgeKind::Terminate)]
+        );
     }
 
     #[test]
