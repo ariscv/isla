@@ -270,23 +270,67 @@ impl<B: BV> SamplePath<B> {
             values.iter().map(|(name, value)| Ok((name.clone(), materialized(value, model, shared)?))).collect()
         };
         let pre_registers = registers(&self.pre)?;
-        let post_registers = registers(&self.post)?;
+        // 绝大多数寄存器在路径上未被改写，复用同一模型的前态物化字节。
+        let post_registers = self
+            .post
+            .iter()
+            .map(|(name, value)| {
+                let value = if self.pre.get(name) == Some(value) {
+                    pre_registers[name].clone()
+                } else {
+                    materialized(value, model, shared)?
+                };
+                Ok((name.clone(), value))
+            })
+            .collect::<Result<BTreeMap<_, _>, ExecError>>()?;
         let mut pre = BTreeMap::new();
         let mut post = BTreeMap::new();
-        for (address, value, commit, read) in self.accesses() {
+        for index in self.memory_guards.keys() {
+            assert!(self.memory.get(*index).expect("读取条件的访存序号必须存在").is_memory_read());
+        }
+        // 每个事件一次取提交条件、基址、整段数据；不对每个字节重复查询模型。
+        // 拆字节及地址回绕与 accesses 的 SMT Extract/Bvadd 完全一致。
+        for (index, event) in self.memory.iter().enumerate() {
+            let (address, data, count, mut commit, read) = match event {
+                Event::ReadMem { address, value, bytes, .. } => (address, value, *bytes, Exp::Bool(true), true),
+                Event::WriteMem { address, data, bytes, value, opts, .. } => {
+                    (address, data, *bytes, if opts.is_exclusive() { Exp::Var(*value) } else { Exp::Bool(true) }, false)
+                }
+                _ => panic!("只允许访存事件"),
+            };
+            if count == 0 {
+                continue;
+            }
+            if let Some(guard) = self.memory_guards.get(&index) {
+                commit = Exp::And(Box::new(guard.clone()), Box::new(commit));
+            }
             if !matches!(model.get_exp(&commit)?.unwrap_exp(), Exp::Bool(true)) {
                 continue;
             }
-            let address = match model.get_exp(&address)?.unwrap_exp() {
-                Exp::Bits64(value) => value.lower_u64(),
+            let address = match model.get_exp(&smt_value(address, SourceLoc::unknown())?)?.unwrap_exp() {
+                Exp::Bits64(value) => {
+                    assert_eq!(value.len(), 64, "地址必须为64位");
+                    value.lower_u64()
+                }
                 value => panic!("地址必须为64位：{value:?}"),
             };
-            let value = match model.get_exp(&value)?.unwrap_exp() {
-                Exp::Bits64(value) => value.lower_u64() as u8,
-                value => panic!("内存必须为字节：{value:?}"),
-            };
-            pre.entry(address).or_insert(if read { Some(value) } else { None });
-            post.insert(address, Some(value));
+            let data = model.get_exp(&smt_value(data, SourceLoc::unknown())?)?.unwrap_exp();
+            for offset in 0..count {
+                let value = match &data {
+                    Exp::Bits64(value) => {
+                        assert!(8 * (offset + 1) <= value.len(), "访存数据位宽不足");
+                        (value.lower_u64() >> (8 * offset)) as u8
+                    }
+                    Exp::Bits(value) => value[8 * offset as usize..8 * (offset + 1) as usize]
+                        .iter()
+                        .enumerate()
+                        .fold(0, |byte, (bit, value)| byte | (u8::from(*value) << bit)),
+                    value => panic!("内存必须为位向量：{value:?}"),
+                };
+                let address = address.wrapping_add(u64::from(offset));
+                pre.entry(address).or_insert(if read { Some(value) } else { None });
+                post.insert(address, Some(value));
+            }
         }
         let cells = |map: BTreeMap<u64, Option<u8>>| {
             map.into_iter().map(|(address, value)| MemoryCell { address, value, bytes: 1 }).collect()
@@ -409,6 +453,58 @@ impl<B: BV> SamplePath<B> {
         })();
         solver.rollback_transaction(tx);
         outcome
+    }
+    #[cfg(test)]
+    fn materialize_per_byte(
+        &self,
+        model: &mut Model<B>,
+        shared: &SharedState<B>,
+        mode: &str,
+        signature: u64,
+        class_id: Option<usize>,
+    ) -> Result<Sample, ExecError> {
+        model.set_complete_model(true);
+        let mut registers = |values: &BTreeMap<String, Val<B>>| -> Result<BTreeMap<String, Value>, ExecError> {
+            values.iter().map(|(name, value)| Ok((name.clone(), materialized(value, model, shared)?))).collect()
+        };
+        let pre_registers = registers(&self.pre)?;
+        let post_registers = registers(&self.post)?;
+        let mut pre = BTreeMap::new();
+        let mut post = BTreeMap::new();
+        for (address, value, commit, read) in self.accesses() {
+            if !matches!(model.get_exp(&commit)?.unwrap_exp(), Exp::Bool(true)) {
+                continue;
+            }
+            let address = match model.get_exp(&address)?.unwrap_exp() {
+                Exp::Bits64(value) => value.lower_u64(),
+                value => panic!("地址必须为64位：{value:?}"),
+            };
+            let value = match model.get_exp(&value)?.unwrap_exp() {
+                Exp::Bits64(value) => value.lower_u64() as u8,
+                value => panic!("内存必须为字节：{value:?}"),
+            };
+            pre.entry(address).or_insert(if read { Some(value) } else { None });
+            post.insert(address, Some(value));
+        }
+        let cells = |map: BTreeMap<u64, Option<u8>>| {
+            map.into_iter().map(|(address, value)| MemoryCell { address, value, bytes: 1 }).collect()
+        };
+        let result = materialized(&self.result, model, shared)?;
+        Ok(Sample {
+            schema_version: 1,
+            sample_id: 0,
+            mode: mode.into(),
+            path_signature: signature,
+            class_id,
+            truncated: false,
+            pre_registers,
+            post_registers,
+            isa_state: BTreeMap::new(),
+            pre_memory: cells(pre),
+            post_memory: cells(post),
+            result,
+            ret_val: self.result.to_string(shared),
+        })
     }
 }
 
@@ -573,6 +669,8 @@ mod tests {
         let shared = SharedState::empty(crate::ir::Symtab::new());
         assert!(sat(&mut solver).unwrap());
         let sample = path.materialize(&mut Model::new(&mut solver), &shared, "fork", 1, None).unwrap();
+        let reference = path.materialize_per_byte(&mut Model::new(&solver), &shared, "fork", 1, None).unwrap();
+        assert_eq!(serde_json::to_vec(&sample).unwrap(), serde_json::to_vec(&reference).unwrap());
         assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
         let mut wrong = sample.clone();
         wrong.post_memory[1].value = Some(8);
@@ -648,6 +746,39 @@ mod tests {
     }
 
     #[test]
+    fn samples_f5_整段内存与逐字节导出完全一致() {
+        use crate::bitvector::b129::B129;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&context);
+        let address = solver.declare_bitvector(64, SourceLoc::unknown());
+        let data = solver.declare_bitvector(128, SourceLoc::unknown());
+        solver.assert(Exp::Eq(Box::new(Exp::Var(address)), Box::new(Exp::Bits64(B64::new(u64::MAX - 7, 64)))));
+        solver
+            .assert(Exp::Eq(Box::new(Exp::Var(data)), Box::new(Exp::Bits((0..128).map(|bit| bit % 3 == 0).collect()))));
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        let path = SamplePath {
+            pre: BTreeMap::from([("wide".into(), Val::Symbolic(data))]),
+            post: BTreeMap::from([("wide".into(), Val::Symbolic(data))]),
+            result: Val::Symbolic(data),
+            memory_guards: BTreeMap::new(),
+            memory: vec![Event::ReadMem {
+                value: Val::Symbolic(data),
+                read_kind: Val::Unit,
+                address: Val::Symbolic(address),
+                bytes: 16,
+                tag_value: None,
+                opts: Default::default(),
+                region: "mem",
+            }],
+        };
+        assert!(sat(&mut solver).unwrap());
+        let mut model = Model::new(&solver);
+        let reference = path.materialize_per_byte(&mut model, &shared, "merge", 1, Some(0)).unwrap();
+        let actual = path.materialize(&mut model, &shared, "merge", 1, Some(0)).unwrap();
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&reference).unwrap());
+    }
+
+    #[test]
     fn samples_guarded_memory_reads_bind_only_active_arm() {
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -675,6 +806,8 @@ mod tests {
             assert!(sat(&mut solver).unwrap());
             let mut model = Model::new(&mut solver);
             let sample = path.materialize(&mut model, &shared, "merge", 1, None).unwrap();
+            let reference = path.materialize_per_byte(&mut model, &shared, "merge", 1, None).unwrap();
+            assert_eq!(serde_json::to_vec(&sample).unwrap(), serde_json::to_vec(&reference).unwrap());
             drop(model);
             assert_eq!(sample.pre_memory.len(), 1);
             assert_eq!(sample.pre_memory[0].address, if direction { 0x1000 } else { 0x1008 });

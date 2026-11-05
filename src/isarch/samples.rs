@@ -101,9 +101,144 @@ pub fn path<B: BV>(
     SamplePath { pre, post, result: result.clone(), memory, memory_guards }
 }
 
+/// 样本已物化完整前态；复用其值格式化 ISA 状态，避免再抽取同一模型。
+pub fn isa_state<B: BV>(
+    target: &dyn Target<B>,
+    sample: &isla_lib::executor::samples::Sample,
+    model: &mut isla_lib::smt::Model<B>,
+    shared: &SharedState<B>,
+) -> Result<BTreeMap<String, String>, isla_lib::error::ExecError> {
+    use isla_lib::error::ExecError;
+    use isla_lib::fmtval::FmtVal;
+    use isla_lib::smt::smtlib::Exp;
+    use isla_lib::zencode;
+    fn formatted<B: BV>(
+        original: &Val<B>,
+        value: &serde_json::Value,
+        model: &mut isla_lib::smt::Model<B>,
+        shared: &SharedState<B>,
+    ) -> Result<Option<FmtVal>, ExecError> {
+        match original {
+            Val::Symbolic(_) => {
+                let expression = if let Some(bits) = value.get("bits") {
+                    Exp::Bits(bits.as_str().unwrap().bytes().rev().map(|bit| bit == b'1').collect())
+                } else if let Some(value) = value.get("bool") {
+                    Exp::Bool(value.as_bool().unwrap())
+                } else if let Some(value) = value.get("enum") {
+                    let name = shared.symtab.lookup(&zencode::encode(value.as_str().unwrap()));
+                    let (member, _, enum_name) = shared.type_info.enum_members[&name];
+                    Exp::Enum(isla_lib::smt::EnumMember {
+                        enum_id: isla_lib::smt::EnumId::from_name(enum_name),
+                        member,
+                    })
+                } else {
+                    panic!("符号标量必须物化为位向量、布尔或枚举");
+                };
+                Ok(FmtVal::from_exp(&expression))
+            }
+            Val::Struct(fields) if fields.len() == 1 => {
+                let (name, original) = fields.iter().next().unwrap();
+                formatted(original, &value["struct"][zencode::decode(shared.symtab.to_str(*name))], model, shared)
+            }
+            Val::Ctor(_, original) => formatted(original, &value["value"], model, shared),
+            // 具体值与混合位串沿用既有格式化，以保留原来的片段语义。
+            Val::Bits(_) | Val::Bool(_) | Val::Enum(_) | Val::MixedBits(_) => {
+                FmtVal::from_val(original, model).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    let mut state = BTreeMap::new();
+    for (name, original) in target.pre_state().iter() {
+        let name = zencode::decode(shared.symtab.to_str(*name));
+        let value = sample.pre_registers.get(&name).expect("完整样本必须包含前态寄存器");
+        if let Some(value) = formatted(original, value, model, shared)? {
+            state.insert(name, value.to_str(shared));
+        }
+    }
+    // PMA 大小不在 pre_registers 中，仍按现有接口查询。
+    for (name, symbol) in target.symbolic_pma_sizes() {
+        let value = model.get_var(*symbol)?;
+        if let Some(value) = FmtVal::from_model_val(&value) {
+            if !value.is_arbitrary() {
+                state.insert(format!("pma_regions.{name}.size"), value.to_str(shared));
+            }
+        }
+    }
+    Ok(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn samples_f5_复用前态格式化字节与模型查询一致() {
+        use isla_lib::bitvector::b129::B129;
+        use isla_lib::ir::Symtab;
+        use isla_lib::smt::{smtlib, Config, Context, Model, Solver};
+        use isla_lib::source_loc::SourceLoc;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&context);
+        let mut symtab = Symtab::new();
+        let flag = symtab.intern("zflag");
+        let wide = symtab.intern("zwide");
+        let wrapped = symtab.intern("zwrapped");
+        let field = symtab.intern("zbits");
+        let list = symtab.intern("zlist");
+        let mut target = super::super::target::RV64::<B129>::default();
+        target
+            .pre_state_mut()
+            .insert(flag, Val::Symbolic(solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown())));
+        target.pre_state_mut().insert(wide, Val::Symbolic(solver.declare_bitvector(256, SourceLoc::unknown())));
+        target.pre_state_mut().insert(
+            wrapped,
+            Val::Struct(std::collections::HashMap::from_iter([(
+                field,
+                Val::Symbolic(solver.declare_bitvector(64, SourceLoc::unknown())),
+            )])),
+        );
+        target.pre_state_mut().insert(list, Val::List(vec![Val::Unit]));
+        // 非零高位与枚举覆盖格式化位序；符号 PMA 大小仍走模型接口。
+        let Val::Symbolic(wide_symbol) = target.pre_state().get(&wide).unwrap() else {
+            panic!("宽值必须符号化");
+        };
+        solver.assert(smtlib::Exp::Eq(
+            Box::new(smtlib::Exp::Var(*wide_symbol)),
+            Box::new(smtlib::Exp::Bits((0..256).map(|bit| bit % 7 == 0).collect())),
+        ));
+        let enum_name = symtab.intern("zF5Enum");
+        let enum_member = symtab.intern("zF5Member");
+        let enum_register = symtab.intern("zenum_reg");
+        let mut shared = SharedState::empty(symtab);
+        shared.type_info.enum_members.insert(enum_member, (0, 1, enum_name));
+        shared.type_info.enums.insert(enum_name, vec![enum_member]);
+        solver.add(smtlib::Def::DefineEnum(enum_name, 1));
+        let enum_value =
+            solver.declare_const(smtlib::Ty::Enum(isla_lib::smt::EnumId::from_name(enum_name)), SourceLoc::unknown());
+        target.pre_state_mut().insert(enum_register, Val::Symbolic(enum_value));
+        let pma_size = solver.declare_bitvector(64, SourceLoc::unknown());
+        target.symbolic_pma_sizes_mut().push(("test".into(), pma_size));
+
+        let pre = target
+            .pre_state()
+            .iter()
+            .map(|(name, value)| (isla_lib::zencode::decode(shared.symtab.to_str(*name)), value.clone()))
+            .collect();
+        let path = SamplePath {
+            pre,
+            post: BTreeMap::new(),
+            result: Val::Unit,
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), isla_lib::smt::SmtResult::Sat);
+        let mut model = Model::new(&solver);
+        let sample = path.materialize(&mut model, &shared, "merge", 0, Some(0)).unwrap();
+        let expected = target.solve_pre_state(&mut model, &shared).unwrap();
+        let actual = isa_state(&target, &sample, &mut model, &shared).unwrap();
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
     #[test]
     fn samples_options_validate_dependencies_and_limits() {
         assert!(SampleOptions::default().validate().is_ok());

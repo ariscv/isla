@@ -239,6 +239,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
     shared_state: &SharedState<B>,
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
+    execution_limits: &ExecutionLimits,
 ) -> Result<bool, String> {
     let bits_len = match encdec_bits {
         Val::Bits(bits) => bits.len(),
@@ -252,7 +253,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
     let collected: Arc<Mutex<Option<Result<Val<B>, ExecError>>>> = Arc::new(Mutex::new(None));
     {
         let sink = Arc::clone(&collected);
-        execute_ir_function(
+        isla_lib::executor::execute_ir_function_with_limits(
             function,
             &[encdec_bits.clone()],
             shared_state,
@@ -272,6 +273,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
                 }
                 Ok((_, _)) => (),
             },
+            TaskState::new().with_execution_limits(execution_limits.clone()),
         );
     }
     let outcome = collected.lock().expect("回环译码收集器 mutex poisoned").take();
@@ -1478,6 +1480,7 @@ struct SolvePathCtx<'a, 'ir, B: BV> {
     lets: &'a Bindings<'ir, B>,
     timeout_reporter: &'a TimeoutReporter,
     task_state: &'a TaskState<B>,
+    execution_limits: &'a ExecutionLimits,
     continuations: &'a Mutex<Vec<ExecuteAsContinuation<B>>>,
     /// P1 值域 signposting：当前批的 hint 标签（自由批为 None），随每条产出
     /// 用例写入 JSON 的 value-hint 字段
@@ -1603,7 +1606,8 @@ fn solve_collect_path<'ir, B: BV>(
                                         frame.path_signature(),
                                         Some(class_id),
                                     )?;
-                                    sample.isa_state = ctx.target.solve_pre_state(model, shared_state)?;
+                                    sample.isa_state =
+                                        super::samples::isa_state(ctx.target, &sample, model, shared_state)?;
                                     exported.push(sample);
                                 }
                                 Ok(())
@@ -1627,8 +1631,8 @@ fn solve_collect_path<'ir, B: BV>(
                             let mut sample = sample_path
                                 .materialize(&mut model, shared_state, mode, frame.path_signature(), None)
                                 .expect("样本物化失败");
-                            sample.isa_state =
-                                ctx.target.solve_pre_state(&mut model, shared_state).expect("样本前置状态物化失败");
+                            sample.isa_state = super::samples::isa_state(ctx.target, &sample, &mut model, shared_state)
+                                .expect("样本前置状态物化失败");
                             writer.append(sample);
                         }
                     }
@@ -1883,6 +1887,7 @@ fn solve_collect_path<'ir, B: BV>(
                                                     shared_state,
                                                     gate_regs,
                                                     ctx.lets,
+                                                    ctx.execution_limits,
                                                 ) {
                                                     Ok(true) => (),
                                                     Ok(false) => {
@@ -2353,14 +2358,18 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let round_memory = initial_memory.clone();
 
     // solve-state 路径收集环境：首段闭包与续执行轮次的转发闭包共用。
+    // 输出译码与入口译码使用同一份具体前置环境；不能传执行后寄存器或
+    // 主 solver 的符号。扩展可用性守卫会读取权限/CSR，故必须保留全部钉值。
+    let decode_regs = decode_register_bindings(regs, &fixed_inputs.prestate, shared_state);
     let solve_ctx = SolvePathCtx {
         target: &*target,
         instruction_name,
         fun_args: &fun_args,
-        regs,
+        regs: &decode_regs,
         lets,
         timeout_reporter: &timeout_reporter,
         task_state: &task_state,
+        execution_limits,
         continuations: &continuations,
         hint_label,
         slice_label,
@@ -3456,6 +3465,60 @@ mod tests {
         (shared_state, regs, lets)
     }
 
+    #[test]
+    fn encdec_guard_f5_继承策略与固定前置权限() {
+        let (mut shared, regs, lets) = real_ir_env();
+        let fixed = parse_fixed_prestate(
+            &[
+                "cur_privilege=Supervisor".into(),
+                "mstatus={bits=0x0000000a00040000}".into(),
+                "menvcfg={bits=0x0000000000000000}".into(),
+                "senvcfg={bits=0x0000000000000000}".into(),
+                "mseccfg={bits=0x0000000000000000}".into(),
+            ],
+            &shared,
+            &regs,
+            &lets,
+        )
+        .unwrap();
+        let decode_regs = decode_register_bindings(&regs, &fixed, &shared);
+        let load = shared.symtab.lookup("zLOAD");
+        let bits = Val::Bits(B129::new(0x0000b103, 32));
+        for merge in [false, true] {
+            let limits = ExecutionLimits::default().with_path_merging(merge);
+            assert_eq!(encdec_guard_roundtrip_ok(load, &bits, &shared, &decode_regs, &lets, &limits), Ok(true));
+        }
+        // 用真实构造子及最小译码体单独检验策略传递；未初始化 Bool 是
+        // 新 solver 自己声明的值，不携带主 solver 的符号。
+        shared.execution_stats = Arc::new(isla_lib::executor::stats::ExecutionStats::new(true));
+        let gate = shared.symtab.intern("zf5_gate");
+        shared.registers.insert(gate, Ty::Bool);
+        let gate_ty = Box::leak(Box::new(Ty::Bool));
+        let mut gate_regs = decode_regs.clone();
+        gate_regs.insert(gate, false, UVal::Uninit(gate_ty));
+        let illegal = shared.symtab.lookup("zILLEGAL");
+        let decode = shared.symtab.lookup("zext_decode");
+        let (args, ret_ty, _) = &shared.functions[&decode];
+        let body = Box::leak(
+            vec![
+                Instr::Jump(isla_lib::ir::Exp::Id(gate), 3, SourceLoc::unknown()),
+                Instr::Call(Loc::Id(RETURN), false, illegal, vec![isla_lib::ir::Exp::Unit], SourceLoc::unknown()),
+                Instr::Goto(4),
+                Instr::Call(Loc::Id(RETURN), false, illegal, vec![isla_lib::ir::Exp::Unit], SourceLoc::unknown()),
+                Instr::End,
+            ]
+            .into_boxed_slice(),
+        );
+        shared.functions.insert(decode, (args.clone(), *ret_ty, body));
+        for merge in [false, true] {
+            shared.execution_stats.reset();
+            let limits = ExecutionLimits::default().with_path_merging(merge);
+            assert_eq!(encdec_guard_roundtrip_ok(illegal, &bits, &shared, &gate_regs, &lets, &limits), Ok(true));
+            assert_eq!(shared.execution_stats.fork_json(&shared.symtab)["total"], usize::from(!merge));
+            assert_eq!(shared.execution_stats.merge_json()["successes"], usize::from(merge));
+        }
+    }
+
     /// P3 集成：ldu 编码（funct3=111，RV64 非法变体——zencdec_forwards 在
     /// 物化环境越过 valid_load_encdec 守卫产出的形态）必须被译码回环拒绝：
     /// zext_decode 对它译出 ILLEGAL，与 zLOAD 构造子不一致。
@@ -3466,7 +3529,7 @@ mod tests {
         // 32'h7e8e_7003：imm=0x7e8, rs1=x28, funct3=111, rd=x0, opcode=0000011
         let ldu_bits = Val::Bits(B129::new(0x7e8e_7003, 32));
         assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &ldu_bits, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(load_ctor, &ldu_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(false),
             "ldu 编码（funct3=111）应被 encdec 守卫回环拒绝"
         );
@@ -3481,14 +3544,14 @@ mod tests {
         // 32'h0900_402f：funct5=amoswap, funct3=100（16 字节 q），实跑产物形态
         let swap_q = Val::Bits(B129::new(0x0900_402f, 32));
         assert_eq!(
-            encdec_guard_roundtrip_ok(amo_ctor, &swap_q, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(amo_ctor, &swap_q, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(false),
             "amoswap.q 编码（无 16 字节 swap）应被回环拒绝"
         );
         // amoswap.h（Zabha）译回 zAMO，放行
         let swap_h = Val::Bits(B129::new(0x09ff_902f, 32));
         assert_eq!(
-            encdec_guard_roundtrip_ok(amo_ctor, &swap_h, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(amo_ctor, &swap_h, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(true),
             "Zabha amoswap.h 编码应译回 zAMO 并通过回环"
         );
@@ -3504,13 +3567,13 @@ mod tests {
         let vsseg_ctor = shared_state.symtab.lookup("zVSSEGTYPE");
         let vse8 = Val::Bits(B129::new(0x0000_0027, 32));
         assert_eq!(
-            encdec_guard_roundtrip_ok(vsseg_ctor, &vse8, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(vsseg_ctor, &vse8, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(true),
             "vse8.v 编码应译回 zVSSEGTYPE 并通过回环"
         );
         let load_ctor = shared_state.symtab.lookup("zLOAD");
         assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &vse8, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(load_ctor, &vse8, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(false),
             "向量 store 编码对 zLOAD 构造子应拒绝"
         );
@@ -3524,7 +3587,7 @@ mod tests {
         // 32'h4000_0003：imm=0x400, rs1=x0, funct3=000, rd=x0, opcode=0000011（lb）
         let lb_bits = Val::Bits(B129::new(0x4000_0003, 32));
         assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &lb_bits, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(load_ctor, &lb_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(true),
             "合法 lb 编码应通过 encdec 守卫回环"
         );
@@ -3538,13 +3601,13 @@ mod tests {
         let nop_bits = Val::Bits(B129::new(0x0001, 16));
         let c_nop_ctor = shared_state.symtab.lookup("zC_NOP");
         assert_eq!(
-            encdec_guard_roundtrip_ok(c_nop_ctor, &nop_bits, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(c_nop_ctor, &nop_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(true),
             "c.nop 编码应译回 zC_NOP 并通过回环"
         );
         let load_ctor = shared_state.symtab.lookup("zLOAD");
         assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &nop_bits, &shared_state, &regs, &lets),
+            encdec_guard_roundtrip_ok(load_ctor, &nop_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
             Ok(false),
             "编码译回的构造子与原指令不一致时应拒绝"
         );
@@ -3555,8 +3618,15 @@ mod tests {
     fn encdec_guard_非位向量编码报错() {
         let (shared_state, regs, lets) = real_ir_env();
         let load_ctor = shared_state.symtab.lookup("zLOAD");
-        let err = encdec_guard_roundtrip_ok(load_ctor, &Val::Bool(true), &shared_state, &regs, &lets)
-            .expect_err("非位向量编码必须报错");
+        let err = encdec_guard_roundtrip_ok(
+            load_ctor,
+            &Val::Bool(true),
+            &shared_state,
+            &regs,
+            &lets,
+            &ExecutionLimits::default(),
+        )
+        .expect_err("非位向量编码必须报错");
         assert!(err.contains("非位向量"), "实际: {}", err);
     }
 

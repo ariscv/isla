@@ -2351,6 +2351,99 @@ fn region_merge_f2_invalid_savepoint_panics_before_arm_commit() {
     assert!(result.is_ok(), "不变量违反必须直接 panic");
 }
 
+// 完整旧集合为上限语义的独立参照；有上限时允许 DFS 改变发现顺序与代表值。
+fn assert_merge_enumeration_reference(
+    frame: &LocalFrame<B64>,
+    solver: &mut Solver<B64>,
+    state: &TaskState<B64>,
+    shared: &SharedState<B64>,
+    result: &Val<B64>,
+    output: &serde_json::Value,
+) {
+    let mut limits = state.execution_limits.as_ref().unwrap().clone();
+    limits.merge_enumeration.class_cap = usize::MAX;
+    limits.merge_enumeration.path_cap = usize::MAX;
+    let reference_state = TaskState::new().with_execution_limits(limits);
+    let reference = frame.enumerate_merges_blocking(solver, &reference_state, shared, result).unwrap().unwrap();
+    let classes = |value: &serde_json::Value| -> BTreeMap<String, HashSet<String>> {
+        value["guard_classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|class| {
+                (
+                    class["guard_assignment"].to_string(),
+                    class["solutions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|solution| solution["slice_values"].to_string())
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let expected = classes(&reference);
+    let actual = classes(output);
+    let mut total = 0;
+    for class in output["guard_classes"].as_array().unwrap() {
+        let key = class["guard_assignment"].to_string();
+        let solutions = &actual[&key];
+        assert_eq!(solutions.len(), class["solution_count"].as_u64().unwrap() as usize);
+        assert!(solutions.is_subset(&expected[&key]));
+        assert_eq!(class["truncated"], solutions.len() < expected[&key].len());
+        total += solutions.len();
+        // 每个叶子回投完整类条件及位片段，验证原路径而非只有计数。
+        for solution in class["solutions"].as_array().unwrap() {
+            use smtlib::Exp::*;
+            let mut condition = Bool(true);
+            let by_id: HashMap<_, _> = frame.region_merge_records.iter().map(|r| (r.record_id, r)).collect();
+            for record in &frame.region_merge_records {
+                let mut context = Bool(true);
+                let mut current = record;
+                while let Some(parent) = current.parent_record {
+                    let parent = by_id[&parent];
+                    let guard = Var(parent.condition);
+                    context = And(
+                        Box::new(context),
+                        Box::new(if current.arm == "then" { guard } else { Not(Box::new(guard)) }),
+                    );
+                    current = parent;
+                }
+                let projection = And(Box::new(context), Box::new(Var(record.condition)));
+                let value = class["guard_assignment"][record.record_id.to_string()].as_bool().unwrap();
+                condition =
+                    And(Box::new(condition), Box::new(if value { projection } else { Not(Box::new(projection)) }));
+            }
+            for (slice, value) in
+                class["tested_slices"].as_array().unwrap().iter().zip(solution["slice_values"].as_array().unwrap())
+            {
+                let expression = Extract(
+                    slice["hi"].as_u64().unwrap() as u32,
+                    slice["lo"].as_u64().unwrap() as u32,
+                    Box::new(Var(Sym::from_u32(slice["smt_id"].as_u64().unwrap() as u32))),
+                );
+                condition = And(
+                    Box::new(condition),
+                    Box::new(Eq(
+                        Box::new(expression),
+                        Box::new(smtlib::smt_bits_from_str(value.as_str().unwrap()).unwrap()),
+                    )),
+                );
+            }
+            assert!(solver.check_sat_with(&condition, info()).is_sat().unwrap());
+        }
+    }
+    assert_eq!(output["enumerated_total"], total);
+    let config = &state.execution_limits.as_ref().unwrap().merge_enumeration;
+    let remaining = actual.len() < expected.len()
+        || output["guard_classes"].as_array().unwrap().iter().any(|c| c["truncated"] == true);
+    assert_eq!(output["path_truncated"], total == config.path_cap && remaining);
+    if !remaining {
+        assert_eq!(actual, expected);
+    }
+}
+
 // E1：上下文投影必须折叠外层不成立时的无关内层条件。
 #[test]
 fn merge_enumeration_nested_context_and_fork_inheritance() {
@@ -2395,6 +2488,7 @@ fn merge_enumeration_nested_context_and_fork_inheritance() {
     let state = TaskState::new().with_execution_limits(limits);
     let before = solver.trace().to_vec().len();
     let output = first.enumerate_merges(&mut solver, &state, &shared, &path.value).unwrap().unwrap();
+    assert_merge_enumeration_reference(&first, &mut solver, &state, &shared, &path.value, &output);
     assert_eq!(output["guard_classes"].as_array().unwrap().len(), baseline.len());
     assert_eq!(output["enumerated_total"], 3);
     assert_eq!(output["path_truncated"], false);
@@ -2464,6 +2558,16 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         single_arm_reads: vec![],
         memory_reads: Vec::new(),
     });
+    let mut rollback_limits = ExecutionLimits::default();
+    rollback_limits.merge_enumeration.enabled = true;
+    let rollback_state = TaskState::new().with_execution_limits(rollback_limits);
+    let before = solver.trace().to_vec().len();
+    let error = frame.enumerate_merges_with(&mut solver, &rollback_state, &shared, &Val::Unit, &mut |_, _, _| {
+        Err(ExecError::Z3Unknown)
+    });
+    assert!(matches!(error, Err(ExecError::Z3Unknown)));
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(solver.trace().to_vec().len(), before);
     for (class_cap, path_cap, count, truncated) in
         [(10, 10, 3, false), (2, 10, 2, true), (10, 1, 1, true), (3, 3, 3, false)]
     {
@@ -2473,6 +2577,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         // 正常处理器失败结果仍必须枚举，不按返回构造子筛掉。
         let failure = Val::Ctor(fault, Box::new(Val::Symbolic(bits)));
         let output = frame.enumerate_merges(&mut solver, &state, &shared, &failure).unwrap().unwrap();
+        assert_merge_enumeration_reference(&frame, &mut solver, &state, &shared, &failure, &output);
         assert_eq!(output["enumerated_total"], count);
         assert_eq!(output["guard_classes"][0]["truncated"], truncated);
         assert_eq!(output["path_truncated"], path_cap == 1);
@@ -2558,6 +2663,8 @@ fn merge_enumeration_extract_of_derived_symbol() {
     limits.merge_enumeration.enabled = true;
     let state = TaskState::new().with_execution_limits(limits);
     let output = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Symbolic(derived)).unwrap().unwrap();
+    assert_merge_enumeration_reference(&frame, &mut solver, &state, &shared, &Val::Symbolic(derived), &output);
+    assert_eq!(output["guard_classes"][0]["guard_assignment"]["0"], false, "DFS 固定先访问假分支");
     assert_eq!(output["enumerated_total"], 4, "必须阻断派生表达式的真实两位取值");
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration.enabled = true;
@@ -2573,6 +2680,99 @@ fn merge_enumeration_extract_of_derived_symbol() {
     frame.region_merge_records[0].condition = guard;
     let output = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
     assert_eq!(output["enumerated_total"], 2, "连续 Extract 只能枚举真正被测试的一位");
+}
+
+#[test]
+fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
+    use smtlib::Exp::*;
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let guard = solver.declare_const(smtlib::Ty::Bool, info());
+    let mut frame = make_frame(vec![Instr::End]);
+    for id in (0..70).rev() {
+        frame.region_merge_records.push(RegionMergeRecord {
+            record_id: id,
+            parent_record: if id == 0 { None } else { Some(id - 1) },
+            arm: if id == 0 { "root" } else { "then" },
+            function: TOP_LEVEL_LET,
+            branch_pc: 0,
+            join: crate::ir::regions::RegionPoint::FunctionExit,
+            condition: guard,
+            source_loc: info(),
+            depth: id + 1,
+            dead: false,
+            value_symbols: HashSet::new(),
+            input_symbols: HashSet::new(),
+            single_arm_reads: vec![],
+            memory_reads: vec![],
+        });
+    }
+    let mut limits = ExecutionLimits::default();
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 2 };
+    let state = TaskState::new().with_execution_limits(limits);
+    let before = solver.trace().to_vec().len();
+    let output = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
+    assert_merge_enumeration_reference(&frame, &mut solver, &state, &shared, &Val::Unit, &output);
+    assert_eq!(output["enumerated_total"], 2);
+    assert_eq!(output["path_truncated"], false);
+    assert_eq!(solver.trace().to_vec().len(), before);
+    frame.region_merge_records.clear();
+    let empty = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
+    assert_eq!(empty["enumerated_total"], 1);
+    solver.assert(Bool(false));
+    let unsat = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
+    assert_eq!(unsat["enumerated_total"], 0);
+}
+
+#[test]
+#[ignore = "F5 万类压力验证，显式运行"]
+fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let mut frame = make_frame(vec![Instr::End]);
+    for id in 0..14 {
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        frame.region_merge_records.push(RegionMergeRecord {
+            record_id: id,
+            parent_record: None,
+            arm: "root",
+            function: TOP_LEVEL_LET,
+            branch_pc: 0,
+            join: crate::ir::regions::RegionPoint::FunctionExit,
+            condition,
+            source_loc: info(),
+            depth: 1,
+            dead: false,
+            value_symbols: HashSet::new(),
+            input_symbols: HashSet::new(),
+            single_arm_reads: vec![],
+            memory_reads: vec![],
+        });
+    }
+    let mut limits = ExecutionLimits::default();
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 16384 };
+    let state = TaskState::new().with_execution_limits(limits);
+    let before = solver.trace().to_vec().len();
+    let mut calls = 0;
+    let output = frame
+        .enumerate_merges_with(&mut solver, &state, &shared, &Val::Unit, &mut |_, index, _| {
+            assert_eq!(index, 0);
+            calls += 1;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(calls, 16384);
+    assert_eq!(output["enumerated_total"], 16384);
+    assert_eq!(output["path_truncated"], false);
+    let classes = output["guard_classes"].as_array().unwrap();
+    let assignments: HashSet<_> = classes.iter().map(|class| class["guard_assignment"].to_string()).collect();
+    assert_eq!(assignments.len(), 16384);
+    assert!(classes.iter().all(|class| class["truncated"] == false));
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(solver.trace().to_vec().len(), before);
 }
 
 /// 与 I2–I5 共用真实 IR、架构初始化及固定原语配置；显式运行以避免依赖外部文件。
@@ -2624,6 +2824,7 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
                 };
                 let enumeration = frame.enumerate_merges(&mut solver, &state, shared, &value).unwrap();
                 if let Some(output) = &enumeration {
+                    assert_merge_enumeration_reference(&frame, &mut solver, &state, shared, &value, output);
                     // 在原路径求解器上逐个回投该解的所有片段，不能只验证计数。
                     for class in output["guard_classes"].as_array().unwrap() {
                         for solution in class["solutions"].as_array().unwrap() {

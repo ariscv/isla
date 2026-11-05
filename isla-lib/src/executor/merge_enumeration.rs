@@ -107,8 +107,9 @@ fn bits_text(value: &Formula<Sym>) -> String {
     }
 }
 
-fn satisfiable<B: BV>(solver: &mut Solver<B>) -> Result<bool, ExecError> {
-    match solver.check_sat(SourceLoc::unknown()) {
+/// 假设只在本次查询生效；不增加路径断言或逐解阻断子句。
+fn satisfiable<B: BV>(solver: &mut Solver<B>, condition: &Formula<Sym>) -> Result<bool, ExecError> {
+    match solver.check_sat_with(condition, SourceLoc::unknown()) {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
         SmtResult::Unknown => Err(ExecError::Z3Unknown),
@@ -117,7 +118,7 @@ fn satisfiable<B: BV>(solver: &mut Solver<B>) -> Result<bool, ExecError> {
 }
 
 impl<B: BV> LocalFrame<'_, B> {
-    /// 在本路径求解器存活时枚举。所有阻断约束均随保存点回滚；错误也必须回滚。
+    /// 在本路径求解器存活时枚举。枚举假设不写入路径，模型缓存随保存点回滚；错误也必须回滚。
     /// 未开启时不读取执行迹、不查询模型、不改变输出。
     pub fn enumerate_merges(
         &self,
@@ -151,13 +152,9 @@ impl<B: BV> LocalFrame<'_, B> {
         let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
         assert_eq!(by_id.len(), records.len(), "帧内记录编号必须唯一");
         let mut contexts = HashMap::new();
-        let contexts: Vec<_> =
-            records.iter().map(|record| context(record, &by_id, &mut HashSet::new(), &mut contexts)).collect();
-        let projections: Vec<_> = records
-            .iter()
-            .zip(&contexts)
-            .map(|(record, ctx)| And(Box::new(ctx.clone()), Box::new(Var(record.condition))))
-            .collect();
+        for record in records {
+            context(record, &by_id, &mut HashSet::new(), &mut contexts);
+        }
         let events = super::definition_events(solver, &self.local_state.pure_definitions).0;
         let definitions: HashMap<_, _> = events
             .iter()
@@ -174,95 +171,192 @@ impl<B: BV> LocalFrame<'_, B> {
                 slices.into_iter().collect()
             })
             .collect();
+        // 提交历史通常子记录在前；按父链的原始位置做字典序排序，
+        // 得到每棵守卫树的前序，整棵子树先于下一根，而非按深度广度遍历。
+        let original_positions: HashMap<_, _> =
+            records.iter().enumerate().map(|(index, record)| (record.record_id, index)).collect();
+        let mut order: Vec<_> = (0..records.len()).collect();
+        order.sort_by_cached_key(|index| {
+            let mut chain = vec![*index];
+            let mut record = &records[*index];
+            while let Some(parent) = record.parent_record {
+                chain.push(original_positions[&parent]);
+                record = by_id[&parent];
+            }
+            chain.reverse();
+            chain
+        });
+        let positions: HashMap<_, _> =
+            order.iter().enumerate().map(|(position, index)| (records[*index].record_id, position)).collect();
+        let mut tested = Vec::new();
+        let mut expressions = Vec::new();
+        let mut bits = std::collections::BTreeSet::new();
+        let mut symbols = std::collections::BTreeSet::new();
+        // 二级仍使用整条路径全部被测片段，并在类间复用扫描结果。
+        for (index, record) in records.iter().enumerate() {
+            for ((symbol, hi, lo), source_loc) in &slices[index] {
+                tested.push(json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "hi":hi, "lo":lo,
+                    "source_loc":source_loc, "record_id":record.record_id}));
+                expressions.push((*symbol, *hi, *lo));
+                symbols.insert(*symbol);
+                for bit in *lo..=*hi {
+                    bits.insert((*symbol, bit));
+                }
+            }
+        }
+        // 一次取回所有裸守卫，再按父链规范化；不为每个守卫单独抽取模型。
+        let packed_guards = records
+            .iter()
+            .map(|record| {
+                Ite(Box::new(Var(record.condition)), Box::new(smtlib::bits64(1, 1)), Box::new(smtlib::bits64(0, 1)))
+            })
+            .reduce(|high, low| Concat(Box::new(high), Box::new(low)));
+        let bit_predicates: Vec<_> = bits
+            .iter()
+            .map(|(symbol, bit)| {
+                Eq(Box::new(Extract(*bit, *bit, Box::new(Var(Sym { id: *symbol })))), Box::new(smtlib::bits64(1, 1)))
+            })
+            .collect();
         let tx = solver.start_transaction();
         let output = (|| {
             let mut classes = Vec::new();
             let mut total = 0;
             let mut path_truncated = false;
-            while satisfiable(solver)? {
+            let mut pending = if let Some(index) = order.first() {
+                let guard = Var(records[*index].condition);
+                vec![(guard.clone(), 1), (Not(Box::new(guard)), 1)]
+            } else {
+                vec![(Bool(true), 0)]
+            };
+            while let Some((class_prefix, guard_depth)) = pending.pop() {
+                let feasible = satisfiable(solver, &class_prefix)?;
+                if !feasible {
+                    continue;
+                }
                 if total == config.path_cap {
                     path_truncated = true;
                     break;
                 }
-                let mut model = Model::new(solver);
-                model.set_complete_model(true);
-                let assignment: Vec<_> = projections
-                    .iter()
-                    .map(|exp| match model.get_exp(exp)?.unwrap_exp() {
-                        Bool(value) => Ok(value),
-                        value => panic!("守卫投影必须为布尔值：{value:?}"),
-                    })
-                    .collect::<Result<_, ExecError>>()?;
-                drop(model);
-                let class_constraint =
-                    projections.iter().zip(&assignment).fold(Bool(true), |condition, (exp, value)| {
-                        And(
-                            Box::new(condition),
-                            Box::new(if *value { exp.clone() } else { Not(Box::new(exp.clone())) }),
-                        )
-                    });
-                let mut tested = Vec::new();
-                let mut expressions = Vec::new();
-                // 二级使用本路径全部守卫测试过的片段；只有一级对上下文做规范化。
-                for (index, record) in records.iter().enumerate() {
-                    for ((symbol, hi, lo), source_loc) in &slices[index] {
-                        tested.push(json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "hi":hi, "lo":lo,
-                            "source_loc":source_loc, "record_id":record.record_id}));
-                        expressions.push(Extract(*hi, *lo, Box::new(Var(Sym { id: *symbol }))));
+                let mut assignment = Vec::<bool>::new();
+                let mut solutions = Vec::new();
+                let mut truncated = false;
+                // 一级叶子的 Sat 缓存直接用于第一个解，class_cap=1 只创建一次模型。
+                let mut candidate = Some((class_prefix, 0));
+                let mut remaining = Vec::<(Formula<Sym>, usize)>::new();
+                while let Some((mut prefix, depth)) = candidate.take() {
+                    let mut model = Model::new(solver);
+                    model.set_complete_model(true);
+                    if solutions.is_empty() {
+                        let raw = if let Some(packed) = &packed_guards {
+                            bits_text(&model.get_exp(packed)?.unwrap_exp())
+                        } else {
+                            String::new()
+                        };
+                        // 当前模型已证明沿其取值的全部后续分支可行，直接走到叶子。
+                        // 相反分支压栈，后续从最深未访问前缀开始 Sat 剪枝。
+                        for (position, index) in order.iter().enumerate() {
+                            let record = &records[*index];
+                            let mut current = record;
+                            let mut active = true;
+                            while let Some(parent) = current.parent_record {
+                                let value = assignment[positions[&parent]];
+                                active &= if current.arm == "then" { value } else { !value };
+                                current = by_id[&parent];
+                            }
+                            let value = active && raw.as_bytes()[2 + *index] == b'1';
+                            assignment.push(value);
+                            if position >= guard_depth && active {
+                                let selected =
+                                    if value { Var(record.condition) } else { Not(Box::new(Var(record.condition))) };
+                                pending.push((
+                                    And(Box::new(prefix.clone()), Box::new(Not(Box::new(selected.clone())))),
+                                    position + 1,
+                                ));
+                                prefix = And(Box::new(prefix), Box::new(selected));
+                            }
+                        }
                     }
-                }
-                let class_tx = solver.start_transaction();
-                solver.add(Def::Assert(class_constraint.clone()));
-                let solutions = (|| {
-                    let mut solutions = Vec::new();
-                    let mut truncated = false;
-                    while satisfiable(solver)? {
-                        // 多查一次区分“刚好完整”与确有未输出的可行解。
-                        if solutions.len() == config.class_cap || total == config.path_cap {
-                            truncated = true;
-                            path_truncated |= total == config.path_cap;
+                    // 每个完整符号只取一次；本地截取所有重复或重叠片段。
+                    let inputs: std::collections::BTreeMap<_, _> = symbols
+                        .iter()
+                        .map(|symbol| {
+                            let value = model.get_exp(&Var(Sym { id: *symbol }))?.unwrap_exp();
+                            Ok((*symbol, bits_text(&value)))
+                        })
+                        .collect::<Result<_, ExecError>>()?;
+                    let values: Vec<_> = expressions
+                        .iter()
+                        .map(|(symbol, hi, lo)| {
+                            let value = &inputs[symbol];
+                            format!("#b{}", &value[value.len() - 1 - *hi as usize..value.len() - *lo as usize])
+                        })
+                        .collect();
+                    let representative_result = model.get_val(result)?.to_string(shared);
+                    let representative_inputs: Vec<_> = inputs
+                        .iter()
+                        .map(|(symbol, value)| json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "value":value}))
+                        .collect();
+                    consume(classes.len(), solutions.len(), &mut model)?;
+                    drop(model);
+                    solutions.push(json!({"slice_values":values, "representative":{"result":representative_result, "inputs":representative_inputs}}));
+                    total += 1;
+                    // 当前模型证明所选位分支可满足。到达上限时，把沿该模型
+                    // 未走的相反分支因式分解为 prefix ∧ ¬(后续全部所选位)，
+                    // 与既有 DFS 前沿合并探测；公式大小只与位数有关。
+                    let selected: Vec<_> = bits
+                        .iter()
+                        .zip(&bit_predicates)
+                        .skip(depth)
+                        .map(|((symbol, bit), predicate)| {
+                            let value = &inputs[symbol];
+                            if value.as_bytes()[value.len() - 1 - *bit as usize] == b'1' {
+                                predicate.clone()
+                            } else {
+                                Not(Box::new(predicate.clone()))
+                            }
+                        })
+                        .collect();
+                    if solutions.len() == config.class_cap || total == config.path_cap {
+                        let leaf =
+                            selected.iter().fold(Bool(true), |leaf, bit| And(Box::new(leaf), Box::new(bit.clone())));
+                        let rest = And(Box::new(prefix), Box::new(Not(Box::new(leaf))));
+                        let rest = remaining
+                            .iter()
+                            .fold(rest, |rest, (condition, _)| Or(Box::new(rest), Box::new(condition.clone())));
+                        truncated = satisfiable(solver, &rest)?;
+                        path_truncated |= truncated && total == config.path_cap;
+                        break;
+                    }
+                    // 下一次从最深未访问分支开始；所选分支由当前模型直接剪枝。
+                    let mut prefix = prefix;
+                    for (index, selected) in selected.into_iter().enumerate() {
+                        remaining.push((
+                            And(Box::new(prefix.clone()), Box::new(Not(Box::new(selected.clone())))),
+                            depth + index + 1,
+                        ));
+                        prefix = And(Box::new(prefix), Box::new(selected));
+                    }
+                    while let Some((prefix, depth)) = remaining.pop() {
+                        let feasible = satisfiable(solver, &prefix)?;
+                        if feasible {
+                            candidate = Some((prefix, depth));
                             break;
                         }
-                        let mut model = Model::new(solver);
-                        model.set_complete_model(true);
-                        let values: Vec<_> = expressions
-                            .iter()
-                            .map(|exp| model.get_exp(exp).map(ModelVal::unwrap_exp))
-                            .collect::<Result<_, _>>()?;
-                        let representative_result = model.get_val(result)?.to_string(shared);
-                        let symbols: std::collections::BTreeSet<_> =
-                            tested.iter().map(|slice| slice["smt_id"].as_u64().unwrap() as u32).collect();
-                        let mut inputs = Vec::new();
-                        for symbol in symbols {
-                            let value = model.get_exp(&Var(Sym { id: symbol }))?.unwrap_exp();
-                            inputs.push(
-                                json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "value":bits_text(&value)}),
-                            );
-                        }
-                        consume(classes.len(), solutions.len(), &mut model)?;
-                        drop(model);
-                        let slice_values: Vec<_> = values.iter().map(bits_text).collect();
-                        solutions.push(json!({"slice_values":slice_values, "representative":{"result":representative_result, "inputs":inputs}}));
-                        total += 1;
-                        let block = expressions.iter().zip(values).fold(Bool(false), |block, (exp, value)| {
-                            Or(Box::new(block), Box::new(Neq(Box::new(exp.clone()), Box::new(value))))
-                        });
-                        solver.add(Def::Assert(block));
                     }
-                    Ok::<_, ExecError>((solutions, truncated))
-                })();
-                solver.rollback_transaction(class_tx);
-                let (solutions, truncated) = solutions?;
+                }
+                let mut record_assignment = vec![false; records.len()];
+                for (index, value) in order.iter().zip(assignment) {
+                    record_assignment[*index] = value;
+                }
                 let guard_assignment: serde_json::Map<_, _> = records
                     .iter()
-                    .zip(&assignment)
+                    .zip(record_assignment)
                     .map(|(record, value)| (record.record_id.to_string(), json!(value)))
                     .collect();
                 classes.push(
                     json!({"class_id":classes.len(), "guard_assignment":guard_assignment, "tested_slices":tested,
                     "solution_count":solutions.len(), "solutions":solutions, "truncated":truncated}),
                 );
-                solver.add(Def::Assert(Not(Box::new(class_constraint))));
                 if path_truncated {
                     break;
                 }
@@ -278,3 +372,7 @@ impl<B: BV> LocalFrame<'_, B> {
         output
     }
 }
+
+#[cfg(test)]
+#[path = "tests/merge_enumeration_reference.rs"]
+mod reference;
