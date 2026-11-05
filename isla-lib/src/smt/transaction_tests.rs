@@ -127,14 +127,16 @@ fn smt_savepoint_restores_overwritten_symbols_and_attributes() {
 fn smt_savepoint_invalid_is_inherited_and_rollback_is_local() {
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
+    let existing = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
     let outer = solver.start_transaction();
     let inner = solver.start_transaction();
-    solver.add_event(Event::Smt(Assert(Bool(false)), DefAttrs::default(), SourceLoc::unknown()));
+    // 修改当前层之外的定义属性仍不受支持；断言本身不再导致 invalid。
+    solver.mark_bitvector(existing);
     assert!(solver.transaction_invalid());
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| solver.commit_transaction())).is_err());
     solver.rollback_transaction(inner);
     assert!(!solver.transaction_invalid());
-    solver.assert(Bool(false));
+    solver.mark_bitvector(existing);
     let inner = solver.start_transaction();
     assert!(solver.transaction_invalid(), "新层不能清除父层的拒绝状态");
     solver.rollback_transaction(inner);
@@ -145,18 +147,18 @@ fn smt_savepoint_invalid_is_inherited_and_rollback_is_local() {
 }
 
 #[test]
-fn smt_savepoint_assert_after_inner_commit_conservatively_invalidates_parent() {
+fn smt_savepoint_assert_after_inner_commit_is_buffered_in_parent() {
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let outer = solver.start_transaction();
     solver.start_transaction();
     let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
     solver.commit_transaction();
-    // 既有执行器在提交后补断言；内层提交后仍在推演父层，不能把臂断言当成无条件事实。
+    // 既有执行器在内层提交后补断言，仍属于父层并能随父层回滚。
     solver.assert(Var(sym));
-    assert!(solver.transaction_invalid());
+    assert!(!solver.transaction_invalid());
     assert_eq!(solver.check_sat_with(&Var(sym), SourceLoc::unknown()), Sat);
-    assert_eq!(solver.check_sat_with(&Not(Box::new(Var(sym))), SourceLoc::unknown()), Sat);
+    assert_eq!(solver.check_sat_with(&Not(Box::new(Var(sym))), SourceLoc::unknown()), Unsat);
     solver.rollback_transaction(outer);
     assert!(!solver.decls.contains_key(&sym));
 }
@@ -252,18 +254,16 @@ fn smt_savepoint_register_reads_support_outer_precommit_and_legacy_postcommit() 
 }
 
 #[test]
-fn smt_savepoint_nested_register_read_ordering_is_rejected_without_mutation() {
+fn smt_savepoint_nested_register_read_ordering_has_no_effect() {
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     solver.start_transaction();
     let inner = solver.start_transaction();
     solver.add_event(Event::Cycle);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| solver.order_transaction_register_reads(inner)))
-        .is_err());
+    solver.order_transaction_register_reads(inner);
     assert_eq!(solver.transaction_depth(), 2);
     solver.commit_transaction();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| solver.order_transaction_register_reads(inner)))
-        .is_err());
+    solver.order_transaction_register_reads(inner);
     assert_eq!(solver.transaction_depth(), 1);
     solver.commit_transaction();
     assert_eq!(solver.transaction_depth(), 0);
@@ -465,4 +465,285 @@ fn smt_savepoint_depth_limit_panics() {
         assert_eq!(solver.transaction_depth(), depth);
         solver.start_transaction();
     }
+}
+
+// 条件查询使用真实 Z3，同时检查发布后的检查点重放，避免仅验证日志形状。
+fn guarded_query(solver: &mut Solver<B64>, g1: Sym, g2: Sym, c: Sym) {
+    let all = And(Box::new(Var(g1)), Box::new(Var(g2)));
+    assert_eq!(solver.check_sat_with(&And(Box::new(all.clone()), Box::new(Var(c))), SourceLoc::unknown()), Sat);
+    assert_eq!(
+        solver.check_sat_with(&And(Box::new(all), Box::new(Not(Box::new(Var(c))))), SourceLoc::unknown()),
+        Unsat
+    );
+    for condition in [Not(Box::new(Var(g1))), Not(Box::new(Var(g2)))] {
+        assert_eq!(
+            solver.check_sat_with(&And(Box::new(condition), Box::new(Not(Box::new(Var(c))))), SourceLoc::unknown()),
+            Sat
+        );
+    }
+}
+
+#[test]
+fn smt_guarded_nested_assertions_and_event_annotations() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let g1 = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let g2 = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let c = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let scopes = unsafe { Z3_solver_get_num_scopes(ctx.z3_ctx, solver.z3_solver) };
+    solver.start_transaction_with_guard(Some(Var(g1)));
+    solver.start_transaction_with_guard(Some(Var(g2)));
+    solver.assert(Var(c));
+    solver.add_event(Event::ReadReg(Name::from_u32(8), vec![], Val::Symbolic(c)));
+    assert!(!solver.transaction_invalid());
+    assert_eq!(solver.check_sat_with(&Not(Box::new(Var(c))), SourceLoc::unknown()), Unsat);
+    assert_eq!(solver.check_sat_deadline(SourceLoc::unknown(), Duration::from_secs(10)), Sat);
+    solver.commit_transaction();
+    assert_eq!(solver.check_sat_with(&Not(Box::new(Var(g2))), SourceLoc::unknown()), Sat);
+    assert_eq!(solver.trace.head.len(), 3);
+    solver.commit_transaction();
+    assert_eq!(unsafe { Z3_solver_get_num_scopes(ctx.z3_ctx, solver.z3_solver) }, scopes);
+    guarded_query(&mut solver, g1, g2, c);
+    let expected =
+        Or(Box::new(Not(Box::new(Var(g1)))), Box::new(Or(Box::new(Not(Box::new(Var(g2)))), Box::new(Var(c)))));
+    assert!(matches!(&solver.trace.head[3], Event::Smt(Assert(exp), ..) if *exp == expected));
+    let events = solver.committed_transaction_events();
+    assert!(matches!(&events[1], (Some(And(a, b)), Event::ReadReg(..)) if **a == Var(g1) && **b == Var(g2)));
+    let mut replayed = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+    guarded_query(&mut replayed, g1, g2, c);
+}
+
+#[test]
+fn smt_guarded_assertions_commit_rollback_combinations() {
+    let ctx = Context::new(Config::new());
+    for outer_commit in [false, true] {
+        for inner_commit in [false, true] {
+            let mut solver = Solver::<B64>::new(&ctx);
+            let g = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+            let c = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+            let outer = solver.start_transaction_with_guard(Some(Var(g)));
+            let inner = solver.start_transaction_with_guard(None);
+            solver.assert(Var(c));
+            if inner_commit {
+                solver.commit_transaction();
+            } else {
+                solver.rollback_transaction(inner);
+            }
+            if outer_commit {
+                solver.commit_transaction();
+            } else {
+                solver.rollback_transaction(outer);
+            }
+            let contrary = And(Box::new(Var(g)), Box::new(Not(Box::new(Var(c)))));
+            let expected = if inner_commit && outer_commit { Unsat } else { Sat };
+            assert_eq!(solver.check_sat_with(&contrary, SourceLoc::unknown()), expected);
+            assert_eq!(solver.check_sat_with(&Not(Box::new(Var(c))), SourceLoc::unknown()), Sat);
+            let mut replayed = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+            assert_eq!(replayed.check_sat_with(&contrary, SourceLoc::unknown()), expected);
+        }
+    }
+}
+
+#[test]
+fn smt_guarded_dead_arm_discards_buffer_and_restores_state() {
+    let ctx = Context::new(Config::new());
+    for nested in [false, true] {
+        let mut solver = Solver::<B64>::new(&ctx);
+        let g = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        if nested {
+            solver.start_transaction();
+        }
+        solver.start_transaction_with_guard(Some(Var(g)));
+        let discarded = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.cycle_count();
+        solver.assert(Bool(false));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), Unsat);
+        assert_eq!(solver.check_sat_deadline(SourceLoc::unknown(), Duration::from_secs(10)), Unsat);
+        solver.commit_dead_transaction();
+        assert!(!solver.decls.contains_key(&discarded));
+        assert_eq!(solver.get_cycle_count(), 0);
+        assert_eq!(solver.check_sat_with(&Var(g), SourceLoc::unknown()), Unsat);
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(g))), SourceLoc::unknown()), Sat);
+        if nested {
+            assert_eq!(solver.trace.head.len(), 1);
+            solver.commit_transaction();
+        }
+        assert!(solver.committed_transaction_events().iter().all(|(_, event)| !matches!(event, Event::Cycle)));
+        assert_eq!(solver.trace.head.len(), 2);
+        let mut replayed = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+        assert_eq!(replayed.check_sat_with(&Var(g), SourceLoc::unknown()), Unsat);
+    }
+}
+
+#[test]
+fn smt_guarded_fresh_product_remains_evaluable_in_merged_value() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let g = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let x = solver.declare_bitvector(8, SourceLoc::unknown());
+    solver.assert_eq(Var(x), smtlib::bits64(3, 8));
+    solver.start_transaction_with_guard(Some(Var(g)));
+    let v = solver.declare_bitvector(8, SourceLoc::unknown());
+    solver.assert_eq(Var(v), Bvmul(Box::new(Var(x)), Box::new(Var(x))));
+    assert!(!solver.transaction_invalid());
+    solver.commit_transaction();
+    let merged =
+        solver.define_bitvector(Ite(Box::new(Var(g)), Box::new(Var(v)), Box::new(Var(x))), SourceLoc::unknown());
+    for replay in [false, true] {
+        if replay {
+            solver = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+        }
+        for (condition, value) in [(Var(g), 9), (Not(Box::new(Var(g))), 3)] {
+            assert_eq!(solver.check_sat_with(&condition, SourceLoc::unknown()), Sat);
+            let actual = solver.take_stashed_model().unwrap().get_var(merged).unwrap().unwrap_exp();
+            assert_eq!(actual, smtlib::bits64::<Sym>(value, 8));
+        }
+    }
+}
+
+#[test]
+fn smt_guarded_legacy_condition_scopes_replay_assertions_under_each_arm() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let g = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let c = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    solver.start_transaction();
+    for (condition, value) in [(Var(g), true), (Not(Box::new(Var(g))), false)] {
+        solver.with_transaction_condition(&condition, |solver| {
+            solver.assert_eq(Var(c), Bool(value));
+            assert!(!solver.transaction_invalid());
+        });
+    }
+    solver.commit_transaction();
+    assert_eq!(solver.check_sat_with(&Neq(Box::new(Var(c)), Box::new(Var(g))), SourceLoc::unknown()), Unsat);
+}
+
+#[test]
+fn smt_guarded_read_order_is_deferred_until_outer_publication() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let g = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let outer = solver.start_transaction();
+    let inner = solver.start_transaction_with_guard(Some(Var(g)));
+    let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    solver.define_const(Not(Box::new(Var(sym))), SourceLoc::unknown());
+    solver.add_event(Event::ReadReg(Name::from_u32(0), vec![], Val::Symbolic(sym)));
+    solver.order_transaction_register_reads(inner);
+    assert!(matches!(solver.transaction_events[1], Event::Smt(DefineConst(..), ..)));
+    solver.commit_transaction();
+    solver.order_transaction_register_reads(inner);
+    solver.order_transaction_register_reads(outer);
+    assert!(matches!(solver.transaction_events[1], Event::Smt(DefineConst(..), ..)));
+    solver.commit_transaction();
+    assert!(matches!(solver.trace.head[2], Event::ReadReg(..)));
+    let events = solver.committed_transaction_events();
+    assert!(matches!(&events[1], (Some(condition), Event::ReadReg(..)) if *condition == Var(g)));
+}
+
+#[test]
+fn smt_guarded_query_snapshot_includes_buffer_and_active_conditions() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let g = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    solver.start_transaction_with_guard(Some(Var(g)));
+    let c = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    solver.with_transaction_condition(&Var(c), |solver| {
+        let v = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.assert(Var(v));
+        let mut replayed = Solver::from_checkpoint(&ctx, solver.checkpoint_snapshot());
+        for sym in [g, c, v] {
+            assert_eq!(replayed.check_sat_with(&Not(Box::new(Var(sym))), SourceLoc::unknown()), Unsat);
+        }
+    });
+    solver.commit_transaction();
+}
+
+#[test]
+fn smt_guarded_dead_arm_is_conditional_on_parent_and_can_be_rolled_back() {
+    let ctx = Context::new(Config::new());
+    for commit in [false, true] {
+        let mut solver = Solver::<B64>::new(&ctx);
+        let outer_guard = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        let inner_guard = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        let outer = solver.start_transaction_with_guard(Some(Var(outer_guard)));
+        solver.start_transaction_with_guard(Some(Var(inner_guard)));
+        // 也覆盖调用方判死而非当前查询返回 Unsat 的入口。
+        solver.commit_dead_transaction();
+        if commit {
+            solver.commit_transaction();
+        } else {
+            solver.rollback_transaction(outer);
+        }
+        assert_eq!(
+            solver.check_sat_with(&And(Box::new(Var(outer_guard)), Box::new(Var(inner_guard))), SourceLoc::unknown()),
+            if commit { Unsat } else { Sat }
+        );
+        assert_eq!(
+            solver.check_sat_with(
+                &And(Box::new(Not(Box::new(Var(outer_guard)))), Box::new(Var(inner_guard))),
+                SourceLoc::unknown()
+            ),
+            Sat
+        );
+    }
+}
+
+#[test]
+fn smt_guarded_supported_assert_and_definitions_do_not_invalidate() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let tx = solver.start_transaction();
+    let flag = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let alias = solver.define_const(Not(Box::new(Var(flag))), SourceLoc::unknown());
+    let fun = solver.fresh();
+    solver.add(DeclareFun(fun, vec![Ty::Bool], Ty::Bool));
+    solver.add_event(Event::Smt(Assert(Var(alias)), DefAttrs::default(), SourceLoc::unknown()));
+    assert!(!solver.transaction_invalid());
+    assert_eq!(solver.check_sat_with(&Var(flag), SourceLoc::unknown()), Unsat);
+    solver.rollback_transaction(tx);
+    assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+}
+
+#[test]
+fn smt_guarded_unconditional_commit_preserves_cached_model_without_new_constraints() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let flag = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    assert_eq!(solver.check_sat_with(&Var(flag), SourceLoc::unknown()), Sat);
+    let original = solver.stashed_model;
+    solver.start_transaction();
+    solver.commit_transaction();
+    assert_eq!(solver.stashed_model, original);
+    assert!(solver.last_check_sat);
+}
+
+#[test]
+fn smt_guarded_commit_preserves_assertion_check_accounting() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    solver.assert(Bool(true));
+    solver.start_transaction();
+    assert_eq!(solver.check_sat(SourceLoc::unknown()), Sat);
+    solver.commit_transaction();
+    assert_eq!(solver.asserts_since_check(), 0, "空提交不能恢复已经查询过的旧断言计数");
+    solver.start_transaction();
+    solver.assert(Bool(true));
+    solver.commit_transaction();
+    assert_eq!(solver.asserts_since_check(), 1, "重放同一断言不能重复计数");
+}
+
+#[test]
+fn smt_guarded_read_order_respects_guard_symbol_definition() {
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let value = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    let outer = solver.start_transaction();
+    let guard = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+    solver.start_transaction_with_guard(Some(Var(guard)));
+    solver.add_event(Event::ReadReg(Name::from_u32(0), vec![], Val::Symbolic(value)));
+    solver.commit_transaction();
+    solver.order_transaction_register_reads(outer);
+    solver.commit_transaction();
+    assert!(matches!(&solver.trace.head[1], Event::Smt(DeclareConst(sym, ..), ..) if *sym == guard));
+    assert!(matches!(&solver.trace.head[2], Event::ReadReg(..)));
 }

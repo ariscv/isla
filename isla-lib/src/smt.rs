@@ -1613,8 +1613,11 @@ pub struct Solver<'ctx, B> {
     stashed_model: Option<Z3_model>,
     savepoints: Vec<SolverSavepoint<'ctx>>,
     transaction_events: Vec<Event<B>>,
+    // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
+    transaction_event_guards: Vec<Option<Exp<Sym>>>,
+    committed_transaction_events: Vec<(Option<Exp<Sym>>, Event<B>)>,
     last_committed_transaction: Option<(SolverTransaction, usize)>,
-    condition_depth: usize,
+    transaction_conditions: Vec<Exp<Sym>>,
 }
 
 impl<B> Drop for Solver<'_, B> {
@@ -2223,8 +2226,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 stashed_model: None,
                 savepoints: Vec::new(),
                 transaction_events: Vec::new(),
+                transaction_event_guards: Vec::new(),
+                committed_transaction_events: Vec::new(),
                 last_committed_transaction: None,
-                condition_depth: 0,
+                transaction_conditions: Vec::new(),
             }
         }
     }
@@ -2400,12 +2405,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
-        if !self.savepoints.is_empty() && matches!(def, Def::Assert(_)) {
-            // 内层提交后补加的断言仍处于父层的推演中，不能无条件写入 Z3。
-            // 保守地使当前层失效；回滚该层可恢复父层，失效层禁止提交。
-            self.savepoints.last_mut().unwrap().invalid = true;
-            return;
-        }
         match &def {
             Def::Assert(exp) => {
                 self.asserts_since_check += 1;
@@ -2420,7 +2419,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         }
                     }
                 }
-                self.z3_assert(exp)
+                // 活动保存点只缓冲断言，查询通过 assumptions 看到它们；
+                // Z3 push/pop 只承载臂条件，回滚不会留下臂内约束。
+                if self.savepoints.is_empty() {
+                    self.z3_assert(exp)
+                }
             }
             Def::DeclareConst(v, ty) => {
                 self.performance_info.add_var_node(*v, info);
@@ -2438,6 +2441,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.func_decls.insert(*v, fd);
             }
             Def::DefineConst(v, exp) => {
+                // DefineConst 降级为化简后的表达式 AST，既不是 DeclareConst + Assert，
+                // 也不向 Z3 solver 加约束；臂 pop 后符号表中的定义仍然有效。
+                // 原有提交只发布定义日志；检查点重放再按同样方式建立符号表。
                 if cfg!(feature = "smtperf") {
                     self.performance_info.add_var_node(*v, info);
                     for used in exp.variables().iter() {
@@ -2564,7 +2570,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 *attrs = attrs.sail_bitvector();
                 self.sail_bitvectors.insert(sym);
             } else {
-                // 事务不能改变提交前已有符号的类别。
+                // 不支持改写本层之外的定义属性：这会修改父层或已发布的日志，
+                // 无法通过本层缓冲回滚。因此保留 invalid，而非拒绝普通 Assert。
                 savepoint.invalid = true;
             }
             return;
@@ -2623,6 +2630,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             || matches!(&event, Event::Smt(Def::DefineEnum(..), ..))
         {
             self.transaction_events.push(event);
+            self.transaction_event_guards.push(None);
         }
     }
 
@@ -2740,7 +2748,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.performance_info.start();
 
         let ast = self.translate_exp(exp);
-        let assumptions = [ast.z3_ast];
+        let pending = self.transaction_assertions();
+        let mut assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
+        assumptions.push(ast.z3_ast);
         let z3_result = match timeout_Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, &assumptions, info) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
@@ -2771,7 +2781,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn check_sat(&mut self, info: SourceLoc) -> SmtResult {
         let started = Instant::now();
-        let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver, info) {
+        let pending = self.transaction_assertions();
+        let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
+        let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver, &assumptions, info) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
                 // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
@@ -2854,16 +2866,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 与 `--smt-timeout` 在该构建下的既有行为一致）。
     pub fn check_sat_deadline(&mut self, info: SourceLoc, deadline: Duration) -> SmtResult {
         let started = Instant::now();
-        let z3_result = match timeout_Z3_solver_check_deadline(self.ctx.z3_ctx, self.z3_solver, info, deadline) {
-            Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
-                // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
-                self.last_check_sat = false;
-                self.asserts_since_check = 0;
-                let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
-            }
-        };
+        let pending = self.transaction_assertions();
+        let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
+        let z3_result =
+            match timeout_Z3_solver_check_deadline(self.ctx.z3_ctx, self.z3_solver, &assumptions, info, deadline) {
+                Ok(result) => result,
+                Err(Z3TimeoutError::Interrupted) => {
+                    // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
+                    self.last_check_sat = false;
+                    self.asserts_since_check = 0;
+                    let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
+                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                }
+            };
         let result = if z3_result == Z3_L_TRUE {
             Sat
         } else if z3_result == Z3_L_FALSE {
@@ -2937,6 +2952,7 @@ pub(crate) fn take_smtperf_report() -> Option<String> {
 pub fn checkpoint<B: BV>(solver: &mut Solver<B>) -> Checkpoint<B> {
     assert_eq!(solver.transaction_depth(), 0, "保存点内不能发布检查点");
     solver.last_committed_transaction = None;
+    solver.committed_transaction_events.clear();
     solver.trace.checkpoint(solver.next_var)
 }
 
@@ -3028,9 +3044,9 @@ mod tests {
         let speculative = solver.declare_const(Ty::Bool, SourceLoc::unknown());
         solver.add_event(Event::Cycle);
         solver.assert(Exp::Bool(false));
-        assert!(solver.transaction_invalid());
+        assert!(!solver.transaction_invalid());
         assert_eq!(solver.trace.head.len(), before);
-        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Unsat);
         solver.rollback_transaction(tx);
         assert!(!solver.decls.contains_key(&speculative));
         assert!(solver.fresh().id > speculative.id);

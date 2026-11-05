@@ -79,11 +79,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub(super) fn checkpoint_snapshot(&self) -> Checkpoint<B> {
-        let trace = Arc::new(Some(Trace {
-            checkpoints: self.trace.checkpoints,
-            head: self.trace.head.clone(),
-            tail: self.trace.tail.clone(),
+        // 诊断快照不能只复制已发布的迹：事务内查询还使用缓冲断言和活动臂条件。
+        // 条件放在定义之后，允许旧臂作用域引用同一保存点内刚声明的符号。
+        let mut head = self.trace.head.clone();
+        head.extend(self.transaction_events.iter().cloned());
+        head.extend(self.transaction_conditions.iter().cloned().map(|condition| {
+            super::Event::Smt(super::Def::Assert(condition), super::DefAttrs::default(), super::SourceLoc::unknown())
         }));
+        let trace = Arc::new(Some(Trace { checkpoints: self.trace.checkpoints, head, tail: self.trace.tail.clone() }));
         Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace }
     }
 }

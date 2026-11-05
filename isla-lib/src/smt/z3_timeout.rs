@@ -276,9 +276,17 @@ macro_rules! interruptible_z3_call {
 pub(super) fn timeout_Z3_solver_check(
     context: Z3_context,
     solver: Z3_solver,
+    assumptions: &[Z3_ast],
     source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
-    interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe { Z3_solver_check(context, solver) })
+    let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
+    interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe {
+        if assumptions.is_empty() {
+            Z3_solver_check(context, solver)
+        } else {
+            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+        }
+    })
 }
 
 /// 带独立 deadline 的 `Z3_solver_check`：与全局 `--smt-timeout` 相互独立，
@@ -288,19 +296,28 @@ pub(super) fn timeout_Z3_solver_check(
 pub(super) fn timeout_Z3_solver_check_deadline(
     context: Z3_context,
     solver: Z3_solver,
+    assumptions: &[Z3_ast],
     source_loc: SourceLoc,
     deadline: Duration,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
     let started = Instant::now();
+    let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
+    let check = || unsafe {
+        if assumptions.is_empty() {
+            Z3_solver_check(context, solver)
+        } else {
+            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+        }
+    };
     let result = {
         #[cfg(feature = "smt-thread-interrupt")]
         {
-            thread_interrupt_call_with_timeout(context, deadline, || unsafe { Z3_solver_check(context, solver) })
+            thread_interrupt_call_with_timeout(context, deadline, check)
         }
         #[cfg(not(feature = "smt-thread-interrupt"))]
         {
             let _ = deadline;
-            Ok(unsafe { Z3_solver_check(context, solver) })
+            Ok(check())
         }
     };
     record_path_smt_call(SmtOperation::CheckSat, source_loc, started.elapsed(), result.is_err());
@@ -316,7 +333,7 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
     assumptions: &[Z3_ast],
     source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
-    let count = assumptions.len().try_into().expect("too many Z3 check assumptions");
+    let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     interruptible_z3_call!(SmtOperation::CheckSatAssuming, source_loc, context, unsafe {
         Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
     })
