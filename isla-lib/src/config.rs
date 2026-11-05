@@ -1633,16 +1633,17 @@ fn get_const_primops<B: BV>(
     config: &Value,
     symtab: &Symtab,
     type_info: &IRTypeInfo,
-) -> Result<HashMap<String, Reset<B>>, String> {
+) -> Result<HashMap<String, (Reset<B>, crate::primop::Effect)>, String> {
     let defaults = config.get("const_primops");
 
     if let Some(defaults) = defaults {
         if let Some(defaults) = defaults.as_table() {
             defaults
                 .into_iter()
-                .map(|(primop, value)| match reset_to_toml_value(value, symtab, type_info) {
-                    Ok(value) => Ok((primop.clone(), value)),
-                    Err(e) => Err(e),
+                .map(|(primop, value)| {
+                    let value = from_toml_value_undef::<B>(value, symtab, type_info)?;
+                    let effect = crate::primop::const_primop_effect(&value);
+                    Ok((primop.clone(), (value.into_reset(), effect)))
                 })
                 .collect()
         } else {
@@ -1658,11 +1659,16 @@ pub fn reset_to_toml_value<B: BV>(
     symtab: &Symtab<'_>,
     type_info: &IRTypeInfo,
 ) -> Result<Reset<B>, String> {
-    let v = from_toml_value_undef::<B>(value, symtab, type_info)?;
-    Ok(Arc::new(move |_, typedefs, solver| match &v {
-        URVal::Init(value) => Ok(value.clone()),
-        URVal::Uninit(ty) => symbolic_from_typedefs(ty, typedefs, solver, SourceLoc::command_line()),
-    }))
+    Ok(from_toml_value_undef::<B>(value, symtab, type_info)?.into_reset())
+}
+
+impl<B: BV> URVal<B> {
+    fn into_reset(self) -> Reset<B> {
+        Arc::new(move |_, typedefs, solver| match &self {
+            URVal::Init(value) => Ok(value.clone()),
+            URVal::Uninit(ty) => symbolic_from_typedefs(ty, typedefs, solver, SourceLoc::command_line()),
+        })
+    }
 }
 
 pub type Resets<B> = Vec<(Loc<Name>, Reset<B>)>;
@@ -2365,8 +2371,8 @@ pub struct ISAConfig<B> {
     pub reset_registers: Vec<(Loc<Name>, Reset<B>)>,
     /// Constraints that should hold at reset_registers
     pub reset_constraints: Vec<Exp<Loc<String>>>,
-    /// Constant primops
-    pub const_primops: HashMap<String, Reset<B>>,
+    /// 配置原语：分类随闭包保存，避免丢失配置值是否为 Uninit 的来源信息。
+    pub const_primops: HashMap<String, (Reset<B>, crate::primop::Effect)>,
     /// Assumptions to use about function behaviour
     pub function_assumptions: Vec<(String, Vec<Option<Exp<Loc<String>>>>, Exp<Loc<String>>)>,
     /// Register synonyms to rename

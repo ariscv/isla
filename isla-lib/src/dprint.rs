@@ -812,8 +812,8 @@ pub fn print_instr_toString<'a, B>(f: &'a mut String, instr: &'a Instr<Name, B>,
         PrimopBinary(loc, fptr, lhs, rhs, info) => {
             write!(f, "PrimopBinary {:?} = {:p}({:?}, {:?}) ` {:?}", loc, fptr, lhs, rhs, info)
         }
-        PrimopReset(loc, reset, info) => {
-            write!(f, "PrimopReset {:?} = {:p} ` {:?}", loc, reset, info)
+        PrimopReset(loc, reset, effect, info) => {
+            write!(f, "PrimopReset {:?} = {:p} {:?} ` {:?}", loc, reset, effect, info)
         }
         PrimopVariadic(loc, fptr, args, info) => {
             write!(f, "PrimopVariadic {:?} = {:p}({:?}) ` {:?}", loc, fptr, args, info)

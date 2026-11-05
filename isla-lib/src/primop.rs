@@ -64,7 +64,7 @@ pub mod memory;
 pub type Unary<B> = fn(Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 pub type Binary<B> = fn(Val<B>, Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 
-pub use effects::{binary_effect, effect, reset_effect, unary_effect, variadic_effect, Effect};
+pub use effects::{binary_effect, const_primop_effect, effect, reset_effect, unary_effect, variadic_effect, Effect};
 mod effects;
 
 /// 保留执行器使用的函数指针接口；纯度只由副作用分类表决定。
@@ -5517,7 +5517,7 @@ pub struct Primops<B> {
     pub unary: HashMap<String, Unary<B>>,
     pub binary: HashMap<String, Binary<B>>,
     pub variadic: HashMap<String, Variadic<B>>,
-    pub consts: HashMap<String, Reset<B>>,
+    pub consts: HashMap<String, (Reset<B>, Effect)>,
 }
 
 impl<B: BV> Default for Primops<B> {

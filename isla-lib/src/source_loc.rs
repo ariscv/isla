@@ -417,7 +417,7 @@ mod tests {
             | Instr::PrimopUnary(_, _, _, info)
             | Instr::PrimopBinary(_, _, _, _, info)
             | Instr::PrimopVariadic(_, _, _, info)
-            | Instr::PrimopReset(_, _, info)
+            | Instr::PrimopReset(_, _, _, info)
             | Instr::Exit(_, info) => Some(*info),
             Instr::Goto(_) | Instr::Arbitrary | Instr::End => None,
         }

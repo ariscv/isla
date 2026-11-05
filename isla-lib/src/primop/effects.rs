@@ -27,7 +27,7 @@ pub enum Effect {
 }
 
 /// 按注册名查询；未知名字返回 `None`，调用方必须拒绝执行或明确处理缺失分类。
-/// 配置动态注入的 Reset 没有固定名字，须使用 [`reset_effect`]。
+/// 配置条目须按解析值使用 [`const_primop_effect`]；任意动态闭包使用 [`reset_effect`]。
 pub fn effect(name: &str) -> Option<Effect> {
     match name {
         // 整数、位向量、字符串、列表和向量：只计算实参；isla_read_vreg 也从实参取寄存器值。
@@ -314,9 +314,17 @@ fn binary_effect_registry<B: BV>() -> impl Iterator<Item = (String, Binary<B>)> 
 pointer_effect!(binary_effect, Binary, binary_effect_registry);
 pointer_effect!(variadic_effect, Variadic, variadic_primops);
 
+/// 配置值已经初始化时，调用只复制固定值；Uninit 每次生成独立符号，必须保守拒绝。
+pub fn const_primop_effect<B>(value: &crate::ir::URVal<B>) -> Effect {
+    match value {
+        crate::ir::URVal::Init(_) => Effect::Pure,
+        crate::ir::URVal::Uninit(_) => Effect::WritesState,
+    }
+}
+
 /// Reset 是配置注入的任意闭包，可读内存并通过 solver 写事件/约束，甚至捕获
 /// 可变外部状态。当前类型未提供更细的契约，统一保守归 WritesState，不能只按
-/// 名字或只读的 Memory 参数推断为纯。无需执行闭包即可查询，适用于所有配置条目。
+/// 名字或只读的 Memory 参数推断为纯。固定配置值另由 [`const_primop_effect`] 分类。
 pub fn reset_effect<B>(reset: &Reset<B>) -> Effect {
     let _ = reset;
     Effect::WritesState

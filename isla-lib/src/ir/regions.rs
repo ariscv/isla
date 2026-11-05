@@ -147,7 +147,7 @@ impl RegionCfg {
                 {
                     Instr::Exit(super::ExitCause::AssertionFailure, *info)
                 }
-                Instr::PrimopReset(loc, _, info) => Instr::Copy(loc.clone(), Exp::Unit, *info),
+                Instr::PrimopReset(loc, _, _, info) => Instr::Copy(loc.clone(), Exp::Unit, *info),
                 _ => instr.clone(),
             };
             normalized.push(LabeledInstr::Labeled(pc, normalized_instr));
@@ -365,7 +365,7 @@ impl<B: BV> FunctionRegions<B> {
                         destination = Some(loc);
                         expressions.extend([lhs, rhs]);
                     }
-                    Instr::PrimopReset(loc, _, _) => destination = Some(loc),
+                    Instr::PrimopReset(loc, _, _, _) => destination = Some(loc),
                     Instr::Monomorphize(name, _, _) => {
                         reads[pc].insert(*name);
                     }
@@ -883,7 +883,7 @@ mod tests {
             decl(local),
             Instr::Goto(4),
             decl(name(2)),
-            Instr::PrimopReset(Loc::Addr(Box::new(Loc::Id(local))), reset, info),
+            Instr::PrimopReset(Loc::Addr(Box::new(Loc::Id(local))), reset.clone(), primop::reset_effect(&reset), info),
             Instr::End,
         ];
         let mut regions = FunctionRegions::new(&body, HAVE_EXCEPTION);

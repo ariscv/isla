@@ -12,13 +12,17 @@ fn effect_classification_covers_all_registries() {
     let mut primops = primops;
     primops.consts.insert(
         "配置注入的复位闭包".into(),
-        std::sync::Arc::new(|memory, types, solver| {
-            let _ = (memory, types, solver);
-            Ok(Val::Unit)
-        }),
+        (
+            std::sync::Arc::new(|memory, types, solver| {
+                let _ = (memory, types, solver);
+                Ok(Val::Unit)
+            }),
+            Effect::WritesState,
+        ),
     );
-    for reset in primops.consts.values() {
+    for (reset, declared) in primops.consts.values() {
         assert_eq!(reset_effect(reset), Effect::WritesState);
+        assert_eq!(*declared, Effect::WritesState);
     }
     assert_eq!(effect("不存在的原语"), None);
 }
@@ -256,4 +260,16 @@ fn effect_classification_covers_load_time_pointer_rewrites() {
         let declared = effect(primop_name).expect("加载期直接重写缺少副作用分类");
         assert!(binary_effect(implementation).unwrap() >= declared, "加载期重写地址分类必须保守：{sail_name}");
     }
+}
+
+#[test]
+fn effect_const_primops_follow_initialized_values() {
+    use crate::ir::URVal;
+    for value in [URVal::Init(Val::<B129>::Bool(false)), URVal::Init(Val::Unit), URVal::Init(Val::I64(0))] {
+        assert_eq!(effects::const_primop_effect(&value), Effect::Pure);
+    }
+    for ty in [crate::ir::Ty::Bool, crate::ir::Ty::Bits(16)] {
+        assert_eq!(effects::const_primop_effect(&URVal::<B129>::Uninit(ty)), Effect::WritesState);
+    }
+    assert_eq!(effect("配置中未声明的调用"), None);
 }

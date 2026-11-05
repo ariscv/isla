@@ -1207,34 +1207,61 @@ fn region_merge_recursive_effect_least_fixed_point() {
 #[ignore = "需要外部 rv64d.ir；用 ISLA_REGIONS_IR 指定路径"]
 fn region_merge_real_ir_effects() {
     let text = Box::leak(std::fs::read_to_string(std::env::var("ISLA_REGIONS_IR").unwrap()).unwrap().into_boxed_str());
-    let mut symtab = Symtab::new();
-    let mut definitions =
-        crate::ir_parser::IrParser::new().parse(&mut symtab, crate::ir_lexer::new_ir_lexer(text)).unwrap();
-    crate::ir::insert_primops(&mut definitions, &symtab, AssertionMode::Optimistic, &empty_isa_config());
-    let definitions = Box::leak(definitions.into_boxed_slice());
-    let types = IRTypeInfo::new(definitions);
-    let shared = SharedState::new(
-        symtab,
-        definitions,
-        types,
-        HashSet::new(),
-        HashSet::new(),
-        HashSet::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-    let summaries = region_merge::function_effect_summaries(&shared);
-    // 基线配置未注册 sys_enable_experimental_extensions；未知调用必须传播 MayFork。
-    for (function, expected) in [
-        ("zcurrentlyEnabled", primop::Effect::MayFork),
-        ("zhartSupports", primop::Effect::MayFork),
-        ("zpte_is_invalid", primop::Effect::MayFork),
-        ("zpte_is_non_leaf", primop::Effect::Pure),
-    ] {
-        let summary = &summaries[&shared.symtab.lookup(function)];
-        eprintln!("{function}: {:?}", summary.effect);
-        assert_eq!(summary.effect, expected, "{function}");
+    for configured in [false, true] {
+        let mut symtab = Symtab::new();
+        let mut definitions =
+            crate::ir_parser::IrParser::new().parse(&mut symtab, crate::ir_lexer::new_ir_lexer(text)).unwrap();
+        let types = IRTypeInfo::new(&definitions);
+        let config_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../agents/path_merge_call_support/",
+            "baseline_config.toml"
+        ))
+        .unwrap();
+        let constants = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../agents/path_merge_call_support/baseline_config_const.toml"
+        ))
+        .unwrap();
+        let config =
+            ISAConfig::<B64>::parse(if configured { &constants } else { &config_text }, None, &symtab, &types).unwrap();
+        if configured {
+            assert_eq!(config.const_primops.len(), 45);
+            assert_eq!(config.const_primops.values().filter(|(_, effect)| *effect == primop::Effect::Pure).count(), 43);
+            assert_eq!(config.const_primops["sys_enable_experimental_extensions"].1, primop::Effect::Pure);
+            for name in ["plat_get_16_random_bits", "speculate_conditional"] {
+                assert_eq!(config.const_primops[name].1, primop::Effect::WritesState);
+            }
+        }
+        crate::ir::insert_primops(&mut definitions, &symtab, AssertionMode::Optimistic, &config);
+        let definitions = Box::leak(definitions.into_boxed_slice());
+        let shared = SharedState::new(
+            symtab,
+            definitions,
+            types,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let summaries = region_merge::function_effect_summaries(&shared);
+        for function in ["zhartSupports", "zcurrentlyEnabled", "zpte_is_invalid", "zpte_is_non_leaf"] {
+            eprintln!("诊断 const_primops={configured} {function}: {:?}", summaries[&shared.symtab.lookup(function)]);
+        }
+        for (function, expected) in [
+            // hartSupports 还读取全局 let vector_support_level，因此不是 Pure。
+            ("zhartSupports", if configured { primop::Effect::ReadsState } else { primop::Effect::MayFork }),
+            // 全函数摘要仍包含 internal_error<o> 的异常构造与写状态路径。
+            ("zcurrentlyEnabled", primop::Effect::MayFork),
+            ("zpte_is_invalid", primop::Effect::MayFork),
+            ("zpte_is_non_leaf", primop::Effect::Pure),
+        ] {
+            let summary = &summaries[&shared.symtab.lookup(function)];
+            eprintln!("const_primops={configured} {function}: {:?}", summary.effect);
+            assert_eq!(summary.effect, expected, "const_primops={configured} {function}");
+        }
     }
 }
 
@@ -1443,4 +1470,65 @@ fn region_merge_effects_use_external_binding_and_reject_callee_vector_writes() {
     let symbol = solver.declare_const(smtlib::Ty::Bool, info());
     assert!(merge_region_for_test(symbol, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap().is_none());
     assert_eq!(shared.execution_stats.merge_json()["candidate_attempts"], 0, "被调函数写状态应在推演前拒绝");
+}
+
+#[test]
+fn region_merge_configured_const_primop_effects() {
+    const IR: &str = r#"
+register zPC : %bv64
+val zconfigured = "configured" : (%unit) -> %bool
+val zcaller : (%unit) -> %bool
+fn zcaller(zunit) {
+  return = zconfigured(());
+  end;
+}
+"#;
+    for (entry, expected) in [
+        ("configured = false", primop::Effect::Pure),
+        ("configured = true", primop::Effect::Pure),
+        ("configured = \"undefined : %bool\"", primop::Effect::WritesState),
+        ("", primop::Effect::MayFork),
+    ] {
+        let (symtab, mut definitions) = parse_ir_string(IR);
+        let types = IRTypeInfo::new(&definitions);
+        let baseline = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../agents/path_merge_call_support/baseline_config.toml"
+        ))
+        .unwrap();
+        let baseline = baseline.replace("in_program_order = [\"sail_barrier\"]", "in_program_order = []");
+        let config =
+            ISAConfig::<B64>::parse(&format!("{baseline}\n[const_primops]\n{entry}\n"), None, &symtab, &types).unwrap();
+        crate::ir::insert_primops(&mut definitions, &symtab, AssertionMode::Optimistic, &config);
+        let definitions = Box::leak(definitions.into_boxed_slice());
+        let shared = SharedState::new(
+            symtab,
+            definitions,
+            types,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let summaries = region_merge::function_effect_summaries(&shared);
+        assert_eq!(summaries[&shared.symtab.lookup("zcaller")].effect, expected, "配置条目：{entry}");
+        if expected != primop::Effect::MayFork {
+            let program = vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                Instr::Goto(4),
+                Instr::Call(Loc::Id(RETURN), false, shared.symtab.lookup("zcaller"), vec![Exp::Unit], info()),
+                Instr::End,
+            ];
+            if expected == primop::Effect::Pure {
+                assert_eq!(differential(program, &shared, 1, true), (2, 1));
+            } else {
+                let merged = paths(program, &shared, 1, true);
+                assert_eq!(merged.len(), 2, "每次生成新符号的配置闭包必须拒绝合并");
+                assert!(merged.iter().all(|path| path.records.is_empty()));
+            }
+        }
+    }
 }

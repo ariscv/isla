@@ -230,7 +230,7 @@ fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effe
         Instr::PrimopUnary(_, f, _, _) => effects::unary_effect(*f).expect("一元原语必须分类"),
         Instr::PrimopBinary(_, f, _, _, _) => effects::binary_effect(*f).expect("二元原语必须分类"),
         Instr::PrimopVariadic(_, f, _, _) => effects::variadic_effect(*f).expect("多元原语必须分类"),
-        Instr::PrimopReset(_, reset, _) => effects::reset_effect(reset),
+        Instr::PrimopReset(_, _, effect, _) => *effect,
         Instr::Call(_, _, function, _, _) if !shared.functions.contains_key(function) => match *function {
             REG_DEREF | READ_REGISTER_FROM_VECTOR => Effect::ReadsState,
             WRITE_REGISTER_FROM_VECTOR => Effect::WritesState,

@@ -736,7 +736,7 @@ pub enum Instr<A, B> {
     PrimopUnary(Loc<A>, Unary<B>, Exp<A>, SourceLoc),
     PrimopBinary(Loc<A>, Binary<B>, Exp<A>, Exp<A>, SourceLoc),
     PrimopVariadic(Loc<A>, Variadic<B>, Vec<Exp<A>>, SourceLoc),
-    PrimopReset(Loc<A>, Reset<B>, SourceLoc),
+    PrimopReset(Loc<A>, Reset<B>, primop::Effect, SourceLoc),
     Exit(ExitCause, SourceLoc),
     Arbitrary,
     End,
@@ -760,8 +760,8 @@ impl<A: fmt::Debug, B: fmt::Debug> fmt::Debug for Instr<A, B> {
             PrimopBinary(loc, fptr, lhs, rhs, info) => {
                 write!(f, "{:?} = {:p}({:?}, {:?}) ` {:?}", loc, fptr, lhs, rhs, info)
             }
-            PrimopReset(loc, reset, info) => {
-                write!(f, "{:?} = {:p} ` {:?}", loc, reset, info)
+            PrimopReset(loc, reset, effect, info) => {
+                write!(f, "{:?} = {:p} {:?} ` {:?}", loc, reset, effect, info)
             }
             PrimopVariadic(loc, fptr, args, info) => write!(f, "{:?} = {:p}({:?}) ` {:?}", loc, fptr, args, info),
         }
@@ -1365,8 +1365,8 @@ fn insert_instr_primops<B: BV>(
                     Instr::PrimopBinary(loc.clone(), *binop, args[0].clone(), args[1].clone(), *info)
                 } else if let Some(varop) = primops.variadic.get(name) {
                     Instr::PrimopVariadic(loc.clone(), *varop, args.clone(), *info)
-                } else if let Some(reset) = primops.consts.get(name) {
-                    Instr::PrimopReset(loc.clone(), reset.clone(), *info)
+                } else if let Some((reset, effect)) = primops.consts.get(name) {
+                    Instr::PrimopReset(loc.clone(), reset.clone(), *effect, *info)
                 } else if name == "reg_deref" {
                     Instr::Call(loc.clone(), false, REG_DEREF, args.clone(), *info)
                 } else if name == "reset_registers" {

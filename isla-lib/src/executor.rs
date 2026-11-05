@@ -1790,7 +1790,7 @@ fn branch_decision<B: BV>(
                 | Instr::PrimopUnary(_, _, _, info)
                 | Instr::PrimopBinary(_, _, _, _, info)
                 | Instr::PrimopVariadic(_, _, _, info)
-                | Instr::PrimopReset(_, _, info)
+                | Instr::PrimopReset(_, _, _, info)
                 | Instr::Exit(_, info) => *info,
                 Instr::Goto(_) | Instr::Arbitrary | Instr::End => SourceLoc::unknown(),
             };
@@ -2352,7 +2352,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 frame.pc += 1;
             }
 
-            Instr::PrimopReset(loc, reset, info) => {
+            Instr::PrimopReset(loc, reset, _, info) => {
                 let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
                 assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
                 frame.pc += 1;
