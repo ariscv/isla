@@ -387,6 +387,9 @@ fn isla_main() -> i32 {
     opts.optmulti("", "extension", "指定扩展名（如 i, m, c）", "<ext>");
     opts.optmulti("", "instruction-name", "指定指令汇编名称", "<name>");
     opts.optopt("", "instruction-bits", "定向执行真实16/32位编码（需单一--clause）", "<0xNNNN|0xNNNNNNNN>");
+    opts.optopt("", "check-samples", "在每条完成路径上检查 JSON Lines 样本", "<path>");
+    opts.optopt("", "check-samples-limit", "只检查前 N 个样本（正整数）", "<N>");
+    opts.optopt("", "check-samples-report", "样本检查报告 JSON 文件；同时输出 stderr", "<path>");
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
@@ -618,6 +621,23 @@ fn isla_main() -> i32 {
                 }
             }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
+            let sample_options = isarch::samples::SampleOptions {
+                check: matches.opt_str("check-samples").map(std::path::PathBuf::from),
+                limit: match matches.opt_str("check-samples-limit").map(|text| text.parse::<usize>()) {
+                    Some(Ok(limit)) => Some(limit),
+                    Some(Err(error)) => {
+                        eprintln!("--check-samples-limit 无效：{error}");
+                        return 1;
+                    }
+                    None => None,
+                },
+                report: matches.opt_str("check-samples-report").map(std::path::PathBuf::from),
+            };
+            if let Err(error) = sample_options.validate() {
+                eprintln!("{error}");
+                return 1;
+            }
+
             // P1 值域 signposting：[[value_hints]] 批调度输入（区域锚点从
             // [[pma_regions]]/[[memory_regions]] 推导）
             let value_hints = isa_config.value_hints.clone();
@@ -663,6 +683,7 @@ fn isla_main() -> i32 {
                         &value_hints,
                         region_configs,
                         &encoding_slices,
+                        &sample_options,
                     )
                 }
                 64 => {
@@ -698,6 +719,7 @@ fn isla_main() -> i32 {
                         &value_hints,
                         region_configs,
                         &encoding_slices,
+                        &sample_options,
                     )
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),

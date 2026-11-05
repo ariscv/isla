@@ -1,5 +1,6 @@
 //! 区域合并集成的差分判据。旧菱形实现必须不能通过带调用和真实嵌套的用例。
 use super::*;
+use std::collections::BTreeMap;
 
 type Formula = smtlib::Exp<Sym>;
 
@@ -2493,4 +2494,197 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
         counts.push(collected.into_inner().unwrap().len());
     }
     assert_eq!(counts, [10, 1, 1, 1]);
+}
+
+/// 直接在真实执行器的收尾求解器上导出与检查，合成 IR 和真实 PTE 共用。
+fn sample_run<'ir>(
+    frame: LocalFrame<'ir, B64>,
+    shared: &SharedState<'ir, B64>,
+    pre: BTreeMap<String, Val<B64>>,
+    mut solver: Solver<B64>,
+    merge: bool,
+    samples: &[crate::executor::samples::Sample],
+) -> (Vec<crate::executor::samples::Sample>, serde_json::Value) {
+    use crate::executor::samples::{SampleChecker, SamplePath};
+    let mut limits = ExecutionLimits::default().with_path_merging(merge);
+    limits.merge_enumeration.enabled = merge;
+    limits.merge_enumeration.path_cap = 10;
+    let state = std::sync::Arc::new(TaskState::new().with_execution_limits(limits));
+    let collector_state = state.clone();
+    let checker = std::sync::Arc::new(SampleChecker::new(samples.to_vec()));
+    let collector_checker = checker.clone();
+    let output = Mutex::new(Vec::new());
+    let cp = checkpoint(&mut solver);
+    start_single(
+        frame.task_with_checkpoint(TaskId::fresh(), &state, cp),
+        shared,
+        &output,
+        &move |_, _, result, shared, mut solver, output| {
+            let Ok((Run::Finished(value), frame)) = result else {
+                panic!("样本测试必须完成");
+            };
+            let path =
+                SamplePath { pre: pre.clone(), post: BTreeMap::new(), result: value.clone(), memory: Vec::new() };
+            collector_checker.check_path(&path, &mut solver, shared, frame.path_signature()).unwrap();
+            let mut generated = Vec::new();
+            let enumeration = frame
+                .enumerate_merges_with(&mut solver, &collector_state, shared, &value, &mut |class, _, model| {
+                    generated.push(path.materialize(model, shared, "merge", frame.path_signature(), Some(class))?);
+                    Ok(())
+                })
+                .unwrap();
+            if enumeration.is_none() {
+                assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+                generated.push(
+                    path.materialize(&mut Model::new(&mut solver), shared, "fork", frame.path_signature(), None)
+                        .unwrap(),
+                );
+            }
+            let mut output = output.lock().unwrap();
+            for mut sample in generated {
+                sample.sample_id = output.len() as u64;
+                output.push(sample);
+            }
+        },
+    );
+    (output.into_inner().unwrap(), checker.report())
+}
+
+#[test]
+fn samples_two_arm_nested_cross_mode_and_roundtrip() {
+    for nested in [false, true] {
+        let shared = empty_shared_state();
+        let program = if nested {
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(7),
+                Instr::Jump(input(1), 6, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(7),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                Instr::End,
+            ]
+        } else {
+            vec![
+                Instr::Jump(input(0), 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(4),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                Instr::End,
+            ]
+        };
+        let run = |merge, samples: &[_]| {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::new(&context);
+            let mut frame = make_frame(program.clone());
+            frame.function_name = TOP_LEVEL_LET;
+            let mut pre = BTreeMap::new();
+            for index in 0..3 {
+                let value = Val::Symbolic(solver.declare_const(smtlib::Ty::Bool, info()));
+                frame.vars_mut().insert(test_name(900 + index), UVal::Init(value.clone()));
+                if index == 2 {
+                    solver.assert(smt_value(&value, info()).unwrap());
+                }
+                pre.insert(format!("x{index}"), value);
+            }
+            sample_run(frame, &shared, pre, solver, merge, samples)
+        };
+        for source in [false, true] {
+            let (samples, _) = run(source, &[]);
+            assert_eq!(samples.len(), if nested { 3 } else { 2 });
+            // 真实 JSON 往返也必须保留复合类型及样本身份。
+            let samples = serde_json::from_str::<Vec<crate::executor::samples::Sample>>(
+                &serde_json::to_string(&samples).unwrap(),
+            )
+            .unwrap();
+            let mut outside = samples[0].clone();
+            outside.sample_id = 100;
+            outside.pre_registers.insert("x2".into(), serde_json::json!({"bool":false}));
+            let mut wrong = samples[0].clone();
+            wrong.sample_id = 101;
+            wrong.result = serde_json::json!({"bool":!wrong.result["bool"].as_bool().unwrap()});
+            for target in [false, true] {
+                let (_, negative) = run(target, &[outside.clone(), wrong.clone()]);
+                assert_eq!(negative["unaccepted_sample_ids"], serde_json::json!([100]));
+                assert_eq!(negative["samples"][1]["consistent_paths"], 0);
+                assert!(negative["samples"][1]["inconsistent_paths"].as_u64().unwrap() > 0);
+                let (_, report) = run(target, &samples);
+                assert!(report["unaccepted_sample_ids"].as_array().unwrap().is_empty());
+                assert!(report["inconsistent"].as_array().unwrap().is_empty());
+                assert!(report["samples"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s["consistent_paths"].as_u64().unwrap() > 0));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "需要 ISLA_REGIONS_IR 指向真实 Sail IR"]
+fn samples_real_ir_pte_cross_mode() {
+    let text = std::fs::read_to_string(std::env::var("ISLA_REGIONS_IR").unwrap()).unwrap();
+    let mut symtab = Symtab::new();
+    let mut definitions =
+        crate::ir_parser::IrParser::new().parse(&mut symtab, crate::ir_lexer::new_ir_lexer(&text)).unwrap();
+    let types = IRTypeInfo::new(&definitions);
+    let config = ISAConfig::<B64>::parse(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../agents/path_merge_call_support/baseline_config_const.toml"
+        ))
+        .unwrap(),
+        None,
+        &symtab,
+        &types,
+    )
+    .unwrap();
+    let initialized = crate::init::initialize_architecture(
+        &mut definitions,
+        symtab,
+        types,
+        &config,
+        AssertionMode::Pessimistic,
+        true,
+    );
+    let shared = &initialized.shared_state;
+    let function = shared.symtab.lookup("zpte_is_invalid");
+    let (args, ret_ty, body) = &shared.functions[&function];
+    let run = |merge, samples: &[_]| {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let mut frame = LocalFrame::new(function, args, ret_ty, None, body);
+        frame.add_regs(&initialized.regs).add_lets(&initialized.lets);
+        reset_registers(0, &mut frame, &TaskState::new(), shared, &mut solver, info()).unwrap();
+        let mut pre = BTreeMap::new();
+        for (name, ty) in args {
+            let value = symbolic(ty, shared, &mut solver, info()).unwrap();
+            frame.vars_mut().insert(*name, UVal::Init(value.clone()));
+            pre.insert(zencode::decode(shared.symtab.to_str(*name)), value);
+        }
+        sample_run(frame, shared, pre, solver, merge, samples)
+    };
+    for source in [false, true] {
+        let (samples, _) = run(source, &[]);
+        assert_eq!(samples.len(), 10);
+        let (_, report) = run(!source, &samples);
+        assert!(report["unaccepted_sample_ids"].as_array().unwrap().is_empty(), "{report}");
+        assert!(report["inconsistent"].as_array().unwrap().is_empty(), "{report}");
+        eprintln!("pte 样本方向 merge={source} → merge={}：{report}", !source);
+        if let Ok(directory) = std::env::var("ISLA_SAMPLES_TEST_OUTPUT") {
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                format!("{directory}/pte-source-{source}.json"),
+                serde_json::to_string_pretty(&samples).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                format!("{directory}/pte-report-{source}.json"),
+                serde_json::to_string_pretty(&report).unwrap(),
+            )
+            .unwrap();
+        }
+    }
 }

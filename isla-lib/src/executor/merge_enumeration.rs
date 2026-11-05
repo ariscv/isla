@@ -126,6 +126,18 @@ impl<B: BV> LocalFrame<'_, B> {
         shared: &SharedState<B>,
         result: &Val<B>,
     ) -> Result<Option<Value>, ExecError> {
+        self.enumerate_merges_with(solver, state, shared, result, &mut |_, _, _| Ok(()))
+    }
+
+    /// 每个解在完整模型仍存活时调用消费方；关闭枚举时不调用。
+    pub fn enumerate_merges_with(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
+        consume: &mut impl FnMut(usize, usize, &mut Model<B>) -> Result<(), ExecError>,
+    ) -> Result<Option<Value>, ExecError> {
         use Formula::*;
         let Some(config) = state.execution_limits.as_ref().map(|limits| &limits.merge_enumeration) else {
             return Ok(None);
@@ -227,6 +239,7 @@ impl<B: BV> LocalFrame<'_, B> {
                                 json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "value":bits_text(&value)}),
                             );
                         }
+                        consume(classes.len(), solutions.len(), &mut model)?;
                         drop(model);
                         let slice_values: Vec<_> = values.iter().map(bits_text).collect();
                         solutions.push(json!({"slice_values":slice_values, "representative":{"result":representative_result, "inputs":inputs}}));

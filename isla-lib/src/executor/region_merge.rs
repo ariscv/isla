@@ -373,6 +373,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         solver.commit_transaction();
                         if !nested {
+                            super::samples::assert_unconditional_reads(solver);
                             super::merge_record::publish(
                                 &mut frame.region_merge_records[record_start..],
                                 &frame.local_state.pure_definitions,

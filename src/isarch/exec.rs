@@ -1115,10 +1115,19 @@ pub fn solve_state_main<'ir, B: BV>(
     value_hints: &[isla_lib::config::ValueHintConfig],
     region_configs: super::value_hints::RegionConfigInput<'_>,
     encoding_slices: &[isla_lib::config::EncodingSliceConfig],
+    sample_options: &super::samples::SampleOptions,
 ) -> bool {
+    let samples = match super::samples::SampleSession::new(sample_options) {
+        Ok(samples) => samples,
+        Err(error) => {
+            eprintln!("样本配置错误：{error}");
+            return false;
+        }
+    };
     let case_quota = execution_limits_config.and_then(|cfg| cfg.case_quota.as_ref().map(CaseQuota::from_config));
     let mut clause_set: HashSet<String> = HashSet::new();
     let mut success = true;
+    let mut sample_paths_complete = true;
 
     // 添加显式指定的 clause
     clause_set.extend(clauses.iter().map(|clause| normalize_clause_name(clause)));
@@ -1331,8 +1340,10 @@ pub fn solve_state_main<'ir, B: BV>(
                 batch_label,
                 batch.label.as_deref().filter(|label| label.starts_with("enc-slice:")),
                 batch.case_limit,
+                &samples,
             ) {
                 Ok(outcome) => {
+                    sample_paths_complete &= outcome.summary.status() == "finished";
                     log!(
                         log::SYM_EXEC,
                         &format!(
@@ -1409,6 +1420,7 @@ pub fn solve_state_main<'ir, B: BV>(
     }
 
     super::solve_summary::print_execution_stats(shared_state);
+    samples.finish(sample_options, success && sample_paths_complete);
     success
 }
 
@@ -1473,6 +1485,9 @@ struct SolvePathCtx<'a, 'ir, B: BV> {
     /// P2 编码维度预分片：当前批的分片标签（自由批为 None），随每条产出
     /// 用例写入 JSON 的 encoding-slice 字段
     slice_label: Option<&'a str>,
+    samples: &'a super::samples::SampleSession,
+    initial_regs: &'a RegisterBindings<'ir, B>,
+    path_merging: bool,
 }
 
 /// solve-state 单条完成路径的收集逻辑（自 collector 闭包迁出）：Sat 路径物化 JSON 项；
@@ -1546,6 +1561,81 @@ fn solve_collect_path<'ir, B: BV>(
                     );
                     return;
                 }
+                // 检查原路径约束：必须早于有限域代表值钉选和 encdec/输出过滤。
+                // 样本功能独立于旧 JSON 是否被消费方过滤，每条可行完成路径均参与。
+                let sample_enumeration = if ctx.samples.enabled() {
+                    if !solver.has_stashed_model() {
+                        match solver.check_sat(SourceLoc::unknown()) {
+                            isla_lib::smt::SmtResult::Sat => (),
+                            isla_lib::smt::SmtResult::Unsat => return,
+                            result => panic!("样本终态查询失败：{result:?}"),
+                        }
+                    }
+                    let sample_path = super::samples::path(
+                        ctx.target,
+                        ctx.initial_regs,
+                        frame,
+                        shared_state,
+                        &ctx.fun_args[0],
+                        ret_val,
+                        memory_events_chronological(solver.trace()).into_iter().cloned().collect(),
+                    );
+                    if let Some(checker) = &ctx.samples.checker {
+                        checker
+                            .check_path(&sample_path, &mut solver, shared_state, frame.path_signature())
+                            .expect("样本成员检查失败");
+                    }
+                    let mut exported = Vec::new();
+                    let mode =
+                        if ctx.path_merging || !frame.region_merge_records().is_empty() { "merge" } else { "fork" };
+                    let merge_enumeration = frame
+                        .enumerate_merges_with(
+                            &mut solver,
+                            ctx.task_state,
+                            shared_state,
+                            ret_val,
+                            &mut |class_id, _, model| {
+                                if ctx.samples.writer.is_some() {
+                                    let mut sample = sample_path.materialize(
+                                        model,
+                                        shared_state,
+                                        mode,
+                                        frame.path_signature(),
+                                        Some(class_id),
+                                    )?;
+                                    sample.isa_state = ctx.target.solve_pre_state(model, shared_state)?;
+                                    exported.push(sample);
+                                }
+                                Ok(())
+                            },
+                        )
+                        .expect("完成路径的合并枚举失败");
+                    if let Some(writer) = &ctx.samples.writer {
+                        if let Some(enumeration) = &merge_enumeration {
+                            for mut sample in exported {
+                                let class = &enumeration["guard_classes"][sample.class_id.unwrap()];
+                                sample.truncated = enumeration["path_truncated"].as_bool().unwrap()
+                                    || class["truncated"].as_bool().unwrap();
+                                writer.append(sample);
+                            }
+                        } else {
+                            match solver.check_sat(SourceLoc::unknown()) {
+                                isla_lib::smt::SmtResult::Sat => (),
+                                result => panic!("样本导出必须有完整模型：{result:?}"),
+                            }
+                            let mut model = Model::new(&mut solver);
+                            let mut sample = sample_path
+                                .materialize(&mut model, shared_state, mode, frame.path_signature(), None)
+                                .expect("样本物化失败");
+                            sample.isa_state =
+                                ctx.target.solve_pre_state(&mut model, shared_state).expect("样本前置状态物化失败");
+                            writer.append(sample);
+                        }
+                    }
+                    merge_enumeration
+                } else {
+                    None
+                };
                 let ret_val_str = ret_val.to_str(shared_state).to_string();
                 log!(
                     log::PATH_RESULT,
@@ -2044,9 +2134,13 @@ fn solve_collect_path<'ir, B: BV>(
                     log!(log::PATH_RESULT, "3. ==============================");
                 }
                 drop(model);
-                let merge_enumeration = frame
-                    .enumerate_merges(&mut solver, ctx.task_state, shared_state, ret_val)
-                    .expect("完成路径的合并枚举失败");
+                let merge_enumeration = if ctx.samples.enabled() {
+                    sample_enumeration
+                } else {
+                    frame
+                        .enumerate_merges(&mut solver, ctx.task_state, shared_state, ret_val)
+                        .expect("完成路径的合并枚举失败")
+                };
                 let mut single_instruction_json = AssemGenJsonItem::new(
                     ctx.target,
                     test_ins,
@@ -2137,6 +2231,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     hint_label: Option<&str>,
     slice_label: Option<&str>,
     case_limit: Option<u32>,
+    samples: &super::samples::SampleSession,
 ) -> Result<BatchOutcome, ExecError> {
     use isla_lib::smt::checkpoint;
 
@@ -2269,6 +2364,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         continuations: &continuations,
         hint_label,
         slice_label,
+        samples,
+        initial_regs: &symbolic_regs,
+        path_merging: execution_limits.path_merging,
     };
 
     //isla_lib::executor::execute_ir_function_with_checkpoint_and_limits(

@@ -64,6 +64,7 @@ mod merge_record;
 mod path_timing;
 mod region_merge;
 mod region_summary;
+pub mod samples;
 pub use merge_record::{GuardedRegisterRead, RegionMergeRecord};
 pub use region_merge::validate_force_regions;
 mod speculation;
