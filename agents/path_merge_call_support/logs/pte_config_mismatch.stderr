@@ -1,0 +1,9 @@
+Warning: Could not find register __isla_always_aligned when parsing registers.defaults in configuration
+No primop parse_hex_bits (Name { id: 2525 })
+No primop emulator_write_tag (Name { id: 2826 })
+No primop emulator_read_tag (Name { id: 2825 })
+No primop valid_reservation (Name { id: 4204 })
+
+thread 'main' (6) panicked at /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/init.rs:130:39:
+Bad initial value for zvr0: value (#x000000000000000000000000000000000 @ #b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000) doesn't appear to match type Bits(128)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

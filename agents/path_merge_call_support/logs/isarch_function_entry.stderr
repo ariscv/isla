@@ -1,0 +1,91 @@
+Error: 未知命令 'pte_is_invalid'
+Usage: isarch [options] <command> [args]
+Commands:
+list-instructions                    List all available instructions
+tree <instruction>                   Show execution path tree
+solve-state [--clause|--extension|--instruction-name|--all]
+Solve for concrete ISA state values
+
+solve-state filters:
+--clause <name>                      Specify clause(s) to execute (repeatable)
+--extension <ext>                    Specify extension (i, m, c, etc.) (repeatable)
+--instruction-name <name>            Specify assembly instruction name (repeatable)
+--all                                Execute all clauses
+
+Options:
+
+
+Options:
+    -T, --threads <n>   use this many worker threads
+    -A, --arch <file>   load architecture file
+    -C, --config <file> load custom config for architecture
+        --toolchain <name>
+                        use specified toolchain from config
+    -R, --register <register>=<value>
+                        set a register, via the reset_registers builtin
+    -I, --initial <register>=<value>
+                        set a register in the initial state
+    -h, --help          print this help message
+        --verbose       print verbose output
+    -D, --debug <flags> set debugging flags
+        --probe <id>    trace specified function calls or location assignments
+                        in debug output
+        --probe-all     probe everything (very verbose)
+        --probe-function <id>
+                        probe everything under the specified function (very
+                        verbose)
+        --trace-function <id>
+                        trace specified function calls in the trace output
+        --trace-all     trace everything
+    -L, --linearize <id>
+                        rewrite function into linear form
+    -P, --partial-linearize <id>
+                        rewrite function into linear form
+    -S, --source <path> directory containing the Sail source used to generate
+                        the IR
+        --test-linearize 
+                        test that linearization rewrite has been performed
+                        correctly
+        --abstract <id> make function abstract
+        --debug-id <name id>
+                        print the name of an interned identifier (for
+                        debugging)
+        --reset-constraint <constraint>
+                        property to enforce at the reset_registers builtin
+        --fork-assertions 
+                        change assertions into explicit control flow
+        --fun-assumption <assumption>
+                        add an assumption about the behaviour of a Sail
+                        function
+        --no-model-reg-init 
+                        don't use register initializers from the model
+        --tastic <name> 指定 Z3 tactic（默认 default）
+        --version       print out version and stop.
+        --init-isa-with-config 
+                        使用配置默认值初始化ISA
+    -g, --graphviz      输出 Graphviz 格式
+        --timeout <n[s|m|h]>
+                        超时时间，默认秒；支持 s/m/h 后缀
+        --smt-timeout <n[s|m|h]>
+                        单次 Z3 operation 的 soft interrupt 超时时间
+        --timeout-smt-output <destinations>
+                        timeout SMT2 输出目标，逗号分隔：file,stdout,itrace
+        --timeout-smt-dir <path>
+                        timeout SMT2 文件输出目录
+        --execution-limits-config <path>
+                        加载独立的执行限制 TOML 配置
+        --clause <name> 指定要符号执行的clause名
+        --extension <ext>
+                        指定扩展名（如 i, m, c）
+        --instruction-name <name>
+                        指定指令汇编名称
+        --instruction-bits <0xNNNN|0xNNNNNNNN>
+                        定向执行真实16/32位编码（需单一--clause）
+        --prestate <reg>=<value>
+                        定向固定完整顶层寄存器初态（需单一--clause）
+        --encoding-slices-config <file>
+                        加载编码分片 TOML（[[encoding_slices]]，叠加到 -C
+                        配置之上）
+        --all           执行所有clause
+        --path-merging  启用运行时动态路径合并 (Veritesting)
+        --itrace <path> 把指令执行轨迹写入文件

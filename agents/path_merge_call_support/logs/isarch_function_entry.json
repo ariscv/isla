@@ -1,0 +1,23 @@
+{
+  "command": [
+    "timeout",
+    "--signal=TERM",
+    "--kill-after=5s",
+    "20s",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/target/release/isarch",
+    "-A",
+    "/data1/baiyifan/workplace/isla-runner/isla/.worktrees/memory-consistency/rv64d.ir",
+    "-C",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/agents/path_merge_call_support/baseline_config.toml",
+    "-T",
+    "1",
+    "--timeout",
+    "15",
+    "--path-merging",
+    "pte_is_invalid",
+    "_",
+    "_"
+  ],
+  "returncode": 1,
+  "elapsed_seconds": 0.108
+}

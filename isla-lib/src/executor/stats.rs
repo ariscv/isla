@@ -138,6 +138,8 @@ impl Default for MergeStats {
 
 pub struct ExecutionStats {
     enabled: bool,
+    // 快照只借用这里拥有的字符串，不依赖 SharedState 或原 IR 的生命周期。
+    snapshot_symbols: Mutex<Option<(Vec<String>, Vec<String>)>>,
     merge: Mutex<MergeStats>,
     forks: Mutex<HashMap<(Name, SourceLoc), usize>>,
     // 源码位置只保留首次记录的值，不参与控制流出口的聚合。
@@ -154,10 +156,30 @@ impl ExecutionStats {
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
+            snapshot_symbols: Mutex::new(None),
             merge: Mutex::new(MergeStats::default()),
             forks: Mutex::new(HashMap::new()),
             arm_unsupported: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 在线程启动前复制符号与文件名，沿用现有符号表序列化接口。
+    pub fn prepare_snapshot(&self, symtab: &Symtab<'_>) {
+        *self.snapshot_symbols.lock().unwrap() = Some(symtab.to_raw_table());
+    }
+
+    /// 仅依赖统计对象持有的数据，可在原 SharedState 释放后安全调用。
+    pub fn snapshot_json(&self) -> (Value, Value, Value) {
+        let symbols = self.snapshot_symbols.lock().unwrap();
+        let (raw, files) = symbols.as_ref().expect("统计快照必须先调用 prepare_snapshot");
+        // from_raw_table 会合并同名符号；逐项复用 intern/gensym，保持重复 gensym 后的 Name 编号。
+        let mut symtab = Symtab::from_raw_table(&[], files);
+        for (index, symbol) in raw.iter().enumerate() {
+            let name = if symtab.get(symbol).is_some() { symtab.gensym() } else { symtab.intern(symbol) };
+            assert_eq!(name, Name::from_u32(u32::try_from(index).expect("快照符号编号超过 u32 范围")));
+            assert_eq!(symtab.to_str(name), symbol, "重复的 IR 符号必须来自 gensym");
+        }
+        (self.merge_json(), self.fork_json(&symtab), self.arm_unsupported_json(&symtab))
     }
 
     pub fn enabled(&self) -> bool {
@@ -491,6 +513,44 @@ mod tests {
             assert_eq!(entry["count"], 40 - index);
             assert_eq!(entry["source_loc"]["line1"], 40 - index);
         }
+    }
+
+    #[test]
+    fn execution_stats_snapshot_owns_symbols_and_preserves_json() {
+        let stats = std::sync::Arc::new(ExecutionStats::new(true));
+        let (forks, arms) = {
+            let raw = vec!["zfirst".to_string(), "zsecond".to_string()];
+            let files = vec!["owned.sail".to_string()];
+            let symtab = Symtab::from_raw_table(&raw, &files);
+            let function = Name::from_u32(1);
+            let info = SourceLoc::new(0, 10, 2, 10, 4);
+            stats.record_fork(function, info);
+            let instr = Instr::<_, B64>::Call(Loc::Id(function), false, Name::from_u32(0), vec![], info);
+            stats.record_arm_unsupported(ArmUnsupported::Call, function, Some(&instr));
+            stats.prepare_snapshot(&symtab);
+            (stats.fork_json(&symtab), stats.arm_unsupported_json(&symtab))
+        };
+        let snapshot = std::thread::spawn(move || stats.snapshot_json()).join().unwrap();
+        assert_eq!(snapshot.1, forks);
+        assert_eq!(snapshot.2, arms);
+        assert_eq!(snapshot.1["top"][0]["function"], "second");
+        assert_eq!(snapshot.1["top"][0]["location"], "owned.sail 10:2 - 10:4");
+        assert_eq!(snapshot.2["top"][0]["callee"], "first");
+    }
+
+    #[test]
+    fn execution_stats_snapshot_preserves_names_after_repeated_gensym() {
+        let stats = ExecutionStats::new(true);
+        let expected = {
+            let mut symtab = Symtab::new();
+            symtab.gensym();
+            symtab.gensym();
+            let function = symtab.intern("zafter");
+            stats.record_fork(function, SourceLoc::unknown());
+            stats.prepare_snapshot(&symtab);
+            stats.fork_json(&symtab)
+        };
+        assert_eq!(stats.snapshot_json().1, expected);
     }
 
     #[test]

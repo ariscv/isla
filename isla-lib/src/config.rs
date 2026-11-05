@@ -1867,8 +1867,30 @@ pub struct ExecutionLimitsConfig {
     pub regions: Option<Vec<SourceRegionSpec>>,
     pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
     pub region_fork_limits: Option<Vec<RegionForkLimitConfig>>,
+    pub merge_policy: Option<Vec<MergePolicyConfig>>,
     /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
     pub case_quota: Option<BTreeMap<String, u32>>,
+}
+
+/// 局部路径合并策略；这里只描述配置，不改变解释器行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMode {
+    Force,
+    Adaptive,
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergePolicyConfig {
+    pub mode: MergeMode,
+    pub selector: MergePolicySelectorConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergePolicySelectorConfig {
+    /// 保存经现有 zencode 工具编码后的 IR 函数名。
+    Function(String),
+    Region(SourceRegionSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1974,11 +1996,12 @@ fn sample_bias(table: &toml::value::Table, root: &str) -> Result<Option<(u32, bo
 
 fn source_region_spec(table: &toml::value::Table, root: &str) -> Result<SourceRegionSpec, String> {
     let file = table.get("file").and_then(Value::as_str).ok_or_else(|| format!("{}.file 是必填字符串", root))?;
-    Ok(SourceRegionSpec::new(
-        file,
-        (required_u32(table, "start_line", root)?, required_u16(table, "start_column", root)?),
-        (required_u32(table, "end_line", root)?, required_u16(table, "end_column", root)?),
-    ))
+    let start = (required_u32(table, "start_line", root)?, required_u16(table, "start_column", root)?);
+    let end = (required_u32(table, "end_line", root)?, required_u16(table, "end_column", root)?);
+    if file.is_empty() || start.0 == 0 || end.0 == 0 || start > end {
+        return Err(format!("{} 的源码区域非法：文件名不能为空、行号必须大于 0，且起点不能晚于终点", root));
+    }
+    Ok(SourceRegionSpec::new(file, start, end))
 }
 
 impl ExecutionLimitsConfig {
@@ -1992,6 +2015,47 @@ impl ExecutionLimitsConfig {
         get_execution_limits_config(&value)?.ok_or_else(|| format!("{}: 缺少 [execution_limits] 配置", path.display()))
     }
 
+    /// 在 IR 加载后、执行前调用。`functions` 只能包含 IR 中实际定义的函数，
+    /// `branch_locations` 由调用方提供实际分支位置，不能用全部指令位置代替。
+    /// strict 沿用全局 strict/ir_sha256；哈希仍由 validate_ir_sha256 单独核对。
+    /// force 的后支配点/回边校验留给后续静态区域分析。
+    pub fn validate_merge_policy(
+        &self,
+        symtab: &Symtab,
+        functions: &HashSet<Name>,
+        branch_locations: &[crate::source_loc::SourceLoc],
+    ) -> Result<(), String> {
+        let Some(rules) = &self.merge_policy else { return Ok(()) };
+        validate_merge_policy_conflicts(rules)?;
+        for (index, rule) in rules.iter().enumerate() {
+            match &rule.selector {
+                MergePolicySelectorConfig::Function(function) => {
+                    if !symtab.get(function).map_or(false, |name| functions.contains(&name)) {
+                        return Err(format!(
+                            "execution_limits.merge_policy[{}] 的函数 {} 不存在于 IR 函数集合中",
+                            index,
+                            zencode::decode(function)
+                        ));
+                    }
+                }
+                MergePolicySelectorConfig::Region(spec) => {
+                    // 非 strict 时，无法解析的文件与 region_fork_limits 一样不匹配任何位置。
+                    if self.strict
+                        && !spec.resolve(symtab.files()).map_or(false, |region| {
+                            branch_locations.iter().any(|location| region.selects_ir_location(*location))
+                        })
+                    {
+                        return Err(format!(
+                            "execution_limits.merge_policy[{}] 的源码区域 {:?} 未匹配任何 IR 分支（strict=true）",
+                            index, spec
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_ir_sha256(&self, actual: &str) -> Result<(), String> {
         if !self.strict {
             return Ok(());
@@ -2003,6 +2067,20 @@ impl ExecutionLimitsConfig {
             Err(format!("IR SHA-256 不匹配：期望 {}，实际 {}", expected, actual))
         }
     }
+}
+
+fn validate_merge_policy_conflicts(rules: &[MergePolicyConfig]) -> Result<(), String> {
+    for (index, rule) in rules.iter().enumerate() {
+        for (previous_index, previous) in rules[..index].iter().enumerate() {
+            if previous.selector == rule.selector && previous.mode != rule.mode {
+                return Err(format!(
+                    "execution_limits.merge_policy[{}] 与 [{}] 的同一选择器 {:?} 存在 mode 冲突：{:?} / {:?}",
+                    previous_index, index, rule.selector, previous.mode, rule.mode
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsConfig>, String> {
@@ -2028,6 +2106,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "regions",
             "branch_region_limits",
             "region_fork_limits",
+            "merge_policy",
             "case_quota",
         ],
     )?;
@@ -2157,6 +2236,53 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         })
         .transpose()?;
 
+    let merge_policy = table
+        .get("merge_policy")
+        .map(|value| {
+            let rules = value.as_array().ok_or_else(|| "execution_limits.merge_policy 必须是数组".to_string())?;
+            if rules.is_empty() {
+                return Err("execution_limits.merge_policy 不能为空".to_string());
+            }
+            let rules = rules
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let root = format!("execution_limits.merge_policy[{}]", index);
+                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
+                    allowed_table_keys(
+                        table,
+                        &root,
+                        &["mode", "function", "file", "start_line", "start_column", "end_line", "end_column"],
+                    )?;
+                    let mode = match table.get("mode").and_then(Value::as_str) {
+                        Some("force") => MergeMode::Force,
+                        Some("adaptive") => MergeMode::Adaptive,
+                        Some("off") => MergeMode::Off,
+                        _ => return Err(format!("{}.mode 必须是 force、adaptive 或 off", root)),
+                    };
+                    let selector = if let Some(function) = table.get("function") {
+                        if ["file", "start_line", "start_column", "end_line", "end_column"]
+                            .iter()
+                            .any(|key| table.contains_key(*key))
+                        {
+                            return Err(format!("{} 的 function 与源码区域必须二选一", root));
+                        }
+                        let function = function
+                            .as_str()
+                            .filter(|name| !name.is_empty())
+                            .ok_or_else(|| format!("{}.function 必须是非空字符串", root))?;
+                        MergePolicySelectorConfig::Function(zencode::encode(function))
+                    } else {
+                        MergePolicySelectorConfig::Region(source_region_spec(table, &root)?)
+                    };
+                    Ok(MergePolicyConfig { mode, selector })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            validate_merge_policy_conflicts(&rules)?;
+            Ok(rules)
+        })
+        .transpose()?;
+
     Ok(Some(ExecutionLimitsConfig {
         strict,
         ir_sha256,
@@ -2175,6 +2301,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         regions,
         branch_region_limits,
         region_fork_limits,
+        merge_policy,
         case_quota: case_quota_table(table)?,
     }))
 }
@@ -2413,6 +2540,212 @@ impl<B: BV> ISAConfig<B> {
 mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
+
+    fn merge_config(text: &str) -> Result<ExecutionLimitsConfig, String> {
+        get_execution_limits_config(&text.parse::<Value>().unwrap()).map(Option::unwrap)
+    }
+
+    #[test]
+    fn execution_limits_merge_policy_parses_modes_and_selectors() {
+        for (text, mode) in [("force", MergeMode::Force), ("adaptive", MergeMode::Adaptive), ("off", MergeMode::Off)] {
+            let config = merge_config(&format!(
+                r#"
+                [[execution_limits.merge_policy]]
+                function = "pte_is_invalid"
+                mode = "{text}"
+                [[execution_limits.merge_policy]]
+                mode = "{text}"
+                file = "model.sail"
+                start_line = 10
+                start_column = 0
+                end_line = 20
+                end_column = 0
+            "#
+            ))
+            .unwrap();
+            let rules = config.merge_policy.unwrap();
+            assert_eq!(rules[0].mode, mode);
+            assert_eq!(rules[0].selector, MergePolicySelectorConfig::Function(zencode::encode("pte_is_invalid")));
+            assert_eq!(
+                rules[1].selector,
+                MergePolicySelectorConfig::Region(SourceRegionSpec::new("model.sail", (10, 0), (20, 0)))
+            );
+        }
+    }
+
+    #[test]
+    fn execution_limits_merge_policy_rejects_invalid_rules_and_conflicts() {
+        for fields in [
+            "mode = 'invalid'\nfunction = 'f'",
+            "mode = 'off'",
+            "mode = 'force'\nfunction = ''",
+            "mode = 'off'\nfunction = 1",
+            "mode = 'off'\nfunction = 'f'\nfile = 'model.sail'",
+            "mode = 'off'\nfile = 'model.sail'",
+            "mode = 'off'\nfunction = 'f'\nextra = true",
+            "mode = 'off'\nfile = ''\nstart_line = 1\nstart_column = 0\nend_line = 2\nend_column = 0",
+            "mode = 'off'\nfile = 'model.sail'\nstart_line = 0\nstart_column = 0\nend_line = 2\nend_column = 0",
+            "mode = 'off'\nfile = 'model.sail'\nstart_line = 3\nstart_column = 0\nend_line = 2\nend_column = 0",
+        ] {
+            assert!(merge_config(&format!("[[execution_limits.merge_policy]]\n{fields}")).is_err(), "{fields}");
+        }
+        for value in ["[]", "true", "['off']"] {
+            assert!(merge_config(&format!("[execution_limits]\nmerge_policy = {value}")).is_err());
+        }
+        for selector in
+            ["function = 'f'", "file = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0"]
+        {
+            let text = format!("[[execution_limits.merge_policy]]\nmode = 'force'\n{selector}\n[[execution_limits.merge_policy]]\nmode = 'off'\n{selector}");
+            let error = merge_config(&text).unwrap_err();
+            assert!(error.contains("冲突") && error.contains("merge_policy"), "{error}");
+            assert!(merge_config(&text.replace("mode = 'off'", "mode = 'force'")).is_ok());
+        }
+    }
+
+    #[test]
+    fn execution_limits_merge_policy_defaults_priority_and_path_merging() {
+        use crate::executor::ExecutionLimits;
+        use crate::source_loc::SourceLoc;
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let f = symtab.intern("zf");
+        let g = symtab.intern("zg");
+        let unknown = SourceLoc::unknown();
+        let defaults = ExecutionLimits::default();
+        assert_eq!(defaults.merge_mode(f, unknown, None), MergeMode::Off);
+        assert_eq!(defaults.clone().with_path_merging(true).merge_mode(f, unknown, None), MergeMode::Adaptive);
+        assert_eq!(defaults.merge_mode(f, unknown, Some(MergeMode::Force)), MergeMode::Force);
+        let config = merge_config(
+            r#"
+            [execution_limits]
+            path_merging = true
+            [[execution_limits.merge_policy]]
+            mode = "off"
+            function = "f"
+            [[execution_limits.merge_policy]]
+            mode = "force"
+            file = "model.sail"
+            start_line = 10
+            start_column = 0
+            end_line = 30
+            end_column = 0
+            [[execution_limits.merge_policy]]
+            mode = "adaptive"
+            file = "model.sail"
+            start_line = 15
+            start_column = 2
+            end_line = 16
+            end_column = 8
+        "#,
+        )
+        .unwrap();
+        let limits = defaults.with_config(&config, &symtab);
+        assert!(limits.path_merging);
+        assert_eq!(limits.merge_mode(g, unknown, None), MergeMode::Adaptive);
+        assert_eq!(limits.merge_mode(f, unknown, Some(MergeMode::Force)), MergeMode::Off);
+        assert_eq!(limits.merge_mode(g, unknown, Some(MergeMode::Off)), MergeMode::Off);
+        assert_eq!(limits.merge_mode(f, SourceLoc::new(0, 12, 0, 12, 1), Some(MergeMode::Off)), MergeMode::Force);
+        assert_eq!(limits.merge_mode(f, SourceLoc::new(0, 15, 3, 15, 4), Some(MergeMode::Force)), MergeMode::Adaptive);
+        let mut reversed = config.clone();
+        reversed.merge_policy.as_mut().unwrap().reverse();
+        let reversed = ExecutionLimits::default().with_config(&reversed, &symtab);
+        assert_eq!(reversed.merge_mode(f, SourceLoc::new(0, 15, 3, 15, 4), None), MergeMode::Adaptive);
+        for enabled in [true, false] {
+            let config = merge_config(&format!("[execution_limits]\npath_merging = {enabled}")).unwrap();
+            let limits = ExecutionLimits::default().with_path_merging(!enabled).with_config(&config, &symtab);
+            assert_eq!(limits.path_merging, enabled);
+            assert_eq!(limits.merge_mode(g, unknown, None), if enabled { MergeMode::Adaptive } else { MergeMode::Off });
+        }
+    }
+
+    #[test]
+    fn execution_limits_merge_policy_columns_crossing_and_unknown_files() {
+        use crate::executor::ExecutionLimits;
+        use crate::source_loc::SourceLoc;
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let function = symtab.intern("zf");
+        let config = merge_config(
+            r#"
+            [[execution_limits.merge_policy]]
+            mode = "force"
+            file = "model.sail"
+            start_line = 10
+            start_column = 0
+            end_line = 10
+            end_column = 40
+            [[execution_limits.merge_policy]]
+            mode = "off"
+            file = "model.sail"
+            start_line = 10
+            start_column = 10
+            end_line = 10
+            end_column = 20
+            [[execution_limits.merge_policy]]
+            mode = "adaptive"
+            file = "model.sail"
+            start_line = 10
+            start_column = 15
+            end_line = 10
+            end_column = 25
+            [[execution_limits.merge_policy]]
+            mode = "off"
+            file = "missing.sail"
+            start_line = 1
+            start_column = 0
+            end_line = 30
+            end_column = 0
+        "#,
+        )
+        .unwrap();
+        assert!(config.validate_merge_policy(&symtab, &HashSet::from([function]), &[]).is_ok());
+        let limits = ExecutionLimits::default().with_config(&config, &symtab);
+        assert_eq!(limits.merge_mode(function, SourceLoc::new(0, 10, 9, 10, 10), None), MergeMode::Force);
+        assert_eq!(limits.merge_mode(function, SourceLoc::new(0, 10, 12, 10, 13), None), MergeMode::Off);
+        assert_eq!(limits.merge_mode(function, SourceLoc::new(0, 10, 20, 10, 21), None), MergeMode::Adaptive);
+        assert_eq!(limits.merge_mode(function, SourceLoc::new(0, 10, 40, 10, 41), None), MergeMode::Off);
+        let mut reversed = config.clone();
+        reversed.merge_policy.as_mut().unwrap().reverse();
+        let reversed = ExecutionLimits::default().with_config(&reversed, &symtab);
+        let overlap = SourceLoc::new(0, 10, 17, 10, 18);
+        assert_eq!(limits.merge_mode(function, overlap, None), reversed.merge_mode(function, overlap, None));
+    }
+
+    #[test]
+    fn execution_limits_merge_policy_validates_ir_functions_and_strict_regions() {
+        use crate::source_loc::SourceLoc;
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let f = symtab.intern("zf");
+        let config = merge_config("[[execution_limits.merge_policy]]\nmode = 'force'\nfunction = 'f'").unwrap();
+        let functions = HashSet::from([f]);
+        assert!(config.validate_merge_policy(&symtab, &functions, &[]).is_ok());
+        let error = config.validate_merge_policy(&symtab, &HashSet::new(), &[]).unwrap_err();
+        assert!(error.contains("函数") && error.contains("f"), "{error}");
+        let missing = merge_config("[[execution_limits.merge_policy]]\nmode = 'off'\nfunction = 'missing'").unwrap();
+        assert!(missing.validate_merge_policy(&symtab, &functions, &[]).unwrap_err().contains("missing"));
+        let region = "[[execution_limits.merge_policy]]\nmode = 'off'\nfile = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0";
+        let config = merge_config(region).unwrap();
+        assert!(config.validate_merge_policy(&symtab, &functions, &[]).is_ok());
+        let strict =
+            merge_config(&format!("[execution_limits]\nstrict = true\nir_sha256 = '{}'\n{region}", "a".repeat(64)))
+                .unwrap();
+        assert!(strict.validate_ir_sha256(&"a".repeat(64)).is_ok());
+        assert!(strict.validate_ir_sha256(&"b".repeat(64)).is_err());
+        let error = strict.validate_merge_policy(&symtab, &functions, &[]).unwrap_err();
+        assert!(error.contains("strict") && error.contains("分支"), "{error}");
+        assert!(strict.validate_merge_policy(&symtab, &functions, &[SourceLoc::new(0, 12, 0, 12, 1)]).is_ok());
+        assert!(strict
+            .validate_merge_policy(&symtab, &functions, &[SourceLoc::unknown(), SourceLoc::new(0, 20, 0, 20, 1)])
+            .is_err());
+        let missing_file = merge_config(&format!(
+            "[execution_limits]\nstrict = true\nir_sha256 = '{}'\n{}",
+            "a".repeat(64),
+            region.replace("model.sail", "missing.sail")
+        ))
+        .unwrap();
+        assert!(missing_file.validate_merge_policy(&symtab, &functions, &[]).is_err());
+    }
 
     #[test]
     fn execution_limits_config_parses_source_regions_and_overrides() {

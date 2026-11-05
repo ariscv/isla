@@ -1,0 +1,24 @@
+{
+  "command": [
+    "timeout",
+    "--signal=TERM",
+    "--kill-after=5s",
+    "590s",
+    "/tmp/claude-1005/-data1-baiyifan-workplace-isla-runner/a39d8bcc-3e1b-4db3-8d63-110f0b832032/scratchpad/target_b/debug/isla-execute-function",
+    "-A",
+    "/data1/baiyifan/workplace/isla-runner/isla/.worktrees/memory-consistency/rv64d.ir",
+    "-C",
+    "configs/riscv64.toml",
+    "-T",
+    "1",
+    "--timeout",
+    "540",
+    "--traces",
+    "--error-traces",
+    "pte_is_invalid",
+    "_",
+    "_"
+  ],
+  "returncode": 101,
+  "elapsed_seconds": 6.215
+}

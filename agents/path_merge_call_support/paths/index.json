@@ -1,0 +1,114 @@
+[
+  {
+    "path": 1,
+    "result": "true",
+    "assertions": [
+      "v2"
+    ],
+    "file": "path-01.smt2"
+  },
+  {
+    "path": 2,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "v4",
+      "v6"
+    ],
+    "file": "path-02.smt2"
+  },
+  {
+    "path": 3,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "(not v4)",
+      "v8"
+    ],
+    "file": "path-03.smt2"
+  },
+  {
+    "path": 4,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "v4",
+      "(not v6)",
+      "v10"
+    ],
+    "file": "path-04.smt2"
+  },
+  {
+    "path": 5,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "(not v4)",
+      "(not v8)",
+      "v11"
+    ],
+    "file": "path-05.smt2"
+  },
+  {
+    "path": 6,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "v4",
+      "(not v6)",
+      "(not v10)",
+      "v13"
+    ],
+    "file": "path-06.smt2"
+  },
+  {
+    "path": 7,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "(not v4)",
+      "(not v8)",
+      "(not v11)",
+      "v14"
+    ],
+    "file": "path-07.smt2"
+  },
+  {
+    "path": 8,
+    "result": "true",
+    "assertions": [
+      "(not v2)",
+      "v4",
+      "(not v6)",
+      "(not v10)",
+      "(not v13)",
+      "v16"
+    ],
+    "file": "path-08.smt2"
+  },
+  {
+    "path": 9,
+    "result": "v17",
+    "assertions": [
+      "(not v2)",
+      "(not v4)",
+      "(not v8)",
+      "(not v11)",
+      "(not v14)"
+    ],
+    "file": "path-09.smt2"
+  },
+  {
+    "path": 10,
+    "result": "v19",
+    "assertions": [
+      "(not v2)",
+      "v4",
+      "(not v6)",
+      "(not v10)",
+      "(not v13)",
+      "(not v16)"
+    ],
+    "file": "path-10.smt2"
+  }
+]

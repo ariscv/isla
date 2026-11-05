@@ -1,0 +1,44 @@
+# 函数基线配置：复用 riscv64.toml 的工具链与地址布局；不覆盖寄存器或原语。
+pc = "PC"
+
+zero_announce_exit = true
+
+default_sizeof = 4
+
+in_program_order = ["sail_barrier"]
+
+[[toolchain]]
+name = "macos-riscv64"
+os = "macos"
+arch = "aarch64"
+assembler = "riscv64-elf-as"
+objdump = "riscv64-elf-objdump"
+nm = "riscv64-elf-nm"
+linker = "riscv64-elf-ld"
+
+[[toolchain]]
+name = "default"
+assembler = "riscv64-linux-gnu-as -march=rv64imac"
+objdump = "riscv64-linux-gnu-objdump"
+linker = "riscv64-linux-gnu-ld"
+nm = "riscv64-linux-gnu-nm"
+
+[mmu]
+page_table_base = "0x300000"
+page_size = "4096"
+s2_page_table_base = "0x300000"
+s2_page_size = "4096"
+
+[threads]
+base = "0x80100000"
+top = "0x80300000"
+stride = "0x10000"
+
+[symbolic_addrs]
+base = "0x80310000"
+top = "0x80410000"
+stride = "0x10"
+
+[registers]
+
+[registers.defaults]

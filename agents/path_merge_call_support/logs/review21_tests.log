@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (/tmp/claude-1005/-data1-baiyifan-workplace-isla-runner/a39d8bcc-3e1b-4db3-8d63-110f0b832032/scratchpad/target_b/debug/deps/isla_lib-4e93a4a47f3b28e4)
+
+running 1 test
+
+thread 'executor::tests::review21_tests::review21_merged_overflow_path' (3074) panicked at isla-lib/src/executor.rs:5802:25:
+assertion `left == right` failed: [Err(Type("unsupported target width for @unsigned: 65", SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })), Err(Type("unsupported target width for @unsigned: 65", SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 }))]
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test executor::tests::review21_tests::review21_merged_overflow_path ... FAILED
+
+failures:
+
+failures:
+    executor::tests::review21_tests::review21_merged_overflow_path
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 584 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p isla-lib --lib`

@@ -364,3 +364,32 @@
 - `executor::run_loop` 用统计 ForkSink 包裹现有提交接口，统一观察 Jump、Monomorphize 和 `executor/symbolic_length.rs` 的重试分叉。统计使用子任务已有的 `frame.function_name` 和 `fork_cond` 中的 `Event::Fork` SourceLoc；合并仅追加事件，没有提交子任务，因此不会误计。
 - `try_merge_diamond` 可能依次尝试多个候选汇合点；调用失败数与候选拒绝原因计数是不同口径。两臂的 Decl 可以模拟，单臂新变量作用域不对称由 `merge_two_frames` 拒绝。
 - `SharedState::execution_stats` 共享线程安全计数，`ISLA_STATS=1` 启用；solve-state 在 clause 执行前清零，全部批次和续执行结束后由 `src/isarch/solve_summary.rs` 输出。字段口径见 [执行统计](execution_stats/status.md)。
+
+## 路径合并分支 HEAD 即失败的测试
+
+复跑日期：2026-11-05。适用分支：`feat/postprocess-enumeration`；适用提交：`8f118db6d74dcddcc9a561c74e5a124c2044f7b8`（`git rev-parse HEAD`）。开始测量时工作树干净，未修改解释器或合并实现。以下五项逐条复跑，**全部仍失败**；每条均实际运行 1 个测试，`0 passed; 1 failed; 584 filtered out`，Cargo 退出码均为 `101`，无超时。
+
+名称均带完整前缀 `executor::tests::`：
+
+| 测试 | 失败摘要 | 单条总耗时（含 Cargo 构建／等待） |
+| --- | --- | ---: |
+| `executor::tests::review12_tests::internal_vector_init_after_merge` | `合并=false` 已出现两次 `Type("unsupported target width for @unsigned: 8", ...)`；正常路径为 0，预期 2；断言位置 `isla-lib/src/executor.rs:9357`。 | 35.539 秒 |
+| `executor::tests::review13_tests::monomorphize_machine_integer_after_merge_does_not_crash` | 日志为 `合并=false，panic=false`，随后 `result.unwrap().iter().all(Result::is_ok)` 断言失败；位置 `executor.rs:8802`。输出未披露具体 `ExecError`，不能认定为解释器崩溃。 | 0.307 秒 |
+| `executor::tests::review14_tests::internal_vector_update_retries_merged_index` | `合并=false` 出现两次 `Type("unsupported target width for @unsigned: 8", ...)`；断言正常路径 0、预期 2；位置 `executor.rs:8386`。 | 31.837 秒 |
+| `executor::tests::review21_tests::review21_merged_overflow_path` | 两条结果均为 `Type("unsupported target width for @unsigned: 65", ...)`；断言得到 0、预期 1；位置 `executor.rs:5802`。 | 0.308 秒 |
+| `executor::tests::review8_tests::adversarial_merge_machine_index_width` | `results.iter().all(\|r\| matches!(r, Ok(Run::Finished(_))))` 断言失败；位置 `executor.rs:11113`。输出未披露具体失败结果。 | 0.208 秒 |
+
+前三项在 `合并=false` 阶段已失败，因此本轮结果只证明这些测试在该 HEAD 原本失败，不能据此归因于开启合并。测试自身执行均约 0.03 秒；第三项的较长总耗时包含与函数入口构建争用同一隔离目录的等待，不是执行器性能数据。
+
+复跑命令（`<完整测试名>` 依次替换为表中名称）：
+
+```sh
+export RUSTFLAGS="-L $HOME/.local/opt/z3-official-1fd1d3613/lib -C link-arg=-Wl,-rpath,$HOME/.local/opt/z3-official-1fd1d3613/lib"
+export LD_LIBRARY_PATH="$HOME/.local/opt/z3-official-1fd1d3613/lib:${LD_LIBRARY_PATH:-}"
+export CARGO_TARGET_DIR=/tmp/claude-1005/-data1-baiyifan-workplace-isla-runner/a39d8bcc-3e1b-4db3-8d63-110f0b832032/scratchpad/target_b
+timeout --signal=TERM --kill-after=5s 590s \
+  cargo test -p isla-lib '<完整测试名>' --offline \
+  --features smt-thread-interrupt -j 8 -- --exact --nocapture
+```
+
+主机可见 128 个 CPU，本轮构建限为 8 路，测试串行，每条外层最多 595 秒。复跑脚本、完整输出、精确命令与退出码位于 [函数基线目录](path_merge_call_support/baseline.md)、[复跑脚本](path_merge_call_support/run_failed_tests.py) 和 [结果索引](path_merge_call_support/logs/failed_tests.json)。逐项日志为该目录 `logs/review12_tests.log`、`review13_tests.log`、`review14_tests.log`、`review21_tests.log`、`review8_tests.log`。

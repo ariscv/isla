@@ -1,0 +1,64 @@
+Usage: isla-execute-function [options]
+
+Options:
+    -T, --threads <n>   use this many worker threads
+    -A, --arch <file>   load architecture file
+    -C, --config <file> load custom config for architecture
+        --toolchain <name>
+                        use specified toolchain from config
+    -R, --register <register>=<value>
+                        set a register, via the reset_registers builtin
+    -I, --initial <register>=<value>
+                        set a register in the initial state
+    -h, --help          print this help message
+        --verbose       print verbose output
+    -D, --debug <flags> set debugging flags
+        --probe <id>    trace specified function calls or location assignments
+                        in debug output
+        --probe-all     probe everything (very verbose)
+        --probe-function <id>
+                        probe everything under the specified function (very
+                        verbose)
+        --trace-function <id>
+                        trace specified function calls in the trace output
+        --trace-all     trace everything
+    -L, --linearize <id>
+                        rewrite function into linear form
+    -P, --partial-linearize <id>
+                        rewrite function into linear form
+    -S, --source <path> directory containing the Sail source used to generate
+                        the IR
+        --test-linearize 
+                        test that linearization rewrite has been performed
+                        correctly
+        --abstract <id> make function abstract
+        --debug-id <name id>
+                        print the name of an interned identifier (for
+                        debugging)
+        --reset-constraint <constraint>
+                        property to enforce at the reset_registers builtin
+        --fork-assertions 
+                        change assertions into explicit control flow
+        --fun-assumption <assumption>
+                        add an assumption about the behaviour of a Sail
+                        function
+        --no-model-reg-init 
+                        don't use register initializers from the model
+        --tastic <name> 指定 Z3 tactic（默认 default）
+        --version       print out version and stop.
+        --optimistic    assume assertions succeed
+        --traces        print execution traces for successful executions
+    -t, --tree          combine traces into tree
+        --error-traces  print execution traces for paths that fail
+    -s, --simplify      simplify function traces
+        --simplify-registers 
+                        simplify register accesses in traces
+    -m, --model         query SMT model to fill in variables
+    -k, --kill-at <function name[, function_name]>
+                        stop executions early and discard if they reach this
+                        function (with optional context)
+        --stop-at <function name[, function_name]>
+                        stop executions early and keep trace if they reach
+                        this function (with optional context)
+        --timeout <n>   Add a timeout (in seconds)
+        --executable    make trace executable

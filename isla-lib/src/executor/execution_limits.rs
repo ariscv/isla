@@ -33,7 +33,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::config::{ExecutionLimitsConfig, LimitBehaviorConfig};
+use crate::config::{ExecutionLimitsConfig, LimitBehaviorConfig, MergeMode, MergePolicySelectorConfig};
 use crate::ir::{Name, Symtab};
 use crate::source_loc::{SourceLoc, SourceRegion, SourceRegionSpec};
 
@@ -65,6 +65,19 @@ pub struct RegionForkLimit {
     pub region: SourceRegion,
     pub max_forks_per_region: u32,
     pub sample_bias: Option<SampleBias>,
+}
+
+#[derive(Clone, Debug)]
+enum MergePolicySelector {
+    // 未解析的函数规则仍保留；执行前由配置的 validate_merge_policy 返回明确错误。
+    Function(Option<Name>),
+    Region(SourceRegion),
+}
+
+#[derive(Clone, Debug)]
+struct MergePolicy {
+    mode: MergeMode,
+    selector: MergePolicySelector,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +115,7 @@ pub struct ExecutionLimits {
     /// 受限分支具体化时使用的可复现抽样 seed。
     pub branch_sampling_seed: u64,
     pub path_merging: bool,
+    merge_policy: Vec<MergePolicy>,
     pub on_limit_reached: LimitBehavior,
 }
 
@@ -120,6 +134,7 @@ impl Default for ExecutionLimits {
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
+            merge_policy: Vec::new(),
             on_limit_reached: LimitBehavior::Truncate,
         }
     }
@@ -261,7 +276,54 @@ impl ExecutionLimits {
             }));
         }
 
+        if let Some(rules) = &config.merge_policy {
+            self.merge_policy = rules
+                .iter()
+                .filter_map(|rule| {
+                    let selector = match &rule.selector {
+                        MergePolicySelectorConfig::Function(function) => {
+                            MergePolicySelector::Function(symtab.get(function))
+                        }
+                        MergePolicySelectorConfig::Region(spec) => {
+                            MergePolicySelector::Region(spec.resolve(symtab.files())?)
+                        }
+                    };
+                    Some(MergePolicy { mode: rule.mode, selector })
+                })
+                .collect();
+        }
+
         self
+    }
+
+    /// 返回分支点的配置策略：源码区域 > 当前函数 > 推演区域继承值 > 全局默认。
+    /// 多个区域命中时按行列坐标跨度选最小者；同跨度的交叉区域按起止坐标稳定排序。
+    /// 此查询只描述策略，不启用合并；执行前须调用配置的 validate_merge_policy。
+    pub fn merge_mode(&self, function: Name, location: SourceLoc, inherited: Option<MergeMode>) -> MergeMode {
+        let region_mode = self
+            .merge_policy
+            .iter()
+            .filter_map(|rule| {
+                let MergePolicySelector::Region(region) = rule.selector else { return None };
+                if !region.selects_ir_location(location) {
+                    return None;
+                }
+                // 列号为 u16，打包坐标后相减使同行及跨行区域使用同一套精度顺序。
+                let start = (u64::from(region.start().0) << 16) | u64::from(region.start().1);
+                let end = (u64::from(region.end().0) << 16) | u64::from(region.end().1);
+                Some(((end - start, region.start(), region.end()), rule.mode))
+            })
+            .min_by_key(|entry| entry.0)
+            .map(|entry| entry.1);
+        region_mode
+            .or_else(|| {
+                self.merge_policy.iter().find_map(|rule| match rule.selector {
+                    MergePolicySelector::Function(Some(name)) if name == function => Some(rule.mode),
+                    _ => None,
+                })
+            })
+            .or(inherited)
+            .unwrap_or(if self.path_merging { MergeMode::Adaptive } else { MergeMode::Off })
     }
 
     pub fn with_call_context_depth(self, call_context_depth: impl Into<Option<usize>>) -> Self {
@@ -323,6 +385,7 @@ impl ExecutionLimits {
             || self.max_fork_pct_per_branch.is_some()
             || !self.branch_region_limits.is_empty()
             || !self.region_fork_limits.is_empty()
+            || !self.merge_policy.is_empty()
             || self.path_merging
     }
 }
@@ -836,6 +899,30 @@ mod tests {
         path.advance_control_flow();
         path.advance_control_flow();
         assert_eq!(path.control_flow_steps(), 2);
+    }
+
+    #[test]
+    fn execution_limits_keeps_local_merge_policy_with_global_merging_off() {
+        use crate::bitvector::b64::B64;
+        use crate::config::MergePolicyConfig;
+        use crate::executor::TaskState;
+
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zf");
+        for mode in [MergeMode::Force, MergeMode::Adaptive, MergeMode::Off] {
+            let config = ExecutionLimitsConfig {
+                merge_policy: Some(vec![MergePolicyConfig {
+                    mode,
+                    selector: MergePolicySelectorConfig::Function("zf".to_string()),
+                }]),
+                ..ExecutionLimitsConfig::default()
+            };
+            let limits = ExecutionLimits::default().with_config(&config, &symtab);
+            assert!(!limits.path_merging);
+            let state = TaskState::<B64>::new().with_execution_limits(limits);
+            let limits = state.execution_limits.expect("全局 off 时也必须保留局部 merge_policy");
+            assert_eq!(limits.merge_mode(function, SourceLoc::unknown(), None), mode);
+        }
     }
 
     #[test]

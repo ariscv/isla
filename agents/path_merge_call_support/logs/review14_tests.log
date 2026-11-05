@@ -1,0 +1,23 @@
+    Blocking waiting for file lock on artifact directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.65s
+     Running unittests src/lib.rs (/tmp/claude-1005/-data1-baiyifan-workplace-isla-runner/a39d8bcc-3e1b-4db3-8d63-110f0b832032/scratchpad/target_b/debug/deps/isla_lib-4e93a4a47f3b28e4)
+
+running 1 test
+内部向量更新：合并=false，错误=Type("unsupported target width for @unsigned: 8", SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+内部向量更新：合并=false，错误=Type("unsupported target width for @unsigned: 8", SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 })
+
+thread 'executor::tests::review14_tests::internal_vector_update_retries_merged_index' (2938) panicked at isla-lib/src/executor.rs:8386:17:
+assertion `left == right` failed
+  left: 0
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test executor::tests::review14_tests::internal_vector_update_retries_merged_index ... FAILED
+
+failures:
+
+failures:
+    executor::tests::review14_tests::internal_vector_update_retries_merged_index
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 584 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p isla-lib --lib`

@@ -1,0 +1,248 @@
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert v2) ; 0:0 - 0:0
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert v4) ; 0:0 - 0:0
+  (define-const v5 ((_ extract 1 1) v0)) ; 10981:0 - 0:0
+  (define-const v6 (= v5 #b0)) ; sys/vmem_pte.sail 84:27 - 84:46
+  (branch 2 "sys/vmem_pte.sail 84:4 - 91:32")
+  (assert v6) ; 0:0 - 0:0
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert (not v4)) ; 0:0 - 0:0
+  (declare-const v5 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v6 ((_ extract 9 9) v5)) ; 10868:0 - 0:0
+  (define-const v7 (= v6 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v8 (not v7)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 2 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert v8) ; 0:0 - 0:0
+  (define-enum |extension| 109 (|Ext_M| |Ext_A| |Ext_F| |Ext_D| |Ext_B| |Ext_V| |Ext_S| |Ext_U| |Ext_H| |Ext_Zibi| |Ext_Zic64b| |Ext_Zicbom| |Ext_Zicbop| |Ext_Zicboz| |Ext_Zicfilp| |Ext_Zicntr| |Ext_Zicond| |Ext_Zicsr| |Ext_Zifencei| |Ext_Zihintntl| |Ext_Zihintpause| |Ext_Zihpm| |Ext_Zimop| |Ext_Zmmul| |Ext_Zaamo| |Ext_Zabha| |Ext_Zacas| |Ext_Zalrsc| |Ext_Zawrs| |Ext_Za64rs| |Ext_Za128rs| |Ext_Zfa| |Ext_Zfbfmin| |Ext_Zfh| |Ext_Zfhmin| |Ext_Zfinx| |Ext_Zdinx| |Ext_Zca| |Ext_Zcb| |Ext_Zcd| |Ext_Zcf| |Ext_Zcmop| |Ext_C| |Ext_Zba| |Ext_Zbb| |Ext_Zbc| |Ext_Zbkb| |Ext_Zbkc| |Ext_Zbkx| |Ext_Zbs| |Ext_Zknd| |Ext_Zkne| |Ext_Zknh| |Ext_Zkr| |Ext_Zksed| |Ext_Zksh| |Ext_Zkt| |Ext_Zhinx| |Ext_Zhinxmin| |Ext_Zvl32b| |Ext_Zvl64b| |Ext_Zvl128b| |Ext_Zvl256b| |Ext_Zvl512b| |Ext_Zvl1024b| |Ext_Zve32f| |Ext_Zve32x| |Ext_Zve64d| |Ext_Zve64f| |Ext_Zve64x| |Ext_Zvabd| |Ext_Zvfbfmin| |Ext_Zvfbfwma| |Ext_Zvfh| |Ext_Zvfhmin| |Ext_Zvbb| |Ext_Zvbc| |Ext_Zvkb| |Ext_Zvkg| |Ext_Zvkned| |Ext_Zvknha| |Ext_Zvknhb| |Ext_Zvksed| |Ext_Zvksh| |Ext_Zvkt| |Ext_Zvkn| |Ext_Zvknc| |Ext_Zvkng| |Ext_Zvks| |Ext_Zvksc| |Ext_Zvksg| |Ext_Sscofpmf| |Ext_Ssstateen| |Ext_Sstc| |Ext_Sstvala| |Ext_Sstvecd| |Ext_Ssu64xl| |Ext_Svbare| |Ext_Sv32| |Ext_Sv39| |Ext_Sv48| |Ext_Sv57| |Ext_Svinval| |Ext_Svnapot| |Ext_Svpbmt| |Ext_Svrsw60t59b| |Ext_Smcntrpmf| |Ext_Smstateen| |Ext_Ssqosid|)) ; 0:0 - 0:0
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert v4) ; 0:0 - 0:0
+  (define-const v5 ((_ extract 1 1) v0)) ; 10981:0 - 0:0
+  (define-const v6 (= v5 #b0)) ; sys/vmem_pte.sail 84:27 - 84:46
+  (branch 2 "sys/vmem_pte.sail 84:4 - 91:32")
+  (assert (not v6)) ; 0:0 - 0:0
+  (declare-const v7 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v8 ((_ extract 9 9) v7)) ; 10868:0 - 0:0
+  (define-const v9 (= v8 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v10 (not v9)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 3 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert v10) ; 0:0 - 0:0
+  (define-enum |extension| 109 (|Ext_M| |Ext_A| |Ext_F| |Ext_D| |Ext_B| |Ext_V| |Ext_S| |Ext_U| |Ext_H| |Ext_Zibi| |Ext_Zic64b| |Ext_Zicbom| |Ext_Zicbop| |Ext_Zicboz| |Ext_Zicfilp| |Ext_Zicntr| |Ext_Zicond| |Ext_Zicsr| |Ext_Zifencei| |Ext_Zihintntl| |Ext_Zihintpause| |Ext_Zihpm| |Ext_Zimop| |Ext_Zmmul| |Ext_Zaamo| |Ext_Zabha| |Ext_Zacas| |Ext_Zalrsc| |Ext_Zawrs| |Ext_Za64rs| |Ext_Za128rs| |Ext_Zfa| |Ext_Zfbfmin| |Ext_Zfh| |Ext_Zfhmin| |Ext_Zfinx| |Ext_Zdinx| |Ext_Zca| |Ext_Zcb| |Ext_Zcd| |Ext_Zcf| |Ext_Zcmop| |Ext_C| |Ext_Zba| |Ext_Zbb| |Ext_Zbc| |Ext_Zbkb| |Ext_Zbkc| |Ext_Zbkx| |Ext_Zbs| |Ext_Zknd| |Ext_Zkne| |Ext_Zknh| |Ext_Zkr| |Ext_Zksed| |Ext_Zksh| |Ext_Zkt| |Ext_Zhinx| |Ext_Zhinxmin| |Ext_Zvl32b| |Ext_Zvl64b| |Ext_Zvl128b| |Ext_Zvl256b| |Ext_Zvl512b| |Ext_Zvl1024b| |Ext_Zve32f| |Ext_Zve32x| |Ext_Zve64d| |Ext_Zve64f| |Ext_Zve64x| |Ext_Zvabd| |Ext_Zvfbfmin| |Ext_Zvfbfwma| |Ext_Zvfh| |Ext_Zvfhmin| |Ext_Zvbb| |Ext_Zvbc| |Ext_Zvkb| |Ext_Zvkg| |Ext_Zvkned| |Ext_Zvknha| |Ext_Zvknhb| |Ext_Zvksed| |Ext_Zvksh| |Ext_Zvkt| |Ext_Zvkn| |Ext_Zvknc| |Ext_Zvkng| |Ext_Zvks| |Ext_Zvksc| |Ext_Zvksg| |Ext_Sscofpmf| |Ext_Ssstateen| |Ext_Sstc| |Ext_Sstvala| |Ext_Sstvecd| |Ext_Ssu64xl| |Ext_Svbare| |Ext_Sv32| |Ext_Sv39| |Ext_Sv48| |Ext_Sv57| |Ext_Svinval| |Ext_Svnapot| |Ext_Svpbmt| |Ext_Svrsw60t59b| |Ext_Smcntrpmf| |Ext_Smstateen| |Ext_Ssqosid|)) ; 0:0 - 0:0
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert (not v4)) ; 0:0 - 0:0
+  (declare-const v5 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v6 ((_ extract 9 9) v5)) ; 10868:0 - 0:0
+  (define-const v7 (= v6 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v8 (not v7)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 2 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert (not v8)) ; 0:0 - 0:0
+  (define-const v9 ((_ extract 8 7) v5)) ; 10879:0 - 0:0
+  (define-const v10 (= v9 #b00)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (define-const v11 (not v10)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (branch 3 "sys/vmem_pte.sail 89:5 - 89:65")
+  (assert v11) ; 0:0 - 0:0
+  (define-enum |extension| 109 (|Ext_M| |Ext_A| |Ext_F| |Ext_D| |Ext_B| |Ext_V| |Ext_S| |Ext_U| |Ext_H| |Ext_Zibi| |Ext_Zic64b| |Ext_Zicbom| |Ext_Zicbop| |Ext_Zicboz| |Ext_Zicfilp| |Ext_Zicntr| |Ext_Zicond| |Ext_Zicsr| |Ext_Zifencei| |Ext_Zihintntl| |Ext_Zihintpause| |Ext_Zihpm| |Ext_Zimop| |Ext_Zmmul| |Ext_Zaamo| |Ext_Zabha| |Ext_Zacas| |Ext_Zalrsc| |Ext_Zawrs| |Ext_Za64rs| |Ext_Za128rs| |Ext_Zfa| |Ext_Zfbfmin| |Ext_Zfh| |Ext_Zfhmin| |Ext_Zfinx| |Ext_Zdinx| |Ext_Zca| |Ext_Zcb| |Ext_Zcd| |Ext_Zcf| |Ext_Zcmop| |Ext_C| |Ext_Zba| |Ext_Zbb| |Ext_Zbc| |Ext_Zbkb| |Ext_Zbkc| |Ext_Zbkx| |Ext_Zbs| |Ext_Zknd| |Ext_Zkne| |Ext_Zknh| |Ext_Zkr| |Ext_Zksed| |Ext_Zksh| |Ext_Zkt| |Ext_Zhinx| |Ext_Zhinxmin| |Ext_Zvl32b| |Ext_Zvl64b| |Ext_Zvl128b| |Ext_Zvl256b| |Ext_Zvl512b| |Ext_Zvl1024b| |Ext_Zve32f| |Ext_Zve32x| |Ext_Zve64d| |Ext_Zve64f| |Ext_Zve64x| |Ext_Zvabd| |Ext_Zvfbfmin| |Ext_Zvfbfwma| |Ext_Zvfh| |Ext_Zvfhmin| |Ext_Zvbb| |Ext_Zvbc| |Ext_Zvkb| |Ext_Zvkg| |Ext_Zvkned| |Ext_Zvknha| |Ext_Zvknhb| |Ext_Zvksed| |Ext_Zvksh| |Ext_Zvkt| |Ext_Zvkn| |Ext_Zvknc| |Ext_Zvkng| |Ext_Zvks| |Ext_Zvksc| |Ext_Zvksg| |Ext_Sscofpmf| |Ext_Ssstateen| |Ext_Sstc| |Ext_Sstvala| |Ext_Sstvecd| |Ext_Ssu64xl| |Ext_Svbare| |Ext_Sv32| |Ext_Sv39| |Ext_Sv48| |Ext_Sv57| |Ext_Svinval| |Ext_Svnapot| |Ext_Svpbmt| |Ext_Svrsw60t59b| |Ext_Smcntrpmf| |Ext_Smstateen| |Ext_Ssqosid|)) ; 0:0 - 0:0
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert v4) ; 0:0 - 0:0
+  (define-const v5 ((_ extract 1 1) v0)) ; 10981:0 - 0:0
+  (define-const v6 (= v5 #b0)) ; sys/vmem_pte.sail 84:27 - 84:46
+  (branch 2 "sys/vmem_pte.sail 84:4 - 91:32")
+  (assert (not v6)) ; 0:0 - 0:0
+  (declare-const v7 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v8 ((_ extract 9 9) v7)) ; 10868:0 - 0:0
+  (define-const v9 (= v8 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v10 (not v9)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 3 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert (not v10)) ; 0:0 - 0:0
+  (define-const v11 ((_ extract 8 7) v7)) ; 10879:0 - 0:0
+  (define-const v12 (= v11 #b00)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (define-const v13 (not v12)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (branch 4 "sys/vmem_pte.sail 89:5 - 89:65")
+  (assert v13) ; 0:0 - 0:0
+  (define-enum |extension| 109 (|Ext_M| |Ext_A| |Ext_F| |Ext_D| |Ext_B| |Ext_V| |Ext_S| |Ext_U| |Ext_H| |Ext_Zibi| |Ext_Zic64b| |Ext_Zicbom| |Ext_Zicbop| |Ext_Zicboz| |Ext_Zicfilp| |Ext_Zicntr| |Ext_Zicond| |Ext_Zicsr| |Ext_Zifencei| |Ext_Zihintntl| |Ext_Zihintpause| |Ext_Zihpm| |Ext_Zimop| |Ext_Zmmul| |Ext_Zaamo| |Ext_Zabha| |Ext_Zacas| |Ext_Zalrsc| |Ext_Zawrs| |Ext_Za64rs| |Ext_Za128rs| |Ext_Zfa| |Ext_Zfbfmin| |Ext_Zfh| |Ext_Zfhmin| |Ext_Zfinx| |Ext_Zdinx| |Ext_Zca| |Ext_Zcb| |Ext_Zcd| |Ext_Zcf| |Ext_Zcmop| |Ext_C| |Ext_Zba| |Ext_Zbb| |Ext_Zbc| |Ext_Zbkb| |Ext_Zbkc| |Ext_Zbkx| |Ext_Zbs| |Ext_Zknd| |Ext_Zkne| |Ext_Zknh| |Ext_Zkr| |Ext_Zksed| |Ext_Zksh| |Ext_Zkt| |Ext_Zhinx| |Ext_Zhinxmin| |Ext_Zvl32b| |Ext_Zvl64b| |Ext_Zvl128b| |Ext_Zvl256b| |Ext_Zvl512b| |Ext_Zvl1024b| |Ext_Zve32f| |Ext_Zve32x| |Ext_Zve64d| |Ext_Zve64f| |Ext_Zve64x| |Ext_Zvabd| |Ext_Zvfbfmin| |Ext_Zvfbfwma| |Ext_Zvfh| |Ext_Zvfhmin| |Ext_Zvbb| |Ext_Zvbc| |Ext_Zvkb| |Ext_Zvkg| |Ext_Zvkned| |Ext_Zvknha| |Ext_Zvknhb| |Ext_Zvksed| |Ext_Zvksh| |Ext_Zvkt| |Ext_Zvkn| |Ext_Zvknc| |Ext_Zvkng| |Ext_Zvks| |Ext_Zvksc| |Ext_Zvksg| |Ext_Sscofpmf| |Ext_Ssstateen| |Ext_Sstc| |Ext_Sstvala| |Ext_Sstvecd| |Ext_Ssu64xl| |Ext_Svbare| |Ext_Sv32| |Ext_Sv39| |Ext_Sv48| |Ext_Sv57| |Ext_Svinval| |Ext_Svnapot| |Ext_Svpbmt| |Ext_Svrsw60t59b| |Ext_Smcntrpmf| |Ext_Smstateen| |Ext_Ssqosid|)) ; 0:0 - 0:0
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert (not v4)) ; 0:0 - 0:0
+  (declare-const v5 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v6 ((_ extract 9 9) v5)) ; 10868:0 - 0:0
+  (define-const v7 (= v6 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v8 (not v7)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 2 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert (not v8)) ; 0:0 - 0:0
+  (define-const v9 ((_ extract 8 7) v5)) ; 10879:0 - 0:0
+  (define-const v10 (= v9 #b00)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (define-const v11 (not v10)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (branch 3 "sys/vmem_pte.sail 89:5 - 89:65")
+  (assert (not v11)) ; 0:0 - 0:0
+  (define-const v12 ((_ extract 6 5) v5)) ; 10890:0 - 0:0
+  (define-const v13 (= v12 #b00)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (define-const v14 (not v13)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (branch 4 "sys/vmem_pte.sail 90:5 - 90:76")
+  (assert v14) ; 0:0 - 0:0
+  (define-enum |extension| 109 (|Ext_M| |Ext_A| |Ext_F| |Ext_D| |Ext_B| |Ext_V| |Ext_S| |Ext_U| |Ext_H| |Ext_Zibi| |Ext_Zic64b| |Ext_Zicbom| |Ext_Zicbop| |Ext_Zicboz| |Ext_Zicfilp| |Ext_Zicntr| |Ext_Zicond| |Ext_Zicsr| |Ext_Zifencei| |Ext_Zihintntl| |Ext_Zihintpause| |Ext_Zihpm| |Ext_Zimop| |Ext_Zmmul| |Ext_Zaamo| |Ext_Zabha| |Ext_Zacas| |Ext_Zalrsc| |Ext_Zawrs| |Ext_Za64rs| |Ext_Za128rs| |Ext_Zfa| |Ext_Zfbfmin| |Ext_Zfh| |Ext_Zfhmin| |Ext_Zfinx| |Ext_Zdinx| |Ext_Zca| |Ext_Zcb| |Ext_Zcd| |Ext_Zcf| |Ext_Zcmop| |Ext_C| |Ext_Zba| |Ext_Zbb| |Ext_Zbc| |Ext_Zbkb| |Ext_Zbkc| |Ext_Zbkx| |Ext_Zbs| |Ext_Zknd| |Ext_Zkne| |Ext_Zknh| |Ext_Zkr| |Ext_Zksed| |Ext_Zksh| |Ext_Zkt| |Ext_Zhinx| |Ext_Zhinxmin| |Ext_Zvl32b| |Ext_Zvl64b| |Ext_Zvl128b| |Ext_Zvl256b| |Ext_Zvl512b| |Ext_Zvl1024b| |Ext_Zve32f| |Ext_Zve32x| |Ext_Zve64d| |Ext_Zve64f| |Ext_Zve64x| |Ext_Zvabd| |Ext_Zvfbfmin| |Ext_Zvfbfwma| |Ext_Zvfh| |Ext_Zvfhmin| |Ext_Zvbb| |Ext_Zvbc| |Ext_Zvkb| |Ext_Zvkg| |Ext_Zvkned| |Ext_Zvknha| |Ext_Zvknhb| |Ext_Zvksed| |Ext_Zvksh| |Ext_Zvkt| |Ext_Zvkn| |Ext_Zvknc| |Ext_Zvkng| |Ext_Zvks| |Ext_Zvksc| |Ext_Zvksg| |Ext_Sscofpmf| |Ext_Ssstateen| |Ext_Sstc| |Ext_Sstvala| |Ext_Sstvecd| |Ext_Ssu64xl| |Ext_Svbare| |Ext_Sv32| |Ext_Sv39| |Ext_Sv48| |Ext_Sv57| |Ext_Svinval| |Ext_Svnapot| |Ext_Svpbmt| |Ext_Svrsw60t59b| |Ext_Smcntrpmf| |Ext_Smstateen| |Ext_Ssqosid|)) ; 0:0 - 0:0
+  (read-reg |misa| nil (_ struct (|bits| #x8000000000000000)))
+  (write-reg |Final result| nil true))
+Result: true
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert v4) ; 0:0 - 0:0
+  (define-const v5 ((_ extract 1 1) v0)) ; 10981:0 - 0:0
+  (define-const v6 (= v5 #b0)) ; sys/vmem_pte.sail 84:27 - 84:46
+  (branch 2 "sys/vmem_pte.sail 84:4 - 91:32")
+  (assert (not v6)) ; 0:0 - 0:0
+  (declare-const v7 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v8 ((_ extract 9 9) v7)) ; 10868:0 - 0:0
+  (define-const v9 (= v8 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v10 (not v9)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 3 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert (not v10)) ; 0:0 - 0:0
+  (define-const v11 ((_ extract 8 7) v7)) ; 10879:0 - 0:0
+  (define-const v12 (= v11 #b00)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (define-const v13 (not v12)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (branch 4 "sys/vmem_pte.sail 89:5 - 89:65")
+  (assert (not v13)) ; 0:0 - 0:0
+  (define-const v14 ((_ extract 6 5) v7)) ; 10890:0 - 0:0
+  (define-const v15 (= v14 #b00)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (define-const v16 (not v15)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (branch 5 "sys/vmem_pte.sail 90:5 - 90:76")
+  (assert v16) ; 0:0 - 0:0
+  (define-enum |extension| 109 (|Ext_M| |Ext_A| |Ext_F| |Ext_D| |Ext_B| |Ext_V| |Ext_S| |Ext_U| |Ext_H| |Ext_Zibi| |Ext_Zic64b| |Ext_Zicbom| |Ext_Zicbop| |Ext_Zicboz| |Ext_Zicfilp| |Ext_Zicntr| |Ext_Zicond| |Ext_Zicsr| |Ext_Zifencei| |Ext_Zihintntl| |Ext_Zihintpause| |Ext_Zihpm| |Ext_Zimop| |Ext_Zmmul| |Ext_Zaamo| |Ext_Zabha| |Ext_Zacas| |Ext_Zalrsc| |Ext_Zawrs| |Ext_Za64rs| |Ext_Za128rs| |Ext_Zfa| |Ext_Zfbfmin| |Ext_Zfh| |Ext_Zfhmin| |Ext_Zfinx| |Ext_Zdinx| |Ext_Zca| |Ext_Zcb| |Ext_Zcd| |Ext_Zcf| |Ext_Zcmop| |Ext_C| |Ext_Zba| |Ext_Zbb| |Ext_Zbc| |Ext_Zbkb| |Ext_Zbkc| |Ext_Zbkx| |Ext_Zbs| |Ext_Zknd| |Ext_Zkne| |Ext_Zknh| |Ext_Zkr| |Ext_Zksed| |Ext_Zksh| |Ext_Zkt| |Ext_Zhinx| |Ext_Zhinxmin| |Ext_Zvl32b| |Ext_Zvl64b| |Ext_Zvl128b| |Ext_Zvl256b| |Ext_Zvl512b| |Ext_Zvl1024b| |Ext_Zve32f| |Ext_Zve32x| |Ext_Zve64d| |Ext_Zve64f| |Ext_Zve64x| |Ext_Zvabd| |Ext_Zvfbfmin| |Ext_Zvfbfwma| |Ext_Zvfh| |Ext_Zvfhmin| |Ext_Zvbb| |Ext_Zvbc| |Ext_Zvkb| |Ext_Zvkg| |Ext_Zvkned| |Ext_Zvknha| |Ext_Zvknhb| |Ext_Zvksed| |Ext_Zvksh| |Ext_Zvkt| |Ext_Zvkn| |Ext_Zvknc| |Ext_Zvkng| |Ext_Zvks| |Ext_Zvksc| |Ext_Zvksg| |Ext_Sscofpmf| |Ext_Ssstateen| |Ext_Sstc| |Ext_Sstvala| |Ext_Sstvecd| |Ext_Ssu64xl| |Ext_Svbare| |Ext_Sv32| |Ext_Sv39| |Ext_Sv48| |Ext_Sv57| |Ext_Svinval| |Ext_Svnapot| |Ext_Svpbmt| |Ext_Svrsw60t59b| |Ext_Smcntrpmf| |Ext_Smstateen| |Ext_Ssqosid|)) ; 0:0 - 0:0
+  (read-reg |misa| nil (_ struct (|bits| #x8000000000000000)))
+  (write-reg |Final result| nil true))
+Result: v17
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert (not v4)) ; 0:0 - 0:0
+  (declare-const v5 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v6 ((_ extract 9 9) v5)) ; 10868:0 - 0:0
+  (define-const v7 (= v6 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v8 (not v7)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 2 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert (not v8)) ; 0:0 - 0:0
+  (define-const v9 ((_ extract 8 7) v5)) ; 10879:0 - 0:0
+  (define-const v10 (= v9 #b00)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (define-const v11 (not v10)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (branch 3 "sys/vmem_pte.sail 89:5 - 89:65")
+  (assert (not v11)) ; 0:0 - 0:0
+  (define-const v12 ((_ extract 6 5) v5)) ; 10890:0 - 0:0
+  (define-const v13 (= v12 #b00)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (define-const v14 (not v13)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (branch 4 "sys/vmem_pte.sail 90:5 - 90:76")
+  (assert (not v14)) ; 0:0 - 0:0
+  (define-const v15 ((_ extract 4 0) v5)) ; 10901:0 - 0:0
+  (define-const v16 (= v15 #b00000)) ; sys/vmem_pte.sail 91:4 - 91:32
+  (define-const v17 (not v16)) ; sys/vmem_pte.sail 91:4 - 91:32
+  (write-reg |Final result| nil v17))
+Result: v19
+(trace
+  (declare-const v0 (_ BitVec 8)) ; sys/vmem_pte.sail 83:4 - 83:16
+  (define-const v1 ((_ extract 0 0) v0)) ; 11003:0 - 0:0
+  (define-const v2 (= v1 #b0)) ; sys/vmem_pte.sail 83:4 - 83:23
+  (branch 0 "sys/vmem_pte.sail 83:4 - 91:32")
+  (assert (not v2)) ; 0:0 - 0:0
+  (define-const v3 ((_ extract 2 2) v0)) ; 11014:0 - 0:0
+  (define-const v4 (= v3 #b1)) ; sys/vmem_pte.sail 84:5 - 84:24
+  (branch 1 "sys/vmem_pte.sail 84:5 - 84:46")
+  (assert v4) ; 0:0 - 0:0
+  (define-const v5 ((_ extract 1 1) v0)) ; 10981:0 - 0:0
+  (define-const v6 (= v5 #b0)) ; sys/vmem_pte.sail 84:27 - 84:46
+  (branch 2 "sys/vmem_pte.sail 84:4 - 91:32")
+  (assert (not v6)) ; 0:0 - 0:0
+  (declare-const v7 (_ BitVec 10)) ; sys/vmem_pte.sail 88:5 - 88:15
+  (define-const v8 ((_ extract 9 9) v7)) ; 10868:0 - 0:0
+  (define-const v9 (= v8 #b0)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (define-const v10 (not v9)) ; sys/vmem_pte.sail 88:5 - 88:22
+  (branch 3 "sys/vmem_pte.sail 88:5 - 88:59")
+  (assert (not v10)) ; 0:0 - 0:0
+  (define-const v11 ((_ extract 8 7) v7)) ; 10879:0 - 0:0
+  (define-const v12 (= v11 #b00)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (define-const v13 (not v12)) ; sys/vmem_pte.sail 89:5 - 89:29
+  (branch 4 "sys/vmem_pte.sail 89:5 - 89:65")
+  (assert (not v13)) ; 0:0 - 0:0
+  (define-const v14 ((_ extract 6 5) v7)) ; 10890:0 - 0:0
+  (define-const v15 (= v14 #b00)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (define-const v16 (not v15)) ; sys/vmem_pte.sail 90:5 - 90:35
+  (branch 5 "sys/vmem_pte.sail 90:5 - 90:76")
+  (assert (not v16)) ; 0:0 - 0:0
+  (define-const v17 ((_ extract 4 0) v7)) ; 10901:0 - 0:0
+  (define-const v18 (= v17 #b00000)) ; sys/vmem_pte.sail 91:4 - 91:32
+  (define-const v19 (not v18)) ; sys/vmem_pte.sail 91:4 - 91:32
+  (write-reg |Final result| nil v19))

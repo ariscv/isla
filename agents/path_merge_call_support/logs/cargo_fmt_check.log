@@ -1,0 +1,137 @@
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2421:
+     #[test]
+     fn execution_limits_merge_policy_parses_modes_and_selectors() {
+         for (text, mode) in [("force", MergeMode::Force), ("adaptive", MergeMode::Adaptive), ("off", MergeMode::Off)] {
+-            let config = merge_config(&format!(r#"
++            let config = merge_config(&format!(
++                r#"
+                 [[execution_limits.merge_policy]]
+                 function = "pte_is_invalid"
+                 mode = "{text}"
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2432:
+                 start_column = 0
+                 end_line = 20
+                 end_column = 0
+-            "#)).unwrap();
++            "#
++            ))
++            .unwrap();
+             let rules = config.merge_policy.unwrap();
+             assert_eq!(rules[0].mode, mode);
+             assert_eq!(rules[0].selector, MergePolicySelectorConfig::Function(zencode::encode("pte_is_invalid")));
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2439:
+-            assert_eq!(rules[1].selector, MergePolicySelectorConfig::Region(SourceRegionSpec::new("model.sail", (10, 0), (20, 0))));
++            assert_eq!(
++                rules[1].selector,
++                MergePolicySelectorConfig::Region(SourceRegionSpec::new("model.sail", (10, 0), (20, 0)))
++            );
+         }
+     }
+ 
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2459:
+         for value in ["[]", "true", "['off']"] {
+             assert!(merge_config(&format!("[execution_limits]\nmerge_policy = {value}")).is_err());
+         }
+-        for selector in [
+-            "function = 'f'",
+-            "file = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0",
+-        ] {
++        for selector in
++            ["function = 'f'", "file = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0"]
++        {
+             let text = format!("[[execution_limits.merge_policy]]\nmode = 'force'\n{selector}\n[[execution_limits.merge_policy]]\nmode = 'off'\n{selector}");
+             let error = merge_config(&text).unwrap_err();
+             assert!(error.contains("冲突") && error.contains("merge_policy"), "{error}");
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2483:
+         assert_eq!(defaults.merge_mode(f, unknown, None), MergeMode::Off);
+         assert_eq!(defaults.clone().with_path_merging(true).merge_mode(f, unknown, None), MergeMode::Adaptive);
+         assert_eq!(defaults.merge_mode(f, unknown, Some(MergeMode::Force)), MergeMode::Force);
+-        let config = merge_config(r#"
++        let config = merge_config(
++            r#"
+             [execution_limits]
+             path_merging = true
+             [[execution_limits.merge_policy]]
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2503:
+             start_column = 2
+             end_line = 16
+             end_column = 8
+-        "#).unwrap();
++        "#,
++        )
++        .unwrap();
+         let limits = defaults.with_config(&config, &symtab);
+         assert!(limits.path_merging);
+         assert_eq!(limits.merge_mode(g, unknown, None), MergeMode::Adaptive);
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2539:
+         let region = "[[execution_limits.merge_policy]]\nmode = 'off'\nfile = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0";
+         let config = merge_config(region).unwrap();
+         assert!(config.validate_merge_policy(&symtab, &functions, &[]).is_ok());
+-        let strict = merge_config(&format!("[execution_limits]\nstrict = true\nir_sha256 = '{}'\n{region}", "a".repeat(64))).unwrap();
++        let strict =
++            merge_config(&format!("[execution_limits]\nstrict = true\nir_sha256 = '{}'\n{region}", "a".repeat(64)))
++                .unwrap();
+         assert!(strict.validate_ir_sha256(&"a".repeat(64)).is_ok());
+         assert!(strict.validate_ir_sha256(&"b".repeat(64)).is_err());
+         let error = strict.validate_merge_policy(&symtab, &functions, &[]).unwrap_err();
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/config.rs:2546:
+         assert!(error.contains("strict") && error.contains("分支"), "{error}");
+         assert!(strict.validate_merge_policy(&symtab, &functions, &[SourceLoc::new(0, 12, 0, 12, 1)]).is_ok());
+-        assert!(strict.validate_merge_policy(&symtab, &functions, &[SourceLoc::unknown(), SourceLoc::new(0, 20, 0, 20, 1)]).is_err());
+-        let missing_file = merge_config(&format!("[execution_limits]\nstrict = true\nir_sha256 = '{}'\n{}", "a".repeat(64), region.replace("model.sail", "missing.sail"))).unwrap();
++        assert!(strict
++            .validate_merge_policy(&symtab, &functions, &[SourceLoc::unknown(), SourceLoc::new(0, 20, 0, 20, 1)])
++            .is_err());
++        let missing_file = merge_config(&format!(
++            "[execution_limits]\nstrict = true\nir_sha256 = '{}'\n{}",
++            "a".repeat(64),
++            region.replace("model.sail", "missing.sail")
++        ))
++        .unwrap();
+         assert!(missing_file.validate_merge_policy(&symtab, &functions, &[]).is_err());
+     }
+ 
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/executor.rs:238:
+             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
+                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+             }
+-            let idx = usize::try_from(bv.lower_u64()).map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
++            let idx = usize::try_from(bv.lower_u64())
++                .map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+             if idx >= regs.len() {
+                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+             }
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/executor.rs:388:
+             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
+                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+             }
+-            let idx = usize::try_from(bv.lower_u64()).map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
++            let idx = usize::try_from(bv.lower_u64())
++                .map_err(|_| ExecError::Type(invalid_index_argument.to_string(), info))?;
+             if idx >= regs.len() {
+                 return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+             }
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/executor.rs:9896:
+                                 op(left.clone(), right.clone(), &mut solver, info()),
+                                 Err(ExecError::Type(..))
+                             ));
+-                            assert!(matches!(
+-                                op(right, left.clone(), &mut solver, info()),
+-                                Err(ExecError::Type(..))
+-                            ));
++                            assert!(matches!(op(right, left.clone(), &mut solver, info()), Err(ExecError::Type(..))));
+                         } else {
+                             assert_eq!(
+                                 op(left.clone(), right.clone(), &mut solver, info()).unwrap(),
+Diff in /data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/primop.rs:1073:
+     let x_len = length_bits(&x, solver, info)?;
+     let y_len = length_bits(&y, solver, info)?;
+     if x_len != y_len {
+-        return Err(ExecError::Type(
+-            format!("eq_bits operands have different lengths: {} and {}", x_len, y_len),
+-            info,
+-        ));
++        return Err(ExecError::Type(format!("eq_bits operands have different lengths: {} and {}", x_len, y_len), info));
+     }
+     let x = replace_mixed_bits(x, solver, info)?;
+     let y = replace_mixed_bits(y, solver, info)?;

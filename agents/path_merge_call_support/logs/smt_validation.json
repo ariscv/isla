@@ -1,0 +1,62 @@
+[
+  {
+    "file": "agents/path_merge_call_support/paths/path-01.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-02.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-03.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-04.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-05.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-06.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-07.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-08.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result true))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-09.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result false))\n",
+    "stderr": ""
+  },
+  {
+    "file": "agents/path_merge_call_support/paths/path-10.smt2",
+    "returncode": 0,
+    "stdout": "sat\n((result false))\n",
+    "stderr": ""
+  }
+]
