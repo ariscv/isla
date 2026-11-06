@@ -135,3 +135,11 @@ E1 的 `class_cap`、`path_cap` 原样生效；每个解的回调拿到该解尚
 用户修订验收后，跨进程代表值差异单列为遗留问题，不以删除页表或内存字段来掩盖差异。线程一致性验收比较规范守卫赋值集合、类号和分区计数；不声称具体代表模型随线程数或跨进程不变。
 
 最终步骤 3：Sv39 LOAD **16592** 条、Sv48 STORE **51638** 条均由原 pt_decode 全量读取；各前 32 条经 --check-samples 全部接纳并一致。1/16 枚举线程的规范守卫集合、类号和最终截断标记逐项相同，分区和与独立 count 逐路径相同；样本编号无重复。最终 MRET -T 64 冒烟输出 4 条普通 v1 样本，既有 partial 状态保留。
+
+## F9 多后端输出
+
+样本 v1 字段及成员检查绑定不变。现可用 TOML 同时选择 v1_jsonl、compact_jsonl、binary，详见 [sample-outputs.md](sample-outputs.md)。三种后端接收同一份已物化的完整样本，统一分配 sample_id；compact_schema_version=1 和二进制版本独立于 samples v1。
+
+F8 计数计划已包含最终类／路径截断信息，F9 的新会话在枚举回调中直接写最终 truncated，不再先写 true 后补齐；旧 SampleWriter 补写 API 保留供既有调用使用。紧凑后端每类保存一份完整骨架以及每组合的全部实际变化，既不省略模型内容，也不假设片段外输入可任意拼接。
+
+现有 pt_decode 和 --check-samples 继续读取普通 v1 JSONL。用 sample_outputs.py 可将两种新格式流式还原；原始物理行序允许不同，按 sample_id 对齐全部字段。真实 Sv39 STORE 小场景 70 类／4444 组合三后端往返相同，全部还原样本经 pt_decode 读取，前 32 条成员检查接纳且一致；不把该子集当作四场景全量。

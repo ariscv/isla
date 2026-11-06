@@ -10,6 +10,9 @@ mod components;
 #[path = "merge_parallel.rs"]
 mod parallel;
 
+type SampleConsumer<'a, B> = dyn Fn(usize, usize, &[String], bool, &mut Model<B>) -> Result<(), ExecError> + Sync + 'a;
+type ClassConsumer<'a> = dyn Fn(usize, &Value) -> Result<(), ExecError> + Sync + 'a;
+
 fn guard_order<B>(records: &[RegionMergeRecord<B>]) -> Vec<usize> {
     let positions: HashMap<_, _> =
         records.iter().enumerate().map(|(index, record)| (record.record_id, index)).collect();
@@ -178,6 +181,28 @@ impl<B: BV> LocalFrame<'_, B> {
         result: &Val<B>,
         consume: &(impl Fn(usize, usize, &mut Model<B>) -> Result<(), ExecError> + Sync),
     ) -> Result<Option<Value>, ExecError> {
+        self.enumerate_merges_output_with(
+            solver,
+            state,
+            shared,
+            result,
+            &|class, solution, _, _, model| consume(class, solution, model),
+            None,
+            true,
+        )
+    }
+
+    /// 输出端收到同一个模型、被测片段与最终截断标志；显式外置解可避免在 gen JSON 中积攒全部组合。
+    pub fn enumerate_merges_output_with(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
+        consume: &SampleConsumer<'_, B>,
+        complete: Option<&ClassConsumer<'_>>,
+        retain_solutions: bool,
+    ) -> Result<Option<Value>, ExecError> {
         let Some(config) = state.execution_limits.as_ref().map(|limits| &limits.merge_enumeration) else {
             return Ok(None);
         };
@@ -193,12 +218,14 @@ impl<B: BV> LocalFrame<'_, B> {
                 state,
                 shared,
                 result,
-                &mut |class, solution, model| consume(class, solution, model),
+                consume,
+                complete,
+                retain_solutions,
                 None,
                 None,
             );
         }
-        parallel::enumerate(self, solver, state, shared, result, consume).map(Some)
+        parallel::enumerate(self, solver, state, shared, result, consume, complete, retain_solutions).map(Some)
     }
 
     fn enumerate_merges_partition(
@@ -207,7 +234,9 @@ impl<B: BV> LocalFrame<'_, B> {
         state: &TaskState<B>,
         shared: &SharedState<B>,
         result: &Val<B>,
-        consume: &mut impl FnMut(usize, usize, &mut Model<B>) -> Result<(), ExecError>,
+        consume: &SampleConsumer<'_, B>,
+        complete: Option<&ClassConsumer<'_>>,
+        retain_solutions: bool,
         partition: Option<&parallel::Partition>,
         plans: Option<&HashMap<Vec<bool>, parallel::ClassPlan>>,
     ) -> Result<Option<Value>, ExecError> {
@@ -285,6 +314,19 @@ impl<B: BV> LocalFrame<'_, B> {
             plans.values().filter(|plan| plan.partition == partition.unwrap().id).map(|plan| plan.count).sum()
         });
         let counting = probing || config.mode == crate::config::MergeEnumerationMode::Count;
+        let measuring = probing
+            && config.mode == crate::config::MergeEnumerationMode::Count
+            && std::env::var("ISLA_ENUM_MEASURE").as_deref() == Ok("1");
+        let measure = |phase, classes, paths| {
+            if measuring {
+                eprintln!(
+                    "[MERGE_ENUMERATION_MEASURE] {}",
+                    json!({"phase":phase,
+                    "path_signature":self.path_signature(), "partition_id":partition.unwrap().id,
+                    "counted_classes":classes, "counted_paths":paths})
+                );
+            }
+        };
         // DFS 只抽取被投影的一位谓词见证；完整输入、返回值和状态仅在选中位置求值。
         let packed_bits = bit_predicates
             .iter()
@@ -388,6 +430,7 @@ impl<B: BV> LocalFrame<'_, B> {
                 let mut assignment = Vec::<bool>::new();
                 let mut solutions = Vec::new();
                 let mut solution_count = 0;
+                let mut class_exported = 0;
                 let mut truncated = false;
                 // 一级叶子的 Sat 缓存直接用于第一个解，class_cap=1 只创建一次模型。
                 let mut candidate = Some((class_prefix, 0));
@@ -490,14 +533,22 @@ impl<B: BV> LocalFrame<'_, B> {
                             })
                             .collect();
                         let representative_result = model.get_val(result)?.to_string(shared);
-                        consume(class_id, solution_count, &mut model)?;
+                        let truncated = plan.map_or(false, |plan| plan.truncated || plan.path_truncated);
+                        consume(class_id, solution_count, &values, truncated, &mut model)?;
+                        class_exported += 1;
                         exported_samples += 1;
-                        solutions
-                            .push(json!({"slice_values":values, "representative":{"result":representative_result}}));
+                        if retain_solutions {
+                            solutions.push(
+                                json!({"slice_values":values, "representative":{"result":representative_result}}),
+                            );
+                        }
                     }
                     projection_time += projected.elapsed();
                     solution_count += 1;
                     total += 1;
+                    if measuring && total % 4096 == 0 {
+                        measure("progress", class_count, total);
+                    }
                     // 模型见证直接选择后续位分支；前沿仍通过 SAT 检查剪枝。
                     if solution_count == class_cap || ((partition.is_none() || probing) && total == config.path_cap) {
                         let leaf =
@@ -533,7 +584,7 @@ impl<B: BV> LocalFrame<'_, B> {
                         }
                     }
                 }
-                if probing || (!counting && !solutions.is_empty()) {
+                if probing || (!counting && class_exported > 0) {
                     let class_id = plans.map_or(class_count, |plans| plans[&assignment].class_id);
                     let mut record_assignment = vec![false; records.len()];
                     for (index, value) in order.iter().zip(assignment) {
@@ -544,9 +595,17 @@ impl<B: BV> LocalFrame<'_, B> {
                         .zip(record_assignment)
                         .map(|(record, value)| (record.record_id.to_string(), json!(value)))
                         .collect();
+                    if !probing {
+                        if let Some(complete) = complete {
+                            complete(
+                                class_id,
+                                &json!({"guard_assignment":guard_assignment, "tested_slices":tested, "solution_count":class_exported}),
+                            )?;
+                        }
+                    }
                     classes.push(json!({"class_id":class_id, "guard_assignment":guard_assignment,
                     "counted_paths":solution_count,
-                    "solution_count":solutions.len(), "solutions":solutions, "truncated":truncated}));
+                    "solution_count":class_exported, "solutions":solutions, "truncated":truncated}));
                 }
                 class_count += 1;
                 truncated_classes += usize::from(truncated);
@@ -556,6 +615,9 @@ impl<B: BV> LocalFrame<'_, B> {
                 if path_truncated {
                     break;
                 }
+            }
+            if measuring {
+                measure("partition_complete", class_count, total);
             }
             if partition.is_none() {
                 shared.execution_stats.enumeration_counted(

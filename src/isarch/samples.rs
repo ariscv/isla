@@ -1,7 +1,9 @@
 //! solve-state 的样本配置与终态适配；算法由 isla-lib 两种模式共用。
 use super::target::Target;
 use isla_lib::bitvector::BV;
-use isla_lib::executor::samples::{SampleChecker, SamplePath, SampleWriter};
+use isla_lib::config::{MergeEnumerationConfig, MergeEnumerationMode, SampleOutputConfig, SampleOutputFormat};
+use isla_lib::executor::samples::outputs::SampleOutputs;
+use isla_lib::executor::samples::{SampleChecker, SamplePath};
 use isla_lib::executor::LocalFrame;
 use isla_lib::ir::{SharedState, Val};
 use isla_lib::register::RegisterBindings;
@@ -33,21 +35,40 @@ impl SampleOptions {
 }
 
 pub struct SampleSession {
-    pub writer: Option<SampleWriter>,
+    pub writer: Option<SampleOutputs>,
     pub checker: Option<SampleChecker>,
+    pub retain_solutions: bool,
 }
 impl SampleSession {
-    pub fn new(options: &SampleOptions) -> Result<Self, String> {
+    pub fn new(options: &SampleOptions, enumeration: Option<&MergeEnumerationConfig>) -> Result<Self, String> {
         options.validate()?;
+        let counting = enumeration.is_some_and(|config| config.enabled && config.mode == MergeEnumerationMode::Count);
+        let outputs = enumeration.map_or(&[][..], |config| config.outputs.as_slice());
+        let mut configured = if counting { Vec::new() } else { outputs.to_vec() };
+        if let Some(path) = std::env::var_os("ISLA_EXPORT_SAMPLES").filter(|_| !counting) {
+            let path = PathBuf::from(path);
+            if configured.iter().any(|output| output.format == SampleOutputFormat::V1Jsonl || output.path == path) {
+                return Err("ISLA_EXPORT_SAMPLES 不得与 TOML 输出路径或 v1_jsonl 后端重复".into());
+            }
+            configured.push(SampleOutputConfig { format: SampleOutputFormat::V1Jsonl, path });
+        }
+        if options.check.as_ref().is_some_and(|input| configured.iter().any(|output| &output.path == input)) {
+            return Err("样本输出不得覆盖检查输入".into());
+        }
+        if options.report.as_ref().is_some_and(|report| configured.iter().any(|output| &output.path == report)) {
+            return Err("检查报告不得覆盖样本输出".into());
+        }
         let checker = options.check.as_ref().map(|path| SampleChecker::load(path, options.limit)).transpose()?;
-        let writer =
-            std::env::var_os("ISLA_EXPORT_SAMPLES").map(|path| SampleWriter::open(std::path::Path::new(&path)));
-        Ok(Self { writer, checker })
+        let writer = (!configured.is_empty()).then(|| SampleOutputs::open(&configured));
+        Ok(Self { writer, checker, retain_solutions: outputs.is_empty() })
     }
     pub fn enabled(&self) -> bool {
         self.writer.is_some() || self.checker.is_some()
     }
     pub fn finish(&self, options: &SampleOptions, completed: bool) {
+        if let Some(writer) = &self.writer {
+            writer.finish();
+        }
         if let Some(checker) = &self.checker {
             let mut report = checker.report();
             report["completed"] = serde_json::json!(completed);
@@ -237,6 +258,21 @@ mod tests {
         let expected = target.solve_pre_state(&mut model, &shared).unwrap();
         let actual = isa_state(&target, &sample, &mut model, &shared).unwrap();
         assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    #[test]
+    fn samples_f9_报告不得覆盖后端文件() {
+        let outputs = MergeEnumerationConfig {
+            outputs: vec![SampleOutputConfig { format: SampleOutputFormat::Binary, path: "same.bin".into() }],
+            ..Default::default()
+        };
+        let options =
+            SampleOptions { check: Some("unused-input.jsonl".into()), limit: None, report: Some("same.bin".into()) };
+        let error = SampleSession::new(&options, Some(&outputs)).err().unwrap();
+        assert!(error.contains("检查报告不得覆盖样本输出"));
+        let counting = MergeEnumerationConfig { enabled: true, mode: MergeEnumerationMode::Count, ..outputs };
+        let session = SampleSession::new(&SampleOptions::default(), Some(&counting)).unwrap();
+        assert!(session.writer.is_none(), "count 不得打开任何输出后端");
     }
 
     #[test]

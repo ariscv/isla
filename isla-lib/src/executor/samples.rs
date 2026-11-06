@@ -16,6 +16,9 @@ use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
 
+#[path = "sample_outputs.rs"]
+pub mod outputs;
+
 fn concrete_bits<B: BV>(value: B) -> Value {
     json!({"bits": (0..value.len()).rev().map(|i| if value.slice(i,1).unwrap().lower_u64()==1 {'1'} else {'0'}).collect::<String>()})
 }
@@ -537,6 +540,10 @@ impl SampleWriter {
     }
     pub fn append(&self, mut sample: Sample) -> SamplePosition {
         sample.sample_id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.append_assigned(&sample)
+    }
+
+    fn append_assigned(&self, sample: &Sample) -> SamplePosition {
         let mut line = serde_json::to_vec(&sample).expect("样本序列化失败");
         // Sample 的字段顺序保证这个键先于所有用户数据；false 和 true+空格均占五字节。
         let key = b"\"truncated\":";

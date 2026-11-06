@@ -1888,6 +1888,20 @@ pub struct MergeEnumerationConfig {
     pub path_cap: usize,
     pub sample_stride: usize,
     pub enumeration_threads: usize,
+    pub outputs: Vec<SampleOutputConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleOutputConfig {
+    pub format: SampleOutputFormat,
+    pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SampleOutputFormat {
+    V1Jsonl,
+    CompactJsonl,
+    Binary,
 }
 
 impl Default for MergeEnumerationConfig {
@@ -1899,6 +1913,7 @@ impl Default for MergeEnumerationConfig {
             path_cap: 65536,
             sample_stride: 1,
             enumeration_threads: std::thread::available_parallelism().unwrap().get().min(16),
+            outputs: Vec::new(),
         }
     }
 }
@@ -2330,9 +2345,33 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             allowed_table_keys(
                 sub,
                 root,
-                &["enabled", "mode", "class_cap", "path_cap", "sample_stride", "enumeration_threads"],
+                &["enabled", "mode", "class_cap", "path_cap", "sample_stride", "enumeration_threads", "outputs"],
             )?;
             let mut config = MergeEnumerationConfig::default();
+            if let Some(outputs) = sub.get("outputs") {
+                let outputs = outputs.as_array().ok_or_else(|| format!("{root}.outputs 必须是数组"))?;
+                let mut formats = std::collections::HashSet::new();
+                let mut paths = std::collections::HashSet::new();
+                for value in outputs {
+                    let table = value.as_table().ok_or_else(|| format!("{root}.outputs 项必须是 table"))?;
+                    allowed_table_keys(table, root, &["format", "path"])?;
+                    let format = match table.get("format").and_then(toml::Value::as_str) {
+                        Some("v1_jsonl") => SampleOutputFormat::V1Jsonl,
+                        Some("compact_jsonl") => SampleOutputFormat::CompactJsonl,
+                        Some("binary") => SampleOutputFormat::Binary,
+                        _ => return Err(format!("{root}.outputs.format 必须是 v1_jsonl、compact_jsonl 或 binary")),
+                    };
+                    let path = table
+                        .get("path")
+                        .and_then(toml::Value::as_str)
+                        .filter(|path| !path.is_empty())
+                        .ok_or_else(|| format!("{root}.outputs.path 必须是非空字符串"))?;
+                    if !formats.insert(format) || !paths.insert(path) {
+                        return Err(format!("{root}.outputs 不得重复格式或文件路径"));
+                    }
+                    config.outputs.push(SampleOutputConfig { format, path: path.into() });
+                }
+            }
             if let Some(mode) = sub.get("mode") {
                 config.mode = match mode.as_str() {
                     Some("samples") => MergeEnumerationMode::Samples,
@@ -2647,6 +2686,33 @@ mod tests {
             MergeEnumerationConfig::default().enumeration_threads,
             std::thread::available_parallelism().unwrap().get().min(16)
         );
+    }
+
+    #[test]
+    fn execution_limits_merge_enumeration_output_backends() {
+        let config = merge_config(
+            r#"
+            [[execution_limits.merge_enumeration.outputs]]
+            format = "v1_jsonl"
+            path = "samples.jsonl"
+            [[execution_limits.merge_enumeration.outputs]]
+            format = "compact_jsonl"
+            path = "compact.jsonl"
+            [[execution_limits.merge_enumeration.outputs]]
+            format = "binary"
+            path = "samples.bin"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.merge_enumeration.unwrap().outputs.len(), 3);
+        for fields in [
+            "format='unknown'\npath='a'",
+            "format='binary'",
+            "format='binary'\npath=''",
+            "format='binary'\npath='a'\nextra=1",
+        ] {
+            assert!(merge_config(&format!("[[execution_limits.merge_enumeration.outputs]]\n{fields}")).is_err());
+        }
     }
 
     #[test]

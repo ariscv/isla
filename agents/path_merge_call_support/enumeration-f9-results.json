@@ -1,0 +1,964 @@
+{
+  "基线": "b37ddf6",
+  "count": {
+    "基线": "b37ddf6",
+    "计数范围": "所有实际 tested_slices 去重位的满足组合，含不活动守卫引用片段；两级预算均为i64::MAX。",
+    "配置": {
+      "class_cap": 9223372036854775807,
+      "path_cap": 9223372036854775807,
+      "mode": "count",
+      "execution_threads": 32,
+      "enumeration_threads": 4,
+      "cpu_affinity_per_process": 4,
+      "simultaneous_scenarios": 4
+    },
+    "完整性说明": "四场景均在二十分钟超时，以下为已知下界；未访问组合不算零，没有给出完整总数或证明总数小于十亿。完成比例分母为已启动枚举的路径。",
+    "scenarios": {
+      "sv39-load": {
+        "lower_bound": 844032,
+        "started_paths": 20,
+        "completed_paths": 1,
+        "complete": false,
+        "paths": [
+          {
+            "path_signature": "10451216379200822465",
+            "complete": true,
+            "counted_classes": 10,
+            "lower_bound": 256
+          },
+          {
+            "path_signature": "933929842286410705",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 843776
+          },
+          {
+            "path_signature": "2752876776965356570",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "13518721048086275240",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "10637179611784840037",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12041149045941709759",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "1560237527141136542",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3021853842726066451",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15750014256193343950",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "499923463869755939",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15220128886027568558",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "16970506114320330013",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "6973640434494283890",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "7003519055933742230",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12363878372900898510",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5612635667498903607",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15337294027415708823",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "8917986596743865391",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12271438732188395442",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "14273580478652762596",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          }
+        ],
+        "seconds": 1201.713,
+        "exit_code": -15,
+        "reason": "timeout",
+        "process_completed": false
+      },
+      "sv39-store": {
+        "lower_bound": 823552,
+        "started_paths": 20,
+        "completed_paths": 1,
+        "complete": false,
+        "paths": [
+          {
+            "path_signature": "10451216379200822465",
+            "complete": true,
+            "counted_classes": 10,
+            "lower_bound": 256
+          },
+          {
+            "path_signature": "933929842286410705",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 823296
+          },
+          {
+            "path_signature": "2752876776965356570",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "13518721048086275240",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "10637179611784840037",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12041149045941709759",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3021853842726066451",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "1560237527141136542",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "499923463869755939",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15750014256193343950",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "6973640434494283890",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15220128886027568558",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "16970506114320330013",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "7003519055933742230",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12363878372900898510",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5612635667498903607",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15337294027415708823",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "8917986596743865391",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12271438732188395442",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "14273580478652762596",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          }
+        ],
+        "seconds": 1201.924,
+        "exit_code": -15,
+        "reason": "timeout",
+        "process_completed": false
+      },
+      "sv48-load": {
+        "lower_bound": 672004,
+        "started_paths": 27,
+        "completed_paths": 1,
+        "complete": false,
+        "paths": [
+          {
+            "path_signature": "10451216379200822465",
+            "complete": true,
+            "counted_classes": 10,
+            "lower_bound": 256
+          },
+          {
+            "path_signature": "933929842286410705",
+            "complete": false,
+            "counted_classes": 2,
+            "lower_bound": 671748
+          },
+          {
+            "path_signature": "2752876776965356570",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "13518721048086275240",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "10637179611784840037",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12041149045941709759",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "1560237527141136542",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3021853842726066451",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "499923463869755939",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15750014256193343950",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "6973640434494283890",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15220128886027568558",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "16970506114320330013",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12363878372900898510",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5612635667498903607",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3434120644046094660",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "10904690414256131709",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "9711230084785329577",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "13086966537797452360",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5308746120572720046",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "1072519218002616177",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "14947180895222177486",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3556644003697749754",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3852488296513071771",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "14426264662589570334",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "9735951877877319656",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5486192723457138630",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          }
+        ],
+        "seconds": 1202.137,
+        "exit_code": -15,
+        "reason": "timeout",
+        "process_completed": false
+      },
+      "sv48-store": {
+        "lower_bound": 700676,
+        "started_paths": 27,
+        "completed_paths": 1,
+        "complete": false,
+        "paths": [
+          {
+            "path_signature": "10451216379200822465",
+            "complete": true,
+            "counted_classes": 10,
+            "lower_bound": 256
+          },
+          {
+            "path_signature": "933929842286410705",
+            "complete": false,
+            "counted_classes": 2,
+            "lower_bound": 700420
+          },
+          {
+            "path_signature": "2752876776965356570",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "10637179611784840037",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "13518721048086275240",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12041149045941709759",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3021853842726066451",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "1560237527141136542",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "499923463869755939",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15750014256193343950",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "6973640434494283890",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "15220128886027568558",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "16970506114320330013",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "12363878372900898510",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5612635667498903607",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "10904690414256131709",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3434120644046094660",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "9711230084785329577",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5308746120572720046",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "13086966537797452360",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "1072519218002616177",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3556644003697749754",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "14947180895222177486",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "3852488296513071771",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "14426264662589570334",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "9735951877877319656",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          },
+          {
+            "path_signature": "5486192723457138630",
+            "complete": false,
+            "counted_classes": 0,
+            "lower_bound": 0
+          }
+        ],
+        "seconds": 1202.4,
+        "exit_code": -15,
+        "reason": "timeout",
+        "process_completed": false
+      }
+    },
+    "binary_sha256": "adae7cf25ceff247db9b8f0936758e9e39a4cca2284ad5e8eee80b82b376ea16"
+  },
+  "acceptance": {
+    "all_v1_fields_equal": true,
+    "samples": 4444,
+    "classes": 70,
+    "removed_fields": [],
+    "binary_header_bytes": 441,
+    "binary_class_index_bytes": 2800,
+    "binary_index_bytes_per_class": 40,
+    "binary_payload_bytes": 7865246,
+    "binary_footer_bytes": 40,
+    "formats": {
+      "v1_jsonl": {
+        "total_bytes": 254884392,
+        "bytes_per_class": 3641205.6,
+        "bytes_per_combination": 57354.72367236724
+      },
+      "compact_jsonl": {
+        "total_bytes": 10307061,
+        "bytes_per_class": 147243.72857142857,
+        "bytes_per_combination": 2319.3206570657067
+      },
+      "binary": {
+        "total_bytes": 7868527,
+        "bytes_per_class": 112407.52857142857,
+        "bytes_per_combination": 1770.5956345634563
+      }
+    }
+  },
+  "command": [
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/target_f8/release/isarch",
+    "-D",
+    "sr",
+    "--smt-timeout",
+    "5",
+    "-A",
+    "/data1/baiyifan/workplace/isla-runner/isla/.worktrees/memory-consistency/rv64d.ir",
+    "-C",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/mmu-symbolic-experiment/symbolic/config.toml",
+    "-T",
+    "64",
+    "--timeout",
+    "590",
+    "--instruction-bits",
+    "0x0020b023",
+    "--prestate",
+    "x1=0x0000000020000000",
+    "--prestate",
+    "cur_privilege=Supervisor",
+    "--prestate",
+    "satp=0x8000000000080200",
+    "--prestate",
+    "mstatus={bits=0x0000000a00040000}",
+    "--prestate",
+    "menvcfg={bits=0x0000000000000000}",
+    "--prestate",
+    "senvcfg={bits=0x0000000000000000}",
+    "--prestate",
+    "mseccfg={bits=0x0000000000000000}",
+    "--path-merging",
+    "--execution-limits-config",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/output/f9/acceptance/limits.toml",
+    "solve-state",
+    "--clause=STORE"
+  ],
+  "execution": {
+    "exit": 0,
+    "seconds": 125.04725733801024
+  },
+  "sample_check": {
+    "schema_version": 1,
+    "sample_total": 32,
+    "samples": [
+      {
+        "sample_id": 2,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 0,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 3,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 4,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 6,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 9,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 7,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 10,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 12,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 15,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 18,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 21,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 13,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 16,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 19,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 22,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 25,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 27,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 30,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 33,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 35,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 38,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 41,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 44,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 23,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 26,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 28,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 29,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 32,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 34,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 36,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 39,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      }
+    ],
+    "unaccepted_sample_ids": [],
+    "inconsistent": [],
+    "completed": true
+  },
+  "smoke": {
+    "all_v1_fields_equal": true,
+    "samples": 4,
+    "classes": 4,
+    "removed_fields": [],
+    "binary_header_bytes": 441,
+    "binary_class_index_bytes": 160,
+    "binary_index_bytes_per_class": 40,
+    "binary_payload_bytes": 113285,
+    "binary_footer_bytes": 40,
+    "formats": {
+      "v1_jsonl": {
+        "total_bytes": 165349,
+        "bytes_per_class": 41337.25,
+        "bytes_per_combination": 41337.25
+      },
+      "compact_jsonl": {
+        "total_bytes": 166289,
+        "bytes_per_class": 41572.25,
+        "bytes_per_combination": 41572.25
+      },
+      "binary": {
+        "total_bytes": 113926,
+        "bytes_per_class": 28481.5,
+        "bytes_per_combination": 28481.5
+      }
+    }
+  },
+  "smoke_summary": {
+    "sampled-paths": 0,
+    "errors": 0,
+    "execution-timeouts": 0,
+    "smt-timeouts": 0,
+    "unfinished-paths": 1,
+    "assertion-filtered-paths": 0,
+    "omitted-cases": 0,
+    "model-query-timeouts": 0,
+    "encoding-filtered-paths": 0,
+    "pending-batches": 0,
+    "status": "partial",
+    "model-coverage": "not-measured",
+    "target-clause": "zMRET"
+  },
+  "tests": {
+    "samples_passed": 8,
+    "samples_ignored": 1,
+    "enumeration_passed": 14,
+    "enumeration_ignored": 2,
+    "python_measure": 2,
+    "python_readback": 4
+  },
+  "artifacts": "output/f9/",
+  "binary_sha256": "be004a459bf45b3da06dd9d237ef5a53e1218c4a7d94663db5f20a2bf622bdc2",
+  "final_binary_sha256": "be004a459bf45b3da06dd9d237ef5a53e1218c4a7d94663db5f20a2bf622bdc2",
+  "source_sha256": {
+    "isla-lib/src/executor/sample_outputs.rs": "e01f91e25790b79264f48bfce77d4cce6e055dbe4332712b068f94a8b2e43ef5",
+    "isla-lib/src/executor/sample_binary.rs": "f12abe0c5ed80721745f0fa7fb6b7073ef6b94708c1e049ec4dcea89276fd162",
+    "isla-lib/src/executor/merge_enumeration.rs": "b1fa9039c1f191c431c0d88aa0e640e3926371750480953152c7cf928d87ddb2",
+    "isla-lib/src/executor/merge_parallel.rs": "84ea75cf0f2b6a8593869b4c27aaeb36fb62f83cdb453bbca176884237b2a20d",
+    "src/isarch/samples.rs": "359d9c49a818e19efed87f6a65ecb3a8c981e2bdb3714a0817fbd03a609618d9",
+    "src/isarch/exec.rs": "e9329f8a35bfad4ef62014bcc75501745769ea99aedf34e855ab76d86602360e"
+  },
+  "validation_note": "4444 条主验收后仅增加编号溢出检查和报告路径防覆盖检查；最终二进制另经三后端 MRET 4 条往返验证。"
+}

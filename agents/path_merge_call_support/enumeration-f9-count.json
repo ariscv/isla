@@ -1,0 +1,629 @@
+{
+  "基线": "b37ddf6",
+  "计数范围": "所有实际 tested_slices 去重位的满足组合，含不活动守卫引用片段；两级预算均为i64::MAX。",
+  "配置": {
+    "class_cap": 9223372036854775807,
+    "path_cap": 9223372036854775807,
+    "mode": "count",
+    "execution_threads": 32,
+    "enumeration_threads": 4,
+    "cpu_affinity_per_process": 4,
+    "simultaneous_scenarios": 4
+  },
+  "完整性说明": "四场景均在二十分钟超时，以下为已知下界；未访问组合不算零，没有给出完整总数或证明总数小于十亿。完成比例分母为已启动枚举的路径。",
+  "scenarios": {
+    "sv39-load": {
+      "lower_bound": 844032,
+      "started_paths": 20,
+      "completed_paths": 1,
+      "complete": false,
+      "paths": [
+        {
+          "path_signature": "10451216379200822465",
+          "complete": true,
+          "counted_classes": 10,
+          "lower_bound": 256
+        },
+        {
+          "path_signature": "933929842286410705",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 843776
+        },
+        {
+          "path_signature": "2752876776965356570",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "13518721048086275240",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "10637179611784840037",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12041149045941709759",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "1560237527141136542",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3021853842726066451",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15750014256193343950",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "499923463869755939",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15220128886027568558",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "16970506114320330013",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "6973640434494283890",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "7003519055933742230",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12363878372900898510",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5612635667498903607",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15337294027415708823",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "8917986596743865391",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12271438732188395442",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "14273580478652762596",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        }
+      ],
+      "seconds": 1201.713,
+      "exit_code": -15,
+      "reason": "timeout",
+      "process_completed": false
+    },
+    "sv39-store": {
+      "lower_bound": 823552,
+      "started_paths": 20,
+      "completed_paths": 1,
+      "complete": false,
+      "paths": [
+        {
+          "path_signature": "10451216379200822465",
+          "complete": true,
+          "counted_classes": 10,
+          "lower_bound": 256
+        },
+        {
+          "path_signature": "933929842286410705",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 823296
+        },
+        {
+          "path_signature": "2752876776965356570",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "13518721048086275240",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "10637179611784840037",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12041149045941709759",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3021853842726066451",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "1560237527141136542",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "499923463869755939",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15750014256193343950",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "6973640434494283890",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15220128886027568558",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "16970506114320330013",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "7003519055933742230",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12363878372900898510",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5612635667498903607",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15337294027415708823",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "8917986596743865391",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12271438732188395442",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "14273580478652762596",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        }
+      ],
+      "seconds": 1201.924,
+      "exit_code": -15,
+      "reason": "timeout",
+      "process_completed": false
+    },
+    "sv48-load": {
+      "lower_bound": 672004,
+      "started_paths": 27,
+      "completed_paths": 1,
+      "complete": false,
+      "paths": [
+        {
+          "path_signature": "10451216379200822465",
+          "complete": true,
+          "counted_classes": 10,
+          "lower_bound": 256
+        },
+        {
+          "path_signature": "933929842286410705",
+          "complete": false,
+          "counted_classes": 2,
+          "lower_bound": 671748
+        },
+        {
+          "path_signature": "2752876776965356570",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "13518721048086275240",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "10637179611784840037",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12041149045941709759",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "1560237527141136542",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3021853842726066451",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "499923463869755939",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15750014256193343950",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "6973640434494283890",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15220128886027568558",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "16970506114320330013",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12363878372900898510",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5612635667498903607",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3434120644046094660",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "10904690414256131709",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "9711230084785329577",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "13086966537797452360",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5308746120572720046",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "1072519218002616177",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "14947180895222177486",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3556644003697749754",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3852488296513071771",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "14426264662589570334",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "9735951877877319656",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5486192723457138630",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        }
+      ],
+      "seconds": 1202.137,
+      "exit_code": -15,
+      "reason": "timeout",
+      "process_completed": false
+    },
+    "sv48-store": {
+      "lower_bound": 700676,
+      "started_paths": 27,
+      "completed_paths": 1,
+      "complete": false,
+      "paths": [
+        {
+          "path_signature": "10451216379200822465",
+          "complete": true,
+          "counted_classes": 10,
+          "lower_bound": 256
+        },
+        {
+          "path_signature": "933929842286410705",
+          "complete": false,
+          "counted_classes": 2,
+          "lower_bound": 700420
+        },
+        {
+          "path_signature": "2752876776965356570",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "10637179611784840037",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "13518721048086275240",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12041149045941709759",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3021853842726066451",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "1560237527141136542",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "499923463869755939",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15750014256193343950",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "6973640434494283890",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "15220128886027568558",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "16970506114320330013",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "12363878372900898510",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5612635667498903607",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "10904690414256131709",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3434120644046094660",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "9711230084785329577",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5308746120572720046",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "13086966537797452360",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "1072519218002616177",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3556644003697749754",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "14947180895222177486",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "3852488296513071771",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "14426264662589570334",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "9735951877877319656",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        },
+        {
+          "path_signature": "5486192723457138630",
+          "complete": false,
+          "counted_classes": 0,
+          "lower_bound": 0
+        }
+      ],
+      "seconds": 1202.4,
+      "exit_code": -15,
+      "reason": "timeout",
+      "process_completed": false
+    }
+  },
+  "binary_sha256": "adae7cf25ceff247db9b8f0936758e9e39a4cca2284ad5e8eee80b82b376ea16"
+}

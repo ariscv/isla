@@ -1119,7 +1119,10 @@ pub fn solve_state_main<'ir, B: BV>(
     encoding_slices: &[isla_lib::config::EncodingSliceConfig],
     sample_options: &super::samples::SampleOptions,
 ) -> bool {
-    let samples = match super::samples::SampleSession::new(sample_options) {
+    let samples = match super::samples::SampleSession::new(
+        sample_options,
+        execution_limits_config.and_then(|limits| limits.merge_enumeration.as_ref()),
+    ) {
         Ok(samples) => samples,
         Err(error) => {
             eprintln!("样本配置错误：{error}");
@@ -1595,16 +1598,25 @@ fn solve_collect_path<'ir, B: BV>(
                             .check_path(&sample_path, &mut solver, shared_state, frame.path_signature())
                             .expect("样本成员检查失败");
                     }
-                    let exported_positions = Mutex::new(Vec::new());
+                    let output_path = ctx.samples.writer.as_ref().map(|writer| writer.start_path());
                     let mode =
                         if ctx.path_merging || !frame.region_merge_records().is_empty() { "merge" } else { "fork" };
+                    let grouped = ctx.samples.writer.as_ref().is_some_and(|writer| writer.grouped());
+                    let complete_class = |class_id, metadata: &serde_json::Value| {
+                        ctx.samples.writer.as_ref().unwrap().finish_class(
+                            output_path.unwrap(),
+                            Some(class_id),
+                            metadata,
+                        );
+                        Ok(())
+                    };
                     let merge_enumeration = frame
-                        .enumerate_merges_parallel_with(
+                        .enumerate_merges_output_with(
                             &mut solver,
                             ctx.task_state,
                             shared_state,
                             ret_val,
-                            &|class_id, _, model| {
+                            &|class_id, solution, slices, truncated, model| {
                                 if let Some(writer) = &ctx.samples.writer {
                                     let mut sample = sample_path.materialize(
                                         model,
@@ -1615,29 +1627,17 @@ fn solve_collect_path<'ir, B: BV>(
                                     )?;
                                     sample.isa_state =
                                         super::samples::isa_state(ctx.target, &sample, model, shared_state)?;
-                                    // 路径尚未结束，先保守标记；收尾再补齐类／路径截断结果。
-                                    sample.truncated = true;
-                                    exported_positions.lock().unwrap().push((class_id, writer.append(sample)));
+                                    sample.truncated = truncated;
+                                    writer.append(output_path.unwrap(), solution, slices, sample);
                                 }
                                 Ok(())
                             },
+                            if grouped { Some(&complete_class) } else { None },
+                            ctx.samples.retain_solutions,
                         )
                         .expect("完成路径的合并枚举失败");
                     if let Some(writer) = &ctx.samples.writer {
-                        if let Some(enumeration) = &merge_enumeration {
-                            for (class_id, position) in exported_positions.into_inner().unwrap() {
-                                let classes = enumeration["guard_classes"].as_array().unwrap();
-                                let index = classes
-                                    .binary_search_by_key(&class_id, |class| {
-                                        class["class_id"].as_u64().unwrap() as usize
-                                    })
-                                    .expect("导出样本必须属于已枚举的类");
-                                let class = &classes[index];
-                                let truncated = enumeration["path_truncated"].as_bool().unwrap()
-                                    || class["truncated"].as_bool().unwrap();
-                                writer.set_truncated(position, truncated);
-                            }
-                        } else {
+                        if merge_enumeration.is_none() {
                             match solver.check_sat(SourceLoc::unknown()) {
                                 isla_lib::smt::SmtResult::Sat => (),
                                 result => panic!("样本导出必须有完整模型：{result:?}"),
@@ -1648,7 +1648,15 @@ fn solve_collect_path<'ir, B: BV>(
                                 .expect("样本物化失败");
                             sample.isa_state = super::samples::isa_state(ctx.target, &sample, &mut model, shared_state)
                                 .expect("样本前置状态物化失败");
-                            writer.append(sample);
+                            writer.append(output_path.unwrap(), 0, &[], sample);
+                            if grouped {
+                                writer.finish_class(
+                                    output_path.unwrap(),
+                                    None,
+                                    &serde_json::json!({
+                                "solution_count":1,"guard_assignment":{},"tested_slices":[]}),
+                                );
+                            }
                         }
                     }
                     merge_enumeration

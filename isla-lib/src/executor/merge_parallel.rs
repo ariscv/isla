@@ -25,7 +25,8 @@ pub(super) struct ClassPlan {
     pub(super) class_id: usize,
     pub(super) ordinal: usize,
     pub(super) count: usize,
-    truncated: bool,
+    pub(super) truncated: bool,
+    pub(super) path_truncated: bool,
     pub(super) partition: usize,
 }
 
@@ -35,7 +36,9 @@ pub(super) fn enumerate<B: BV>(
     state: &TaskState<B>,
     shared: &SharedState<B>,
     result: &Val<B>,
-    consume: &(impl Fn(usize, usize, &mut Model<B>) -> Result<(), ExecError> + Sync),
+    consume: &SampleConsumer<'_, B>,
+    complete: Option<&ClassConsumer<'_>>,
+    retain_solutions: bool,
 ) -> Result<Value, ExecError> {
     use Formula::*;
     let config = &state.execution_limits.as_ref().unwrap().merge_enumeration;
@@ -97,6 +100,15 @@ pub(super) fn enumerate<B: BV>(
     drop(partition_solver);
     drop(context);
     let workers = config.enumeration_threads.min(partitions.len());
+    let measuring =
+        config.mode == MergeEnumerationMode::Count && std::env::var("ISLA_ENUM_MEASURE").as_deref() == Ok("1");
+    if measuring {
+        eprintln!(
+            "[MERGE_ENUMERATION_MEASURE] {}",
+            json!({"phase":"started",
+            "path_signature":frame.path_signature(), "partitions":partitions.len()})
+        );
+    }
     // 路径内线程数为 1 时仍允许既有的跨路径并发，避免串行化 -T 的完成路径。
     let process_budget = std::thread::available_parallelism().unwrap().get().min(16).max(config.enumeration_threads);
     let budget = {
@@ -131,7 +143,9 @@ pub(super) fn enumerate<B: BV>(
                         state,
                         shared,
                         result,
-                        &mut |_, _, _| unreachable!(),
+                        &|_, _, _, _, _| unreachable!(),
+                        None,
+                        true,
                         Some(&partitions[index]),
                         None,
                     );
@@ -158,14 +172,15 @@ pub(super) fn enumerate<B: BV>(
                     if !selected.values().any(|plan| plan.partition == index) {
                         continue;
                     }
-                    let mut callback = |class, solution, model: &mut Model<B>| consume(class, solution, model);
                     let output = frame
                         .enumerate_merges_partition(
                             &mut solver,
                             state,
                             shared,
                             result,
-                            &mut callback,
+                            consume,
+                            complete,
+                            retain_solutions,
                             Some(&partitions[index]),
                             Some(&selected),
                         )?
@@ -238,12 +253,18 @@ pub(super) fn enumerate<B: BV>(
             let kept = count.min(config.path_cap - total);
             let truncated = truncated || kept < count;
             let class_id = selected.len();
-            selected.insert(key, ClassPlan { class_id, ordinal: total, count: kept, truncated, partition });
+            selected.insert(
+                key,
+                ClassPlan { class_id, ordinal: total, count: kept, truncated, path_truncated: false, partition },
+            );
             total += kept;
             truncated_classes += usize::from(truncated);
             partition_counts[partition].0 += 1;
             partition_counts[partition].1 += kept;
             path_truncated |= kept < count || (truncated && total == config.path_cap);
+        }
+        for plan in selected.values_mut() {
+            plan.path_truncated = path_truncated;
         }
         let selected = Arc::new(selected);
         for sender in plan_senders {
@@ -294,6 +315,14 @@ pub(super) fn enumerate<B: BV>(
             exported_samples,
         );
         if config.mode == MergeEnumerationMode::Count {
+            if measuring {
+                eprintln!(
+                    "[MERGE_ENUMERATION_MEASURE] {}",
+                    json!({"phase":"complete",
+                    "path_signature":frame.path_signature(), "counted_classes":counted_classes,
+                    "counted_paths":total, "path_truncated":path_truncated, "truncated_classes":truncated_classes})
+                );
+            }
             return Ok(json!({"schema_version":2,"mode":"count","counted_classes":counted_classes,
                 "counted_paths":total,"truncated_classes":truncated_classes,"path_truncated":path_truncated,
                 "class_cap":config.class_cap,"path_cap":config.path_cap,"sample_stride":config.sample_stride,
@@ -302,7 +331,7 @@ pub(super) fn enumerate<B: BV>(
         let expected = total / config.sample_stride + usize::from(total % config.sample_stride != 0);
         assert_eq!(exported_samples, expected, "分区的规范序 ordinal 必须保持 stride 和总预算");
         Ok(
-            json!({"schema_version":2,"guard_records":guard_records,"tested_slices":tested_slices,"guard_classes":classes,
+            json!({"schema_version":if retain_solutions { 2 } else { 3 }, "solutions_external":!retain_solutions,"guard_records":guard_records,"tested_slices":tested_slices,"guard_classes":classes,
             "path_truncated":path_truncated,"enumerated_total":exported_samples,"exported_samples":exported_samples,
             "counted_classes":counted_classes,"counted_paths":total,"truncated_classes":truncated_classes,
             "class_cap":config.class_cap,"path_cap":config.path_cap,"sample_stride":config.sample_stride,
