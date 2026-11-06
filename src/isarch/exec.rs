@@ -1566,7 +1566,14 @@ fn solve_collect_path<'ir, B: BV>(
                 }
                 // 检查原路径约束：必须早于有限域代表值钉选和 encdec/输出过滤。
                 // 样本功能独立于旧 JSON 是否被消费方过滤，每条可行完成路径均参与。
-                let sample_enumeration = if ctx.samples.enabled() {
+                let count_enumeration = ctx.execution_limits.merge_enumeration.enabled
+                    && ctx.execution_limits.merge_enumeration.mode == isla_lib::config::MergeEnumerationMode::Count;
+                let sample_enumeration = if count_enumeration && !ctx.samples.enabled() {
+                    // 计数必须早于代表值钉选与输出过滤，和完整样本使用同一原路径条件。
+                    frame
+                        .enumerate_merges(&mut solver, ctx.task_state, shared_state, ret_val)
+                        .expect("完成路径的合并计数失败")
+                } else if ctx.samples.enabled() {
                     if !solver.has_stashed_model() {
                         match solver.check_sat(SourceLoc::unknown()) {
                             isla_lib::smt::SmtResult::Sat => (),
@@ -2139,7 +2146,7 @@ fn solve_collect_path<'ir, B: BV>(
                     log!(log::PATH_RESULT, "3. ==============================");
                 }
                 drop(model);
-                let merge_enumeration = if ctx.samples.enabled() {
+                let merge_enumeration = if ctx.samples.enabled() || count_enumeration {
                     sample_enumeration
                 } else {
                     frame

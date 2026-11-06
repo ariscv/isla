@@ -54,6 +54,44 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.savepoints.len()
     }
 
+    /// 在保存点内用同一 Context、同一断言集做只读增量查询。
+    /// tactic solver 每次查询可能重新执行预处理；计数 DFS 需要复用查询间的学习结果。
+    /// 现有构造接口不能临时切换后端，因此在此资源边界配对替换、恢复 solver。
+    pub(crate) fn with_incremental_checks<T>(&mut self, query: impl FnOnce(&mut Self) -> T) -> T {
+        assert!(self.transaction_depth() > 0, "增量查询必须位于保存点内");
+        let original = self.z3_solver;
+        let model = self.stashed_model.take();
+        let last_check_sat = self.last_check_sat;
+        let asserts_since_check = self.asserts_since_check;
+        let depth = self.transaction_depth();
+        let events_len = self.transaction_events.len();
+        unsafe {
+            let incremental = Z3_mk_solver(self.ctx.z3_ctx);
+            Z3_solver_inc_ref(self.ctx.z3_ctx, incremental);
+            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, original);
+            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
+            for index in 0..Z3_ast_vector_size(self.ctx.z3_ctx, assertions) {
+                Z3_solver_assert(self.ctx.z3_ctx, incremental, Z3_ast_vector_get(self.ctx.z3_ctx, assertions, index));
+            }
+            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
+            self.z3_solver = incremental;
+        }
+        self.last_check_sat = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| query(self)));
+        self.clear_stashed_model();
+        unsafe { Z3_solver_dec_ref(self.ctx.z3_ctx, self.z3_solver) };
+        self.z3_solver = original;
+        self.stashed_model = model;
+        self.last_check_sat = last_check_sat;
+        self.asserts_since_check = asserts_since_check;
+        assert_eq!(self.transaction_depth(), depth, "增量查询不得遗留保存点");
+        assert_eq!(self.transaction_events.len(), events_len, "增量查询不得修改执行迹");
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     pub fn start_transaction(&mut self) -> SolverTransaction {
         self.start_transaction_with_guard(None)
     }

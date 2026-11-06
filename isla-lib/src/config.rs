@@ -1883,14 +1883,22 @@ pub struct ExecutionLimitsConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeEnumerationConfig {
     pub enabled: bool,
+    pub mode: MergeEnumerationMode,
     pub class_cap: usize,
     pub path_cap: usize,
 }
 
 impl Default for MergeEnumerationConfig {
     fn default() -> Self {
-        Self { enabled: false, class_cap: 1024, path_cap: 65536 }
+        Self { enabled: false, mode: MergeEnumerationMode::Samples, class_cap: 1024, path_cap: 65536 }
     }
+}
+
+/// 枚举时导出代表样本，或只统计投影域。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeEnumerationMode {
+    Samples,
+    Count,
 }
 
 /// 局部路径合并策略；这里只描述配置，不改变解释器行为。
@@ -2310,8 +2318,15 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         .map(|value| {
             let root = "execution_limits.merge_enumeration";
             let sub = value.as_table().ok_or_else(|| format!("{root} 必须是 TOML table"))?;
-            allowed_table_keys(sub, root, &["enabled", "class_cap", "path_cap"])?;
+            allowed_table_keys(sub, root, &["enabled", "mode", "class_cap", "path_cap"])?;
             let mut config = MergeEnumerationConfig::default();
+            if let Some(mode) = sub.get("mode") {
+                config.mode = match mode.as_str() {
+                    Some("samples") => MergeEnumerationMode::Samples,
+                    Some("count") => MergeEnumerationMode::Count,
+                    _ => return Err(format!("{root}.mode 必须是 samples 或 count")),
+                };
+            }
             if let Some(enabled) = optional_bool(sub, "enabled", root)? {
                 config.enabled = enabled;
             }
@@ -2591,12 +2606,23 @@ mod tests {
     }
 
     #[test]
+    fn execution_limits_merge_enumeration_count_mode() {
+        for mode in ["count", "samples"] {
+            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nmode = \"{mode}\"\nenabled = true"))
+                .is_ok());
+        }
+        for mode in ["\"unknown\"", "1", "true"] {
+            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nmode = {mode}")).is_err());
+        }
+    }
+
+    #[test]
     fn execution_limits_merge_enumeration_table() {
         let config =
             merge_config("[execution_limits.merge_enumeration]\nenabled = true\nclass_cap = 7\npath_cap = 11").unwrap();
         assert_eq!(
             config.merge_enumeration.unwrap(),
-            MergeEnumerationConfig { enabled: true, class_cap: 7, path_cap: 11 }
+            MergeEnumerationConfig { enabled: true, class_cap: 7, path_cap: 11, ..Default::default() }
         );
         assert_eq!(
             merge_config("[execution_limits.merge_enumeration]").unwrap().merge_enumeration.unwrap(),

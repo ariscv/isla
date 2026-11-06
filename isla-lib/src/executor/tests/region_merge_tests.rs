@@ -2365,6 +2365,24 @@ fn assert_merge_enumeration_reference(
     limits.merge_enumeration.path_cap = usize::MAX;
     let reference_state = TaskState::new().with_execution_limits(limits);
     let reference = frame.enumerate_merges_blocking(solver, &reference_state, shared, result).unwrap().unwrap();
+    let mut count_limits = reference_state.execution_limits.as_ref().unwrap().clone();
+    count_limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
+    let count_state = TaskState::new().with_execution_limits(count_limits);
+    let before = solver.trace().to_vec().len();
+    let counted = frame
+        .enumerate_merges_with(solver, &count_state, shared, &Val::Symbolic(Sym { id: u32::MAX }), &mut |_, _, _| {
+            panic!("计数不得消费模型")
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(counted["counted_classes"], reference["guard_classes"].as_array().unwrap().len());
+    assert_eq!(counted["counted_paths"], reference["enumerated_total"]);
+    assert_eq!(counted["truncated_classes"], 0);
+    assert_eq!(counted["path_truncated"], false);
+    assert!(counted.get("guard_classes").is_none());
+    assert!(counted.get("enumerated_total").is_none());
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(solver.trace().to_vec().len(), before);
     let classes = |value: &serde_json::Value| -> BTreeMap<String, HashSet<String>> {
         value["guard_classes"]
             .as_array()
@@ -2493,6 +2511,20 @@ fn merge_enumeration_nested_context_and_fork_inheritance() {
     assert_eq!(output["enumerated_total"], 3);
     assert_eq!(output["path_truncated"], false);
     assert_eq!(before, solver.trace().to_vec().len(), "枚举不得污染路径求解器");
+    for path_cap in 1..=4 {
+        let mut count_limits = state.execution_limits.as_ref().unwrap().clone();
+        count_limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
+        count_limits.merge_enumeration.class_cap = 1;
+        count_limits.merge_enumeration.path_cap = path_cap;
+        let counted = first
+            .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(count_limits), &shared, &path.value)
+            .unwrap()
+            .unwrap();
+        assert_eq!(counted["counted_classes"], path_cap.min(3));
+        assert_eq!(counted["counted_paths"], path_cap.min(3));
+        assert_eq!(counted["truncated_classes"], 0);
+        assert_eq!(counted["path_truncated"], path_cap < 3);
+    }
     // 在已完成的合并历史之后真正 fork：两条任务都继承历史，但各自使用自己的约束。
     let mut fork = make_frame(vec![
         Instr::Jump(input(0), 3, info()),
@@ -2572,7 +2604,8 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         [(10, 10, 3, false), (2, 10, 2, true), (10, 1, 1, true), (3, 3, 3, false)]
     {
         let mut limits = ExecutionLimits::default();
-        limits.merge_enumeration = crate::config::MergeEnumerationConfig { enabled: true, class_cap, path_cap };
+        limits.merge_enumeration =
+            crate::config::MergeEnumerationConfig { enabled: true, class_cap, path_cap, ..Default::default() };
         let state = TaskState::new().with_execution_limits(limits);
         // 正常处理器失败结果仍必须枚举，不按返回构造子筛掉。
         let failure = Val::Ctor(fault, Box::new(Val::Symbolic(bits)));
@@ -2581,6 +2614,16 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         assert_eq!(output["enumerated_total"], count);
         assert_eq!(output["guard_classes"][0]["truncated"], truncated);
         assert_eq!(output["path_truncated"], path_cap == 1);
+        let mut count_limits = state.execution_limits.as_ref().unwrap().clone();
+        count_limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
+        let counted = frame
+            .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(count_limits), &shared, &failure)
+            .unwrap()
+            .unwrap();
+        assert_eq!(counted["counted_classes"], 1);
+        assert_eq!(counted["counted_paths"], count);
+        assert_eq!(counted["truncated_classes"], usize::from(truncated));
+        assert_eq!(counted["path_truncated"], path_cap == 1);
         let class = &output["guard_classes"][0];
         assert_eq!(class["tested_slices"].as_array().unwrap().len(), 2, "未被测试的高两位不参与展开");
         let mut found = HashSet::new();
@@ -2709,7 +2752,8 @@ fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
         });
     }
     let mut limits = ExecutionLimits::default();
-    limits.merge_enumeration = crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 2 };
+    limits.merge_enumeration =
+        crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 2, ..Default::default() };
     let state = TaskState::new().with_execution_limits(limits);
     let before = solver.trace().to_vec().len();
     let output = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
@@ -2720,9 +2764,11 @@ fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
     frame.region_merge_records.clear();
     let empty = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
     assert_eq!(empty["enumerated_total"], 1);
+    assert_merge_enumeration_reference(&frame, &mut solver, &state, &shared, &Val::Unit, &empty);
     solver.assert(Bool(false));
     let unsat = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
     assert_eq!(unsat["enumerated_total"], 0);
+    assert_merge_enumeration_reference(&frame, &mut solver, &state, &shared, &Val::Unit, &unsat);
 }
 
 #[test]
@@ -2752,7 +2798,8 @@ fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
         });
     }
     let mut limits = ExecutionLimits::default();
-    limits.merge_enumeration = crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 16384 };
+    limits.merge_enumeration =
+        crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 16384, ..Default::default() };
     let state = TaskState::new().with_execution_limits(limits);
     let before = solver.trace().to_vec().len();
     let mut calls = 0;
@@ -2806,7 +2853,8 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
         [(false, 1024, 65536), (true, 1024, 65536), (true, usize::MAX, usize::MAX), (true, 2, 5)]
     {
         let mut limits = ExecutionLimits::default().with_path_merging(merge);
-        limits.merge_enumeration = crate::config::MergeEnumerationConfig { enabled: merge, class_cap, path_cap };
+        limits.merge_enumeration =
+            crate::config::MergeEnumerationConfig { enabled: merge, class_cap, path_cap, ..Default::default() };
         let state = TaskState::new().with_execution_limits(limits);
         let mut frame = LocalFrame::new(function, args, ret_ty, None, body);
         frame.add_regs(&initialized.regs).add_lets(&initialized.lets);

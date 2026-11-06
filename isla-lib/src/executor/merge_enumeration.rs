@@ -130,7 +130,7 @@ impl<B: BV> LocalFrame<'_, B> {
         self.enumerate_merges_with(solver, state, shared, result, &mut |_, _, _| Ok(()))
     }
 
-    /// 每个解在完整模型仍存活时调用消费方；关闭枚举时不调用。
+    /// samples 模式在每个解的模型存活时调用消费方；关闭枚举或 count 模式不调用。
     pub fn enumerate_merges_with(
         &self,
         solver: &mut Solver<B>,
@@ -217,19 +217,54 @@ impl<B: BV> LocalFrame<'_, B> {
                 Eq(Box::new(Extract(*bit, *bit, Box::new(Var(Sym { id: *symbol })))), Box::new(smtlib::bits64(1, 1)))
             })
             .collect();
+        let counting = config.mode == crate::config::MergeEnumerationMode::Count;
+        // 计数只抽取被投影的一位谓词见证，不求值完整输入、返回值或状态。
+        let packed_bits = bit_predicates
+            .iter()
+            .filter(|_| counting)
+            .map(|bit| Ite(Box::new(bit.clone()), Box::new(smtlib::bits64(1, 1)), Box::new(smtlib::bits64(0, 1))))
+            .reduce(|high, low| Concat(Box::new(high), Box::new(low)));
         let tx = solver.start_transaction();
-        let output = (|| {
+        let mut enumerate = |solver: &mut Solver<B>| {
+            let started = std::time::Instant::now();
+            let mut sat_time = std::time::Duration::ZERO;
+            let mut projection_time = std::time::Duration::ZERO;
+            let mut sat_checks = 0;
+            let mut class_count = 0;
+            let mut truncated_classes = 0;
             let mut classes = Vec::new();
             let mut total = 0;
             let mut path_truncated = false;
-            let mut pending = if let Some(index) = order.first() {
+            // 在原路径约束与活动上下文中固定的守卫，不必在每个类重复探测相反分支。
+            // 只剪去已由 SAT 证明确不可能的极性；不限制任何真实可行类。
+            let mut split_guards = vec![true; records.len()];
+            if counting {
+                let queried = std::time::Instant::now();
+                for (index, record) in records.iter().enumerate() {
+                    let ctx = &contexts[&record.record_id];
+                    let guard = Var(record.condition);
+                    sat_checks += 1;
+                    let positive = satisfiable(solver, &And(Box::new(ctx.clone()), Box::new(guard.clone())))?;
+                    split_guards[index] = positive && {
+                        sat_checks += 1;
+                        satisfiable(solver, &And(Box::new(ctx.clone()), Box::new(Not(Box::new(guard)))))?
+                    };
+                }
+                sat_time += queried.elapsed();
+            }
+            let mut pending = if counting {
+                vec![(Bool(true), 0)]
+            } else if let Some(index) = order.first() {
                 let guard = Var(records[*index].condition);
                 vec![(guard.clone(), 1), (Not(Box::new(guard)), 1)]
             } else {
                 vec![(Bool(true), 0)]
             };
             while let Some((class_prefix, guard_depth)) = pending.pop() {
+                let queried = std::time::Instant::now();
                 let feasible = satisfiable(solver, &class_prefix)?;
+                sat_time += queried.elapsed();
+                sat_checks += 1;
                 if !feasible {
                     continue;
                 }
@@ -239,14 +274,16 @@ impl<B: BV> LocalFrame<'_, B> {
                 }
                 let mut assignment = Vec::<bool>::new();
                 let mut solutions = Vec::new();
+                let mut solution_count = 0;
                 let mut truncated = false;
                 // 一级叶子的 Sat 缓存直接用于第一个解，class_cap=1 只创建一次模型。
                 let mut candidate = Some((class_prefix, 0));
                 let mut remaining = Vec::<(Formula<Sym>, usize)>::new();
                 while let Some((mut prefix, depth)) = candidate.take() {
+                    let projected = std::time::Instant::now();
                     let mut model = Model::new(solver);
                     model.set_complete_model(true);
-                    if solutions.is_empty() {
+                    if solution_count == 0 {
                         let raw = if let Some(packed) = &packed_guards {
                             bits_text(&model.get_exp(packed)?.unwrap_exp())
                         } else {
@@ -265,7 +302,7 @@ impl<B: BV> LocalFrame<'_, B> {
                             }
                             let value = active && raw.as_bytes()[2 + *index] == b'1';
                             assignment.push(value);
-                            if position >= guard_depth && active {
+                            if position >= guard_depth && active && split_guards[*index] {
                                 let selected =
                                     if value { Var(record.condition) } else { Not(Box::new(Var(record.condition))) };
                                 pending.push((
@@ -276,54 +313,78 @@ impl<B: BV> LocalFrame<'_, B> {
                             }
                         }
                     }
-                    // 每个完整符号只取一次；本地截取所有重复或重叠片段。
-                    let inputs: std::collections::BTreeMap<_, _> = symbols
-                        .iter()
-                        .map(|symbol| {
-                            let value = model.get_exp(&Var(Sym { id: *symbol }))?.unwrap_exp();
-                            Ok((*symbol, bits_text(&value)))
-                        })
-                        .collect::<Result<_, ExecError>>()?;
-                    let values: Vec<_> = expressions
-                        .iter()
-                        .map(|(symbol, hi, lo)| {
-                            let value = &inputs[symbol];
-                            format!("#b{}", &value[value.len() - 1 - *hi as usize..value.len() - *lo as usize])
-                        })
-                        .collect();
-                    let representative_result = model.get_val(result)?.to_string(shared);
-                    let representative_inputs: Vec<_> = inputs
+                    let selected: Vec<_> = if counting {
+                        let raw = if let Some(packed) = &packed_bits {
+                            bits_text(&model.get_exp(packed)?.unwrap_exp())
+                        } else {
+                            String::new()
+                        };
+                        bit_predicates
+                            .iter()
+                            .enumerate()
+                            .skip(depth)
+                            .map(|(index, bit)| {
+                                if raw.as_bytes()[2 + index] == b'1' {
+                                    bit.clone()
+                                } else {
+                                    Not(Box::new(bit.clone()))
+                                }
+                            })
+                            .collect()
+                    } else {
+                        // 每个完整符号只取一次；本地截取所有重复或重叠片段。
+                        let inputs: std::collections::BTreeMap<_, _> = symbols
+                            .iter()
+                            .map(|symbol| {
+                                let value = model.get_exp(&Var(Sym { id: *symbol }))?.unwrap_exp();
+                                Ok((*symbol, bits_text(&value)))
+                            })
+                            .collect::<Result<_, ExecError>>()?;
+                        let values: Vec<_> = expressions
+                            .iter()
+                            .map(|(symbol, hi, lo)| {
+                                let value = &inputs[symbol];
+                                format!("#b{}", &value[value.len() - 1 - *hi as usize..value.len() - *lo as usize])
+                            })
+                            .collect();
+                        let representative_result = model.get_val(result)?.to_string(shared);
+                        let representative_inputs: Vec<_> = inputs
                         .iter()
                         .map(|(symbol, value)| json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "value":value}))
                         .collect();
-                    consume(classes.len(), solutions.len(), &mut model)?;
+                        consume(class_count, solution_count, &mut model)?;
+                        solutions.push(json!({"slice_values":values, "representative":{"result":representative_result, "inputs":representative_inputs}}));
+                        let selected: Vec<_> = bits
+                            .iter()
+                            .zip(&bit_predicates)
+                            .skip(depth)
+                            .map(|((symbol, bit), predicate)| {
+                                let value = &inputs[symbol];
+                                if value.as_bytes()[value.len() - 1 - *bit as usize] == b'1' {
+                                    predicate.clone()
+                                } else {
+                                    Not(Box::new(predicate.clone()))
+                                }
+                            })
+                            .collect();
+                        selected
+                    };
                     drop(model);
-                    solutions.push(json!({"slice_values":values, "representative":{"result":representative_result, "inputs":representative_inputs}}));
+                    projection_time += projected.elapsed();
+                    solution_count += 1;
                     total += 1;
-                    // 当前模型证明所选位分支可满足。到达上限时，把沿该模型
-                    // 未走的相反分支因式分解为 prefix ∧ ¬(后续全部所选位)，
-                    // 与既有 DFS 前沿合并探测；公式大小只与位数有关。
-                    let selected: Vec<_> = bits
-                        .iter()
-                        .zip(&bit_predicates)
-                        .skip(depth)
-                        .map(|((symbol, bit), predicate)| {
-                            let value = &inputs[symbol];
-                            if value.as_bytes()[value.len() - 1 - *bit as usize] == b'1' {
-                                predicate.clone()
-                            } else {
-                                Not(Box::new(predicate.clone()))
-                            }
-                        })
-                        .collect();
-                    if solutions.len() == config.class_cap || total == config.path_cap {
+                    // 模型见证直接选择后续位分支；前沿仍通过 SAT 检查剪枝。
+                    if solution_count == config.class_cap || total == config.path_cap {
                         let leaf =
                             selected.iter().fold(Bool(true), |leaf, bit| And(Box::new(leaf), Box::new(bit.clone())));
                         let rest = And(Box::new(prefix), Box::new(Not(Box::new(leaf))));
                         let rest = remaining
                             .iter()
                             .fold(rest, |rest, (condition, _)| Or(Box::new(rest), Box::new(condition.clone())));
+                        let queried = std::time::Instant::now();
                         truncated = satisfiable(solver, &rest)?;
+                        sat_time += queried.elapsed();
+                        sat_checks += 1;
                         path_truncated |= truncated && total == config.path_cap;
                         break;
                     }
@@ -337,29 +398,48 @@ impl<B: BV> LocalFrame<'_, B> {
                         prefix = And(Box::new(prefix), Box::new(selected));
                     }
                     while let Some((prefix, depth)) = remaining.pop() {
+                        let queried = std::time::Instant::now();
                         let feasible = satisfiable(solver, &prefix)?;
+                        sat_time += queried.elapsed();
+                        sat_checks += 1;
                         if feasible {
                             candidate = Some((prefix, depth));
                             break;
                         }
                     }
                 }
-                let mut record_assignment = vec![false; records.len()];
-                for (index, value) in order.iter().zip(assignment) {
-                    record_assignment[*index] = value;
-                }
-                let guard_assignment: serde_json::Map<_, _> = records
-                    .iter()
-                    .zip(record_assignment)
-                    .map(|(record, value)| (record.record_id.to_string(), json!(value)))
-                    .collect();
-                classes.push(
-                    json!({"class_id":classes.len(), "guard_assignment":guard_assignment, "tested_slices":tested,
+                if !counting {
+                    let mut record_assignment = vec![false; records.len()];
+                    for (index, value) in order.iter().zip(assignment) {
+                        record_assignment[*index] = value;
+                    }
+                    let guard_assignment: serde_json::Map<_, _> = records
+                        .iter()
+                        .zip(record_assignment)
+                        .map(|(record, value)| (record.record_id.to_string(), json!(value)))
+                        .collect();
+                    classes.push(
+                        json!({"class_id":classes.len(), "guard_assignment":guard_assignment, "tested_slices":tested,
                     "solution_count":solutions.len(), "solutions":solutions, "truncated":truncated}),
-                );
+                    );
+                }
+                class_count += 1;
+                truncated_classes += usize::from(truncated);
+                if counting && shared.execution_stats.enabled() && class_count % 4096 == 0 {
+                    eprintln!("[MERGE_ENUMERATION_COUNT_PROGRESS] 类={class_count} 解={total} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", started.elapsed());
+                }
                 if path_truncated {
                     break;
                 }
+            }
+            if counting {
+                shared.execution_stats.enumeration_counted(class_count, total, truncated_classes, path_truncated);
+                if shared.execution_stats.enabled() {
+                    eprintln!("[MERGE_ENUMERATION_COUNT] 类={class_count} 解={total} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", started.elapsed());
+                }
+                return Ok(Some(json!({"schema_version":1, "mode":"count", "counted_classes":class_count,
+                    "counted_paths":total, "truncated_classes":truncated_classes,
+                    "path_truncated":path_truncated, "class_cap":config.class_cap, "path_cap":config.path_cap})));
             }
             let guard_records: Vec<_> = records.iter().map(|record| json!({"record_id":record.record_id, "parent_record":record.parent_record,
                 "arm":record.arm, "condition":{"symbol":format!("v{}", record.condition.id), "smt_id":record.condition.id},
@@ -367,7 +447,8 @@ impl<B: BV> LocalFrame<'_, B> {
                 "branch_pc":record.branch_pc})).collect();
             Ok(Some(json!({"schema_version":1, "guard_records":guard_records, "guard_classes":classes,
                 "path_truncated":path_truncated, "enumerated_total":total, "class_cap":config.class_cap, "path_cap":config.path_cap})))
-        })();
+        };
+        let output = if counting { solver.with_incremental_checks(enumerate) } else { enumerate(solver) };
         solver.rollback_transaction(tx);
         output
     }

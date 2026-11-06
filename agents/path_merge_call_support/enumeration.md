@@ -17,11 +17,18 @@ F4 保留完整带条件内存读记录；枚举不改变主迹。每个解导�
 ```toml
 [execution_limits.merge_enumeration]
 enabled = true
+mode = "samples"
 class_cap = 1024
 path_cap = 65536
 ```
 
-三个字段均可省略，默认分别为 `false`、`1024`、`65536`。上限必须是正整数；未知字段、错误类型、零和负数会在加载时拒绝。`execution_limits.enabled=false` 仍沿用原有规则，不能同时配置其他限制字段。枚举开关与合并开关独立；还需用 `--path-merging` 或 `merge_policy` 开启希望合并的区域。
+四个字段均可省略，默认分别为 `false`、`"samples"`、`1024`、`65536`。`mode` 只接受 `"samples"` 与 `"count"`。上限必须是正整数；未知字段、错误类型、零和负数会在加载时拒绝。`execution_limits.enabled=false` 仍沿用原有规则，不能同时配置其他限制字段。枚举开关与合并开关独立；还需用 `--path-merging` 或 `merge_policy` 开启希望合并的区域。
+
+`mode = "count"` 只统计两级投影域。它复用守卫树前序、父链上下文、去重的被测位和既有模型引导的两级 DFS，以 SAT 假设查询剪去不可满足的前缀。计数前先在原路径条件和活动上下文中检查守卫两种极性，跳过只有一种可行极性的分裂。每个 SAT 见证只读取打包的守卫真值与被测位，不查询完整输入符号、返回值或处理器状态，不物化代表样本，也不调用样本消费者。即使设置 `ISLA_EXPORT_SAMPLES`，也不会导出这些枚举样本。原有每条合并路径的普通 ISA 输出仍沿用既有物化流程。
+
+计数结果仍写入每条路径的 `merge_enumeration`，包含 `schema_version=1`、`mode="count"`、`class_cap`、`path_cap`、`counted_classes`（已访问的可行守卫叶子类数）、`counted_paths`（按上限计入的片段组合数）、`truncated_classes`（确有剩余解的已访问类数）和 `path_truncated`。不输出 `guard_classes`、代表样本或 `enumerated_total`，避免将计数误当作已导出样本数。类内上限仍按片段组合数计，不限制访问的守卫类数；只有额外 SAT 查询证明确有剩余解或可行类时才标记截断。`path_truncated=false` 但 `truncated_classes>0` 表示类数完整，片段组合数受类内上限限制。
+
+启用 `ISLA_STATS=1` 后，`MERGE_STATS` 及周期快照的 `merge_enumeration` 汇总计数模式的 `completed_paths`、`counted_classes`、`counted_paths`、`truncated_classes`、`truncated_paths`。计数模式另输出分阶段计时：SAT 次数、SAT 累计耗时和投影见证累计耗时；每 4096 类输出一次进度。默认 samples 模式的输出协议保持不变；以下字段表与算法步骤描述 samples 模式。
 
 isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isla-execute-function` 在该路径的 `Result:` 后输出单行 `merge_enumeration: {JSON}`，`--tree` 模式也保留此行。没有开启枚举时不查询模型、不扫描枚举依赖、不输出字段或附加行。旧 JSON 反序列化时缺少此字段仍有效。
 
@@ -158,3 +165,16 @@ ISLA_ENUMERATION_TEST_OUTPUT=/tmp/e1 \
 输出译码回环复用入口译码的“初始化寄存器表 + 全部钉值”环境，继续按当前模型具象化显式符号 CSR，并通过现有带限额函数入口继承主运行执行限额和合并策略。译码的扩展可用性守卫会读取权限与 CSR，故不能只传指令位，也不能向独立 solver 传主执行的符号或执行后寄存器。
 
 F5 真实负载的一次完整测量得到 20 条路径、16592 类及 16592 个代表样本，路径截断为 false。与指定旧合并基线分别按原始 merge 模式复用 pt_decode 解码，均为 104 种形状，但 103 种计数相同，2 项差值为 −16/+16：16 个 L1 超级页未对齐样本从 `leaf_--x_u0` 变为 `leaf_r-x_u0`。该类中 W=0、X=1，相关 R 守卫的上下文不活动，且未对齐检查在权限检查之前返回，R 可有两种代表值。旧、新各取一个样本并只切换 R 位（同步前后内存）后，四个样本均被原路径 Z3 各接纳一次且结果一致。没有调整代表值或分类凑齐形状计数，因此本次不宣称达到“形状差异 0”，也不宣称具体 PTE 内容多重集合相同。详细原始证据见 `/tmp/f5/` 的报告及交叉检验。
+
+
+## 计数模式验收（2026-11-06）
+
+使用指定 `target_f6/release/isarch`、`-T 8`、`class_cap=1/path_cap=1000000`。Sv39 LOAD 最终版本完整得到 20 条路径、16592 类、16592 个计入预算的片段组合，用时 **49 秒**；与 `/tmp/f5/enumeration-final-samples.jsonl` 的 16592 行一致。所有路径 `path_truncated=false`，16570 个类仍有未计入的类内组合，这是 `class_cap=1` 的预期语义，不表示类数不完整。
+
+只省去样本物化的版本为相同类数、226 秒；增加固定守卫剪枝后为 221 秒，切换现有 `qfaufbv` 策略为 218 秒。计时显示大路径约 95% 的时间在重复 SAT 查询。源码中的原 solver 由 tactic 创建；最终 count 模式在既有保存点内，使用同一 Context 将**全部原断言**复制一次到临时增量 solver，复用跨查询学习结果，退出时恢复原 solver、缓存与状态。原有接口没有临时切换后端的能力，因此在 `smt/transaction.rs` 增加此资源边界接口；普通执行与 samples 模式仍使用原后端。查询、Unknown 和错误继续沿既有 API 处理，没有降级路径。单元测试覆盖原断言保留、SAT/UNSAT、模型读取、错误返回、panic 展开与缓存恢复；完整枚举继续和旧阻断算法差分。
+
+Sv48 LOAD（`satp=0x9000000000080200`）在外层 `timeout 1500` 下完整结束：**27 条路径、122654 类、122654 个计入预算的片段组合，430 秒**。逐路径结果与 stats 汇总一致，全部 `path_truncated=false`；122572 个类因 `class_cap=1` 有类内截断。最大路径为 49152 类，枚举耗时约 419 秒，SAT 查询约 335 秒、投影见证和 DFS 准备约 76 秒。完整计数输出仅 163584 字节。较慢的 tactic 版本在约 1000 秒时仍未完成，已主动停止；430 秒是最终增量版本的完整测量，不是该未完成运行的推算。
+
+最终最大 Sv39 路径为 6912 类，枚举耗时约 41 秒，SAT 查询累计约 33 秒、投影见证读取和 DFS 准备约 7 秒。既有完整 samples 对照为 448 秒；不能把 448→49 秒全部归因于省去导出，其中 221→49 秒来自增量 SAT。证据显示原来重复求解的成本很高，尚未单独确认输出体积是主要瓶颈，因此没有增加 `sample_detail`。
+
+红测、分阶段计时、实际输出和复跑脚本保存在工作树 `output/count-validation/`。配置红测先证实旧解析器拒绝 `mode`；嵌套上下文、耦合片段、派生符号、空记录、UNSAT、上限与截断、保存点恢复均用既有阻断算法作独立对照。真实 `pte_is_invalid` 对照通过；isla-lib 全量为 **704 通过、12 失败、6 忽略**，失败项与既有 12 项逐名一致。`make solve-MRET` 通过指定二进制执行，4 条正常结果各计 1 类/1 解；即使启用样本导出，文件仍为 0 字节。MRET 的既有 `Run::Exit` 另计为 1 条未完成路径，未纳入枚举。`cargo fmt` 和旧 JSON 序列化兼容测试通过。

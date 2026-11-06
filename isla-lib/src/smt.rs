@@ -2978,6 +2978,48 @@ pub fn z3_version() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn count增量查询退出后恢复原求解器与模型缓存() {
+        use crate::bitvector::b64::B64;
+        use smtlib::Exp::*;
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let guard = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());
+        let fixed = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());
+        solver.assert(Var(fixed));
+        assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+        let original = solver.z3_solver;
+        let before = solver.trace().to_vec().len();
+        let tx = solver.start_transaction();
+        let result: Result<(), ()> = solver.with_incremental_checks(|solver| {
+            assert_ne!(solver.z3_solver, original);
+            assert!(solver.check_sat_with(&Not(Box::new(Var(fixed))), SourceLoc::unknown()).is_unsat().unwrap());
+            assert!(solver.check_sat_with(&Var(guard), SourceLoc::unknown()).is_sat().unwrap());
+            let mut model = Model::new(solver);
+            assert!(matches!(model.get_exp(&Var(guard)).unwrap().unwrap_exp(), Bool(true)));
+            drop(model);
+            assert!(solver.check_sat_with(&Not(Box::new(Var(guard))), SourceLoc::unknown()).is_sat().unwrap());
+            Err(())
+        });
+        assert_eq!(result, Err(()));
+        assert_eq!(solver.z3_solver, original);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            solver.with_incremental_checks(|solver| {
+                assert!(solver.check_sat_with(&Var(guard), SourceLoc::unknown()).is_sat().unwrap());
+                panic!("验证增量查询展开后的资源恢复");
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(solver.z3_solver, original);
+        assert!(solver.has_stashed_model());
+        solver.rollback_transaction(tx);
+        assert!(solver.has_stashed_model());
+        assert_eq!(solver.transaction_depth(), 0);
+        assert_eq!(solver.trace().to_vec().len(), before);
+        assert!(solver.check_sat_with(&Var(guard), SourceLoc::unknown()).is_sat().unwrap());
+        assert!(solver.check_sat_with(&Not(Box::new(Var(guard))), SourceLoc::unknown()).is_sat().unwrap());
+    }
+
     #[cfg(feature = "smtperf")]
     #[test]
     fn review12_transaction_performance_graph_leak() {
