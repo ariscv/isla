@@ -3044,6 +3044,41 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
                         )
                         .unwrap();
                     }
+                    if merge && class_cap == 1024 {
+                        for domain_cap in [256, 1] {
+                            let mut prediction_limits = ExecutionLimits::default();
+                            prediction_limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+                                enabled: true,
+                                mode: crate::config::MergeEnumerationMode::Predict,
+                                predict_probes: 256,
+                                predict_domain_cap: domain_cap,
+                                enumeration_threads: 4,
+                                ..Default::default()
+                            };
+                            let prediction = frame
+                                .enumerate_merges(
+                                    &mut solver,
+                                    &TaskState::new().with_execution_limits(prediction_limits),
+                                    shared,
+                                    &value,
+                                )
+                                .unwrap()
+                                .unwrap();
+                            if domain_cap == 256 {
+                                assert_eq!(prediction["total"]["exact"], "256");
+                            }
+                            assert!(prediction["total"]["confidence_95"][0].as_f64().unwrap() <= 256.0);
+                            assert!(prediction["total"]["confidence_95"][1].as_f64().unwrap() >= 256.0);
+                            assert_eq!(prediction["guard_classes"].as_array().unwrap().len(), 10);
+                            if let Some(directory) = std::env::var_os("ISLA_ENUMERATION_TEST_OUTPUT") {
+                                std::fs::write(
+                                    std::path::PathBuf::from(directory).join(format!("pte-predict-{domain_cap}.json")),
+                                    serde_json::to_vec_pretty(&prediction).unwrap(),
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
                     if class_cap > 2 {
                         assert_eq!(output["guard_classes"].as_array().unwrap().len(), 10);
                         assert_eq!(output["enumerated_total"], 256);
@@ -3855,4 +3890,163 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
             }
         }
     }
+}
+
+#[test]
+fn merge_enumeration_budget_边枚举边回调并正常截断回滚() {
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let frame = make_frame(vec![Instr::End]);
+    let mut limits = ExecutionLimits::default();
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+        enabled: true,
+        class_cap: usize::MAX,
+        path_cap: usize::MAX,
+        max_output_bytes: Some(25_000_000_000),
+        ..Default::default()
+    };
+    let state = TaskState::new().with_execution_limits(limits);
+    let output = frame
+        .enumerate_merges_output_with(
+            &mut solver,
+            &state,
+            &shared,
+            &Val::Unit,
+            &|_, _, _, _, _| Err(ExecError::SampleOutputStopped("output_budget")),
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(output["path_truncated"], true);
+    assert_eq!(output["counted_paths"], 0);
+    assert_eq!(output["stop_reason"], "output_budget");
+    assert!(output["truncated_classes"].as_u64().unwrap() <= output["counted_classes"].as_u64().unwrap());
+    assert_eq!(solver.transaction_depth(), 0);
+}
+
+#[test]
+fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
+    use smtlib::Exp::*;
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let input = solver.declare_bitvector(8, info());
+    let condition =
+        solver.define_const(Eq(Box::new(Extract(7, 0, Box::new(Var(input)))), Box::new(smtlib::bits64(0, 8))), info());
+    let mut frame = make_frame(vec![Instr::End]);
+    frame.region_merge_records.push(RegionMergeRecord {
+        record_id: 0,
+        parent_record: None,
+        arm: "root",
+        function: TOP_LEVEL_LET,
+        branch_pc: 0,
+        join: crate::ir::regions::RegionPoint::FunctionExit,
+        condition,
+        source_loc: info(),
+        depth: 1,
+        dead: false,
+        value_symbols: HashSet::new(),
+        input_symbols: HashSet::new(),
+        single_arm_reads: vec![],
+        memory_reads: vec![],
+    });
+    let mut reference = None;
+    for threads in [1, 4] {
+        let mut limits = ExecutionLimits::default();
+        limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+            enabled: true,
+            class_cap: usize::MAX,
+            path_cap: usize::MAX,
+            enumeration_threads: threads,
+            max_output_bytes: Some(25_000_000_000),
+            ..Default::default()
+        };
+        let values = Mutex::new(BTreeMap::new());
+        let output = frame
+            .enumerate_merges_output_with(
+                &mut solver,
+                &TaskState::new().with_execution_limits(limits),
+                &shared,
+                &Val::Unit,
+                &|class, _, slices, _, _| {
+                    assert!(values.lock().unwrap().insert(slices[0].clone(), class).is_none());
+                    Ok(())
+                },
+                None,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(output["counted_paths"], 256);
+        assert_eq!(output["path_truncated"], false);
+        assert_eq!(
+            output["partitions"].as_array().unwrap().iter().map(|p| p["counted_paths"].as_u64().unwrap()).sum::<u64>(),
+            256
+        );
+        let values = values.into_inner().unwrap();
+        assert_eq!(values.len(), 256);
+        if let Some(reference) = &reference {
+            assert_eq!(reference, &values);
+        } else {
+            reference = Some(values);
+        }
+    }
+}
+
+#[test]
+fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截断() {
+    use smtlib::Exp::*;
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let input = solver.declare_bitvector(9, info());
+    let condition = solver.define_const(
+        Eq(
+            Box::new(Bvand(Box::new(Extract(8, 0, Box::new(Var(input)))), Box::new(smtlib::bits64(256, 9)))),
+            Box::new(smtlib::bits64(0, 9)),
+        ),
+        info(),
+    );
+    let mut frame = make_frame(vec![Instr::End]);
+    frame.region_merge_records.push(RegionMergeRecord {
+        record_id: 0,
+        parent_record: None,
+        arm: "root",
+        function: TOP_LEVEL_LET,
+        branch_pc: 0,
+        join: crate::ir::regions::RegionPoint::FunctionExit,
+        condition,
+        source_loc: info(),
+        depth: 1,
+        dead: false,
+        value_symbols: HashSet::new(),
+        input_symbols: HashSet::new(),
+        single_arm_reads: vec![],
+        memory_reads: vec![],
+    });
+    let mut limits = ExecutionLimits::default();
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+        enabled: true,
+        class_cap: usize::MAX,
+        path_cap: 256,
+        enumeration_threads: 1,
+        max_output_bytes: Some(25_000_000_000),
+        ..Default::default()
+    };
+    let output = frame
+        .enumerate_merges_output_with(
+            &mut solver,
+            &TaskState::new().with_execution_limits(limits),
+            &shared,
+            &Val::Unit,
+            &|_, _, _, _, _| Ok(()),
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(output["counted_paths"], 256);
+    assert_eq!(output["path_truncated"], true);
 }

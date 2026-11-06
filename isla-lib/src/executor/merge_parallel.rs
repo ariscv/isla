@@ -5,7 +5,18 @@ use std::sync::{Arc, Condvar, Mutex};
 
 static THREAD_BUDGET: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
 
-struct ThreadBudget(usize);
+pub(super) struct ThreadBudget(usize);
+
+pub(super) fn reserve_threads(workers: usize, configured: usize) -> ThreadBudget {
+    assert!(workers > 0 && workers <= configured);
+    let process_budget = std::thread::available_parallelism().unwrap().get().min(16).max(configured);
+    let mut active = THREAD_BUDGET.0.lock().unwrap();
+    while active.checked_add(workers).unwrap() > process_budget {
+        active = THREAD_BUDGET.1.wait(active).unwrap();
+    }
+    *active += workers;
+    ThreadBudget(workers)
+}
 
 impl Drop for ThreadBudget {
     fn drop(&mut self) {
@@ -39,11 +50,50 @@ pub(super) fn enumerate<B: BV>(
     consume: &SampleConsumer<'_, B>,
     complete: Option<&ClassConsumer<'_>>,
     retain_solutions: bool,
+    guard_catalog: bool,
 ) -> Result<Value, ExecError> {
     use Formula::*;
     let config = &state.execution_limits.as_ref().unwrap().merge_enumeration;
     assert!(config.enumeration_threads > 0, "枚举线程数必须大于零");
     assert_eq!(solver.transaction_depth(), 0, "仅在路径结束后枚举");
+    if guard_catalog {
+        assert_eq!(config.mode, MergeEnumerationMode::Count);
+        assert_eq!(config.class_cap, 1);
+        assert_eq!(config.path_cap, usize::MAX);
+    }
+    let streaming = config.max_output_bytes.is_some() && config.mode == MergeEnumerationMode::Samples;
+    let guard_state = if streaming {
+        let mut limits = state.execution_limits.as_ref().unwrap().clone();
+        limits.merge_enumeration.class_cap = 1;
+        limits.merge_enumeration.path_cap = usize::MAX;
+        limits.merge_enumeration.max_output_bytes = None;
+        Some(TaskState::<B>::new().with_execution_limits(limits))
+    } else {
+        None
+    };
+    let accepted = std::sync::atomic::AtomicUsize::new(0);
+    let cancelled = Mutex::new(None);
+    let stream_consume = |class, solution, slices: &[String], truncated, model: &mut Model<B>| {
+        use std::sync::atomic::Ordering;
+        if let Some(reason) = *cancelled.lock().unwrap() {
+            return Err(ExecError::SampleOutputStopped(reason));
+        }
+        if accepted
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| (value < config.path_cap).then(|| value + 1))
+            .is_err()
+        {
+            *cancelled.lock().unwrap() = Some("path_cap");
+            return Err(ExecError::SampleOutputStopped("path_cap"));
+        }
+        match consume(class, solution, slices, truncated, model) {
+            Ok(()) => Ok(()),
+            Err(ExecError::SampleOutputStopped(reason)) => {
+                *cancelled.lock().unwrap() = Some(reason);
+                Err(ExecError::SampleOutputStopped(reason))
+            }
+            Err(error) => Err(error),
+        }
+    };
     let started = std::time::Instant::now();
     let records = &frame.region_merge_records;
     let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
@@ -110,15 +160,7 @@ pub(super) fn enumerate<B: BV>(
         );
     }
     // 路径内线程数为 1 时仍允许既有的跨路径并发，避免串行化 -T 的完成路径。
-    let process_budget = std::thread::available_parallelism().unwrap().get().min(16).max(config.enumeration_threads);
-    let budget = {
-        let mut active = THREAD_BUDGET.0.lock().unwrap();
-        while active.checked_add(workers).unwrap() > process_budget {
-            active = THREAD_BUDGET.1.wait(active).unwrap();
-        }
-        *active += workers;
-        ThreadBudget(workers)
-    };
+    let budget = reserve_threads(workers, config.enumeration_threads);
     let output = std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut handles = Vec::new();
@@ -127,6 +169,8 @@ pub(super) fn enumerate<B: BV>(
             let sender = sender.clone();
             let partitions = &partitions;
             let replay_events = &replay_events;
+            let guard_state = guard_state.as_ref();
+            let stream_consume = &stream_consume;
             let (plan_sender, plan_receiver) = std::sync::mpsc::channel::<Arc<HashMap<Vec<bool>, ClassPlan>>>();
             plan_senders.push(plan_sender);
             handles.push(scope.spawn(move || {
@@ -140,7 +184,7 @@ pub(super) fn enumerate<B: BV>(
                 for index in (worker..partitions.len()).step_by(workers) {
                     let output = frame.enumerate_merges_partition(
                         &mut solver,
-                        state,
+                        guard_state.unwrap_or(state),
                         shared,
                         result,
                         &|_, _, _, _, _| unreachable!(),
@@ -178,7 +222,7 @@ pub(super) fn enumerate<B: BV>(
                             state,
                             shared,
                             result,
-                            consume,
+                            if streaming { stream_consume } else { consume },
                             complete,
                             retain_solutions,
                             Some(&partitions[index]),
@@ -228,7 +272,8 @@ pub(super) fn enumerate<B: BV>(
         let guard_records = first["guard_records"].clone();
         let tested_slices = first["tested_slices"].clone();
         let mut classes = std::collections::BTreeMap::new();
-        let mut path_truncated = probes.iter().any(|(_, output)| output["path_truncated"].as_bool().unwrap());
+        let mut path_truncated =
+            !streaming && probes.iter().any(|(_, output)| output["path_truncated"].as_bool().unwrap());
         for (partition, output) in probes {
             for class in output["guard_classes"].as_array().unwrap() {
                 let key: Vec<_> = order
@@ -236,7 +281,7 @@ pub(super) fn enumerate<B: BV>(
                     .map(|index| class["guard_assignment"][records[*index].record_id.to_string()].as_bool().unwrap())
                     .collect();
                 let count = class["counted_paths"].as_u64().unwrap() as usize;
-                let truncated = class["truncated"].as_bool().unwrap();
+                let truncated = !streaming && class["truncated"].as_bool().unwrap();
                 assert!(classes.insert(key, (partition, count, truncated)).is_none(), "前缀分区不得重复守卫赋值");
             }
         }
@@ -255,7 +300,14 @@ pub(super) fn enumerate<B: BV>(
             let class_id = selected.len();
             selected.insert(
                 key,
-                ClassPlan { class_id, ordinal: total, count: kept, truncated, path_truncated: false, partition },
+                ClassPlan {
+                    class_id,
+                    ordinal: if streaming { 0 } else { total },
+                    count: if streaming { config.class_cap } else { kept },
+                    truncated,
+                    path_truncated: false,
+                    partition,
+                },
             );
             total += kept;
             truncated_classes += usize::from(truncated);
@@ -274,7 +326,29 @@ pub(super) fn enumerate<B: BV>(
         for handle in handles {
             outputs.extend(handle.join().unwrap()?);
         }
-        let counted_classes = selected.len();
+        let by_class: HashMap<_, _> = selected.values().map(|plan| (plan.class_id, plan)).collect();
+        if streaming {
+            total = outputs.iter().map(|output| output["counted_paths"].as_u64().unwrap() as usize).sum();
+            path_truncated |= outputs.iter().any(|output| output["path_truncated"].as_bool().unwrap());
+            truncated_classes = outputs
+                .iter()
+                .flat_map(|output| output["guard_classes"].as_array().unwrap())
+                .filter(|class| class["truncated"].as_bool().unwrap())
+                .count();
+            partition_counts.fill((0, 0));
+            for output in &outputs {
+                for class in output["guard_classes"].as_array().unwrap() {
+                    let plan = by_class[&(class["class_id"].as_u64().unwrap() as usize)];
+                    partition_counts[plan.partition].0 += 1;
+                    partition_counts[plan.partition].1 += class["counted_paths"].as_u64().unwrap() as usize;
+                }
+            }
+        }
+        let counted_classes = if streaming {
+            outputs.iter().map(|output| output["guard_classes"].as_array().unwrap().len()).sum()
+        } else {
+            selected.len()
+        };
         let partition_json: Vec<_> = partition_counts
             .iter()
             .enumerate()
@@ -298,7 +372,9 @@ pub(super) fn enumerate<B: BV>(
                     .collect();
                 let plan = &selected[&key];
                 assert_eq!(class["class_id"], plan.class_id);
-                class["truncated"] = json!(plan.truncated);
+                if !streaming {
+                    class["truncated"] = json!(plan.truncated);
+                }
                 class.as_object_mut().unwrap().remove("counted_paths");
                 exported_samples += class["solution_count"].as_u64().unwrap() as usize;
                 classes.push(class);
@@ -323,15 +399,24 @@ pub(super) fn enumerate<B: BV>(
                     "counted_paths":total, "path_truncated":path_truncated, "truncated_classes":truncated_classes})
                 );
             }
-            return Ok(json!({"schema_version":2,"mode":"count","counted_classes":counted_classes,
+            let mut output = json!({"schema_version":2,"mode":"count","counted_classes":counted_classes,
                 "counted_paths":total,"truncated_classes":truncated_classes,"path_truncated":path_truncated,
                 "class_cap":config.class_cap,"path_cap":config.path_cap,"sample_stride":config.sample_stride,
-                "exported_samples":0,"enumeration_threads":workers,"partitions":partition_json}));
+                "exported_samples":0,"enumeration_threads":workers,"partitions":partition_json});
+            if guard_catalog {
+                let mut assignments: Vec<_> = selected.iter().map(|(values, plan)| (plan.class_id, values)).collect();
+                assignments.sort_by_key(|(class, _)| *class);
+                output["guard_assignments"] =
+                    json!(assignments.into_iter().map(|(_, values)| values).collect::<Vec<_>>());
+            }
+            return Ok(output);
         }
         let expected = total / config.sample_stride + usize::from(total % config.sample_stride != 0);
-        assert_eq!(exported_samples, expected, "分区的规范序 ordinal 必须保持 stride 和总预算");
+        if !streaming {
+            assert_eq!(exported_samples, expected, "分区的规范序 ordinal 必须保持 stride 和总预算");
+        }
         Ok(
-            json!({"schema_version":if retain_solutions { 2 } else { 3 }, "solutions_external":!retain_solutions,"guard_records":guard_records,"tested_slices":tested_slices,"guard_classes":classes,
+            json!({"schema_version":if retain_solutions { 2 } else { 3 }, "solutions_external":!retain_solutions,"stop_reason":*cancelled.lock().unwrap(),"guard_records":guard_records,"tested_slices":tested_slices,"guard_classes":classes,
             "path_truncated":path_truncated,"enumerated_total":exported_samples,"exported_samples":exported_samples,
             "counted_classes":counted_classes,"counted_paths":total,"truncated_classes":truncated_classes,
             "class_cap":config.class_cap,"path_cap":config.path_cap,"sample_stride":config.sample_stride,

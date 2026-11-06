@@ -10,6 +10,9 @@ mod components;
 #[path = "merge_parallel.rs"]
 mod parallel;
 
+#[path = "merge_predict.rs"]
+mod predict;
+
 type SampleConsumer<'a, B> = dyn Fn(usize, usize, &[String], bool, &mut Model<B>) -> Result<(), ExecError> + Sync + 'a;
 type ClassConsumer<'a> = dyn Fn(usize, &Value) -> Result<(), ExecError> + Sync + 'a;
 
@@ -210,8 +213,9 @@ impl<B: BV> LocalFrame<'_, B> {
             return Ok(None);
         }
         // 分量诊断需要完整的原顺序联合见证，继续使用其专用串行参照遍历。
-        if config.mode == crate::config::MergeEnumerationMode::Count
-            && std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1")
+        if config.mode == crate::config::MergeEnumerationMode::Predict
+            || (config.mode == crate::config::MergeEnumerationMode::Count
+                && std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1"))
         {
             return self.enumerate_merges_partition(
                 solver,
@@ -225,7 +229,7 @@ impl<B: BV> LocalFrame<'_, B> {
                 None,
             );
         }
-        parallel::enumerate(self, solver, state, shared, result, consume, complete, retain_solutions).map(Some)
+        parallel::enumerate(self, solver, state, shared, result, consume, complete, retain_solutions, false).map(Some)
     }
 
     fn enumerate_merges_partition(
@@ -309,10 +313,72 @@ impl<B: BV> LocalFrame<'_, B> {
                 Eq(Box::new(Extract(*bit, *bit, Box::new(Var(Sym { id: *symbol })))), Box::new(smtlib::bits64(1, 1)))
             })
             .collect();
+        if config.mode == crate::config::MergeEnumerationMode::Predict {
+            let path_started = std::time::Instant::now();
+            eprintln!(
+                "[MERGE_PREDICT_START] {}",
+                json!({"path_signature":self.path_signature(),"probes":config.predict_probes,
+                "guard_depth":order.len(),"bit_depth":bits.len()})
+            );
+            let guards: Vec<_> = order
+                .iter()
+                .map(|index| {
+                    let record = &records[*index];
+                    And(Box::new(contexts[&record.record_id].clone()), Box::new(Var(record.condition)))
+                })
+                .collect();
+            let record_ids: Vec<_> = order.iter().map(|index| records[*index].record_id).collect();
+            let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
+            let mut limits = state.execution_limits.as_ref().unwrap().clone();
+            limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
+            limits.merge_enumeration.class_cap = 1;
+            limits.merge_enumeration.path_cap = usize::MAX;
+            limits.merge_enumeration.max_output_bytes = None;
+            let guard_state = TaskState::<B>::new().with_execution_limits(limits);
+            // 只取并行一级DFS的类目录，保留既有活动父链剪枝和规范类号。
+            let catalog = parallel::enumerate(
+                self,
+                solver,
+                &guard_state,
+                shared,
+                result,
+                &|_, _, _, _, _| unreachable!("一级类目录不物化样本"),
+                None,
+                true,
+                true,
+            )?;
+            let classes: Vec<Vec<bool>> = serde_json::from_value(catalog["guard_assignments"].clone()).unwrap();
+            assert!(classes.windows(2).all(|pair| pair[0] != pair[1]));
+            drop(catalog);
+            let catalog_seconds = path_started.elapsed().as_secs_f64();
+            let mut prediction =
+                predict::run(self.path_signature(), &events, &guards, &record_ids, &bit_predicates, classes, config)?;
+            prediction["domain_and_probe_seconds"] = prediction["seconds"].clone();
+            prediction["guard_catalog_seconds"] = json!(catalog_seconds);
+            prediction["seconds"] = json!(path_started.elapsed().as_secs_f64());
+            prediction["tested_slices"] = json!(tested);
+            prediction["projected_bits"] =
+                json!(bits.iter().map(|(symbol, bit)| json!({"smt_id":symbol,"bit":bit})).collect::<Vec<_>>());
+            prediction["guard_order"] = json!(record_ids);
+            prediction["guard_records"] = json!(records
+                .iter()
+                .map(|record| json!({"record_id":record.record_id,
+                "parent_record":record.parent_record,"arm":record.arm,"source_loc":record.source_loc,
+                "function":zencode::decode(shared.symtab.to_str(record.function)),"branch_pc":record.branch_pc}))
+                .collect::<Vec<_>>());
+            eprintln!("[MERGE_PREDICT_RESULT] {}", serde_json::to_string(&prediction).unwrap());
+            return Ok(Some(prediction));
+        }
+        let streaming =
+            config.max_output_bytes.is_some() && config.mode == crate::config::MergeEnumerationMode::Samples;
         let probing = partition.is_some() && plans.is_none();
-        let partition_cap = plans.map_or(config.path_cap, |plans| {
-            plans.values().filter(|plan| plan.partition == partition.unwrap().id).map(|plan| plan.count).sum()
-        });
+        let partition_cap = if streaming {
+            config.path_cap
+        } else {
+            plans.map_or(config.path_cap, |plans| {
+                plans.values().filter(|plan| plan.partition == partition.unwrap().id).map(|plan| plan.count).sum()
+            })
+        };
         let counting = probing || config.mode == crate::config::MergeEnumerationMode::Count;
         let measuring = probing
             && config.mode == crate::config::MergeEnumerationMode::Count
@@ -352,6 +418,8 @@ impl<B: BV> LocalFrame<'_, B> {
             let mut total = 0;
             let mut exported_samples = 0;
             let mut path_truncated = false;
+            let mut output_stopped = false;
+            let mut stop_reason = None;
             // 在原路径约束与活动上下文中固定的守卫，不必在每个类重复探测相反分支。
             // 只剪去已由 SAT 证明确不可能的极性；不限制任何真实可行类。
             let mut split_guards = vec![true; records.len()];
@@ -380,7 +448,7 @@ impl<B: BV> LocalFrame<'_, B> {
                 vec![(Bool(true), 0)]
             };
             while let Some((class_prefix, guard_depth)) = pending.pop() {
-                if plans.is_some() && total == partition_cap {
+                if !streaming && plans.is_some() && total == partition_cap {
                     break;
                 }
                 let queried = std::time::Instant::now();
@@ -534,7 +602,16 @@ impl<B: BV> LocalFrame<'_, B> {
                             .collect();
                         let representative_result = model.get_val(result)?.to_string(shared);
                         let truncated = plan.map_or(false, |plan| plan.truncated || plan.path_truncated);
-                        consume(class_id, solution_count, &values, truncated, &mut model)?;
+                        match consume(class_id, solution_count, &values, truncated, &mut model) {
+                            Ok(()) => (),
+                            Err(ExecError::SampleOutputStopped(reason)) if streaming => {
+                                stop_reason = Some(reason);
+                                output_stopped = true;
+                                path_truncated = true;
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        }
                         class_exported += 1;
                         exported_samples += 1;
                         if retain_solutions {
@@ -599,16 +676,16 @@ impl<B: BV> LocalFrame<'_, B> {
                         if let Some(complete) = complete {
                             complete(
                                 class_id,
-                                &json!({"guard_assignment":guard_assignment, "tested_slices":tested, "solution_count":class_exported}),
+                                &json!({"guard_assignment":guard_assignment, "tested_slices":tested, "solution_count":class_exported,"truncated":truncated || output_stopped}),
                             )?;
                         }
                     }
                     classes.push(json!({"class_id":class_id, "guard_assignment":guard_assignment,
                     "counted_paths":solution_count,
-                    "solution_count":class_exported, "solutions":solutions, "truncated":truncated}));
+                    "solution_count":class_exported, "solutions":solutions, "truncated":truncated || output_stopped}));
                 }
                 class_count += 1;
-                truncated_classes += usize::from(truncated);
+                truncated_classes += usize::from(truncated || output_stopped);
                 if shared.execution_stats.enabled() && class_count % 4096 == 0 {
                     eprintln!("[MERGE_ENUMERATION_PROGRESS] stride={} 类={class_count} 解={total} 已导出={exported_samples} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", config.sample_stride, started.elapsed());
                 }
@@ -646,7 +723,7 @@ impl<B: BV> LocalFrame<'_, B> {
                 "source_loc":record.source_loc, "function":zencode::decode(shared.symtab.to_str(record.function)),
                 "branch_pc":record.branch_pc})).collect();
             Ok(Some(
-                json!({"schema_version":2, "guard_records":guard_records, "tested_slices":tested, "guard_classes":classes,
+                json!({"schema_version":if retain_solutions {2} else {3}, "solutions_external":!retain_solutions, "stop_reason":stop_reason, "guard_records":guard_records, "tested_slices":tested, "guard_classes":classes,
                 "path_truncated":path_truncated, "enumerated_total":exported_samples,
                 "sample_stride":config.sample_stride, "counted_classes":class_count, "counted_paths":total,
                 "exported_samples":exported_samples, "truncated_classes":truncated_classes, "class_cap":config.class_cap, "path_cap":config.path_cap}),

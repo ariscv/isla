@@ -2,15 +2,23 @@
 use super::*;
 
 pub(super) fn header(file: &mut File) {
-    let fields = json!({"schema_version":1,"sample_schema_version":1,"compact_schema_version":1,
+    header_version(file, 1);
+}
+
+pub(super) fn header_version(file: &mut File, version: u32) {
+    let mut fields = json!({"schema_version":version,"sample_schema_version":1,"compact_schema_version":1,
         "endianness":"little","record_bytes":40,
         "fields":[["path_signature","u64",0],["class_id","u64",8],["solution_count","u64",16],
                   ["payload_bytes","u64",24],["flags","u64",32]],
         "null_class_id":u64::MAX,"end_flags":u64::MAX,"payload_codec":"typed-json-v1",
-        "payload_layout":"class_header then solution_count increment values"});
+        "payload_layout":if version == 1 {"class_header then solution_count increment values"} else {"chunk_header then solution_count increments; flags=2 summary; EOF payload_bytes=summary_offset"},
+        "summary_layout":if version == 2 {Some("u64 reason,total,path_count,class_count; path_count * (nonce,signature,count,truncated); class_count * (nonce,class_id,count,truncated)")} else {None}});
+    if version == 1 {
+        fields.as_object_mut().unwrap().remove("summary_layout");
+    }
     let metadata = serde_json::to_vec(&fields).unwrap();
     file.write_all(b"ISLASB1\0").unwrap();
-    for value in [1u32, 24, 40, u32::try_from(metadata.len()).unwrap()] {
+    for value in [version, 24, 40, u32::try_from(metadata.len()).unwrap()] {
         file.write_all(&value.to_le_bytes()).unwrap();
     }
     file.write_all(&metadata).unwrap();
@@ -60,7 +68,7 @@ pub(super) fn finish(file: &mut File) {
     }
 }
 
-fn encode(writer: &mut impl Write, value: &Value) {
+pub(super) fn encode(writer: &mut impl Write, value: &Value) {
     match value {
         Value::Null => writer.write_all(&[0]).unwrap(),
         Value::Bool(false) => writer.write_all(&[1]).unwrap(),

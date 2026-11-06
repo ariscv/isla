@@ -1570,7 +1570,7 @@ fn solve_collect_path<'ir, B: BV>(
                 // 检查原路径约束：必须早于有限域代表值钉选和 encdec/输出过滤。
                 // 样本功能独立于旧 JSON 是否被消费方过滤，每条可行完成路径均参与。
                 let count_enumeration = ctx.execution_limits.merge_enumeration.enabled
-                    && ctx.execution_limits.merge_enumeration.mode == isla_lib::config::MergeEnumerationMode::Count;
+                    && ctx.execution_limits.merge_enumeration.mode != isla_lib::config::MergeEnumerationMode::Samples;
                 let sample_enumeration = if count_enumeration && !ctx.samples.enabled() {
                     // 计数必须早于代表值钉选与输出过滤，和完整样本使用同一原路径条件。
                     frame
@@ -1598,7 +1598,8 @@ fn solve_collect_path<'ir, B: BV>(
                             .check_path(&sample_path, &mut solver, shared_state, frame.path_signature())
                             .expect("样本成员检查失败");
                     }
-                    let output_path = ctx.samples.writer.as_ref().map(|writer| writer.start_path());
+                    let output_path =
+                        ctx.samples.writer.as_ref().map(|writer| writer.start_path(frame.path_signature()));
                     let mode =
                         if ctx.path_merging || !frame.region_merge_records().is_empty() { "merge" } else { "fork" };
                     let grouped = ctx.samples.writer.as_ref().is_some_and(|writer| writer.grouped());
@@ -1618,6 +1619,9 @@ fn solve_collect_path<'ir, B: BV>(
                             ret_val,
                             &|class_id, solution, slices, truncated, model| {
                                 if let Some(writer) = &ctx.samples.writer {
+                                    if let Some(reason) = writer.stop_reason() {
+                                        return Err(ExecError::SampleOutputStopped(reason));
+                                    }
                                     let mut sample = sample_path.materialize(
                                         model,
                                         shared_state,
@@ -1628,7 +1632,9 @@ fn solve_collect_path<'ir, B: BV>(
                                     sample.isa_state =
                                         super::samples::isa_state(ctx.target, &sample, model, shared_state)?;
                                     sample.truncated = truncated;
-                                    writer.append(output_path.unwrap(), solution, slices, sample);
+                                    if !writer.append(output_path.unwrap(), solution, slices, sample) {
+                                        return Err(ExecError::SampleOutputStopped(writer.stop_reason().unwrap()));
+                                    }
                                 }
                                 Ok(())
                             },
@@ -1654,10 +1660,16 @@ fn solve_collect_path<'ir, B: BV>(
                                     output_path.unwrap(),
                                     None,
                                     &serde_json::json!({
-                                "solution_count":1,"guard_assignment":{},"tested_slices":[]}),
+                                "solution_count":1,"guard_assignment":{},"tested_slices":[],"truncated":false}),
                                 );
                             }
                         }
+                    }
+                    if let Some(writer) = &ctx.samples.writer {
+                        writer.finish_path(
+                            output_path.unwrap(),
+                            merge_enumeration.as_ref().is_some_and(|value| value["path_truncated"].as_bool().unwrap()),
+                        );
                     }
                     merge_enumeration
                 } else {

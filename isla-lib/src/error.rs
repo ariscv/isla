@@ -136,6 +136,8 @@ pub enum ExecError {
     Z3Unknown,
     /// Execution stopped because this function is in the stop_functions set
     Stopped(String),
+    /// 样本输出会话的正常停止，由枚举器收尾，不是执行失败。
+    SampleOutputStopped(&'static str),
     PCLimitReached(u64),
     BranchLimitReached(Name, usize),
     LoopLimitReached(Name, usize),
@@ -174,6 +176,7 @@ impl IslaError for ExecError {
             | NoModel
             | Z3Error(_)
             | Z3Unknown
+            | SampleOutputStopped(_)
             | Stopped(_)
             | PCLimitReached(_)
             | InconsistentRegisterReset
@@ -223,6 +226,7 @@ impl fmt::Display for ExecError {
             NoModel => write!(f, "No SMT model found"),
             Z3Error(msg) => write!(f, "SMT solver error: {}", msg),
             Z3Unknown => write!(f, "SMT solver returned unknown"),
+            SampleOutputStopped(reason) => write!(f, "样本输出会话正常停止：{reason}"),
             Stopped(func) => write!(f, "Execution stopped at {}", func),
             PCLimitReached(pc_value) => write!(f, "Executed instruction at {} more than specified limit", pc_value),
             BranchLimitReached(func, pc_value) => {

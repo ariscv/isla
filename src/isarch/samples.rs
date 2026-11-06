@@ -42,7 +42,7 @@ pub struct SampleSession {
 impl SampleSession {
     pub fn new(options: &SampleOptions, enumeration: Option<&MergeEnumerationConfig>) -> Result<Self, String> {
         options.validate()?;
-        let counting = enumeration.is_some_and(|config| config.enabled && config.mode == MergeEnumerationMode::Count);
+        let counting = enumeration.is_some_and(|config| config.enabled && config.mode != MergeEnumerationMode::Samples);
         let outputs = enumeration.map_or(&[][..], |config| config.outputs.as_slice());
         let mut configured = if counting { Vec::new() } else { outputs.to_vec() };
         if let Some(path) = std::env::var_os("ISLA_EXPORT_SAMPLES").filter(|_| !counting) {
@@ -59,7 +59,13 @@ impl SampleSession {
             return Err("检查报告不得覆盖样本输出".into());
         }
         let checker = options.check.as_ref().map(|path| SampleChecker::load(path, options.limit)).transpose()?;
-        let writer = (!configured.is_empty()).then(|| SampleOutputs::open(&configured));
+        if enumeration.and_then(|config| config.max_output_bytes).is_some_and(|limit| limit < 1024) {
+            return Err("max_output_bytes 至少为1024，必须容纳文件头和正常结束标记".into());
+        }
+        let writer = (!configured.is_empty()).then(|| match enumeration.and_then(|config| config.max_output_bytes) {
+            Some(limit) => SampleOutputs::open_budget(&configured, limit),
+            None => SampleOutputs::open(&configured),
+        });
         Ok(Self { writer, checker, retain_solutions: outputs.is_empty() })
     }
     pub fn enabled(&self) -> bool {
@@ -258,6 +264,20 @@ mod tests {
         let expected = target.solve_pre_state(&mut model, &shared).unwrap();
         let actual = isa_state(&target, &sample, &mut model, &shared).unwrap();
         assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    #[test]
+    fn samples_predict_配置后端也不创建样本文件() {
+        let root = std::env::temp_dir().join(format!("f12-no-samples-{}", std::process::id()));
+        let config = MergeEnumerationConfig {
+            enabled: true,
+            mode: MergeEnumerationMode::Predict,
+            outputs: vec![SampleOutputConfig { format: SampleOutputFormat::Binary, path: root.join("never.bin") }],
+            ..Default::default()
+        };
+        let session = SampleSession::new(&SampleOptions::default(), Some(&config)).unwrap();
+        assert!(session.writer.is_none());
+        assert!(!root.exists());
     }
 
     #[test]

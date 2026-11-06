@@ -1889,6 +1889,11 @@ pub struct MergeEnumerationConfig {
     pub sample_stride: usize,
     pub enumeration_threads: usize,
     pub outputs: Vec<SampleOutputConfig>,
+    /// 有界二进制会话采用直接流式枚举；None 保持既有后端语义。
+    pub max_output_bytes: Option<u64>,
+    pub predict_probes: usize,
+    pub predict_seed: u64,
+    pub predict_domain_cap: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1914,6 +1919,10 @@ impl Default for MergeEnumerationConfig {
             sample_stride: 1,
             enumeration_threads: std::thread::available_parallelism().unwrap().get().min(16),
             outputs: Vec::new(),
+            max_output_bytes: None,
+            predict_probes: 256,
+            predict_seed: 0,
+            predict_domain_cap: 256,
         }
     }
 }
@@ -1923,6 +1932,7 @@ impl Default for MergeEnumerationConfig {
 pub enum MergeEnumerationMode {
     Samples,
     Count,
+    Predict,
 }
 
 /// 局部路径合并策略；这里只描述配置，不改变解释器行为。
@@ -2345,7 +2355,19 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             allowed_table_keys(
                 sub,
                 root,
-                &["enabled", "mode", "class_cap", "path_cap", "sample_stride", "enumeration_threads", "outputs"],
+                &[
+                    "enabled",
+                    "mode",
+                    "class_cap",
+                    "path_cap",
+                    "sample_stride",
+                    "enumeration_threads",
+                    "outputs",
+                    "max_output_bytes",
+                    "predict_probes",
+                    "predict_seed",
+                    "predict_domain_cap",
+                ],
             )?;
             let mut config = MergeEnumerationConfig::default();
             if let Some(outputs) = sub.get("outputs") {
@@ -2376,11 +2398,36 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
                 config.mode = match mode.as_str() {
                     Some("samples") => MergeEnumerationMode::Samples,
                     Some("count") => MergeEnumerationMode::Count,
-                    _ => return Err(format!("{root}.mode 必须是 samples 或 count")),
+                    Some("predict") => MergeEnumerationMode::Predict,
+                    _ => return Err(format!("{root}.mode 必须是 samples、count 或 predict")),
                 };
             }
             if let Some(enabled) = optional_bool(sub, "enabled", root)? {
                 config.enabled = enabled;
+            }
+            if let Some(value) = optional_u64(sub, "predict_probes", root)? {
+                if value < 200 {
+                    return Err(format!("{root}.predict_probes 必须至少为200"));
+                }
+                config.predict_probes = usize::try_from(value).unwrap();
+            }
+            if let Some(value) = optional_u64(sub, "predict_seed", root)? {
+                config.predict_seed = value;
+            }
+            if let Some(value) = optional_u64(sub, "predict_domain_cap", root)? {
+                if value == 0 {
+                    return Err(format!("{root}.predict_domain_cap 必须大于零"));
+                }
+                config.predict_domain_cap = usize::try_from(value).unwrap();
+            }
+            if let Some(value) = optional_u64(sub, "max_output_bytes", root)? {
+                if value == 0 {
+                    return Err(format!("{root}.max_output_bytes 必须大于零"));
+                }
+                if config.outputs.len() != 1 || config.outputs[0].format != SampleOutputFormat::Binary {
+                    return Err(format!("{root}.max_output_bytes 要求只启用一个 binary 后端"));
+                }
+                config.max_output_bytes = Some(value);
             }
             for (name, cap) in [
                 ("class_cap", &mut config.class_cap),
@@ -2394,6 +2441,15 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
                     }
                     *cap = usize::try_from(value).map_err(|error| format!("{root}.{name}: {error}"))?;
                 }
+            }
+            if config.max_output_bytes.is_none()
+                && config.outputs.len() == 1
+                && config.outputs[0].format == SampleOutputFormat::Binary
+            {
+                config.max_output_bytes = Some(25_000_000_000);
+            }
+            if config.max_output_bytes.is_some() && config.sample_stride != 1 {
+                return Err(format!("{root}.max_output_bytes 流式会话要求 sample_stride=1"));
             }
             Ok(config)
         })
@@ -2686,6 +2742,25 @@ mod tests {
             MergeEnumerationConfig::default().enumeration_threads,
             std::thread::available_parallelism().unwrap().get().min(16)
         );
+    }
+
+    #[test]
+    fn execution_limits_predict_不生成样本且至少200次独立探测() {
+        let text="[execution_limits.merge_enumeration]\nenabled=true\nmode='predict'\npredict_probes=256\npredict_seed=7\npredict_domain_cap=256";
+        let config = merge_config(text).unwrap().merge_enumeration.unwrap();
+        assert_eq!(config.mode, MergeEnumerationMode::Predict);
+        assert_eq!(config.predict_probes, 256);
+        for probes in ["0", "199", "-1"] {
+            assert!(merge_config(&text.replace("predict_probes=256", &format!("predict_probes={probes}"))).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_limits_output_budget_必须为正且只用二进制() {
+        let text = "[execution_limits.merge_enumeration]\nenabled=true\nmax_output_bytes=25000000000\n[[execution_limits.merge_enumeration.outputs]]\nformat='binary'\npath='samples.bin'";
+        assert_eq!(merge_config(text).unwrap().merge_enumeration.unwrap().max_output_bytes, Some(25_000_000_000));
+        assert!(merge_config(&text.replace("25000000000", "0")).is_err());
+        assert!(merge_config(&text.replace("'binary'", "'v1_jsonl'")).is_err());
     }
 
     #[test]

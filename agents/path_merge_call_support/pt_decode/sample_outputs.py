@@ -151,29 +151,84 @@ def value(source):
     raise ValueError(f'未知二进制值类型 {tag}')
 
 
-def binary_samples(source):
+def binary_summary(source):
+    """从固定文件尾定位预算会话汇总，不扫描或展开组合。"""
+    source.seek(-40,2)
+    tail=struct.unpack('<QQQQQ',exact(source,40))
+    assert tail[:3] == (0,0,0) and tail[4] == (1<<64)-1
+    offset=tail[3]
+    source.seek(offset)
+    signature,cls,count,size,flags=struct.unpack('<QQQQQ',exact(source,40))
+    assert (signature,cls,count,flags) == (0,0,0,2)
+    reason,total,path_count,class_count=struct.unpack('<QQQQ',exact(source,32))
+    assert reason in (0,1,2) and size == 32+32*(path_count+class_count)
+    paths={}
+    classes={}
+    for index in range(path_count):
+        path,signature,count,truncated=struct.unpack('<QQQQ',exact(source,32))
+        assert path not in paths and truncated in (0,1)
+        paths[path]=dict(path_signature=signature,combinations=count,truncated=bool(truncated))
+    for index in range(class_count):
+        path,cls,count,truncated=struct.unpack('<QQQQ',exact(source,32))
+        assert path in paths and (path,cls) not in classes and truncated in (0,1)
+        classes[path,cls]=dict(combinations=count,truncated=bool(truncated))
+    assert sum(p['combinations'] for p in paths.values()) == total
+    assert sum(c['combinations'] for c in classes.values()) == total
+    assert source.tell() == offset+40+size
+    assert struct.unpack('<QQQQQ',exact(source,40)) == tail and source.read(1) == b''
+    return dict(reason={0:None,1:'output_budget',2:'no_progress'}[reason], combinations=total,
+                paths=paths,classes=classes,offset=offset)
+
+
+def binary_samples(source, selected=None):
     if exact(source,8) != b'ISLASB1\0':
         raise ValueError('二进制样本 magic 不匹配')
     version, header_size, record_size, metadata_size = struct.unpack('<IIII',exact(source,16))
-    assert (version,header_size,record_size) == (1,24,40)
+    assert version in (1,2) and (header_size,record_size) == (24,40)
     metadata = json.loads(exact(source,metadata_size))
-    assert metadata['schema_version'] == metadata['sample_schema_version'] == 1
+    assert metadata['schema_version'] == version and metadata['sample_schema_version'] == 1
     assert metadata['endianness'] == 'little' and metadata['payload_codec'] == 'typed-json-v1'
     assert metadata['fields'] == [['path_signature','u64',0],['class_id','u64',8],['solution_count','u64',16],
                                   ['payload_bytes','u64',24],['flags','u64',32]]
+    start=source.tell()
+    summary=binary_summary(source) if version == 2 else None
+    source.seek(start)
+    ordinal=0
+    observed={}
     while True:
         signature, class_id, count, size, flags = struct.unpack('<QQQQQ',exact(source,40))
         if flags == (1<<64)-1:
-            assert (signature,class_id,count,size) == (0,0,0,0) and source.read(1) == b''
+            assert version == 1 and (signature,class_id,count,size) == (0,0,0,0) and source.read(1) == b''
+            return
+        if version == 2 and flags == 2:
+            assert source.tell()-40 == summary['offset']
+            assert ordinal == summary['combinations']
+            if selected is None:
+                assert observed == {key:entry['combinations'] for key,entry in summary['classes'].items()}
             return
         assert flags in (0,1) and count > 0
+        if version == 2:
+            assert source.tell()+size <= summary['offset']
+        wanted = None if selected is None else {item-ordinal for item in selected if ordinal <= item < ordinal+count}
+        ordinal += count
+        if wanted == set():
+            source.seek(size,1)
+            continue
         end = source.tell()+size
         header = value(source)
         assert header['path_signature'] == signature and header['solution_count'] == count
         assert header['class_id'] == (None if class_id == (1<<64)-1 else class_id)
-        for sample in restore(header,(value(source) for _ in range(count))):
+        if version == 2:
+            path=header['path_nonce']
+            key=(path,class_id)
+            assert summary['paths'][path]['path_signature'] == signature
+            observed[key]=observed.get(key,0)+count
+        for index,sample in enumerate(restore(header,(value(source) for _ in range(count)))):
             assert sample['truncated'] == bool(flags)
-            yield sample
+            if version == 2:
+                sample['truncated'] = summary['paths'][path]['truncated'] or summary['classes'][key]['truncated']
+            if wanted is None or index in wanted:
+                yield sample
         assert source.tell() == end, '类载荷长度不符'
 
 
@@ -182,11 +237,20 @@ def main():
     parser.add_argument('--format',choices=['compact_jsonl','binary'],required=True)
     parser.add_argument('--input',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--random',type=int,help='按组合均匀无放回抽取，流式二进制专用')
+    parser.add_argument('--seed',type=int,default=11)
     args = parser.parse_args()
     assert args.input.resolve() != args.output.resolve()
     rows = 0
     with args.input.open('rb' if args.format == 'binary' else 'r') as source, args.output.open('x') as output:
-        samples = binary_samples(source) if args.format == 'binary' else compact_samples(source)
+        selected=None
+        if args.random is not None:
+            import random
+            assert args.format == 'binary' and args.random > 0
+            summary=binary_summary(source)
+            selected=set(random.Random(args.seed).sample(range(summary['combinations']),min(args.random,summary['combinations'])))
+            source.seek(0)
+        samples = binary_samples(source,selected) if args.format == 'binary' else compact_samples(source)
         for sample in samples:
             output.write(json.dumps(sample,ensure_ascii=False,separators=(',',':'))+'\n')
             rows += 1

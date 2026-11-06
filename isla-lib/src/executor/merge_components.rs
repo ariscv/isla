@@ -193,6 +193,58 @@ fn partition(nodes: &[Formula<Sym>], constraints: &[Formula<Sym>], support: &mut
     groups
 }
 
+fn event_support<B: BV>(events: &[Event<B>]) -> (Support, Vec<Formula<Sym>>) {
+    use Formula::*;
+    let mut definitions = HashMap::new();
+    let mut types = HashMap::new();
+    let mut constraints = Vec::new();
+    fn conjuncts(exp: &Formula<Sym>, out: &mut Vec<Formula<Sym>>) {
+        if let And(a, b) = exp {
+            conjuncts(a, out);
+            conjuncts(b, out);
+        } else {
+            out.push(exp.clone());
+        }
+    }
+    for event in events {
+        match event {
+            Event::Smt(Def::DeclareConst(v, ty), ..) => {
+                types.insert(*v, ty.clone());
+            }
+            Event::Smt(Def::DefineConst(v, e), ..) => {
+                definitions.insert(*v, e.clone());
+            }
+            Event::Smt(Def::Assert(e), ..) => conjuncts(e, &mut constraints),
+            _ => (),
+        }
+    }
+    (Support::new(definitions, types), constraints)
+}
+
+pub(super) struct PredictionGraph {
+    support: Support,
+    constraints: Vec<Formula<Sym>>,
+}
+
+impl PredictionGraph {
+    pub(super) fn new<B: BV>(events: &[Event<B>]) -> Self {
+        let (support, constraints) = event_support(events);
+        Self { support, constraints }
+    }
+
+    /// 原断言和所有类条件均参与连接；不是仅候选图或两两SAT抽查。
+    pub(super) fn groups(
+        &mut self,
+        bits: &[Formula<Sym>],
+        literals: &[Formula<Sym>],
+    ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        let candidate = partition(bits, &[], &mut self.support);
+        let constraints: Vec<_> = self.constraints.iter().chain(literals).cloned().collect();
+        let verified = partition(bits, &constraints, &mut self.support);
+        (candidate, verified)
+    }
+}
+
 pub(super) struct Diagnostic {
     guards: usize,
     slices: Vec<(u32, u32, u32)>,
@@ -217,29 +269,7 @@ impl Diagnostic {
     ) -> Self {
         use Formula::*;
         let started = std::time::Instant::now();
-        let mut definitions = HashMap::new();
-        let mut types = HashMap::new();
-        let mut constraints = Vec::new();
-        fn conjuncts(exp: &Formula<Sym>, out: &mut Vec<Formula<Sym>>) {
-            if let And(a, b) = exp {
-                conjuncts(a, out);
-                conjuncts(b, out);
-            } else {
-                out.push(exp.clone());
-            }
-        }
-        for event in events {
-            match event {
-                Event::Smt(Def::DeclareConst(v, ty), ..) => {
-                    types.insert(*v, ty.clone());
-                }
-                Event::Smt(Def::DefineConst(v, e), ..) => {
-                    definitions.insert(*v, e.clone());
-                }
-                Event::Smt(Def::Assert(e), ..) => conjuncts(e, &mut constraints),
-                _ => (),
-            }
-        }
+        let (mut support, constraints) = event_support(events);
         let mut nodes: Vec<_> =
             records.iter().map(|r| And(Box::new(contexts[&r.record_id].clone()), Box::new(Var(r.condition)))).collect();
         let mut predicates = nodes.clone();
@@ -250,7 +280,6 @@ impl Diagnostic {
         predicates.extend(bits.iter().map(|(v, bit)| {
             Eq(Box::new(Extract(*bit, *bit, Box::new(Var(Sym { id: *v })))), Box::new(smtlib::bits64(1, 1)))
         }));
-        let mut support = Support::new(definitions, types);
         let constraint_groups = partition(&nodes, &constraints, &mut support);
         // 原断言可能因数组一致性等原因将整路径相连。候选图只用于提出切分，
         // 是否可乘由完整守卫边际域的基数及原约束 SAT 验证决定。

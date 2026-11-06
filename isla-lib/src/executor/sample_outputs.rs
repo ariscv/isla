@@ -8,9 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "sample_binary.rs"]
 mod binary;
 
+#[path = "sample_budget.rs"]
+mod budget;
+
 /// 每条路径使用独立命名空间；相同路径签名可能在不同 clause 或批次中再次出现。
 pub struct SampleOutputs {
     backends: Vec<SampleBackend>,
+    budget: Option<std::sync::Arc<Mutex<budget::BudgetWriter>>>,
+    monitor: Option<(std::sync::mpsc::Sender<()>, Mutex<Option<std::thread::JoinHandle<()>>>)>,
+    summary_path: Option<PathBuf>,
     next_sample: AtomicU64,
     next_path: AtomicU64,
 }
@@ -82,24 +88,92 @@ impl SampleOutputs {
                 }));
             }
         }
-        Self { backends, next_sample: AtomicU64::new(next), next_path: AtomicU64::new(0) }
+        Self {
+            backends,
+            budget: None,
+            monitor: None,
+            summary_path: None,
+            next_sample: AtomicU64::new(next),
+            next_path: AtomicU64::new(0),
+        }
     }
 
-    pub fn start_path(&self) -> u64 {
-        self.next_path
+    pub fn open_budget(configs: &[SampleOutputConfig], limit: u64) -> Self {
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].format, SampleOutputFormat::Binary);
+        let path = &configs[0].path;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let writer = std::sync::Arc::new(Mutex::new(budget::BudgetWriter::open(path, limit)));
+        let progress = writer.clone();
+        let stop_file = path.with_extension("stop");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let monitor = std::thread::spawn(move || {
+            let mut previous = 0;
+            let mut changed = std::time::Instant::now();
+            loop {
+                match receiver.recv_timeout(std::time::Duration::from_secs(60)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                }
+                let mut writer = progress.lock().unwrap();
+                writer.flush_pending();
+                let report = writer.progress();
+                let total = report["combinations"].as_u64().unwrap();
+                if total != previous {
+                    previous = total;
+                    changed = std::time::Instant::now();
+                }
+                if changed.elapsed().as_secs() >= 3600 || stop_file.exists() {
+                    writer.stop_stalled();
+                }
+                eprintln!("[MERGE_ENUMERATION_PROGRESS] {}", report);
+            }
+        });
+        Self {
+            backends: Vec::new(),
+            budget: Some(writer),
+            monitor: Some((sender, Mutex::new(Some(monitor)))),
+            summary_path: Some(path.with_extension("summary.json")),
+            next_sample: AtomicU64::new(0),
+            next_path: AtomicU64::new(0),
+        }
+    }
+
+    pub fn stop_reason(&self) -> Option<&'static str> {
+        self.budget.as_ref().and_then(|writer| writer.lock().unwrap().stop_reason())
+    }
+
+    pub fn finish_path(&self, path: u64, truncated: bool) {
+        if let Some(writer) = &self.budget {
+            writer.lock().unwrap().finish_path(path, truncated);
+        }
+    }
+
+    pub fn start_path(&self, signature: u64) -> u64 {
+        let path = self
+            .next_path
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
-            .expect("输出路径编号溢出")
+            .expect("输出路径编号溢出");
+        if let Some(writer) = &self.budget {
+            writer.lock().unwrap().start_path(path, signature);
+        }
+        path
     }
 
     pub fn grouped(&self) -> bool {
-        self.backends.iter().any(|backend| matches!(backend, SampleBackend::Grouped(_)))
+        self.budget.is_some() || self.backends.iter().any(|backend| matches!(backend, SampleBackend::Grouped(_)))
     }
 
-    pub fn append(&self, path: u64, solution: usize, slices: &[String], mut sample: Sample) {
+    pub fn append(&self, path: u64, solution: usize, slices: &[String], mut sample: Sample) -> bool {
         sample.sample_id = self
             .next_sample
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
             .expect("样本编号溢出");
+        if let Some(writer) = &self.budget {
+            return writer.lock().unwrap().append(path, solution, slices, serde_json::to_value(sample).unwrap());
+        }
         let value = self.grouped().then(|| serde_json::to_value(&sample).expect("样本序列化失败"));
         for backend in &self.backends {
             match backend {
@@ -138,9 +212,18 @@ impl SampleOutputs {
                 }
             }
         }
+        true
     }
 
     pub fn finish_class(&self, path: u64, class_id: Option<usize>, metadata: &Value) {
+        if let Some(writer) = &self.budget {
+            writer.lock().unwrap().finish_class(
+                path,
+                class_id,
+                metadata["truncated"].as_bool().expect("流式类结束必须携带最终截断标记"),
+            );
+            return;
+        }
         for backend in &self.backends {
             if let SampleBackend::Grouped(writer) = backend {
                 let class = writer.classes.lock().unwrap().remove(&(path, class_id)).expect("结束的类必须已经写出样本");
@@ -173,6 +256,15 @@ impl SampleOutputs {
     }
 
     pub fn finish(&self) {
+        if let Some((sender, monitor)) = &self.monitor {
+            sender.send(()).unwrap();
+            monitor.lock().unwrap().take().unwrap().join().unwrap();
+        }
+        if let Some(writer) = &self.budget {
+            let report = writer.lock().unwrap().finish();
+            std::fs::write(self.summary_path.as_ref().unwrap(), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            eprintln!("[SAMPLE_OUTPUT_REPORT] {}", report);
+        }
         for backend in &self.backends {
             if let SampleBackend::Grouped(writer) = backend {
                 assert!(writer.classes.lock().unwrap().is_empty(), "所有输出类都必须正常收尾");
@@ -235,7 +327,11 @@ mod tests {
         ]
         .map(|(format, path)| SampleOutputConfig { format, path: root.join(path) });
         let outputs = SampleOutputs::open(&configs);
-        let path = outputs.start_path();
+        let budget = SampleOutputs::open_budget(
+            &[SampleOutputConfig { format: SampleOutputFormat::Binary, path: root.join("budget.bin") }],
+            1_000_000,
+        );
+        let path = outputs.start_path(7);
         for class in 0..2 {
             for solution in 0..3 {
                 let sample = Sample {
@@ -258,14 +354,18 @@ mod tests {
                     result: json!({"ctor":"完成","value":{"bool":solution%2==0}}),
                     ret_val: "保留原显示文本".into(),
                 };
+                assert!(budget.append(path, solution as usize, &[format!("#b{solution:02b}")], sample.clone()));
                 outputs.append(path, solution as usize, &[format!("#b{solution:02b}")], sample);
             }
+            budget.finish_class(path, Some(class), &json!({"truncated":class == 1}));
             outputs.finish_class(
                 path,
                 Some(class),
                 &json!({"guard_assignment":{"1":class==1},"tested_slices":[],"solution_count":3}),
             );
         }
+        budget.finish_path(path, false);
+        budget.finish();
         outputs.finish();
         let rows = SampleChecker::load(&root.join("v1.jsonl"), None).unwrap().samples;
         assert_eq!(rows.len(), 6);

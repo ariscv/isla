@@ -50,6 +50,38 @@ class SampleOutputTests(unittest.TestCase):
         rows=list(compact_samples(TinyRead(json.dumps(record)+'\n'+json.dumps(record)+'\n')))
         self.assertEqual([row['sample_id'] for row in rows],list(range(100,112))*2)
 
+class BudgetOutputTests(unittest.TestCase):
+    def test_流式二进制正常尾及路径类截断标记(self):
+        import struct
+        from sample_outputs import binary_summary
+        def encode(item):
+            if item is None: return b'\0'
+            if isinstance(item,bool): return bytes([2 if item else 1])
+            if isinstance(item,int): return b'\3'+struct.pack('<Q',item)
+            if isinstance(item,str):
+                text=item.encode()
+                return b'\6'+struct.pack('<I',len(text))+text
+            if isinstance(item,list): return b'\7'+struct.pack('<I',len(item))+b''.join(map(encode,item))
+            return b'\10'+struct.pack('<I',len(item))+b''.join(encode(k)+encode(v) for k,v in item.items())
+        fields=[['path_signature','u64',0],['class_id','u64',8],['solution_count','u64',16],
+                ['payload_bytes','u64',24],['flags','u64',32]]
+        metadata=json.dumps(dict(schema_version=2,sample_schema_version=1,endianness='little',
+                                 payload_codec='typed-json-v1',fields=fields)).encode()
+        prefix=b'ISLASB1\0'+struct.pack('<IIII',2,24,40,len(metadata))+metadata
+        skeleton=dict(schema_version=1,sample_id=0,path_signature=7,class_id=0,truncated=False)
+        header=dict(compact_schema_version=1,path_nonce=3,path_signature=7,class_id=0,solution_count=1,skeleton=skeleton)
+        payload=encode(header)+encode(dict(solution_index=0,delta=dict(set={},remove=[])))
+        data=prefix+struct.pack('<QQQQQ',7,0,1,len(payload),0)+payload
+        offset=len(data)
+        # 原因/组合/路径数/类数 + 路径和类各32字节。
+        summary=struct.pack('<'+'Q'*12,1,1,1,1,3,7,1,1,3,0,1,1)
+        data+=struct.pack('<QQQQQ',0,0,0,len(summary),2)+summary+struct.pack('<QQQQQ',0,0,0,offset,(1<<64)-1)
+        self.assertEqual(binary_summary(io.BytesIO(data))['combinations'],1)
+        rows=list(binary_samples(io.BytesIO(data)))
+        self.assertEqual(rows,[dict(skeleton,truncated=True)])
+        with self.assertRaises((AssertionError,EOFError)):
+            list(binary_samples(io.BytesIO(data[:-1])))
+
 
 if __name__ == '__main__':
     unittest.main()

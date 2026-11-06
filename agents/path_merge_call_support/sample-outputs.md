@@ -107,3 +107,54 @@ python3 agents/path_merge_call_support/pt_decode/compare_sample_outputs.py \
 ```
 
 比较器对全部 v1 字段排序后计算完整内容签名，按 sample_id 一一对齐；不删除 ret_val、向量寄存器、内存、编号或其他字段。它为本轮小场景保存每条记录的签名，内存随比较样本数增长；单纯展开工具则按类内增量流式写出。输出文件必须不存在，避免覆盖输入或已有还原结果。
+
+## F11：有预算的二进制流式会话
+
+只配置一个 binary 后端时，默认 `max_output_bytes=25000000000`（十进制25 GB）。也可以显式设置该字段；显式预算要求只配置 binary，且 `sample_stride=1`。多后端 F9 会话保留原格式和逐类暂存方式。有界会话使用二进制 schema=2；samples v1 的字段及含义不变。预算至少1024字节，以容纳正常协议头尾。
+
+```toml
+[execution_limits.merge_enumeration]
+enabled=true
+mode="samples"
+class_cap=9223372036854775807
+path_cap=9223372036854775807
+sample_stride=1
+enumeration_threads=4
+max_output_bytes=25000000000
+[[execution_limits.merge_enumeration.outputs]]
+format="binary"
+path="samples.bin"
+```
+
+### 小块提交与精确预算
+
+复用 F9 的完整样本物化、JSON Pointer 差分及 typed-json-v1 编码。每个活动类最多缓冲256个组合，或达到256 KiB增量后提交一个完整块；每60秒也提交尚未满块的缓冲。每块仍为40 B索引＋完整骨架＋相对该骨架的增量，不经过磁盘文本暂存，也不等待整个类结束。骨架随块重复，略增空间，换取有界缓冲、持续写出及正常预算停止。
+
+接纳每条组合之前，在同一个互斥临界区精确计算其编码字节数，包含新块的骨架／索引、新路径／类的最终汇总空间、所有待提交缓冲，以及正常结束标记。无法容纳时整条拒绝，不接受半条、不丢弃此前已接纳的组合。并发线程共享同一额度。预算只计二进制主文件（含其所有协议开销）；配置、stderr、gen JSON 和人类可读汇总另计。
+
+schema=2 继续使用8字节 magic 和24字节固定头，版本数字改为2，头内说明新载荷布局。普通块索引 flags=0/1，含义是块内骨架原始 truncated；骨架额外携带 `path_nonce`，区分同签名重复会话。相同 path_nonce/class_id 可有多个块，类内 solution_index 连续且唯一。守卫赋值和片段布局仍在 gen JSON，不依赖其还原完整 v1 样本。
+
+### 结束汇总与截断语义
+
+路径／类是否截断要到生成结束才知道，不能在写块时提前宣称完整。schema=2 在全部普通块之后写 flags=2 的40 B汇总索引，再写定长小端汇总载荷：
+
+- 四个 u64：停止原因（0正常、1 output_budget、2 no_progress）、已接纳组合总数、有样本的路径数、有样本的类数。
+- 每路径四个 u64：path_nonce、path_signature、组合数、path_truncated。
+- 每类四个 u64：path_nonce、class_id、组合数、class_truncated。
+- 正常40 B文件尾：前3个u64为0，第4个为汇总索引偏移，flags=u64::MAX。
+
+读回先从固定文件尾定位汇总，再逐块展开；最终样本 `truncated = path_truncated || class_truncated`，与 v1 原定义一致。完整结束文件才有最终截断语义，缺少汇总或正常尾的文件明确拒读。最终汇总、文件尾和全部已接纳组合均在预算内；并不靠截断文件或捕获 I/O 错误补救。
+
+旁置 `samples.summary.json` 包含组合数、实际字节数、上限、truncated、reason、每路径组合数（包括未能写出组合的路径）。正常业务停止不会成为执行 panic。每60秒 `MERGE_ENUMERATION_PROGRESS` 输出组合数、已编码／提交字节数、已知总量下界和上限；下界不伪称完整总数。连续60分钟组合数不增长，或检测到同目录 `samples.stop`，会请求正常停止，原因为 no_progress。收尾后停止监控线程。
+
+### 随机读回
+
+读回工具同时支持 schema=1/2。可均匀无放回抽100个组合，只读取命中块，避免把几十GB全部展开成v1：
+
+```sh
+python3 agents/path_merge_call_support/pt_decode/sample_outputs.py \
+  --format binary --input output/f11/sv39-store/samples.bin \
+  --random 100 --seed 11 --output output/f11/sv39-store/random100.jsonl
+```
+
+抽样依据组合序号而非块序号，避免偏向小块。展开的每条仍是普通 samples v1，可直接交给既有 pt_decode 和 --check-samples；只根据结束汇总补齐 truncated，不更改代表值、内存、寄存器或结果。
