@@ -130,7 +130,7 @@ impl<B: BV> LocalFrame<'_, B> {
         self.enumerate_merges_with(solver, state, shared, result, &mut |_, _, _| Ok(()))
     }
 
-    /// samples 模式在每个解的模型存活时调用消费方；关闭枚举或 count 模式不调用。
+    /// samples 模式仅在 stride 选中的解模型存活时调用消费方；关闭枚举或 count 模式不调用。
     pub fn enumerate_merges_with(
         &self,
         solver: &mut Solver<B>,
@@ -146,7 +146,10 @@ impl<B: BV> LocalFrame<'_, B> {
         if !config.enabled {
             return Ok(None);
         }
-        assert!(config.class_cap > 0 && config.path_cap > 0, "枚举上限必须大于零");
+        assert!(
+            config.class_cap > 0 && config.path_cap > 0 && config.sample_stride > 0,
+            "枚举上限和采样步长必须大于零"
+        );
         assert_eq!(solver.transaction_depth(), 0, "仅在路径结束后枚举");
         let records = &self.region_merge_records;
         let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
@@ -218,14 +221,16 @@ impl<B: BV> LocalFrame<'_, B> {
             })
             .collect();
         let counting = config.mode == crate::config::MergeEnumerationMode::Count;
-        // 计数只抽取被投影的一位谓词见证，不求值完整输入、返回值或状态。
+        // DFS 只抽取被投影的一位谓词见证；完整输入、返回值和状态仅在选中位置求值。
         let packed_bits = bit_predicates
             .iter()
-            .filter(|_| counting)
             .map(|bit| Ite(Box::new(bit.clone()), Box::new(smtlib::bits64(1, 1)), Box::new(smtlib::bits64(0, 1))))
             .reduce(|high, low| Concat(Box::new(high), Box::new(low)));
+        // 物化会在 Z3 Context 中创建 AST、补全模型，影响后续代表值。
+        // 复用现有事件重放接口隔离 DFS 与逐解物化，避免 stride 改变样本内容。
+        let replay_events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
         let tx = solver.start_transaction();
-        let mut enumerate = |solver: &mut Solver<B>| {
+        let enumerate = |solver: &mut Solver<B>| {
             let started = std::time::Instant::now();
             let mut sat_time = std::time::Duration::ZERO;
             let mut projection_time = std::time::Duration::ZERO;
@@ -234,11 +239,12 @@ impl<B: BV> LocalFrame<'_, B> {
             let mut truncated_classes = 0;
             let mut classes = Vec::new();
             let mut total = 0;
+            let mut exported_samples = 0;
             let mut path_truncated = false;
             // 在原路径约束与活动上下文中固定的守卫，不必在每个类重复探测相反分支。
             // 只剪去已由 SAT 证明确不可能的极性；不限制任何真实可行类。
             let mut split_guards = vec![true; records.len()];
-            if counting {
+            {
                 let queried = std::time::Instant::now();
                 for (index, record) in records.iter().enumerate() {
                     let ctx = &contexts[&record.record_id];
@@ -313,7 +319,8 @@ impl<B: BV> LocalFrame<'_, B> {
                             }
                         }
                     }
-                    let selected: Vec<_> = if counting {
+                    let export = !counting && total % config.sample_stride == 0;
+                    let selected: Vec<_> = {
                         let raw = if let Some(packed) = &packed_bits {
                             bits_text(&model.get_exp(packed)?.unwrap_exp())
                         } else {
@@ -331,7 +338,20 @@ impl<B: BV> LocalFrame<'_, B> {
                                 }
                             })
                             .collect()
-                    } else {
+                    };
+                    drop(model);
+                    if export {
+                        let context = crate::smt::Context::new(crate::smt::Config::new());
+                        let mut representative_solver = Solver::new_seeded(&context, 0);
+                        for event in &replay_events {
+                            representative_solver.add_event(event.clone());
+                        }
+                        let condition = selected
+                            .iter()
+                            .fold(prefix.clone(), |condition, bit| And(Box::new(condition), Box::new(bit.clone())));
+                        assert!(satisfiable(&mut representative_solver, &condition)?, "DFS 见证必须可重放");
+                        let mut model = Model::new(&representative_solver);
+                        model.set_complete_model(true);
                         // 每个完整符号只取一次；本地截取所有重复或重叠片段。
                         let inputs: std::collections::BTreeMap<_, _> = symbols
                             .iter()
@@ -353,23 +373,9 @@ impl<B: BV> LocalFrame<'_, B> {
                         .map(|(symbol, value)| json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "value":value}))
                         .collect();
                         consume(class_count, solution_count, &mut model)?;
+                        exported_samples += 1;
                         solutions.push(json!({"slice_values":values, "representative":{"result":representative_result, "inputs":representative_inputs}}));
-                        let selected: Vec<_> = bits
-                            .iter()
-                            .zip(&bit_predicates)
-                            .skip(depth)
-                            .map(|((symbol, bit), predicate)| {
-                                let value = &inputs[symbol];
-                                if value.as_bytes()[value.len() - 1 - *bit as usize] == b'1' {
-                                    predicate.clone()
-                                } else {
-                                    Not(Box::new(predicate.clone()))
-                                }
-                            })
-                            .collect();
-                        selected
-                    };
-                    drop(model);
+                    }
                     projection_time += projected.elapsed();
                     solution_count += 1;
                     total += 1;
@@ -408,7 +414,7 @@ impl<B: BV> LocalFrame<'_, B> {
                         }
                     }
                 }
-                if !counting {
+                if !counting && !solutions.is_empty() {
                     let mut record_assignment = vec![false; records.len()];
                     for (index, value) in order.iter().zip(assignment) {
                         record_assignment[*index] = value;
@@ -419,26 +425,34 @@ impl<B: BV> LocalFrame<'_, B> {
                         .map(|(record, value)| (record.record_id.to_string(), json!(value)))
                         .collect();
                     classes.push(
-                        json!({"class_id":classes.len(), "guard_assignment":guard_assignment, "tested_slices":tested,
+                        json!({"class_id":class_count, "guard_assignment":guard_assignment, "tested_slices":tested,
                     "solution_count":solutions.len(), "solutions":solutions, "truncated":truncated}),
                     );
                 }
                 class_count += 1;
                 truncated_classes += usize::from(truncated);
-                if counting && shared.execution_stats.enabled() && class_count % 4096 == 0 {
-                    eprintln!("[MERGE_ENUMERATION_COUNT_PROGRESS] 类={class_count} 解={total} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", started.elapsed());
+                if shared.execution_stats.enabled() && class_count % 4096 == 0 {
+                    eprintln!("[MERGE_ENUMERATION_PROGRESS] stride={} 类={class_count} 解={total} 已导出={exported_samples} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", config.sample_stride, started.elapsed());
                 }
                 if path_truncated {
                     break;
                 }
             }
+            shared.execution_stats.enumeration_counted(
+                class_count,
+                total,
+                truncated_classes,
+                path_truncated,
+                config.sample_stride,
+                exported_samples,
+            );
             if counting {
-                shared.execution_stats.enumeration_counted(class_count, total, truncated_classes, path_truncated);
                 if shared.execution_stats.enabled() {
                     eprintln!("[MERGE_ENUMERATION_COUNT] 类={class_count} 解={total} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", started.elapsed());
                 }
                 return Ok(Some(json!({"schema_version":1, "mode":"count", "counted_classes":class_count,
                     "counted_paths":total, "truncated_classes":truncated_classes,
+                    "sample_stride":config.sample_stride, "exported_samples":exported_samples,
                     "path_truncated":path_truncated, "class_cap":config.class_cap, "path_cap":config.path_cap})));
             }
             let guard_records: Vec<_> = records.iter().map(|record| json!({"record_id":record.record_id, "parent_record":record.parent_record,
@@ -446,9 +460,23 @@ impl<B: BV> LocalFrame<'_, B> {
                 "source_loc":record.source_loc, "function":zencode::decode(shared.symtab.to_str(record.function)),
                 "branch_pc":record.branch_pc})).collect();
             Ok(Some(json!({"schema_version":1, "guard_records":guard_records, "guard_classes":classes,
-                "path_truncated":path_truncated, "enumerated_total":total, "class_cap":config.class_cap, "path_cap":config.path_cap})))
+                "path_truncated":path_truncated, "enumerated_total":exported_samples,
+                "sample_stride":config.sample_stride, "counted_classes":class_count, "counted_paths":total,
+                "exported_samples":exported_samples, "truncated_classes":truncated_classes, "class_cap":config.class_cap, "path_cap":config.path_cap})))
         };
-        let output = if counting { solver.with_incremental_checks(enumerate) } else { enumerate(solver) };
+        let output = if counting {
+            solver.with_incremental_checks(enumerate)
+        } else {
+            let context = crate::smt::Context::new(crate::smt::Config::new());
+            let mut projection_solver = Solver::new_seeded(&context, 0);
+            for event in &replay_events {
+                projection_solver.add_event(event.clone());
+            }
+            let projection_tx = projection_solver.start_transaction();
+            let output = projection_solver.with_incremental_checks(enumerate);
+            projection_solver.rollback_transaction(projection_tx);
+            output
+        };
         solver.rollback_transaction(tx);
         output
     }

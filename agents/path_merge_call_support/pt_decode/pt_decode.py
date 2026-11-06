@@ -612,7 +612,8 @@ def process(path, mode, config, va, va_register, offset, access=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fork", type=Path, required=True, help="分叉样本 JSONL")
+    parser.add_argument("--fork", type=Path, help="分叉样本 JSONL")
+    parser.add_argument("--merge-only", action="store_true", help="只解码合并样本，不声称完成双边交叉检验")
     parser.add_argument("--merge", type=Path, required=True, help="合并样本 JSONL")
     parser.add_argument("--out", type=Path, required=True, help="报告目录")
     parser.add_argument("--svrsw60t59b", choices=["enabled", "disabled"], required=True, help="模型中的扩展开关")
@@ -624,12 +625,21 @@ def main(argv=None):
     addresses.add_argument("--va-register", help="显式取址寄存器（完整名字）")
     parser.add_argument("--offset", type=lambda s: int(s, 0), default=0, help="寄存器取址的有符号字节偏移")
     args = parser.parse_args(argv)
+    if args.merge_only and args.fork:
+        parser.error("--merge-only 与 --fork 互斥")
+    if not args.merge_only and not args.fork:
+        parser.error("双边比较要求 --fork；单边解码请指定 --merge-only")
     if args.offset and not args.va_register:
         parser.error("--offset 要求 --va-register")
     config = Config(args.svrsw60t59b == "enabled", args.dirty_update == "enabled",
                     None if args.misaligned_access is None else args.misaligned_access == "enabled")
     start = time.perf_counter()
     try:
+        if args.merge_only:
+            merge, mm = process(args.merge, "merge", config, args.va, args.va_register, args.offset, args.access)
+            write_outputs(args.out, merge, mm)
+            print(f"merge：{mm['sample_count']} 样本，{len(merge)} 形状，{mm['elapsed_seconds']:.3f} 秒；仅单边解码")
+            return 0
         fork, fm = process(args.fork, "fork", config, args.va, args.va_register, args.offset, args.access)
         print(f"fork：{fm['sample_count']} 样本，{len(fork)} 形状，{fm['elapsed_seconds']:.3f} 秒", flush=True)
         merge, mm = process(args.merge, "merge", config, args.va, args.va_register, args.offset, args.access)

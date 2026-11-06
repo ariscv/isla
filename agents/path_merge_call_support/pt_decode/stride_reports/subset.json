@@ -1,0 +1,29 @@
+{
+  "full_count": 16592,
+  "full_signatures": 16592,
+  "subsets": {
+    "sv39-7-final": {
+      "count": 2382,
+      "signatures": 2382,
+      "missing": 0,
+      "strict_subset": true
+    },
+    "sv39-11-final": {
+      "count": 1516,
+      "signatures": 1516,
+      "missing": 0,
+      "strict_subset": true
+    }
+  },
+  "签名规则": {
+    "算法": "SHA-256，JSON 键排序，紧凑分隔符",
+    "移除顶层字段": [
+      "sample_id",
+      "class_id",
+      "path_signature",
+      "ret_val"
+    ],
+    "移除未使用的向量寄存器": "pre_registers/post_registers/isa_state 中的 vl、vtype",
+    "保留": "其余全部样本内容，包括完整前后内存、结构化 result、LOAD 相关全部寄存器与权限上下文、truncated"
+  }
+}

@@ -3572,3 +3572,85 @@ fn region_merge_f4_special_calls_still_rejected_statically() {
         assert!(reject.is_some(), "可执行特殊调用不能当成无实现 Unknown：{name:?}");
     }
 }
+
+#[test]
+fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
+    use smtlib::Exp::*;
+    let run = |stride, class_cap, path_cap| {
+        let shared = empty_shared_state();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let input = solver.declare_bitvector(4, info());
+        let extra = solver.declare_bitvector(32, info());
+        solver.assert(Not(Box::new(Eq(Box::new(Var(extra)), Box::new(smtlib::bits64(0, 32))))));
+        let condition = solver
+            .define_const(Eq(Box::new(Extract(0, 0, Box::new(Var(input)))), Box::new(smtlib::bits64(0, 1))), info());
+        let mut frame = make_frame(vec![Instr::End]);
+        frame.region_merge_records.push(RegionMergeRecord {
+            record_id: 0,
+            parent_record: None,
+            arm: "root",
+            function: TOP_LEVEL_LET,
+            branch_pc: 0,
+            join: crate::ir::regions::RegionPoint::FunctionExit,
+            condition,
+            source_loc: info(),
+            depth: 1,
+            dead: false,
+            value_symbols: HashSet::new(),
+            input_symbols: HashSet::new(),
+            single_arm_reads: vec![],
+            memory_reads: vec![],
+        });
+        // 守卫的派生依赖实际测试四位，类内也有多个解。
+        let masked = solver.define_const(Extract(3, 0, Box::new(Var(input))), info());
+        let guard = solver.define_const(Eq(Box::new(Var(masked)), Box::new(smtlib::bits64(0, 4))), info());
+        frame.region_merge_records[0].condition = guard;
+        let mut limits = ExecutionLimits::default();
+        limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+            enabled: true,
+            sample_stride: stride,
+            class_cap,
+            path_cap,
+            ..Default::default()
+        };
+        let state = TaskState::new().with_execution_limits(limits);
+        let path = crate::executor::samples::SamplePath {
+            pre: BTreeMap::from([("input".into(), Val::Symbolic(input)), ("extra".into(), Val::Symbolic(extra))]),
+            post: BTreeMap::from([("input".into(), Val::Symbolic(input))]),
+            result: Val::Symbolic(input),
+            memory: vec![],
+            memory_guards: BTreeMap::new(),
+        };
+        let mut calls = Vec::new();
+        let output = frame
+            .enumerate_merges_with(
+                &mut solver,
+                &state,
+                &shared,
+                &Val::Symbolic(input),
+                &mut |class, solution, model| {
+                    let sample = path.materialize(model, &shared, "merge", 0, Some(class))?;
+                    calls.push((class, solution, serde_json::to_value(sample).unwrap()));
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(solver.transaction_depth(), 0);
+        (output, calls)
+    };
+    for (class_cap, path_cap) in [(32, 32), (3, 32), (32, 5), (1, 32)] {
+        let (full, calls) = run(1, class_cap, path_cap);
+        for stride in [2, 7, 100] {
+            let (sampled, selected) = run(stride, class_cap, path_cap);
+            assert_eq!(sampled["sample_stride"], stride);
+            assert_eq!(sampled["counted_classes"], full["counted_classes"]);
+            assert_eq!(sampled["counted_paths"], full["enumerated_total"]);
+            assert_eq!(sampled["path_truncated"], full["path_truncated"]);
+            assert_eq!(selected, calls.iter().step_by(stride).cloned().collect::<Vec<_>>());
+            assert_eq!(sampled["exported_samples"], selected.len());
+            assert_eq!(sampled["enumerated_total"], selected.len());
+        }
+    }
+}

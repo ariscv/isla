@@ -1624,7 +1624,13 @@ fn solve_collect_path<'ir, B: BV>(
                     if let Some(writer) = &ctx.samples.writer {
                         if let Some(enumeration) = &merge_enumeration {
                             for mut sample in exported {
-                                let class = &enumeration["guard_classes"][sample.class_id.unwrap()];
+                                let classes = enumeration["guard_classes"].as_array().unwrap();
+                                let index = classes
+                                    .binary_search_by_key(&sample.class_id.unwrap(), |class| {
+                                        class["class_id"].as_u64().unwrap() as usize
+                                    })
+                                    .expect("导出样本必须属于已枚举的类");
+                                let class = &classes[index];
                                 sample.truncated = enumeration["path_truncated"].as_bool().unwrap()
                                     || class["truncated"].as_bool().unwrap();
                                 writer.append(sample);

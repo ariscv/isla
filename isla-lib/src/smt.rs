@@ -2183,10 +2183,15 @@ unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> Option<&'sta
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub fn new(ctx: &'ctx Context) -> Self {
-        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer)
+        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, fresh_random_seed())
     }
 
-    fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer) -> Self {
+    /// 为可复现的投影枚举创建求解器；不改变普通执行的随机种子策略。
+    pub(crate) fn new_seeded(ctx: &'ctx Context, seed: u32) -> Self {
+        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, seed)
+    }
+
+    fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: u32) -> Self {
         unsafe {
             // 始终通过 tactic 创建 solver，既允许命令行切换 tactic，也避免按 logic 名称创建
             // QF_AUFBV solver 时枚举支持不完整而导致 Z3 崩溃。
@@ -2202,7 +2207,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             if let Some(seed_param_name) = z3_seed_param_name(ctx.z3_ctx, z3_solver) {
                 let seed_symbol =
                     Z3_mk_string_symbol(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(seed_param_name).as_ptr());
-                Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, fresh_random_seed());
+                Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, seed);
                 Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
             }
 

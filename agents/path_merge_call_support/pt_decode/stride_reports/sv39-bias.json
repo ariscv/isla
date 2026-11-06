@@ -1,0 +1,856 @@
+{
+  "全量形状数": 106,
+  "抽样形状数": 79,
+  "缺失形状数": 27,
+  "最大绝对差百分点": 0.5239515244654893,
+  "逐形状比较": [
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r-x_u0--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 71,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.04683377308707124,
+      "差值百分点": -0.5239515244654893
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rwx_u1--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 34,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.022427440633245383,
+      "差值百分点": 0.506967785600334
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r-x_u1--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 85,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.056068601583113456,
+      "差值百分点": 0.39953132513873213
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r--_u0--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 21,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.013852242744063324,
+      "差值百分点": -0.350552003317872
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r--_u1--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 74,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.048812664907651716,
+      "差值百分点": -0.32606234240744186
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u0--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 1,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": -0.31976500103047406
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r--_u1--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 22,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.014511873350923483,
+      "差值百分点": -0.2845889426318561
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u1--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 10,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.006596306068601583,
+      "差值百分点": 0.27390254514366846
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r--_u0--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 83,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.05474934036939314,
+      "差值百分点": 0.26760520376670066
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r-x_u1--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 30,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.01978891820580475,
+      "差值百分点": 0.24311554285627068
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r--_u0--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 49,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.032321899736147755,
+      "差值百分点": -0.23936258183363326
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rw-_u1--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 23,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.015171503957783642,
+      "差值百分点": -0.2186258819458402
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u0--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 9,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.005936675461741424,
+      "差值百分点": 0.20793948445765256
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u0--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 6,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.00395778364116095,
+      "差值百分点": 0.2029143332578501
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u0--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 0,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.0,
+      "差值百分点": -0.19286403085824494
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u1--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 3,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.001978891820580475,
+      "差值百分点": -0.18783887965844237
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u0--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 6,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.00395778364116095,
+      "差值百分点": -0.18281372845863983
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u1--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 11,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.007255936675461741,
+      "差值百分点": 0.14700157497143929
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u0--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 8,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.005277044854881266,
+      "差值百分点": 0.14197642377163674
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rwx_u0--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 81,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.05343007915567282,
+      "差值百分点": 0.13567908239466853
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rwx_u1--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 77,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.05079155672823219,
+      "差值百分点": -0.12817316034939435
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u1--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 1,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": -0.12690097017222912
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u1--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 7,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.004617414248021108,
+      "差值百分点": -0.11685066777262403
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u0--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 7,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.004617414248021108,
+      "差值百分点": -0.11685066777262403
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-invalid_pbmt_disabled--no-leaf--E_Load_Page_Fault--pbmt_disabled",
+      "stride1计数": 96,
+      "stride11计数": 7,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.004617414248021108,
+      "差值百分点": -0.11685066777262403
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u0--leaf-l1--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 14,
+      "stride11计数": 3,
+      "stride1占比": 0.0008437801350048216,
+      "stride11占比": 0.001978891820580475,
+      "差值百分点": 0.11351116855756534
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r-x_u0--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 28,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.018469656992084433,
+      "差值百分点": 0.11118942148423891
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rw-_u0--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 51,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.033641160949868076,
+      "差值百分点": -0.10743646046160113
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-invalid_write_without_read--no-leaf--E_Load_Page_Fault--write_without_read",
+      "stride1计数": 48,
+      "stride11计数": 6,
+      "stride1占比": 0.0028929604628736743,
+      "stride11占比": 0.00395778364116095,
+      "差值百分点": 0.1064823178287276
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-invalid_reserved_nonzero--no-leaf--E_Load_Page_Fault--reserved_nonzero",
+      "stride1计数": 16,
+      "stride11计数": 3,
+      "stride1占比": 0.0009643201542912247,
+      "stride11占比": 0.001978891820580475,
+      "差值百分点": 0.10145716662892505
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-invalid_reserved_nonzero--no-leaf--E_Load_Page_Fault--reserved_nonzero",
+      "stride1计数": 192,
+      "stride11计数": 19,
+      "stride1占比": 0.011571841851494697,
+      "stride11占比": 0.012532981530343008,
+      "差值百分点": 0.09611396788483106
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rw-_u1--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 54,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.03562005277044855,
+      "差值百分点": 0.09045272159644638
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rwx_u1--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 54,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.03562005277044855,
+      "差值百分点": 0.09045272159644638
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r-x_u0--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 54,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.03562005277044855,
+      "差值百分点": 0.09045272159644638
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rw-_u0--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 25,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.016490765171503958,
+      "差值百分点": -0.0866997605738086
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u0--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 2,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0013192612137203166,
+      "差值百分点": 0.08371011365747043
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u0--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 10,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.006596306068601583,
+      "差值百分点": 0.08103851428542348
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u1--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 10,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.006596306068601583,
+      "差值百分点": 0.08103851428542348
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u1--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 10,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.006596306068601583,
+      "差值百分点": 0.08103851428542348
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u1--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 4,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.002638522427440633,
+      "差值百分点": 0.07098821188581837
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u0--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 4,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.002638522427440633,
+      "差值百分点": 0.07098821188581837
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u1--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 4,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.002638522427440633,
+      "差值百分点": 0.07098821188581837
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u1--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 2,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.0013192612137203166,
+      "差值百分点": -0.06093790948621328
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u0--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 5,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.0032981530343007917,
+      "差值百分点": -0.05591275828641072
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u1--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 5,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.0032981530343007917,
+      "差值百分点": -0.05591275828641072
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_--x_u1--leaf-l0--E_Load_Page_Fault--load_permission",
+      "stride1计数": 144,
+      "stride11计数": 14,
+      "stride1占比": 0.008678881388621022,
+      "stride11占比": 0.009234828496042216,
+      "差值百分点": 0.055594710742119455
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-pointer--no-leaf--E_Load_Page_Fault--pointer_at_level0",
+      "stride1计数": 144,
+      "stride11计数": 14,
+      "stride1占比": 0.008678881388621022,
+      "stride11占比": 0.009234828496042216,
+      "差值百分点": 0.055594710742119455
+    },
+    {
+      "形状": "load--sv39--l2-pointer--no-leaf--E_Load_Access_Fault--pte_read_pma_access_fault",
+      "stride1计数": 2,
+      "stride11计数": 1,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.05390905875737552
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u0--leaf-l2--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 2,
+      "stride11计数": 1,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.05390905875737552
+    },
+    {
+      "形状": "load--sv39--l2-leaf_--x_u1--leaf-l2--E_Load_Page_Fault--load_permission",
+      "stride1计数": 2,
+      "stride11计数": 1,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.05390905875737552
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-invalid_n_disabled--no-leaf--E_Load_Page_Fault--n_disabled",
+      "stride1计数": 96,
+      "stride11计数": 8,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.005277044854881266,
+      "差值百分点": -0.05088760708660822
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-invalid_pbmt_disabled--no-leaf--E_Load_Page_Fault--pbmt_disabled",
+      "stride1计数": 8,
+      "stride11计数": 0,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0,
+      "差值百分点": -0.048216007714561235
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u1--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 0,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0,
+      "差值百分点": -0.048216007714561235
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u0--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 0,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0,
+      "差值百分点": -0.048216007714561235
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u1--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 0,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0,
+      "差值百分点": -0.048216007714561235
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-invalid_n_disabled--no-leaf--E_Load_Page_Fault--n_disabled",
+      "stride1计数": 8,
+      "stride11计数": 0,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0,
+      "差值百分点": -0.048216007714561235
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rwx_u0--leaf-l0--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 288,
+      "stride11计数": 27,
+      "stride1占比": 0.017357762777242044,
+      "stride11占比": 0.017810026385224276,
+      "差值百分点": 0.04522636079822319
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u1--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u0--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u1--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u0--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-invalid_reserved_nonzero--no-leaf--E_Load_Page_Fault--reserved_nonzero",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u1--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u0--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-invalid_write_without_read--no-leaf--E_Load_Page_Fault--write_without_read",
+      "stride1计数": 4,
+      "stride11计数": 1,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.041855056828735214
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r--_u1--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 52,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.03430079155672823,
+      "差值百分点": -0.041473399775585756
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_r-x_u1--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 52,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.03430079155672823,
+      "差值百分点": -0.041473399775585756
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_--x_u1--leaf-l1--E_Load_Page_Fault--load_permission",
+      "stride1计数": 16,
+      "stride11计数": 2,
+      "stride1占比": 0.0009643201542912247,
+      "stride11占比": 0.0013192612137203166,
+      "差值百分点": 0.035494105942909186
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_--x_u0--leaf-l1--E_Load_Page_Fault--load_permission",
+      "stride1计数": 16,
+      "stride11计数": 1,
+      "stride1占比": 0.0009643201542912247,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": -0.03046895474310664
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u0--leaf-l1--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 16,
+      "stride11计数": 1,
+      "stride1占比": 0.0009643201542912247,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": -0.03046895474310664
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u0--leaf-l1--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 16,
+      "stride11计数": 1,
+      "stride1占比": 0.0009643201542912247,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": -0.03046895474310664
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rwx_u0--leaf-l1--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 16,
+      "stride11计数": 1,
+      "stride1占比": 0.0009643201542912247,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": -0.03046895474310664
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-invalid_v_zero--no-leaf--E_Load_Page_Fault--v_zero",
+      "stride1计数": 48,
+      "stride11计数": 4,
+      "stride1占比": 0.0028929604628736743,
+      "stride11占比": 0.002638522427440633,
+      "差值百分点": -0.02544380354330411
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rwx_u0--leaf-l0--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 576,
+      "stride11计数": 53,
+      "stride1占比": 0.03471552555448409,
+      "stride11占比": 0.03496042216358839,
+      "差值百分点": 0.02448966091043031
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u0--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u1--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-invalid_v_zero--no-leaf--E_Load_Page_Fault--v_zero",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u1--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u1--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u0--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u0--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u0--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u1--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u0--leaf-l2--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u1--leaf-l2--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 4,
+      "stride11计数": 0,
+      "stride1占比": 0.00024108003857280618,
+      "stride11占比": 0.0,
+      "差值百分点": -0.024108003857280617
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u1--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 1,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.017747052971454593
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rwx_u1--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 1,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.017747052971454593
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u0--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 1,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.017747052971454593
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u0--leaf-l2--Retire_Success--success",
+      "stride1计数": 8,
+      "stride11计数": 1,
+      "stride1占比": 0.00048216007714561236,
+      "stride11占比": 0.0006596306068601583,
+      "差值百分点": 0.017747052971454593
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r-x_u0--leaf-l1--Retire_Success--success",
+      "stride1计数": 96,
+      "stride11计数": 9,
+      "stride1占比": 0.0057859209257473485,
+      "stride11占比": 0.005936675461741424,
+      "差值百分点": 0.015075453599407585
+    },
+    {
+      "形状": "load--sv39--l2-invalid_n_disabled--no-leaf--E_Load_Page_Fault--n_disabled",
+      "stride1计数": 2,
+      "stride11计数": 0,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0,
+      "差值百分点": -0.012054001928640309
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r--_u0--leaf-l2--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 2,
+      "stride11计数": 0,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0,
+      "差值百分点": -0.012054001928640309
+    },
+    {
+      "形状": "load--sv39--l2-leaf_rw-_u0--leaf-l2--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 2,
+      "stride11计数": 0,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0,
+      "差值百分点": -0.012054001928640309
+    },
+    {
+      "形状": "load--sv39--l2-invalid_pbmt_disabled--no-leaf--E_Load_Page_Fault--pbmt_disabled",
+      "stride1计数": 2,
+      "stride11计数": 0,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0,
+      "差值百分点": -0.012054001928640309
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_--x_u0--leaf-l1--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 2,
+      "stride11计数": 0,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0,
+      "差值百分点": -0.012054001928640309
+    },
+    {
+      "形状": "load--sv39--l2-leaf_--x_u0--leaf-l2--E_Load_Page_Fault--load_permission",
+      "stride1计数": 2,
+      "stride11计数": 0,
+      "stride1占比": 0.00012054001928640309,
+      "stride11占比": 0.0,
+      "差值百分点": -0.012054001928640309
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_--x_u0--leaf-l0--E_Load_Page_Fault--load_permission",
+      "stride1计数": 144,
+      "stride11计数": 13,
+      "stride1占比": 0.008678881388621022,
+      "stride11占比": 0.008575197889182058,
+      "差值百分点": -0.010368349943896439
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_rw-_u1--leaf-l1--E_Load_Access_Fault--data_read_pma_access_fault",
+      "stride1计数": 64,
+      "stride11计数": 6,
+      "stride1占比": 0.003857280617164899,
+      "stride11占比": 0.00395778364116095,
+      "差值百分点": 0.010050302399605129
+    },
+    {
+      "形状": "load--sv39--l2-leaf_r-x_u0--leaf-l2--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 1,
+      "stride11计数": 0,
+      "stride1占比": 6.0270009643201545e-05,
+      "stride11占比": 0.0,
+      "差值百分点": -0.006027000964320154
+    },
+    {
+      "形状": "load--sv39--l2-invalid_v_zero--no-leaf--E_Load_Page_Fault--v_zero",
+      "stride1计数": 1,
+      "stride11计数": 0,
+      "stride1占比": 6.0270009643201545e-05,
+      "stride11占比": 0.0,
+      "差值百分点": -0.006027000964320154
+    },
+    {
+      "形状": "load--sv39--l2-leaf_--x_u0--leaf-l2--E_Load_Page_Fault--superpage_misaligned",
+      "stride1计数": 1,
+      "stride11计数": 0,
+      "stride1占比": 6.0270009643201545e-05,
+      "stride11占比": 0.0,
+      "差值百分点": -0.006027000964320154
+    },
+    {
+      "形状": "load--sv39--l2-invalid_write_without_read--no-leaf--E_Load_Page_Fault--write_without_read",
+      "stride1计数": 1,
+      "stride11计数": 0,
+      "stride1占比": 6.0270009643201545e-05,
+      "stride11占比": 0.0,
+      "差值百分点": -0.006027000964320154
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-leaf_r--_u0--leaf-l1--E_Load_Page_Fault--accessed_update_disabled",
+      "stride1计数": 32,
+      "stride11计数": 3,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.001978891820580475,
+      "差值百分点": 0.0050251511998025645
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--no-leaf--E_Load_Access_Fault--pte_read_pma_access_fault",
+      "stride1计数": 32,
+      "stride11计数": 3,
+      "stride1占比": 0.0019286403085824494,
+      "stride11占比": 0.001978891820580475,
+      "差值百分点": 0.0050251511998025645
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rw-_u0--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 79,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.052110817941952506,
+      "差值百分点": 0.0037529610226370858
+    },
+    {
+      "形状": "load--sv39--l2-pointer--l1-pointer--l0-leaf_rw-_u1--leaf-l0--Retire_Success--success",
+      "stride1计数": 864,
+      "stride11计数": 79,
+      "stride1占比": 0.052073288331726135,
+      "stride11占比": 0.052110817941952506,
+      "差值百分点": 0.0037529610226370858
+    }
+  ]
+}

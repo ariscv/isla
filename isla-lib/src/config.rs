@@ -1886,11 +1886,12 @@ pub struct MergeEnumerationConfig {
     pub mode: MergeEnumerationMode,
     pub class_cap: usize,
     pub path_cap: usize,
+    pub sample_stride: usize,
 }
 
 impl Default for MergeEnumerationConfig {
     fn default() -> Self {
-        Self { enabled: false, mode: MergeEnumerationMode::Samples, class_cap: 1024, path_cap: 65536 }
+        Self { enabled: false, mode: MergeEnumerationMode::Samples, class_cap: 1024, path_cap: 65536, sample_stride: 1 }
     }
 }
 
@@ -2318,7 +2319,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         .map(|value| {
             let root = "execution_limits.merge_enumeration";
             let sub = value.as_table().ok_or_else(|| format!("{root} 必须是 TOML table"))?;
-            allowed_table_keys(sub, root, &["enabled", "mode", "class_cap", "path_cap"])?;
+            allowed_table_keys(sub, root, &["enabled", "mode", "class_cap", "path_cap", "sample_stride"])?;
             let mut config = MergeEnumerationConfig::default();
             if let Some(mode) = sub.get("mode") {
                 config.mode = match mode.as_str() {
@@ -2330,7 +2331,11 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             if let Some(enabled) = optional_bool(sub, "enabled", root)? {
                 config.enabled = enabled;
             }
-            for (name, cap) in [("class_cap", &mut config.class_cap), ("path_cap", &mut config.path_cap)] {
+            for (name, cap) in [
+                ("class_cap", &mut config.class_cap),
+                ("path_cap", &mut config.path_cap),
+                ("sample_stride", &mut config.sample_stride),
+            ] {
                 if let Some(value) = optional_u64(sub, name, root)? {
                     if value == 0 {
                         return Err(format!("{root}.{name} 必须大于零"));
@@ -2603,6 +2608,17 @@ mod tests {
 
     fn merge_config(text: &str) -> Result<ExecutionLimitsConfig, String> {
         get_execution_limits_config(&text.parse::<Value>().unwrap()).map(Option::unwrap)
+    }
+
+    #[test]
+    fn execution_limits_merge_enumeration_sample_stride() {
+        let config = merge_config("[execution_limits.merge_enumeration]\nsample_stride = 7");
+        assert!(config.is_ok(), "正整数 stride 必须可解析：{config:?}");
+        assert_eq!(config.unwrap().merge_enumeration.unwrap().sample_stride, 7);
+        assert_eq!(MergeEnumerationConfig::default().sample_stride, 1);
+        for value in ["0", "-1", "true", "1.5", "\"7\""] {
+            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nsample_stride = {value}")).is_err());
+        }
     }
 
     #[test]

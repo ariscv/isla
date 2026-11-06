@@ -23,6 +23,16 @@ PYTHONDONTWRITEBYTECODE=1 python3 pt_decode.py \
   --dirty-update disabled
 ```
 
+没有 Sv48 fork 基线时，可以只解码合并样本：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 pt_decode.py \
+  --merge-only --merge "$MERGE_SAMPLES" --out out-sv48 \
+  --svrsw60t59b enabled --dirty-update disabled
+```
+
+`--merge-only` 与 `--fork` 互斥；不指定单边选项时仍要求同时提供 `--fork`、`--merge`。单边模式在输出根目录生成 `shapes.json`、`distribution.md`、`page_tables.json`，元数据来自 merge，不生成双边交叉检验，也不声称与 fork 相同；成功退出码为 0。请使用独立的空输出目录，避免混入旧的双边报告。错误仍按原规则返回 2。
+
 这两个模型开关是必填项。样本 v1 不携带扩展支持表或 `plat_enable_dirty_update`，工具不会猜测。上述取值对应本次核对的 IR；其他实验应使用其实际配置。
 
 默认从 `pre_registers.$instruction` 解码 Sail 的 `LOAD(imm, rs1, rd, false, 8)` 或 `STORE(imm, rs2, rs1, 8)`。元组字段名称和顺序来自 `sail-riscv/model/extensions/I/base_insts.sail:270`、`:320`、`:327`，并已核对本轮两份 STORE 样本：
@@ -153,6 +163,48 @@ F5 双方各 16592 条、104 种形状；与历史同 SHA-256 输入产物比较
 | leaf_r-x_u0 | 0 | 16 | +16 |
 
 双方 LOAD 结果类别仍为页异常 3662（22.0709%）、访问异常 5186（31.2560%）、成功 7744（46.6731%）。本轮没有为消除差异调整分类，也不据此推断类内全部具体解相同。
+
+## stride 抽样验证（2026-11-06）
+
+本轮固定 LOAD 编码 `0x0000b103`、VA `0x20000000`、Supervisor、`mstatus=0x0000000a00040000`，`class_cap=1/path_cap=1000000`，`-T 8`。构建与运行产物全部位于工作树 `output/stride-validation/`，使用其中 `scratchpad/target_f6/release/isarch`，未覆盖默认 release 二进制。脚本 `run.sh` 由指定 scratchpad 的 `x_cmd2.sh` 复制并只替换二进制路径；三份 `stride*.toml` 保存完整枚举配置。超过 10 分钟的运行通过 `setsid nohup` 启动并轮询。
+
+Sv39 使用 `satp=0x8000000000080200`，三次均完整访问 **16592 类、20 条路径**，全部 `path_truncated=false`。stride=1 导出 16592 条，stride=7 导出 2382 条，stride=11 导出 1516 条。逐路径从 DFS 序号 0 抽取，样本数与各路径 `ceil(counted_paths/stride)` 的和一致，且与 `MERGE_STATS` 汇总相同。
+
+[集合对照](stride_reports/subset.json)确认 stride=7、stride=11 每条样本的稳定签名都在本轮 stride=1 集合中，缺失为 **0**。签名包括完整前后态内存、结构化 result、截断状态及前后态寄存器与 ISA 状态；只移除 sample_id/class_id/path_signature、冗余 ret_val 展示文本，以及 LOAD 不使用且跨运行代表值可变化的 vl/vtype。JSON 对象键排序后计算 SHA-256；没有屏蔽页表位、数据、地址、异常或 LOAD 权限上下文。这里验证的是此明确归一化下的样本内容子集，不声称所有无关寄存器的具体代表值逐字节相同。
+
+Sv39 同版本、同配置的 [stride=1 分布](stride_reports/sv39-stride1/distribution.md)为 **106 种形状**，[stride=11 分布](stride_reports/sv39-stride11/distribution.md)为 **79 种形状**，遗漏 **27 种**。按两组形状并集计算，每个形状的占比差取 `sample_count/1516 − full_count/16592`，缺失形状计零；[全部差值](stride_reports/sv39-bias.md)的最大绝对值为 **0.523952 个百分点**。最大差来自 Sv39 L2 pointer→L1 pointer→L0 `leaf_r-x_u0` 成功：全量 864/16592=5.207329%，抽样 71/1516=4.683377%。机器结果见 [sv39-bias.json](stride_reports/sv39-bias.json)。
+
+本轮样本代表模型选择与旧二进制不同，因此全量的 106 种不能与历史 104 种混作抽样对照。已同时使用 `--fork` 和 `--merge` 解码两组 Sv39 数据；与旧 fork 的计数差异如实保存在 `output/stride-validation/decode-sv39-{1,11}/crosscheck.*`，退出码 1 表示双方计数不同。抽样偏差始终用本轮 merge stride=1 对照本轮 merge stride=11。
+
+Sv48 使用 `satp=0x9000000000080200`、stride=11，完整访问 **122654 类、27 条路径**，导出 **11162 条样本**，用时 **666 秒**，全部 `path_truncated=false`。样本文件、逐路径输出和 stats 三者计数一致。没有 Sv48 fork 基线，使用 `--merge-only` 解码，15.618 秒得到 **118 种已观察形状**；这不是全域形状数。产物：[distribution.md](stride_reports/sv48-stride11/distribution.md)、[page_tables.json](stride_reports/sv48-stride11/page_tables.json)、[验收汇总](stride_reports/validation.json)。
+
+| Sv48 结果类别 | 样本数 | 占全部样本 |
+| --- | ---: | ---: |
+| Retire_Success | 5174 | 46.3537% |
+| E_Load_Access_Fault | 3467 | 31.0607% |
+| E_Load_Page_Fault | 2521 | 22.5856% |
+
+| Sv48 叶子层（包括叶子处失败） | 样本数 | 占全部样本 |
+| --- | ---: | ---: |
+| L0 | 9125 | 81.7506% |
+| L1 | 1338 | 11.9871% |
+| L2 | 154 | 1.3797% |
+| L3 | 14 | 0.1254% |
+| 无叶子 | 531 | 4.7572% |
+
+复核本轮分布（从仓库根目录执行；`RUNS` 指向运行产物目录）：
+
+```sh
+RUNS="$PWD/output/stride-validation"
+PYTHONDONTWRITEBYTECODE=1 python3 agents/path_merge_call_support/pt_decode/pt_decode.py \
+  --merge-only --merge "$RUNS/sv48-11-final/samples.jsonl" \
+  --out "$RUNS/decode-sv48-recheck" --svrsw60t59b enabled --dirty-update disabled
+python3 "$RUNS/check_subset.py" sv39-1-final sv39-7-final sv39-11-final
+```
+
+**这不是随机抽样。** DFS 的周期顺序与字段位相关，各完成路径又从 0 重置；小路径和罕见形状可能被高估或漏采。Sv39 最大差较小并不保证 Sv48 具有相同偏差，缺失 27 种也说明频率误差不能代表完整覆盖。频数以守卫类的代表模型为单位，不是所有具体处理器状态的概率。`class_cap=1` 产生的类内截断按原协议保留，不能解释成守卫类枚举未完成。
+
+验证采用先红后绿：配置、stride 回调与上限、真实样本集合及单边 CLI 均保留红测日志；Python 40 项通过，枚举专项 8 项通过、2 项默认忽略，真实 `pte_is_invalid` 显式测试通过。isla-lib 默认特性全量 **706 通过、既有 12 项失败、6 忽略**，失败项逐名一致；可选 `smt-thread-interrupt` 全量曾复现历史文档已有的 1ms deadline 提前返回 Sat 不稳定项，未修改或跳过该测试。`cargo fmt --check`、isarch 样本专项和 `make -j1 solve-MRET THREADS=8` 通过。
 
 ## 边界和限制
 

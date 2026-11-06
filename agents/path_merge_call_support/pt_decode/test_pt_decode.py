@@ -461,6 +461,28 @@ class DistributionTests(unittest.TestCase):
             with self.assertRaises(DecodeError):
                 list(load_samples(p))
 
+    def test_cli_merge_only_sv48(self):
+        from pt_decode import main
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item = sample([(ROOT, 0)], "Memory_Exception", "E_Load_Page_Fault", mode=9)
+            item["mode"] = "merge"
+            source = root/"merge.jsonl"
+            source.write_text(json.dumps(item)+'\n')
+            args = ["--merge-only", "--merge", str(source), "--out", str(root/"out"),
+                    "--svrsw60t59b", "disabled", "--dirty-update", "disabled"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(args), 0)
+            report = json.loads((root/"out/page_tables.json").read_text())
+            self.assertEqual(report["metadata"]["sample_count"], 1)
+            self.assertTrue((root/"out/distribution.md").exists())
+            self.assertFalse((root/"out/crosscheck.json").exists())
+            self.assertFalse((root/"out/fork").exists())
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main(args+["--fork", str(source)])
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main([value for value in args if value != "--merge-only"])
+
     def test_cli_equal_and_different_reports(self):
         from pt_decode import main
         with tempfile.TemporaryDirectory() as tmp:

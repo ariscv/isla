@@ -51,6 +51,8 @@ struct MergeStats {
 #[derive(Default, Serialize)]
 struct EnumerationCountStats {
     completed_paths: usize,
+    sample_stride: usize,
+    exported_samples: usize,
     counted_classes: usize,
     counted_paths: usize,
     truncated_classes: usize,
@@ -98,10 +100,17 @@ impl ExecutionStats {
         paths: usize,
         truncated_classes: usize,
         path_truncated: bool,
+        sample_stride: usize,
+        exported_samples: usize,
     ) {
         if self.enabled {
             let mut merge = self.merge.lock().unwrap();
             let stats = merge.merge_enumeration.get_or_insert_with(EnumerationCountStats::default);
+            if stats.completed_paths > 0 {
+                assert_eq!(stats.sample_stride, sample_stride, "同一次执行的采样步长必须一致");
+            }
+            stats.sample_stride = sample_stride;
+            stats.exported_samples += exported_samples;
             stats.completed_paths += 1;
             stats.counted_classes += classes;
             stats.counted_paths += paths;
@@ -290,14 +299,14 @@ mod tests {
     #[test]
     fn count枚举汇总与重置() {
         let disabled = ExecutionStats::new(false);
-        disabled.enumeration_counted(2, 3, 1, false);
+        disabled.enumeration_counted(2, 3, 1, false, 7, 1);
         assert!(disabled.merge_json().get("merge_enumeration").is_none());
         let stats = ExecutionStats::new(true);
-        stats.enumeration_counted(2, 3, 1, false);
-        stats.enumeration_counted(1, 2, 1, true);
+        stats.enumeration_counted(2, 3, 1, false, 7, 1);
+        stats.enumeration_counted(1, 2, 1, true, 7, 1);
         assert_eq!(
             stats.merge_json()["merge_enumeration"],
-            json!({"completed_paths":2,
+            json!({"completed_paths":2, "sample_stride":7, "exported_samples":2,
             "counted_classes":3, "counted_paths":5, "truncated_classes":2, "truncated_paths":1})
         );
         stats.reset();

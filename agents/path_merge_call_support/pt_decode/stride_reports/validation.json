@@ -1,0 +1,95 @@
+{
+  "sv39-1-final": {
+    "完成路径数": 20,
+    "总类数": 16592,
+    "导出样本数": 16592,
+    "stride": 1,
+    "路径截断": false,
+    "stats": {
+      "completed_paths": 20,
+      "sample_stride": 1,
+      "exported_samples": 16592,
+      "counted_classes": 16592,
+      "counted_paths": 16592,
+      "truncated_classes": 16570,
+      "truncated_paths": 0
+    },
+    "耗时秒": 382,
+    "样本字节数": 965830110,
+    "样本sha256": "79beb427deba352d21d0f6dc9ed12cc9b13545cad792881775f3c43b2bc53bbd"
+  },
+  "sv39-7-final": {
+    "完成路径数": 20,
+    "总类数": 16592,
+    "导出样本数": 2382,
+    "stride": 7,
+    "路径截断": false,
+    "stats": {
+      "completed_paths": 20,
+      "sample_stride": 7,
+      "exported_samples": 2382,
+      "counted_classes": 16592,
+      "counted_paths": 16592,
+      "truncated_classes": 16570,
+      "truncated_paths": 0
+    },
+    "耗时秒": 109,
+    "样本字节数": 138646183,
+    "样本sha256": "0470aa2dbc79c69952a3e30490063a1452479309ed6ab85f2e33e08325c963a5"
+  },
+  "sv39-11-final": {
+    "完成路径数": 20,
+    "总类数": 16592,
+    "导出样本数": 1516,
+    "stride": 11,
+    "路径截断": false,
+    "stats": {
+      "completed_paths": 20,
+      "sample_stride": 11,
+      "exported_samples": 1516,
+      "counted_classes": 16592,
+      "counted_paths": 16592,
+      "truncated_classes": 16570,
+      "truncated_paths": 0
+    },
+    "耗时秒": 93,
+    "样本字节数": 88239452,
+    "样本sha256": "9ee9020d83187b4c16f28f80c9ac4931912030ca259019a2a24424d89f43c981"
+  },
+  "测试": {
+    "库默认特性": "706 通过、12 既有失败、6 忽略",
+    "既有失败逐名一致": true,
+    "Python": "40 通过",
+    "枚举专项": "8 通过、2 忽略",
+    "真实IR": "1 通过",
+    "isarch样本专项": "3 通过"
+  },
+  "sv48-11-final": {
+    "完成路径数": 27,
+    "总类数": 122654,
+    "导出样本数": 11162,
+    "stride": 11,
+    "耗时秒": 666,
+    "路径截断": false,
+    "stats": {
+      "completed_paths": 27,
+      "sample_stride": 11,
+      "exported_samples": 11162,
+      "counted_classes": 122654,
+      "counted_paths": 122654,
+      "truncated_classes": 122572,
+      "truncated_paths": 0
+    }
+  },
+  "二进制": {
+    "相对路径": "output/stride-validation/scratchpad/target_f6/release/isarch",
+    "sha256": "57370fa101f104034306c2117ed9777ea16df88e8c363bdb91fa0b5c5af3249d",
+    "构建": "cargo build -j 8 --release --bin isarch --offline --features smt-thread-interrupt --target-dir output/stride-validation/scratchpad/target_f6"
+  },
+  "MRET冒烟": {
+    "完成路径数": 4,
+    "样本数": 4,
+    "stride": 11,
+    "命令": "make -f output/stride-validation/smoke.mk -j1 solve-MRET THREADS=8（详见 smoke.log）"
+  }
+}
