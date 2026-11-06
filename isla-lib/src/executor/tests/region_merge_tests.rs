@@ -2898,6 +2898,14 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
             }
             assert!(classes.iter().enumerate().all(|(index, class)| class["class_id"] == index));
             assert_eq!(output["path_truncated"], cap < 24);
+            if cap == 30 && threads > 1 {
+                let partitions = output["partitions"].as_array().unwrap();
+                assert!(
+                    partitions.iter().all(|part| part["counted_classes"].as_u64().unwrap() > 0),
+                    "完整计数不得把不可满足前缀当成工作任务"
+                );
+                assert!(partitions.len() > threads, "应生成多于工作线程的可行任务以均衡后续类负载");
+            }
             let calls = calls.into_inner().unwrap();
             assert_eq!(calls.len(), classes.len());
             assert_eq!(calls.iter().map(|(class, _)| *class).collect::<HashSet<_>>().len(), classes.len());
@@ -2942,13 +2950,23 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
         ..Default::default()
     };
     let output = frame
-        .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(limits), &shared, &Val::Unit)
+        .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(limits.clone()), &shared, &Val::Unit)
         .unwrap()
         .unwrap();
     assert_eq!(output["counted_classes"], 1);
     assert_eq!(output["counted_paths"], 1);
     assert_eq!(output["path_truncated"], true);
     assert!(output["guard_classes"][0]["guard_assignment"].as_object().unwrap().values().all(|value| value == false));
+    assert!(output["partitions"].as_array().unwrap().len() <= 4, "全路径预算不超过单类上限时，不应四倍放大预计数任务");
+    // 原路径不可满足是合法的空域；不能误当成已证明前缀的内部错误。
+    solver.assert(smtlib::Exp::Bool(false));
+    let empty = frame
+        .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(limits), &shared, &Val::Unit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(empty["counted_classes"], 0);
+    assert_eq!(empty["counted_paths"], 0);
+    assert_eq!(solver.transaction_depth(), 0);
 }
 
 /// 与 I2–I5 共用真实 IR、架构初始化及固定原语配置；显式运行以避免依赖外部文件。

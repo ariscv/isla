@@ -113,32 +113,45 @@ pub(super) fn enumerate<B: BV>(
     let mut partitions = vec![Partition { id: 0, condition: Bool(true), depth: 0 }];
     let transaction = partition_solver.start_transaction();
     let split = partition_solver.with_incremental_checks(|solver| {
+        // 调用方可传入空域；仅对已经证明可满足的根前缀要求子分支非空。
+        if !satisfiable(solver, &Bool(true))? {
+            return Ok(());
+        }
+        // 先证明每个前缀可满足，再把任务数增加到线程数的四倍；空前缀不占工作线程。
+        // 单线程沿用单任务，路径/类预算仍由下面的规范类目录统一分配。
+        // 当全路径预算最多容纳一个满额类时，更多预计数分区只会放大被丢弃的工作。
+        let task_target = if config.enumeration_threads == 1 || config.path_cap <= config.class_cap {
+            config.enumeration_threads
+        } else {
+            config.enumeration_threads.checked_mul(4).unwrap()
+        };
         for (position, index) in order.iter().enumerate() {
-            if partitions.len() >= config.enumeration_threads {
+            if partitions.len() >= task_target {
                 break;
             }
             let record = &records[*index];
-            let ctx = &contexts[&record.record_id];
-            let guard = Var(record.condition);
-            if !satisfiable(solver, &And(Box::new(ctx.clone()), Box::new(guard.clone())))?
-                || !satisfiable(solver, &And(Box::new(ctx.clone()), Box::new(Not(Box::new(guard.clone())))))?
-            {
-                continue;
+            let predicate = And(Box::new(contexts[&record.record_id].clone()), Box::new(Var(record.condition)));
+            let current = std::mem::take(&mut partitions);
+            let remaining = current.len();
+            let mut next = Vec::new();
+            for (offset, partition) in current.into_iter().enumerate() {
+                if next.len() + remaining - offset >= task_target {
+                    next.push(partition);
+                    continue;
+                }
+                let previous = next.len();
+                for value in [false, true] {
+                    let condition = And(
+                        Box::new(partition.condition.clone()),
+                        Box::new(if value { predicate.clone() } else { Not(Box::new(predicate.clone())) }),
+                    );
+                    if satisfiable(solver, &condition)? {
+                        next.push(Partition { id: 0, condition, depth: position + 1 });
+                    }
+                }
+                assert!(next.len() > previous, "已证明可满足的前缀必须至少有一个可行子分支");
             }
-            let predicate = And(Box::new(ctx.clone()), Box::new(guard));
-            partitions = std::mem::take(&mut partitions)
-                .into_iter()
-                .flat_map(|partition| {
-                    [false, true].map(|value| Partition {
-                        id: 0,
-                        condition: And(
-                            Box::new(partition.condition.clone()),
-                            Box::new(if value { predicate.clone() } else { Not(Box::new(predicate.clone())) }),
-                        ),
-                        depth: position + 1,
-                    })
-                })
-                .collect();
+            partitions = next;
         }
         Ok::<_, ExecError>(())
     });
@@ -161,16 +174,20 @@ pub(super) fn enumerate<B: BV>(
     }
     // 路径内线程数为 1 时仍允许既有的跨路径并发，避免串行化 -T 的完成路径。
     let budget = reserve_threads(workers, config.enumeration_threads);
+    let next_probe = std::sync::atomic::AtomicUsize::new(0);
+    let next_export = std::sync::atomic::AtomicUsize::new(0);
     let output = std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut handles = Vec::new();
         let mut plan_senders = Vec::new();
-        for worker in 0..workers {
+        for _ in 0..workers {
             let sender = sender.clone();
             let partitions = &partitions;
             let replay_events = &replay_events;
             let guard_state = guard_state.as_ref();
             let stream_consume = &stream_consume;
+            let next_probe = &next_probe;
+            let next_export = &next_export;
             let (plan_sender, plan_receiver) = std::sync::mpsc::channel::<Arc<HashMap<Vec<bool>, ClassPlan>>>();
             plan_senders.push(plan_sender);
             handles.push(scope.spawn(move || {
@@ -181,7 +198,11 @@ pub(super) fn enumerate<B: BV>(
                     solver.add_event(event.clone());
                 }
                 let mut probes = Vec::new();
-                for index in (worker..partitions.len()).step_by(workers) {
+                loop {
+                    let index = next_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if index >= partitions.len() {
+                        break;
+                    }
                     let output = frame.enumerate_merges_partition(
                         &mut solver,
                         guard_state.unwrap_or(state),
@@ -212,7 +233,11 @@ pub(super) fn enumerate<B: BV>(
                     return Ok(Vec::new());
                 }
                 let mut outputs = Vec::new();
-                for index in (worker..partitions.len()).step_by(workers) {
+                loop {
+                    let index = next_export.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if index >= partitions.len() {
+                        break;
+                    }
                     if !selected.values().any(|plan| plan.partition == index) {
                         continue;
                     }
