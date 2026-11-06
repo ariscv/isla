@@ -193,3 +193,18 @@ MRET 使用 `rv64d.ir`（SHA-256 `c65b26c8518042c67bfcb48c9feaf2a13a6eb7d741bc01
 受测实现是基线加本轮未提交改动。生产文件 SHA-256：`isla-lib/src/executor.rs` 为 `2bd9c77ba02c0f1b37f4672baa08df8562714064b1ce7899478577918ca01492`，`isla-lib/src/memory.rs` 为 `908b142a50e8302be92a58e14d6329898e87c1e2d412306933e51384b8119e54`。后续测试断言修订未改动这两个文件。
 
 MRET 使用默认 `rv64d.ir`（SHA-256 `c65b26c8518042c67bfcb48c9feaf2a13a6eb7d741bc01ae8688d78c4370e5d9`）及 `configs/riscv64_difftest.toml`（SHA-256 `9a315cbcc83837a4a245a03a5f8d4c9c88d69622ffe1abb47777cb761b909fc2`），未重新生成 IR。既有 `output/` 已在运行前复制到系统临时目录 `isla-review33-fix-output-before/` 留存；本次 smoke 不代表全部 ISA clause 验收。
+
+
+## 2026-11-06：枚举分量诊断（edee95d + 未提交诊断，测量完成）
+
+只写指定 isla-enumerate 独立工作树；使用用户指定 scratchpad/target_f7 release 二进制，ISLA_ENUM_COMPONENTS=1、count/class_cap=1/path_cap=1000000、-T 64，前态与 x_cmd2.sh 一致。
+
+| 场景 | 退出／耗时 | 完成路径／守卫类 | 结果 |
+| --- | --- | --- | --- |
+| Sv39 LOAD，satp=0x8000000000080200 | 0／49s | 20／16592 | 原约束图 1 分量／路径；候选 1–10 分量，20 条路径守卫域乘积均相等 |
+| Sv48 LOAD，satp=0x9000000000080200 | 0／454s | 27／122654 | 原约束图 1 分量／路径；候选 1–12 分量，6 条路径乘积不等且有 UNSAT 缺失组合 |
+| Sv48 STORE，0x0020b023、clause=STORE | 0／97s | 27／51638 | 原约束图 1 分量／路径；候选 1–11 分量，6 条路径乘积不等且有 UNSAT 缺失组合 |
+
+全部 path_truncated=false；片段类内域并未完整枚举。两两／全分量抽样 SAT 查询分别为 5841/1024、14411/1472、14081/1472；Sv39 全部 SAT，LOAD Sv48 各有 1 个 UNSAT，STORE 抽样全部 SAT 但明确缺失组合有 6 个 UNSAT。只完成测量和设计，无生产加速或离线展开实现。
+
+3 项诊断测试通过；最终开启诊断的 isla-lib 全量 **709 通过、12 失败、6 忽略**，与 `output/stride-validation/full-lib-final-default.log` 逐名比较无新增／缺失失败项。cargo fmt、cargo fmt --check、git diff --check 和指定 target_f7 release 构建通过。原始证据为指定 scratchpad/components/final/ 三场景及 full-lib-final-enabled.log；[受测哈希和全部路径机器记录](../agents/path_merge_call_support/component-results.json)、[前六条胖路径与设计](../agents/path_merge_call_support/enumeration.md)、[当前状态](../agents/path_merge_call_support/status.md)。

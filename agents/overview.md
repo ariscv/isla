@@ -1,5 +1,7 @@
 # 议题入口
 
+- [枚举分量诊断与紧凑样本设计](path_merge_call_support/status.md)：2026-11-06 三场景完整 count；Sv39 候选守卫域可乘，Sv48 各有 6 条路径被原求解器反例否定；仅测量和设计。
+
 - [可选执行统计](execution_stats/status.md)：2026-11-05 合并尝试／拒绝原因和分叉位置直方图已实现，cargo check 与 9 个定向测试通过，未跑 Sv39。
 
 - [Review 37 修复](review37/status.md)：Constrained 数组一致性、区域遮蔽分派、整数绝对值边界及浮点转换格式。

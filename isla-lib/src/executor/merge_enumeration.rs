@@ -4,6 +4,9 @@ use super::*;
 use serde_json::{json, Value};
 use smtlib::Exp as Formula;
 
+#[path = "merge_components.rs"]
+mod components;
+
 fn context<B>(
     record: &RegionMergeRecord<B>,
     records: &HashMap<usize, &RegionMergeRecord<B>>,
@@ -230,6 +233,11 @@ impl<B: BV> LocalFrame<'_, B> {
         // 复用现有事件重放接口隔离 DFS 与逐解物化，避免 stride 改变样本内容。
         let replay_events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
         let tx = solver.start_transaction();
+        let mut diagnostic = if counting && std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1") {
+            Some(components::Diagnostic::new(records, &contexts, &expressions, &bits, &replay_events))
+        } else {
+            None
+        };
         let enumerate = |solver: &mut Solver<B>| {
             let started = std::time::Instant::now();
             let mut sat_time = std::time::Duration::ZERO;
@@ -326,6 +334,13 @@ impl<B: BV> LocalFrame<'_, B> {
                         } else {
                             String::new()
                         };
+                        if let Some(diagnostic) = &mut diagnostic {
+                            let mut record_assignment = vec![false; records.len()];
+                            for (index, value) in order.iter().zip(&assignment) {
+                                record_assignment[*index] = *value;
+                            }
+                            diagnostic.observe(&record_assignment, &raw);
+                        }
                         bit_predicates
                             .iter()
                             .enumerate()
@@ -447,6 +462,9 @@ impl<B: BV> LocalFrame<'_, B> {
                 exported_samples,
             );
             if counting {
+                if let Some(diagnostic) = &diagnostic {
+                    diagnostic.finish(&replay_events, class_count, total, path_truncated, truncated_classes)?;
+                }
                 if shared.execution_stats.enabled() {
                     eprintln!("[MERGE_ENUMERATION_COUNT] 类={class_count} 解={total} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", started.elapsed());
                 }

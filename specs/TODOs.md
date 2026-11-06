@@ -15,3 +15,8 @@
 - 2026-11-04 [Review 34 三个缺陷修复](../agents/review34/status.md)：完成。复现补丁已应用，两个 P1 与一个 P2 已修复；Review 34 核心 7/7、内存复现 1/1、Review 33 筛选 10/10、内存模型 32/32、`isla-lib` 全量 560/560、`isla` 全量 151/151、`itrace,smtperf` 全量 623/623、MRET smoke 4 条及格式检查全部通过。改动未提交，未执行全部 ISA clause。
 
 - 2026-11-04 [Review 33 两个 P1 修复](../agents/review33/status.md)：完成。复现补丁已应用，两个生产修复及旧写侧错误类型断言修订已验证；Review 33 单元 4/4、内存模型 31/31、`isla-lib` 全量 553/553、`isla` 全量 150/150、MRET smoke 4 条及格式检查均通过。改动未提交，未执行全部 ISA clause。
+
+
+## 2026-11-06 分量诊断（测量与设计完成）
+
+edee95d + 只读环境变量诊断，count/-T 64：Sv39 LOAD 16592 类（49s）、Sv48 LOAD 122654 类（454s）、Sv48 STORE 51638 类（97s），全部完整结束。原约束图每路径 1 分量；候选分组 Sv39 20/20 路径守卫域可乘，两个 Sv48 场景各 6 条路径不可乘，均有原求解器确认的缺失组合 UNSAT。未实现生产分解或紧凑输出；片段域与完整状态组合仍待验证。isla-lib 709 通过／既有 12 失败／6 忽略，格式检查与指定 target_f7 构建通过。[结果与设计](../agents/path_merge_call_support/enumeration.md)、[机器记录](../agents/path_merge_call_support/component-results.json)、[状态和下一步](../agents/path_merge_call_support/status.md)。

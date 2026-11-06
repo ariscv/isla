@@ -404,3 +404,12 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 三个中文命名测试：`寄存器解引用与向量单项符号索引必须精确过滤`、`宽位转换在合并前后保留数值`、`合并后单态化不得采用任意默认值`。
 
 适用提交：6819246 及其后的 C1–C4 合并（47e0cfc、677d21f、6809968、e828b0b），合并后全量为 626 通过、12 失败，失败集合与基线逐个相同。根因尚未调查；改动这些测试之前不应把它们算作新改动造成的回归。
+
+
+## 守卫域可乘不等于片段／完整模型可拼接（2026-11-06）
+
+适用 edee95d 加 ISLA_ENUM_COMPONENTS=1 诊断。现行 count 的 `counted_classes` 是上下文守卫赋值的完整叶子数；class_cap=1 仅保留每类一个片段见证，不能据此取得完整片段域。代码见 `executor/merge_enumeration.rs` 两级循环；新增诊断使用现成投影，不修改类计数。
+
+在 Sv39 LOAD、Sv48 LOAD、Sv48 STORE 中，把原断言、展开的守卫／ITE 和自由输入位全部纳入时，每路径均连成一个分量。暂不纳入原断言的候选图可拆为多个组，但 Sv48 两场景各有 6 条路径的守卫边际域乘积大于实际类数，并有原 Z3 对具体缺失组合返回 UNSAT；STORE 本轮全部两两／全组抽样仍为 SAT，证实抽样不足以独立证明可乘。Sv39 全部 20 条路径乘积相等，可用完整有限集合基数证明这些固定路径的守卫域可乘；不外推到完整片段或处理器状态。
+
+现有 sample v1 的 `SamplePath::materialize` 每类依据同一求解模型重建读写地址／数据、后态寄存器和结构化结果；`src/isarch/samples.rs::isa_state` 也以同类前态为依据。只替换守卫／片段而沿用另一类的完整状态，缺少正确性依据。详细数值、哈希、样本规模与设计见 [枚举说明](path_merge_call_support/enumeration.md) 和 [机器记录](path_merge_call_support/component-results.json)。
