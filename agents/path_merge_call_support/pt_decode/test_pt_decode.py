@@ -10,6 +10,7 @@ from pt_decode import (
     Config, DecodeError, aggregate, compare_distributions, decode_pte,
     decode_sample, effective_address, load_samples, parse_satp, read_word,
     shape_key, classify_pte, memory_bytes,
+    result_category,
 )
 
 
@@ -42,6 +43,178 @@ def sample(words, result="Retire_Success", exception=None, mode=8, va=0x20000000
 
 CFG = Config(svrsw60t59b=False, dirty_update=False)
 ROOT = 0x80200000
+
+
+def store_sample(words, result="Retire_Success", exception=None, mode=8, va=0x20000000):
+    s = sample(words, result, exception, mode, va)
+    # base_insts.sail: STORE(imm, rs2, rs1, width)，与真实样本一致。
+    s["pre_registers"]["$instruction"] = {"ctor": "STORE", "value": {"struct": {
+        f"tuple#%bv12_%bv5_%bv5_%i64{i}": v for i, v in enumerate(
+            [bits(0, 12), bits(2, 5), bits(1, 5), {"i64": "8"}])}}}
+    return s
+
+
+class StoreTests(unittest.TestCase):
+    def test_store_tuple_address_and_assembly(self):
+        s = store_sample([])
+        fields = s["pre_registers"]["$instruction"]["value"]["struct"]
+        fields["tuple#%bv12_%bv5_%bv5_%i640"] = bits(0xff8, 12)
+        self.assertEqual(effective_address(s), 0x1ffffff8)
+        fields["tuple#%bv12_%bv5_%bv5_%i642"] = bits(0, 5)
+        self.assertEqual(effective_address(s), (1 << 64)-8)
+        del s["pre_registers"]["$instruction"]
+        s["isa_state"]["$instruction"] = "sd x2, -0x8(x1)"
+        self.assertEqual(effective_address(s), 0x1ffffff8)
+
+    def test_store_bad_instruction_rejected_even_with_va(self):
+        for field, value in [("tuple#%bv12_%bv5_%bv5_%i643", {"i64": "4"}),
+                             ("new", bits(0))]:
+            s = store_sample([(ROOT, 0)], "Memory_Exception", "E_SAMO_Page_Fault")
+            s["pre_registers"]["$instruction"]["value"]["struct"][field] = value
+            with self.assertRaises(DecodeError):
+                decode_sample(s, CFG, va=0x20000000)
+        s["pre_registers"]["$instruction"]["ctor"] = "UNKNOWN"
+        with self.assertRaises(DecodeError):
+            decode_sample(s, CFG, va=0x20000000)
+
+    def test_store_exception_family_is_strict(self):
+        for suffix in ["Page_Fault", "Access_Fault", "Addr_Align"]:
+            s = store_sample([], "Memory_Exception", f"E_SAMO_{suffix}")
+            self.assertEqual(result_category(s["result"], 0x20000000, "store")[1], f"E_SAMO_{suffix}")
+            with self.assertRaises(DecodeError):
+                result_category(s["result"], 0x20000000, "load")
+        with self.assertRaises(DecodeError):
+            result_category(sample([])["result"], 0x20000000, "unknown")
+
+    def test_store_permissions_and_ad_bits(self):
+        for flags, reason in [(0x43, "store_permission"), (0x49, "store_permission"),
+                              (0x47, "dirty_update_disabled"), (7, "accessed_update_disabled"),
+                              (0xd7, "privilege_permission")]:
+            s = store_sample([(ROOT, flags)], "Memory_Exception", "E_SAMO_Page_Fault")
+            s["pre_registers"]["mstatus"]["struct"]["bits"] = bits(1 << 19)
+            self.assertEqual(decode_sample(s, CFG)["failure_reason"], reason)
+        # LOAD 无须 D=1，STORE 的 SUM/User/MPRV 仍复用同一权限流程。
+        for privilege, status in [("Supervisor", 1 << 18), ("User", 0),
+                                  ("Machine", (1 << 17) | (1 << 11) | (1 << 18))]:
+            s = store_sample([(ROOT, 0xd7), (0x20000000, 99)])
+            s["post_memory"] = cells(0x20000000, 0)
+            s["pre_registers"]["cur_privilege"] = {"enum": privilege}
+            s["pre_registers"]["mstatus"]["struct"]["bits"] = bits(status)
+            self.assertIsNone(decode_sample(s, CFG)["failure_reason"])
+
+    def test_store_unknown_preimage_and_post_data(self):
+        s = store_sample([(ROOT, 0xc7)])
+        s["pre_memory"] += [dict(c, value=None) for c in cells(0x20000000, 0)]
+        s["post_memory"] = cells(0x20000000, 123)
+        d = decode_sample(s, CFG)
+        self.assertEqual(d["paddr_if_success"], 0x20000000)
+        self.assertEqual(d["entries"][-1]["value"], "0x000000000000007b")
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)/"samples.jsonl"
+            p.write_text(json.dumps(s)+'\n')
+            self.assertEqual(len(list(load_samples(p))), 1)
+        s["post_memory"] = []
+        with self.assertRaisesRegex(DecodeError, "missing_memory"):
+            decode_sample(s, CFG)
+
+    def test_store_null_pte_and_unrelated_null_rejected(self):
+        s = store_sample([(ROOT, 0)])
+        s["pre_memory"][0]["value"] = None
+        with self.assertRaisesRegex(DecodeError, "未知.*初值"):
+            decode_sample(s, CFG)
+        s = store_sample([(ROOT, 0)], "Memory_Exception", "E_SAMO_Page_Fault")
+        s["pre_memory"] += [dict(c, value=None) for c in cells(0x1000, 0)]
+        with self.assertRaisesRegex(DecodeError, "无法归属"):
+            decode_sample(s, CFG)
+
+    def test_store_pma_uses_read_for_pte_and_write_for_data(self):
+        for readable, writable, expected in [(True, False, "data_write_pma_access_fault"),
+                                               (False, True, "pte_read_pma_access_fault")]:
+            words = [(ROOT, 0xc7)] if readable else []
+            s = store_sample(words, "Memory_Exception", "E_SAMO_Access_Fault")
+            s["pre_registers"]["pma_regions"] = {"list": [{"struct": {
+                "base": bits(0), "size": bits(1 << 63), "include_in_device_tree": {"bool": True},
+                "attributes": {"struct": {"readable": {"bool": readable},
+                                            "writable": {"bool": writable}}}}}]}
+            self.assertEqual(decode_sample(s, CFG)["failure_reason"], expected)
+        s = store_sample([(0x20000000, 0)], mode=0)
+        s["post_memory"] = cells(0x20000000, 1)
+        s["pre_registers"]["pma_regions"] = {"list": [{"struct": {
+            "base": bits(0), "size": bits(1 << 63), "include_in_device_tree": {"bool": True},
+            "attributes": {"struct": {"readable": {"bool": False}, "writable": {"bool": True}}}}}]}
+        self.assertIsNone(decode_sample(s, CFG)["failure_reason"])
+
+    def test_store_sv48_full_walk_and_canonical_va(self):
+        words = [(ROOT, (0x80300 << 10) | 1), (0x80300000, (0x80400 << 10) | 1),
+                 (0x80400800, (0x80500 << 10) | 1), (0x80500000, (0x80600 << 10) | 0xc7),
+                 (0x80600000, 77)]
+        s = store_sample(words, mode=9)
+        s["post_memory"] = cells(0x80600000, 42)
+        d = decode_sample(s, CFG)
+        self.assertEqual((d["mode"], d["vpn"], d["paddr_if_success"]), ("Sv48", [0, 256, 0, 0], 0x80600000))
+        self.assertEqual([e["level"] for e in d["entries"][:-1]], [3, 2, 1, 0])
+        s = store_sample([], "Memory_Exception", "E_SAMO_Page_Fault", mode=9, va=1 << 47)
+        self.assertEqual(decode_sample(s, CFG)["failure_reason"], "noncanonical_va")
+
+    def test_store_enabled_ad_update_requires_exact_post_memory(self):
+        cfg = Config(svrsw60t59b=False, dirty_update=True)
+        for flags in [7, 0x47, 0x87]:
+            s = store_sample([(ROOT, flags), (0x20000000, 0)])
+            s["post_memory"] = cells(0x20000000, 0)
+            with self.assertRaisesRegex(DecodeError, "missing_memory"):
+                decode_sample(s, cfg)
+            s["post_memory"] += cells(ROOT, 0xc7)
+            self.assertIsNone(decode_sample(s, cfg)["failure_reason"])
+            s["post_memory"] = cells(ROOT, 0x47)+cells(0x20000000, 0)
+            with self.assertRaisesRegex(DecodeError, "A/D 位更新"):
+                decode_sample(s, cfg)
+
+    def test_store_alignment_needs_explicit_platform_configuration(self):
+        s = store_sample([], "Memory_Exception", "E_SAMO_Addr_Align", va=0x20000001)
+        with self.assertRaisesRegex(DecodeError, "misaligned-access"):
+            decode_sample(s, CFG)
+        cfg = Config(svrsw60t59b=False, dirty_update=False, misaligned_access=False)
+        self.assertEqual(decode_sample(s, cfg)["failure_reason"], "address_misaligned")
+        s = store_sample([], "Memory_Exception", "E_SAMO_Addr_Align")
+        with self.assertRaises(DecodeError):
+            decode_sample(s, cfg)
+
+    def test_explicit_access_and_address_without_instruction(self):
+        s = store_sample([(ROOT, 0)], "Memory_Exception", "E_SAMO_Page_Fault")
+        del s["pre_registers"]["$instruction"]
+        with self.assertRaisesRegex(DecodeError, "访问类型"):
+            decode_sample(s, CFG, va=0x20000000)
+        d = decode_sample(s, CFG, va=0x20000000, access="store")
+        self.assertEqual(d["exception_type"], "E_SAMO_Page_Fault")
+        s = store_sample([(ROOT, 0)], "Memory_Exception", "E_SAMO_Page_Fault")
+        with self.assertRaisesRegex(DecodeError, "--access.*不符"):
+            decode_sample(s, CFG, va=0x20000000, access="load")
+        del s["pre_registers"]["x1"]
+        self.assertEqual(decode_sample(s, CFG, va=0x20000000)["va"], 0x20000000)
+
+    def test_store_cli_alignment_and_automatic_address(self):
+        from pt_decode import main
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = ["--fork", str(root/'fork.jsonl'), "--merge", str(root/'merge.jsonl'),
+                    "--out", str(root/'out'), "--svrsw60t59b", "disabled", "--dirty-update", "disabled"]
+            for aligned in [True, False]:
+                va = 0x20000000 if aligned else 0x20000001
+                s = store_sample([(ROOT, 0)] if aligned else [], "Memory_Exception",
+                                 "E_SAMO_Page_Fault" if aligned else "E_SAMO_Addr_Align", va=va)
+                for side in ["fork", "merge"]:
+                    s["mode"] = side
+                    (root/f'{side}.jsonl').write_text(json.dumps(s)+'\n')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(args+["--misaligned-access", "disabled"]), 0)
+                table = json.loads((root/'out/page_tables.json').read_text())["page_tables"][0]
+                self.assertEqual((table["access"], table["va"]), ("store", va))
+
+    def test_load_and_store_success_have_different_shapes(self):
+        load = decode_sample(sample([(ROOT, 0xc7), (0x20000000, 0)]), CFG)
+        s = store_sample([(ROOT, 0xc7), (0x20000000, 0)])
+        s["post_memory"] = cells(0x20000000, 0)
+        self.assertNotEqual(shape_key(load), shape_key(decode_sample(s, CFG)))
 
 
 class FieldsTests(unittest.TestCase):

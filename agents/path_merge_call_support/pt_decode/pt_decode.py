@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""独立的 RV64 LOAD 页表样本后处理；不调用 Isla 或求解器。"""
+"""独立的 RV64 LOAD/STORE 页表样本后处理；不调用 Isla 或求解器。"""
 import argparse
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -15,6 +15,9 @@ MASK64 = (1 << 64) - 1
 SAMPLE_FIELDS = set("schema_version sample_id mode path_signature class_id truncated pre_registers "
                     "post_registers isa_state pre_memory post_memory result ret_val".split())
 LOAD_FIELDS = [f"tuple#%bv12_%bv5_%bv5_%bool_%i64{i}" for i in range(5)]
+STORE_FIELDS = [f"tuple#%bv12_%bv5_%bv5_%i64{i}" for i in range(4)]
+ACCESSES = {"load": dict(exception="E_Load", permission="R", pma="readable", operation="read"),
+            "store": dict(exception="E_SAMO", permission="W", pma="writable", operation="write")}
 EXCEPTION_FIELDS = [f"tuple#%bv64_%union zExceptionType{i}" for i in range(2)]
 INFERENCE_NOTE = "位约束仅由本形状的已导出样本推断，非求解器约束；free 位不可独立任意组合。"
 
@@ -27,10 +30,13 @@ class DecodeError(ValueError):
 class Config:
     svrsw60t59b: bool
     dirty_update: bool
+    misaligned_access: bool | None = None
 
     def __post_init__(self):
         if type(self.svrsw60t59b) is not bool or type(self.dirty_update) is not bool:
             raise DecodeError("模型配置必须是布尔值")
+        if self.misaligned_access is not None and type(self.misaligned_access) is not bool:
+            raise DecodeError("非对齐访问配置必须是布尔值或未指定")
 
 
 def exact(obj, fields, where):
@@ -104,7 +110,7 @@ def classify_pte(value, level, config):
                 page_size=1 << (12+9*level))
 
 
-def memory_bytes(cells):
+def memory_bytes(cells, allow_unknown=False):
     if not isinstance(cells, list):
         raise DecodeError("内存必须是字节单元数组")
     memory = {}
@@ -113,7 +119,9 @@ def memory_bytes(cells):
         address = uint(cell["address"], 64, "内存地址")
         if type(cell["bytes"]) is not int or cell["bytes"] != 1:
             raise DecodeError("只支持 samples v1 的逐字节内存单元")
-        value = uint(cell["value"], 8, "内存字节；null 不是已知初值")
+        value = cell["value"]
+        if value is not None or not allow_unknown:
+            value = uint(value, 8, "内存字节；null 不是已知初值")
         if address in memory:
             raise DecodeError(f"重复内存地址 {address:#x}")
         memory[address] = value
@@ -127,7 +135,47 @@ def read_word(memory, address):
     missing = [address+i for i in range(8) if address+i not in memory]
     if missing:
         raise DecodeError("missing_memory: 缺少地址 " + ", ".join(f"{a:#x}" for a in missing))
+    if any(memory[address+i] is None for i in range(8)):
+        raise DecodeError(f"未知内存初值不能用于读取: {address:#x}")
     return sum(memory[address+i] << (i*8) for i in range(8))
+
+
+def decode_instruction(sample):
+    """按 Sail 的构造子字段解析；已有但损坏的指令不得换用另一来源。"""
+    registers = sample["pre_registers"]
+    if "$instruction" in registers:
+        instruction = exact(registers["$instruction"], ["ctor", "value"], "$instruction")
+        ctor = instruction["ctor"]
+        if ctor not in {"LOAD", "STORE"}:
+            raise DecodeError(f"仅支持 LOAD(ld)/STORE(sd)，实际 {ctor!r}")
+        names = LOAD_FIELDS if ctor == "LOAD" else STORE_FIELDS
+        fields = exact(struct_value(instruction["value"]), names, f"{ctor} 参数")
+        immediate = bit_value(fields[names[0]], 12)
+        first = bit_value(fields[names[1]], 5)
+        second = bit_value(fields[names[2]], 5)
+        if ctor == "LOAD":
+            unsigned = exact(fields[names[3]], ["bool"], "LOAD 无符号标记")["bool"]
+            if type(unsigned) is not bool or unsigned:
+                raise DecodeError("RV64 ld 要求 LOAD(is_unsigned=false,width=8)")
+        width = exact(fields[names[-1]], ["i64"], f"{ctor} 宽度")["i64"]
+        if width != "8":
+            raise DecodeError(f"RV64 ld/sd 要求 {ctor}(width=8)")
+        # base_insts.sail: LOAD(imm, rs1, rd, false, width)；STORE(imm, rs2, rs1, width)。
+        return ctor.lower(), immediate-4096 if immediate & 0x800 else immediate, first if ctor == "LOAD" else second
+    state = sample["isa_state"]
+    if "$instruction" in state:
+        text = state["$instruction"]
+        if not isinstance(text, str):
+            raise DecodeError("isa_state.$instruction 必须为汇编字符串")
+        match = re.fullmatch(r"(ld|sd)\s+x(?:[0-9]|[12][0-9]|3[01]),\s*([+-]?(?:0x[0-9a-fA-F]+|[0-9]+))\(x([0-9]|[12][0-9]|3[01])\)", text)
+        if not match:
+            raise DecodeError("无法解析 isa_state.$instruction")
+        mnemonic, imm_text, rs1 = match.groups()
+        immediate = int(imm_text, 16 if "0x" in imm_text else 10)
+        if not -2048 <= immediate <= 2047:
+            raise DecodeError("ld/sd 立即数超出有符号 12 位范围")
+        return "load" if mnemonic == "ld" else "store", immediate, int(rs1)
+    raise DecodeError("缺少可解析的指令；请传入 --access 与 --va，或 --access 与 --va-register/--offset")
 
 
 def effective_address(sample, va=None, va_register=None, offset=0):
@@ -148,41 +196,13 @@ def effective_address(sample, va=None, va_register=None, offset=0):
         return (base+offset) & MASK64
     if offset:
         raise DecodeError("--offset 要求同时指定 --va-register")
-    if "$instruction" in registers:
-        instruction = exact(registers["$instruction"], ["ctor", "value"], "$instruction")
-        if instruction["ctor"] != "LOAD":
-            raise DecodeError("仅支持 LOAD(ld)；其他指令请显式使用 --va")
-        fields = exact(struct_value(instruction["value"]), LOAD_FIELDS, "LOAD 参数")
-        immediate = bit_value(fields[LOAD_FIELDS[0]], 12)
-        rs1 = bit_value(fields[LOAD_FIELDS[1]], 5)
-        bit_value(fields[LOAD_FIELDS[2]], 5)
-        unsigned = exact(fields[LOAD_FIELDS[3]], ["bool"], "LOAD 无符号标记")["bool"]
-        if type(unsigned) is not bool:
-            raise DecodeError("LOAD 无符号标记必须为布尔值")
-        width = exact(fields[LOAD_FIELDS[4]], ["i64"], "LOAD 宽度")["i64"]
-        if unsigned or width != "8":
-            raise DecodeError("当前仅支持 RV64 ld，要求 LOAD(is_unsigned=false,width=8)")
-        if rs1 and f"x{rs1}" not in registers:
-            raise DecodeError(f"缺少取址寄存器 x{rs1}；请传入 --va")
-        base = 0 if rs1 == 0 else bit_value(registers[f"x{rs1}"], 64)
-        return (base + (immediate-4096 if immediate & 0x800 else immediate)) & MASK64
-    state = sample["isa_state"]
-    if "$instruction" in state:
-        text = state["$instruction"]
-        if not isinstance(text, str):
-            raise DecodeError("isa_state.$instruction 必须为汇编字符串")
-        match = re.fullmatch(r"ld\s+x(?:[0-9]|[12][0-9]|3[01]),\s*([+-]?(?:0x[0-9a-fA-F]+|[0-9]+))\(x([0-9]|[12][0-9]|3[01])\)", text)
-        if not match:
-            raise DecodeError("无法解析 isa_state.$instruction；请使用 --va")
-        imm_text, rs1 = match.groups()
-        imm = int(imm_text, 16 if "0x" in imm_text else 10)
-        if not -2048 <= imm <= 2047:
-            raise DecodeError("ld 立即数超出有符号 12 位范围")
-        return effective_address(sample, va_register=f"x{rs1}", offset=imm)
-    raise DecodeError("缺少可解析的指令；请传入 --va，或 --va-register 与 --offset")
+    instruction = decode_instruction(sample)
+    return effective_address(sample, va_register=f"x{instruction[2]}", offset=instruction[1])
 
 
-def result_category(result, va):
+def result_category(result, va, access):
+    if access not in ACCESSES:
+        raise DecodeError(f"未知访问类型 {access!r}")
     exact(result, ["ctor", "value"], "result")
     name = result["ctor"]
     if name == "Retire_Success":
@@ -195,15 +215,19 @@ def result_category(result, va):
     if bit_value(payload[EXCEPTION_FIELDS[0]], 64) != va:
         raise DecodeError("Memory_Exception 地址与计算的 VA 不符")
     exception = exact(payload[EXCEPTION_FIELDS[1]], ["ctor", "value"], "异常类型")
-    if exception["ctor"] not in {"E_Load_Page_Fault", "E_Load_Access_Fault", "E_Load_Addr_Align"}:
-        raise DecodeError(f"未知 ld 异常类型 {exception['ctor']!r}")
+    prefix = ACCESSES[access]["exception"]
+    if exception["ctor"] not in {f"{prefix}_{suffix}" for suffix in ["Page_Fault", "Access_Fault", "Addr_Align"]}:
+        raise DecodeError(f"未知 {access} 异常类型 {exception['ctor']!r}")
     if exception["value"] != {"unit": True}:
         raise DecodeError("异常类型载荷不是 unit")
     return name, exception["ctor"]
 
 
-def pma_readable(registers, address):
+def pma_permitted(registers, address, access):
     """只用样本中的 PMA 证明提前终止；不猜测未记录的 PMP/设备行为。"""
+    if access not in ACCESSES:
+        raise DecodeError(f"未知访问类型 {access!r}")
+    attribute = ACCESSES[access]["pma"]
     if "pma_regions" not in registers:
         return None
     regions = exact(registers["pma_regions"], ["list"], "pma_regions")["list"]
@@ -215,22 +239,31 @@ def pma_readable(registers, address):
         region = exact(struct_value(item), ["base", "size", "attributes", "include_in_device_tree"], "PMA 区域")
         base, size = bit_value(region["base"], 64), bit_value(region["size"], 64)
         attrs = struct_value(region["attributes"])
-        if set(attrs) - known_attributes or "readable" not in attrs:
+        if set(attrs) - known_attributes or attribute not in attrs:
             raise DecodeError(f"未知或不完整的 PMA 属性 {sorted(attrs)}")
-        readable = exact(attrs["readable"], ["bool"], "PMA readable")["bool"]
-        if type(readable) is not bool:
-            raise DecodeError("PMA readable 必须为布尔值")
+        permitted = exact(attrs[attribute], ["bool"], f"PMA {attribute}")["bool"]
+        if type(permitted) is not bool:
+            raise DecodeError(f"PMA {attribute} 必须为布尔值")
         if base <= address and address+8 <= base+size <= (1 << 64):
-            return readable
+            return permitted
     return False
 
 
-def decode_sample(sample, config, va=None, va_register=None, offset=0):
+def decode_sample(sample, config, va=None, va_register=None, offset=0, access=None):
     registers = sample["pre_registers"]
+    if "$instruction" in registers or "$instruction" in sample["isa_state"]:
+        instruction_access = decode_instruction(sample)[0]
+        if access is not None and access != instruction_access:
+            raise DecodeError("--access 与样本指令不符")
+        access = instruction_access
+    if access not in ACCESSES:
+        raise DecodeError("缺少访问类型；请提供指令或 --access load/store")
+    operation = ACCESSES[access]["operation"]
+    prefix = ACCESSES[access]["exception"]
     satp = bit_value(registers["satp"], 64)
     translation = parse_satp(satp)
     address = effective_address(sample, va, va_register, offset)
-    result, exception = result_category(sample["result"], address)
+    result, exception = result_category(sample["result"], address, access)
     status = bit_value(exact(struct_value(registers["mstatus"]), ["bits"], "mstatus")["bits"], 64)
     privilege = exact(registers["cur_privilege"], ["enum"], "cur_privilege")["enum"]
     if status & (1 << 17):
@@ -243,8 +276,8 @@ def decode_sample(sample, config, va=None, va_register=None, offset=0):
     mode = "Bare" if privilege == "Machine" else translation["mode"]
     levels = 0 if mode == "Bare" else translation["levels"]
     vpn = [(address >> (12+9*i)) & 511 for i in range(levels)]
-    memory = memory_bytes(sample["pre_memory"])
-    decoded = dict(sample_id=sample["sample_id"], satp=f"0x{satp:016x}", mode=mode,
+    memory = memory_bytes(sample["pre_memory"], allow_unknown=access == "store")
+    decoded = dict(sample_id=sample["sample_id"], access=access, satp=f"0x{satp:016x}", mode=mode,
                    satp_mode=translation["mode"], root_paddr=translation["root_paddr"],
                    va=address, vpn=vpn, effective_privilege=privilege, mxr=bool(status & (1 << 19)),
                    sum=bool(status & (1 << 18)), entries=[], sequence=[], leaf_level=None,
@@ -255,8 +288,12 @@ def decode_sample(sample, config, va=None, va_register=None, offset=0):
     failure = None
     physical = address if mode == "Bare" else None
     if address & 7:
-        raise DecodeError("不支持非 8 字节对齐的 ld；跨页/未对齐平台策略需单独实现")
-    if levels:
+        if config.misaligned_access is None:
+            raise DecodeError("非对齐 ld/sd 要求显式 --misaligned-access disabled；不猜测平台配置")
+        if config.misaligned_access:
+            raise DecodeError("不支持平台允许的非对齐/跨页 ld/sd 拆分访问")
+        failure = "address_misaligned"
+    if levels and failure is None:
         width = translation["va_bits"]
         low = address & ((1 << width)-1)
         canonical = low | (MASK64 ^ ((1 << width)-1)) if low & (1 << (width-1)) else low
@@ -267,7 +304,7 @@ def decode_sample(sample, config, va=None, va_register=None, offset=0):
             if failure:
                 break
             paddr = table + vpn[level]*8
-            readable = pma_readable(registers, paddr)
+            readable = pma_permitted(registers, paddr, "load")
             if readable is False:
                 if any(paddr+i in memory for i in range(8)):
                     raise DecodeError(f"PMA 拒绝的 PTE 地址却出现在 pre_memory: {paddr:#x}")
@@ -292,39 +329,49 @@ def decode_sample(sample, config, va=None, va_register=None, offset=0):
             if (privilege == "User" and not fields["U"]) or (
                     privilege == "Supervisor" and fields["U"] and not decoded["sum"]):
                 failure = "privilege_permission"
-            elif not (fields["R"] or (fields["X"] and decoded["mxr"])):
-                failure = "load_permission"
+            elif not (fields[ACCESSES[access]["permission"]] or (
+                    access == "load" and fields["X"] and decoded["mxr"])):
+                failure = f"{access}_permission"
             elif not fields["A"] and not config.dirty_update:
                 failure = "accessed_update_disabled"
+            elif access == "store" and not fields["D"] and not config.dirty_update:
+                failure = "dirty_update_disabled"
             if failure:
                 entry["failure_reason"] = failure
                 break
             page_size = entry["page_size"]
             physical = ((fields["PPN"] << 12) & ~(page_size-1)) | (address & (page_size-1))
-            if not fields["A"]:
+            update_mask = (1 << 6) | ((1 << 7) if access == "store" else 0)
+            if value | update_mask != value:
                 post = memory_bytes(sample["post_memory"])
-                if read_word(post, paddr) != value | (1 << 6):
-                    raise DecodeError("A 位更新与 post_memory 不符；不支持未证实的写回失败")
+                if read_word(post, paddr) != value | update_mask:
+                    raise DecodeError("A/D 位更新与 post_memory 不符；不支持未证实的写回失败")
             break
     if failure is None:
         if physical is None:
             raise DecodeError("内部不变量违反：遍历结束但没有物理地址")
         decoded["translated_paddr"] = physical
-        if pma_readable(registers, physical) is False:
+        if pma_permitted(registers, physical, access) is False:
             if any(physical+i in memory and physical+i not in used for i in range(8)):
                 raise DecodeError("PMA 拒绝的数据地址却有读取字节")
-            failure = "data_read_pma_access_fault"
-            decoded["termination"] = dict(level=None, paddr=physical, evidence="sample_pma_no_read")
+            failure = f"data_{operation}_pma_access_fault"
+            decoded["termination"] = dict(level=None, paddr=physical, evidence=f"sample_pma_no_{operation}")
         else:
-            value = read_word(memory, physical)
+            # STORE 的 pre_memory 可仅记录写入目标的未知初值；写后值必须存在。
+            data = memory if access == "load" else memory_bytes(sample["post_memory"])
+            value = read_word(data, physical)
+            if access == "store" and any(physical+i not in memory for i in range(8)):
+                raise DecodeError("missing_memory: STORE 缺少写入目标的 pre_memory 单元")
             used.update(range(physical, physical+8))
             entries.append(dict(level=None, paddr=physical, value=f"0x{value:016x}",
                                 role="data", fields={}, kind="data", failure_reason=None, page_size=None))
             decoded["paddr_if_success"] = physical
-    if failure in {"pte_read_pma_access_fault", "data_read_pma_access_fault"}:
-        predicted = "E_Load_Access_Fault"
+    if failure == "address_misaligned":
+        predicted = f"{prefix}_Addr_Align"
+    elif failure in {"pte_read_pma_access_fault", f"data_{operation}_pma_access_fault"}:
+        predicted = f"{prefix}_Access_Fault"
     elif failure:
-        predicted = "E_Load_Page_Fault"
+        predicted = f"{prefix}_Page_Fault"
     else:
         predicted = None
     if exception != predicted:
@@ -337,7 +384,7 @@ def decode_sample(sample, config, va=None, va_register=None, offset=0):
 
 
 def shape_key(decoded):
-    return json.dumps(dict(mode=decoded["mode"], sequence=decoded["sequence"],
+    return json.dumps(dict(access=decoded["access"], mode=decoded["mode"], sequence=decoded["sequence"],
                            leaf_level=decoded["leaf_level"], result=decoded["result"],
                            exception_type=decoded["exception_type"], failure_reason=decoded["failure_reason"]),
                       sort_keys=True, separators=(",", ":"))
@@ -347,7 +394,7 @@ def shape_name(key):
     shape = json.loads(key)
     sequence = "--".join(f"l{e['level']}-{e['kind']}" for e in shape["sequence"]) or "no-pte"
     leaf = "no-leaf" if shape["leaf_level"] is None else f"leaf-l{shape['leaf_level']}"
-    return "--".join([shape["mode"].lower(), sequence, leaf, shape["exception_type"] or shape["result"],
+    return "--".join([shape["access"], shape["mode"].lower(), sequence, leaf, shape["exception_type"] or shape["result"],
                       shape["failure_reason"] or "success"])
 
 
@@ -514,7 +561,7 @@ def write_outputs(directory, shapes, metadata):
     tables = []
     for shape in shapes:
         rep = shape["representative"]
-        tables.append(dict(name=shape["name"], count=shape["count"], satp=rep["satp"],
+        tables.append(dict(name=shape["name"], count=shape["count"], access=rep["access"], satp=rep["satp"],
                            mode=rep["mode"], root_paddr=rep["root_paddr"], va=rep["va"], vpn=rep["vpn"],
                            context=dict(effective_privilege=rep["effective_privilege"], mxr=rep["mxr"], sum=rep["sum"]),
                            leaf_level=rep["leaf_level"], page_size=rep["page_size"], entries=rep["entries"],
@@ -523,7 +570,8 @@ def write_outputs(directory, shapes, metadata):
                            failure_reason=rep["failure_reason"], termination=rep["termination"],
                            representative_sample_id=rep["sample_id"], context_varies=shape["context_varies"],
                            notes=[INFERENCE_NOTE, "satp、地址、权限上下文和 expected 是代表样本的具体值。"
-                                  "data 条目不是 PTE，其 fields 为空。未读取的下级页表不补零。"] ))
+                                  "data 条目不是 PTE，其 fields 为空；LOAD 取前态值，STORE 取写后值。"
+                                  "未读取的下级页表不补零。"] ))
     write_json(directory/"page_tables.json", dict(**common, page_tables=tables))
     total = metadata["sample_count"]
     results, leaves = Counter(), Counter()
@@ -542,9 +590,9 @@ def write_outputs(directory, shapes, metadata):
     (directory/"distribution.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def process(path, mode, config, va, va_register, offset):
+def process(path, mode, config, va, va_register, offset, access=None):
     start = time.perf_counter()
-    metadata = dict(config=asdict(config), addressing=dict(va=va, va_register=va_register, offset=offset),
+    metadata = dict(config=asdict(config), addressing=dict(va=va, va_register=va_register, offset=offset, access=access),
                     python_version=sys.version.split()[0],
                     decoder_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
 
@@ -553,7 +601,7 @@ def process(path, mode, config, va, va_register, offset):
             if sample["mode"] != mode:
                 raise DecodeError(f"{Path(path).name}: sample_id={sample['sample_id']}，要求 mode={mode}")
             try:
-                yield decode_sample(sample, config, va, va_register, offset)
+                yield decode_sample(sample, config, va, va_register, offset, access)
             except (DecodeError, KeyError, TypeError) as error:
                 raise DecodeError(f"{Path(path).name}: sample_id={sample['sample_id']}: {error}") from error
 
@@ -569,19 +617,22 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, required=True, help="报告目录")
     parser.add_argument("--svrsw60t59b", choices=["enabled", "disabled"], required=True, help="模型中的扩展开关")
     parser.add_argument("--dirty-update", choices=["enabled", "disabled"], required=True, help="模型的平台 A/D 更新开关")
+    parser.add_argument("--misaligned-access", choices=["enabled", "disabled"], help="平台非对齐访问开关；非对齐样本必须指定")
+    parser.add_argument("--access", choices=["load", "store"], help="指令缺失时必填；已有指令时必须与之相符")
     addresses = parser.add_mutually_exclusive_group()
-    addresses.add_argument("--va", type=lambda s: int(s, 0), help="显式 RV64 虚拟地址；覆盖指令解码")
+    addresses.add_argument("--va", type=lambda s: int(s, 0), help="显式 RV64 虚拟地址；仍校验已有指令与访问类型")
     addresses.add_argument("--va-register", help="显式取址寄存器（完整名字）")
     parser.add_argument("--offset", type=lambda s: int(s, 0), default=0, help="寄存器取址的有符号字节偏移")
     args = parser.parse_args(argv)
     if args.offset and not args.va_register:
         parser.error("--offset 要求 --va-register")
-    config = Config(args.svrsw60t59b == "enabled", args.dirty_update == "enabled")
+    config = Config(args.svrsw60t59b == "enabled", args.dirty_update == "enabled",
+                    None if args.misaligned_access is None else args.misaligned_access == "enabled")
     start = time.perf_counter()
     try:
-        fork, fm = process(args.fork, "fork", config, args.va, args.va_register, args.offset)
+        fork, fm = process(args.fork, "fork", config, args.va, args.va_register, args.offset, args.access)
         print(f"fork：{fm['sample_count']} 样本，{len(fork)} 形状，{fm['elapsed_seconds']:.3f} 秒", flush=True)
-        merge, mm = process(args.merge, "merge", config, args.va, args.va_register, args.offset)
+        merge, mm = process(args.merge, "merge", config, args.va, args.va_register, args.offset, args.access)
         print(f"merge：{mm['sample_count']} 样本，{len(merge)} 形状，{mm['elapsed_seconds']:.3f} 秒", flush=True)
         # 两组完整解码后再写报告，避免输入错误留下半组新产物。
         write_outputs(args.out, fork, fm)

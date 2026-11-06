@@ -1,8 +1,8 @@
 # 页表样本解码与形状分布交叉检验
 
-这是独立的 Python 3 标准库工具。它读取 [samples v1](../samples.md) 的 JSONL，重建 RV64 `ld rd, imm(rs1)` 的页表路径，为每种形状输出一个具体模板，并逐形状比较分叉与合并样本的计数。它不调用 Isla、Sail、Z3 或任何二进制。
+这是独立的 Python 3.10+ 标准库工具。它读取 [samples v1](../samples.md) 的 JSONL，重建 RV64 `ld rd, imm(rs1)` 和 `sd rs2, imm(rs1)` 的页表路径，为每种形状输出一个具体模板，并逐形状比较分叉与合并样本的计数。它不调用 Isla、Sail、Z3 或任何二进制。
 
-本次两份各 16592 行的输入均得到 **104 种形状，所有形状计数相同**。详细结果见 [交叉检验](out/crosscheck.md)、[分布](out/distribution.md)、[验证记录](status.md)。合并输入有 16570 行 `truncated=true`，因此本结论只覆盖已导出的代表样本。
+初版 LOAD 的两份各 16592 条输入均得到 **104 种形状，所有形状计数相同**。这些历史产物见 [交叉检验](out/crosscheck.md)、[分布](out/distribution.md)、[验证记录](status.md)，保留初版形状键和名字。本轮 STORE 扩展与 F5 LOAD 回归结果见下文；合并输入包含截断的代表样本，结论只覆盖已导出的样本。
 
 ## 使用
 
@@ -25,22 +25,31 @@ PYTHONDONTWRITEBYTECODE=1 python3 pt_decode.py \
 
 这两个模型开关是必填项。样本 v1 不携带扩展支持表或 `plat_enable_dirty_update`，工具不会猜测。上述取值对应本次核对的 IR；其他实验应使用其实际配置。
 
-默认从 `pre_registers.$instruction` 解码 Sail 的 `LOAD(imm, rs1, rd, false, 8)`。元组字段名称和顺序来自 `sail-riscv/model/extensions/I/base_insts.sail`。如果没有该字段，则接受 `isa_state.$instruction` 中的 `ld x2, -0x8(x1)` 汇编字符串。取址为寄存器值加符号扩展的 12 位立即数，结果按 RV64 回绕；`x0` 为零。
+默认从 `pre_registers.$instruction` 解码 Sail 的 `LOAD(imm, rs1, rd, false, 8)` 或 `STORE(imm, rs2, rs1, 8)`。元组字段名称和顺序来自 `sail-riscv/model/extensions/I/base_insts.sail:270`、`:320`、`:327`，并已核对本轮两份 STORE 样本：
 
-指令无法取得时必须指定以下一种方式：
+| 构造子 | 结构体字段 | 字段含义与样本值 |
+| --- | --- | --- |
+| LOAD | `tuple#%bv12_%bv5_%bv5_%bool_%i64{0..4}` | imm、rs1、rd、is_unsigned、width |
+| STORE | `tuple#%bv12_%bv5_%bv5_%i64{0..3}` | imm=0、rs2=2、rs1=1、width=8 |
+
+因此 STORE 使用字段 2 的 x1 取址，字段 1 是数据来源 x2。如果前态没有该指令字段，则接受 `isa_state.$instruction` 中的 `ld x2, -0x8(x1)` 或 `sd x2, -0x8(x1)` 汇编字符串。取址为寄存器值加符号扩展的 12 位立即数，结果按 RV64 回绕；`x0` 为零。
+
+指令缺失时必须显式指定 `--access load` 或 `--access store`，并指定以下一种取址方式：
 
 ```sh
 # 直接指定虚拟地址
 python3 pt_decode.py --fork "$FORK_SAMPLES" --merge "$MERGE_SAMPLES" \
-  --out out --svrsw60t59b enabled --dirty-update disabled --va 0x20000000
+  --out out --svrsw60t59b enabled --dirty-update disabled --access store --va 0x20000000
 
 # 指定取址寄存器与有符号字节偏移
 python3 pt_decode.py --fork "$FORK_SAMPLES" --merge "$MERGE_SAMPLES" \
   --out out --svrsw60t59b enabled --dirty-update disabled \
-  --va-register x1 --offset=-8
+  --access store --va-register x1 --offset=-8
 ```
 
-显式指定地址时，调用者保证负载仍是 8 字节对齐的 RV64 ld。未知或损坏的自动指令格式直接报错，不自动换用另一个解释。`--va` 与寄存器方式互斥；`--offset` 要求寄存器方式。
+显式指定地址时，调用者保证指令仍为 RV64 ld/sd。工具继续校验已有指令的字段、宽度与访问类型；未知或损坏的指令直接报错，不自动换用另一个解释。`--access` 与已有指令矛盾也报错。`--va` 与寄存器方式互斥；`--offset` 要求寄存器方式。
+
+对齐的访问不需要非对齐平台配置。非对齐 VA 必须显式指定 `--misaligned-access disabled`，工具才按 Sail `vmem_utils.sail::check_misaligned` 在遍历前预测 `E_Load_Addr_Align` / `E_SAMO_Addr_Align`；未提供开关直接报错。`enabled` 下的非对齐拆分访问尚未实现，直接拒绝。
 
 退出码：`0` 为形状计数相同；`1` 为计数不同且已生成差异报告；`2` 为输入、解码或文件错误。输入错误包含文件行号；遍历错误包含 `sample_id`，缺单元另列缺失地址。空文件、重复编号、重复 JSON 字段、NaN、未知顶层字段、未知具体值标签均拒绝。寄存器名和结构体成员名沿用样本协议；参与语义解析的结构必须匹配已支持字段。
 
@@ -52,13 +61,13 @@ python3 pt_decode.py --fork "$FORK_SAMPLES" --merge "$MERGE_SAMPLES" \
 | --- | --- |
 | `metadata` | 输入文件名、SHA-256、样本数、截断数、模式计数、显式配置、地址覆盖选项、Python 版本、解码器哈希、实测耗时 |
 | `shapes.json: shapes` | 按计数降序排列的形状；计数相同按描述性名字排序 |
-| `key` | 有效翻译模式、带层号的 PTE 种类序列、叶子层、结果、异常类型、失败原因 |
+| `key` | 访问类型 access（load/store）、有效翻译模式、带层号的 PTE 种类序列、叶子层、结果、异常类型、失败原因；形状名字也增加 load/store 前缀 |
 | `sequence` | 根至终止位置的已读取 PTE；叶子种类带 R/W/X/U，G/A/D 等在 fields 和位掩码中保留 |
 | `representative` | 该形状中最小 `sample_id` 的具体路径；同一输入改变行序不影响代表选择 |
 | `distribution.md` | 形状计数与占比、结果汇总、叶子层汇总；叶子层汇总包括在叶子处失败的样本 |
 | `page_tables.json: page_tables` | 每种形状一个可供模板消费的条目；名字由形状生成，无预设类别名 |
 | `satp`、`root_paddr`、`va`、`vpn` | 代表样本的 satp、根物理地址、虚拟地址、VPN 数组；VPN 按低层至高层排列 |
-| `entries` | 沿实际路径排序；PTE 后接成功读取的 data；每项有 level、paddr、64 位十六进制 value、role、fields 和位约束 |
+| `entries` | 沿实际路径排序；PTE 后接成功访问的 data；LOAD data 取 pre_memory，STORE data 取 post_memory；每项有 level、paddr、64 位十六进制 value、role、fields 和位约束 |
 | `role` | `pointer`、`leaf`、`invalid` 或 `data`；权限不足或大页未对齐仍为 leaf，以 failure_reason 说明失败 |
 | `fields` | V/R/W/X/U/G/A/D、RSW、PPN、reserved、RSW_60t59b、PBMT、N；data 的 fields 为空 |
 | `fixed_mask`、`fixed_value`、`free_mask` | 同形状、同层条目值的实际固定和变化位；均为 64 位十六进制串 |
@@ -98,20 +107,64 @@ fixed_value = and_all
 
 invalid 的首个原因依次为 V=0、W=1/R=0、N 未启用、PBMT 未启用、RSW_60t59b 未启用、reserved 非零。顺序对应 Sail 短路判断；其他同时成立的位仍完整保存在 fields 中。合法项的 R/W/X 全零即 pointer。**当前 Sail 不额外拒绝指针的 U/A/D 非零**，工具遵循这一点。L0 的 pointer 终止为页异常。
 
-叶子先检查低 `9 × level` 个 PPN 位是否全零，再检查 U/S、SUM、MXR 和读权限，最后处理 A 位。页大小是 `2^(12+9×level)`；大页地址由 PPN 高位、低层 VPN 与页内偏移拼接。D 位不影响 ld。dirty-update 关闭时，A=0 为页异常；开启时必须从 post_memory 核实 A 位写回，未证实的写回失败不猜测。
+叶子先检查低 `9 × level` 个 PPN 位是否全零，再检查 U/S、SUM 和访问权限，最后处理 A/D 位。LOAD 要求 R=1 或 X=1 且 MXR=1；STORE 要求 W=1，MXR 不能赋予写权限。权限与更新规则分别核对 `vmem_pte.sail::check_PTE_permission`、`update_PTE_Bits`，并共用一个遍历流程。页大小是 `2^(12+9×level)`；大页地址由 PPN 高位、低层 VPN 与页内偏移拼接。
 
-有效权限遵循 `sys_control.sail::effectivePrivilege` 的 MPRV/MPP；有效 M 态使用 Bare。其他模式从 RV64 satp.MODE 决定：Bare/Sv39/Sv48/Sv57 对应 0/3/4/5 层，PTE 固定 8 字节。分页模式先检查 VA 符号扩展是否合法。
+dirty-update 关闭时，A=0 为 `accessed_update_disabled`；STORE 的 A=1、D=0 为 `dirty_update_disabled`，均预测对应访问类型的页异常。两位同时为零时先归入 A 位原因。D 位不影响 LOAD。开启更新时，LOAD 核对 A 置位、STORE 核对 A/D 均置位后的完整 PTE 与 `post_memory` 一致，未证实的写回失败直接报错。PTE 读取失败即使发生在 STORE 中，也预测 `E_SAMO_Access_Fault`；预测异常族由原始访问类型决定。
+
+有效权限遵循 `sys_control.sail::effectivePrivilege` 的 MPRV/MPP；有效 M 态使用 Bare。其他模式从 RV64 satp.MODE 决定：0/8/9/10 分别为 Bare/Sv39/Sv48/Sv57，对应 0/3/4/5 层，PTE 固定 8 字节。分页模式先检查 VA 符号扩展是否合法；Sv48 使用 48 位 VA 和四个 9 位 VPN。
+
+## 本轮验证（2026-11-06）
+
+先新增 STORE 行为测试，确认原实现失败后再修改代码。最终 39 项 unittest 通过。测试覆盖 STORE 的元组/汇编取址、异常族匹配、未知输入拒绝、W 权限、MXR/SUM/MPRV、A/D 更新、PMA 读写区分、写前未知值与写后数据、Sv48 四级遍历及非规范 VA、显式平台配置下的对齐异常。原 LOAD 测试保持通过。
+
+STORE 验收命令，在本目录执行：
+
+```sh
+SAMPLES_ROOT=/tmp/claude-1005/-data1-baiyifan-workplace-isla-runner/a39d8bcc-3e1b-4db3-8d63-110f0b832032/scratchpad
+PYTHONDONTWRITEBYTECODE=1 python3 pt_decode.py \
+  --fork "$SAMPLES_ROOT/w_storefork/samples.jsonl" \
+  --merge "$SAMPLES_ROOT/w_store/samples.jsonl" --out /tmp/ptstore \
+  --svrsw60t59b enabled --dirty-update disabled --va 0x20000000
+```
+
+实际两份输入均为 **6920 条**，各 **92 种形状**，92 种逐项计数完全相同，差异为零，退出码 0。fork 无截断行，merge 有 6898 条 `truncated=true`。当前提供的 STORE 样本全部为 satp.MODE=8（Sv39），没有对齐异常；Sv48（mode 9）与 `E_SAMO_Addr_Align` 的支持由上述单元测试确认。
+
+| STORE 结果类别 | fork | merge | 双方各自占比 |
+| --- | ---: | ---: | ---: |
+| E_SAMO_Page_Fault | 3662 | 3662 | 52.9191% |
+| E_SAMO_Access_Fault | 1322 | 1322 | 19.1040% |
+| Retire_Success | 1936 | 1936 | 27.9769% |
+| E_SAMO_Addr_Align | 0 | 0 | 0% |
+
+LOAD 原数据回归使用相同配置，将输入换为 `$SAMPLES_ROOT/x_fork/samples.jsonl` 和 `$SAMPLES_ROOT/x_merge/samples.jsonl`，输出至 `/tmp/ptload-original`：双方各 16592 条、104 种形状，逐形状计数完全相同，退出码 0。F5 回归命令为：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 pt_decode.py \
+  --fork "$SAMPLES_ROOT/x_fork/samples.jsonl" \
+  --merge /tmp/f5/enumeration-final-samples.jsonl --out /tmp/ptload \
+  --svrsw60t59b enabled --dirty-update disabled
+```
+
+F5 双方各 16592 条、104 种形状；与历史同 SHA-256 输入产物比较，除新增 access 字段与名字前缀外，形状键及逐项计数均未改变。F5 已有两种差异仍如实保留，故该命令退出码为 1；本次解码器 LOAD 回归通过，不宣称 F5 双方计数相等：
+
+| LOAD 差异形状（Sv39，L2 pointer→L1 leaf，U=0，superpage_misaligned 页异常） | fork | F5 merge | merge − fork |
+| --- | ---: | ---: | ---: |
+| leaf_--x_u0 | 16 | 0 | -16 |
+| leaf_r-x_u0 | 0 | 16 | +16 |
+
+双方 LOAD 结果类别仍为页异常 3662（22.0709%）、访问异常 5186（31.2560%）、成功 7744（46.6731%）。本轮没有为消除差异调整分类，也不据此推断类内全部具体解相同。
 
 ## 边界和限制
 
 - 本目录包含全部 ISA 专用后处理；Isla 核心仍不感知页表、RISC-V 位号或模板形状。
-- 仅支持 RV64、对齐 ld、单阶段翻译。Sv32、非对齐或跨页负载、取指/写入、虚拟化、NAPOT、PBMT、非标准 PTE 扩展未实现，不能直接套用。
+- 仅支持 RV64 ld/sd、单阶段翻译及显式配置下的提前对齐异常。Sv32、非对齐或跨页访问的执行、取指、原子指令、虚拟化、NAPOT、PBMT、非标准 PTE 扩展未实现，不能直接套用。
 - 必须有冷页表路径所需的前置字节。工具不重建 TLB、精确事件时序或未观察状态。只依据地址查单元，不把排序最前的内存当成页表。
-- 访问异常只有在样本 `pma_regions` 能证明 PTE 或数据地址不可读时才归因。缺失 PMA 不是拒绝证据；不模拟 PMP、设备或其他平台拒绝。此类样本缺单元时明确报错。
-- PMA 采用 Sail 的首个包含完整访问区间的区域，检查 readable；本工具限定对齐的普通 ld，不模拟其他属性相关的访存类别。未使用属性保持原协议，只对当前读取需要的字段解释语义。
-- 后态寄存器保留在输入中但不做指令执行重放；本任务验证页表形状与导出结果类别的一致性，不检验加载值或全部后态。ret_val 展示文本不作为结果来源。
+- 访问异常只有在样本 `pma_regions` 能证明 PTE 不可读、LOAD 数据不可读或 STORE 目标不可写时才归因。缺失 PMA 不是拒绝证据；不模拟 PMP、设备或其他平台拒绝。此类样本缺单元时明确报错。
+- PMA 采用 Sail 的首个包含完整访问区间的区域；PTE 读取及 LOAD 数据检查 readable，STORE 数据检查 writable，不要求目标可读。不模拟其他属性相关的访存类别；缺少当前访问所需的属性直接报错。
+- STORE 成功写入目标的前态字节可以为 null，保留为未知值，必须有对应的具体 post_memory 字节。读取 PTE 或 LOAD 数据遇到 null、出现未归属内存或缺失写后字节均报错，不补零。STORE 的 data 位掩码描述写后值。
+- 后态寄存器保留在输入中但不做指令执行重放；本任务验证页表形状与导出结果类别的一致性，不检验加载值、STORE 源寄存器与写后数据相等或全部后态。ret_val 展示文本不作为结果来源。
 - 形状计数相同不代表双方具体 PTE 值、地址集合或形状内全部解相同。两侧各自计算 free_mask，可能因代表模型不同而不同。
 - `truncated=true` 保留在统计中。一级守卫叶子各有代表，与类内所有具体值完整枚举是两个不同结论。本次只能确认用户提供样本的形状分布一致。
 - 工具严格拒绝新格式，后续扩展必须同步代码与测试。没有遇错补零、忽略未知字段、忽略缺单元或调整分类以凑齐计数的路径。
 
-本次只读核对了现有抽象：样本具体值协议、Sail LOAD 参数和原有逐路径脚本。现有 Python 脚本解析的是 SMT 迹，不能表达 JSONL 页表重建，因此本目录新增直接解码模块；没有向核心引入 ISA 依赖。
+初版只读核对了现有抽象：样本具体值协议、Sail LOAD 参数和原有逐路径脚本。现有 Python 脚本解析的是 SMT 迹，不能表达 JSONL 页表重建，因此本目录新增直接解码模块。本轮沿用该模块的解析、遍历、聚合和报告结构，以访问类型参数化扩展 STORE；没有向核心引入 ISA 依赖。
