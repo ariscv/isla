@@ -853,3 +853,74 @@ TDD 先确认两个 `attr="ram"` 区域仅 `reservability="eventual"/"none"` 的
 设备 excluded 的两个 partial 场景均为既有 `BadRead("symbolic address falls in excluded memory region")`，枚举 panic 已消除；本修复不宣称设备访问错误已改为干净判死。另运行 `make -j1 solve-MRET THREADS=64`（跳过重复构建，以软链接指向新 isarch），1.569 秒退出 0、生成 4 个用例，仍有既有 `partial / 1 unfinished`。
 
 沙箱将 `replay-p0` 挂载为只读，创建指定 `replay-p0/output/dev2/fixed/` 返回 `Read-only file system`。日志实际保存在本树 [target_edev/logs](../../target_edev/logs/)（均位于 `/data1`）：红绿及全量测试日志、[场景汇总](../../target_edev/logs/fixed/summary.json)、逐场景 `command.sh`/`done.json`/stdout/stderr、配置副本及[输入哈希](../../target_edev/logs/input-hashes.json)。每次场景外限 900 秒，未触发止损。
+
+
+### BadRead 调查（2026-11-07）
+
+**结论：本次四个 BadRead 都是 excluded 配置要求的路径终止，没有发现地址判断或 Sv39 执行缺陷。** 两个错误发生于后续页表的 PTE 读取，两个发生于翻译后的数据读取。逐条导出实际失败查询后，确认它们的全部可行地址都在新增设备窗口 `[0x30000000,0x30010000)`。只移除当前读取的 excluded 子句、保留全部历史断言和当前读值一致性约束，四条查询均从 UNSAT 变成 SAT。因此不是用错误文本猜测区域归属，也不是此前枚举类型登记 panic 的延续。
+
+`partial / errors=4` 是上层统计把预期过滤与普通执行错误合并记录的结果。当前实现明确用 BadRead 表示 excluded 判死，所以这四次终止符合现有设计；若产品要求“excluded 只过滤、不报错”，应改进终止原因的表达与收集分类。**excluded 表示生成范围排除，不表示 RISC-V 架构不可读或必然产生 AccessFault。** 这两层语义不能互相代替。
+
+#### 四个错误、地址与路径
+
+沿用原 Sv39 LOAD：`ld x2,0(x1)`，`x1=0x20000000`、Supervisor、`satp=0x8000000000080200`，根表为 `0x80200000`。虚拟页号为 `VPN[2:0]=[0,256,0]`，页内偏移为 0。以下编号对应本轮 `observed-raw/query-0..3.smt2`，不使用可能随调度变化的线程号作路径标识；每次读取均为 8 字节。
+
+| 查询 | 失败读取与路径 | 精确物理起始地址集合 | 一个可满足地址例子 |
+|---|---|---|---|
+| 0 | 根 L2 PTE 为指针，递归到 L1；`pt_walk` 两层 → `read_pte` → `sail_mem_read` | `0x30000800 + n*0x1000`，`n=0..15` | `0x30000800` |
+| 1 | L2、L1 PTE 均为指针，递归到 L0；`pt_walk` 三层 → `read_pte` → `sail_mem_read` | `0x30000000 + n*0x1000`，`n=0..15` | `0x30001000` |
+| 2 | L1 为合法 2 MiB 叶子，地址翻译成功；`vmem_read_addr` → `mem_read` → `sail_mem_read` | 只有 `0x30000000` | `0x30000000` |
+| 3 | L0 为合法 4 KiB 叶子，地址翻译成功；`vmem_read_addr` → `mem_read` → `sail_mem_read` | `0x30000000 + n*0x1000`，`n=0..15` | `0x30001000` |
+
+上述是**整个失败符号路径的精确地址集合**，不是每条路径只对应一个地址。离线对每个候选地址分别查询 SAT，并查询“地址不属于上述全部候选”得到 UNSAT。查询 2 的 2 MiB 叶子要求低 PPN 对齐，且本例虚拟地址的低 21 位为 0，所以设备窗口内只有一个可行数据地址。1 GiB 叶子的偏移为 `0x20000000`，不能命中这个设备窗口，故没有对应的第五个错误。
+
+为便于人工复核，以下是移除当前 excluded 子句后求解器实际给出的 PTE 见证。历史读取和路径限制全部保留；末列的目标读取仍会被原配置拒绝，不是已经成功访问的日志。
+
+| 查询 | 已读取的 PTE 地址 → 值 | 接下来被拒绝的读取 |
+|---|---|---|
+| 0 | `0x80200000 → 0x000000000c000001` | L1 PTE `0x30000800` |
+| 1 | `0x80200000 → 0x000001001c000001`；`0x40070000800 → 0x000000000c000401` | L0 PTE `0x30001000` |
+| 2 | `0x80200000 → 0x000001001c000001`；`0x40070000800 → 0x000000000c000043` | 数据 `0x30000000` |
+| 3 | `0x80200000 → 0x000001001c000001`；`0x40070000800 → 0x000001000c000001`；`0x40030000000 → 0x000000000c000443` | 数据 `0x30001000` |
+
+配置 `replay-p0/output/dev2/mmio-excluded.toml` 有三个 excluded 内容区：`mmio_hole=[0x02000000,0x04000000)`、`harness=[0x80000000,0x80100000)`、`device_probe=[0x30000000,0x30010000)`。对四条失败路径，分别加“当前访问与某区域重叠”约束，只有 device_probe 为 SAT；加“不与 device_probe 重叠”均为 UNSAT。所有地址连同 8 字节读取范围都位于 device_probe 内，不涉及跨界误判。
+
+组合配置 `target_edev/logs/fixed/config-xs-devices.toml` 把 device_excluded 扩为 `[0x30000000,0x30020000)`，前半为可读 mmio，后半 `[0x30010000,0x30020000)` 为不可读 hole。实际四个错误的地址集合仍与上表相同；对后半 hole 的重叠查询全部 UNSAT。hole 的 PMA 拒绝分支在内容读取之前返回架构异常，因此不会再产生这类 BadRead。
+
+#### 产生点与语义
+
+1. `isla-lib/src/config.rs:125` 和 `isla-lib/src/memory.rs:104` 明确把 Excluded 定义为“这一段不关心”，访问时判死，不提供内容语义。它独立于 PMA 属性。`config.rs:243` 的 mmio 别名为 `readable=true`；`:256` 的 hole 为 `readable=false`。
+2. 默认数组内存回调 `src/isarch/memory_model.rs:239` 把当前读值与字节数组的一致性等式，以及“不与所有 excluded 区域重叠”的约束合取后加入 solver，并返回 constrained=true。
+3. `isla-lib/src/memory.rs:1240` 的 `smt_excluded_constraint` 检查实际各字节的重叠，使用模距离处理地址回绕。符号地址仍可避开 excluded 时，只收缩可行域，读取继续；当前路径被 PMA 等分支约束为只能访问 excluded 时，才整体判死。
+4. `isla-lib/src/memory.rs:1037` 立即检查 SAT，UNSAT 则在 `:1038` 返回 `BadRead("symbolic address falls in excluded memory region")`。`ReadMem` 事件在 `:1040` 才加入，所以失败读取没有事件、读值或样本导出。具体地址重叠则在 `:535` 等分派点直接返回 `BadRead("excluded memory region")`。
+5. `src/isarch/exec.rs:1535` 把失败交给 ErrorRecorder，`:789` 调用 `SolveCollectorState::record_error`；`:717` 对包括此 BadRead 在内的错误统一 `errors += 1`。`src/isarch/solve_summary.rs:21` 又因 errors 非零返回 partial；`:2225` 输出“执行错误”。因此这不是摘要声称四个求解器崩溃，而是四条预期过滤路径借用了错误通道。
+
+此处 BadRead 文本本身并非通用的 excluded 归因证明：回调同时追加读值一致性，其他矛盾也可能使同一检查 UNSAT。本轮通过“保留读值等式、仅删当前 excluded 子句”的正反查询，排除了这一歧义。也不能把所有 BadRead 一律当作合法终止。
+
+#### 复现与证据
+
+全部产物位于 [target_edev/logs/badread-investigation](../../target_edev/logs/badread-investigation/)，均在 `/data1`。所有 isarch 运行保持 `-T 64`、原指令与前态、路径合并、原样本枚举配置；只增加日志探针，内限 540 秒、外限 560 秒，未超时。
+
+| 本轮运行目录 | 用途 | 秒数 | 最终结果 |
+|---|---|---:|---|
+| `repro/` | 原 mmio+excluded，无观测库 | 24.126 | 退出 0；20 用例；partial/errors=4 |
+| `observed-raw/` | 同输入，导出四个原始失败查询 | 24.441 | 退出 0；20 用例；partial/errors=4 |
+| `combined/` | 既有 mmio/hole/excluded 组合，导出查询 | 29.750 | 退出 0；23 用例；partial/errors=4 |
+
+每个目录保留 `command.sh`、`done.json`、stderr、最终 JSON 与样本；运行前后四项输入哈希均一致。二进制 SHA-256 仍为 `5a5a0972d88eb497de6912158c3291daee18ef6b32525014c6014b88f0a782a0`，IR 仍为 `c0e4661a73888c56438a6f76059370667d141a026502d0511291586067bd31c0`。本轮不重新构建 isarch。
+
+观测方式：`observe.c/observe.so` 通过 LD_PRELOAD 转发原 Z3 查询，先取得原返回值，仅在 `Memory::read_symbolic` 调用栈返回 UNSAT 时复制断言至独立 solver 并导出 SMT2。原 solver、结果及输入均不改动。函数地址范围来自此锁定二进制的符号表，不能直接复用于别的构建。最初 `observed/` 导出的是 Z3 化简状态，含 `model-add`；正式分析使用后续 `observed-raw/` 的完整断言副本。原二进制默认构建未启用 itrace feature，因此传入 `--itrace` 没有产出轨迹文件；路径依据为实际探针、调用栈及 SMT 查询，不声称已有 itrace 证据。
+
+`analyze.c` 离线读取 SMT2，取最后一项当前读取约束，保留读值等式，仅移除当前三段 excluded 子句，生成 `base-*.smt2`。`check.py` 与 `check-combined.py` 对原始 UNSAT、移除后的 SAT、区域归属和精确地址集合逐项断言；两组八条查询全部通过。完整子句、见证与检查分别在 `analysis-*.txt`、`checks-*.smt2/.txt`、[原窗口机器摘要](../../target_edev/logs/badread-investigation/address-checks.json)及[组合窗口机器摘要](../../target_edev/logs/badread-investigation/combined-address-checks.json)。可重新运行两个 check 脚本，均不调用或更改 isarch。
+
+原始 stderr 中四个错误的位置：原窗口 `observed-raw/stderr.txt:94/259/526/788`，组合窗口 `combined/stderr.txt:115/395/648/996`。其前一行的 `BADREAD_OBSERVE query=N` 与同名 SMT2 对应。`check-outputs.py` 另核对本轮正式运行的用例访存事件及全部样本前置内存字节，没有 excluded 命中；这些输出不能代替失败路径证据，也不代表完整具体状态覆盖。
+
+#### 后续流程建议（本轮未实施）
+
+- 对此次锁定输入，可把已核实的四条路径另记为“访问 excluded 区的合法终止”。保留原始 `errors=4/status=partial`，在验收报告增加 `excluded_filtered_paths=4`、经核实的真实错误数 0；不要重写原始日志或仅凭退出码报全量成功。仍保留 `model-coverage=not-measured` 及原枚举截断口径。
+- 后续实现应给 excluded 终止独立的结构化原因，包含操作、地址表达式、长度、区域与路径标识。收集器在通用错误计数之前识别它，单独计数并结束该路径；普通 BadRead、SMT Unknown/Timeout 和内部错误继续走原错误流程。现有 Run::Dead 可作为终止通道，但仍需保留可审计原因，不能只静默吞错。
+- 符号读取必须区分“excluded 子句导致不可满足”与“其他约束已矛盾”。推荐验证排除前可满足、保留内容等式时可满足、排除后不可满足；或者在已验证的入口保留等价归因证据。本轮的离线消融就是该归因的实例。不要仅按错误字符串批量忽略，也不要把回调产生的所有 UNSAT 都改名为 excluded。
+- 获准实现时先按 TDD 覆盖四类路径及具体地址/跨界读写；再覆盖“可避开 excluded 继续读取”、普通 BadRead 不降级、内容一致性冲突不误分类、PMA 先拒绝仍保留 AF 输出。验收要求无被拒绝读取事件或样本，预期过滤计数为 4，真实错误为 0；仅当其他 partial 原因也为零，摘要才可称 finished。
+- 如果业务真正需要“访问设备得到架构 AF”，应由 PMA/PMP 的不可读属性表达。现有 mmio 的可读属性与 excluded 的生成过滤是两件事。不要用删除 excluded、改变设备属性或关闭合并来宣称修好本次统计问题。
+
+本轮只追加本小节；未改 isla-lib、生产代码、已有配置、IR 或 isarch，未做 git 写操作。该任务为只读调查和文档追加，不重跑会构建或改动产物的 make solve 验收链。
