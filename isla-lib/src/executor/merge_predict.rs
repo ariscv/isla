@@ -118,7 +118,11 @@ fn summarize(values: &[f64]) -> Value {
 }
 
 /// 域查询只遍历一个经依赖证明的分量；达到验证额度时返回未完成证明，转估计层。
-fn domain_count<B: BV>(solver: &mut Solver<B>, bits: &[Formula<Sym>], cap: usize) -> Result<Option<usize>, ExecError> {
+pub(super) fn domain_count<B: BV>(
+    solver: &mut Solver<B>,
+    bits: &[Formula<Sym>],
+    cap: usize,
+) -> Result<Option<usize>, ExecError> {
     use Formula::*;
     let mut free = Vec::new();
     for bit in bits {

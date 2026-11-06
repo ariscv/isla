@@ -1,5 +1,8 @@
-//! 仅供 ISLA_ENUM_COMPONENTS=1 的只读诊断；不改变枚举输出或预算。
+//! 预测器的保守分量证明，以及 ISLA_ENUM_COMPONENTS / ISLA_ENUM_GLUE 只读诊断。
 use super::*;
+
+#[path = "merge_glue.rs"]
+mod glue;
 
 // 自由 BV 按位区分；数组、布尔及函数符号作为不可拆原子。
 type Atom = (u32, Option<u32>);
@@ -488,6 +491,27 @@ mod tests {
         }
         // 候选乘积 8 > 实际 4；finish 必须找到原约束拒绝的具体组合。
         diagnostic.finish(&events, 4, 4, false, 0).unwrap();
+        let directory = std::env::temp_dir().join(format!("glue-domain-{}", std::process::id()));
+        std::env::set_var("ISLA_ENUM_GLUE_DETAIL", "17");
+        PredictionGraph::diagnose(
+            &directory,
+            17,
+            &events,
+            &[Var(x), Var(y), Var(z)],
+            &[0, 1, 2],
+            &[Var(x), Var(y), Var(z)],
+            &[],
+            &[vec![false, false, false], vec![false, true, true], vec![true, false, true], vec![true, true, false]],
+            &[],
+            &SharedState::<B64>::empty(Symtab::new()),
+        )
+        .unwrap();
+        std::env::remove_var("ISLA_ENUM_GLUE_DETAIL");
+        let report: Value = serde_json::from_slice(&std::fs::read(directory.join("glue-17.json")).unwrap()).unwrap();
+        assert_eq!(report["first_class_domain_at_cap_256"]["exact"], 1);
+        assert_eq!(report["guard_domain_product"], "8");
+        assert_eq!(report["guard_product_equal"], false);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -501,7 +525,40 @@ mod tests {
         let mut support = Support::new(HashMap::new(), types);
         assert_eq!(partition(&[a.clone(), b.clone()], &[], &mut support), vec![vec![0], vec![1]]);
         let constraints = vec![Eq(Box::new(a.clone()), Box::new(Var(h))), Eq(Box::new(Var(h)), Box::new(b.clone()))];
-        assert_eq!(partition(&[a, b], &constraints, &mut support), vec![vec![0, 1]]);
+        assert_eq!(partition(&[a.clone(), b.clone()], &constraints, &mut support), vec![vec![0, 1]]);
+        let mut graph = PredictionGraph { support, constraints };
+        let report = graph.explain(&[a.clone(), b.clone()], &[]);
+        assert_eq!(report["candidate_components"], 2);
+        assert_eq!(report["verified_components"], 1);
+        assert_eq!(report["ablation"]["other"], 2);
+        assert_eq!(report["bridges"].as_array().unwrap().len(), 2, "隐藏原子的传递连接也必须列出");
+        assert!(report["bridges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["direct_components"].as_array().unwrap().len() == 1));
+        graph.constraints.clear();
+        let literal = Eq(Box::new(a.clone()), Box::new(b.clone()));
+        let report = graph.explain(&[a.clone(), b.clone()], &[literal.clone()]);
+        assert_eq!(report["ablation"]["class_literal"], 2);
+        assert!(report["polarity_invariant"].as_bool().unwrap());
+        assert_eq!(
+            report["verified_partition"],
+            graph.explain(&[a.clone(), b.clone()], &[Not(Box::new(literal))])["verified_partition"]
+        );
+        graph.constraints.push(Eq(Box::new(Var(x)), Box::new(smtlib::bits64(1, 2))));
+        assert_eq!(graph.explain(&[a.clone(), b.clone()], &[])["ablation"]["full_operand_fallback"], 2);
+        let memory = Sym { id: 2 };
+        graph
+            .support
+            .types
+            .insert(memory, smtlib::Ty::Array(Box::new(smtlib::Ty::BitVec(64)), Box::new(smtlib::Ty::BitVec(2))));
+        graph.constraints =
+            vec![Eq(Box::new(Var(x)), Box::new(Select(Box::new(Var(memory)), Box::new(smtlib::bits64(0, 64)))))];
+        let report = graph.explain(&[a, b], &[]);
+        assert_eq!(report["ablation"]["memory_alias_consistency"], 2);
+        assert_eq!(report["bridges"][0]["category"], "memory_alias_consistency");
+        assert!(report["bridges"][0]["has_full_operand_fallback"].as_bool().unwrap());
     }
 
     #[test]

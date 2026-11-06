@@ -1,0 +1,4445 @@
+{
+  "933929842286410705": {
+    "rows": [
+      {
+        "constraint_id": 3,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 174 })), Bvult(Var(Sym { id: 174 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 174 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 4,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 175 })), Bvult(Var(Sym { id: 175 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 175 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 5,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 176 })), Bvult(Var(Sym { id: 176 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 176 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 6,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 177 })), Bvult(Var(Sym { id: 177 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 177 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 7,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 178 })), Bvult(Var(Sym { id: 178 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 178 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 8,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 179 })), Bvult(Var(Sym { id: 179 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 179 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 9,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 180 })), Bvult(Var(Sym { id: 180 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 180 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 10,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 181 })), Bvult(Var(Sym { id: 181 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 181 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 13,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Eq(Var(Sym { id: 173 }), Concat(Select(Var(Sym { id: 0 }), Bvadd(Bits64(B64 { len: 64, bits: 2149580800 }), Bits64(B64 { len: 64, bits: 7 }))), Concat(Select(Var(Sym { id: 0 }), Bvadd(Bits64(B64 { len: 64, bits: 2149580800 }), Bits64(B64 { len: 64, bits: 6 }))), Concat(Select(Var",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                3
+              ],
+              [
+                10,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 14,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Var(Sym { id: 324 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                54,
+                58
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                50,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            50,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 15,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "other",
+        "summary": "Var(Sym { id: 335 })",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                1,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                1,
+                3
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            1,
+            3
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 18,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Var(Sym { id: 369 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                4,
+                47
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            4,
+            47
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 21,
+        "origin": "class_literal",
+        "class_literal_index": 1,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Var(Sym { id: 194 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            0
+          ],
+          [
+            2,
+            2
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 22,
+        "origin": "class_literal",
+        "class_literal_index": 2,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Var(Sym { id: 197 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 23,
+        "origin": "class_literal",
+        "class_literal_index": 3,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Var(Sym { id: 200 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                52,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            52,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 24,
+        "origin": "class_literal",
+        "class_literal_index": 4,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Var(Sym { id: 310 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                52,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            52,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 25,
+        "origin": "class_literal",
+        "class_literal_index": 5,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Not(Var(Sym { id: 310 }))), Var(Sym { id: 313 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                50,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            50,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 26,
+        "origin": "class_literal",
+        "class_literal_index": 6,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Not(Var(Sym { id: 310 }))), Var(Sym { id: 314 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                50,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            50,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 27,
+        "origin": "class_literal",
+        "class_literal_index": 7,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Not(Var(Sym { id: 310 }))), Not(Var(Sym { id: 314 }))), Var(Sym { id: 317 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                59,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                48,
+                52
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            48,
+            52
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 29,
+        "origin": "class_literal",
+        "class_literal_index": 9,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Var(Sym { id: 329 })), Var(Sym { id: 331 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                2,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                2,
+                3
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            2,
+            3
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 30,
+        "origin": "class_literal",
+        "class_literal_index": 10,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 358 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                4,
+                47
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            4,
+            47
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 31,
+        "origin": "class_literal",
+        "class_literal_index": 11,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 359 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                4,
+                47
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            4,
+            47
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 32,
+        "origin": "class_literal",
+        "class_literal_index": 12,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 359 }))), Var(Sym { id: 363 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                4,
+                47
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            4,
+            47
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      },
+      {
+        "constraint_id": 33,
+        "origin": "class_literal",
+        "class_literal_index": 13,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 359 }))), Var(Sym { id: 364 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                4,
+                47
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            4,
+            47
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            52
+          ]
+        ]
+      }
+    ],
+    "direct_bridge_count": 16,
+    "transitive_extra_count": 8,
+    "raw_report": "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/output/f15/final/sv39-load/reports/glue-933929842286410705.json",
+    "range_convention": "闭区间[lo,hi]，保留全部索引/位；逐原子关系见raw_report"
+  },
+  "12271438732188395442": {
+    "rows": [
+      {
+        "constraint_id": 3,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 174 })), Bvult(Var(Sym { id: 174 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 174 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 4,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 175 })), Bvult(Var(Sym { id: 175 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 175 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 5,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 176 })), Bvult(Var(Sym { id: 176 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 176 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 6,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 177 })), Bvult(Var(Sym { id: 177 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 177 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 7,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 178 })), Bvult(Var(Sym { id: 178 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 178 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 8,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 179 })), Bvult(Var(Sym { id: 179 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 179 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 9,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 180 })), Bvult(Var(Sym { id: 180 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 180 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 10,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 181 })), Bvult(Var(Sym { id: 181 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 181 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          }
+        ],
+        "direct_component_ranges": [],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 13,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Eq(Var(Sym { id: 173 }), Concat(Select(Var(Sym { id: 0 }), Bvadd(Bits64(B64 { len: 64, bits: 2149580800 }), Bits64(B64 { len: 64, bits: 7 }))), Concat(Select(Var(Sym { id: 0 }), Bvadd(Bits64(B64 { len: 64, bits: 2149580800 }), Bits64(B64 { len: 64, bits: 6 }))), Concat(Select(Var",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                3
+              ],
+              [
+                5,
+                5
+              ],
+              [
+                10,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 14,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Var(Sym { id: 324 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                54,
+                58
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                51,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            51,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 15,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "other",
+        "summary": "Var(Sym { id: 335 })",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                1,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                1,
+                3
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            1,
+            3
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 18,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Var(Sym { id: 369 })",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 19,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 376 })), Bvult(Var(Sym { id: 376 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 376 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 20,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 377 })), Bvult(Var(Sym { id: 377 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 377 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 21,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 378 })), Bvult(Var(Sym { id: 378 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 378 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 22,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 379 })), Bvult(Var(Sym { id: 379 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 379 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 23,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 380 })), Bvult(Var(Sym { id: 380 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 380 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 24,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 381 })), Bvult(Var(Sym { id: 381 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 381 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 25,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 382 })), Bvult(Var(Sym { id: 382 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 382 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 26,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 383 })), Bvult(Var(Sym { id: 383 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 383 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 28,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Or(And(Bvule(Bits64(B64 { len: 64, bits: 33554432 }), Var(Sym { id: 374 })), Bvult(Var(Sym { id: 374 }), Bits64(B64 { len: 64, bits: 67108864 }))), Bvult(Bvsub(Bits64(B64 { len: 64, bits: 33554432 }), Var(Sym { id: 374 })), Bits64(B64 { len: 64, bits: 8 }))))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 29,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Eq(Var(Sym { id: 375 }), Concat(Select(Var(Sym { id: 0 }), Bvadd(Var(Sym { id: 374 }), Bits64(B64 { len: 64, bits: 7 }))), Concat(Select(Var(Sym { id: 0 }), Bvadd(Var(Sym { id: 374 }), Bits64(B64 { len: 64, bits: 6 }))), Concat(Select(Var(Sym { id: 0 }), Bvadd(Var(Sym { id: 374 }",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                3
+              ],
+              [
+                5,
+                5
+              ],
+              [
+                10,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ],
+          [
+            54,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 30,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Var(Sym { id: 416 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                54,
+                58
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ],
+              [
+                105,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ],
+          [
+            105,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 31,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "other",
+        "summary": "Var(Sym { id: 428 })",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                1,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                55,
+                57
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            55,
+            57
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 34,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Var(Sym { id: 466 })",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 35,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 473 })), Bvult(Var(Sym { id: 473 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 473 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 36,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 474 })), Bvult(Var(Sym { id: 474 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 474 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 37,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 475 })), Bvult(Var(Sym { id: 475 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 475 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 38,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 476 })), Bvult(Var(Sym { id: 476 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 476 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 39,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 477 })), Bvult(Var(Sym { id: 477 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 477 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 40,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 478 })), Bvult(Var(Sym { id: 478 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 478 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 41,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 479 })), Bvult(Var(Sym { id: 479 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 479 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 42,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Or(Not(And(Bool(true), And(Bvule(Bits64(B64 { len: 64, bits: 0 }), Var(Sym { id: 480 })), Bvult(Var(Sym { id: 480 }), Bits64(B64 { len: 64, bits: 4096 }))))), Eq(Select(Var(Sym { id: 0 }), Var(Sym { id: 480 })), Bits64(B64 { len: 8, bits: 0 })))",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 44,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Or(And(Bvule(Bits64(B64 { len: 64, bits: 33554432 }), Var(Sym { id: 471 })), Bvult(Var(Sym { id: 471 }), Bits64(B64 { len: 64, bits: 67108864 }))), Bvult(Bvsub(Bits64(B64 { len: 64, bits: 33554432 }), Var(Sym { id: 471 })), Bits64(B64 { len: 64, bits: 8 }))))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 45,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "memory_alias_consistency",
+        "summary": "Eq(Var(Sym { id: 472 }), Concat(Select(Var(Sym { id: 0 }), Bvadd(Var(Sym { id: 471 }), Bits64(B64 { len: 64, bits: 7 }))), Concat(Select(Var(Sym { id: 0 }), Bvadd(Var(Sym { id: 471 }), Bits64(B64 { len: 64, bits: 6 }))), Concat(Select(Var(Sym { id: 0 }), Bvadd(Var(Sym { id: 471 }",
+        "has_memory": true,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v0",
+            "kind": "array",
+            "bit_ranges": [],
+            "direct_component_ranges": []
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          },
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                4
+              ],
+              [
+                6,
+                7
+              ],
+              [
+                10,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ],
+          [
+            108,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 46,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Var(Sym { id: 513 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                54,
+                58
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ],
+              [
+                161,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ],
+          [
+            161,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 47,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "other",
+        "summary": "Not(Var(Sym { id: 525 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                1,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                109,
+                111
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            109,
+            111
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 48,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "other",
+        "summary": "Var(Sym { id: 543 })",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                1,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                109,
+                110
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            109,
+            110
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 49,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "other",
+        "summary": "Or(Not(Not(Var(Sym { id: 533 }))), Var(Sym { id: 541 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                1,
+                1
+              ],
+              [
+                3,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                109,
+                109
+              ],
+              [
+                111,
+                111
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            109,
+            109
+          ],
+          [
+            111,
+            111
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 53,
+        "origin": "path_assertion",
+        "class_literal_index": null,
+        "category": "full_operand_fallback",
+        "summary": "Not(Var(Sym { id: 597 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 55,
+        "origin": "class_literal",
+        "class_literal_index": 1,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Var(Sym { id: 194 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            0
+          ],
+          [
+            2,
+            2
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 56,
+        "origin": "class_literal",
+        "class_literal_index": 2,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Var(Sym { id: 197 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 57,
+        "origin": "class_literal",
+        "class_literal_index": 3,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Var(Sym { id: 200 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                53,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            53,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 58,
+        "origin": "class_literal",
+        "class_literal_index": 4,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Var(Sym { id: 310 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                53,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            53,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 59,
+        "origin": "class_literal",
+        "class_literal_index": 5,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Not(Var(Sym { id: 310 }))), Var(Sym { id: 313 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                51,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            51,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 60,
+        "origin": "class_literal",
+        "class_literal_index": 6,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Not(Var(Sym { id: 310 }))), Var(Sym { id: 314 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                51,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            51,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 61,
+        "origin": "class_literal",
+        "class_literal_index": 7,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(And(Bool(true), Not(Var(Sym { id: 192 }))), Not(Var(Sym { id: 197 }))), Not(Var(Sym { id: 310 }))), Not(Var(Sym { id: 314 }))), Var(Sym { id: 317 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                59,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                49,
+                53
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            0,
+            2
+          ],
+          [
+            49,
+            53
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 63,
+        "origin": "class_literal",
+        "class_literal_index": 9,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Var(Sym { id: 329 })), Var(Sym { id: 331 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                2,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                2,
+                3
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            2,
+            3
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 64,
+        "origin": "class_literal",
+        "class_literal_index": 10,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 358 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 65,
+        "origin": "class_literal",
+        "class_literal_index": 11,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 359 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 66,
+        "origin": "class_literal",
+        "class_literal_index": 12,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Not(Var(Sym { id: 359 }))), Var(Sym { id: 363 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 67,
+        "origin": "class_literal",
+        "class_literal_index": 13,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Not(Var(Sym { id: 359 }))), Var(Sym { id: 364 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                5,
+                48
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            5,
+            48
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 69,
+        "origin": "class_literal",
+        "class_literal_index": 15,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Var(Sym { id: 395 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                54
+              ],
+              [
+                56,
+                56
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            54
+          ],
+          [
+            56,
+            56
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 70,
+        "origin": "class_literal",
+        "class_literal_index": 16,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Var(Sym { id: 398 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 71,
+        "origin": "class_literal",
+        "class_literal_index": 17,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Not(Var(Sym { id: 398 }))), Var(Sym { id: 401 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ],
+              [
+                107,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ],
+          [
+            107,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 72,
+        "origin": "class_literal",
+        "class_literal_index": 18,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Not(Var(Sym { id: 398 }))), Var(Sym { id: 402 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ],
+              [
+                107,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ],
+          [
+            107,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 73,
+        "origin": "class_literal",
+        "class_literal_index": 19,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Not(Var(Sym { id: 398 }))), Not(Var(Sym { id: 402 }))), Var(Sym { id: 405 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ],
+              [
+                105,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ],
+          [
+            105,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 74,
+        "origin": "class_literal",
+        "class_literal_index": 20,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Not(Var(Sym { id: 398 }))), Not(Var(Sym { id: 402 }))), Var(Sym { id: 406 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ],
+              [
+                105,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ],
+          [
+            105,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 75,
+        "origin": "class_literal",
+        "class_literal_index": 21,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(And(Bool(true), Not(Var(Sym { id: 393 }))), Not(Var(Sym { id: 398 }))), Not(Var(Sym { id: 402 }))), Not(Var(Sym { id: 406 }))), Var(Sym { id: 409 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                59,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                54,
+                56
+              ],
+              [
+                103,
+                107
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            54,
+            56
+          ],
+          [
+            103,
+            107
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 78,
+        "origin": "class_literal",
+        "class_literal_index": 24,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Var(Sym { id: 422 })), Var(Sym { id: 424 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                2,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                56,
+                57
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            56,
+            57
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 79,
+        "origin": "class_literal",
+        "class_literal_index": 25,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 451 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 80,
+        "origin": "class_literal",
+        "class_literal_index": 26,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Var(Sym { id: 451 })), Var(Sym { id: 452 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 81,
+        "origin": "class_literal",
+        "class_literal_index": 27,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 454 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 82,
+        "origin": "class_literal",
+        "class_literal_index": 28,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Not(Var(Sym { id: 454 }))), Var(Sym { id: 458 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 83,
+        "origin": "class_literal",
+        "class_literal_index": 29,
+        "category": "class_literal",
+        "summary": "And(And(And(Bool(true), Not(Var(Sym { id: 454 }))), Var(Sym { id: 458 })), Var(Sym { id: 459 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 84,
+        "origin": "class_literal",
+        "class_literal_index": 30,
+        "category": "class_literal",
+        "summary": "And(And(Bool(true), Not(Var(Sym { id: 454 }))), Var(Sym { id: 461 }))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                59,
+                102
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            59,
+            102
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 86,
+        "origin": "class_literal",
+        "class_literal_index": 32,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Var(Sym { id: 492 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                108
+              ],
+              [
+                110,
+                110
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            108
+          ],
+          [
+            110,
+            110
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 87,
+        "origin": "class_literal",
+        "class_literal_index": 33,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Var(Sym { id: 495 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 88,
+        "origin": "class_literal",
+        "class_literal_index": 34,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Not(Var(Sym { id: 495 }))), Var(Sym { id: 498 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ],
+              [
+                163,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ],
+          [
+            163,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 89,
+        "origin": "class_literal",
+        "class_literal_index": 35,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Not(Var(Sym { id: 495 }))), Var(Sym { id: 499 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                63,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ],
+              [
+                163,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ],
+          [
+            163,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 90,
+        "origin": "class_literal",
+        "class_literal_index": 36,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Not(Var(Sym { id: 495 }))), Not(Var(Sym { id: 499 }))), Var(Sym { id: 502 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ],
+              [
+                161,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ],
+          [
+            161,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 91,
+        "origin": "class_literal",
+        "class_literal_index": 37,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Not(Var(Sym { id: 495 }))), Not(Var(Sym { id: 499 }))), Var(Sym { id: 503 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                61,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ],
+              [
+                161,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ],
+          [
+            161,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 92,
+        "origin": "class_literal",
+        "class_literal_index": 38,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(And(And(Bool(true), Not(Var(Sym { id: 490 }))), Not(Var(Sym { id: 495 }))), Not(Var(Sym { id: 499 }))), Not(Var(Sym { id: 503 }))), Var(Sym { id: 506 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                0,
+                2
+              ],
+              [
+                59,
+                63
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                108,
+                110
+              ],
+              [
+                159,
+                163
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            108,
+            110
+          ],
+          [
+            159,
+            163
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 93,
+        "origin": "class_literal",
+        "class_literal_index": 39,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 420 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v173",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                5,
+                5
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                4,
+                4
+              ]
+            ]
+          },
+          {
+            "symbol": "v375",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                5,
+                5
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                58,
+                58
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            4,
+            4
+          ],
+          [
+            58,
+            58
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 95,
+        "origin": "class_literal",
+        "class_literal_index": 41,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Var(Sym { id: 519 })), Var(Sym { id: 521 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": false,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                2,
+                3
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                110,
+                111
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            110,
+            111
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 108,
+        "origin": "class_literal",
+        "class_literal_index": 54,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 582 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 109,
+        "origin": "class_literal",
+        "class_literal_index": 55,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Var(Sym { id: 582 })), Var(Sym { id: 583 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 110,
+        "origin": "class_literal",
+        "class_literal_index": 56,
+        "category": "class_literal",
+        "summary": "Not(And(Bool(true), Var(Sym { id: 585 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 111,
+        "origin": "class_literal",
+        "class_literal_index": 57,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 585 }))), Var(Sym { id: 589 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 112,
+        "origin": "class_literal",
+        "class_literal_index": 58,
+        "category": "class_literal",
+        "summary": "Not(And(And(And(Bool(true), Not(Var(Sym { id: 585 }))), Var(Sym { id: 589 })), Var(Sym { id: 590 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      },
+      {
+        "constraint_id": 113,
+        "origin": "class_literal",
+        "class_literal_index": 59,
+        "category": "class_literal",
+        "summary": "Not(And(And(Bool(true), Not(Var(Sym { id: 585 }))), Var(Sym { id: 592 })))",
+        "has_memory": false,
+        "has_full_operand_fallback": true,
+        "bridge_symbols": [
+          {
+            "symbol": "v472",
+            "kind": "bit",
+            "bit_ranges": [
+              [
+                10,
+                53
+              ]
+            ],
+            "direct_component_ranges": [
+              [
+                115,
+                158
+              ]
+            ]
+          }
+        ],
+        "direct_component_ranges": [
+          [
+            115,
+            158
+          ]
+        ],
+        "transitive_component_ranges": [
+          [
+            0,
+            163
+          ]
+        ]
+      }
+    ],
+    "direct_bridge_count": 73,
+    "transitive_extra_count": 8,
+    "raw_report": "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/output/f15/final/sv39-load/reports/glue-12271438732188395442.json",
+    "range_convention": "闭区间[lo,hi]，保留全部索引/位；逐原子关系见raw_report"
+  }
+}

@@ -215,7 +215,8 @@ impl<B: BV> LocalFrame<'_, B> {
         // 分量诊断需要完整的原顺序联合见证，继续使用其专用串行参照遍历。
         if config.mode == crate::config::MergeEnumerationMode::Predict
             || (config.mode == crate::config::MergeEnumerationMode::Count
-                && std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1"))
+                && (std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1")
+                    || std::env::var_os("ISLA_ENUM_GLUE").is_some()))
         {
             return self.enumerate_merges_partition(
                 solver,
@@ -313,7 +314,12 @@ impl<B: BV> LocalFrame<'_, B> {
                 Eq(Box::new(Extract(*bit, *bit, Box::new(Var(Sym { id: *symbol })))), Box::new(smtlib::bits64(1, 1)))
             })
             .collect();
-        if config.mode == crate::config::MergeEnumerationMode::Predict {
+        let glue_directory = if partition.is_none() && config.mode == crate::config::MergeEnumerationMode::Count {
+            std::env::var_os("ISLA_ENUM_GLUE").map(std::path::PathBuf::from)
+        } else {
+            None
+        };
+        if config.mode == crate::config::MergeEnumerationMode::Predict || glue_directory.is_some() {
             let path_started = std::time::Instant::now();
             eprintln!(
                 "[MERGE_PREDICT_START] {}",
@@ -349,6 +355,23 @@ impl<B: BV> LocalFrame<'_, B> {
             )?;
             let classes: Vec<Vec<bool>> = serde_json::from_value(catalog["guard_assignments"].clone()).unwrap();
             assert!(classes.windows(2).all(|pair| pair[0] != pair[1]));
+            if let Some(directory) = glue_directory {
+                assert_eq!(config.class_cap, 1, "粘合诊断只取完整守卫类目录");
+                assert_eq!(catalog["path_truncated"], false, "粘合诊断不得截断守卫类目录");
+                components::PredictionGraph::diagnose(
+                    &directory,
+                    self.path_signature(),
+                    &events,
+                    &guards,
+                    &record_ids,
+                    &bit_predicates,
+                    &expressions,
+                    &classes,
+                    records,
+                    shared,
+                )?;
+                return Ok(Some(catalog));
+            }
             drop(catalog);
             let catalog_seconds = path_started.elapsed().as_secs_f64();
             let mut prediction =
