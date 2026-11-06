@@ -734,6 +734,28 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     Ok(RegionResult::Merged)
 }
 
+/// 配置注入的具体枚举可能从未经过 IR 常量读取；登记必须进入当前合并事务的事件迹。
+fn register_value_enums<B: BV>(value: &Val<B>, types: &IRTypeInfo, solver: &mut Solver<B>) {
+    match value {
+        Val::Enum(member) => {
+            let name = member.enum_id.to_name();
+            solver.get_enum(name, types.enums[&name].len());
+        }
+        Val::Struct(fields) | Val::SymbolicCtor(_, fields) => {
+            for value in fields.values() {
+                register_value_enums(value, types, solver);
+            }
+        }
+        Val::Ctor(_, value) => register_value_enums(value, types, solver),
+        Val::Vector(values) | Val::List(values) => {
+            for value in values {
+                register_value_enums(value, types, solver);
+            }
+        }
+        _ => (),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn merge_states<'ir, B: BV>(
     record_id: usize,
@@ -816,6 +838,8 @@ fn merge_states<'ir, B: BV>(
             let (Some(UVal::Init(a)), Some(UVal::Init(b))) = (va, vb) else {
                 return Err(incompatible());
             };
+            register_value_enums(&a, &shared.type_info, solver);
+            register_value_enums(&b, &shared.type_info, solver);
             let value =
                 crate::primop_util::merge_val(condition, &a, &b, solver, info).map_err(|error| match error {
                     ExecError::Smt(_) | ExecError::Timeout => error,
@@ -842,14 +866,11 @@ fn merge_states<'ir, B: BV>(
             } else {
                 None
             };
-            crate::primop_util::merge_val(
-                condition,
-                a.or(initial.as_ref()).unwrap(),
-                b.or(initial.as_ref()).unwrap(),
-                solver,
-                info,
-            )
-            .map_err(|error| match error {
+            let a = a.or(initial.as_ref()).unwrap();
+            let b = b.or(initial.as_ref()).unwrap();
+            register_value_enums(a, &shared.type_info, solver);
+            register_value_enums(b, &shared.type_info, solver);
+            crate::primop_util::merge_val(condition, a, b, solver, info).map_err(|error| match error {
                 ExecError::Smt(_) | ExecError::Timeout => error,
                 ExecError::IncompatibleUnionPayload => reject(base, SpeculativeRejectReason::UnionPayload),
                 _ => incompatible(),

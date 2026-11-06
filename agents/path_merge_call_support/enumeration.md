@@ -829,3 +829,27 @@ glue 用 `ISLA_ENUM_GLUE`、mode=count、class_cap=1 获取完整守卫类目录
 - 未测：新配置完整具体位组合样本生成、形状数独立复测、check-samples、XiangShan/NEMU重放。E-cfg的2404类/104形状为既有代表模式结果，本轮不把守卫类复测冒充形状复测。
 
 原始报告与命令保留在 `output/f16/`，源脚本快照在 `output/f16/scripts/`；机器摘要同步保存为本目录 `enumeration-f16-results.json`。
+
+
+### E-dev 修复（2026-11-07）
+
+**PMA 合并前遗漏枚举登记的缺陷已修复。** `merge_states` 在局部变量、let 和寄存器合并前递归检查具体值，覆盖 struct、union 载荷及 list/vector；依据 `SharedState.type_info.enums` 的成员数调用既有 `solver.get_enum`。登记进入当前事务的 `DefineEnum` 事件，可随 checkpoint 重放；不修改 SMT 查表的不变量处理。
+
+TDD 先确认两个 `attr="ram"` 区域仅 `reservability="eventual"/"none"` 的属性差异在 `smt.rs:968` panic；`non_eventual` 和 `misaligned` 也复现同类遗漏。新增 4 项回归测试，检查两种枚举、全部布尔属性、三个合并入口、事务回滚重试、checkpoint 重建及两臂结果。`readable/writable/executable` 等字段是 bool，不需要枚举登记。
+
+验收：`cargo fmt --check` 通过；`cargo test -p isla-lib --offline --features smt-thread-interrupt --target-dir target_edev -j16` 为 **743 通过、0 失败、6 忽略**，另集成 2 项、文档 3 项通过。默认 feature 的 release isarch 构建于 `target_edev`，SHA-256 为 `5a5a0972d88eb497de6912158c3291daee18ef6b32525014c6014b88f0a782a0`。未修改 `target_f8` 二进制、冻结输入，未做 git 写操作。
+
+以下均使用新 isarch、冻结 `rv64d.ir`、路径合并和 `-T 64`；设备场景以 `replay-p0/output/ecfg/config-xs.toml` 为底座，保留原样本枚举设置。所有运行退出 0、无 panic、无超时；不能仅据退出码认定完整通过。
+
+| 场景 | 秒数 | 用例 | 最终摘要 |
+|---|---:|---:|---|
+| 原最小 reservability 复现（无样本枚举） | 7.132 | 20 | finished / errors=0 |
+| 新增 mmio 窗口，原 Sv39 LOAD 前态 | 68.559 | 51 | finished / errors=0 |
+| 新增 hole 窗口，原 Sv39 LOAD 前态 | 27.802 | 24 | finished / errors=0 |
+| 原 mmio+excluded，原 Sv39 LOAD 前态 | 23.883 | 20 | partial / errors=4 |
+| 同时新增 mmio/hole/excluded，原 Sv39 LOAD 前态 | 29.221 | 23 | partial / errors=4 |
+| 同一组合窗口配置，satp=0、x1=0x80101000 的 RAM LOAD 小场景 | 1.268 | 1 | finished / errors=0 |
+
+设备 excluded 的两个 partial 场景均为既有 `BadRead("symbolic address falls in excluded memory region")`，枚举 panic 已消除；本修复不宣称设备访问错误已改为干净判死。另运行 `make -j1 solve-MRET THREADS=64`（跳过重复构建，以软链接指向新 isarch），1.569 秒退出 0、生成 4 个用例，仍有既有 `partial / 1 unfinished`。
+
+沙箱将 `replay-p0` 挂载为只读，创建指定 `replay-p0/output/dev2/fixed/` 返回 `Read-only file system`。日志实际保存在本树 [target_edev/logs](../../target_edev/logs/)（均位于 `/data1`）：红绿及全量测试日志、[场景汇总](../../target_edev/logs/fixed/summary.json)、逐场景 `command.sh`/`done.json`/stdout/stderr、配置副本及[输入哈希](../../target_edev/logs/input-hashes.json)。每次场景外限 900 秒，未触发止损。
