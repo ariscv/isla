@@ -17,7 +17,7 @@
 - `vector_update` 与 `vector_access` 共用无符号边界分区，混合合法／非法域返回 `SymbolicLength`，不追加合法性断言。普通向量具体索引先用 `usize::try_from` 检查，再用 `get`／`get_mut` 检查容器边界。
 - 切片更新在移位前检查 `update_length <= bits_length` 且 `index <= bits_length - update_length`。减法使用 `checked_sub`，索引保留原始 64／128 位宽；负数的补码超出无符号上界。混合域通过 `RetryCondition` 使用已有条件分叉和操作数缓存，非法侧重试返回 `OutOfBounds`。合法空更新保留原值，避免末尾零宽更新触发宿主整数移位溢出。
 - 普通符号构造子 Unwrap 只有在标签必然匹配时成功；匹配／不匹配均可达时返回 `RetryCondition`。表达式缓存保存已求值的构造子，执行器复用 `fork_retry_operand` 保留成功侧与 Type 错误侧，不重复读取副作用。推测期间仍要求标签必然匹配，否则拒绝合流。
-- 整个 `_TLB` 的 ReadReg／WriteReg 按解码后的寄存器名称精确过滤；标量、合流、寄存器向量的具体选择和 REG_DEREF 使用同一规则。`core_TLB`、`_TLB_cache` 均保留事件。早于 Review 35 的 contains 预期已由本轮反例修订。多候选符号寄存器向量仍通过 Abstract 记录索引、引用列表及候选值；这一既有契约不同于具体选择的 ReadReg／WriteReg，单候选与构造子拆分后的具体选择会经过精确过滤。
+- `_TLB` 的事件规则以 `dc76449` 的裁决为准（F13 历史实跑确认）：普通标量访问、合流仍按解码名称精确过滤；REG_DEREF 和寄存器向量的具体选择保留 ReadReg／WriteReg，不使用 `_TLB` 特判。`core_TLB`、`_TLB_cache` 均保留事件。多候选符号寄存器向量仍通过 Abstract 记录索引、引用列表及候选值。此前“所有访问路径统一过滤”的描述已失效，不能用于断言当前行为。
 
 ## isarch 符号执行
 
@@ -413,3 +413,32 @@ timeout --signal=TERM --kill-after=5s 590s \
 在 Sv39 LOAD、Sv48 LOAD、Sv48 STORE 中，把原断言、展开的守卫／ITE 和自由输入位全部纳入时，每路径均连成一个分量。暂不纳入原断言的候选图可拆为多个组，但 Sv48 两场景各有 6 条路径的守卫边际域乘积大于实际类数，并有原 Z3 对具体缺失组合返回 UNSAT；STORE 本轮全部两两／全组抽样仍为 SAT，证实抽样不足以独立证明可乘。Sv39 全部 20 条路径乘积相等，可用完整有限集合基数证明这些固定路径的守卫域可乘；不外推到完整片段或处理器状态。
 
 现有 sample v1 的 `SamplePath::materialize` 每类依据同一求解模型重建读写地址／数据、后态寄存器和结构化结果；`src/isarch/samples.rs::isa_state` 也以同类前态为依据。只替换守卫／片段而沿用另一类的完整状态，缺少正确性依据。详细数值、哈希、样本规模与设计见 [枚举说明](path_merge_call_support/enumeration.md) 和 [机器记录](path_merge_call_support/component-results.json)。
+
+
+## F13：12 项既有失败的诊断与修正（41e231d 基线）
+
+先逐项复现红测，再修正测试。12 项均为 **A（测试与现行设计不一致）**；B（合并实现错误）0 项，C（环境限制）0 项。首次失败提交统一为 `dc7644909bb13c714d250576ddfa60a52e794289`：其父 `e6f9d24d8d7705584de53dfd556c2c869dea27f3` 的 12 项逐个通过，该提交的 12 项逐个失败。用 `git archive` 导出历史源码、同一依赖锁与 Z3 环境实跑，未切换或修改 git 状态。历史快照只加独立 `[workspace]` 并补齐源码引用的 Sail 测试文件。日志在 `output/f13/history/{e6f9d24,dc76449}/`，逐项结果在 `output/f13/history/results.json`；当前基线红测在 `output/f13/diagnosis/`。此前 `6819246` 基线已有同一失败集合（见上节），不是 F3–F12 枚举工作引入。
+
+设计依据为 `git show dc76449`：撤回 REG_DEREF 和具体寄存器向量选择中的 `_TLB` 过滤；`Op::Unsigned(n)` / `Op::Signed(n)` 的 n 是**目标**机器整数位宽，当前合同仅接受 64，而非源位向量宽度。`unsupported target width ... 65` 是解释器主动返回的 Type，不是 Z3 位宽限制。源 65/128/129 位输入仍须检查数值、范围和溢出。
+
+| 测试（省略 executor::tests） | 分类 | 根因及处理 | 测试原引入提交 |
+|---|---|---|---|
+| boundary_regression_tests::寄存器解引用与向量单项符号索引必须精确过滤 | A | 旧期望过滤 `_TLB`；改为检验解引用、单候选向量均保留读写事件，并改名为“必须保留事件”。标量／合流过滤测试保留。 | 985e0a9 |
+| review12_tests::internal_vector_init_after_merge | A | Unsigned(8) 在初始化前即 Type；目标改64，仍检查两条合法长度路径。 | 6dee70f |
+| review12_tests::special_primop_retry_counts_call_once | A | Unsigned(1) 在重试前即 Type；目标改64，保留两种特殊调用及深度检查。 | 6dee70f |
+| review14_tests::internal_vector_update_retries_merged_index | A | Unsigned(8) 使索引未形成；目标改64，保留合并开关与更新检查。 | 92fa4b8 |
+| review14_tests::read_register_vector_retries_strings | A | Unsigned(8) 使读取前即失败；目标改64，保留字符串候选与合并开关。 | 92fa4b8 |
+| review13_tests::monomorphize_machine_integer_after_merge_does_not_crash | A | Unsigned(8) 返回普通 Err，并非 panic；目标改64，仍检查单态化成功。 | 2555479 |
+| review13_tests::machine_integer_models_preserve_negative_i64_and_i128 | A | I64 分支误用 Signed(8)；目标改64，保留 I128 以及 -128、-1 断言。 | 2555479 |
+| review17_tests::review17_hex_machine_integer_width | A | Signed(8) 未进入格式化；目标改64，检查两个完整64位负数的十六进制结果。 | 6696872 |
+| review21_tests::review21_merged_overflow_path | A | 误把源65/128/129传作目标；改64，仍逐项要求1正常＋1 Overflow，不接受 Type。 | 97e2b66 |
+| review8_tests::adversarial_merge_machine_index_width | A | Unsigned(8) 未进入向量更新；目标改64，保留两种索引与合并开关。 | aab36f6 |
+| review26_tests::合并后单态化不得采用任意默认值 | A | I64 分支误用 Unsigned(8)；目标改64，Bits/I128 与候选值1、2检查保留。 | 0ed2061 |
+| review20_tests::宽位转换在合并前后保留数值 | A | wide_conversion 将源宽度误作目标；目标改64，源64/65/128/129测试矩阵保留。 | 2a995ea |
+
+验收（先红后绿）：基线12项逐个失败，修正后12项逐个通过（`output/f13/fixed/results.json`）。本轮仅修改测试和本文档；生产执行器、枚举器与样本实现均未改动，没有删测试或新增 ignore。
+
+- `cargo test -p isla-lib --offline --features smt-thread-interrupt --target-dir target_f8 -j4`：**739 通过、0 失败、6 忽略**；另有集成测试2通过、文档测试3通过。整条命令27.55秒，日志 `output/f13/full-test.log`。原12项已全部处理，无剩余失败或环境限制。
+- 重建 `target_f8/release/isarch` 后，F9 原配置 Sv39 STORE（`-T 64`、枚举线程4、class_cap=512/path_cap=256）72.08秒退出0：**20路径、70类、4444组合**，逐路径和逐类计数均与F9一致；各分区类/组合数之和等于路径总数，每路径无重复守卫赋值。此比较不包含跨进程符号编号或代表值。明细见 `output/f13/acceptance/regression.json`，命令与配置同目录。
+- `make solve-MRET`（独立 `output/f13/mret` 目录，`-f scripts/run.mk -o build-isarch` 复用本轮显式 target_f8 构建，`-T 64`）：2.42秒退出0，**4用例**。汇总与F12完全相同，仍为 `partial` / `unfinished-paths=1`（Poison 路径的既有现象），不是全路径完成；详见 `output/f13/mret/regression.json`。
+- 已运行 `cargo fmt --all` 和 `git diff --check`。全部新增日志、缓存、历史快照及构建产物位于 `/data1`，无 git 写操作。

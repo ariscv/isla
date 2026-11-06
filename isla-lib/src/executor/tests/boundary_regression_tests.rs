@@ -159,7 +159,7 @@ fn 位向量更新与嵌套切片表达式必须保留越界路径() {
 }
 
 #[test]
-fn 寄存器解引用与向量单项符号索引必须精确过滤() {
+fn 寄存器解引用与向量单项符号索引必须保留事件() {
     for name in ["_TLB", "core_TLB", "_TLB_cache"] {
         let mut shared = empty_shared_state();
         let encoded = zencode::encode(name);
@@ -175,7 +175,8 @@ fn 寄存器解引用与向量单项符号索引必须精确过滤() {
                 solver.trace().to_vec().iter().filter(|e| matches!(e, Event::ReadReg(r, ..) if *r == reg)).count(),
             );
         });
-        assert_eq!(*out.lock().unwrap(), vec![usize::from(name != "_TLB")]);
+        // dc76449 撤回这两条访问路径的 _TLB 特判，所有名称均须保留事件。
+        assert_eq!(*out.lock().unwrap(), vec![1]);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let index = solver.define_const(smtlib::bits64(0, 128), info());
@@ -199,10 +200,9 @@ fn 寄存器解引用与向量单项符号索引必须精确过滤() {
             info(),
         )
         .unwrap();
-        assert_eq!(
-            solver.trace().to_vec().iter().filter(|e| matches!(e, Event::ReadReg(..) | Event::WriteReg(..))).count(),
-            2 * usize::from(name != "_TLB")
-        );
+        let trace = solver.trace().to_vec();
+        assert_eq!(trace.iter().filter(|e| matches!(e, Event::ReadReg(r, ..) if *r == reg)).count(), 1);
+        assert_eq!(trace.iter().filter(|e| matches!(e, Event::WriteReg(r, ..) if *r == reg)).count(), 1);
     }
 }
 

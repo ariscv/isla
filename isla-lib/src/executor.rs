@@ -3753,6 +3753,8 @@ pub fn execute_ir_function_with_checkpoint_multi_thread<'ir, B: BV, R>(
 
 #[cfg(test)]
 mod tests {
+    // dc76449 固定的 IR 契约：@unsigned/@signed 参数是目标机器整数位宽（64），
+    // 源位宽由操作数决定；宽输入、负数与溢出测试不能将源位宽传作该参数。
     mod boundary_regression_tests;
     mod region_merge_tests;
     mod review27_tests;
@@ -3963,7 +3965,7 @@ mod tests {
                     Ty::Bits(_) => instrs.push(Instr::Copy(Loc::Id(value), Exp::Id(bits), info())),
                     Ty::I64 => instrs.push(Instr::Copy(
                         Loc::Id(value),
-                        Exp::Call(Op::Unsigned(8), vec![Exp::Id(bits)]),
+                        Exp::Call(Op::Unsigned(64), vec![Exp::Id(bits)]),
                         info(),
                     )),
                     Ty::I128 => instrs.push(Instr::PrimopUnary(
@@ -5408,7 +5410,7 @@ mod tests {
                         let bits = shared.symtab.intern("zbits");
                         let left = shared.symtab.intern("zleft");
                         let right = shared.symtab.intern("zright");
-                        let op = if signed { Op::Signed(width) } else { Op::Unsigned(width) };
+                        let op = if signed { Op::Signed(64) } else { Op::Unsigned(64) };
                         let instrs = Box::leak(
                             vec![
                                 Instr::Decl(cond, Ty::Bool, info()),
@@ -5675,7 +5677,7 @@ mod tests {
             let a = shared.symtab.intern("za");
             let b = shared.symtab.intern("zb");
             let info = SourceLoc::unknown();
-            let op = if signed { Op::Signed(width) } else { Op::Unsigned(width) };
+            let op = if signed { Op::Signed(64) } else { Op::Unsigned(64) };
             let instrs = Box::leak(
                 vec![
                     Instr::Decl(branch, Ty::Bool, info),
@@ -6779,7 +6781,7 @@ mod tests {
                         Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(255, 8)), info()),
                         Instr::Goto(7),
                         Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(254, 8)), info()),
-                        Instr::Copy(Loc::Id(integer), Exp::Call(Op::Signed(8), vec![Exp::Id(bits)]), info()),
+                        Instr::Copy(Loc::Id(integer), Exp::Call(Op::Signed(64), vec![Exp::Id(bits)]), info()),
                         Instr::PrimopUnary(
                             Loc::Id(RETURN),
                             primop::unary_primops()["hex_str"],
@@ -6799,7 +6801,9 @@ mod tests {
                     })
                     .collect();
                 eprintln!("机器整数十六进制：合并={enabled}，结果={values:?}");
-                assert!(values.iter().all(|v| v.len() == 18), "i64 十六进制格式必须保持 16 位");
+                let mut values = values;
+                values.sort();
+                assert_eq!(values, ["0xfffffffffffffffe", "0xffffffffffffffff"], "i64 十六进制格式必须保持 16 位");
             }
         }
 
@@ -7978,7 +7982,7 @@ mod tests {
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
                         Instr::Goto(7),
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
-                        Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                        Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(64), vec![Exp::Id(data)]), info()),
                         Instr::Call(
                             Loc::Id(RETURN),
                             false,
@@ -8023,7 +8027,7 @@ mod tests {
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(0, 8)), info()),
                         Instr::Goto(7),
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
-                        Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                        Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(64), vec![Exp::Id(data)]), info()),
                         Instr::Call(
                             Loc::Id(RETURN),
                             false,
@@ -8239,7 +8243,7 @@ mod tests {
                 let data = test_name(331);
                 let integer = test_name(332);
                 let conversion = if matches!(ty, Ty::I64) {
-                    Instr::Copy(Loc::Id(integer), Exp::Call(Op::Signed(8), vec![Exp::Id(data)]), info())
+                    Instr::Copy(Loc::Id(integer), Exp::Call(Op::Signed(64), vec![Exp::Id(data)]), info())
                 } else {
                     Instr::PrimopUnary(Loc::Id(integer), primop::unary_primops()["sail_signed"], Exp::Id(data), info())
                 };
@@ -8448,7 +8452,7 @@ mod tests {
                             Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
                             Instr::Goto(7),
                             Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
-                            Instr::Copy(Loc::Id(integer), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                            Instr::Copy(Loc::Id(integer), Exp::Call(Op::Unsigned(64), vec![Exp::Id(data)]), info()),
                             Instr::Monomorphize(integer, Ty::I64, info()),
                             Instr::Copy(Loc::Id(RETURN), Exp::Id(integer), info()),
                             Instr::End,
@@ -8761,7 +8765,7 @@ mod tests {
                 let data = test_name(311);
                 let vector = test_name(313);
                 let arg = if op == INTERNAL_VECTOR_INIT {
-                    Exp::Call(Op::Unsigned(1), vec![Exp::Id(data)])
+                    Exp::Call(Op::Unsigned(64), vec![Exp::Id(data)])
                 } else {
                     Exp::Id(data)
                 };
@@ -8999,7 +9003,7 @@ mod tests {
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
                         Instr::Goto(8),
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(2, 8)), info()),
-                        Instr::Copy(Loc::Id(length), Exp::Call(Op::Unsigned(8), vec![Exp::Id(data)]), info()),
+                        Instr::Copy(Loc::Id(length), Exp::Call(Op::Unsigned(64), vec![Exp::Id(data)]), info()),
                         Instr::Call(Loc::Id(vector), false, INTERNAL_VECTOR_INIT, vec![Exp::Id(length)], info()),
                         Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
                         Instr::End,
@@ -10762,7 +10766,7 @@ mod tests {
                     Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(0, 8)), info()),
                     Instr::Goto(7),
                     Instr::Copy(Loc::Id(value), Exp::Bits(B64::new(1, 8)), info()),
-                    Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(8), vec![Exp::Id(value)]), info()),
+                    Instr::Copy(Loc::Id(index), Exp::Call(Op::Unsigned(64), vec![Exp::Id(value)]), info()),
                     Instr::PrimopVariadic(
                         Loc::Id(RETURN),
                         update,
