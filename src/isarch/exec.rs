@@ -1595,17 +1595,17 @@ fn solve_collect_path<'ir, B: BV>(
                             .check_path(&sample_path, &mut solver, shared_state, frame.path_signature())
                             .expect("样本成员检查失败");
                     }
-                    let mut exported = Vec::new();
+                    let exported_positions = Mutex::new(Vec::new());
                     let mode =
                         if ctx.path_merging || !frame.region_merge_records().is_empty() { "merge" } else { "fork" };
                     let merge_enumeration = frame
-                        .enumerate_merges_with(
+                        .enumerate_merges_parallel_with(
                             &mut solver,
                             ctx.task_state,
                             shared_state,
                             ret_val,
-                            &mut |class_id, _, model| {
-                                if ctx.samples.writer.is_some() {
+                            &|class_id, _, model| {
+                                if let Some(writer) = &ctx.samples.writer {
                                     let mut sample = sample_path.materialize(
                                         model,
                                         shared_state,
@@ -1615,7 +1615,9 @@ fn solve_collect_path<'ir, B: BV>(
                                     )?;
                                     sample.isa_state =
                                         super::samples::isa_state(ctx.target, &sample, model, shared_state)?;
-                                    exported.push(sample);
+                                    // 路径尚未结束，先保守标记；收尾再补齐类／路径截断结果。
+                                    sample.truncated = true;
+                                    exported_positions.lock().unwrap().push((class_id, writer.append(sample)));
                                 }
                                 Ok(())
                             },
@@ -1623,17 +1625,17 @@ fn solve_collect_path<'ir, B: BV>(
                         .expect("完成路径的合并枚举失败");
                     if let Some(writer) = &ctx.samples.writer {
                         if let Some(enumeration) = &merge_enumeration {
-                            for mut sample in exported {
+                            for (class_id, position) in exported_positions.into_inner().unwrap() {
                                 let classes = enumeration["guard_classes"].as_array().unwrap();
                                 let index = classes
-                                    .binary_search_by_key(&sample.class_id.unwrap(), |class| {
+                                    .binary_search_by_key(&class_id, |class| {
                                         class["class_id"].as_u64().unwrap() as usize
                                     })
                                     .expect("导出样本必须属于已枚举的类");
                                 let class = &classes[index];
-                                sample.truncated = enumeration["path_truncated"].as_bool().unwrap()
+                                let truncated = enumeration["path_truncated"].as_bool().unwrap()
                                     || class["truncated"].as_bool().unwrap();
-                                writer.append(sample);
+                                writer.set_truncated(position, truncated);
                             }
                         } else {
                             match solver.check_sat(SourceLoc::unknown()) {

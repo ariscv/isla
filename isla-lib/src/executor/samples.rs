@@ -12,7 +12,8 @@ use crate::zencode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
 
 fn concrete_bits<B: BV>(value: B) -> Value {
@@ -509,25 +510,52 @@ impl<B: BV> SamplePath<B> {
 }
 
 pub struct SampleWriter {
-    file: Mutex<std::fs::File>,
+    file: Mutex<(std::fs::File, u64)>,
     next: std::sync::atomic::AtomicU64,
 }
+
+/// 只保留固定宽度布尔值的文件位置，不保留完整样本。
+pub struct SamplePosition(u64);
+
 impl SampleWriter {
     pub fn open(path: &std::path::Path) -> Self {
-        let file =
-            std::fs::OpenOptions::new().create(true).read(true).append(true).open(path).expect("打开样本文件失败");
+        // 不能使用 O_APPEND：Linux 上它也会让 pwrite 忽略补写位置。
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .expect("打开样本文件失败");
         let mut next = 0;
         for line in std::io::BufReader::new(file.try_clone().unwrap()).lines() {
             let sample: Sample = serde_json::from_str(&line.expect("读取已有样本失败")).expect("已有样本行损坏");
             next = next.max(sample.sample_id.checked_add(1).expect("样本编号溢出"));
         }
-        Self { file: Mutex::new(file), next: std::sync::atomic::AtomicU64::new(next) }
+        let end = file.seek(SeekFrom::End(0)).unwrap();
+        Self { file: Mutex::new((file, end)), next: std::sync::atomic::AtomicU64::new(next) }
     }
-    pub fn append(&self, mut sample: Sample) {
+    pub fn append(&self, mut sample: Sample) -> SamplePosition {
         sample.sample_id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut line = serde_json::to_vec(&sample).expect("样本序列化失败");
+        // Sample 的字段顺序保证这个键先于所有用户数据；false 和 true+空格均占五字节。
+        let key = b"\"truncated\":";
+        let position = line.windows(key.len()).position(|bytes| bytes == key).unwrap() + key.len();
+        if sample.truncated {
+            line.insert(position + 4, b' ');
+        }
         line.push(b'\n');
-        self.file.lock().unwrap().write_all(&line).expect("追加样本失败");
+        let mut file = self.file.lock().unwrap();
+        let position = SamplePosition(file.1.checked_add(position as u64).unwrap());
+        file.0.write_all(&line).expect("追加样本失败");
+        file.1 = file.1.checked_add(line.len() as u64).unwrap();
+        position
+    }
+
+    /// 枚举收尾后补齐原 v1 字段，不追加非样本记录，也不移动其他行。
+    pub fn set_truncated(&self, position: SamplePosition, truncated: bool) {
+        let file = self.file.lock().unwrap();
+        file.0.write_all_at(if truncated { b"true " } else { b"false" }, position.0).expect("补写样本截断标志失败");
     }
 }
 
@@ -597,6 +625,42 @@ mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::smt::{Config, Context};
+
+    #[test]
+    fn samples_流式写出后原位补齐截断且不改变编号和文件长度() {
+        let file = std::env::temp_dir().join(format!("e2-patch-{}.jsonl", std::process::id()));
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let path = SamplePath {
+            pre: BTreeMap::new(),
+            post: BTreeMap::new(),
+            result: Val::Unit,
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        assert!(sat(&mut solver).unwrap());
+        let sample = path.materialize(&mut Model::new(&solver), &shared, "merge", 17, Some(0)).unwrap();
+        let writer = SampleWriter::open(&file);
+        let first = writer.append(sample.clone());
+        assert_eq!(SampleChecker::load(&file, None).unwrap().samples.len(), 1, "回调返回前必须可见");
+        let mut second = sample.clone();
+        second.class_id = Some(1);
+        second.truncated = true;
+        let second = writer.append(second);
+        let length = std::fs::metadata(&file).unwrap().len();
+        writer.set_truncated(first, true);
+        writer.set_truncated(second, false);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), length, "补写不得移动后续行");
+        let samples = SampleChecker::load(&file, None).unwrap().samples;
+        assert!(samples[0].truncated);
+        assert!(!samples[1].truncated);
+        assert_eq!((samples[0].sample_id, samples[1].sample_id), (0, 1));
+        drop(writer);
+        SampleWriter::open(&file).append(sample);
+        assert_eq!(SampleChecker::load(&file, None).unwrap().samples[2].sample_id, 2);
+        std::fs::remove_file(file).unwrap();
+    }
 
     #[test]
     fn samples_membership_and_wrong_result() {
@@ -688,14 +752,17 @@ mod tests {
                 let writer = writer.clone();
                 let sample = sample.clone();
                 scope.spawn(move || {
-                    for _ in 0..32 {
-                        writer.append(sample.clone());
+                    for index in 0..32 {
+                        let position = writer.append(sample.clone());
+                        writer.set_truncated(position, index % 2 == 0);
                     }
                 });
             }
         });
         drop(writer);
-        assert_eq!(SampleChecker::load(&file, None).unwrap().samples.len(), 256);
+        let samples = SampleChecker::load(&file, None).unwrap().samples;
+        assert_eq!(samples.len(), 256);
+        assert_eq!(samples.iter().filter(|sample| sample.truncated).count(), 128);
         assert_eq!(SampleChecker::load(&file, Some(10)).unwrap().samples.len(), 10);
         SampleWriter::open(&file).append(sample);
         assert_eq!(SampleChecker::load(&file, None).unwrap().samples.len(), 257, "续写编号不得重复");

@@ -24,7 +24,19 @@ target/release/isarch … --path-merging \
 
 `--check-samples` 读取 UTF-8 JSON Lines。`--check-samples-limit N` 只读取前 N 行，N 必须为正整数；省略时读取全部。`--check-samples-report` 可省略，收尾始终在 stderr 输出 `[SAMPLE_CHECK_REPORT] {JSON}`，指定路径时还写入易读 JSON。后两个选项必须同时有 `--check-samples`。进程退出码仍表示执行是否成功；等价性结论须读取报告。被外部强杀的运行没有最终检查报告。
 
-导出以追加方式打开文件，编号从已有最大编号之后继续。进程内共用写端；整行序列化后持互斥锁调用无用户态缓冲的 `File::write_all`。每条完成路径独立落盘，不等待整个运行结束；枚举路径的样本在该路径枚举收尾取得截断标志后追加。不同进程不要同时写同一文件。已有损坏行、模型失败、未知值和内部状态不变量违反不会降级为虚构样本。SIGKILL 前尚未写完的最后一行应由实验方核查，导入不会静默跳过损坏数据。
+导出继续追加已有文件，编号从已有最大编号之后继续。进程内共用写端；整行序列化后持互斥锁调用无用户态缓冲的 `File::write_all`。枚举回调立即物化并写出每个选中的样本，不等待路径枚举完成。每个待收尾样本只保留类号和文件偏移，不缓存完整前后态。不同进程不要同时写同一文件。已有损坏行、模型失败、未知值和内部状态不变量违反不会降级为虚构样本。
+
+### 流式写出与截断补写
+
+沿用 v1 样本字段，不增加 trailer。`pt_decode` 要求每行为完整样本并统计布尔 `truncated`；`SampleChecker::load` 直接反序列化且拒绝未知字段。独立 trailer 会要求修改两种读端，因此采用路径收尾后的原位补写。
+
+尚未收尾的枚举样本暂写 `truncated=true`，避免运行中把未确认的枚举当作完整。路径收尾后按原定义补齐 `path_truncated || class.truncated`。普通非枚举样本仍直接写最终值。`false` 与 `true ` 各占五字节；尾随空格是合法 JSON 空白，补写不移动后续行、不改变编号及其他字段。最终文件仍能由未修改的 `pt_decode` 和 `--check-samples` 读取。
+
+写端在同一互斥锁中维护末尾偏移；补写使用定位写，不改变追加位置。文件不能设置 `O_APPEND`，因为 Linux 的定位写在该标志下也会追加。已有文件打开时先验证每行并恢复编号与末尾位置。
+
+路径内并行枚举仍遵守上述写出方式。工作线程先形成不含完整状态的计数计划，再按规范守卫类号、全局预算和 stride 导出。样本的 class_id 在写出时已是最终编号，无需补写该字段。各线程只在整行追加或补写时持文件锁；样本物化并行执行。编号与样本行顺序不承诺跨运行一致，唯一性检查仍适用。
+
+消费最终截断统计前须确认路径正常收尾。外部强杀可能留下仍为保守 true 的未收尾样本；它们不能作为完整枚举证据。SIGKILL 前尚未写完的最后一行也应由实验方核查，导入不会静默跳过损坏数据。该机制不提供崩溃恢复或跨进程并发写保证。
 
 环境变量由 solve-state 启动时读取一次。函数 CLI 没有新增检查选项；函数交叉检验使用 isla-lib 的同一套 `SamplePath` / `SampleChecker`，见下文。完整 Sv39 命令见 [sv39-pinned.md](sv39-pinned.md)。
 
@@ -58,7 +70,7 @@ target/release/isarch … --path-merging \
 {"schema_version":1,"sample_id":0,"mode":"merge","path_signature":42,"class_id":0,"truncated":false,"pre_registers":{"r0":{"bits":"00000000"}},"post_registers":{"r0":{"bits":"00000001"}},"isa_state":{"r0":"8'h00"},"pre_memory":[{"address":4096,"value":85,"bytes":1}],"post_memory":[{"address":4096,"value":85,"bytes":1}],"result":{"ctor":"Retire_Success","value":{"unit":true}},"ret_val":"Retire_Success(())"}
 ```
 
-E1 的 `class_cap`、`path_cap` 原样生效；每个解的回调拿到该解尚存活的完整模型，寄存器、内存、返回值都从这个模型取值，不重用路径代表状态。原来的 `merge_enumeration` JSON 结构不变。关闭样本且关闭枚举时不增加模型查询和输出字段。
+E1 的 `class_cap`、`path_cap` 原样生效；每个解的回调拿到该解尚存活的完整模型，寄存器、内存、返回值都从这个模型取值，不重用路径代表状态。`merge_enumeration` 使用独立的枚举格式版本，当前版本 2；该版本变化不改变本文件的 samples v1。关闭样本且关闭枚举时不增加模型查询和输出字段。
 
 ## 检查与报告
 
@@ -113,3 +125,13 @@ E1 的 `class_cap`、`path_cap` 原样生效；每个解的回调拿到该解尚
 | `src/isarch_main.rs` | 沿用原选项写法注册并传递 check-samples、limit、report |
 | `agents/path_merge_call_support/samples.md` | 字段、使用方法、证据及冲突 |
 | `agents/path_merge_call_support/sv39-pinned.md` | CSR 位/类型核实、完整实验命令及短测结果 |
+
+## F8 流式与并行验证
+
+同一固定事件迹中，缓冲与流式写出的所有 v1 字段逐项相等；覆盖类内多个解、stride=1/2/7/100、类和路径截断，后续在 1/2/3/4 枚举线程下重复验证。另覆盖无缓冲增量可见、原位补写保持文件长度、8 线程 256 条样本交错追加／补写和打开已有文件续写编号。枚举格式独立升为 2，没有改动 samples v1 字段。
+
+最终 isla-lib 全量 **712 通过、既有 12 失败、6 忽略**，失败集合与既有日志逐名一致。Python 解码测试 **40 通过**。步骤 1 Sv39 LOAD 全量 **16592** 条能由原 pt_decode 读取；前 32 条 `--check-samples` 全部恰由一条路径接纳并判定一致。步骤 2 Sv39 STORE **6920** 条全量解码成功，前 32 条成员／结果检查均通过。步骤 3 的最终真实场景、守卫集合与计时数据见 [enumeration.md](enumeration.md)。
+
+用户修订验收后，跨进程代表值差异单列为遗留问题，不以删除页表或内存字段来掩盖差异。线程一致性验收比较规范守卫赋值集合、类号和分区计数；不声称具体代表模型随线程数或跨进程不变。
+
+最终步骤 3：Sv39 LOAD **16592** 条、Sv48 STORE **51638** 条均由原 pt_decode 全量读取；各前 32 条经 --check-samples 全部接纳并一致。1/16 枚举线程的规范守卫集合、类号和最终截断标记逐项相同，分区和与独立 count 逐路径相同；样本编号无重复。最终 MRET -T 64 冒烟输出 4 条普通 v1 样本，既有 partial 状态保留。

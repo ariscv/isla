@@ -1887,11 +1887,19 @@ pub struct MergeEnumerationConfig {
     pub class_cap: usize,
     pub path_cap: usize,
     pub sample_stride: usize,
+    pub enumeration_threads: usize,
 }
 
 impl Default for MergeEnumerationConfig {
     fn default() -> Self {
-        Self { enabled: false, mode: MergeEnumerationMode::Samples, class_cap: 1024, path_cap: 65536, sample_stride: 1 }
+        Self {
+            enabled: false,
+            mode: MergeEnumerationMode::Samples,
+            class_cap: 1024,
+            path_cap: 65536,
+            sample_stride: 1,
+            enumeration_threads: std::thread::available_parallelism().unwrap().get().min(16),
+        }
     }
 }
 
@@ -2319,7 +2327,11 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         .map(|value| {
             let root = "execution_limits.merge_enumeration";
             let sub = value.as_table().ok_or_else(|| format!("{root} 必须是 TOML table"))?;
-            allowed_table_keys(sub, root, &["enabled", "mode", "class_cap", "path_cap", "sample_stride"])?;
+            allowed_table_keys(
+                sub,
+                root,
+                &["enabled", "mode", "class_cap", "path_cap", "sample_stride", "enumeration_threads"],
+            )?;
             let mut config = MergeEnumerationConfig::default();
             if let Some(mode) = sub.get("mode") {
                 config.mode = match mode.as_str() {
@@ -2335,6 +2347,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
                 ("class_cap", &mut config.class_cap),
                 ("path_cap", &mut config.path_cap),
                 ("sample_stride", &mut config.sample_stride),
+                ("enumeration_threads", &mut config.enumeration_threads),
             ] {
                 if let Some(value) = optional_u64(sub, name, root)? {
                     if value == 0 {
@@ -2619,6 +2632,21 @@ mod tests {
         for value in ["0", "-1", "true", "1.5", "\"7\""] {
             assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nsample_stride = {value}")).is_err());
         }
+    }
+
+    #[test]
+    fn execution_limits_merge_enumeration_threads() {
+        let config = merge_config("[execution_limits.merge_enumeration]\nenumeration_threads = 3").unwrap();
+        assert_eq!(config.merge_enumeration.unwrap().enumeration_threads, 3);
+        for value in ["0", "-1", "true", "\"4\""] {
+            assert!(
+                merge_config(&format!("[execution_limits.merge_enumeration]\nenumeration_threads = {value}")).is_err()
+            );
+        }
+        assert_eq!(
+            MergeEnumerationConfig::default().enumeration_threads,
+            std::thread::available_parallelism().unwrap().get().min(16)
+        );
     }
 
     #[test]

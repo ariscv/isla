@@ -2360,6 +2360,18 @@ fn assert_merge_enumeration_reference(
     result: &Val<B64>,
     output: &serde_json::Value,
 ) {
+    assert_eq!(output["schema_version"], 2);
+    assert!(output["tested_slices"].is_array(), "片段全表只保存在路径级");
+    for class in output["guard_classes"].as_array().unwrap() {
+        assert!(class.get("tested_slices").is_none(), "类不得重复保存路径片段表");
+        for solution in class["solutions"].as_array().unwrap() {
+            assert!(solution["representative"].get("inputs").is_none(), "完整输入由样本协议承载");
+            assert_eq!(
+                solution["slice_values"].as_array().unwrap().len(),
+                output["tested_slices"].as_array().unwrap().len()
+            );
+        }
+    }
     let mut limits = state.execution_limits.as_ref().unwrap().clone();
     limits.merge_enumeration.class_cap = usize::MAX;
     limits.merge_enumeration.path_cap = usize::MAX;
@@ -2434,7 +2446,7 @@ fn assert_merge_enumeration_reference(
                     And(Box::new(condition), Box::new(if value { projection } else { Not(Box::new(projection)) }));
             }
             for (slice, value) in
-                class["tested_slices"].as_array().unwrap().iter().zip(solution["slice_values"].as_array().unwrap())
+                output["tested_slices"].as_array().unwrap().iter().zip(solution["slice_values"].as_array().unwrap())
             {
                 let expression = Extract(
                     slice["hi"].as_u64().unwrap() as u32,
@@ -2625,13 +2637,13 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         assert_eq!(counted["truncated_classes"], usize::from(truncated));
         assert_eq!(counted["path_truncated"], path_cap == 1);
         let class = &output["guard_classes"][0];
-        assert_eq!(class["tested_slices"].as_array().unwrap().len(), 2, "未被测试的高两位不参与展开");
+        assert_eq!(output["tested_slices"].as_array().unwrap().len(), 2, "未被测试的高两位不参与展开");
         let mut found = HashSet::new();
         for solution in class["solutions"].as_array().unwrap() {
             let values = solution["slice_values"].as_array().unwrap();
             let mut conjunction = Bool(true);
             let mut pair = 0;
-            for (slice, value) in class["tested_slices"].as_array().unwrap().iter().zip(values) {
+            for (slice, value) in output["tested_slices"].as_array().unwrap().iter().zip(values) {
                 let lo = slice["lo"].as_u64().unwrap() as u32;
                 let bit = match value.as_str().unwrap() {
                     "#b0" => 0,
@@ -2822,6 +2834,123 @@ fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
     assert_eq!(solver.trace().to_vec().len(), before);
 }
 
+#[test]
+fn merge_enumeration_多分区耦合守卫规范编号与计数() {
+    fn event_can_cross_threads<T: Send + Sync>() {}
+    event_can_cross_threads::<Event<B64>>();
+    let shared = empty_shared_state();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let mut frame = make_frame(vec![Instr::End]);
+    for id in 0..5 {
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        frame.region_merge_records.push(RegionMergeRecord {
+            record_id: id,
+            parent_record: None,
+            arm: "root",
+            function: TOP_LEVEL_LET,
+            branch_pc: 0,
+            join: crate::ir::regions::RegionPoint::FunctionExit,
+            condition,
+            source_loc: info(),
+            depth: 1,
+            dead: false,
+            value_symbols: HashSet::new(),
+            input_symbols: HashSet::new(),
+            single_arm_reads: vec![],
+            memory_reads: vec![],
+        });
+    }
+    use smtlib::Exp::*;
+    solver.assert(Not(Box::new(And(
+        Box::new(Var(frame.region_merge_records[0].condition)),
+        Box::new(Var(frame.region_merge_records[1].condition)),
+    ))));
+    for cap in [5, 24, 30] {
+        let mut reference = None;
+        for threads in [1, 3, 4] {
+            let mut limits = ExecutionLimits::default();
+            limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+                enabled: true,
+                class_cap: 1,
+                path_cap: cap,
+                enumeration_threads: threads,
+                ..Default::default()
+            };
+            let state = TaskState::new().with_execution_limits(limits.clone());
+            let calls = Mutex::new(Vec::new());
+            let output = frame
+                .enumerate_merges_parallel_with(&mut solver, &state, &shared, &Val::Unit, &|class, solution, _| {
+                    assert_eq!(solution, 0);
+                    calls.lock().unwrap().push((class, std::thread::current().id()));
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+            let classes = output["guard_classes"].as_array().unwrap();
+            let assignments: Vec<_> = classes.iter().map(|class| class["guard_assignment"].to_string()).collect();
+            assert_eq!(assignments.len(), cap.min(24));
+            assert_eq!(assignments.iter().collect::<HashSet<_>>().len(), assignments.len());
+            if let Some(reference) = &reference {
+                assert_eq!(&assignments, reference);
+            } else {
+                reference = Some(assignments);
+            }
+            assert!(classes.iter().enumerate().all(|(index, class)| class["class_id"] == index));
+            assert_eq!(output["path_truncated"], cap < 24);
+            let calls = calls.into_inner().unwrap();
+            assert_eq!(calls.len(), classes.len());
+            assert_eq!(calls.iter().map(|(class, _)| *class).collect::<HashSet<_>>().len(), classes.len());
+            if threads == 4 && cap == 30 {
+                assert!(
+                    calls.iter().map(|(_, thread)| thread).collect::<HashSet<_>>().len() > 1,
+                    "必须在多个线程上物化"
+                );
+            }
+            limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
+            let counted = frame
+                .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(limits), &shared, &Val::Unit)
+                .unwrap()
+                .unwrap();
+            assert_eq!(counted["counted_classes"], classes.len());
+            for field in ["counted_classes", "counted_paths"] {
+                let parts = output["partitions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part[field].as_u64().unwrap())
+                    .sum::<u64>();
+                assert_eq!(parts, counted[field].as_u64().unwrap());
+            }
+            assert_eq!(solver.transaction_depth(), 0);
+        }
+    }
+    // 约十亿个守卫组合只允许访问每分区预算内的规范前缀，不能为分配类号先遍历全集。
+    for id in 5..30 {
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut record = frame.region_merge_records[0].clone();
+        record.record_id = id;
+        record.condition = condition;
+        frame.region_merge_records.push(record);
+    }
+    let mut limits = ExecutionLimits::default();
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+        enabled: true,
+        class_cap: usize::MAX,
+        path_cap: 1,
+        enumeration_threads: 4,
+        ..Default::default()
+    };
+    let output = frame
+        .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(limits), &shared, &Val::Unit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(output["counted_classes"], 1);
+    assert_eq!(output["counted_paths"], 1);
+    assert_eq!(output["path_truncated"], true);
+    assert!(output["guard_classes"][0]["guard_assignment"].as_object().unwrap().values().all(|value| value == false));
+}
+
 /// 与 I2–I5 共用真实 IR、架构初始化及固定原语配置；显式运行以避免依赖外部文件。
 #[test]
 #[ignore = "需要 ISLA_REGIONS_IR 指向真实 rv64d.ir"]
@@ -2878,7 +3007,7 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
                         for solution in class["solutions"].as_array().unwrap() {
                             use smtlib::Exp::*;
                             let mut condition = Bool(true);
-                            for (slice, value) in class["tested_slices"]
+                            for (slice, value) in output["tested_slices"]
                                 .as_array()
                                 .unwrap()
                                 .iter()
@@ -3576,7 +3705,7 @@ fn region_merge_f4_special_calls_still_rejected_statically() {
 #[test]
 fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
     use smtlib::Exp::*;
-    let run = |stride, class_cap, path_cap| {
+    let run = |stride, class_cap, path_cap, enumeration_threads| {
         let shared = empty_shared_state();
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
@@ -3612,6 +3741,7 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
             sample_stride: stride,
             class_cap,
             path_cap,
+            enumeration_threads,
             ..Default::default()
         };
         let state = TaskState::new().with_execution_limits(limits);
@@ -3622,6 +3752,16 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
             memory: vec![],
             memory_guards: BTreeMap::new(),
         };
+        let directory = std::env::temp_dir().join(format!(
+            "e2-fixed-trace-{}-{}-{stride}-{class_cap}-{path_cap}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let stream_file = directory.join("stream.jsonl");
+        let buffered_file = directory.join("buffered.jsonl");
+        let writer = crate::executor::samples::SampleWriter::open(&stream_file);
+        let mut positions = Vec::new();
         let mut calls = Vec::new();
         let output = frame
             .enumerate_merges_with(
@@ -3631,26 +3771,88 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
                 &Val::Symbolic(input),
                 &mut |class, solution, model| {
                     let sample = path.materialize(model, &shared, "merge", 0, Some(class))?;
-                    calls.push((class, solution, serde_json::to_value(sample).unwrap()));
+                    calls.push((class, solution, serde_json::to_value(&sample).unwrap()));
+                    positions.push((class, writer.append(sample)));
+                    assert_eq!(
+                        crate::executor::samples::SampleChecker::load(&stream_file, None).unwrap().samples.len(),
+                        calls.len(),
+                        "同一固定事件迹的每个回调返回前均已落盘"
+                    );
                     Ok(())
                 },
             )
             .unwrap()
             .unwrap();
+        let buffered = crate::executor::samples::SampleWriter::open(&buffered_file);
+        for (class, _, value) in &calls {
+            let mut sample: crate::executor::samples::Sample = serde_json::from_value(value.clone()).unwrap();
+            sample.truncated = output["path_truncated"].as_bool().unwrap()
+                || output["guard_classes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|value| value["class_id"] == *class)
+                    .unwrap()["truncated"]
+                    .as_bool()
+                    .unwrap();
+            buffered.append(sample);
+        }
+        for (class, position) in positions {
+            let truncated = output["path_truncated"].as_bool().unwrap()
+                || output["guard_classes"].as_array().unwrap().iter().find(|value| value["class_id"] == class).unwrap()
+                    ["truncated"]
+                    .as_bool()
+                    .unwrap();
+            writer.set_truncated(position, truncated);
+        }
+        let stream = crate::executor::samples::SampleChecker::load(&stream_file, None).unwrap();
+        let buffered_samples = crate::executor::samples::SampleChecker::load(&buffered_file, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(&stream.samples).unwrap(),
+            serde_json::to_value(&buffered_samples.samples).unwrap(),
+            "缓冲写出与流式写出的所有 v1 字段必须完全相同"
+        );
+        drop((writer, buffered));
+        std::fs::remove_dir_all(directory).unwrap();
         assert_eq!(solver.transaction_depth(), 0);
+        calls.sort_by_key(|(class, solution, _)| (*class, *solution));
         (output, calls)
     };
     for (class_cap, path_cap) in [(32, 32), (3, 32), (32, 5), (1, 32)] {
-        let (full, calls) = run(1, class_cap, path_cap);
-        for stride in [2, 7, 100] {
-            let (sampled, selected) = run(stride, class_cap, path_cap);
-            assert_eq!(sampled["sample_stride"], stride);
-            assert_eq!(sampled["counted_classes"], full["counted_classes"]);
-            assert_eq!(sampled["counted_paths"], full["enumerated_total"]);
-            assert_eq!(sampled["path_truncated"], full["path_truncated"]);
-            assert_eq!(selected, calls.iter().step_by(stride).cloned().collect::<Vec<_>>());
-            assert_eq!(sampled["exported_samples"], selected.len());
-            assert_eq!(sampled["enumerated_total"], selected.len());
+        let (reference, _) = run(1, class_cap, path_cap, 1);
+        for threads in [1, 2, 3, 4] {
+            let (full, calls) = run(1, class_cap, path_cap, threads);
+            for field in ["counted_classes", "counted_paths", "truncated_classes", "path_truncated"] {
+                assert_eq!(full[field], reference[field], "线程数不得改变预算与计数");
+            }
+            let assignments = |output: &serde_json::Value| {
+                output["guard_classes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|class| (class["class_id"].clone(), class["guard_assignment"].clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(assignments(&full), assignments(&reference), "规范类号与守卫赋值必须与线程数无关");
+            assert_eq!(
+                full["partitions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part["counted_classes"].as_u64().unwrap())
+                    .sum::<u64>(),
+                full["counted_classes"].as_u64().unwrap()
+            );
+            for stride in [2, 7, 100] {
+                let (sampled, selected) = run(stride, class_cap, path_cap, threads);
+                assert_eq!(sampled["sample_stride"], stride);
+                assert_eq!(sampled["counted_classes"], full["counted_classes"]);
+                assert_eq!(sampled["counted_paths"], full["enumerated_total"]);
+                assert_eq!(sampled["path_truncated"], full["path_truncated"]);
+                assert_eq!(selected, calls.iter().step_by(stride).cloned().collect::<Vec<_>>());
+                assert_eq!(sampled["exported_samples"], selected.len());
+                assert_eq!(sampled["enumerated_total"], selected.len());
+            }
         }
     }
 }

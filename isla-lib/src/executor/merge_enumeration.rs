@@ -7,6 +7,28 @@ use smtlib::Exp as Formula;
 #[path = "merge_components.rs"]
 mod components;
 
+#[path = "merge_parallel.rs"]
+mod parallel;
+
+fn guard_order<B>(records: &[RegionMergeRecord<B>]) -> Vec<usize> {
+    let positions: HashMap<_, _> =
+        records.iter().enumerate().map(|(index, record)| (record.record_id, index)).collect();
+    let mut order: Vec<_> = (0..records.len()).collect();
+    order.sort_by_cached_key(|index| {
+        let mut chain = vec![*index];
+        let mut record = &records[*index];
+        while let Some(parent) = record.parent_record {
+            let parent = positions[&parent];
+            assert!(!chain.contains(&parent), "记录上下文不得成环");
+            chain.push(parent);
+            record = &records[parent];
+        }
+        chain.reverse();
+        chain
+    });
+    order
+}
+
 fn context<B>(
     record: &RegionMergeRecord<B>,
     records: &HashMap<usize, &RegionMergeRecord<B>>,
@@ -121,7 +143,6 @@ fn satisfiable<B: BV>(solver: &mut Solver<B>, condition: &Formula<Sym>) -> Resul
 }
 
 impl<B: BV> LocalFrame<'_, B> {
-    /// 在本路径求解器存活时枚举。枚举假设不写入路径，模型缓存随保存点回滚；错误也必须回滚。
     /// 未开启时不读取执行迹、不查询模型、不改变输出。
     pub fn enumerate_merges(
         &self,
@@ -130,17 +151,65 @@ impl<B: BV> LocalFrame<'_, B> {
         shared: &SharedState<B>,
         result: &Val<B>,
     ) -> Result<Option<Value>, ExecError> {
-        self.enumerate_merges_with(solver, state, shared, result, &mut |_, _, _| Ok(()))
+        self.enumerate_merges_parallel_with(solver, state, shared, result, &|_, _, _| Ok(()))
     }
 
-    /// samples 模式仅在 stride 选中的解模型存活时调用消费方；关闭枚举或 count 模式不调用。
+    /// 保留可变消费者接口；消费者由互斥锁保护，按需使用并行只读接口提高物化吞吐。
     pub fn enumerate_merges_with(
         &self,
         solver: &mut Solver<B>,
         state: &TaskState<B>,
         shared: &SharedState<B>,
         result: &Val<B>,
+        consume: &mut (impl FnMut(usize, usize, &mut Model<B>) -> Result<(), ExecError> + Send),
+    ) -> Result<Option<Value>, ExecError> {
+        let consume = Mutex::new(consume);
+        self.enumerate_merges_parallel_with(solver, state, shared, result, &|class, solution, model| {
+            consume.lock().unwrap()(class, solution, model)
+        })
+    }
+
+    /// 并行消费者在各工作线程本地使用模型；模型及其 Z3 Context 不跨线程传递。
+    pub fn enumerate_merges_parallel_with(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
+        consume: &(impl Fn(usize, usize, &mut Model<B>) -> Result<(), ExecError> + Sync),
+    ) -> Result<Option<Value>, ExecError> {
+        let Some(config) = state.execution_limits.as_ref().map(|limits| &limits.merge_enumeration) else {
+            return Ok(None);
+        };
+        if !config.enabled {
+            return Ok(None);
+        }
+        // 分量诊断需要完整的原顺序联合见证，继续使用其专用串行参照遍历。
+        if config.mode == crate::config::MergeEnumerationMode::Count
+            && std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1")
+        {
+            return self.enumerate_merges_partition(
+                solver,
+                state,
+                shared,
+                result,
+                &mut |class, solution, model| consume(class, solution, model),
+                None,
+                None,
+            );
+        }
+        parallel::enumerate(self, solver, state, shared, result, consume).map(Some)
+    }
+
+    fn enumerate_merges_partition(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
         consume: &mut impl FnMut(usize, usize, &mut Model<B>) -> Result<(), ExecError>,
+        partition: Option<&parallel::Partition>,
+        plans: Option<&HashMap<Vec<bool>, parallel::ClassPlan>>,
     ) -> Result<Option<Value>, ExecError> {
         use Formula::*;
         let Some(config) = state.execution_limits.as_ref().map(|limits| &limits.merge_enumeration) else {
@@ -179,19 +248,7 @@ impl<B: BV> LocalFrame<'_, B> {
             .collect();
         // 提交历史通常子记录在前；按父链的原始位置做字典序排序，
         // 得到每棵守卫树的前序，整棵子树先于下一根，而非按深度广度遍历。
-        let original_positions: HashMap<_, _> =
-            records.iter().enumerate().map(|(index, record)| (record.record_id, index)).collect();
-        let mut order: Vec<_> = (0..records.len()).collect();
-        order.sort_by_cached_key(|index| {
-            let mut chain = vec![*index];
-            let mut record = &records[*index];
-            while let Some(parent) = record.parent_record {
-                chain.push(original_positions[&parent]);
-                record = by_id[&parent];
-            }
-            chain.reverse();
-            chain
-        });
+        let order = guard_order(records);
         let positions: HashMap<_, _> =
             order.iter().enumerate().map(|(position, index)| (records[*index].record_id, position)).collect();
         let mut tested = Vec::new();
@@ -223,7 +280,11 @@ impl<B: BV> LocalFrame<'_, B> {
                 Eq(Box::new(Extract(*bit, *bit, Box::new(Var(Sym { id: *symbol })))), Box::new(smtlib::bits64(1, 1)))
             })
             .collect();
-        let counting = config.mode == crate::config::MergeEnumerationMode::Count;
+        let probing = partition.is_some() && plans.is_none();
+        let partition_cap = plans.map_or(config.path_cap, |plans| {
+            plans.values().filter(|plan| plan.partition == partition.unwrap().id).map(|plan| plan.count).sum()
+        });
+        let counting = probing || config.mode == crate::config::MergeEnumerationMode::Count;
         // DFS 只抽取被投影的一位谓词见证；完整输入、返回值和状态仅在选中位置求值。
         let packed_bits = bit_predicates
             .iter()
@@ -266,7 +327,9 @@ impl<B: BV> LocalFrame<'_, B> {
                 }
                 sat_time += queried.elapsed();
             }
-            let mut pending = if counting {
+            let mut pending = if let Some(partition) = partition {
+                vec![(partition.condition.clone(), partition.depth)]
+            } else if counting {
                 vec![(Bool(true), 0)]
             } else if let Some(index) = order.first() {
                 let guard = Var(records[*index].condition);
@@ -275,6 +338,9 @@ impl<B: BV> LocalFrame<'_, B> {
                 vec![(Bool(true), 0)]
             };
             while let Some((class_prefix, guard_depth)) = pending.pop() {
+                if plans.is_some() && total == partition_cap {
+                    break;
+                }
                 let queried = std::time::Instant::now();
                 let feasible = satisfiable(solver, &class_prefix)?;
                 sat_time += queried.elapsed();
@@ -282,9 +348,42 @@ impl<B: BV> LocalFrame<'_, B> {
                 if !feasible {
                     continue;
                 }
-                if total == config.path_cap {
+                if (partition.is_none() || probing) && total == config.path_cap {
                     path_truncated = true;
                     break;
+                }
+                // 分区内先按 false/true 顺序展开守卫，确保 path_cap 截取规范前缀。
+                // 这样类内上限很大时，预计数也不会遍历超过本分区的路径预算。
+                if partition.is_some() {
+                    let mut model = Model::new(solver);
+                    model.set_complete_model(true);
+                    let raw = packed_guards
+                        .as_ref()
+                        .map(|packed| model.get_exp(packed).map(|value| bits_text(&value.unwrap_exp())))
+                        .transpose()?;
+                    drop(model);
+                    let mut values = Vec::<bool>::new();
+                    let mut split = None;
+                    for (position, index) in order.iter().enumerate() {
+                        let record = &records[*index];
+                        let mut current = record;
+                        let mut active = true;
+                        while let Some(parent) = current.parent_record {
+                            let value = values[positions[&parent]];
+                            active &= if current.arm == "then" { value } else { !value };
+                            current = by_id[&parent];
+                        }
+                        values.push(active && raw.as_ref().unwrap().as_bytes()[2 + *index] == b'1');
+                        if position >= guard_depth && active && split_guards[*index] {
+                            split = Some((position, Var(record.condition)));
+                            break;
+                        }
+                    }
+                    if let Some((position, guard)) = split {
+                        pending.push((And(Box::new(class_prefix.clone()), Box::new(guard.clone())), position + 1));
+                        pending.push((And(Box::new(class_prefix), Box::new(Not(Box::new(guard)))), position + 1));
+                        continue;
+                    }
                 }
                 let mut assignment = Vec::<bool>::new();
                 let mut solutions = Vec::new();
@@ -316,7 +415,7 @@ impl<B: BV> LocalFrame<'_, B> {
                             }
                             let value = active && raw.as_bytes()[2 + *index] == b'1';
                             assignment.push(value);
-                            if position >= guard_depth && active && split_guards[*index] {
+                            if partition.is_none() && position >= guard_depth && active && split_guards[*index] {
                                 let selected =
                                     if value { Var(record.condition) } else { Not(Box::new(Var(record.condition))) };
                                 pending.push((
@@ -327,7 +426,15 @@ impl<B: BV> LocalFrame<'_, B> {
                             }
                         }
                     }
-                    let export = !counting && total % config.sample_stride == 0;
+                    let plan = plans.map(|plans| plans.get(&assignment));
+                    if matches!(plan, Some(None)) {
+                        break;
+                    }
+                    let plan = plan.flatten();
+                    let class_id = plan.map_or(class_count, |plan| plan.class_id);
+                    let ordinal = plan.map_or(total, |plan| plan.ordinal.checked_add(solution_count).unwrap());
+                    let class_cap = plan.map_or(config.class_cap.min(config.path_cap), |plan| plan.count);
+                    let export = !counting && ordinal % config.sample_stride == 0;
                     let selected: Vec<_> = {
                         let raw = if let Some(packed) = &packed_bits {
                             bits_text(&model.get_exp(packed)?.unwrap_exp())
@@ -383,19 +490,16 @@ impl<B: BV> LocalFrame<'_, B> {
                             })
                             .collect();
                         let representative_result = model.get_val(result)?.to_string(shared);
-                        let representative_inputs: Vec<_> = inputs
-                        .iter()
-                        .map(|(symbol, value)| json!({"symbol":format!("v{symbol}"), "smt_id":symbol, "value":value}))
-                        .collect();
-                        consume(class_count, solution_count, &mut model)?;
+                        consume(class_id, solution_count, &mut model)?;
                         exported_samples += 1;
-                        solutions.push(json!({"slice_values":values, "representative":{"result":representative_result, "inputs":representative_inputs}}));
+                        solutions
+                            .push(json!({"slice_values":values, "representative":{"result":representative_result}}));
                     }
                     projection_time += projected.elapsed();
                     solution_count += 1;
                     total += 1;
                     // 模型见证直接选择后续位分支；前沿仍通过 SAT 检查剪枝。
-                    if solution_count == config.class_cap || total == config.path_cap {
+                    if solution_count == class_cap || ((partition.is_none() || probing) && total == config.path_cap) {
                         let leaf =
                             selected.iter().fold(Bool(true), |leaf, bit| And(Box::new(leaf), Box::new(bit.clone())));
                         let rest = And(Box::new(prefix), Box::new(Not(Box::new(leaf))));
@@ -406,7 +510,7 @@ impl<B: BV> LocalFrame<'_, B> {
                         truncated = satisfiable(solver, &rest)?;
                         sat_time += queried.elapsed();
                         sat_checks += 1;
-                        path_truncated |= truncated && total == config.path_cap;
+                        path_truncated |= (partition.is_none() || probing) && truncated && total == config.path_cap;
                         break;
                     }
                     // 下一次从最深未访问分支开始；所选分支由当前模型直接剪枝。
@@ -429,7 +533,8 @@ impl<B: BV> LocalFrame<'_, B> {
                         }
                     }
                 }
-                if !counting && !solutions.is_empty() {
+                if probing || (!counting && !solutions.is_empty()) {
+                    let class_id = plans.map_or(class_count, |plans| plans[&assignment].class_id);
                     let mut record_assignment = vec![false; records.len()];
                     for (index, value) in order.iter().zip(assignment) {
                         record_assignment[*index] = value;
@@ -439,10 +544,9 @@ impl<B: BV> LocalFrame<'_, B> {
                         .zip(record_assignment)
                         .map(|(record, value)| (record.record_id.to_string(), json!(value)))
                         .collect();
-                    classes.push(
-                        json!({"class_id":class_count, "guard_assignment":guard_assignment, "tested_slices":tested,
-                    "solution_count":solutions.len(), "solutions":solutions, "truncated":truncated}),
-                    );
+                    classes.push(json!({"class_id":class_id, "guard_assignment":guard_assignment,
+                    "counted_paths":solution_count,
+                    "solution_count":solutions.len(), "solutions":solutions, "truncated":truncated}));
                 }
                 class_count += 1;
                 truncated_classes += usize::from(truncated);
@@ -453,22 +557,24 @@ impl<B: BV> LocalFrame<'_, B> {
                     break;
                 }
             }
-            shared.execution_stats.enumeration_counted(
-                class_count,
-                total,
-                truncated_classes,
-                path_truncated,
-                config.sample_stride,
-                exported_samples,
-            );
-            if counting {
+            if partition.is_none() {
+                shared.execution_stats.enumeration_counted(
+                    class_count,
+                    total,
+                    truncated_classes,
+                    path_truncated,
+                    config.sample_stride,
+                    exported_samples,
+                );
+            }
+            if counting && !probing {
                 if let Some(diagnostic) = &diagnostic {
                     diagnostic.finish(&replay_events, class_count, total, path_truncated, truncated_classes)?;
                 }
                 if shared.execution_stats.enabled() {
                     eprintln!("[MERGE_ENUMERATION_COUNT] 类={class_count} 解={total} 耗时={:?} SAT次数={sat_checks} SAT耗时={sat_time:?} 投影耗时={projection_time:?}", started.elapsed());
                 }
-                return Ok(Some(json!({"schema_version":1, "mode":"count", "counted_classes":class_count,
+                return Ok(Some(json!({"schema_version":2, "mode":"count", "counted_classes":class_count,
                     "counted_paths":total, "truncated_classes":truncated_classes,
                     "sample_stride":config.sample_stride, "exported_samples":exported_samples,
                     "path_truncated":path_truncated, "class_cap":config.class_cap, "path_cap":config.path_cap})));
@@ -477,12 +583,14 @@ impl<B: BV> LocalFrame<'_, B> {
                 "arm":record.arm, "condition":{"symbol":format!("v{}", record.condition.id), "smt_id":record.condition.id},
                 "source_loc":record.source_loc, "function":zencode::decode(shared.symtab.to_str(record.function)),
                 "branch_pc":record.branch_pc})).collect();
-            Ok(Some(json!({"schema_version":1, "guard_records":guard_records, "guard_classes":classes,
+            Ok(Some(
+                json!({"schema_version":2, "guard_records":guard_records, "tested_slices":tested, "guard_classes":classes,
                 "path_truncated":path_truncated, "enumerated_total":exported_samples,
                 "sample_stride":config.sample_stride, "counted_classes":class_count, "counted_paths":total,
-                "exported_samples":exported_samples, "truncated_classes":truncated_classes, "class_cap":config.class_cap, "path_cap":config.path_cap})))
+                "exported_samples":exported_samples, "truncated_classes":truncated_classes, "class_cap":config.class_cap, "path_cap":config.path_cap}),
+            ))
         };
-        let output = if counting {
+        let output = if counting || partition.is_some() {
             solver.with_incremental_checks(enumerate)
         } else {
             let context = crate::smt::Context::new(crate::smt::Config::new());

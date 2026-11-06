@@ -21,21 +21,22 @@ mode = "samples"
 class_cap = 1024
 path_cap = 65536
 sample_stride = 1
+enumeration_threads = 16
 ```
 
-五个字段均可省略，默认分别为 `false`、`"samples"`、`1024`、`65536`、`1`。`mode` 只接受 `"samples"` 与 `"count"`。上限必须是正整数；未知字段、错误类型、零和负数会在加载时拒绝。`execution_limits.enabled=false` 仍沿用原有规则，不能同时配置其他限制字段。枚举开关与合并开关独立；还需用 `--path-merging` 或 `merge_policy` 开启希望合并的区域。
+六个字段均可省略，前五项默认分别为 `false`、`"samples"`、`1024`、`65536`、`1`；`enumeration_threads` 默认 `min(16, std::thread::available_parallelism())`，与 `-T` 的执行线程数独立。`mode` 只接受 `"samples"` 与 `"count"`。上限必须是正整数；未知字段、错误类型、零和负数会在加载时拒绝。`execution_limits.enabled=false` 仍沿用原有规则，不能同时配置其他限制字段。枚举开关与合并开关独立；还需用 `--path-merging` 或 `merge_policy` 开启希望合并的区域。
 
-`sample_stride = N` 只在 samples 模式选择导出位置。每条完成路径的两级 DFS 解序号从 **0** 开始，序号满足 `ordinal % N == 0` 时物化完整代表模型并调用样本消费者；其余位置只读守卫与被测位的投影见证、计数和维护 DFS 前沿，不求值完整输入、返回值或处理器状态。`class_cap=1` 时这就是每隔 N 个守卫类保留一个。类内有多个解时，序号跨类连续，不在每个类重置；不同完成路径各自从 0 开始。因此样本数是各路径 `ceil(counted_paths/N)` 的和，并非全局总数除 N 后取整。`N=1` 仍导出每个已访问解；count 模式无论 stride 是多少都不物化样本。
+`sample_stride = N` 只在 samples 模式选择导出位置。每条完成路径按规范守卫类顺序、类内 DFS 顺序分配解序号，从 **0** 开始，序号满足 `ordinal % N == 0` 时物化完整代表模型并调用样本消费者；其余位置只读守卫与被测位的投影见证、计数和维护 DFS 前沿，不求值完整输入、返回值或处理器状态。`class_cap=1` 时这就是每隔 N 个守卫类保留一个。类内有多个解时，序号跨类连续，不在每个类重置；不同完成路径各自从 0 开始。因此样本数是各路径 `ceil(counted_paths/N)` 的和，并非全局总数除 N 后取整。`N=1` 仍导出每个已访问解；count 模式无论 stride 是多少都不物化样本。
 
-这属于 **DFS 顺序的等间隔系统抽样，不是随机抽样**。DFS 顺序与守卫树、被测字段位及求解器见证有关，周期可能与字段位相关；某些形状可能集中出现或被遗漏。每条路径从 0 重置也使短路径获得较高的保留比例。样本占比不能直接称为真实状态概率，Sv39 上测得的偏差也不能作为 Sv48 偏差的上界。
+这属于 **规范守卫顺序与类内 DFS 顺序的等间隔系统抽样，不是随机抽样**。类内 DFS 顺序与被测字段位及求解器见证有关，周期可能与字段位相关；某些形状可能集中出现或被遗漏。每条路径从 0 重置也使短路径获得较高的保留比例。样本占比不能直接称为真实状态概率，Sv39 上测得的偏差也不能作为 Sv48 偏差的上界。
 
 为使 stride 选择不改变后续代表值，samples 模式复用既有事件重放和增量 SAT 接口，将 DFS 投影与完整样本物化放在隔离的 Context 中；只为被选中的解重放原约束及当前类／片段条件。枚举专用求解器固定种子为 0，普通执行的随机种子策略不变。旧实现的具体代表值本就不保证跨运行稳定；`N=1` 保留全量导出、上限与样本 v1 字段语义，但具体代表值和 DFS 发现顺序可能与旧二进制不同。未测试的位仍取一个满足原约束的代表值，没有为抽样固定 ISA 状态或缩小可行域。
 
-`mode = "count"` 只统计两级投影域。它复用守卫树前序、父链上下文、去重的被测位和既有模型引导的两级 DFS，以 SAT 假设查询剪去不可满足的前缀。计数前先在原路径条件和活动上下文中检查守卫两种极性，跳过只有一种可行极性的分裂。每个 SAT 见证只读取打包的守卫真值与被测位，不查询完整输入符号、返回值或处理器状态，不物化代表样本，也不调用样本消费者。即使设置 `ISLA_EXPORT_SAMPLES`，也不会导出这些枚举样本。原有每条合并路径的普通 ISA 输出仍沿用既有物化流程。
+`mode = "count"` 只统计两级投影域。它复用守卫树前序、父链上下文和去重的被测位，一级按规范布尔顺序 DFS，二级沿用模型引导的片段 DFS，以 SAT 假设查询剪去不可满足的前缀。计数前先在原路径条件和活动上下文中检查守卫两种极性，跳过只有一种可行极性的分裂。每个 SAT 见证只读取打包的守卫真值与被测位，不查询完整输入符号、返回值或处理器状态，不物化代表样本，也不调用样本消费者。即使设置 `ISLA_EXPORT_SAMPLES`，也不会导出这些枚举样本。原有每条合并路径的普通 ISA 输出仍沿用既有物化流程。
 
-计数结果仍写入每条路径的 `merge_enumeration`，包含 `schema_version=1`、`mode="count"`、`class_cap`、`path_cap`、`counted_classes`（已访问的可行守卫叶子类数）、`counted_paths`（按上限计入的片段组合数）、`truncated_classes`（确有剩余解的已访问类数）和 `path_truncated`。不输出 `guard_classes`、代表样本或 `enumerated_total`，避免将计数误当作已导出样本数。类内上限仍按片段组合数计，不限制访问的守卫类数；只有额外 SAT 查询证明确有剩余解或可行类时才标记截断。`path_truncated=false` 但 `truncated_classes>0` 表示类数完整，片段组合数受类内上限限制。
+计数结果仍写入每条路径的 `merge_enumeration`，包含 `schema_version=2`、`mode="count"`、`class_cap`、`path_cap`、`counted_classes`（已访问的可行守卫叶子类数）、`counted_paths`（按上限计入的片段组合数）、`truncated_classes`（确有剩余解的已访问类数）和 `path_truncated`。不输出 `guard_classes`、代表样本或 `enumerated_total`，避免将计数误当作已导出样本数。类内上限仍按片段组合数计，不限制访问的守卫类数；只有额外 SAT 查询证明确有剩余解或可行类时才标记截断。`path_truncated=false` 但 `truncated_classes>0` 表示类数完整，片段组合数受类内上限限制。
 
-启用 `ISLA_STATS=1` 后，`MERGE_STATS` 及周期快照的 `merge_enumeration` 汇总计数模式的 `completed_paths`、`counted_classes`、`counted_paths`、`truncated_classes`、`truncated_paths`。计数模式另输出分阶段计时：SAT 次数、SAT 累计耗时和投影见证累计耗时；每 4096 类输出一次进度。两种模式都汇总 `sample_stride` 和 `exported_samples`，samples 模式也汇总全部已访问类与解数；以下字段表描述 samples 模式。sample v1 行没有增加或改写协议字段。
+启用 `ISLA_STATS=1` 后，`MERGE_STATS` 及周期快照的 `merge_enumeration` 汇总计数模式的 `completed_paths`、`counted_classes`、`counted_paths`、`truncated_classes`、`truncated_paths`。常规入口在分区进度中报告类数、解数与墙钟时间；较大分区每 4096 类还报告 SAT 次数、SAT 累计耗时和投影见证累计耗时。显式分量诊断仍保留原有计数汇总行。两种模式都汇总 `sample_stride` 和 `exported_samples`，samples 模式也汇总全部已访问类与解数；以下字段表描述 samples 模式。sample v1 行没有增加或改写协议字段。
 
 isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isla-execute-function` 在该路径的 `Result:` 后输出单行 `merge_enumeration: {JSON}`，`--tree` 模式也保留此行。没有开启枚举时不查询模型、不扫描枚举依赖、不输出字段或附加行。旧 JSON 反序列化时缺少此字段仍有效。
 
@@ -55,9 +56,10 @@ isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isl
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `schema_version` | 整数 | 枚举格式当前为 `1`，与独立记录日志的版本区分 |
+| `schema_version` | 整数 | 枚举格式当前为 `2`，与独立记录日志的版本区分 |
 | `class_cap` / `path_cap` | 整数 | 本次实际使用的类内解数上限／路径总解数上限 |
 | `guard_records` | 数组 | 本路径保存的全部合并记录，包括嵌套记录 |
+| `tested_slices` | 数组 | 本路径全部守卫测试的片段表，只保存一次，保留记录归属 |
 | `guard_classes` | 数组 | 至少导出一个解的可行叶子类；stride>1 时是稀疏数组，不能用 class_id 直接当数组下标 |
 | `enumerated_total` / `exported_samples` | 整数 | 已物化并交给消费者的解数，等于所有保留类的 `solution_count` 之和；配置样本文件时对应实际导出行数 |
 | `sample_stride` | 整数 | 实际使用的正整数采样步长 |
@@ -80,9 +82,8 @@ isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isl
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `class_id` | 整数 | 此路径内的发现顺序，从 0 开始 |
+| `class_id` | 整数 | 此路径内规范守卫位串的字典序编号，从 0 开始；固定事件迹和预算下与线程数无关 |
 | `guard_assignment` | 对象 | 记录编号字符串 → **上下文与守卫合取的布尔值**；上下文不成立的记录规范化为 false，不声称其裸守卫为 false |
-| `tested_slices` | 数组 | 本路径全部守卫定义所测试的片段并集，保留记录归属 |
 | `solutions` | 数组 | 满足该类和真实路径条件的片段组合，每个组合只输出一个代表模型 |
 | `solution_count` | 整数 | 已输出的 `solutions` 数量，不是估算的完整域大小 |
 | `truncated` | 布尔 | 类上限或路径总上限阻止了本类尚存解的输出 |
@@ -95,15 +96,14 @@ isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isl
 | --- | --- | --- |
 | `slice_values` | 字符串数组 | 与 `tested_slices` 按下标对应的定宽 `#b…` 值，最高位在左 |
 | `representative.result` | 字符串 | 在这个解的模型下物化的函数／处理器返回值 |
-| `representative.inputs` | 数组 | 被选中片段所属的完整符号及其代表位向量；每项为 `symbol/smt_id/value`，未测试的位只保留该模型的一个取值 |
 
-顶层原有 `isa-state`、访存等字段仍代表原路径选出的一个模型；本次没有为每个解复制这些 ISA 输出。每解明确携带自己的返回结果和片段输入代表值。完整 SMT 定义仍来自对应路径迹；仅凭进程外另一条路径的同号 `vN` 不能解释本结果。
+顶层原有 `isa-state`、访存等字段仍代表原路径选出的一个模型；本次没有为每个解复制这些 ISA 输出。每解保留自己的返回结果和片段值；完整输入由 samples v1 文件承载。完整 SMT 定义仍来自对应路径迹；仅凭进程外另一条路径的同号 `vN` 不能解释本结果。
 
 下面是单条守卫 `v2 = (v0[0] == 0)` 为真时的简化输出示例：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "class_cap": 1024,
   "path_cap": 65536,
   "guard_records": [{
@@ -112,17 +112,17 @@ isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isl
     "function": "example", "branch_pc": 0,
     "source_loc": {"file": 0, "line1": 10, "char1": 0, "line2": 10, "char2": 8}
   }],
-  "guard_classes": [{
-    "class_id": 0,
-    "guard_assignment": {"0": true},
-    "tested_slices": [{
+  "tested_slices": [{
       "symbol": "v0", "smt_id": 0, "hi": 0, "lo": 0,
       "source_loc": {"file": 0, "line1": 10, "char1": 0, "line2": 10, "char2": 8},
       "record_id": 0
-    }],
+  }],
+  "guard_classes": [{
+    "class_id": 0,
+    "guard_assignment": {"0": true},
     "solutions": [{
       "slice_values": ["#b0"],
-      "representative": {"result": "true", "inputs": [{"symbol": "v0", "smt_id": 0, "value": "#b00000000"}]}
+      "representative": {"result": "true"}
     }],
     "solution_count": 1,
     "truncated": false
@@ -135,8 +135,8 @@ isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isl
 ## 算法与上限语义
 
 1. 从终态帧取记录，检查编号唯一、父链完整且无环。沿父链计算 `ctx(root)=true`，子上下文是父上下文与父守卫对应极性的合取。按照守卫树前序排序，父记录及其子树先于下一棵树；JSON 中记录和片段的顺序仍沿用原帧顺序。
-2. 一级类的定义仍是 `p_r = ctx_r ∧ g_r`。DFS 栈保存待访问的分支前缀和已固定的守卫位置；每次复用现有 `check_sat_with`，在原路径求解器上用假设检查前缀，UNSAT 时整支剪去，Unknown/错误直接返回错误。
-3. Sat 模型已经证明沿其守卫取值的后续分支都可行，无需逐个重复查询这些所选分支。用 `Ite(g, #b1, #b0)` 和 Concat 将裸守卫打包，一次 `Model::get_exp` 取值，再沿父链规范化：上下文不成立的记录直接赋 false；活动上下文中 `ctx∧g` 等于裸 `g`。依次将每个活动守卫的相反分支压栈，从最深的未访问分支继续。这是以模型作可满足性见证的 DFS 分裂，不是阻断已发现的类。
+2. 一级类的定义仍是 `p_r = ctx_r ∧ g_r`。DFS 栈保存待访问的分支前缀和已固定的守卫位置；复用 `check_sat_with` 检查前缀，UNSAT 时整支剪去，Unknown/错误直接返回错误。并行常规入口按 false/true 顺序展开活动分裂守卫，使每分区访问的类为规范前缀；计数阶段每分区最多访问 path_cap 个解。不能先遍历全部可行类再处理很小的预算。
+3. 每次一次性读取打包的裸守卫真值，再沿父链规范化：上下文不成立的记录直接赋 false；活动上下文中 `ctx∧g` 等于裸 `g`。固定极性与不活动守卫不产生额外分裂。原来的模型引导一级 DFS 仍保存在显式分量诊断入口；它不能在任意发现顺序上提前截断后同时保证规范预算前缀，因此常规入口采用上述规范一级前缀遍历。全部工作线程使用同一遍历逻辑。
 4. 二级仍使用整条路径全部守卫测试过的片段并集；跨类只扫描一次。对去重的实际位同样做模型引导的 DFS：模型选中的位分支直接走到叶子，相反分支进入前沿，随后在当前守卫类和真实路径条件下剪枝。字段耦合仍由 Z3 保留，例如 `¬(W∧¬R)` 只产生三个组合。一般派生表达式沿用原 AST，不把它当成自由输入。
 5. 一级 Sat 模型提供第一个二级解的投影见证。被 stride 选中时，在隔离求解器中用原约束和当前投影条件物化代表样本；完整输入符号每个只求值一次，所有重复、重叠片段均本地截取。到达类上限时，将剩余 DFS 前沿因式分解后作一次存在性查询；存在未输出解才标记截断，不再抽取额外模型。
 6. 求解器中不增加逐类或逐解阻断断言；前沿的大小只与守卫数、被测位数有关，不随已输出类数增长。外层仍使用一个保存点保护模型缓存等状态，正常或错误返回都配对回滚。旧阻断算法仅保存在测试模块中作为独立参照。
@@ -145,7 +145,7 @@ isarch 将结果放在每个路径 item 的 `merge_enumeration` 字段中。`isl
 
 上限按**已访问的投影解数**计数，stride 不改变预算。达到数值后额外查询一次：只有确有未计入预算的可行解才设置截断，刚好完整时保持 false。类上限触发后仍尝试其他类；因此类 `truncated=true` 可以与 `path_truncated=false` 同时出现。路径上限触发后可能仍有未发现的类，不能把当前类数当作完整叶子数。类没有片段时每类只消耗一个解的预算。
 
-类顺序由守卫前序、DFS 前沿与 Z3 模型取值共同决定。固定配置、相同事件和枚举版本下，采样与全量使用相同投影和代表值选择；不同版本、tactic 或约束下不保证相同；编号在进程内唯一，不保证跨运行稳定。上限生效时不声称得到均匀样本，也不声称完整覆盖。完整性须同时检查 `path_truncated=false` 和汇总 `truncated_classes=0`。stride 跳过本身不会设置 truncated；stride>1 时即使两个截断标志均为零，样本集合仍只是子集。这里的完整性只指选定守卫和片段的投影域；若未被守卫测试的位会影响返回值，一个代表结果不等于穷举了全部可能返回值。
+F8 起类顺序为守卫树前序下规范赋值位串的字典序（false 在前）；类内仍使用模型引导的片段 DFS。固定配置、相同事件和枚举版本下，采样与全量使用相同投影和代表值选择；不同版本、tactic 或约束下不保证相同；编号在进程内唯一，不保证跨运行稳定。上限生效时不声称得到均匀样本，也不声称完整覆盖。完整性须同时检查 `path_truncated=false` 和汇总 `truncated_classes=0`。stride 跳过本身不会设置 truncated；stride>1 时即使两个截断标志均为零，样本集合仍只是子集。这里的完整性只指选定守卫和片段的投影域；若未被守卫测试的位会影响返回值，一个代表结果不等于穷举了全部可能返回值。
 
 ## 适用范围与验收
 
@@ -335,3 +335,63 @@ Sv39 前六条路径的全部组合抽样均 SAT；其完整守卫域乘积也�
 诊断实现为 [merge_components.rs](../../isla-lib/src/executor/merge_components.rs)，接入点为 [merge_enumeration.rs](../../isla-lib/src/executor/merge_enumeration.rs)。诊断只收集现行枚举已经读出的投影，额外 SAT 在独立 Context 重放完整原迹，保存点配对恢复；默认关闭，不增加样本字段。3 个诊断测试覆盖不同位分离、隐藏约束／ITE 耦合、以及“两两可行但三分量不可乘”的 XOR 反例。开启诊断的枚举专项最初为 10 通过、2 忽略；最终开启诊断的 isla-lib 全量为 **709 通过、12 失败、6 忽略**，12 个失败与既有默认特性日志逐名比较完全相同，没有新增失败。cargo fmt、cargo fmt --check、git diff --check 和指定 target_f7 release 构建通过。
 
 全部原始红测、编译、全量测试及三场景日志位于 `scratchpad/components/`；`full-lib-final-enabled.log` 是最终全量，`final/` 是最终三场景。此前 `sv39-load/`、`sv48-load/`、`sv48-store/` 为原约束图首轮，`verified/` 为尚未输出具体缺失组合的中间轮，`trial/` 的 path_cap=1 仅调试候选结构，均不替代本节最终结果。没有运行 samples 加速实验或实现离线展开。
+
+## F8 步骤 1：回调立即写出样本
+
+原 `exported: Vec<Sample>` 改为回调内 `writer.append`，路径收尾只保留并处理 `(class_id, 文件偏移)`。每项为两个机器字，不再保留完整寄存器和内存；gen JSON 的类数组仍占内存，由步骤 2 处理。样本协议继续为 v1，截断采用固定宽度原位补写，具体运行中与收尾语义见 [samples.md](samples.md#流式写出与截断补写)。没有引入 trailer 或修改下游。
+
+红测先确认缺少补写接口。绿测覆盖回调写出立即可见、两种截断值互换不改变文件长度、编号续写、8 线程 256 条样本交错追加和补写。样本专项 **7 通过、1 忽略**；Python **40 通过**。isla-lib 默认特性全量 **710 通过、12 失败、6 忽略**，12 个失败名称与既有日志完全相同。两个二进制 cargo check 通过。`make -j1 solve-MRET THREADS=8` 使用指定 target_f8 构建与二进制完成冒烟；保留原有部分完成状态，不声称 MRET 全集覆盖。
+
+Sv39 LOAD 使用原 IR、配置及前态，`class_cap=1/path_cap=100000000/-T 8`：**20 条路径、16592 类、16592 个样本、16570 个类截断、0 条路径截断，269 秒**。样本最终 **965846680 字节**；2 秒观测中有 **123 次**字节数增长。进度取自 `MERGE_ENUMERATION_PROGRESS`，没有用样本行数推算。前 32 条经 `--check-samples` 全部恰被一条路径接纳且一致；全量 pt_decode 成功，得到 **106 种形状**。
+
+同机 target_f7 基线复跑 `-T 8` 为 **271 秒**，样本出口设 `/dev/null`，仍保留原先的整路径缓存；RSS 峰值 **18040.9 MiB**，流式版为 **9197.8 MiB**。这是每 2 秒采样的进程峰值，包含最终 gen JSON 格式化；不能称为常量内存或胖路径 RSS 已不增长。流式版仍有 gen JSON 的线性开销，待步骤 2 的测量。
+
+**按用户修订后的验收：同一固定事件迹的缓冲写出与流式写出逐字段一致。** 测试覆盖类内多个解、stride=1/2/7/100、类上限与路径上限；包括最终 `truncated`、编号和全部完整状态字段。流式回调每次返回前文件已能由 SampleChecker 读取。后续又在 1/2/3/4 枚举线程下运行同一对照。
+
+**遗留：跨进程代表值不稳定。** 指定历史文件与步骤 1 首次复跑各有 16592 个稳定签名，差异各 16535；未改动的原二进制按原参数复跑也有 **231/16592** 条差异。签名沿用仓库既有规则，只排除编号、ret_val 与未使用的 vl/vtype，没有屏蔽页表、内存或结果。已观察到 ret_val 的结构字段遍历顺序不同、并发合并记录编号不同，以及部分完整 PTE 代表位不同。源码中 Val::Struct 使用随机种子的 ahash，普通执行 solver 也使用既有随机种子；这些只是已知线索，没有证明它们各自造成多少差异。用户明确要求本轮不继续追查；后续线程验收只比较守卫赋值集合，不比较代表值内容。
+
+原始日志、复跑脚本、RSS 观测及签名比较脚本位于用户指定 `scratchpad/f8/`；构建使用 `--target-dir scratchpad/target_f8`，没有覆盖默认 target/release，也没有执行 git 写操作。
+
+## F8 步骤 2：枚举 JSON 去重
+
+枚举结果（samples 与 count 模式）的 `schema_version` 升为 **2**。samples 模式将 `tested_slices` 移至 `guard_records` 旁，每路径只写一次；各解的 `slice_values` 仍按该表的下标对应。类内删除片段全表及 `representative.inputs`，保留守卫赋值、片段值和代表结果。samples v1 的字段和完整状态没有变化。
+
+检索确认 `pt_decode.py` 与 `SampleChecker` 均不读取 gen JSON 的上述被移除字段。枚举测试改为从路径级片段表回投原求解器；旧阻断算法保留原格式，继续作为集合参照。物化阶段仍按原顺序查询完整输入，以保持现有代表值选择，省去的是 JSON 中的重复复制。
+
+Sv39 STORE 的历史 gen JSON 为 **188652067 字节**，步骤 2 为 **27891511 字节**，缩小 **6.76 倍**（减少 **85.22%**），两边均 **6920 类、20 条路径**。新运行 `-T 32`、class_cap=1，耗时 **60 秒**。Sv39 LOAD 为 **460966385 → 68045507 字节，6.77 倍**，仍为 **16592 类、20 条路径**，耗时 **260 秒**。同时运行上述两个场景，没有超出用户指定的批量上限。
+
+2 秒 RSS 观测：步骤 2 LOAD 峰值 **1213.9 MiB**，STORE **869.3 MiB**；LOAD 相比步骤 1 的 9197.8 MiB 明显下降。完整样本已不在路径内缓存，但 gen 类数组及每样本两个机器字的补写索引仍随输出规模增长，不能宣称整个进程为常量内存。原始产物在 scratchpad/f8/step2-*。
+
+## F8 步骤 3：路径内守卫前缀并行
+
+采用独立的 `enumeration_threads` 配置，不复用 `-T`。省略时取可用核数与 16 的较小值；显式值必须为正整数。`-T` 仍控制符号执行线程。进程内枚举工作线程共用预算，进程预算为默认线程预算与显式路径线程数的较大值，避免多条完成路径各自启动整组线程。每次调用按自己的路径线程数申请预算，路径内线程数为 1 时仍保留跨路径并发；没有因失败而切换算法。
+
+从守卫树前序中选择前 d 个在原路径及活动上下文中正反极性均可满足的守卫，取最小 d 使 `2^d >= enumeration_threads`，守卫不足时提前结束。使用 `context ∧ guard` 生成互斥的布尔前缀，保留不可满足分区为零计数；每个线程静态领取若干前缀任务，一级使用规范布尔前缀 DFS，二级复用原来的模型引导片段 DFS。非二次幂线程数例如 3 对应 4 个前缀，最多 3 个工作线程。
+
+`Event<B>` 的成员只依赖满足 Send/Sync 的 BV 和已有值类型；泛型工作线程的编译及 B64 编译期断言验证事件可安全跨线程。每个工作线程自建 Z3 Context、固定种子求解器并重放原事件一次，计数与导出两阶段复用该求解器。Z3 AST、Model、Context 不跨线程传递；没有新增 unsafe。每个完整样本仍使用原有隔离 Context 重放来物化，保留 stride 不改变同迹代表内容的机制，本轮没有优化这部分重放成本。
+
+为同时保证规范类号、全局 path_cap 和跨类连续 stride，先并行遍历投影域，收集每类按 class_cap 计入的解数和截断证据；每分区预计数最多访问 path_cap 个解，不物化完整状态。协调线程检查守卫赋值无重复，按守卫树前序下的布尔位串排序，分配 class_id、路径 ordinal 和剩余全局预算；再唤醒原工作线程导出这些预算内的解。count 模式到此不再执行导出阶段。导出阶段达到本分区获配预算后立即停止，避免扫描未计划的巨大尾部。路径上限不是每分区各一份，不会因线程数增加而放大输出。
+
+这增加了一次投影计数遍历；首条样本须等待所属路径的计数计划形成。导出阶段每个样本仍在模型回调内立即写出，没有缓存完整样本。协调线程只保留规范赋值和计数计划，计数阶段的重复类 JSON 会先释放；最终 gen JSON 的类数组和样本补写偏移仍随规模增长。该方案不承诺常量总内存，也没有实现“骨架+增量”的紧凑样本协议。
+
+增加 `enumerate_merges_parallel_with` 接口，让生产消费者在工作线程内直接物化样本，只有文件追加和紧凑补写索引持锁。既有 FnMut 消费接口保留并由锁保护，要求消费者 Send；旧调用方无需自行处理并发。`guard_classes` 按最终 class_id 排序，sample_id 继续在共享写端分配唯一编号；样本行顺序允许不同。
+
+结果新增 `enumeration_threads`（实际工作线程数）和 `partitions`：每项包含 `partition_id/counted_classes/counted_paths`，两种计数均按最终全局预算统计。所有分区的类数／解数之和必须等于本路径汇总；同一配置的 samples 与 count 结果也必须一致。`MERGE_ENUMERATION_PROGRESS` 报告分区计数进度，`MERGE_ENUMERATION_PARTITION` 报告分区最终预算，不使用样本文件行数作为进度。
+
+显式的 `ISLA_ENUM_COMPONENTS=1` 且 mode=count 仍运行分量诊断专用串行参照，以保留其联合见证采集及历史测量口径；这是诊断入口的既定算法选择，不是并行错误后的替代路径。常规 samples/count 使用上述同一分区实现，包括 enumeration_threads=1。
+
+配置红测先因缺少线程字段失败；随后专项覆盖 1/2/3/4 线程下的编号、预算和 stride，含不满足分区与跨守卫耦合；检查多个工作线程实际物化、Event 的 Send/Sync、分区和等于 count、无重复赋值，以及消费错误后保存点恢复。真实 `pte_is_invalid` 验证 10 类／256 解无截断及 3 类／5 解有截断；单路径 16384 类压力测试通过。
+
+最终代码的 isla-lib 全量 **712 通过、12 失败、6 忽略**；失败项与既有 12 项逐名一致。两个 CLI cargo check、cargo fmt --check、git diff --check、Python 40 项均通过。真实 PTE 与 16384 类压力测试均在最终规范 DFS 版本上重跑通过。另加 30 个独立守卫、class_cap=usize::MAX/path_cap=1 的约十亿组合域回归，验证计数和导出均及时停止，不为分配规范类号遍历剩余全集。
+
+本轮中间调度和预算版本只保留日志，不作为最终验收；作废样本／gen JSON 已清理。步骤 3 正式产物固定为 `scratchpad/f8/acceptance/`，两组并发，每个 isarch `-T 32`，长命令均 setsid/nohup 后台运行。源码与二进制哈希见 `scratchpad/f8/final-hashes.json`。墙钟比较受共用主机负载变化影响，不视为稳定的性能上界。
+
+Sv39 LOAD 最终 samples 对照（两次均 `-T 32`）：enumeration_threads=1 为 **406 秒**，=16 为 **124 秒**，墙钟约 **3.27 倍**。两边均 **20 条路径、16592 类、16592 条样本**；规范守卫集合哈希完全相同，类号逐项对应，样本编号唯一、样本 class_id 均映射到对应守卫类，最终 truncated 与类／路径标志一致。分区计数之和与每路径汇总一致，重复守卫赋值为 0。RSS 峰值分别 **2328.8 / 2268.0 MiB**（2 秒采样，包含最终 gen JSON 序列化）。完整 16592 条通过原 pt_decode，得到 104 种形状；前 32 条 --check-samples 全部接纳且一致。
+
+Sv48 STORE 最终 samples 对照（两次均 `-T 32`）：enumeration_threads=1 为 **731 秒**，=16 为 **566 秒**，墙钟约 **1.29 倍**。两边均 **27 条路径、51638 类、51638 条样本**，守卫集合及规范类号完全一致，重复赋值为 0。RSS 峰值分别 **6911.5 / 6134.6 MiB**。独立 count 模式为 **51638 类／51638 解，140 秒**；Sv39 count 为 **16592 类／16592 解，30 秒**。两个场景中，各路径分区类数／解数之和均与独立 count 逐路径相等；类截断、路径截断也逐项相同，分别为 16570 / 51568 个类截断、0 条路径截断。
+
+最终 Sv48 STORE 全量 **51638** 条由原 pt_decode 成功读取，观察到 **125 种形状**；前 32 条成员检查全部恰由一条路径接纳并一致。最终 `make -j1 solve-MRET THREADS=64` 通过 scratchpad 的 make 覆盖文件使用已构建的 target_f8 二进制（`-o build-isarch` 避免重新构建），输出 **4 条用例／4 条样本**，均为枚举 schema=2、样本 schema=1。MRET 仍有既有 **1 条未完成路径，status=partial**，不把它当作完整覆盖。
+
+机器汇总见 [enumeration-f8-results.json](enumeration-f8-results.json)，包括计数、守卫集合哈希、体积、RSS 和源码／二进制哈希；原始日志及完整正式文件位于 `scratchpad/f8/acceptance/`。最终完整审查补丁为 `scratchpad/f8/final.patch`，步骤 2 的独立生产差异为 `scratchpad/f8/step2-enumeration.patch`。没有执行 git 写操作。
+
+遗留问题：跨进程代表值不稳定；总体 RSS 仍受 gen 类数组、紧凑补写索引和求解器开销影响，未达到常量总内存；两阶段计划会延后所属路径的首条样本并增加一次投影遍历；每个导出样本仍保留隔离 Context 的事件重放。没有实现紧凑骨架协议，也没有把守卫集合相同声称为代表模型内容相同。

@@ -1,0 +1,137 @@
+{
+  "说明": "最终正式验收；守卫集合按路径签名和守卫树前序规范化，不比较跨进程代表值。",
+  "起始HEAD": "c57d5d2",
+  "steps": {
+    "streaming": {
+      "fixed_trace_equal": true,
+      "samples": 16592,
+      "existing_lib_failures": 12,
+      "initial_lib_passed": 710
+    },
+    "json": {
+      "sv39_store_before_bytes": 188652067,
+      "sv39_store_after_bytes": 27891511,
+      "ratio": 6.763780814886651
+    }
+  },
+  "parallel": {
+    "sv39-load": {
+      "n1": {
+        "wall_seconds": 406,
+        "peak_rss_mib": 2328.8,
+        "paths": 20,
+        "classes": 16592,
+        "counted_paths": 16592,
+        "samples": 16592,
+        "duplicate_guards": 0,
+        "partitions_equal_count": true,
+        "guard_signature_sha256": "8988086bbef43c5217e090b7d2a98398c8d49ae9bd319f0ff58be73e8efde793",
+        "truncated_classes": 16570,
+        "truncated_paths": 0,
+        "gen_json_bytes": 68049429
+      },
+      "n16": {
+        "wall_seconds": 124,
+        "peak_rss_mib": 2268.0,
+        "paths": 20,
+        "classes": 16592,
+        "counted_paths": 16592,
+        "samples": 16592,
+        "duplicate_guards": 0,
+        "partitions_equal_count": true,
+        "guard_signature_sha256": "8988086bbef43c5217e090b7d2a98398c8d49ae9bd319f0ff58be73e8efde793",
+        "truncated_classes": 16570,
+        "truncated_paths": 0,
+        "gen_json_bytes": 68083329
+      },
+      "count": {
+        "wall_seconds": 30,
+        "peak_rss_mib": 884.8,
+        "paths": 20,
+        "classes": 16592,
+        "counted_paths": 16592,
+        "samples": null,
+        "duplicate_guards": 0,
+        "partitions_equal_count": true,
+        "truncated_classes": 16570,
+        "truncated_paths": 0,
+        "gen_json_bytes": 155706
+      },
+      "guard_sets_equal": true,
+      "speedup": 3.274,
+      "truncation_equal": true
+    },
+    "sv48-store": {
+      "n1": {
+        "wall_seconds": 731,
+        "peak_rss_mib": 6911.5,
+        "paths": 27,
+        "classes": 51638,
+        "counted_paths": 51638,
+        "samples": 51638,
+        "duplicate_guards": 0,
+        "partitions_equal_count": true,
+        "guard_signature_sha256": "6f87cfb8af770011efb5be7d276df24c365c10b7ba5e45d581ff0f78ebb0534c",
+        "truncated_classes": 51568,
+        "truncated_paths": 0,
+        "gen_json_bytes": 264134919
+      },
+      "n16": {
+        "wall_seconds": 566,
+        "peak_rss_mib": 6134.6,
+        "paths": 27,
+        "classes": 51638,
+        "counted_paths": 51638,
+        "samples": 51638,
+        "duplicate_guards": 0,
+        "partitions_equal_count": true,
+        "guard_signature_sha256": "6f87cfb8af770011efb5be7d276df24c365c10b7ba5e45d581ff0f78ebb0534c",
+        "truncated_classes": 51568,
+        "truncated_paths": 0,
+        "gen_json_bytes": 264095528
+      },
+      "count": {
+        "wall_seconds": 140,
+        "peak_rss_mib": 1373.5,
+        "paths": 27,
+        "classes": 51638,
+        "counted_paths": 51638,
+        "samples": null,
+        "duplicate_guards": 0,
+        "partitions_equal_count": true,
+        "truncated_classes": 51568,
+        "truncated_paths": 0,
+        "gen_json_bytes": 218514
+      },
+      "guard_sets_equal": true,
+      "speedup": 1.292,
+      "truncation_equal": true
+    }
+  },
+  "validation": {
+    "python_tests": 40,
+    "isla_lib_passed": 712,
+    "isla_lib_existing_failures": 12,
+    "isla_lib_ignored": 6,
+    "new_failures": 0,
+    "pt_decode_samples": [
+      16592,
+      51638
+    ],
+    "pt_decode_shapes": [
+      104,
+      125
+    ],
+    "check_samples_each": 32,
+    "smoke_samples": 4,
+    "smoke_status": "partial",
+    "smoke_unfinished": 1
+  },
+  "hashes": {
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/executor/merge_enumeration.rs": "b2fd1c80b834673007d634cdbe62a7df61084ab270c1452eeaff44b6116279b0",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/executor/merge_parallel.rs": "4259208079f1c5db5a9c105bd28eb18860843b9628340ec7f55bbf75b39f26d5",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/isla-lib/src/executor/samples.rs": "d8303fb59fe1f664d80879b4dacaba61a16f8a537d60abf15f646caa6826c155",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-enumerate/src/isarch/exec.rs": "07f83a3e5100d1cd8a881601bc4eb47d6ae6759a5f4238d65b774dd1f05688f5",
+    "/tmp/claude-1005/-data1-baiyifan-workplace-isla-runner/a39d8bcc-3e1b-4db3-8d63-110f0b832032/scratchpad/target_f8/release/isarch": "2fa6cd1f6601add9b0d264985a5b515c33b919fb01e69a99e17c6004a13359a8"
+  }
+}
