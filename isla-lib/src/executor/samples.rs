@@ -513,6 +513,7 @@ impl<B: BV> SamplePath<B> {
 }
 
 pub struct SampleWriter {
+    path: std::path::PathBuf,
     file: Mutex<(std::fs::File, u64)>,
     next: std::sync::atomic::AtomicU64,
 }
@@ -536,7 +537,7 @@ impl SampleWriter {
             next = next.max(sample.sample_id.checked_add(1).expect("样本编号溢出"));
         }
         let end = file.seek(SeekFrom::End(0)).unwrap();
-        Self { file: Mutex::new((file, end)), next: std::sync::atomic::AtomicU64::new(next) }
+        Self { path: path.to_path_buf(), file: Mutex::new((file, end)), next: std::sync::atomic::AtomicU64::new(next) }
     }
     pub fn append(&self, mut sample: Sample) -> SamplePosition {
         sample.sample_id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

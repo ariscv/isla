@@ -924,3 +924,49 @@ TDD 先确认两个 `attr="ram"` 区域仅 `reservability="eventual"/"none"` 的
 - 如果业务真正需要“访问设备得到架构 AF”，应由 PMA/PMP 的不可读属性表达。现有 mmio 的可读属性与 excluded 的生成过滤是两件事。不要用删除 excluded、改变设备属性或关闭合并来宣称修好本次统计问题。
 
 本轮只追加本小节；未改 isla-lib、生产代码、已有配置、IR 或 isarch，未做 git 写操作。该任务为只读调查和文档追加，不重跑会构建或改动产物的 make solve 验收链。
+
+## 代表稳定性（class_cap=1，2026-11-07）
+
+结论：指定新配置的 Sv39 STORE 在两个独立进程、`-T 32` 与 `-T 8` 下均导出 **1204 条完整 samples v1**，原始文件逐字节相同，包含 sample_id、行序、ret_val、全部前后寄存器、ISA 展示及内存；无需删除或归一化任何字段。两份 SHA-256 均为：
+
+```text
+bad0a0998055c75f2a6d84f86b931c9848e68c2408e05463667b2fdb8d86d241
+```
+
+例如，回归场景中同一守卫类的 `extra > 9` 固定选择 10，129 位非零输入选择 1，自由寄存器选择 0，枚举选择第一个可行成员，符号地址和嵌套数组读取选择地址 4096、字节 5。1 与 4 个枚举线程下完整样本字节相同，且全部被原路径成员检查接纳、后态及结果一致。
+
+### 根因与实现
+
+复核 F14 记录与当前 `merge_enumeration.rs`、`merge_parallel.rs`、样本物化及写出代码，三个来源仍成立：模型引导 DFS 的首个叶子没有唯一化；seed=0 不保证自由寄存器和内存的完整模型唯一；无序容器影响 fresh 符号与展示次序，并发追加影响编号和行序。本轮没有把排序或固定 seed 单独当作修复。
+
+- `class_cap=1` 的隔离导出求解器只接收原路径约束及该类规范活动守卫赋值，不再接收 DFS 任意首个叶子的被测位赋值。投影遍历、类号、预算、stride 与截断判据继续使用既有接口。
+- 按固定重放声明序依次规范全部自由有限域标量，再按固定定义序规范数组／函数的有限域可观察值；先固定自由标量，再固定读取，支持嵌套数组。复用 SMT 表达式类型推导区分数组本体与标量观察，不枚举整个数组。布尔 false 优先、位向量按无符号数序最小化（保留任意位宽）、枚举按声明成员序取第一个可行值。先尝试最小值和唯一性证明，再对确有自由度的位向量从高位到低位做 SAT 选择。规范标量逻辑放在 `merge_representative.rs`，复用原有模型读取、保存点及增量 SAT 接口，没有引入 Z3 优化器或新的 unsafe。
+- 局部槽、寄存器及结构体合并按已有 Name 序处理，结构体和符号构造子的文本也按此顺序显示，消除哈希遍历对变量分配与文本的影响。规范约束只存在于每个代表自己的隔离求解器，不覆盖 ISA 入口状态，也不修改原执行求解器。
+- 仅使用 v1_jsonl 后端且本会话每个枚举类只输出第 0 个解时，正常收尾按 `(path_signature, class_id)` 排序并连续编号；相同路径／类在不同 clause 重复时以除 sample_id 外的完整内容打破平局。保留已有文件前缀及编号，新追加部分从原最大编号之后开始。内存只存文件偏移索引，每次读写一个完整样本，临时排序文件位于输出文件旁并在完成后删除。运行中仍即时写出，最终文件稳定性在正常收尾后成立。
+
+samples v1 字段、版本、成员绑定语义保持不变。`class_cap>1` 的类内 DFS 继续使用原模型引导选择。多后端组合和字节预算后端继续使用原同源追加编号，不承诺这些容器文件的原始字节顺序；本轮固定语料验收使用单独的 v1_jsonl 导出。`class_cap=1` 仍是每类一个见证，不代表穷举该类全部具体位组合：本场景 `truncated_classes=1182`、`truncated_paths=0`。
+
+### 验收与复现
+
+产物根目录为本工作树的 `target_edev/logs/representative-stability/`，全部位于 `/data1`。正式二进制为 `target_edev/release/isarch`，默认 direct 构建，SHA-256 为 `610df5395219d4202a0dc347d05104737f521562d85dd47a70fbe25d8d31a3db`。构建与库测试复用基线的本机 Z3：
+
+```sh
+export RUSTFLAGS='-L /home/baiyifan/.local/opt/z3-official-1fd1d3613/lib -C link-arg=-Wl,-rpath,/home/baiyifan/.local/opt/z3-official-1fd1d3613/lib'
+export TMPDIR="$PWD/target_edev/logs/representative-stability/tmp"
+cargo build --release --offline --bin isarch --target-dir target_edev -j16
+cargo test -p isla-lib --offline --features smt-thread-interrupt --target-dir target_edev -j16
+cargo fmt --check
+```
+
+TDD 先红后绿的三项新增测试覆盖跨线程完整代表及规范最小值、哈希字段分配与显示顺序、反序追加后的最终完整文件；扩展红测还捕获了直接物化嵌套数组本体的问题。最终库测试 **746 通过、0 失败、6 忽略**，另集成 2 项、文档 3 项通过；`cargo fmt --check` 与 `git diff --check` 通过。日志为 [tests-delivery.log](../../target_edev/logs/representative-stability/tests-delivery.log)。前几次测试中保留了既有 1ms deadline 返回 Sat 的失败日志；最终未修改或跳过该测试，完整测试正常通过。
+
+正式输入只读来自 `/data1/baiyifan/workplace/isla-runner/.worktree/replay-p0/output/ecfg/`：`config-xs.toml` SHA-256 为 `40d728925731cd7a8d7308b4f1f0b0f61940a79881ad4955780c48a366704129`，`rv64d.ir` 为 `c0e4661a73888c56438a6f76059370667d141a026502d0511291586067bd31c0`。使用 `0x0020b023`、x1=`0x20000000`、Supervisor、satp=`0x8000000000080200`、mstatus=`0x0000000a00040000`，menvcfg/senvcfg/mseccfg 均为 0；`class_cap=1`、`path_cap=1000000`、`sample_stride=1`、`enumeration_threads=4`。两个进程各设外限 890 秒，每次均有持续样本进展并正常退出 0。
+
+| 正式运行 | 秒数 | 完成路径 | 守卫类／样本 | 原始 v1 字节 |
+|---|---:|---:|---:|---|
+| [final-T32](../../target_edev/logs/representative-stability/final-T32/) | 261.24 | 20 | 1204／1204 | 完全一致 |
+| [final-T8](../../target_edev/logs/representative-stability/final-T8/) | 270.85 | 20 | 1204／1204 | 完全一致 |
+
+每个运行目录保存完整 `command.sh`、`limits.toml`、`samples.jsonl`、stderr 和带输入哈希的 `done.json`；[verification.json](../../target_edev/logs/representative-stability/verification.json) 保存最终字节比较、类号连续性、路径及枚举汇总核对。可运行同目录 `verify.py` 重做校验，不重建或调用 isarch。另一次系统 Z3 的补充复跑也得到相同的两份 1204 条原始 v1 文件，但正式验收以上表及基线 Z3 为准；单次耗时不作为性能统计结论。
+
+`make -j1 solve-MRET THREADS=8` 冒烟使用同一最终二进制和指定新配置，退出 0、生成 4 条用例、耗时 2.64 秒，命令及日志位于 [mret](../../target_edev/logs/representative-stability/mret/)。为保留既有 output 产物，在独立验收目录运行 Makefile，`-o build-isarch` 复用已显式构建的 target_edev 二进制。未改 target_f8 的 isarch、冻结配置或 IR，未做 git 写操作。

@@ -801,7 +801,7 @@ fn merge_states<'ir, B: BV>(
         let a = if lets { left.lets() } else { left.vars() };
         let b = if lets { right.lets() } else { right.vars() };
         let original = if lets { base.lets() } else { base.vars() };
-        let names: HashSet<_> = a.keys().chain(b.keys()).copied().collect();
+        let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
         for name in names {
             if !lets && region.local_variables.contains(&name) && !original.contains_key(&name) {
                 merged.vars_mut().remove(&name);
@@ -854,7 +854,9 @@ fn merge_states<'ir, B: BV>(
         }
     }
     let registers: HashSet<_> = lhs.writes.modified_regs.union(&rhs.writes.modified_regs).copied().collect();
-    for reg in lhs.writes.read_regs.union(&rhs.writes.read_regs).chain(registers.iter()) {
+    let read_or_written: std::collections::BTreeSet<_> =
+        lhs.writes.read_regs.union(&rhs.writes.read_regs).chain(registers.iter()).collect();
+    for reg in read_or_written {
         if base.regs().is_relaxed(*reg) || base.regs().has_old_writes(*reg) {
             return Err(reject(base, SpeculativeRejectReason::RelaxedRegister));
         }

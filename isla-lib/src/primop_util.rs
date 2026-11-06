@@ -303,6 +303,8 @@ fn build_ite_with<B: BV>(
         (Val::Struct(l_fields), Val::Struct(r_fields)) => {
             let fields: Result<_, _> = l_fields
                 .iter()
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_iter()
                 .map(|(k, l_val)| match r_fields.get(k) {
                     None => Err(ExecError::Type(format!("build_ite {:?}", &k), info)),
                     Some(r_val) => Ok((*k, merge_payload(b, l_val, r_val, solver, info)?)),
@@ -353,7 +355,7 @@ fn build_ite_with<B: BV>(
             let sym_id = solver.define_const(Ite(Box::new(Var(b)), Box::new(Var(*l_id)), Box::new(Var(*r_id))), info);
 
             let mut possibilities = lhs.clone();
-            for (ctor, rhs_val) in rhs.iter() {
+            for (ctor, rhs_val) in rhs.iter().collect::<std::collections::BTreeMap<_, _>>() {
                 match possibilities.entry(*ctor) {
                     Entry::Occupied(o) => *o.into_mut() = merge_payload(b, o.get(), rhs_val, solver, info)?,
                     Entry::Vacant(v) => {
@@ -680,6 +682,8 @@ pub fn merge_val<B: BV>(
             }
             let fields: Result<_, _> = a_fields
                 .iter()
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_iter()
                 .map(|(field, a_val)| match b_fields.get(field) {
                     Some(b_val) => Ok((*field, merge_val(cond, a_val, b_val, solver, info)?)),
                     None => Err(ExecError::Type(format!("merge_val missing struct field {:?}", field), info)),
@@ -775,6 +779,8 @@ fn merge_struct_fields_nary<B: BV>(
 
     let fields: Result<_, _> = first_fields
         .iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_iter()
         .map(|(field, first_val)| {
             let mut field_values = Vec::with_capacity(structs.len());
             field_values.push(first_val);
@@ -804,7 +810,7 @@ pub fn merge_bindings_nary<'ir, B: BV>(
 
     let keys = binding_keys(bindings);
     let mut merged = HashMap::default();
-    for key in keys {
+    for key in keys.into_iter().collect::<std::collections::BTreeSet<_>>() {
         let mut values = Vec::with_capacity(bindings.len());
         let mut all_uninit = true;
         let mut uninit = None;
@@ -861,7 +867,7 @@ pub fn merge_register_bindings_nary<'ir, B: BV>(
 
     let keys = register_binding_keys(reg_bindings);
     let mut merged = RegisterBindings::new();
-    for key in keys {
+    for key in keys.into_iter().collect::<std::collections::BTreeSet<_>>() {
         let mut values = Vec::with_capacity(reg_bindings.len());
         for regs in reg_bindings {
             match regs.get_last_if_initialized(key) {

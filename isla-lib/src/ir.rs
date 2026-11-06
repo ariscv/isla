@@ -445,7 +445,7 @@ impl<B: BV> Val<B> {
                 if fields.is_empty() {
                     write!(buf, "nil")?
                 } else {
-                    for (i, (k, v)) in fields.iter().enumerate() {
+                    for (i, (k, v)) in fields.iter().collect::<BTreeMap<_, _>>().into_iter().enumerate() {
                         write!(buf, "(|{}| ", zencode::decode(symtab.to_str(*k)))?;
                         v.write(buf, shared_state)?;
                         write!(buf, ")")?;
@@ -466,7 +466,7 @@ impl<B: BV> Val<B> {
                 if possibilities.is_empty() {
                     write!(buf, "nil")?
                 } else {
-                    for (i, (k, v)) in possibilities.iter().enumerate() {
+                    for (i, (k, v)) in possibilities.iter().collect::<BTreeMap<_, _>>().into_iter().enumerate() {
                         write!(buf, "(|{}| ", zencode::decode(symtab.to_str_demangled(*k)))?;
                         v.write(buf, shared_state)?;
                         write!(buf, ")")?;

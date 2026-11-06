@@ -3756,6 +3756,173 @@ fn region_merge_f4_special_calls_still_rejected_statically() {
 }
 
 #[test]
+fn merge_enumeration_结构字段分配与显示不依赖哈希迭代() {
+    let shared = empty_shared_state();
+    let mut reference = None;
+    for round in 0..16 {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let guard = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut left = ahash::HashMap::default();
+        let mut right = ahash::HashMap::default();
+        for index in 0..8 {
+            let field = test_name(1 + (index + round) % 8);
+            left.insert(field, Val::Bits(B64::new(0, 8)));
+            right.insert(field, Val::Bits(B64::new(1, 8)));
+        }
+        let value =
+            crate::primop_util::merge_val(guard, &Val::Struct(left), &Val::Struct(right), &mut solver, info()).unwrap();
+        let text = value.to_string(&shared);
+        if let Some(reference) = &reference {
+            assert_eq!(&text, reference, "字段对应的 fresh 符号及展示次序必须固定");
+        } else {
+            reference = Some(text);
+        }
+    }
+}
+
+#[test]
+fn merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规范最小值() {
+    use crate::executor::samples::SamplePath;
+    use smtlib::Exp::*;
+    let mut shared = empty_shared_state();
+    let enum_name = shared.symtab.intern("zStableEnum");
+    let members = ["zFirst", "zSecond", "zThird"].map(|name| shared.symtab.intern(name));
+    shared.type_info.enums.insert(enum_name, members.to_vec());
+    for (index, member) in members.iter().enumerate() {
+        shared.type_info.enum_members.insert(*member, (index, members.len(), enum_name));
+    }
+    let run = |threads| {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let input = solver.declare_bitvector(8, info());
+        let extra = solver.declare_bitvector(32, info());
+        let free = solver.declare_bitvector(64, info());
+        let wide = solver.declare_bitvector(129, info());
+        let enum_id = solver.get_enum(enum_name, 3);
+        let member = solver.declare_const(smtlib::Ty::Enum(enum_id), info());
+        solver.assert(Neq(Box::new(Var(member)), Box::new(Enum(enum_id.first_member()))));
+        let array = solver.declare_const(
+            smtlib::Ty::Array(
+                Box::new(smtlib::Ty::BitVec(64)),
+                Box::new(smtlib::Ty::Array(Box::new(smtlib::Ty::BitVec(64)), Box::new(smtlib::Ty::BitVec(8)))),
+            ),
+            info(),
+        );
+        let address = solver.declare_bitvector(64, info());
+        solver.assert(Bvugt(Box::new(Var(address)), Box::new(smtlib::bits64(4095, 64))));
+        let data = solver.define_const(
+            Select(Box::new(Select(Box::new(Var(array)), Box::new(smtlib::bits64(0, 64)))), Box::new(Var(address))),
+            info(),
+        );
+        solver.assert(Bvuge(Box::new(Var(data)), Box::new(smtlib::bits64(5, 8))));
+        solver.assert(Bvugt(Box::new(Var(extra)), Box::new(smtlib::bits64(9, 32))));
+        solver.assert(Neq(Box::new(Var(wide)), Box::new(Bits(vec![false; 129]))));
+        let mut frame = make_frame(vec![Instr::End]);
+        for id in 0..2 {
+            let condition = if id == 0 {
+                solver.define_const(
+                    Eq(Box::new(Extract(3, 0, Box::new(Var(input)))), Box::new(smtlib::bits64(0, 4))),
+                    info(),
+                )
+            } else {
+                solver.declare_const(smtlib::Ty::Bool, info())
+            };
+            frame.region_merge_records.push(RegionMergeRecord {
+                record_id: id,
+                parent_record: None,
+                arm: "root",
+                function: TOP_LEVEL_LET,
+                branch_pc: id,
+                join: crate::ir::regions::RegionPoint::FunctionExit,
+                condition,
+                source_loc: info(),
+                depth: 1,
+                dead: false,
+                value_symbols: HashSet::new(),
+                input_symbols: HashSet::new(),
+                single_arm_reads: vec![],
+                memory_reads: vec![],
+            });
+        }
+        let path = SamplePath {
+            pre: BTreeMap::from([
+                ("input".into(), Val::Symbolic(input)),
+                ("extra".into(), Val::Symbolic(extra)),
+                ("free".into(), Val::Symbolic(free)),
+                ("wide".into(), Val::Symbolic(wide)),
+                ("enum".into(), Val::Symbolic(member)),
+            ]),
+            post: BTreeMap::from([("extra".into(), Val::Symbolic(extra))]),
+            result: Val::Symbolic(input),
+            memory: vec![Event::ReadMem {
+                value: Val::Symbolic(data),
+                read_kind: Val::Unit,
+                address: Val::Symbolic(address),
+                bytes: 1,
+                tag_value: None,
+                opts: Default::default(),
+                region: "mem",
+            }],
+            memory_guards: BTreeMap::new(),
+        };
+        let mut limits = ExecutionLimits::default();
+        limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+            enabled: true,
+            class_cap: 1,
+            path_cap: 100,
+            enumeration_threads: threads,
+            ..Default::default()
+        };
+        let samples = Mutex::new(BTreeMap::new());
+        let before = solver.trace().to_vec().len();
+        let output = frame
+            .enumerate_merges_parallel_with(
+                &mut solver,
+                &TaskState::new().with_execution_limits(limits),
+                &shared,
+                &path.result,
+                &|class, solution, model| {
+                    assert_eq!(solution, 0);
+                    let sample = path.materialize(model, &shared, "merge", 42, Some(class))?;
+                    samples.lock().unwrap().insert(class, serde_json::to_vec(&sample).unwrap());
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(output["counted_classes"], 4);
+        let samples = samples.into_inner().unwrap();
+        for bytes in samples.values() {
+            let sample = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(
+                path.check(&mut solver, &shared, &sample).unwrap(),
+                Some(true),
+                "规范代表必须被原路径接纳且结果一致"
+            );
+        }
+        assert_eq!(solver.trace().to_vec().len(), before);
+        assert_eq!(solver.transaction_depth(), 0);
+        (output, samples)
+    };
+    let (reference, serial) = run(1);
+    let (parallel, concurrent) = run(4);
+    assert_eq!(serial, concurrent, "同一守卫类的完整 v1 样本必须逐字节相同");
+    for (class, bytes) in serial {
+        let sample: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let input = if class < 2 { 1 } else { 0 };
+        assert_eq!(sample["pre_registers"]["input"]["bits"], format!("{input:08b}"));
+        assert_eq!(sample["pre_registers"]["extra"]["bits"], format!("{:032b}", 10));
+        assert_eq!(sample["pre_registers"]["free"]["bits"], "0".repeat(64));
+        assert_eq!(sample["pre_registers"]["wide"]["bits"], format!("{}1", "0".repeat(128)));
+        assert_eq!(sample["pre_registers"]["enum"]["enum"], "Second");
+        assert_eq!(sample["pre_memory"], serde_json::json!([{"address":4096,"value":5,"bytes":1}]));
+        assert_eq!(sample["post_memory"], sample["pre_memory"]);
+    }
+    assert_eq!(reference["counted_classes"], parallel["counted_classes"]);
+}
+
+#[test]
 fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
     use smtlib::Exp::*;
     let run = |stride, class_cap, path_cap, enumeration_threads| {

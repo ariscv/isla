@@ -10,6 +10,9 @@ mod components;
 #[path = "merge_parallel.rs"]
 mod parallel;
 
+#[path = "merge_representative.rs"]
+mod representative;
+
 #[path = "merge_predict.rs"]
 mod predict;
 
@@ -424,6 +427,52 @@ impl<B: BV> LocalFrame<'_, B> {
         // 物化会在 Z3 Context 中创建 AST、补全模型，影响后续代表值。
         // 复用现有事件重放接口隔离 DFS 与逐解物化，避免 stride 改变样本内容。
         let replay_events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
+        // 同一路径的全部代表复用固定变量序；只收集可观察的有限域自由度。
+        let canonical_symbols = if !counting && config.class_cap == 1 {
+            let mut types = HashMap::new();
+            let mut functions = HashMap::new();
+            let mut opaque = HashSet::new();
+            let mut observations = Vec::new();
+            let mut declarations = Vec::new();
+            for event in &replay_events {
+                if let Event::Smt(definition, _, _) = event {
+                    match definition {
+                        Def::DeclareConst(symbol, ty) => {
+                            types.insert(*symbol, ty.clone());
+                            if matches!(ty, smtlib::Ty::Bool | smtlib::Ty::BitVec(_) | smtlib::Ty::Enum(_)) {
+                                declarations.push(*symbol);
+                            } else {
+                                opaque.insert(*symbol);
+                            }
+                        }
+                        Def::DeclareFun(symbol, arguments, result) => {
+                            functions.insert(*symbol, (arguments.clone(), result.clone()));
+                        }
+                        Def::DefineConst(symbol, expression) => {
+                            let ty = expression.infer(&types, &functions).expect("重放定义必须具有类型");
+                            let mut open = expression.variables().iter().any(|symbol| opaque.contains(symbol));
+                            let mut expression = expression.clone();
+                            expression.modify(&mut |expression| {
+                                open |= matches!(expression, App(..));
+                            });
+                            if open {
+                                if matches!(ty, smtlib::Ty::Bool | smtlib::Ty::BitVec(_) | smtlib::Ty::Enum(_)) {
+                                    observations.push(*symbol);
+                                } else {
+                                    opaque.insert(*symbol);
+                                }
+                            }
+                            types.insert(*symbol, ty);
+                        }
+                        Def::DefineEnum(..) | Def::Assert(..) => (),
+                    }
+                }
+            }
+            declarations.extend(observations);
+            declarations
+        } else {
+            Vec::new()
+        };
         let tx = solver.start_transaction();
         let mut diagnostic = if counting && std::env::var("ISLA_ENUM_COMPONENTS").as_deref() == Ok("1") {
             Some(components::Diagnostic::new(records, &contexts, &expressions, &bits, &replay_events))
@@ -602,10 +651,38 @@ impl<B: BV> LocalFrame<'_, B> {
                         for event in &replay_events {
                             representative_solver.add_event(event.clone());
                         }
-                        let condition = selected
-                            .iter()
-                            .fold(prefix.clone(), |condition, bit| And(Box::new(condition), Box::new(bit.clone())));
+                        let condition = if config.class_cap == 1 {
+                            // 代表只由活动守卫赋值决定，不钉选投影求解器任意发现的首个叶子。
+                            order.iter().zip(&assignment).fold(Bool(true), |condition, (index, value)| {
+                                let record = &records[*index];
+                                let guard =
+                                    And(Box::new(contexts[&record.record_id].clone()), Box::new(Var(record.condition)));
+                                And(Box::new(condition), Box::new(if *value { guard } else { Not(Box::new(guard)) }))
+                            })
+                        } else {
+                            selected
+                                .iter()
+                                .fold(prefix.clone(), |condition, bit| And(Box::new(condition), Box::new(bit.clone())))
+                        };
                         assert!(satisfiable(&mut representative_solver, &condition)?, "DFS 见证必须可重放");
+                        if config.class_cap == 1 {
+                            let mut condition = condition;
+                            let transaction = representative_solver.start_transaction();
+                            let canonical = representative_solver.with_incremental_checks(|solver| {
+                                // 固定声明序下全部自由标量，再固定数组/函数的实际读取。
+                                // 不最小化数组本体；输出只观察它的有限次读取。
+                                for symbol in &canonical_symbols {
+                                    representative::canonical_value(solver, Var(*symbol), &mut condition, shared)?;
+                                }
+                                Ok::<_, ExecError>(())
+                            });
+                            representative_solver.rollback_transaction(transaction);
+                            canonical?;
+                            assert!(
+                                satisfiable(&mut representative_solver, &condition)?,
+                                "规范代表必须满足原路径及所属守卫类"
+                            );
+                        }
                         let mut model = Model::new(&representative_solver);
                         model.set_complete_model(true);
                         // 每个完整符号只取一次；本地截取所有重复或重叠片段。

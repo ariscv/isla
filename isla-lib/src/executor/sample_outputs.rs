@@ -19,6 +19,8 @@ pub struct SampleOutputs {
     summary_path: Option<PathBuf>,
     next_sample: AtomicU64,
     next_path: AtomicU64,
+    single_representatives: std::sync::atomic::AtomicBool,
+    first_sample: u64,
 }
 
 /// 所有后端接收同一份已物化完整样本；不会各自查询 Z3 或另选代表模型。
@@ -95,6 +97,8 @@ impl SampleOutputs {
             summary_path: None,
             next_sample: AtomicU64::new(next),
             next_path: AtomicU64::new(0),
+            single_representatives: std::sync::atomic::AtomicBool::new(true),
+            first_sample: next,
         }
     }
 
@@ -138,6 +142,8 @@ impl SampleOutputs {
             summary_path: Some(path.with_extension("summary.json")),
             next_sample: AtomicU64::new(0),
             next_path: AtomicU64::new(0),
+            single_representatives: std::sync::atomic::AtomicBool::new(false),
+            first_sample: 0,
         }
     }
 
@@ -167,6 +173,9 @@ impl SampleOutputs {
     }
 
     pub fn append(&self, path: u64, solution: usize, slices: &[String], mut sample: Sample) -> bool {
+        if solution != 0 || sample.class_id.is_none() {
+            self.single_representatives.store(false, Ordering::Relaxed);
+        }
         sample.sample_id = self
             .next_sample
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
@@ -265,6 +274,70 @@ impl SampleOutputs {
             std::fs::write(self.summary_path.as_ref().unwrap(), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
             eprintln!("[SAMPLE_OUTPUT_REPORT] {}", report);
         }
+        // 单代表 v1 语料在正常收尾时统一行序和编号；运行中仍即时可读。
+        // 多后端沿用同源编号，不能只改 v1 而破坏紧凑格式展开的一致性。
+        if self.single_representatives.load(Ordering::Relaxed)
+            && self.backends.iter().all(|backend| matches!(backend, SampleBackend::V1(_)))
+        {
+            for backend in &self.backends {
+                let SampleBackend::V1(writer) = backend else { unreachable!() };
+                let mut file = writer.file.lock().unwrap();
+                file.0.seek(SeekFrom::Start(0)).unwrap();
+                let mut rows = Vec::new();
+                let mut start = 0;
+                let mut position = 0;
+                for line in std::io::BufReader::new(file.0.try_clone().unwrap()).split(b'\n') {
+                    let line = line.unwrap();
+                    let sample: Sample = serde_json::from_slice(&line).expect("收尾前样本必须完整");
+                    let length = line.len() as u64 + 1;
+                    if sample.sample_id < self.first_sample {
+                        assert!(rows.is_empty(), "历史样本必须位于新样本之前");
+                        start += length;
+                    } else {
+                        rows.push(((sample.path_signature, sample.class_id), position, length));
+                    }
+                    position += length;
+                }
+                // 内存只保留索引；同签名/类可在不同 clause 中重复，以完整内容打破平局。
+                let source = file.0.try_clone().unwrap();
+                let read_sample = |position, length| {
+                    let mut bytes = vec![0; length as usize];
+                    source.read_exact_at(&mut bytes, position).unwrap();
+                    let mut sample: Sample = serde_json::from_slice(&bytes).unwrap();
+                    sample.sample_id = 0;
+                    sample
+                };
+                rows.sort_by(|left, right| {
+                    left.0.cmp(&right.0).then_with(|| {
+                        serde_json::to_vec(&read_sample(left.1, left.2))
+                            .unwrap()
+                            .cmp(&serde_json::to_vec(&read_sample(right.1, right.2)).unwrap())
+                    })
+                });
+                let temporary = writer.path.with_extension(format!(
+                    "canonical-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                ));
+                let mut sorted = std::io::BufWriter::new(
+                    OpenOptions::new().read(true).write(true).create_new(true).open(&temporary).unwrap(),
+                );
+                file.0.seek(SeekFrom::Start(0)).unwrap();
+                std::io::copy(&mut std::io::Read::take(file.0.try_clone().unwrap(), start), &mut sorted).unwrap();
+                for (index, (_, position, length)) in rows.into_iter().enumerate() {
+                    let mut sample = read_sample(position, length);
+                    sample.sample_id = self.first_sample.checked_add(index as u64).unwrap();
+                    serde_json::to_writer(&mut sorted, &sample).unwrap();
+                    sorted.write_all(b"\n").unwrap();
+                }
+                let mut sorted = sorted.into_inner().unwrap();
+                sorted.seek(SeekFrom::Start(0)).unwrap();
+                file.0.seek(SeekFrom::Start(0)).unwrap();
+                file.1 = std::io::copy(&mut sorted, &mut file.0).unwrap();
+                file.0.set_len(file.1).unwrap();
+                std::fs::remove_file(temporary).unwrap();
+            }
+        }
         for backend in &self.backends {
             if let SampleBackend::Grouped(writer) = backend {
                 assert!(writer.classes.lock().unwrap().is_empty(), "所有输出类都必须正常收尾");
@@ -313,6 +386,50 @@ fn difference(base: &Value, value: &Value, path: &str, delta: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outputs_单代表规范文件不依赖路径和类的追加顺序() {
+        let root = std::env::temp_dir().join(format!(
+            "代表文件-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let mut reference = None;
+        for (run, order) in [[(7, 0), (7, 1), (9, 0)], [(9, 0), (7, 1), (7, 0)]].iter().enumerate() {
+            let file = root.join(format!("{run}.jsonl"));
+            let outputs =
+                SampleOutputs::open(&[SampleOutputConfig { format: SampleOutputFormat::V1Jsonl, path: file.clone() }]);
+            for (signature, class) in order {
+                let path = outputs.start_path(*signature);
+                let sample = Sample {
+                    schema_version: 1,
+                    sample_id: 999,
+                    mode: "merge".into(),
+                    path_signature: *signature,
+                    class_id: Some(*class),
+                    truncated: false,
+                    pre_registers: BTreeMap::new(),
+                    post_registers: BTreeMap::new(),
+                    isa_state: BTreeMap::new(),
+                    pre_memory: vec![],
+                    post_memory: vec![],
+                    result: json!({"unit":true}),
+                    ret_val: "()".into(),
+                };
+                assert!(outputs.append(path, 0, &[], sample));
+                outputs.finish_path(path, false);
+            }
+            outputs.finish();
+            let bytes = std::fs::read(&file).unwrap();
+            if let Some(reference) = &reference {
+                assert_eq!(&bytes, reference, "收尾后的完整 v1 文件含编号与行序必须逐字节一致");
+            } else {
+                reference = Some(bytes);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn outputs_同一完整样本写三后端且类内增量不丢字段() {
