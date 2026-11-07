@@ -115,6 +115,7 @@ fn check_pma_merge(overrides: &str) {
     assert_ne!(values[0], values[1]);
     // 三个实际合并入口：局部变量、let 和寄存器；首个 checkpoint 不含枚举定义。
     for slot in ["var", "let", "reg"] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let condition = solver.declare_const(smtlib::Ty::Bool, info());

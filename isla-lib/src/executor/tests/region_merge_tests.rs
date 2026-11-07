@@ -21,6 +21,7 @@ fn paths_with_memory(
     merge: bool,
     memory: crate::memory::Memory<B64>,
 ) -> Vec<Path> {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let mut frame = make_frame(instrs);
@@ -145,6 +146,7 @@ fn differential(
     if merged.len() == 1 {
         assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并，不能仅普通剪枝");
     }
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let input_symbols: Vec<_> = (0..inputs).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
@@ -283,6 +285,7 @@ fn region_merge_undeclared_call_rejected_only_when_reached() {
             instr,
             Instr::End,
         ]);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -490,6 +493,7 @@ fn region_merge_single_arm_register_read_union_and_guard() {
         Instr::Copy(Loc::Id(RETURN), Exp::Id(register), info()),
         Instr::End,
     ]);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -574,6 +578,7 @@ pub(super) fn check_region_effect_rejection_and_negative_cache() {
         Instr::End,
     ]);
     shared.symtab.set_files(vec!["region.sail"]);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -620,6 +625,7 @@ pub(super) fn check_region_rejection_locations_and_budget() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
         Instr::End,
     ]);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -670,6 +676,7 @@ pub(super) fn check_region_read_after_write_location() {
         Instr::End,
     ]);
     frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -724,6 +731,7 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
     assert_eq!(differential(program.clone(), &shared, 3, false), (3, 2));
     let mut frame = make_frame(program);
     frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     for index in 0..3 {
@@ -833,6 +841,7 @@ fn region_merge_force_process_failure_and_off_conflict() {
         let state = TaskState::new().with_execution_limits(policy_limits(&shared, rules));
         let mut frame = make_frame(program);
         frame.function_name = root;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         for index in 0..2 {
@@ -932,6 +941,7 @@ fn region_merge_policy_inheritance_and_global_off() {
             Instr::End,
         ]);
         frame.function_name = root;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         for index in 0..2 {
@@ -974,6 +984,7 @@ fn region_merge_callee_have_exception_write_rejects() {
         Instr::End,
     ]);
     frame.lets_mut().insert(HAVE_EXCEPTION, UVal::Init(Val::Bool(false)));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1044,6 +1055,7 @@ fn region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit()
             Instr::Call(Loc::Id(RETURN), false, wrapper, vec![Exp::Bool(execute_exception)], info()),
             Instr::End,
         ]);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1092,6 +1104,7 @@ fn region_merge_non_returning_requires_all_paths_and_preserves_normal_writes() {
         Instr::Call(Loc::Id(RETURN), false, function, vec![Exp::Bool(true)], info()),
         Instr::End,
     ]);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1227,6 +1240,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
     });
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let symbol = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1272,6 +1286,7 @@ fn region_merge_nested_single_read_keeps_complete_guard() {
         Instr::End,
     ]);
     frame.regs_mut().insert(register, false, UVal::Uninit(&Ty::Bool));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let g = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1323,6 +1338,7 @@ fn region_merge_partial_register_write_reuses_original_unwritten_fields() {
         Instr::End,
     ]);
     frame.regs_mut().insert(register, false, UVal::Uninit(Box::leak(Box::new(Ty::Struct(structure)))));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1400,6 +1416,7 @@ fn region_merge_repeated_pure_calls_keep_distinct_local_initial_values() {
         Instr::End,
     ]);
     frame.function_name = TOP_LEVEL_LET;
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let outer = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1786,6 +1803,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
         let mut frame = make_frame(program);
         frame.function_name = root;
         frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let symbol = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1854,6 +1872,7 @@ fn region_merge_effects_use_external_binding_and_reject_callee_vector_writes() {
         Instr::Call(Loc::Id(RETURN), false, caller, vec![Exp::Bool(true)], info()),
         Instr::End,
     ]);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let symbol = solver.declare_const(smtlib::Ty::Bool, info());
@@ -1983,6 +2002,7 @@ fn region_merge_f2_union_initial_value_constraints() {
                         }
                         _ => unreachable!(),
                     }
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let context = Context::new(Config::new());
                     let mut solver = Solver::new(&context);
                     let g = solver.declare_const(smtlib::Ty::Bool, info());
@@ -2226,6 +2246,7 @@ fn region_merge_f2_force_and_adaptive_errors() {
         if case == "budget" {
             state = state.with_region_step_budget(0);
         }
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -2327,6 +2348,7 @@ fn region_merge_f2_records_disabled_skips_scan() {
 #[should_panic(expected = "臂提交前保存点必须有效")]
 fn region_merge_f2_invalid_savepoint_panics_before_arm_commit() {
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let g = solver.declare_const(smtlib::Ty::Bool, info());
@@ -2498,6 +2520,7 @@ fn merge_enumeration_nested_context_and_fork_inheritance() {
     let parent = path.records.iter().find(|r| r.parent_record.is_none()).unwrap();
     assert_eq!(child.parent_record, Some(parent.record_id));
     assert_eq!(child.arm, "then");
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     for event in &path.events {
@@ -2571,6 +2594,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
     use smtlib::Exp::*;
     let mut shared = empty_shared_state();
     let fault = shared.symtab.intern("zPageFault");
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let bits = solver.declare_bitvector(4, info());
@@ -2691,6 +2715,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
 fn merge_enumeration_extract_of_derived_symbol() {
     use smtlib::Exp::*;
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let input = solver.declare_bitvector(8, info());
@@ -2741,6 +2766,7 @@ fn merge_enumeration_extract_of_derived_symbol() {
 fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
     use smtlib::Exp::*;
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let guard = solver.declare_const(smtlib::Ty::Bool, info());
@@ -2787,6 +2813,7 @@ fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
 #[ignore = "F5 万类压力验证，显式运行"]
 fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let mut frame = make_frame(vec![Instr::End]);
@@ -2839,6 +2866,7 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
     fn event_can_cross_threads<T: Send + Sync>() {}
     event_can_cross_threads::<Event<B64>>();
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let mut frame = make_frame(vec![Instr::End]);
@@ -3005,6 +3033,7 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
         let state = TaskState::new().with_execution_limits(limits);
         let mut frame = LocalFrame::new(function, args, ret_ty, None, body);
         frame.add_regs(&initialized.regs).add_lets(&initialized.lets);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         reset_registers(0, &mut frame, &state, shared, &mut solver, info()).unwrap();
@@ -3203,6 +3232,7 @@ fn samples_two_arm_nested_cross_mode_and_roundtrip() {
             ]
         };
         let run = |merge, samples: &[_]| {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let context = Context::new(Config::new());
             let mut solver = Solver::new(&context);
             let mut frame = make_frame(program.clone());
@@ -3281,6 +3311,7 @@ fn samples_real_ir_pte_cross_mode() {
     let function = shared.symtab.lookup("zpte_is_invalid");
     let (args, ret_ty, body) = &shared.functions[&function];
     let run = |merge, samples: &[_]| {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let mut frame = LocalFrame::new(function, args, ret_ty, None, body);
@@ -3420,6 +3451,7 @@ fn region_merge_f4_unreachable_unknown_extern() {
         (2, 1)
     );
     // 普通执行的未知入口确实报 NoFunction；推演执行改为可回滚拒绝。
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let mut frame = make_frame(vec![Instr::End]);
@@ -3492,6 +3524,7 @@ fn region_merge_f4_memory_read_union() {
             let merged = paths_with_memory(program, &shared, 1, true, memory);
             assert_eq!((forked.len(), merged.len()), (2, 1), "concrete={concrete}, same={same_address}");
             assert_eq!(merged[0].events.iter().filter(|e| e.is_memory_read()).count(), 2);
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let context = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&context);
             let g = solver.declare_const(smtlib::Ty::Bool, info());
@@ -3581,6 +3614,7 @@ impl crate::memory::MemoryCallbacks<B64> for F4ReadConstraint {
 fn region_merge_f4_memory_constraints_are_guarded_and_reads_survive_checkpoint() {
     use smtlib::Exp::{And, Eq, Not, Var};
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let g = solver.declare_const(smtlib::Ty::Bool, info());
@@ -3689,6 +3723,7 @@ fn region_merge_f4_real_get_xlpe_diagnosis() {
     }
     for (fixed, merge) in [(true, false), (true, true), (false, false), (false, true)] {
         shared.execution_stats.reset();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
@@ -3760,6 +3795,7 @@ fn merge_enumeration_结构字段分配与显示不依赖哈希迭代() {
     let shared = empty_shared_state();
     let mut reference = None;
     for round in 0..16 {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let guard = solver.declare_const(smtlib::Ty::Bool, info());
@@ -3793,6 +3829,7 @@ fn merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规�
         shared.type_info.enum_members.insert(*member, (index, members.len(), enum_name));
     }
     let run = |threads| {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let input = solver.declare_bitvector(8, info());
@@ -3927,6 +3964,7 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
     use smtlib::Exp::*;
     let run = |stride, class_cap, path_cap, enumeration_threads| {
         let shared = empty_shared_state();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
         let input = solver.declare_bitvector(4, info());
@@ -4080,6 +4118,7 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
 #[test]
 fn merge_enumeration_budget_边枚举边回调并正常截断回滚() {
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let frame = make_frame(vec![Instr::End]);
@@ -4115,6 +4154,7 @@ fn merge_enumeration_budget_边枚举边回调并正常截断回滚() {
 fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
     use smtlib::Exp::*;
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let input = solver.declare_bitvector(8, info());
@@ -4184,6 +4224,7 @@ fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
 fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截断() {
     use smtlib::Exp::*;
     let shared = empty_shared_state();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let input = solver.declare_bitvector(9, info());

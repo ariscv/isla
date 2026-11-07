@@ -637,6 +637,7 @@ mod tests {
     #[test]
     fn samples_流式写出后原位补齐截断且不改变编号和文件长度() {
         let file = std::env::temp_dir().join(format!("e2-patch-{}.jsonl", std::process::id()));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let path = SamplePath {
@@ -672,6 +673,7 @@ mod tests {
 
     #[test]
     fn samples_membership_and_wrong_result() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
@@ -707,6 +709,7 @@ mod tests {
     #[test]
     fn samples_memory_membership_post_and_multithread_jsonl() {
         use std::sync::Arc;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let value = solver.declare_const(crate::smt::smtlib::Ty::BitVec(16), SourceLoc::unknown());
@@ -780,6 +783,7 @@ mod tests {
     /// 规格将每次读绑定初始内存；改写后的再次读取无法满足该协议，明确保留证据。
     #[test]
     fn samples_initial_memory_protocol_rejects_read_after_changed_write() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let written = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
@@ -823,6 +827,7 @@ mod tests {
     #[test]
     fn samples_f5_整段内存与逐字节导出完全一致() {
         use crate::bitvector::b129::B129;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&context);
         let address = solver.declare_bitvector(64, SourceLoc::unknown());
@@ -855,6 +860,7 @@ mod tests {
 
     #[test]
     fn samples_guarded_memory_reads_bind_only_active_arm() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let guard = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());

@@ -9,6 +9,7 @@ fn 符号构造子的直接与字段解包必须检查标签可满足性() {
     let shared = empty_shared_state();
     for through_field in [false, true] {
         for selected_tag in [Some(tag_a), Some(tag_b), None] {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let tag = solver.declare_const(Name::smt_ty(), info());

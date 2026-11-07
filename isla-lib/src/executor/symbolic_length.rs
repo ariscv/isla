@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use super::execution_limits::{ExecutionLimitDecision, ExecutionLimitHandler};
 use super::{
-    branch_decision, execution_limit_error, freeze_frame, itrace_fork_frame_with_branch_condition,
-    itrace_push_branch_condition, record_execution_limit, ForkSink, Frame, LocalFrame, SpeculativeRejectReason,
-    StopConditions, Task, TaskId, TaskState,
+    branch_decision, btrace_push_branch_condition, execution_limit_error, freeze_frame, record_execution_limit,
+    trace_fork_frame_with_branch_condition, ForkSink, Frame, LocalFrame, SpeculativeRejectReason, StopConditions, Task,
+    TaskId, TaskState,
 };
 use crate::bitvector::BV;
 use crate::error::ExecError;
@@ -140,6 +140,20 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         } else {
             match &operands[index] {
                 Val::Symbolic(sym) => symbols.push(*sym),
+                Val::MixedBits(_)
+                    if matches!(
+                        op,
+                        "read_mem_address" | "write_mem_address" | "read_memt_address" | "write_memt_address"
+                    ) =>
+                {
+                    // 区域边界针对完整地址；不能把某个拼接片段当作整个地址。
+                    let Val::Symbolic(sym) =
+                        crate::primop_util::replace_mixed_bits(operands[index].clone(), solver, info)?
+                    else {
+                        panic!("含符号片段的内存地址规范化后必须为符号位向量");
+                    };
+                    symbols.push(sym);
+                }
                 Val::MixedBits(segments) => {
                     for segment in segments {
                         if let crate::ir::BitsSegment::Symbolic(sym) = segment {
@@ -501,7 +515,7 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
     if let Some(fork_id) = fork_id {
         let point = checkpoint(solver);
         frame.capture_path_smt_stats();
-        let mut child = itrace_fork_frame_with_branch_condition!(frame, frame.pc, remainder.clone());
+        let mut child = trace_fork_frame_with_branch_condition!(frame, frame.pc, remainder.clone());
         Arc::make_mut(&mut child.execution_limit_state).advance_path_signature(false);
         frame.execution_limit_state.advance_path_signature(true);
         let child_fraction = task_fraction.min_split(6);
@@ -528,10 +542,10 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
             }
         };
         solver.add(Assert(selected.clone()));
-        itrace_push_branch_condition!(frame, selected);
+        btrace_push_branch_condition!(frame, selected);
         return Ok(());
     }
     solver.add(Assert(equal.clone()));
-    itrace_push_branch_condition!(frame, equal);
+    btrace_push_branch_condition!(frame, equal);
     Ok(())
 }

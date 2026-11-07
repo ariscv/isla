@@ -121,6 +121,7 @@ fn 唯一低位投影不得改变宽地址写事件() {
 fn 排除谓词必须与完整低位投影访问区间一致() {
     use crate::bitvector::b129::B129;
     for width in [8, 64, 65, 128, 129, 256] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&ctx);
         let address = solver.declare_bitvector(width, info());
@@ -174,6 +175,7 @@ fn 排除谓词必须与完整低位投影访问区间一致() {
 #[test]
 fn 单态化必须保留有符号整数极值与布尔完整候选域() {
     for ty in [Ty::I64, Ty::I128, Ty::Bool] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let (sort, choices) = match ty {
@@ -237,6 +239,7 @@ fn 单态化必须保留有符号整数极值与布尔完整候选域() {
 #[test]
 fn 写入拆分必须保留所有合法起始地址和数据值域() {
     for op in ["write_mem", "write_mem_exclusive", "platform_write_memt"] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let addr = solver.declare_bitvector(64, info());
@@ -451,6 +454,7 @@ fn 宽位符号程序计数器必须与等值具体计数器保持公告限制�
                     Vec::new(),
                 );
                 let pc = shared.symtab.intern("zreview28_pc");
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B129>::new(&ctx);
                 let bits = B129::new(0x1000, width);

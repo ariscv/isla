@@ -18,6 +18,7 @@ fn 超宽地址和符号长度的排除拆分必须保持全部合法组合() {
                 Vec::new(),
                 Vec::new(),
             );
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let address = solver.declare_bitvector(width, info());
@@ -122,6 +123,7 @@ fn 超宽地址和符号长度的排除拆分必须保持全部合法组合() {
 #[test]
 fn 空位向量的宽切片必须与具体索引一致补零() {
     for width in [65, 128, 129, 256] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let from = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -163,6 +165,7 @@ fn 连续单态化必须保留宽位候选域与相关性() {
             Vec::new(),
             Vec::new(),
         );
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&ctx);
         let source = solver.declare_bitvector(width, info());

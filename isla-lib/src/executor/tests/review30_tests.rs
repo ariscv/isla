@@ -108,6 +108,7 @@ fn 超宽地址跨排除边界的读写必须保持完整候选域和事件地�
                     Vec::new(),
                     Vec::new(),
                 );
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B129>::new(&ctx);
                 let address = solver.declare_bitvector(width, info());
@@ -252,6 +253,7 @@ fn 宽位单态化必须保留与窄候选相关的全部模型() {
             Vec::new(),
             Vec::new(),
         );
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&ctx);
         let source = solver.declare_bitvector(2, info());

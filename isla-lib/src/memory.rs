@@ -47,6 +47,7 @@ use crate::error::ExecError;
 use crate::ir;
 use crate::ir::Val;
 use crate::log;
+use crate::primop_util::replace_mixed_bits;
 use crate::probe;
 use crate::smt::smtlib::{bits64, Def, Exp};
 use crate::smt::{Event, Model, ModelVal, ReadOpts, SmtResult, Solver, Sym, WriteOpts};
@@ -524,6 +525,7 @@ impl<B: BV> Memory<B> {
         opts: ReadOpts,
     ) -> Result<Val<B>, ExecError> {
         log!(log::MEMORY, &format!("Read: {:?} {:?} {:?} {:?}", read_kind, address, bytes, tag));
+        let address = replace_mixed_bits(address, solver, SourceLoc::unknown())?;
 
         if let Val::I128(bytes) = bytes.widen_int() {
             let bytes = u32::try_from(bytes).expect("Bytes did not fit in u32 in memory read");
@@ -911,6 +913,7 @@ impl<B: BV> Memory<B> {
         opts: WriteOpts,
     ) -> Result<Val<B>, ExecError> {
         log!(log::MEMORY, &format!("Write: {:?} {:?} {:?} {:?}", write_kind, address, data, tag));
+        let address = replace_mixed_bits(address, solver, SourceLoc::unknown())?;
 
         match address {
             Val::Bits(concrete_addr) => {
@@ -1433,6 +1436,7 @@ mod tests {
     fn symbolic_ifetch_callbacks_preserve_regions_and_exclusions() {
         for callback in [false, true] {
             for excluded in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let info = SourceLoc::unknown();
@@ -1468,6 +1472,7 @@ mod tests {
         for width in [65, 128, 129] {
             let mut mem = Memory::<B64>::new();
             mem.add_zero_region(0x1000..0x1002);
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let addr = solver.declare_bitvector(width, SourceLoc::unknown());
@@ -1490,6 +1495,7 @@ mod tests {
     fn 宽地址高位非零按低64位分派() {
         let mut mem = Memory::<B64>::new();
         mem.add_zero_region(0x1000..0x1002);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let addr = solver.declare_bitvector(65, SourceLoc::unknown());
@@ -1514,6 +1520,7 @@ mod tests {
         for width in [65, 128, 129] {
             let mut mem = Memory::<B64>::new();
             mem.add_zero_region(0x1000..0x1002);
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let addr = solver.declare_bitvector(width, SourceLoc::unknown());
@@ -1538,6 +1545,7 @@ mod tests {
             for excluded in [false, true] {
                 let mut mem = Memory::<B64>::new();
                 mem.add_excluded_region(0x1000..0x1002);
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let info = SourceLoc::unknown();
@@ -1586,6 +1594,7 @@ mod tests {
 
     #[test]
     fn review33_自约束回调必须能够处理未收窄的普通读地址() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut mem = Memory::<B64>::new();
@@ -1599,6 +1608,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_overlap() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut mem = Memory::<B64>::new();
         mem.add_zero_region(0x00..0xFF);
 

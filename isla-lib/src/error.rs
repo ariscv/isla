@@ -91,7 +91,7 @@ impl fmt::Display for SmtError {
 
 impl Error for SmtError {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExecError {
     /// 推演控制信号，区别于正常返回和异常终止；不是普通路径错误。
     /// 后续集成的推演边界必须捕获并回滚，禁止交给普通调度器或路径收尾。

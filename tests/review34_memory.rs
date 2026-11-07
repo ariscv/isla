@@ -12,6 +12,7 @@ use isla_lib::source_loc::SourceLoc;
 
 #[test]
 fn review34_自约束内存的具体区域读不能因菱形合流变为任意值() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     let defs = &[];
     let mut symtab = Symtab::new();

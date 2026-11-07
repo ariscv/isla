@@ -1507,6 +1507,10 @@ fn mixed_bits_slice<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if length == 0 {
+        return Ok(Val::Bits(B::zeros(0)));
+    }
+    assert!(from <= bits_length && length <= bits_length - from, "mixed_bits_slice out of bounds");
     let mut remaining = bits_length;
     let mut new_segments = vec![];
     let to = from + length;
@@ -1585,8 +1589,16 @@ pub(crate) fn op_slice<B: BV>(
             _ if bits.is_zero() => zeros(Val::I128(i128::from(length)), solver, info),
             _ => slice!(bits_length, smt_sbits(bits), from, length as i128, solver, info),
         },
+        Val::MixedBits(_) if length == 0 => Ok(Val::Bits(B::zeros(0))),
         Val::MixedBits(ref segments) => match from {
-            Val::I64(from) => mixed_bits_slice(segments, bits_length, from as u32, length, solver, info),
+            Val::I64(from) => mixed_bits_slice(
+                segments,
+                bits_length,
+                u32::try_from(from).expect("op_slice MixedBits invalid index"),
+                length,
+                solver,
+                info,
+            ),
             _ => op_slice(replace_mixed_bits(bits, solver, info)?, from, length, solver, info),
         },
         _ => Err(ExecError::Type(format!("op_slice {:?}", &bits), info)),
@@ -1664,8 +1676,18 @@ pub fn subrange_internal<B: BV>(
             )),
         },
         (Val::MixedBits(ref segments), Val::I128(high), Val::I128(low)) => {
+            assert!(high >= low, "subrange MixedBits invalid range");
             let bits_length = segments_length(segments, solver, info)?;
-            mixed_bits_slice(segments, bits_length, low as u32, (high - low + 1) as u32, solver, info)
+            let length =
+                high.checked_sub(low).and_then(|width| width.checked_add(1)).expect("subrange MixedBits invalid width");
+            mixed_bits_slice(
+                segments,
+                bits_length,
+                u32::try_from(low).expect("subrange MixedBits invalid low index"),
+                u32::try_from(length).expect("subrange MixedBits invalid width"),
+                solver,
+                info,
+            )
         }
         (bits, Val::Symbolic(high), Val::Symbolic(low)) => {
             let width = solver.define_const(
@@ -1755,7 +1777,9 @@ fn sail_truncate_lsb<B: BV>(
         }
         (Val::MixedBits(ref segments), Val::I128(len)) => {
             let bits_length = segments_length(segments, solver, info)?;
-            mixed_bits_slice(segments, bits_length, bits_length - len as u32, len as u32, solver, info)
+            let len = u32::try_from(len).expect("sail_truncateLSB MixedBits invalid length");
+            assert!(len <= bits_length, "sail_truncateLSB MixedBits out of bounds");
+            mixed_bits_slice(segments, bits_length, bits_length - len, len, solver, info)
         }
         (_, Val::Symbolic(_)) => Err(ExecError::SymbolicLength("sail_truncateLSB", info)),
         (bits, len) => Err(ExecError::Type(format!("sail_truncateLSB {:?} {:?}", &bits, &len), info)),
@@ -2180,14 +2204,14 @@ pub(crate) fn append<B: BV>(
             if y.len() == 0 {
                 solver.define_bitvector(Exp::Var(x), info).into()
             } else {
-                solver.define_bitvector(Exp::Concat(Box::new(Exp::Var(x)), Box::new(smt_sbits(y))), info).into()
+                Ok(Val::MixedBits(vec![BitsSegment::Symbolic(x), BitsSegment::Concrete(y)]))
             }
         }
         (Val::Bits(x), Val::Symbolic(y)) => {
             if x.len() == 0 {
                 solver.define_bitvector(Exp::Var(y), info).into()
             } else {
-                solver.define_bitvector(Exp::Concat(Box::new(smt_sbits(x)), Box::new(Exp::Var(y))), info).into()
+                Ok(Val::MixedBits(vec![BitsSegment::Concrete(x), BitsSegment::Symbolic(y)]))
             }
         }
         (Val::Bits(x), Val::Bits(y)) => match x.append(y) {
@@ -2199,7 +2223,9 @@ pub(crate) fn append<B: BV>(
             Ok(Val::MixedBits(segments))
         }
         (Val::MixedBits(mut segments), Val::Bits(bv)) => {
-            segments.push(BitsSegment::Concrete(bv));
+            if bv.len() != 0 {
+                segments.push(BitsSegment::Concrete(bv));
+            }
             Ok(Val::MixedBits(segments))
         }
         (Val::MixedBits(mut segments_l), Val::MixedBits(mut segments_r)) => {
@@ -2211,7 +2237,9 @@ pub(crate) fn append<B: BV>(
             Ok(Val::MixedBits(segments))
         }
         (Val::Bits(bv), Val::MixedBits(mut segments)) => {
-            segments.insert(0, BitsSegment::Concrete(bv));
+            if bv.len() != 0 {
+                segments.insert(0, BitsSegment::Concrete(bv));
+            }
             Ok(Val::MixedBits(segments))
         }
         (lhs, rhs) => Err(ExecError::Type(format!("append {:?} {:?}", &lhs, &rhs), info)),
@@ -5539,11 +5567,13 @@ mod tests {
     use crate::error::ExecError;
     use crate::ir::{BitsSegment, Val};
     use crate::smt::smtlib::Ty;
+    use crate::smt::Model;
     use crate::smt::{Config, Context, SmtResult, Solver};
     use crate::source_loc::SourceLoc;
 
     #[test]
     fn review15_decimal_preserves_full_signed_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -5568,6 +5598,7 @@ mod tests {
 
     #[test]
     fn review15_wide_out_of_bounds_slices_are_zero() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -5582,6 +5613,7 @@ mod tests {
 
     #[test]
     fn review13_integer_slices_sign_extend_beyond_integer_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -5611,6 +5643,7 @@ mod tests {
 
     #[test]
     fn review13_unique_symbolic_strings_preserve_format_and_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -5626,6 +5659,7 @@ mod tests {
 
     #[test]
     fn symbolic_integer_compare_uses_asserted_bounds_without_picking_candidate() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5657,6 +5691,7 @@ mod tests {
     /// 具体（B129::unsigned 的 try_from unwrap）与符号（assert length < 128）两条路都失败。
     #[test]
     fn bits_compare_u_128_boundary_values() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B129>::new(&ctx);
@@ -5681,6 +5716,7 @@ mod tests {
     /// 0xFF..F 是 -1。
     #[test]
     fn bits_compare_s_128_cross_sign_boundary() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B129>::new(&ctx);
@@ -5704,6 +5740,7 @@ mod tests {
     /// 走 `<_u`/`<_s` 不得再 panic；路径约束钉死后应能具体化。
     #[test]
     fn bits_compare_symbolic_128_no_panic_and_concretizes() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5736,6 +5773,7 @@ mod tests {
     /// 无符号 a=2^127 > b=2^127-1，有符号 a 为负数 < b。
     #[test]
     fn bits_compare_amo_min_shape_128_symbolic() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5758,6 +5796,7 @@ mod tests {
     /// 既有宽度回归：64 位及以下与旧实现（sail_unsigned/sail_signed + lt_int）语义一致。
     #[test]
     fn bits_compare_64_equivalent_to_int_roundtrip() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5792,6 +5831,7 @@ mod tests {
     /// 具体与符号化操作数混合时仍按位向量宽度直接比较。
     #[test]
     fn bits_compare_mixed_concrete_symbolic() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5808,6 +5848,7 @@ mod tests {
     /// 非位向量或宽度不一致的比较是类型错误（Sail 类型系统保证同宽，此处防御）。
     #[test]
     fn bits_compare_length_mismatch_is_type_error() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5824,6 +5865,7 @@ mod tests {
     /// 128 位符号量已具有 %i 的 SMT 位宽，unsigned 转换保留符号并约束非负。
     #[test]
     fn sail_unsigned_symbolic_128_is_identity() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5836,6 +5878,7 @@ mod tests {
     /// 位向量本身就是 %i 的 SMT 表示（128 位位向量），直接恒等返回。
     #[test]
     fn sail_signed_symbolic_128_is_identity() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5859,6 +5902,7 @@ mod tests {
     /// 即使已经被路径约束钉死也证明不出来。
     #[test]
     fn proven_symbolic_i128_concretizes_values_outside_the_old_candidate_range() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5879,6 +5923,7 @@ mod tests {
     /// 只要还存在第二个可行取值就必须保持符号量；完全没有约束的符号量同理。
     #[test]
     fn proven_symbolic_i128_keeps_values_that_are_not_pinned_down() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5899,6 +5944,7 @@ mod tests {
     /// 把单路径预算耗光的关键。
     #[test]
     fn proven_symbolic_i128_uses_a_constant_number_of_queries() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5922,6 +5968,7 @@ mod tests {
 
     #[test]
     fn zeros_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5938,6 +5985,7 @@ mod tests {
 
     #[test]
     fn zeros_rejects_unconstrained_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5950,6 +5998,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in zeros")]
     fn zeros_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5961,6 +6010,7 @@ mod tests {
 
     #[test]
     fn ones_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5977,6 +6027,7 @@ mod tests {
 
     #[test]
     fn ones_rejects_unconstrained_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -5989,6 +6040,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in ones")]
     fn ones_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6001,6 +6053,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in pow2")]
     fn pow2_panics_on_negative_proven_symbolic_exponent() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6012,6 +6065,7 @@ mod tests {
 
     #[test]
     fn replicate_bits_accepts_proven_symbolic_count() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6028,6 +6082,7 @@ mod tests {
 
     #[test]
     fn replicate_bits_accepts_symbolic_bits_with_proven_symbolic_count() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6045,6 +6100,7 @@ mod tests {
 
     #[test]
     fn replicate_bits_rejects_unconstrained_symbolic_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6059,6 +6115,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in replicate_bits")]
     fn replicate_bits_panics_on_negative_proven_symbolic_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6070,6 +6127,7 @@ mod tests {
 
     #[test]
     fn vector_init_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6089,6 +6147,7 @@ mod tests {
 
     #[test]
     fn vector_init_rejects_unconstrained_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6102,6 +6161,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in vector_init")]
     fn vector_init_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6113,6 +6173,7 @@ mod tests {
 
     #[test]
     fn subrange_rejects_negative_proven_symbolic_bounds() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6134,6 +6195,7 @@ mod tests {
 
     #[test]
     fn subrange_accepts_proven_symbolic_bounds() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6158,6 +6220,7 @@ mod tests {
 
     #[test]
     fn subrange_accepts_symbolic_bounds_with_proven_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6206,6 +6269,7 @@ mod tests {
 
     #[test]
     fn i64_to_i128_accepts_bits_as_signed_i64() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6217,6 +6281,7 @@ mod tests {
 
     #[test]
     fn get_slice_int_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6240,6 +6305,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in get_slice_int")]
     fn get_slice_int_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6258,6 +6324,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in get_slice_int")]
     fn get_slice_int_panics_on_negative_concrete_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6269,6 +6336,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in expect_concrete_len test")]
     fn expect_concrete_len_panics_on_negative_proven_symbolic_value() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6281,6 +6349,7 @@ mod tests {
 
     #[test]
     fn extension_accepts_proven_symbolic_length() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6297,6 +6366,7 @@ mod tests {
 
     #[test]
     fn extension_accepts_proven_symbolic_length_from_fallback_candidate() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B129>::new(&ctx);
@@ -6314,6 +6384,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "nat invariant violated in extension")]
     fn extension_panics_on_negative_proven_symbolic_length() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6325,6 +6396,7 @@ mod tests {
 
     #[test]
     fn isla_brev8_reverses_bits_inside_each_byte() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6339,6 +6411,7 @@ mod tests {
 
     #[test]
     fn isla_rev8_reverses_byte_order() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6358,6 +6431,7 @@ mod tests {
 
     #[test]
     fn isla_rev8_symbolic_path_preserves_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6373,6 +6447,7 @@ mod tests {
 
     #[test]
     fn isla_vector_rev8_maps_each_element() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6391,6 +6466,7 @@ mod tests {
 
     #[test]
     fn isla_cpop_counts_full_register_or_low_word() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6415,6 +6491,7 @@ mod tests {
 
     #[test]
     fn isla_cpop_symbolic_path_has_register_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6435,6 +6512,7 @@ mod tests {
 
     #[test]
     fn count_trailing_zeros_symbolic_counts_from_low_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6456,6 +6534,7 @@ mod tests {
 
     #[test]
     fn isla_clmul_variants_extract_expected_product_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6515,6 +6594,7 @@ mod tests {
 
     #[test]
     fn isla_carryless_mul_symbolic_paths_have_double_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6543,6 +6623,7 @@ mod tests {
 
     #[test]
     fn isla_xperm4_handles_concrete_operands() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6560,6 +6641,7 @@ mod tests {
 
     #[test]
     fn isla_xperm8_handles_concrete_operands() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6577,6 +6659,7 @@ mod tests {
 
     #[test]
     fn isla_xperm4_symbolic_path_has_input_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6597,6 +6680,7 @@ mod tests {
 
     #[test]
     fn isla_read_vreg_splits_concrete_registers() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6630,6 +6714,7 @@ mod tests {
 
     #[test]
     fn isla_read_vreg_splits_symbolic_registers() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6667,6 +6752,7 @@ mod tests {
 
     #[test]
     fn isla_read_vreg_requires_unique_symbolic_num_elem() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6705,6 +6791,7 @@ mod tests {
 
     #[test]
     fn isla_init_mask_builds_concrete_active_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6720,6 +6807,7 @@ mod tests {
 
     #[test]
     fn isla_init_mask_builds_concrete_b129_high_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B129>::new(&ctx);
@@ -6736,6 +6824,7 @@ mod tests {
 
     #[test]
     fn isla_init_mask_builds_symbolic_mask_with_fixed_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6760,6 +6849,7 @@ mod tests {
 
     #[test]
     fn bool_to_bit_builds_one_bit_result() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6778,6 +6868,7 @@ mod tests {
 
     #[test]
     fn isla_fixed_rounding_incr_handles_concrete_modes() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6821,6 +6912,7 @@ mod tests {
 
     #[test]
     fn isla_fixed_rounding_incr_builds_symbolic_bit() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6841,6 +6933,7 @@ mod tests {
 
     #[test]
     fn isla_select_int_selects_concrete_and_symbolic_values() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6877,6 +6970,7 @@ mod tests {
 
     #[test]
     fn isla_mask_from_low_bits_handles_concrete_fill_and_source() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6912,6 +7006,7 @@ mod tests {
 
     #[test]
     fn isla_mask_from_low_bits_requires_unique_len_without_template() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6935,6 +7030,7 @@ mod tests {
 
     #[test]
     fn isla_mask_from_low_bits_builds_symbolic_width_preserving_mask() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6961,6 +7057,7 @@ mod tests {
 
     #[test]
     fn isla_vector_select_uses_mask_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -6984,6 +7081,7 @@ mod tests {
 
     #[test]
     fn isla_vector_access_or_default_handles_concrete_bounds() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7013,6 +7111,7 @@ mod tests {
 
     #[test]
     fn isla_vector_access_or_default_builds_smt_array_select() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7070,6 +7169,7 @@ mod tests {
 
     #[test]
     fn isla_masktypei_result_merges_body_elements() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7117,6 +7217,7 @@ mod tests {
 
     #[test]
     fn isla_masktypev_result_merges_body_elements() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7172,6 +7273,7 @@ mod tests {
 
     #[test]
     fn isla_pack_vreg_packs_elements_little_endian_per_register() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7192,6 +7294,7 @@ mod tests {
 
     #[test]
     fn isla_mux2_selects_bitvector_operand() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7236,6 +7339,7 @@ mod tests {
 
     #[test]
     fn mixed_bits() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -7301,6 +7405,244 @@ mod tests {
         );
 
         assert!(solver.check_sat(SourceLoc::unknown()) == SmtResult::Sat);
+        Ok(())
+    }
+
+    #[test]
+    fn append_keeps_concrete_segments_and_empty_slices() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(9), info);
+        let low = B64::new(0x57, 7);
+        let high = B64::new(0x2d, 6);
+        let lhs = append(Val::Symbolic(sym), Val::Bits(low), &mut solver, info)?;
+        let rhs = append(Val::Bits(high), Val::Symbolic(sym), &mut solver, info)?;
+        assert_eq!(lhs, Val::MixedBits(vec![BitsSegment::Symbolic(sym), BitsSegment::Concrete(low)]));
+        assert_eq!(rhs, Val::MixedBits(vec![BitsSegment::Concrete(high), BitsSegment::Symbolic(sym)]));
+        assert_eq!(op_slice(lhs.clone(), Val::I64(0), 7, &mut solver, info)?, Val::Bits(low));
+        assert_eq!(op_slice(rhs.clone(), Val::I64(9), 6, &mut solver, info)?, Val::Bits(high));
+        assert_eq!(op_slice(lhs.clone(), Val::I64(16), 0, &mut solver, info)?, Val::Bits(B64::zeros(0)));
+        assert_eq!(
+            slice_internal(rhs.clone(), Val::I128(15), Val::I128(0), &mut solver, info)?,
+            Val::Bits(B64::zeros(0))
+        );
+        assert_eq!(vector_access(lhs.clone(), Val::I128(0), &mut solver, info)?, Val::Bits(B64::BIT_ONE));
+
+        let joined = append(rhs, Val::Bits(low), &mut solver, info)?;
+        assert_eq!(op_slice(joined.clone(), Val::I64(0), 7, &mut solver, info)?, Val::Bits(low));
+        assert_eq!(op_slice(joined.clone(), Val::I64(7), 9, &mut solver, info)?, Val::Symbolic(sym));
+        assert_eq!(op_slice(joined.clone(), Val::I64(16), 6, &mut solver, info)?, Val::Bits(high));
+        assert!(matches!(op_slice(joined.clone(), Val::I64(5), 13, &mut solver, info)?, Val::MixedBits(_)));
+        assert_eq!(length_bits(&joined, &mut solver, info)?, 22);
+        assert_eq!(append(joined.clone(), Val::Bits(B64::zeros(0)), &mut solver, info)?, joined);
+        assert_eq!(append(Val::Bits(B64::zeros(0)), joined.clone(), &mut solver, info)?, joined);
+        let rhs_mixed = append(Val::Symbolic(sym), Val::Bits(low), &mut solver, info)?;
+        let combined = append(joined.clone(), rhs_mixed, &mut solver, info)?;
+        assert_eq!(length_bits(&combined, &mut solver, info)?, 38);
+        assert_eq!(op_slice(combined.clone(), Val::I64(0), 7, &mut solver, info)?, Val::Bits(low));
+        assert_eq!(op_slice(combined.clone(), Val::I64(7), 9, &mut solver, info)?, Val::Symbolic(sym));
+        assert_eq!(op_slice(combined.clone(), Val::I64(32), 6, &mut solver, info)?, Val::Bits(high));
+        assert_eq!(op_slice(combined, Val::I64(0), 38, &mut solver, info)?.is_symbolic(), true);
+        assert_eq!(append(Val::Symbolic(sym), Val::Bits(B64::zeros(0)), &mut solver, info)?.is_symbolic(), true);
+        assert_eq!(append(Val::Bits(B64::zeros(0)), Val::Symbolic(sym), &mut solver, info)?.is_symbolic(), true);
+        assert!(matches!(append(Val::Symbolic(sym), Val::Symbolic(sym), &mut solver, info)?, Val::Symbolic(_)));
+        assert!(matches!(append(Val::Bits(high), Val::Bits(low), &mut solver, info)?, Val::Bits(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_append_matches_concat_for_unknown_inputs() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(25), info);
+        let opcode = B64::new(0x57, 7);
+        let new = append(Val::Symbolic(sym), Val::Bits(opcode), &mut solver, info)?;
+        let old = Exp::Concat(Box::new(Exp::Var(sym)), Box::new(smt_sbits(opcode)));
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(&Exp::Neq(Box::new(smt_value(&new, info)?), Box::new(old)), info),
+            SmtResult::Unsat
+        );
+
+        let new = append(Val::Bits(opcode), Val::Symbolic(sym), &mut solver, info)?;
+        let old = Exp::Concat(Box::new(smt_sbits(opcode)), Box::new(Exp::Var(sym)));
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(&Exp::Neq(Box::new(smt_value(&new, info)?), Box::new(old)), info),
+            SmtResult::Unsat
+        );
+
+        let wide = solver.declare_const(Ty::BitVec(64), info);
+        let new = append(Val::Symbolic(wide), Val::Bits(opcode), &mut solver, info)?;
+        assert_eq!(length_bits(&new, &mut solver, info)?, 71);
+        assert_eq!(op_slice(new.clone(), Val::I64(0), 7, &mut solver, info)?, Val::Bits(opcode));
+        let old = Exp::Concat(Box::new(Exp::Var(wide)), Box::new(smt_sbits(opcode)));
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(&Exp::Neq(Box::new(smt_value(&new, info)?), Box::new(old)), info),
+            SmtResult::Unsat
+        );
+        {
+            assert_eq!(solver.check_sat(info), SmtResult::Sat);
+            let mut model = Model::new(&solver);
+            let concrete = model.get_val(&new)?;
+            assert!(concrete.is_concrete());
+            assert!(matches!(concrete, Val::MixedBits(_)));
+            assert!(matches!(model.get_fmtval(&new)?, crate::fmtval::FmtVal::Bits(_)));
+        }
+        let sym2 = solver.declare_const(Ty::BitVec(9), info);
+        let left = append(Val::Symbolic(sym), Val::Bits(opcode), &mut solver, info)?;
+        let right = append(Val::Bits(B64::new(5, 3)), Val::Symbolic(sym2), &mut solver, info)?;
+        let combined = append(left, right, &mut solver, info)?;
+        let expected = Exp::Concat(
+            Box::new(Exp::Concat(Box::new(Exp::Var(sym)), Box::new(smt_sbits(opcode)))),
+            Box::new(Exp::Concat(Box::new(smt_sbits(B64::new(5, 3))), Box::new(Exp::Var(sym2)))),
+        );
+        let expected_var = solver.define_const(expected.clone(), info);
+        let equality = eq_anything(combined.clone(), Val::Symbolic(expected_var), &mut solver, info)?;
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(&Exp::Neq(Box::new(smt_value(&combined, info)?), Box::new(expected)), info),
+            SmtResult::Unsat
+        );
+        assert_eq!(solver.check_sat_with(&Exp::Not(Box::new(smt_value(&equality, info)?)), info), SmtResult::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_append_exceeds_concrete_host_width() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(128), info);
+        let low = B129::new(0x57, 7);
+        let mixed = append(Val::Symbolic(sym), Val::Bits(low), &mut solver, info)?;
+        assert_eq!(length_bits(&mixed, &mut solver, info)?, 135);
+        assert_eq!(op_slice(mixed.clone(), Val::I64(0), 7, &mut solver, info)?, Val::Bits(low));
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(
+                &Exp::Neq(
+                    Box::new(smt_value(&mixed, info)?),
+                    Box::new(Exp::Concat(Box::new(Exp::Var(sym)), Box::new(smt_sbits(low))))
+                ),
+                info
+            ),
+            SmtResult::Unsat
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_append_dynamic_index_and_cross_segment_slices() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(9), info);
+        let index = solver.declare_const(Ty::BitVec(128), info);
+        solver.assert(Exp::Bvsge(Box::new(Exp::Var(index)), Box::new(smt_i128(0))));
+        solver.assert(Exp::Bvsle(Box::new(Exp::Var(index)), Box::new(smt_i128(12))));
+        let high = B64::new(0b101, 3);
+        let low = B64::new(0x57, 7);
+        let mixed =
+            append(append(Val::Bits(high), Val::Symbolic(sym), &mut solver, info)?, Val::Bits(low), &mut solver, info)?;
+        let old = solver.define_const(
+            Exp::Concat(
+                Box::new(Exp::Concat(Box::new(smt_sbits(high)), Box::new(Exp::Var(sym)))),
+                Box::new(smt_sbits(low)),
+            ),
+            info,
+        );
+        for (from, length) in [(0, 19), (7, 9), (5, 8), (14, 5), (19, 0)] {
+            let actual = op_slice(mixed.clone(), Val::I64(from), length, &mut solver, info)?;
+            if length != 0 {
+                let expected = op_slice(Val::Symbolic(old), Val::I64(from), length, &mut solver, info)?;
+                assert_eq!(solver.check_sat(info), SmtResult::Sat);
+                assert_eq!(
+                    solver.check_sat_with(
+                        &Exp::Neq(Box::new(smt_value(&actual, info)?), Box::new(smt_value(&expected, info)?)),
+                        info,
+                    ),
+                    SmtResult::Unsat,
+                    "slice from={} length={}",
+                    from,
+                    length
+                );
+            } else {
+                assert_eq!(actual, Val::Bits(B64::zeros(0)));
+            }
+        }
+        let mixed_dynamic = op_slice(mixed, Val::Symbolic(index), 7, &mut solver, info)?;
+        let old_dynamic = op_slice(Val::Symbolic(old), Val::Symbolic(index), 7, &mut solver, info)?;
+        assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        assert_eq!(
+            solver.check_sat_with(
+                &Exp::Neq(Box::new(smt_value(&mixed_dynamic, info)?), Box::new(smt_value(&old_dynamic, info)?)),
+                info,
+            ),
+            SmtResult::Unsat
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_append_fixed_slices_match_symbolic_bounds() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(9), info);
+        let mixed = append(Val::Symbolic(sym), Val::Bits(B64::new(0x57, 7)), &mut solver, info)?;
+        let combined = replace_mixed_bits(mixed.clone(), &mut solver, info)?;
+        for (from, length) in [(-1, 1), (17, 1), (15, 2), (1_i64 << 32, 1), (-(1_i64 << 32), 1)] {
+            let actual = op_slice(mixed.clone(), Val::I64(from), length, &mut solver, info)?;
+            let expected = op_slice(combined.clone(), Val::I64(from), length, &mut solver, info)?;
+            assert_eq!(
+                solver.check_sat_with(
+                    &Exp::Neq(Box::new(smt_value(&actual, info)?), Box::new(smt_value(&expected, info)?)),
+                    info
+                ),
+                SmtResult::Unsat
+            );
+        }
+        for from in [-1, 17, 1_i64 << 32, -(1_i64 << 32)] {
+            assert_eq!(op_slice(mixed.clone(), Val::I64(from), 0, &mut solver, info)?, Val::Bits(B64::zeros(0)));
+        }
+        for from in [-1, 1_i128 << 32] {
+            assert_eq!(
+                slice_internal(mixed.clone(), Val::I128(from), Val::I128(1), &mut solver, info)?,
+                Val::Bits(B64::zeros(1))
+            );
+        }
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            slice_internal(mixed.clone(), Val::I128(0), Val::I128(-(1_i128 << 32)), &mut solver, info).unwrap()
+        }))
+        .is_err());
+        for from in [-1, 17, 1_i128 << 32, -(1_i128 << 32)] {
+            assert_eq!(
+                slice_internal(mixed.clone(), Val::I128(from), Val::I128(0), &mut solver, info)?,
+                Val::Bits(B64::zeros(0))
+            );
+        }
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            subrange_internal(mixed.clone(), Val::I128(2), Val::I128(3), &mut solver, info).unwrap()
+        }))
+        .is_err());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            subrange_internal(mixed.clone(), Val::I128(1_i128 << 32), Val::I128(0), &mut solver, info).unwrap()
+        }))
+        .is_err());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sail_truncate_lsb(mixed.clone(), Val::I128(1_i128 << 32), &mut solver, info).unwrap()
+        }))
+        .is_err());
+        assert_eq!(op_slice(mixed, Val::I64(16), 0, &mut solver, info)?, Val::Bits(B64::zeros(0)));
         Ok(())
     }
 }

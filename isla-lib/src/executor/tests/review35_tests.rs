@@ -4,6 +4,7 @@ use super::*;
 fn review35_vector_update_must_keep_oob_path() {
     let mut observations = Vec::new();
     for width in [64, 128] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let index = solver.declare_const(smtlib::Ty::BitVec(width), info());
@@ -48,6 +49,7 @@ fn review35_vector_update_must_keep_oob_path() {
 fn review35_bitvector_update_must_reject_oob() {
     let mut failures = Vec::new();
     for n in [-1, 8, 1_i128 << 64] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let index = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -70,6 +72,7 @@ fn review35_bitvector_update_must_reject_oob() {
 fn review35_unwrap_must_not_succeed_for_wrong_symbolic_tag() {
     let mut failures = Vec::new();
     for owned in [false, true] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let flag = solver.declare_const(smtlib::Ty::Bool, info());
@@ -112,6 +115,7 @@ fn review35_vector_register_access_must_filter_tlb() {
         let tlb = shared.symtab.intern(&encoded);
         let mut frame = make_frame(vec![Instr::End]);
         frame.regs_mut().insert(tlb, false, UVal::Init(Val::Bits(B64::new(0, 8))));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let refs = Val::Vector(vec![Val::Ref(tlb)]);
@@ -144,6 +148,7 @@ fn review35_vector_register_access_must_filter_tlb() {
 
 #[test]
 fn review35_concrete_vector_indices_must_not_truncate() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let access = primop::binary_primops::<B64>()["vector_access"];
@@ -203,6 +208,7 @@ fn review35_b129_arithmetic_independent_oracle() {
 #[test]
 fn review35_fp_classification_and_conversion_markers() {
     use crate::bitvector::b129::B129;
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B129>::new(&ctx);
     let unary = primop::unary_primops::<B129>();

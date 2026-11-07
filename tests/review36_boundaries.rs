@@ -45,6 +45,7 @@ impl CustomRegion<B64> for Device {
 
 #[test]
 fn 设备符号唯一地址执行副作用而混合地址先拆分() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
@@ -83,6 +84,7 @@ fn 设备符号唯一地址执行副作用而混合地址先拆分() {
 
 #[test]
 fn 多字节生成器保持整区域读取约束和原始地址() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
@@ -115,6 +117,7 @@ fn 多字节生成器保持整区域读取约束和原始地址() {
 
 #[test]
 fn 整数切片全宽度逐位核对符号扩展() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     for width in 0..=129 {
         for from in [0, 1, 63, 64, 127] {
             for integer in [i128::MIN, i128::MAX, -1, 0, 1] {
@@ -137,6 +140,7 @@ fn 整数切片全宽度逐位核对符号扩展() {
 
 #[test]
 fn 窄位向量减去整数极值按模截断() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     for width in 0..=64 {
         let mask = if width == 0 { 0 } else { u64::MAX >> (64 - width) };
         for integer in [i128::MIN, i128::MAX, i128::from(i64::MIN), i128::from(i64::MAX), -1, 0, 1] {
@@ -149,6 +153,7 @@ fn 窄位向量减去整数极值按模截断() {
 
 #[test]
 fn 回绕排除约束保留合法候选并独立验证读写() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     for (address_width, index_width) in [(32, 32), (64, 32), (65, 32), (64, 64), (129, 64)] {
         let maximum = if index_width == 64 { u64::MAX } else { u64::from(u32::MAX) };
@@ -194,6 +199,7 @@ fn 回绕排除约束保留合法候选并独立验证读写() {
 
 #[test]
 fn 具体区域遮蔽生成器时符号读取仍保留数组更新() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);

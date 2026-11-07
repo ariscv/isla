@@ -4,6 +4,7 @@ use super::*;
 fn 符号解包必须分离成功与类型错误且只读取一次() {
     for workers in [0, 1, 4] {
         for owned in [false, true] {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let flag = solver.declare_const(smtlib::Ty::Bool, info());
@@ -65,6 +66,7 @@ fn 切片所有入口必须检查完整边界() {
         for symbolic_bits in [false, true] {
             for symbolic_update in [false, true] {
                 for n in [-1, 0, 7, 8, i128::from(i64::MAX)] {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B64>::new(&ctx);
                     let mut frame = make_frame(vec![Instr::End]);
@@ -109,6 +111,7 @@ fn 切片所有入口必须检查完整边界() {
 #[test]
 fn 位向量更新与嵌套切片表达式必须保留越界路径() {
     for expression in [false, true] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let width = if expression { 64 } else { 128 };
@@ -177,6 +180,7 @@ fn 寄存器解引用与向量单项符号索引必须保留事件() {
         });
         // dc76449 撤回这两条访问路径的 _TLB 特判，所有名称均须保留事件。
         assert_eq!(*out.lock().unwrap(), vec![1]);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let index = solver.define_const(smtlib::bits64(0, 128), info());
@@ -208,6 +212,7 @@ fn 寄存器解引用与向量单项符号索引必须保留事件() {
 
 #[test]
 fn 空切片在末尾更新必须保持原值而超长更新必须拒绝() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let mut frame = make_frame(vec![Instr::End]);

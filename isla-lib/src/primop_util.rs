@@ -391,6 +391,7 @@ mod build_ite_tests {
 
     #[test]
     fn different_bit_widths_are_rejected() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -423,6 +424,7 @@ mod build_ite_tests {
 
     #[test]
     fn matching_ctor_merges_nested_payload() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let condition = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());
@@ -488,6 +490,7 @@ mod build_ite_tests {
 
     #[test]
     fn 通用选择与路径合流均支持符号构造子标签() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();

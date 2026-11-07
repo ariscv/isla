@@ -77,6 +77,7 @@ fn relaxed寄存器不同构造子历史必须可读且保留标签候选() {
         let reg = shared.symtab.intern("zreview32_relaxed");
         let a = shared.symtab.intern("zreview32_A");
         let b = shared.symtab.intern("zreview32_B");
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()), Instr::End]);
@@ -121,6 +122,7 @@ fn 宽位单态化必须保持稀疏候选及相关补码值域() {
     use crate::bitvector::b129::B129;
     for width in [1, 63, 64, 65, 127, 128, 129] {
         for workers in [0, 3] {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let source = solver.declare_bitvector(width, info());
@@ -193,6 +195,7 @@ fn 超宽读事件必须保留符号高位和相关长度排除约束() {
     use std::collections::BTreeSet;
     for width in [8, 65, 129, 256] {
         for op in ["read_mem_ifetch", "read_mem_exclusive", "platform_read_memt"] {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let address = solver.declare_bitvector(width, info());

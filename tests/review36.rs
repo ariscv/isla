@@ -17,6 +17,7 @@ fn info() -> SourceLoc {
 
 #[test]
 fn review36_get_slice_int_concrete_129_must_match_symbolic() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B129>::new(&ctx);
     let instrs = [Instr::End];
@@ -39,6 +40,7 @@ fn review36_get_slice_int_concrete_129_must_match_symbolic() {
 
 #[test]
 fn review36_seq_constrained_region_must_match_concrete_address() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let mut memory = Memory::<B64>::new();
@@ -72,6 +74,7 @@ fn review36_seq_constrained_region_must_match_concrete_address() {
 
 #[test]
 fn review36_b64_subtract_min_must_match_symbolic() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let f = primop::binary_primops()["sub_bits_int"];
@@ -92,6 +95,7 @@ fn review36_b64_subtract_min_must_match_symbolic() {
 
 #[test]
 fn review36_seq_wrapped_access_must_not_touch_excluded_byte() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::error::ExecError;
     use isla_lib::smt::WriteOpts;
     let mut observations = Vec::new();
@@ -153,6 +157,7 @@ fn review36_seq_wrapped_access_must_not_touch_excluded_byte() {
 
 #[test]
 fn review36_seq_constrained_diamond_must_preserve_values() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::executor::{start_single, ExecutionLimits, Run, TaskId, TaskState};
     use isla_lib::ir::{Exp as IRExp, IRTypeInfo, Loc, SharedState, Symtab, RETURN};
     use std::{collections::HashSet, sync::Mutex};
@@ -228,6 +233,7 @@ fn review36_seq_constrained_diamond_must_preserve_values() {
 
 #[test]
 fn review36_b129_ripple_oracle_all_widths() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     fn ripple(a: &[bool], n: i128, subtract: bool) -> Vec<bool> {
         let mut carry = subtract;
         a.iter()
@@ -271,6 +277,7 @@ fn review36_b129_ripple_oracle_all_widths() {
 
 #[test]
 fn review36_signed_fp_conversion_markers_all_widths() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::smt::{checkpoint, Model};
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B129>::new(&ctx);
@@ -335,6 +342,7 @@ impl isla_lib::memory::CustomRegion<B64> for Review36Device {
 
 #[test]
 fn review36_seq_custom_diamond_write_must_reach_device() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::executor::{start_single, ExecutionLimits, Run, TaskId, TaskState};
     use isla_lib::ir::{Exp as IRExp, IRTypeInfo, Loc, SharedState, Symtab, RETURN};
     use std::{collections::HashSet, sync::Mutex};

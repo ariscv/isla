@@ -187,6 +187,8 @@ mod transaction;
 use transaction::SolverSavepoint;
 pub use transaction::{SolverTransaction, MAX_TRANSACTION_DEPTH};
 pub mod smtlib;
+mod tactic;
+pub use tactic::Tactic;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
@@ -211,6 +213,76 @@ impl<B> Checkpoint<B> {
 
     pub fn trace(&self) -> &Option<Trace<B>> {
         &self.trace
+    }
+}
+
+impl<B: BV> Checkpoint<B> {
+    /// 辅助编码仅保留由指令字段和常量定义得到的原路径断言。
+    pub fn with_instruction_assertions(&self, instruction: &Val<B>) -> Self {
+        fn only_instruction_symbols(exp: &mut Exp<Sym>, pure_symbols: &HashSet<Sym>) -> bool {
+            let mut pure = true;
+            exp.modify(&mut |part| match part {
+                Exp::Var(sym) if !pure_symbols.contains(sym) => pure = false,
+                Exp::App(_, _) => pure = false,
+                _ => (),
+            });
+            pure
+        }
+
+        let inputs = instruction.symbolic_variables();
+        let mut pure_symbols = HashSet::new();
+        let mut events = Vec::new();
+        if let Some(trace) = self.trace.as_ref().as_ref() {
+            for mut event in trace.to_vec().into_iter().rev().cloned() {
+                let keep = match &mut event {
+                    Event::Smt(Def::DeclareConst(sym, _), _, _) => {
+                        if inputs.contains(sym) {
+                            pure_symbols.insert(*sym);
+                        }
+                        true
+                    }
+                    Event::Smt(Def::DefineConst(sym, exp), _, _) => {
+                        pure_symbols.remove(sym);
+                        if only_instruction_symbols(exp, &pure_symbols) {
+                            pure_symbols.insert(*sym);
+                        }
+                        true
+                    }
+                    Event::Smt(Def::Assert(exp), _, _) => only_instruction_symbols(exp, &pure_symbols),
+                    _ => true,
+                };
+                if keep {
+                    events.push(event);
+                }
+            }
+        }
+        Checkpoint {
+            num: 1,
+            next_var: self.next_var,
+            trace: Arc::new(Some(Trace { checkpoints: 0, head: events, tail: Arc::new(None) })),
+        }
+    }
+
+    /// 将辅助 checkpoint 从 base 开始新增的事件接到完整执行 checkpoint。
+    pub fn with_suffix_from(&self, base: &Self, candidate: &Self) -> Self {
+        assert_eq!(self.next_var, base.next_var, "执行与辅助基点的符号编号不一致");
+        assert!(candidate.next_var >= base.next_var, "候选符号编号回退");
+        assert!(candidate.num >= base.num, "候选 checkpoint 早于辅助基点");
+        let mut suffix = Vec::with_capacity(candidate.num - base.num);
+        let mut cursor = candidate.trace.clone();
+        while !Arc::ptr_eq(&cursor, &base.trace) {
+            let segment = cursor.as_ref().as_ref().expect("候选 checkpoint 缺少辅助基点祖先");
+            suffix.push(segment.head.clone());
+            cursor = segment.tail.clone();
+        }
+        assert_eq!(suffix.len(), candidate.num - base.num, "候选 checkpoint 链长度不一致");
+        let mut trace = self.trace.clone();
+        let mut num = self.num;
+        for head in suffix.into_iter().rev() {
+            trace = Arc::new(Some(Trace { checkpoints: num, head, tail: trace }));
+            num += 1;
+        }
+        Checkpoint { num, next_var: candidate.next_var, trace }
     }
 }
 
@@ -714,7 +786,6 @@ impl<'ctx> Enums<'ctx> {
                 self.enums.insert(name, enumeration);
                 return;
             }
-
             let members: Vec<Z3_symbol> = members
                 .iter()
                 .enumerate()
@@ -1325,6 +1396,10 @@ impl<'ctx> Ast<'ctx> {
         }
     }
 
+    fn mk_fpa_to_ieee_bv(&self) -> Self {
+        z3_unary_op!(Z3_mk_fpa_to_ieee_bv, self)
+    }
+
     fn mk_fpa_to_fp_float(&self, exp: &Ast<'ctx>, ebits: u32, sbits: u32) -> Self {
         unsafe {
             let sort = Sort::float(self.ctx, ebits, sbits);
@@ -1550,6 +1625,7 @@ impl PerformanceInfo {
 /// # use isla_lib::smt::smtlib::Def::*;
 /// # use isla_lib::smt::smtlib::*;
 /// # use isla_lib::smt::*;
+/// # configure_tastic(Tactic::Qfaufbv);
 /// # let x = Sym::from_u32(0);
 /// let cfg = Config::new();
 /// let ctx = Context::new(cfg);
@@ -1575,6 +1651,7 @@ impl PerformanceInfo {
 /// # use isla_lib::smt::smtlib::Def::*;
 /// # use isla_lib::smt::smtlib::*;
 /// # use isla_lib::smt::*;
+/// # configure_tastic(Tactic::Qfaufbv);
 /// # let x = Sym::from_u32(0);
 /// let point = {
 ///     let cfg = Config::new();
@@ -1643,6 +1720,7 @@ impl<B> Drop for Solver<'_, B> {
 /// # use isla_lib::smt::smtlib::Def::*;
 /// # use isla_lib::smt::smtlib::*;
 /// # use isla_lib::smt::*;
+/// # configure_tastic(Tactic::Qfaufbv);
 /// # let x = Sym::from_u32(0);
 /// let mut cfg = Config::new();
 /// cfg.set_param_value("model", "true");
@@ -1659,6 +1737,7 @@ pub struct Model<'ctx, B> {
     solver: &'ctx Solver<'ctx, B>,
     ctx: &'ctx Context,
     complete_model: bool,
+    concrete_cache: HashMap<Sym, ModelVal>,
 }
 
 impl<B> Drop for Model<'_, B> {
@@ -1734,11 +1813,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             // 保存点回滚也只恢复本侧引用。没有有效模型属于调用顺序错误。
             let z3_model = solver.stashed_model.expect("获取模型前必须完成 Sat 查询且未新增断言、未取走缓存");
             Z3_model_inc_ref(solver.ctx.z3_ctx, z3_model);
-            Model { z3_model, solver, ctx: solver.ctx, complete_model: false }
+            Model { z3_model, solver, ctx: solver.ctx, complete_model: false, concrete_cache: HashMap::new() }
         }
     }
 
     pub fn set_complete_model(&mut self, b: bool) {
+        if self.complete_model != b {
+            self.concrete_cache.clear();
+        }
         self.complete_model = b;
     }
 
@@ -1797,11 +1879,18 @@ impl<'ctx, B: BV> Model<'ctx, B> {
     }
 
     pub fn get_var(&mut self, var: Sym) -> Result<ModelVal, ExecError> {
+        if let Some(value) = self.concrete_cache.get(&var) {
+            return Ok(value.clone());
+        }
         let var_ast = match self.solver.decls.get(&var) {
             None => return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown())),
             Some(ast) => ast.clone(),
         };
-        self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })
+        let value = self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })?;
+        if matches!(&value, ModelVal::Exp(Exp::Bits(_) | Exp::Bits64(_) | Exp::Bool(_) | Exp::Enum(_))) {
+            self.concrete_cache.insert(var, value.clone());
+        }
+        Ok(value)
     }
 
     /// 只读取输出多样化支持的 enum、bool 和 bitvector；其它合法 SMT sort 不参与取值选择。
@@ -1844,7 +1933,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
                     ModelVal::Exp(Exp::Bits64(bv)) => Ok(Val::Bits(B::new(bv.lower_u64(), bv.len()))),
                     ModelVal::Exp(Exp::Bool(b)) => Ok(Val::Bool(b)),
                     ModelVal::Exp(Exp::Enum(m)) => Ok(Val::Enum(m)),
-                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::Bits(model_bits_to_bv(&bv)?)),
+                    ModelVal::Exp(Exp::Bits(bv)) => Ok(Val::from_bits_slice(&bv)),
                     ModelVal::Exp(exp) => {
                         // 对于其他复杂的表达式，返回错误
                         Err(ExecError::Type(
@@ -1907,30 +1996,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
             MixedBits(segments) => {
                 let mut new_segments = Vec::with_capacity(segments.len());
                 for segment in segments {
-                    match segment {
-                        crate::ir::BitsSegment::Symbolic(sym) => {
-                            let model_val = self.get_var(*sym)?;
-                            match model_val {
-                                ModelVal::Exp(Exp::Bits64(bv)) => {
-                                    new_segments
-                                        .push(crate::ir::BitsSegment::Concrete(B::new(bv.lower_u64(), bv.len())));
-                                }
-                                ModelVal::Exp(Exp::Bits(bv)) => {
-                                    new_segments.push(crate::ir::BitsSegment::Concrete(model_bits_to_bv(&bv)?));
-                                }
-                                ModelVal::Arbitrary(smtlib::Ty::BitVec(_)) => {
-                                    panic!("补全模型后仍无法物化位向量片段：{sym:?}");
-                                }
-                                _ => {
-                                    return Err(ExecError::Type(
-                                        format!("Unsupported model value for BitsSegment: {:?}", model_val),
-                                        SourceLoc::unknown(),
-                                    ));
-                                }
-                            }
-                        }
-                        crate::ir::BitsSegment::Concrete(bv) => {
-                            new_segments.push(crate::ir::BitsSegment::Concrete(*bv));
+                    match self.get_val(&Val::from(segment))? {
+                        Bits(bv) => new_segments.push(crate::ir::BitsSegment::Concrete(bv)),
+                        MixedBits(mut concrete) => new_segments.append(&mut concrete),
+                        value => {
+                            return Err(ExecError::Type(
+                                format!("Unsupported value for BitsSegment: {:?}", value),
+                                SourceLoc::unknown(),
+                            ));
                         }
                     }
                 }
@@ -2133,52 +2206,62 @@ impl SmtResult {
     }
 }
 
-static DEFAULT_TASTIC_STR: &[u8] = b"default\0";
-static TASTIC_STR: OnceLock<CString> = OnceLock::new();
-static SEED_STR: &[u8] = b"seed\0";
-static RANDOM_SEED_STR: &[u8] = b"random_seed\0";
-
-pub fn configure_tastic(tastic: Option<&str>) {
-    let Some(tastic) = tastic else { return };
-    assert!(!tastic.is_empty(), "--tastic 不能为空");
-    let tastic = CString::new(tastic).expect("--tastic 不能包含 NUL 字节");
-
-    if let Some(configured) = TASTIC_STR.get() {
-        assert_eq!(configured, &tastic, "--tastic 被重复配置为不同值");
-    } else {
-        TASTIC_STR.set(tastic).expect("--tastic 配置发生并发冲突");
-    }
+struct SmtConfig {
+    tactic: Tactic,
+    seed_param: &'static CStr,
 }
 
-fn tastic() -> &'static CStr {
-    match TASTIC_STR.get() {
-        Some(tastic) => tastic.as_c_str(),
-        None => unsafe { CStr::from_bytes_with_nul_unchecked(DEFAULT_TASTIC_STR) },
-    }
-}
+static SMT_CONFIG: OnceLock<SmtConfig> = OnceLock::new();
 
-// 不同 Z3 solver 暴露的随机种子参数名不同，按实际参数表选择；两个名字都不支持
-// 的 solver（如 default tactic 生成的）不设置种子参数，避免 Z3 对未知参数触发
-// 致命错误导致进程退出。
-unsafe fn z3_seed_param_name(ctx: Z3_context, solver: Z3_solver) -> Option<&'static [u8]> {
-    let param_descrs = Z3_solver_get_param_descrs(ctx, solver);
-    Z3_param_descrs_inc_ref(ctx, param_descrs);
-    let mut seed_param_name = None;
-    for i in 0..Z3_param_descrs_size(ctx, param_descrs) {
-        let symbol = Z3_param_descrs_get_name(ctx, param_descrs, i);
-        if Z3_get_symbol_kind(ctx, symbol) == SymbolKind::String {
-            let name = CStr::from_ptr(Z3_get_symbol_string(ctx, symbol)).to_bytes();
-            if name == &SEED_STR[..SEED_STR.len() - 1] {
-                seed_param_name = Some(SEED_STR);
-                break;
-            }
-            if name == &RANDOM_SEED_STR[..RANDOM_SEED_STR.len() - 1] {
-                seed_param_name = Some(RANDOM_SEED_STR);
-            }
+/// 在启动执行任务前显式初始化 SMT。相同配置可以重复传入，但只探测一次。
+/// Z3 参数支持取决于版本及 tactic，因此按实际加载的库查询能力，不硬编码版本分界。
+/// 不支持随机种子或试图更改已确定的 tactic 时直接终止。
+pub fn configure_tastic(tactic: Tactic) {
+    let config = SMT_CONFIG.get_or_init(|| {
+        let version = z3_version();
+        let ctx = Context::new(Config::new());
+        unsafe {
+            assert!(
+                (0..Z3_get_num_tactics(ctx.z3_ctx))
+                    .any(|i| CStr::from_ptr(Z3_get_tactic_name(ctx.z3_ctx, i)) == tactic.as_c_str()),
+                "Z3 {version} 不存在 tactic {tactic:?}",
+            );
+            let solver = new_z3_solver(ctx.z3_ctx, tactic.as_c_str());
+            let descrs = Z3_solver_get_param_descrs(ctx.z3_ctx, solver);
+            Z3_param_descrs_inc_ref(ctx.z3_ctx, descrs);
+            let seed_param = [b"seed\0".as_slice(), b"random_seed\0".as_slice()]
+                .into_iter()
+                .map(|name| CStr::from_bytes_with_nul(name).unwrap())
+                .find(|name| {
+                    let exists = (0..Z3_param_descrs_size(ctx.z3_ctx, descrs)).any(|i| {
+                        let symbol = Z3_param_descrs_get_name(ctx.z3_ctx, descrs, i);
+                        Z3_get_symbol_kind(ctx.z3_ctx, symbol) == SymbolKind::String
+                            && CStr::from_ptr(Z3_get_symbol_string(ctx.z3_ctx, symbol)) == *name
+                    });
+                    if !exists {
+                        return false;
+                    }
+                    let symbol = Z3_mk_string_symbol(ctx.z3_ctx, name.as_ptr());
+                    Z3_param_descrs_get_kind(ctx.z3_ctx, descrs, symbol) == ParamKind::UInt
+                });
+            Z3_param_descrs_dec_ref(ctx.z3_ctx, descrs);
+            Z3_solver_dec_ref(ctx.z3_ctx, solver);
+            let seed_param = seed_param
+                .unwrap_or_else(|| panic!("Z3 {version} 的 tactic {tactic:?} 不支持随机种子参数 seed / random_seed"));
+            SmtConfig { tactic, seed_param }
         }
-    }
-    Z3_param_descrs_dec_ref(ctx, param_descrs);
-    seed_param_name
+    });
+    assert_eq!(config.tactic, tactic, "SMT 已初始化，不能更改 tactic");
+}
+
+// 初始化能力探测与实际求解必须使用相同的 tactic 创建方式。
+unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr) -> Z3_solver {
+    let solver_tactic = Z3_mk_tactic(ctx, tactic.as_ptr());
+    Z3_tactic_inc_ref(ctx, solver_tactic);
+    let solver = Z3_mk_solver_from_tactic(ctx, solver_tactic);
+    Z3_solver_inc_ref(ctx, solver);
+    Z3_tactic_dec_ref(ctx, solver_tactic);
+    solver
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -2192,24 +2275,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: u32) -> Self {
+        let config = SMT_CONFIG.get().expect("SMT 尚未初始化，请在程序启动时调用 smt::configure_tastic");
         unsafe {
-            // 始终通过 tactic 创建 solver，既允许命令行切换 tactic，也避免按 logic 名称创建
-            // QF_AUFBV solver 时枚举支持不完整而导致 Z3 崩溃。
-            let solver_tactic = Z3_mk_tactic(ctx.z3_ctx, tastic().as_ptr());
-            Z3_tactic_inc_ref(ctx.z3_ctx, solver_tactic);
-            let z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, solver_tactic);
-            Z3_solver_inc_ref(ctx.z3_ctx, z3_solver);
-            Z3_tactic_dec_ref(ctx.z3_ctx, solver_tactic);
+            // 始终通过 tactic 创建 solver，避免按 logic 创建时枚举支持不完整。
+            let z3_solver = new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str());
 
             let z3_params = Z3_mk_params(ctx.z3_ctx);
             Z3_params_inc_ref(ctx.z3_ctx, z3_params);
 
-            if let Some(seed_param_name) = z3_seed_param_name(ctx.z3_ctx, z3_solver) {
-                let seed_symbol =
-                    Z3_mk_string_symbol(ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(seed_param_name).as_ptr());
-                Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, seed);
-                Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
-            }
+            let seed_symbol = Z3_mk_string_symbol(ctx.z3_ctx, config.seed_param.as_ptr());
+            Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, seed);
+            Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
 
             Z3_params_dec_ref(ctx.z3_ctx, z3_params);
 
@@ -2343,6 +2419,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     IsNegative => Ast::mk_fpa_is_negative(&self.translate_exp(exp)),
                     IsPositive => Ast::mk_fpa_is_positive(&self.translate_exp(exp)),
                     FromIEEE(ebits, sbits) => Ast::mk_fpa_to_fp_bv(&self.translate_exp(exp), *ebits, *sbits),
+                    ToIEEE(..) => Ast::mk_fpa_to_ieee_bv(&self.translate_exp(exp)),
                 }
             }
             FPRoundingUnary(op, rm, exp) => {
@@ -2403,9 +2480,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn get_enum(&mut self, id: Name, size: usize) -> EnumId {
-        if !self.enums.enums.contains_key(&id) {
-            self.add(Def::DefineEnum(id, size))
-        };
+        if let Some(enumeration) = self.enums.enums.get(&id) {
+            assert_eq!(enumeration.consts.len(), size, "枚举类型的成员数量冲突");
+        } else {
+            self.add(Def::DefineEnum(id, size));
+        }
         EnumId { id }
     }
 
@@ -2464,7 +2543,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
             }
             Def::DefineEnum(name, size) => {
-                if !self.enums.enums.contains_key(name) {
+                assert!(*size > 0, "枚举类型至少需要一个成员");
+                if let Some(enumeration) = self.enums.enums.get(name) {
+                    assert_eq!(enumeration.consts.len(), *size, "枚举类型的成员数量冲突");
+                } else {
                     // Keep enum sort names deterministic across checkpoint replay.
                     // Member constructor names do not need to be stable: get_ast
                     // matches constructors through recognizers from the model
@@ -2498,6 +2580,22 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub fn is_bool(&self, v: Sym) -> bool {
         let ast = self.decls.get(&v).expect("布尔类型查询必须引用已声明符号");
         unsafe { Z3_get_sort_kind(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, ast.z3_ast)) == SortKind::Bool }
+    }
+
+    /// Return the SMT sort of a symbolic value used as a floating-point primop argument.
+    pub(crate) fn scalar_sort(&self, v: Sym) -> Option<Ty> {
+        let ast = self.decls.get(&v)?;
+        unsafe {
+            let ctx = self.ctx.z3_ctx;
+            let sort = Z3_get_sort(ctx, ast.z3_ast);
+            match Z3_get_sort_kind(ctx, sort) {
+                SortKind::Bool => Some(Ty::Bool),
+                SortKind::BV => Some(Ty::BitVec(Z3_get_bv_sort_size(ctx, sort))),
+                SortKind::FloatingPoint => Some(Ty::Float(Z3_fpa_get_ebits(ctx, sort), Z3_fpa_get_sbits(ctx, sort))),
+                SortKind::RoundingMode => Some(Ty::RoundingMode),
+                _ => None,
+            }
+        }
     }
 
     pub fn is_bitvector(&mut self, v: Sym) -> bool {
@@ -2860,7 +2958,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // Z3_model 是裸指针（Copy），必须用 take() 真正移出，避免字段残留导致
         // 重复取出、双重 dec_ref。
         let model = self.stashed_model.take()?;
-        Some(Model { z3_model: model, solver: &*self, ctx: self.ctx, complete_model: false })
+        Some(Model {
+            z3_model: model,
+            solver: &*self,
+            ctx: self.ctx,
+            complete_model: false,
+            concrete_cache: HashMap::new(),
+        })
     }
 
     /// 带独立时间盒的 `check_sat`：deadline 到期后软中断 Z3 并返回超时错误。
@@ -2987,6 +3091,7 @@ mod tests {
     fn count增量查询退出后恢复原求解器与模型缓存() {
         use crate::bitvector::b64::B64;
         use smtlib::Exp::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let guard = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());
@@ -3028,6 +3133,7 @@ mod tests {
     #[cfg(feature = "smtperf")]
     #[test]
     fn review12_transaction_performance_graph_leak() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         for _ in 0..32 {
@@ -3047,6 +3153,7 @@ mod tests {
     #[cfg(feature = "smtperf")]
     #[test]
     fn review12_transaction_preserves_existing_performance_graph() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let info = SourceLoc::unknown();
@@ -3084,6 +3191,7 @@ mod tests {
 
     #[test]
     fn transaction_keeps_trace_and_solver_state_isolated() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let before = solver.trace.head.len();
@@ -3103,6 +3211,7 @@ mod tests {
 
     #[test]
     fn committed_transaction_replays_buffered_events() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let tx = solver.start_transaction();
@@ -3118,6 +3227,7 @@ mod tests {
 
     #[test]
     fn review34_推测臂条件必须隔离且不得进入提交或回滚后的路径() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         for commit in [false, true] {
             let mut solver = Solver::<B64>::new(&ctx);
@@ -3178,6 +3288,7 @@ mod tests {
 
     #[test]
     fn path_smt_stats_accumulate_protected_z3_calls_with_their_source_location() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         reset_path_smt_stats();
         let cfg = Config::new();
         let ctx = Context::new(cfg);
@@ -3222,8 +3333,8 @@ mod tests {
 
     #[test]
     fn configured_tastic_is_used_by_solver() {
-        configure_tastic(Some("qfaufbv"));
-        assert_eq!(tastic().to_bytes(), b"qfaufbv");
+        configure_tastic(Tactic::Qfaufbv);
+        assert_eq!(SMT_CONFIG.get().unwrap().tactic, Tactic::Qfaufbv);
 
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
@@ -3247,6 +3358,7 @@ mod tests {
 
     #[test]
     fn bv_macro() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -3256,6 +3368,7 @@ mod tests {
 
     #[test]
     fn get_const() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3290,7 +3403,131 @@ mod tests {
     }
 
     #[test]
+    fn model_get_var_reuses_concrete_typed_values_and_mixed_segments() {
+        use crate::bitvector::b129::B129;
+        use crate::ir::BitsSegment;
+
+        configure_tastic(Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B129>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let bits64 = solver.declare_const(Ty::BitVec(64), loc);
+        let bits129 = solver.declare_const(Ty::BitVec(129), loc);
+        let boolean = solver.declare_const(Ty::Bool, loc);
+        let enum_id = solver.get_enum(Name::from_u32(777), 3);
+        let enumeration = solver.declare_const(Ty::Enum(enum_id), loc);
+        let member = EnumMember { enum_id, member: 2 };
+        let wide_bits: Vec<bool> = (0..129).map(|i| i == 0 || i == 64 || i == 128).collect();
+        solver.assert_eq(Var(bits64), Bits64(B64::new(0x1234_5678_9abc_def0, 64)));
+        solver.assert_eq(Var(bits129), Bits(wide_bits.clone()));
+        solver.assert_eq(Var(boolean), Bool(true));
+        solver.assert_eq(Var(enumeration), Enum(member));
+        assert_eq!(solver.check_sat(loc), Sat);
+
+        let mut model = Model::new(&solver);
+        for (sym, expected) in [
+            (bits64, Bits64(B64::new(0x1234_5678_9abc_def0, 64))),
+            (bits129, Bits(wide_bits)),
+            (boolean, Bool(true)),
+            (enumeration, Enum(member)),
+        ] {
+            assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), expected);
+            reset_path_smt_stats();
+            assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), expected);
+            assert_eq!(path_smt_stats().calls, 0, "相同 Model 内的具体 get_var 不应再次调用 Z3");
+        }
+
+        let wide =
+            B129::zeros(129).set_slice(0, B129::BIT_ONE).set_slice(64, B129::BIT_ONE).set_slice(128, B129::BIT_ONE);
+        let value = Val::MixedBits(vec![BitsSegment::Symbolic(bits129), BitsSegment::Concrete(B129::new(5, 3))]);
+        reset_path_smt_stats();
+        assert_eq!(
+            model.get_val(&value).unwrap(),
+            Val::MixedBits(vec![BitsSegment::Concrete(wide), BitsSegment::Concrete(B129::new(5, 3))])
+        );
+        assert_eq!(path_smt_stats().calls, 0, "MixedBits 应复用同一个符号的具体值");
+
+        reset_path_smt_stats();
+        assert_eq!(model.get_exp(&Var(bits129)).unwrap().unwrap_exp(), Bits(wide.to_vec()));
+        assert!(path_smt_stats().calls > 0, "get_exp 应保留原有求值路径");
+    }
+
+    #[test]
+    fn model_get_var_cache_is_local_and_cleared_on_completion_switch() {
+        configure_tastic(Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let sym = solver.declare_const(Ty::BitVec(8), loc);
+        solver.assert_eq(Var(sym), Bits64(B64::new(0xa5, 8)));
+        assert_eq!(solver.check_sat(loc), Sat);
+
+        let mut model = Model::new(&solver);
+        assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        reset_path_smt_stats();
+        model.get_var(sym).unwrap();
+        assert_eq!(path_smt_stats().calls, 0);
+
+        model.set_complete_model(true);
+        reset_path_smt_stats();
+        assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        assert!(path_smt_stats().calls > 0, "切换到 completion 后须重新求值");
+
+        model.set_complete_model(false);
+        reset_path_smt_stats();
+        assert_eq!(model.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        assert!(path_smt_stats().calls > 0, "切换回非 completion 后须重新求值");
+
+        let mut fresh = Model::new(&solver);
+        reset_path_smt_stats();
+        assert_eq!(fresh.get_var(sym).unwrap().unwrap_exp(), Bits64(B64::new(0xa5, 8)));
+        assert!(path_smt_stats().calls > 0, "新 Model 不应继承另一实例的缓存");
+    }
+
+    #[test]
+    fn model_get_var_does_not_cache_arbitrary_or_errors() {
+        configure_tastic(Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let arbitrary = solver.declare_const(Ty::BitVec(8), loc);
+        let unsupported = solver.declare_const(Ty::Array(Box::new(Ty::BitVec(8)), Box::new(Ty::BitVec(8))), loc);
+        assert_eq!(solver.check_sat(loc), Sat);
+
+        let mut model = Model::new(&solver);
+        assert!(model.get_var(arbitrary).unwrap().is_arbitrary());
+        assert!(model.concrete_cache.is_empty());
+        reset_path_smt_stats();
+        assert!(model.get_var(arbitrary).unwrap().is_arbitrary());
+        assert!(path_smt_stats().calls > 0, "Arbitrary 不应跳过再次求值");
+        assert!(model.concrete_cache.is_empty());
+
+        model.set_complete_model(true);
+        assert_eq!(model.get_exp(&Var(arbitrary)).unwrap().unwrap_exp(), Bits64(B64::new(0, 8)));
+        model.set_complete_model(false);
+        assert_eq!(model.get_var(arbitrary).unwrap().unwrap_exp(), Bits64(B64::new(0, 8)));
+        reset_path_smt_stats();
+        model.get_var(arbitrary).unwrap();
+        assert_eq!(path_smt_stats().calls, 0, "completion 后得到的具体值可在当前模式下复用");
+
+        let invalid = Sym::from_u32(9999);
+        assert!(matches!(model.get_var(invalid), Err(ExecError::Type(_, _))));
+        assert!(matches!(model.get_var(invalid), Err(ExecError::Type(_, _))));
+        assert!(!model.concrete_cache.contains_key(&invalid));
+        assert!(matches!(model.get_var(unsupported), Err(ExecError::Type(_, _))));
+        assert!(matches!(model.get_var(unsupported), Err(ExecError::Type(_, _))));
+        assert!(!model.concrete_cache.contains_key(&unsupported));
+    }
+
+    #[test]
     fn local_model_debug_preserves_original_model_text_semantics() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3307,6 +3544,7 @@ mod tests {
 
     #[test]
     fn get_enum_const() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3331,6 +3569,7 @@ mod tests {
 
     #[test]
     fn get_single_member_enum_const_after_checkpoint_replay() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3341,6 +3580,7 @@ mod tests {
 
         let checkpoint = checkpoint(&mut solver);
         let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert!(unsafe { Z3_is_eq_sort(ctx.z3_ctx, solver.enums.enums[&e.id].sort, replayed.enums.enums[&e.id].sort) });
         assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
 
         let mut model = Model::new(&replayed);
@@ -3349,6 +3589,7 @@ mod tests {
 
     #[test]
     fn get_multi_member_enum_const_after_checkpoint_replay() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3360,6 +3601,7 @@ mod tests {
 
         let checkpoint = checkpoint(&mut solver);
         let mut replayed = Solver::from_checkpoint(&ctx, checkpoint);
+        assert!(unsafe { Z3_is_eq_sort(ctx.z3_ctx, solver.enums.enums[&e.id].sort, replayed.enums.enums[&e.id].sort) });
         assert_eq!(replayed.check_sat(SourceLoc::unknown()), Sat);
 
         let mut model = Model::new(&replayed);
@@ -3367,7 +3609,215 @@ mod tests {
     }
 
     #[test]
+    fn enum_checkpoint_replays_after_all_solvers_drop() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let loc = SourceLoc::unknown();
+        let (point, small_var, large_var, small_member, large_member) = {
+            let mut source = Solver::<B64>::new(&ctx);
+            let small = source.get_enum(Name::from_u32(30), 1);
+            let large = source.get_enum(Name::from_u32(31), 4);
+            let small_var = source.declare_const(Ty::Enum(small), loc);
+            let large_var = source.declare_const(Ty::Enum(large), loc);
+            let small_member = small.first_member();
+            let large_member = EnumMember { enum_id: large, member: 3 };
+            source.assert_eq(Var(small_var), Enum(small_member));
+            source.assert_eq(Var(large_var), Enum(large_member));
+            (checkpoint(&mut source), small_var, large_var, small_member, large_member)
+        };
+
+        for _ in 0..3 {
+            let mut replayed = Solver::from_checkpoint(&ctx, point.clone());
+            assert_eq!(replayed.check_sat(loc), Sat);
+            let mut model = Model::new(&replayed);
+            assert_eq!(model.get_var(small_var).unwrap().unwrap_exp(), Enum(small_member));
+            assert_eq!(model.get_var(large_var).unwrap().unwrap_exp(), Enum(large_member));
+        }
+
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let other_ctx = Context::new(Config::new());
+        let mut replayed = Solver::from_checkpoint(&other_ctx, point);
+        assert_eq!(replayed.check_sat(loc), Sat);
+        let mut model = Model::new(&replayed);
+        assert_eq!(model.get_var(small_var).unwrap().unwrap_exp(), Enum(small_member));
+        assert_eq!(model.get_var(large_var).unwrap().unwrap_exp(), Enum(large_member));
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型的成员数量冲突")]
+    fn get_enum_rejects_conflicting_member_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        solver.get_enum(Name::from_u32(32), 2);
+        solver.get_enum(Name::from_u32(32), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型的成员数量冲突")]
+    fn get_enum_rejects_conflicting_member_count_across_solvers() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        Solver::<B64>::new(&ctx).get_enum(Name::from_u32(33), 2);
+        Solver::<B64>::new(&ctx).get_enum(Name::from_u32(33), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型的成员数量冲突")]
+    fn define_enum_rejects_conflicting_member_count() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let name = Name::from_u32(35);
+        solver.add(DefineEnum(name, 2));
+        solver.add(DefineEnum(name, 3));
+    }
+
+    #[test]
+    fn different_enums_keep_distinct_sorts_when_members_share_symbols() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        cfg.set_param_value("model", "true");
+        let ctx = Context::new(cfg);
+        let loc = SourceLoc::unknown();
+        let mut first = Solver::<B64>::new(&ctx);
+        let mut second = Solver::<B64>::new(&ctx);
+        let first_enum = first.get_enum(Name::from_u32(36), 2);
+        let second_enum = second.get_enum(Name::from_u32(37), 2);
+        assert!(!unsafe {
+            Z3_is_eq_sort(ctx.z3_ctx, first.enums.enums[&first_enum.id].sort, second.enums.enums[&second_enum.id].sort)
+        });
+        let first_var = first.declare_const(Ty::Enum(first_enum), loc);
+        let second_var = second.declare_const(Ty::Enum(second_enum), loc);
+        let first_member = EnumMember { enum_id: first_enum, member: 1 };
+        let second_member = EnumMember { enum_id: second_enum, member: 1 };
+        first.assert_eq(Var(first_var), Enum(first_member));
+        second.assert_eq(Var(second_var), Enum(second_member));
+        assert_eq!(first.check_sat(loc), Sat);
+        assert_eq!(second.check_sat(loc), Sat);
+        assert_eq!(Model::new(&first).get_var(first_var).unwrap().unwrap_exp(), Enum(first_member));
+        assert_eq!(Model::new(&second).get_var(second_var).unwrap().unwrap_exp(), Enum(second_member));
+    }
+
+    #[test]
+    #[should_panic(expected = "枚举类型至少需要一个成员")]
+    fn get_enum_rejects_empty_enumeration() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        Solver::<B64>::new(&ctx).get_enum(Name::from_u32(34), 0);
+    }
+
+    #[test]
+    fn isolated_checkpoint_preserves_definitions_and_rebases_only_new_constraints() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut execution = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let enum_id = execution.get_enum(Name::from_u32(214), 2);
+        let choice = execution.declare_const(Ty::Bool, loc);
+        let derived = execution.define_const(Var(choice), loc);
+        let enum_value = execution.declare_const(Ty::Enum(enum_id), loc);
+        execution.assert(Var(choice));
+        execution.trace_call(Name::from_u32(215));
+        let full = checkpoint(&mut execution);
+
+        let isolated = full.with_instruction_assertions(&Val::Unit);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let helper_ctx = Context::new(Config::new());
+        let mut helper = Solver::from_checkpoint(&helper_ctx, isolated.clone());
+        assert_eq!(helper.check_sat(loc), Sat);
+        helper.assert(Not(Box::new(Var(derived))));
+        assert_eq!(helper.check_sat(loc), Sat);
+        helper.trace_call(Name::from_u32(216));
+        let _intermediate = checkpoint(&mut helper);
+        let new_symbol = helper.declare_const(Ty::Bool, loc);
+        assert_ne!(new_symbol, choice);
+        assert_ne!(new_symbol, derived);
+        assert_ne!(new_symbol, enum_value);
+        let new_enum = helper.get_enum(Name::from_u32(217), 2);
+        let enum_symbol = helper.declare_const(Ty::Enum(new_enum), loc);
+        helper.assert_eq(Var(enum_symbol), Enum(new_enum.first_member()));
+        helper.assert(Var(new_symbol));
+        let candidate = checkpoint(&mut helper);
+
+        let combined = full.with_suffix_from(&isolated, &candidate);
+        let events = combined.trace().as_ref().unwrap().to_vec();
+        assert_eq!(events.iter().filter(|event| matches!(event, Event::Function { call: true, .. })).count(), 2);
+        assert_eq!(events.iter().filter(|event| matches!(event, Event::Smt(Def::Assert(_), _, _))).count(), 4);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let verified_ctx = Context::new(Config::new());
+        let mut verified = Solver::from_checkpoint(&verified_ctx, combined);
+        assert_eq!(verified.check_sat(loc), Unsat);
+
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let next_helper_ctx = Context::new(Config::new());
+        let mut helper = Solver::from_checkpoint(&next_helper_ctx, isolated.clone());
+        helper.assert(Var(derived));
+        helper.assert_eq(Enum(enum_id.first_member()), Var(enum_value));
+        let combined = full.with_suffix_from(&isolated, &checkpoint(&mut helper));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let next_verified_ctx = Context::new(Config::new());
+        let mut verified = Solver::from_checkpoint(&next_verified_ctx, combined);
+        assert_eq!(verified.check_sat(loc), Sat);
+    }
+
+    #[test]
+    fn instruction_checkpoint_keeps_only_instruction_derived_assertions() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut execution = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let op = execution.declare_const(Ty::Bool, loc);
+        let fpr = execution.declare_const(Ty::BitVec(32), loc);
+        let first = execution.define_const(Var(op), loc);
+        let second = execution.define_const(Var(first), loc);
+        let mixed = execution
+            .define_const(And(Box::new(Var(second)), Box::new(Eq(Box::new(Var(fpr)), Box::new(bits64(0, 32))))), loc);
+        let function = execution.fresh();
+        execution.add(DeclareFun(function, vec![Ty::Bool], Ty::Bool));
+        let unknown = execution.define_const(App(function, vec![Var(op)]), loc);
+        execution.assert(Var(op));
+        execution.assert(Var(second));
+        execution.assert_eq(Var(fpr), bits64(0, 32));
+        execution.assert(Var(mixed));
+        execution.assert(Var(unknown));
+        execution.assert(Bool(true));
+        let full = checkpoint(&mut execution);
+
+        let instruction = Val::<B64>::Symbolic(op);
+        let isolated = full.with_instruction_assertions(&instruction);
+        let kept: Vec<_> = isolated
+            .trace()
+            .as_ref()
+            .unwrap()
+            .to_vec()
+            .into_iter()
+            .filter_map(|event| if let Event::Smt(Def::Assert(exp), _, _) = event { Some(exp.clone()) } else { None })
+            .collect();
+        assert_eq!(kept.len(), 3);
+        assert!(kept.contains(&Var(op)));
+        assert!(kept.contains(&Var(second)));
+        assert!(kept.contains(&Bool(true)));
+
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let helper_ctx = Context::new(Config::new());
+        let mut helper = Solver::from_checkpoint(&helper_ctx, isolated.clone());
+        assert_eq!(helper.check_sat(loc), Sat);
+        assert_eq!(helper.check_sat_with(&Not(Box::new(Var(op))), loc), Unsat);
+        assert_eq!(helper.check_sat_with(&Neq(Box::new(Var(fpr)), Box::new(bits64(0, 32))), loc), Sat);
+        helper.assert_eq(Var(fpr), bits64(1, 32));
+        let combined = full.with_suffix_from(&isolated, &checkpoint(&mut helper));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let verified_ctx = Context::new(Config::new());
+        let mut verified = Solver::from_checkpoint(&verified_ctx, combined);
+        assert_eq!(verified.check_sat(loc), Unsat);
+    }
+
+    #[test]
     fn get_struct_with_enum_field_after_checkpoint_replay() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3402,6 +3852,7 @@ mod tests {
 
     #[test]
     fn smt_func() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
         let ctx = Context::new(cfg);
@@ -3424,6 +3875,7 @@ mod tests {
 
     #[test]
     fn array() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
@@ -3446,6 +3898,7 @@ mod tests {
     #[test]
     fn 模型缓存跟踪新增断言且不被unsat探测失效() {
         let cfg = Config::new();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         solver.add(DeclareConst(Sym::from_u32(0), Ty::Bool));
@@ -3459,6 +3912,7 @@ mod tests {
 
         // Sat 后缓存可用
         let cfg2 = Config::new();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx2 = Context::new(cfg2);
         let mut solver = Solver::<B64>::new(&ctx2);
         solver.add(DeclareConst(Sym::from_u32(0), Ty::Bool));
@@ -3492,6 +3946,7 @@ mod tests {
     #[test]
     fn 复用缓存模型与重解结果一致() {
         let cfg = Config::new();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         solver.add(DeclareConst(Sym::from_u32(0), Ty::BitVec(8)));
@@ -3524,32 +3979,34 @@ mod tests {
         assert!(resolved.lower_u64() > 5, "重解模型应满足既有约束 x > 5，实际 {}", resolved.lower_u64());
     }
 
-    /// `check_sat_deadline` 到期后软中断 Z3 并返回 CheckSat 超时错误；同一
-    /// 查询给足时间则正常返回 Sat。仅 `smt-thread-interrupt` 构建可中断。
+    /// deadline 查询可在限时内完成，也可返回 CheckSat 超时错误；两种结果
+    /// 都不应破坏同一 solver 后续的正常查询。watchdog 的确定性中断另有专测。
     #[cfg(feature = "smt-thread-interrupt")]
     #[test]
-    fn deadline到期中断check返回超时错误() {
+    fn deadline查询完成或中断后仍可重用() {
         let cfg = Config::new();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
-        // 64 位乘法逆运算：已知乘积求因子，短 deadline 内无法完成
+        // 64 位乘法逆运算用于触发限时调用；具体求解器可能很快找到解。
         let p = Sym::from_u32(0);
         let q = Sym::from_u32(1);
         solver.add(DeclareConst(p, Ty::BitVec(64)));
         solver.add(DeclareConst(q, Ty::BitVec(64)));
         solver.add(DeclareConst(Sym::from_u32(2), Ty::BitVec(64)));
         solver.add(Assert(Eq(Box::new(Bvmul(Box::new(Var(p)), Box::new(Var(q)))), Box::new(Var(Sym::from_u32(2))))));
-        // 把乘积钉在一个大素数上，只能靠搜索分解
+        // 固定乘积，让两次查询使用相同断言。
         let prime_bits: Vec<bool> = (0..64).rev().map(|i| (0xC71CA6CBB5F1B7AEu64 >> i) & 1 == 1).collect();
         solver.add(Assert(Eq(Box::new(Var(Sym::from_u32(2))), Box::new(Bits(prime_bits)))));
 
         let result = solver.check_sat_deadline(SourceLoc::unknown(), Duration::from_millis(1));
         match result {
+            Sat => (),
             SmtResult::Error(smt_error) => {
                 let message = format!("{}", smt_error);
                 assert!(message.contains("CheckSat"), "超时错误应标记 CheckSat 操作，实际 {}", message);
             }
-            other => panic!("1ms deadline 下应超时，实际 {:?}", other),
+            other => panic!("1ms deadline 下应返回 Sat 或超时，实际 {:?}", other),
         }
 
         // 给足时间后同一 solver 状态可正常求解（软中断不破坏 solver 状态的后续使用）

@@ -50,7 +50,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::log;
 use crate::primop;
-use crate::primop_util::{build_vector_ite, i128_from_bits, ite_phi, smt_value, symbolic};
+use crate::primop_util::{build_vector_ite, i128_from_bits, ite_phi, replace_mixed_bits, smt_value, symbolic};
 use crate::probe;
 use crate::smt::smtlib::Def;
 use crate::smt::*;
@@ -281,6 +281,7 @@ fn read_register_from_vector<'ir, B: BV>(
     let rib = required_index_bits(regs.len());
 
     let invalid_index_argument = "read_register_from_vector invalid index";
+    let n = replace_mixed_bits(n, solver, info)?;
     let index = match n {
         Val::Bits(bv) => {
             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
@@ -448,6 +449,7 @@ fn write_register_from_vector<'ir, B: BV>(
     let rib = required_index_bits(regs.len());
 
     let invalid_index_argument = "write_register_from_vector invalid index";
+    let n = replace_mixed_bits(n, solver, info)?;
     let index = match n {
         Val::Bits(bv) => {
             if bv.len() > 64 && !bv.slice(64, bv.len() - 64).unwrap().is_zero() {
@@ -1095,6 +1097,11 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     });
     let mut frame = unfreeze_frame(frame);
     frame.path_timing.start_active();
+    #[cfg(feature = "tracetool")]
+    if shared_state.trace.ftrace_enabled() && frame.trace_path.instruction_count == 0 {
+        // 最外层入口不经过 IR Call；补入同一种 Function 事件，fork 恢复不重复记录。
+        solver.trace_call(frame.function_name);
+    }
     let result = run_loop(
         tid,
         task_id,
@@ -1108,6 +1115,12 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         solver,
     );
     frame.path_timing.pause_active();
+    // collector 可能用完成帧继续执行，必须连同最后一次 fork 之后的 SMT 调用一起保留。
+    frame.capture_path_smt_stats();
+    #[cfg(feature = "tracetool")]
+    if shared_state.trace.ftrace_enabled() {
+        frame.trace_path.capture_function_trace(solver.trace());
+    }
 
     match result {
         Ok(run) => Ok((run, frame)),
@@ -1139,23 +1152,24 @@ impl<'a, 'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for SingleForkSink<'a, 'ir, 
     }
 }
 
-struct MultiForkSink<'scope, 'env, 'ir, 'task, B: BV, R> {
-    runtime: Arc<MultiRuntime<'ir, 'task, B, R>>,
+struct MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B: BV, R> {
+    runtime: Arc<MultiRuntime<'ir, 'task, 'collector, B, R>>,
     scope: &'scope thread::Scope<'scope, 'env>,
 }
 
-impl<'scope, 'env, 'ir, 'task, B: BV + Send + Sync, R: Send + Sync> ForkSink<'ir, 'task, B>
-    for MultiForkSink<'scope, 'env, 'ir, 'task, B, R>
+impl<'scope, 'env, 'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> ForkSink<'ir, 'task, B>
+    for MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B, R>
 where
     'ir: 'scope,
     'task: 'scope,
+    'collector: 'scope,
 {
     fn submit(&self, task: Task<'ir, 'task, B>) {
         self.runtime.submit(self.scope, task);
     }
 }
 
-struct MultiRuntime<'ir, 'task, B: BV, R> {
+struct MultiRuntime<'ir, 'task, 'collector, B: BV, R> {
     limit: usize,
     timeout: PathTimeout,
     active_threads: AtomicUsize,
@@ -1165,16 +1179,17 @@ struct MultiRuntime<'ir, 'task, B: BV, R> {
     queued_tasks: Mutex<VecDeque<Task<'ir, 'task, B>>>,
     finished_mu: Mutex<()>,
     finished_cv: Condvar,
-    shared_state: &'ir SharedState<'ir, B>,
+    shared_state: &'collector SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &'ir Collector<'ir, B, R>,
+    collector: &'collector ScopedCollector<'ir, 'collector, B, R>,
 }
 
-impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B, R> {
+impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, 'collector, B, R> {
     fn submit<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>, task: Task<'ir, 'task, B>)
     where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         self.pending_tasks.fetch_add(1, Ordering::AcqRel);
         if self.try_reserve_thread() {
@@ -1204,10 +1219,19 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     ) where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         let tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
         let runtime = Arc::clone(self);
-        scope.spawn(move || runtime.execute_task(scope, tid, task));
+        scope.spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Arc::clone(&runtime).execute_task(scope, tid, task);
+            }));
+            runtime.on_task_finished(scope);
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        });
     }
 
     fn execute_task<'scope, 'env>(
@@ -1218,6 +1242,7 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     ) where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");
@@ -1241,13 +1266,13 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
             &mut solver,
         );
         (self.collector)(tid, task.id, result, self.shared_state, solver, self.collected.as_ref());
-        self.on_task_finished(scope);
     }
 
     fn on_task_finished<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>)
     where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
         self.active_threads.fetch_sub(1, Ordering::AcqRel);
@@ -1265,6 +1290,7 @@ impl<'ir, 'task, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'ir, 'task, B
     where
         'ir: 'scope,
         'task: 'scope,
+        'collector: 'scope,
     {
         if self.refill_owner.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
@@ -1638,11 +1664,11 @@ fn concretize_loop_branch_with_sampling<B: BV>(
     Ok(Some(concrete_value))
 }
 
-macro_rules! itrace_push_branch_condition {
+macro_rules! btrace_push_branch_condition {
     ($frame:expr, $condition:expr) => {{
         #[cfg(feature = "tracetool")]
         {
-            $frame.itrace_path.push_branch_condition($condition);
+            $frame.trace_path.push_branch_condition($condition);
         }
         #[cfg(not(feature = "tracetool"))]
         {
@@ -1651,13 +1677,13 @@ macro_rules! itrace_push_branch_condition {
     }};
 }
 
-macro_rules! itrace_fork_frame_with_branch_condition {
+macro_rules! trace_fork_frame_with_branch_condition {
     ($frame:expr, $pc:expr, $condition:expr) => {{
         #[cfg(feature = "tracetool")]
         {
-            let mut itrace_path = $frame.itrace_path.clone();
-            itrace_path.push_branch_condition($condition);
-            Frame { pc: $pc, itrace_path: Arc::new(itrace_path), ..freeze_frame($frame) }
+            let mut trace_path = $frame.trace_path.clone();
+            trace_path.push_branch_condition($condition);
+            Frame { pc: $pc, trace_path: Arc::new(trace_path), ..freeze_frame($frame) }
         }
         #[cfg(not(feature = "tracetool"))]
         {
@@ -1667,8 +1693,25 @@ macro_rules! itrace_fork_frame_with_branch_condition {
     }};
 }
 
-use itrace_fork_frame_with_branch_condition;
-use itrace_push_branch_condition;
+use btrace_push_branch_condition;
+use trace_fork_frame_with_branch_condition;
+macro_rules! btrace_record_jump {
+    ($frame:expr, $pc:expr, $taken:expr, $state:expr) => {{
+        #[cfg(feature = "tracetool")]
+        if $state.trace.btrace_enabled() {
+            $frame.trace_path.record_jump(
+                $frame.function_name,
+                $frame.backtrace.clone(),
+                $pc as u64,
+                $frame.pc as u64,
+                $taken,
+                &$frame.instrs[$pc],
+            );
+        }
+        #[cfg(not(feature = "tracetool"))]
+        let _ = ($pc, $taken);
+    }};
+}
 
 /// 路径撞上 `--timeout` 预算时，输出这条路径的 SMT 用时构成与超时原因判定。
 ///
@@ -1693,7 +1736,7 @@ fn report_path_timeout<'ir, B: BV>(
         log_from!(tid, log::SYM_EXEC, line);
     }
     #[cfg(feature = "tracetool")]
-    frame.itrace_path.record_summary(frame.function_name, frame.backtrace.clone(), frame.pc as u64, lines.join("\n"));
+    frame.trace_path.record_summary(frame.function_name, frame.backtrace.clone(), frame.pc as u64, lines.join("\n"));
     #[cfg(not(feature = "tracetool"))]
     let _ = frame;
 }
@@ -1732,7 +1775,7 @@ fn record_execution_limit<B: BV>(frame: &mut LocalFrame<'_, B>, reason: Executio
                 format!("max_path_depth exceeded: control_flow_steps={}, max_path_depth={}", actual, max)
             }
         };
-        frame.itrace_path.record_summary(
+        frame.trace_path.record_summary(
             frame.function_name,
             frame.backtrace.clone(),
             frame.pc as u64,
@@ -1922,7 +1965,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         };
 
         #[cfg(feature = "tracetool")]
-        frame.itrace_path.record(frame.function_name, frame.backtrace.clone(), frame.pc as u64);
+        frame.trace_path.record_instruction(
+            frame.function_name,
+            frame.backtrace.clone(),
+            frame.pc as u64,
+            &frame.instrs[frame.pc],
+            &shared_state.trace,
+        );
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
@@ -1946,6 +1995,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 frame.pending_retry_operand = None;
                 frame.local_state.expression_values.clear();
                 frame.local_state.expression_retry_operands = None;
+                let jump_pc = frame.pc;
                 let decision = match limit_handler.as_ref() {
                     Some(handler) => handler.on_conditional_jump(
                         &mut frame.execution_limit_state,
@@ -1988,12 +2038,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             };
 
                             if concrete_bool {
-                                itrace_push_branch_condition!(frame, Var(v));
+                                btrace_push_branch_condition!(frame, Var(v));
                                 frame.pc = *target;
                             } else {
-                                itrace_push_branch_condition!(frame, Not(Box::new(Var(v))));
+                                btrace_push_branch_condition!(frame, Not(Box::new(Var(v))));
                                 frame.pc += 1;
                             }
+                            btrace_record_jump!(frame, jump_pc, concrete_bool, shared_state);
                             continue 'main_loop;
                         }
                         Val::Bool(jump) => {
@@ -2007,6 +2058,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             } else {
                                 frame.pc += 1;
                             }
+                            btrace_record_jump!(frame, jump_pc, jump, shared_state);
                             continue 'main_loop;
                         }
                         _ => return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info)),
@@ -2097,12 +2149,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     record_execution_limit(frame, reason, "sample_branch_condition");
                                     let concrete_bool = concretize_branch_with_sampling(v, solver, *info, &sample)?;
                                     if concrete_bool {
-                                        itrace_push_branch_condition!(frame, test_true);
+                                        btrace_push_branch_condition!(frame, test_true);
                                         frame.pc = *target;
                                     } else {
-                                        itrace_push_branch_condition!(frame, test_false);
+                                        btrace_push_branch_condition!(frame, test_false);
                                         frame.pc += 1;
                                     }
+                                    btrace_record_jump!(frame, jump_pc, concrete_bool, shared_state);
                                     continue 'main_loop;
                                 }
                                 ExecutionLimitDecision::Continue | ExecutionLimitDecision::KeepCurrentModel { .. } => {
@@ -2118,7 +2171,18 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             let point = checkpoint(solver);
                             frame.capture_path_smt_stats();
                             let mut frozen =
-                                itrace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
+                                trace_fork_frame_with_branch_condition!(frame, frame.pc + 1, test_false.clone());
+                            #[cfg(feature = "tracetool")]
+                            if shared_state.trace.btrace_enabled() {
+                                Arc::make_mut(&mut frozen.trace_path).record_jump(
+                                    frozen.function_name,
+                                    (*frozen.backtrace).clone(),
+                                    jump_pc as u64,
+                                    frozen.pc as u64,
+                                    false,
+                                    &frame.instrs[jump_pc],
+                                );
+                            }
                             // 父子路径的采样签名从这次 fork 起分叉，受限分支的具体化抽样
                             // 才会在不同路径上抽到不同方向。
                             Arc::make_mut(&mut frozen.execution_limit_state).advance_path_signature(false);
@@ -2138,14 +2202,17 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             // can turn a set of traces into a tree later
                             solver.add_event(Event::Fork(fork_id, v, 0, *info));
                             solver.add(Assert(test_true.clone()));
-                            itrace_push_branch_condition!(frame, test_true);
+                            btrace_push_branch_condition!(frame, test_true);
                             frame.pc = *target;
+                            btrace_record_jump!(frame, jump_pc, true, shared_state);
                         } else if can_be_true {
                             solver.add(Assert(test_true));
                             frame.pc = *target;
+                            btrace_record_jump!(frame, jump_pc, true, shared_state);
                         } else if can_be_false {
                             solver.add(Assert(test_false));
                             frame.pc += 1;
+                            btrace_record_jump!(frame, jump_pc, false, shared_state);
                         } else {
                             return Ok(Run::Dead);
                         }
@@ -2156,6 +2223,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         } else {
                             frame.pc += 1;
                         }
+                        btrace_record_jump!(frame, jump_pc, jump, shared_state);
                     }
                     _ => {
                         return Err(ExecError::Type(format!("Jump on non boolean {:?}", &value), *info));
@@ -2747,7 +2815,24 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     *info,
                     false,
                 )?;
-                if let Val::Symbolic(v) = *val.as_ref() {
+                let val = match val.as_ref() {
+                    Val::MixedBits(_) => {
+                        let normalized = replace_mixed_bits(val.as_ref().clone(), solver, *info)?;
+                        // 分叉快照必须引用规范化后的同一符号，重入时继续枚举其剩余取值。
+                        assign(
+                            tid,
+                            &Loc::Id(*id),
+                            normalized.clone(),
+                            &mut frame.local_state,
+                            shared_state,
+                            solver,
+                            *info,
+                        )?;
+                        normalized
+                    }
+                    value => value.clone(),
+                };
+                if let Val::Symbolic(v) = val {
                     use smtlib::bits64;
                     use smtlib::Def::*;
                     use smtlib::Exp::*;
@@ -2960,7 +3045,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 /// state at the end of the execution or an error, as well as the shared state and the SMT solver
 /// state associated with that execution. It build a final result for all the executions by
 /// collecting the results into a type R.
-pub type Collector<'ir, B, R> = dyn 'ir
+// 保留既有公开别名；作用域调用可独立缩短 collector 捕获值的借用期。
+pub type Collector<'ir, B, R> = ScopedCollector<'ir, 'ir, B, R>;
+
+pub type ScopedCollector<'ir, 'collector, B, R> = dyn 'collector
     + Sync
     + Fn(
         usize,
@@ -2971,11 +3059,11 @@ pub type Collector<'ir, B, R> = dyn 'ir
         &R,
     );
 
-pub fn submit_itrace_for_local_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) {
-    submit_itrace_for_local_frame_with_diagnostics(frame, shared_state, Vec::new());
+pub fn submit_trace_for_local_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>, shared_state: &SharedState<'ir, B>) {
+    submit_trace_for_local_frame_with_diagnostics(frame, shared_state, Vec::new());
 }
 
-pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
+pub fn submit_trace_for_local_frame_with_diagnostics<'ir, B: BV>(
     frame: &LocalFrame<'ir, B>,
     shared_state: &SharedState<'ir, B>,
     diagnostics: Vec<(crate::timeout::TimeoutDiagnostic, bool)>,
@@ -2992,28 +3080,28 @@ pub fn submit_itrace_for_local_frame_with_diagnostics<'ir, B: BV>(
                 dump.configure_names(frame.smt_dump_names(shared_state));
             }
         }
-        let mut completed =
-            crate::tracetool::itrace::ItraceCompletedPath::without_diagnostics(frame.itrace_path.clone());
+        let mut completed = crate::tracetool::TraceCompletedPath::without_diagnostics(frame.trace_path.clone());
         for (diagnostic, include_smt_dump) in diagnostics {
             completed.push_diagnostic_with_dump(diagnostic, include_smt_dump);
         }
+        completed.set_path_signature(frame.path_signature());
         completed.set_timing(frame.path_time_snapshot());
         completed.set_smtperf_summary(smtperf_summary);
-        shared_state.itrace.submit_completed_path(&completed, &shared_state.symtab);
+        shared_state.trace.submit_completed_path(&completed, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
     let _ = (frame, shared_state, diagnostics, smtperf_summary);
 }
 
-pub fn submit_itrace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {
+pub fn submit_trace_for_frame<'ir, B: BV>(frame: &Frame<'ir, B>, shared_state: &SharedState<'ir, B>) {
     #[cfg(feature = "tracetool")]
     {
-        let completed = crate::tracetool::itrace::ItraceCompletedPath::with_timing(
-            (*frame.itrace_path).clone(),
+        let completed = crate::tracetool::TraceCompletedPath::with_timing(
+            (*frame.trace_path).clone(),
             Vec::new(),
             frame.path_time_snapshot(),
         );
-        shared_state.itrace.submit_completed_path(&completed, &shared_state.symtab);
+        shared_state.trace.submit_completed_path(&completed, &shared_state.symtab);
     }
     #[cfg(not(feature = "tracetool"))]
     let _ = (frame, shared_state);
@@ -3035,7 +3123,7 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     timeout: PathTimeout,
     shared_state: &SharedState<'ir, B>,
     collected: &R,
-    collector: &Collector<'ir, B, R>,
+    collector: &ScopedCollector<'ir, '_, B, R>,
 ) {
     let queue = Worker::new_lifo();
     queue.push(task);
@@ -3122,13 +3210,13 @@ enum Progress {
 
 /// Start symbolically executing a Task across `num_threads` new threads, collecting the results
 /// using the given collector.
-pub fn start_multi<'ir, B: BV, R>(
+pub fn start_multi<'ir, 'collector, B: BV, R>(
     num_threads: usize,
     timeout: Option<u64>,
     tasks: Vec<Task<'ir, '_, B>>,
-    shared_state: &'ir SharedState<'ir, B>,
+    shared_state: &'collector SharedState<'ir, B>,
     collected: Arc<R>,
-    collector: &'ir Collector<'ir, B, R>,
+    collector: &'collector ScopedCollector<'ir, 'collector, B, R>,
 ) where
     B: Send + Sync,
     R: Send + Sync,
@@ -3337,12 +3425,12 @@ pub fn all_unsat_collector<'ir, B: BV>(
                 }
                 _ => log_from!(tid, log::VERBOSE, &format!("Got value {:?}", value)),
             }
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Dead, frame)) => submit_trace_for_local_frame(&frame, shared_state),
         Ok((Run::Exit | Run::Suspended, frame)) => {
             log_from!(tid, log::VERBOSE, "Unexpected return".to_string());
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
         Err((err, frame)) => {
             err.assert_normal_execution();
@@ -3352,7 +3440,7 @@ pub fn all_unsat_collector<'ir, B: BV>(
                     log_from!(tid, log::VERBOSE, format!("  {} @ {}", shared_state.symtab.to_str(*f), pc));
                 }
             });
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
             collected.store(false, Ordering::Release)
         }
     }
@@ -3428,13 +3516,13 @@ pub fn trace_collector<'ir, B: BV>(
         Ok((Run::Finished(_) | Run::Exit, frame)) => {
             let mut events = solver.trace().to_vec();
             collected.push(Ok((task_id, events.drain(..).cloned().collect())));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
         Ok((Run::Suspended, frame)) => {
             collected.push(Err(TraceError::UnexpectedSuspension));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Dead, frame)) => submit_trace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
             err.assert_normal_execution();
             log_from!(tid, log::VERBOSE, format!("Error {:?}", err));
@@ -3453,7 +3541,7 @@ pub fn trace_collector<'ir, B: BV>(
                 }
                 SmtResult::Unsat | SmtResult::Unknown => collected.push(Err(TraceError::exec(err, backtrace))),
             }
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -3470,10 +3558,10 @@ pub fn trace_value_collector<'ir, B: BV>(
         Ok((Run::Finished(value), frame)) => {
             let mut events = solver.trace().to_vec();
             collected.push(Ok((task_id, value, events.drain(..).cloned().collect())));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Exit | Run::Suspended, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
-        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Exit | Run::Suspended, frame)) => submit_trace_for_local_frame(&frame, shared_state),
+        Ok((Run::Dead, frame)) => submit_trace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
             err.assert_normal_execution();
             let backtrace = backtrace_string(&frame.backtrace, &shared_state.symtab);
@@ -3488,7 +3576,7 @@ pub fn trace_value_collector<'ir, B: BV>(
                 }
                 SmtResult::Unsat | SmtResult::Unknown => collected.push(Err(TraceError::exec(err, backtrace))),
             }
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -3505,7 +3593,7 @@ pub fn trace_result_collector<'ir, B: BV>(
         Ok((Run::Finished(Val::Bool(result)), frame)) => {
             let mut events = solver.trace().to_vec();
             collected.push(Ok((task_id, result, events.drain(..).cloned().collect())));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
         Ok((Run::Finished(Val::Symbolic(sym)), frame)) if solver.is_bool(sym) => {
             let info = SourceLoc::unknown();
@@ -3524,22 +3612,22 @@ pub fn trace_result_collector<'ir, B: BV>(
                         .push(Err(TraceError::exec(error, backtrace_string(&frame.backtrace, &shared_state.symtab)))),
                 }
             }
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Exit, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Exit, frame)) => submit_trace_for_local_frame(&frame, shared_state),
         Ok((Run::Suspended, frame)) => {
             collected.push(Err(TraceError::UnexpectedSuspension));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
         Ok((Run::Finished(val), frame)) => {
             collected.push(Err(TraceError::unexpected_value(val)));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
-        Ok((Run::Dead, frame)) => submit_itrace_for_local_frame(&frame, shared_state),
+        Ok((Run::Dead, frame)) => submit_trace_for_local_frame(&frame, shared_state),
         Err((err, frame)) => {
             err.assert_normal_execution();
             collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -3557,7 +3645,7 @@ pub fn footprint_collector<'ir, B: BV>(
         Ok((Run::Finished(Val::Bool(true)), frame)) => {
             let mut events = solver.trace().to_vec();
             collected.push(Ok((task_id, events.drain(..).cloned().collect())));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
         Ok((Run::Finished(Val::Symbolic(sym)), frame)) if solver.is_bool(sym) => {
             let info = SourceLoc::unknown();
@@ -3571,27 +3659,27 @@ pub fn footprint_collector<'ir, B: BV>(
                 Err(error) => collected
                     .push(Err(TraceError::exec(error, backtrace_string(&frame.backtrace, &shared_state.symtab)))),
             }
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
         // If it is dead, returns false or exits, we ignore that trace
         Ok((Run::Finished(Val::Bool(false)) | Run::Exit | Run::Dead, frame)) => {
-            submit_itrace_for_local_frame(&frame, shared_state)
+            submit_trace_for_local_frame(&frame, shared_state)
         }
         // Any other value is an error!
         Ok((Run::Finished(value), frame)) => {
             collected.push(Err(TraceError::unexpected_value(value)));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
 
         Ok((Run::Suspended, frame)) => {
             collected.push(Err(TraceError::UnexpectedSuspension));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
 
         Err((err, frame)) => {
             err.assert_normal_execution();
             collected.push(Err(TraceError::exec(err, backtrace_string(&frame.backtrace, &shared_state.symtab))));
-            submit_itrace_for_local_frame(&frame, shared_state);
+            submit_trace_for_local_frame(&frame, shared_state);
         }
     }
 }
@@ -3808,6 +3896,7 @@ mod tests {
         #[test]
         fn 宽地址合并不能丢弃具体区域读() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let mut memory = crate::memory::Memory::new();
@@ -3840,6 +3929,7 @@ mod tests {
                     for name in ["shiftl", "shiftr", "arith_shiftr"] {
                         for shift in [-1, 0, 1, i128::from(width - 1), i128::from(width), i128::from(width + 1), 256] {
                             for select in [false, true] {
+                                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                                 let ctx = Context::new(Config::new());
                                 let mut solver = Solver::<B129>::new(&ctx);
                                 let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -4010,6 +4100,7 @@ mod tests {
         #[test]
         fn 地址重试必须先拆分未固定的符号长度() {
             for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let address = solver.declare_bitvector(64, info());
@@ -4066,6 +4157,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "内存访问重试必须提供长度或待写入数据")]
         fn 缺少长度和数据时禁止假定单字节访问() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let address = solver.declare_bitvector(64, info());
@@ -4091,6 +4183,7 @@ mod tests {
 
         #[test]
         fn 窄地址排除区域上界不能导致崩溃() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let address = solver.declare_bitvector(8, info());
@@ -4109,6 +4202,7 @@ mod tests {
 
         #[test]
         fn 窄地址符号代码区上界不能导致崩溃() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let address = solver.declare_bitvector(8, info());
@@ -4137,6 +4231,7 @@ mod tests {
                 "write_mem_exclusive",
                 "platform_write_memt",
             ] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let address = solver.declare_bitvector(64, info());
@@ -4255,6 +4350,7 @@ mod tests {
         fn 排除区间拆分必须保留完整合法地址域() {
             for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
                 for bytes in [Val::I128(4), Val::I64(4), Val::Bits(B64::new(4, 8))] {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B64>::new(&ctx);
                     let address = solver.declare_const(smtlib::Ty::BitVec(64), info());
@@ -4314,6 +4410,7 @@ mod tests {
         #[test]
         fn 窄地址重试必须用扩展位宽比较区域上界() {
             for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let address = solver.declare_const(smtlib::Ty::BitVec(8), info());
@@ -4538,6 +4635,7 @@ mod tests {
             ];
             for op in ["read_mem_address", "write_mem_address", "read_memt_address", "write_memt_address"] {
                 for region in &regions {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B64>::new(&ctx);
                     let address = solver.declare_const(smtlib::Ty::BitVec(64), info());
@@ -4601,6 +4699,7 @@ mod tests {
 
         #[test]
         fn 单一区域无拆分谓词时必须明确报错而非枚举地址() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let address = solver.declare_const(smtlib::Ty::BitVec(64), info());
@@ -4927,6 +5026,7 @@ mod tests {
         #[test]
         fn 操作数重试必须缓存已经读取的寄存器() {
             let shared = empty_shared_state();
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let index = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -5214,6 +5314,7 @@ mod tests {
         #[test]
         fn 机器整数转换的具体符号边界一致() {
             for width in [1, 63, 64, 65, 127, 128, 129] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B129>::new(&ctx);
                 // 显式列出边界预期，避免用被测的截断和扩展算法推导预期结果。
@@ -5282,6 +5383,7 @@ mod tests {
         fn 具体寄存器索引完整校验且错误无副作用() {
             for count in [0, 1, 2] {
                 for write in [false, true] {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B129>::new(&ctx);
                     let mut shared = SharedState::<B129>::empty(Symtab::new());
@@ -5365,6 +5467,7 @@ mod tests {
 
         #[test]
         fn review21_symbolic_unsigned_overflow() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let mut accepted = Vec::new();
@@ -5386,6 +5489,7 @@ mod tests {
 
         #[test]
         fn review21_symbolic_signed_overflow() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let value = Val::Bits(B129::BIT_ONE.zero_extend(129) << B129::new(128, 129));
@@ -5479,6 +5583,7 @@ mod tests {
         fn review21_concrete_register_index_out_of_bounds() {
             let mut bad = Vec::new();
             for write in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let mut shared = empty_shared_state();
@@ -5523,6 +5628,7 @@ mod tests {
         fn review21_wide_concrete_register_index() {
             let mut bad = Vec::new();
             for write in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B129>::new(&ctx);
                 let mut shared = SharedState::<B129>::empty(Symtab::new());
@@ -5562,6 +5668,7 @@ mod tests {
 
         #[test]
         fn review21_wide_conversion_equality() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for width in [65, 128, 129] {
@@ -5616,6 +5723,7 @@ mod tests {
 
         #[test]
         fn review21_wide_conversion_consumer() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for width in [1, 63, 64, 65, 128, 129] {
@@ -5869,6 +5977,7 @@ mod tests {
 
         #[test]
         fn 具体宽位转换保持整数类型并检查溢出() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for width in [64, 65, 128, 129] {
@@ -5892,6 +6001,7 @@ mod tests {
 
         #[test]
         fn 符号转换使用正确整数位宽和符号扩展() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for width in [1, 63, 64, 65, 127, 128, 129] {
@@ -5936,6 +6046,7 @@ mod tests {
                 (2, 129, Some((2, 3))),
             ] {
                 for write in [false, true] {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B64>::new(&ctx);
                     let mut shared = empty_shared_state();
@@ -6013,6 +6124,7 @@ mod tests {
 
         #[test]
         fn review19_singleton_mixed_index_keeps_zero_candidate() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let mut shared = empty_shared_state();
@@ -6045,6 +6157,7 @@ mod tests {
 
         #[test]
         fn review19_singleton_write_mixed_index_keeps_zero_candidate() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let mut shared = empty_shared_state();
@@ -6083,6 +6196,7 @@ mod tests {
 
         #[test]
         fn review19_proven_i128_completion_keeps_free_variable_symbolic() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let free = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -6107,6 +6221,7 @@ mod tests {
                 .into_boxed_slice(),
             );
             let mut frame: LocalFrame<B129> = LocalFrame::new(test_name(25), &[], &Ty::Unit, None, instrs);
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let sym = solver.declare_bitvector(128, info());
@@ -6148,6 +6263,7 @@ mod tests {
                 .into_boxed_slice(),
             );
             let mut frame: LocalFrame<B129> = LocalFrame::new(test_name(25), &[], &Ty::Unit, None, instrs);
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let state = TaskState::new().with_execution_limits(
@@ -6220,6 +6336,7 @@ mod tests {
         fn singleton_register_vector_symbolic_read_and_write() {
             for width in [8, 64, 128] {
                 for index in [0, 1] {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B64>::new(&ctx);
                     let mut shared = empty_shared_state();
@@ -6449,6 +6566,7 @@ mod tests {
 
         #[test]
         fn symbolic_subrange_with_constrained_input() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let low = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -6645,6 +6763,7 @@ mod tests {
 
         #[test]
         fn review17_subrange_all_representations() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let sym = solver.define_bitvector(smtlib::Exp::Bits64(B64::new(0xab, 8)), info());
@@ -6810,6 +6929,7 @@ mod tests {
 
         #[test]
         fn review17_float_bitvector_shift_category() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<crate::bitvector::b129::B129>::new(&ctx);
             let unary = primop::unary_primops::<crate::bitvector::b129::B129>();
@@ -6907,6 +7027,7 @@ mod tests {
                     let branch = test_name(490);
                     let bits = test_name(491);
                     let mixed = test_name(492);
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::<B64>::new(&ctx);
                     let low = solver.define_bitvector(smtlib::Exp::Bits64(B64::new(11, 8)), info());
@@ -6988,6 +7109,7 @@ mod tests {
                                 })
                                 .collect();
                             assert!(!assertions.is_empty(), "每条布尔结果轨迹必须携带对应断言");
+                            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                             let ctx = Context::new(Config::new());
                             let mut replayed = Solver::<B64>::new(&ctx);
                             for event in events.iter().rev() {
@@ -7161,6 +7283,7 @@ mod tests {
 
         #[test]
         fn audit_truncate_lsb_all_representations_reject_large_lengths() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let bits = solver.declare_bitvector(8, info());
@@ -7638,6 +7761,7 @@ mod tests {
         #[test]
         fn decimal_129_unique_merged_value() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let c = solver.declare_const(smtlib::Ty::Bool, info());
@@ -7698,6 +7822,7 @@ mod tests {
 
         #[test]
         fn wide_zero_padding_slice() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let source = solver.define_bitvector(primop::smt_ones(256), info());
@@ -7721,6 +7846,7 @@ mod tests {
 
         #[test]
         fn wide_slice_symbolic_start_matches_concrete_start() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let source = solver.define_bitvector(primop::smt_ones(256), info());
@@ -7735,6 +7861,7 @@ mod tests {
 
         #[test]
         fn symbolic_write_preserves_aliased_register_references() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let shared = empty_shared_state();
@@ -7772,6 +7899,7 @@ mod tests {
     mod review14_tests {
         #[test]
         fn memory_read_bitvector_category_survives_checkpoint() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let value = crate::memory::Memory::new()
@@ -7787,6 +7915,7 @@ mod tests {
 
         #[test]
         fn string_drop_retries_merged_length() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let n = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -7936,6 +8065,7 @@ mod tests {
         }
         #[test]
         fn memory_bitvector_shift_keeps_unsigned_amount() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let memory = crate::memory::Memory::new();
@@ -8793,6 +8923,7 @@ mod tests {
 
         #[test]
         fn slice_partial_zero_extension_indices() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let bits = solver.declare_bitvector(8, info());
@@ -8914,6 +9045,7 @@ mod tests {
 
         #[test]
         fn small_index_vector() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let n = solver.declare_const(smtlib::Ty::BitVec(1), info());
@@ -8935,6 +9067,7 @@ mod tests {
 
         #[test]
         fn large_pow_exponent() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let b = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9219,6 +9352,7 @@ mod tests {
 
         #[test]
         fn pow_valid_exponent_cost() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let b = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9303,6 +9437,7 @@ mod tests {
         #[test]
         fn align_internal_conversion_prunes_overflow() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9404,6 +9539,7 @@ mod tests {
 
         #[test]
         fn review11_integer_slice_result_category() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let integer = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -9423,6 +9559,7 @@ mod tests {
         #[test]
         fn review11_bit_access_original_index_bounds() {
             for mixed in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let input = if mixed {
@@ -9449,6 +9586,7 @@ mod tests {
 
         #[test]
         fn review11_slice_indices_do_not_wrap() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let index = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -9476,6 +9614,7 @@ mod tests {
 
         #[test]
         fn review11_bitvector_categories_and_replay() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let input = Val::Symbolic(solver.declare_bitvector(128, info()));
@@ -9526,6 +9665,7 @@ mod tests {
 
         #[test]
         fn review11_zero_width_operations() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let input = Val::Symbolic(solver.declare_bitvector(8, info()));
@@ -9544,6 +9684,7 @@ mod tests {
 
         #[test]
         fn review11_equality_width_matrix() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let a = solver.declare_bitvector(8, info());
@@ -9581,6 +9722,7 @@ mod tests {
 
         #[test]
         fn review11_signed_129_boundaries() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let signed = *crate::primop::unary_primops::<B129>().get("sail_signed").unwrap();
@@ -9636,6 +9778,7 @@ mod tests {
 
         #[test]
         fn review11_unsigned_mixed_128() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9668,6 +9811,7 @@ mod tests {
 
         #[test]
         fn review11_ctz_b129_zero() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9694,6 +9838,7 @@ mod tests {
 
         #[test]
         fn review11_empty_shift_amount() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9717,6 +9862,7 @@ mod tests {
 
         #[test]
         fn review11_zero_width_add_int() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9742,6 +9888,7 @@ mod tests {
 
         #[test]
         fn review11_narrow_overflow() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9765,6 +9912,7 @@ mod tests {
 
         #[test]
         fn review11_different_width_equality() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9790,6 +9938,7 @@ mod tests {
 
         #[test]
         fn review11_bitvector_category_after_not() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9825,6 +9974,7 @@ mod tests {
 
         #[test]
         fn review11_merged_129_unsigned() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9847,6 +9997,7 @@ mod tests {
 
         #[test]
         fn review11_merged_129_signed() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9870,6 +10021,7 @@ mod tests {
             let mut shared = empty_shared_state();
             let written = shared.symtab.intern("zreview11_written");
             let read = shared.symtab.intern("zreview11_read");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9911,6 +10063,7 @@ mod tests {
 
         #[test]
         fn review11_bit_access_large_index() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -9944,6 +10097,7 @@ mod tests {
                 for number in [i128::MIN, -1, 0, 1, i128::MAX] {
                     for symbolic_bits in [false, true] {
                         for symbolic_integer in [false, true] {
+                            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                             let ctx = Context::new(Config::new());
                             let mut solver = Solver::<B129>::new(&ctx);
                             let bits = B129::new(2, 129);
@@ -9974,6 +10128,7 @@ mod tests {
 
         #[test]
         fn review10_signed_conversion_preserves_negative_shift() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let bits = solver.declare_bitvector(128, info());
@@ -9992,6 +10147,7 @@ mod tests {
 
         #[test]
         fn review10_bitvector_category_survives_checkpoint_and_rollback() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let bits = solver.declare_bitvector(128, info());
@@ -10016,6 +10172,7 @@ mod tests {
         fn review10_vector_index_domain_and_out_of_bounds() {
             let access = *crate::primop::binary_primops::<B64>().get("vector_access").unwrap();
             for len in [2, 3] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let index = solver.declare_const(smtlib::Ty::BitVec(1), info());
@@ -10033,6 +10190,7 @@ mod tests {
                 }
             }
             for n in [-1, 2, 3] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let index = solver.define_const(crate::primop_util::smt_i128(n), info());
@@ -10048,6 +10206,7 @@ mod tests {
             let mut shared = empty_shared_state();
             let left = shared.symtab.intern("zreview_read_left");
             let right = shared.symtab.intern("zreview_read_right");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10120,6 +10279,7 @@ mod tests {
         #[test]
         fn current_review_symbolic_ctor_model() {
             let shared = empty_shared_state();
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10164,6 +10324,7 @@ mod tests {
         fn current_review_b129_add_after_merge() {
             use crate::bitvector::b129::B129;
             let shared = SharedState::<B129>::empty(Symtab::new());
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10246,6 +10407,7 @@ mod tests {
             let mut shared = empty_shared_state();
             let left = shared.symtab.intern("zreview_left");
             let right = shared.symtab.intern("zreview_right");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10280,6 +10442,7 @@ mod tests {
             let mut shared = empty_shared_state();
             let left = shared.symtab.intern("zreview_left");
             let right = shared.symtab.intern("zreview_right");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10315,6 +10478,7 @@ mod tests {
         #[test]
         fn current_review_model_value_must_belong_to_merged_paths() {
             let shared = empty_shared_state();
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10344,6 +10508,7 @@ mod tests {
         fn current_review_intrinsic_control_dependency() {
             let mut shared = empty_shared_state();
             let reg = shared.symtab.intern("zreview_input");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let mut frame = make_frame(vec![
@@ -10384,6 +10549,7 @@ mod tests {
 
         #[test]
         fn current_review_pow_exp_complexity() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10408,6 +10574,7 @@ mod tests {
 
         #[test]
         fn current_review_vector_access_bounds() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10439,6 +10606,7 @@ mod tests {
         fn current_review_trace_definition_read_order() {
             let mut shared = empty_shared_state();
             let reg = shared.symtab.intern("zreview_input");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10490,6 +10658,7 @@ mod tests {
         #[test]
         fn current_review_unsigned_representable_129() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
@@ -10559,6 +10728,7 @@ mod tests {
         #[test]
         fn current_review_arith_unsigned_128_count_changes_direction() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10591,6 +10761,7 @@ mod tests {
         #[test]
         fn adversarial_merge_large_shift() {
             let shared = empty_shared_state();
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10735,6 +10906,7 @@ mod tests {
 
         #[test]
         fn adversarial_unsigned_128_must_not_prune_input() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -10789,6 +10961,7 @@ mod tests {
 
         #[test]
         fn adversarial_enum_cache_variable_collision() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let enum_name = test_name(200);
             {
@@ -10821,6 +10994,7 @@ mod tests {
         fn adversarial_merge_lazy_reads_trace() {
             let mut shared = empty_shared_state();
             let reg = shared.symtab.intern("zreg");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -10864,6 +11038,7 @@ mod tests {
             let mut shared = empty_shared_state();
             let a = shared.symtab.intern("za");
             let b = shared.symtab.intern("zb");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -11009,6 +11184,7 @@ mod tests {
             let mut shared = empty_shared_state();
             let reg = shared.symtab.intern("zreg");
             let ctor = shared.symtab.intern("zctor");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let mut regs = RegisterBindings::new();
@@ -11030,6 +11206,7 @@ mod tests {
         #[test]
         fn machine_and_integer_indices_preserve_slice_and_update_values() {
             for index_width in [64, 128] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 for width in [8, 64, 128, 256] {
@@ -11114,6 +11291,7 @@ mod tests {
 
         #[test]
         fn symbolic_constructor_equality_checks_tag_and_payload() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -11793,6 +11971,7 @@ fn zspike_match(zaddr, zwidth) {
     }
 
     fn shared_state_from_defs<'ir>(defs: Vec<crate::ir::Def<Name, B64>>) -> SharedState<'ir, B64> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let symtab = Symtab::new();
         let defs: &'ir [crate::ir::Def<Name, B64>] = Box::leak(defs.into_boxed_slice());
         let type_info = IRTypeInfo::new(defs);
@@ -11810,6 +11989,7 @@ fn zspike_match(zaddr, zwidth) {
     }
 
     fn parse_ir_string(ir: &'static str) -> (Symtab<'static>, Vec<crate::ir::Def<Name, B64>>) {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut symtab = Symtab::new();
         let defs = crate::ir_parser::IrParser::new()
             .parse(&mut symtab, crate::ir_lexer::new_ir_lexer(ir))
@@ -11905,6 +12085,8 @@ fn zcaller(za, zb) {
             pmp: None,
             clint_enabled: None,
             execution_limits: None,
+            initial_state: Vec::new(),
+            initial_state_rv64_domain: false,
         }
     }
 
@@ -11927,8 +12109,187 @@ fn zcaller(za, zb) {
         );
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let ir_path = PathBuf::from(manifest_dir).join("tests/fixtures/ir_cache_assumption.ir");
-        shared_state.itrace.configure("itrace test title", ir_path, None, &shared_state.symtab);
+        shared_state.trace.configure("itrace test title", ir_path, None, &shared_state.symtab);
         shared_state
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_records_concrete_jump_direction_even_when_successors_match() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        for taken in [true, false] {
+            let shared_state = empty_shared_state();
+            let mut frame = make_frame(vec![Instr::Jump(Exp::Bool(taken), 1, info()), Instr::End]);
+            let task_state = TaskState::new();
+            let queue = Worker::new_lifo();
+            let mut task_fraction = Fraction::one();
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::new(&ctx);
+            let result = run_loop(
+                0,
+                TaskId::from_usize(0),
+                &mut task_fraction,
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &task_state,
+                &shared_state,
+                &mut solver,
+            );
+            assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+            assert_eq!(frame.trace_path.branch_edges_for_test(), vec![(test_name(25), 0, 1, taken)]);
+        }
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn btrace_submits_executed_jump_and_path_signature() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut shared_state = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::Jump(Exp::Bool(true), 2, info()), Instr::End, Instr::End]);
+        let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Unit));
+        shared_state.functions.insert(test_name(25), (Vec::new(), ret_ty, frame.instrs));
+        let output_path = std::env::temp_dir().join(format!("itrace_runtime_jump_{}.txt", std::process::id()));
+        shared_state.trace.set_path(Some(output_path.clone()));
+        shared_state.trace.write_branch_sites(&shared_state);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        submit_trace_for_local_frame_with_diagnostics(&frame, &shared_state, Vec::new());
+        shared_state.trace.dump();
+        let content = std::fs::read_to_string(&output_path).expect("read runtime jump itrace");
+        assert!(content.contains("---- branch sites ----"));
+        assert!(content.contains("\"target\":2"));
+        assert!(content.contains(&format!("path_signature: {}", frame.path_signature())));
+        assert!(content.contains("branch_edge function="));
+        assert!(content.contains("successor=2 taken=true"));
+        if std::env::var_os("ITRACE_KEEP_TEST_OUTPUT").is_none() {
+            let _ = std::fs::remove_file(output_path);
+        }
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_records_both_sides_of_symbolic_fork_before_completion() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let var = test_name(100);
+        let mut frame = make_frame(vec![
+            Instr::Decl(var, Ty::Bool, info()),
+            Instr::Jump(Exp::Id(var), 3, info()),
+            Instr::End,
+            Instr::End,
+        ]);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        assert_eq!(frame.trace_path.branch_edges_for_test(), vec![(test_name(25), 1, 3, true)]);
+        let child = queue.pop().expect("false path should be queued");
+        assert_eq!(child.frame.trace_path.branch_edges_for_test(), vec![(test_name(25), 1, 2, false)]);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_records_only_satisfiable_jump_direction() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let var = test_name(100);
+        let mut frame = make_frame(vec![Instr::Jump(Exp::Id(var), 2, info()), Instr::End, Instr::End]);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        solver.add(smtlib::Def::Assert(smtlib::Exp::Var(symbol)));
+        frame.vars_mut().insert(var, UVal::Init(Val::Symbolic(symbol)));
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
+        assert_eq!(frame.trace_path.branch_edges_for_test(), vec![(test_name(25), 0, 2, true)]);
+        assert!(queue.pop().is_none(), "unsatisfiable side must not be queued");
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn itrace_reaching_a_failed_jump_does_not_claim_an_edge() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::Jump(Exp::I64(1), 1, info()), Instr::End]);
+        let task_state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let result = run_loop(
+            0,
+            TaskId::from_usize(0),
+            &mut task_fraction,
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &task_state,
+            &shared_state,
+            &mut solver,
+        );
+        assert!(matches!(result, Err(ExecError::Type(_, _))));
+        assert_eq!(frame.trace_path.record_count(), 1);
+        assert!(frame.trace_path.branch_edges_for_test().is_empty());
+        let output_path = std::env::temp_dir().join(format!("itrace_failed_jump_{}.txt", std::process::id()));
+        shared_state.trace.set_path(Some(output_path.clone()));
+        submit_trace_for_local_frame_with_diagnostics(&frame, &shared_state, Vec::new());
+        shared_state.trace.dump();
+        let content = std::fs::read_to_string(&output_path).expect("read failed jump itrace");
+        assert!(content.contains(&format!("path_signature: {}", frame.path_signature())));
+        assert!(!content.contains("branch_edge"));
+        let _ = std::fs::remove_file(output_path);
     }
 
     #[cfg(feature = "tracetool")]
@@ -11942,21 +12303,21 @@ fn zcaller(za, zb) {
             std::thread::current().name().unwrap_or("unnamed")
         ));
         let _ = std::fs::remove_file(&output_path);
-        shared_state.itrace.set_path(Some(output_path.clone()));
+        shared_state.trace.set_path(Some(output_path.clone()));
 
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let function = shared_state.symtab.lookup("zcache_ok");
         let mut frame = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
-        frame.itrace_path.record(function, Vec::new(), 0);
+        frame.trace_path.record(function, Vec::new(), 0);
 
-        itrace_push_branch_condition!(&mut frame, smtlib::Exp::<Sym>::Bool(true));
-        let forked = itrace_fork_frame_with_branch_condition!(&frame, 7, smtlib::Exp::<Sym>::Bool(false));
+        btrace_push_branch_condition!(&mut frame, smtlib::Exp::<Sym>::Bool(true));
+        let forked = trace_fork_frame_with_branch_condition!(&frame, 7, smtlib::Exp::<Sym>::Bool(false));
 
         assert_eq!(forked.pc, 7);
 
-        submit_itrace_for_local_frame(&frame, &shared_state);
-        submit_itrace_for_frame(&forked, &shared_state);
-        shared_state.itrace.dump();
+        submit_trace_for_local_frame(&frame, &shared_state);
+        submit_trace_for_frame(&forked, &shared_state);
+        shared_state.trace.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read macro itrace output");
         assert_eq!(content.matches("<itrace test title> path").count(), 2);
@@ -11973,14 +12334,14 @@ fn zcaller(za, zb) {
         let temp_dir = std::env::temp_dir();
         let output_path = temp_dir.join(format!("itrace_submit_executor_test_{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&output_path);
-        shared_state.itrace.set_path(Some(output_path.clone()));
+        shared_state.trace.set_path(Some(output_path.clone()));
 
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let mut frame = LocalFrame::new(shared_state.symtab.lookup("zcache_ok"), &[], &Ty::Unit, None, &instrs);
-        frame.itrace_path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
+        frame.trace_path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
 
-        submit_itrace_for_local_frame(&frame, &shared_state);
-        shared_state.itrace.dump();
+        submit_trace_for_local_frame(&frame, &shared_state);
+        shared_state.trace.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read itrace submit output");
         assert!(content.contains("itrace test title"));
@@ -12000,26 +12361,26 @@ fn zcaller(za, zb) {
             std::thread::current().name().unwrap_or("unnamed")
         ));
         let _ = std::fs::remove_file(&output_path);
-        shared_state.itrace.set_path(Some(output_path.clone()));
+        shared_state.trace.set_path(Some(output_path.clone()));
 
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let zcache_ok = shared_state.symtab.lookup("zcache_ok");
         let zpc_lookup = shared_state.symtab.lookup("zpc_lookup");
 
         let mut first_frame = LocalFrame::new(zcache_ok, &[], &Ty::Unit, None, &instrs);
-        first_frame.itrace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(true));
-        first_frame.itrace_path.record(zcache_ok, Vec::new(), 0);
-        first_frame.itrace_path.record(zcache_ok, Vec::new(), 3);
+        first_frame.trace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(true));
+        first_frame.trace_path.record(zcache_ok, Vec::new(), 0);
+        first_frame.trace_path.record(zcache_ok, Vec::new(), 3);
 
         let mut error_like_frame = LocalFrame::new(zpc_lookup, &[], &Ty::Unit, None, &instrs);
-        error_like_frame.itrace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(false));
-        error_like_frame.itrace_path.record(zpc_lookup, Vec::new(), 1);
-        error_like_frame.itrace_path.record(zpc_lookup, Vec::new(), 5);
+        error_like_frame.trace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(false));
+        error_like_frame.trace_path.record(zpc_lookup, Vec::new(), 1);
+        error_like_frame.trace_path.record(zpc_lookup, Vec::new(), 5);
         let frozen_error_like_frame = freeze_frame(&error_like_frame);
 
-        submit_itrace_for_local_frame(&first_frame, &shared_state);
-        submit_itrace_for_frame(&frozen_error_like_frame, &shared_state);
-        shared_state.itrace.dump();
+        submit_trace_for_local_frame(&first_frame, &shared_state);
+        submit_trace_for_frame(&frozen_error_like_frame, &shared_state);
+        shared_state.trace.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read itrace integration output");
 
@@ -12053,11 +12414,12 @@ fn zcaller(za, zb) {
     #[cfg(feature = "tracetool")]
     #[test]
     fn itrace_integration_run_loop_collector_writes_executed_path() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = itrace_fixture_shared_state();
         let temp_dir = std::env::temp_dir();
         let output_path = temp_dir.join(format!("itrace_run_loop_collector_test_{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&output_path);
-        shared_state.itrace.set_path(Some(output_path.clone()));
+        shared_state.trace.set_path(Some(output_path.clone()));
 
         let function = shared_state.symtab.lookup("zcache_ok");
         let (args, ret_ty, instrs) = shared_state.functions.get(&function).expect("fixture function exists");
@@ -12073,15 +12435,52 @@ fn zcaller(za, zb) {
             &collected,
             &all_unsat_collector,
         );
-        shared_state.itrace.dump();
+        shared_state.trace.dump();
 
         let content = std::fs::read_to_string(&output_path).expect("read run_loop itrace output");
         assert!(content.contains("itrace test title"));
-        assert!(content.contains("z0 : %i"));
-        assert!(content.contains("z1 : %i"));
-        assert!(content.contains("z1 = z0(zu)"));
-        assert!(!content.contains('`'));
+        assert!(content.contains(&format!("[zcache_ok 0]: {:?}", instrs[0])));
+        assert!(content.contains(&format!("[zcache_ok 1]: {:?}", instrs[1])));
+        assert!(content.contains(&format!("[zcache_ok 2]: {:?}", instrs[2])));
+        assert!(!content.contains("not found"));
         assert!(!content.contains("branch_conditions"));
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[cfg(feature = "tracetool")]
+    #[test]
+    fn ftrace_reuses_call_events_and_includes_entry_function() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut shared_state = itrace_fixture_shared_state();
+        shared_state.trace_functions.extend(shared_state.symtab.all_names());
+        shared_state.trace.set_traces(false, true, false);
+        let temp_dir = std::env::temp_dir();
+        let output_path = temp_dir.join(format!("ftrace_collector_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&output_path);
+        shared_state.trace.set_path(Some(output_path.clone()));
+
+        let function = shared_state.symtab.lookup("zcache_ok");
+        let instrs = vec![Instr::Copy(Loc::Id(RETURN), Exp::I128(1), info()), Instr::End];
+        let initial_frame = LocalFrame::new(function, &[], &Ty::I128, None, &instrs);
+        let task_state = TaskState::new();
+        let task = initial_frame.task(TaskId::fresh(), &task_state);
+        let collected = AtomicBool::new(true);
+
+        start_single_with_timeout(
+            task,
+            PathTimeout::from_seconds(None),
+            &shared_state,
+            &collected,
+            &all_unsat_collector,
+        );
+        shared_state.trace.dump();
+
+        let content = std::fs::read_to_string(&output_path).expect("read run_loop itrace output");
+        assert!(content.contains("function_call function=zcache_ok"));
+        assert!(content.contains("function_return function=zcache_ok"));
+        assert!(!content.contains("[zcache_ok 0]:"));
+        assert!(!content.contains("branch_edge"));
 
         let _ = std::fs::remove_file(&output_path);
     }
@@ -12116,6 +12515,7 @@ fn zcaller(za, zb) {
                     let task_state = TaskState::new();
                     let queue = Worker::new_lifo();
                     let mut task_fraction = Fraction::one();
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::new(&ctx);
                     run_loop(
@@ -12230,6 +12630,7 @@ fn zcaller(za, zb) {
         while let Some(mut task) = queue.pop() {
             let mut cfg = Config::new();
             cfg.set_param_value("model", "true");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(cfg);
             let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
             if let Some((def, event)) = task.fork_cond {
@@ -12252,6 +12653,96 @@ fn zcaller(za, zb) {
         }
 
         results
+    }
+
+    #[test]
+    fn append_monomorphize_enumerates_both_models() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let x = test_name(100);
+        let y = test_name(101);
+        let results = run_all_with_shared_state(
+            vec![
+                Instr::Decl(x, Ty::Bits(1), info()),
+                Instr::Decl(y, Ty::Bits(2), info()),
+                Instr::PrimopBinary(
+                    Loc::Id(y),
+                    crate::primop::binary_primops::<B64>()["append"],
+                    Exp::Id(x),
+                    Exp::Bits(B64::BIT_ZERO),
+                    info(),
+                ),
+                Instr::Monomorphize(y, Ty::Bits(2), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(y), info()),
+                Instr::End,
+            ],
+            ExecutionLimits::default(),
+            empty_shared_state(),
+        );
+        println!("append monomorphize 终态数: {}", results.len());
+        assert_eq!(results.len(), 2, "一位符号高位必须产生两个具体终态");
+        let mut values: Vec<u64> = results
+            .into_iter()
+            .map(|result| match result.unwrap() {
+                Run::Finished(Val::Bits(value)) => value.lower_u64(),
+                _ => panic!("monomorphize 未返回具体位向量"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec![0, 2]);
+    }
+
+    fn appended_register_index(write: bool) {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let mut frame = make_frame(vec![Instr::End]);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let high = solver.declare_const(smtlib::Ty::BitVec(1), info());
+        solver.assert_eq(smtlib::Exp::Var(high), smtlib::Exp::Bits64(B64::BIT_ONE));
+        let n = crate::primop::binary_primops::<B64>()["append"](
+            Val::Symbolic(high),
+            Val::Bits(B64::BIT_ZERO),
+            &mut solver,
+            info(),
+        )
+        .unwrap();
+        let names: Vec<Name> = (100..104).map(test_name).collect();
+        for (i, name) in names.iter().enumerate() {
+            frame.local_state.regs.insert(*name, false, UVal::Init(Val::Bits(B64::new(i as u64, 8))));
+        }
+        let refs = Val::Vector(names.iter().map(|name| Val::Ref(*name)).collect());
+        if write {
+            write_register_from_vector(
+                n,
+                Val::Bits(B64::new(99, 8)),
+                refs,
+                &mut frame.local_state,
+                &shared,
+                &mut solver,
+                info(),
+            )
+            .unwrap();
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            let mut model = Model::new(&solver);
+            for (i, name) in names.iter().enumerate() {
+                let actual = model.get_val(frame.local_state.regs.get_last_if_initialized(*name).unwrap()).unwrap();
+                assert_eq!(actual, Val::Bits(B64::new(if i == 2 { 99 } else { i as u64 }, 8)));
+            }
+        } else {
+            let actual =
+                read_register_from_vector(n, refs, &mut frame.local_state, &shared, &mut solver, info()).unwrap();
+            assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
+            assert_eq!(Model::new(&solver).get_val(&actual).unwrap(), Val::Bits(B64::new(2, 8)));
+        }
+    }
+
+    #[test]
+    fn append_read_register_index() {
+        appended_register_index(false);
+    }
+    #[test]
+    fn append_write_register_index() {
+        appended_register_index(true);
     }
 
     fn empty_shared_state<'ir>() -> SharedState<'ir, B64> {
@@ -12313,6 +12804,7 @@ fn zcaller(za, zb) {
                     "assertion_failure",
                 ] {
                     for condition in [Some(false), Some(true), None] {
+                        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                         let ctx = Context::new(Config::new());
                         let mut solver = Solver::<B64>::new(&ctx);
                         let sym = solver.declare_const(smtlib::Ty::Bool, info());
@@ -12405,6 +12897,7 @@ fn zcaller(za, zb) {
             let mut frame = make_frame(vec![Instr::End]);
             frame.set_speculation_mode(SpeculationMode::On);
             frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(true)));
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let result = run_loop(
@@ -12438,6 +12931,7 @@ fn zcaller(za, zb) {
         #[test]
         #[should_panic(expected = "推演拒绝泄漏到普通")]
         fn speculation_leak_panics_at_normal_scheduler_boundary() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -12470,6 +12964,7 @@ fn zcaller(za, zb) {
                 pc: 0,
                 location: info(),
             };
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             trace_value_collector(
                 0,
@@ -12498,6 +12993,7 @@ fn zcaller(za, zb) {
                 LimitSampling,
                 LimitTruncation,
             ] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let mut shared = empty_shared_state();
@@ -12612,6 +13108,7 @@ fn zcaller(za, zb) {
         fn speculation_symbolic_helpers_reject_before_checkpoint_or_cache() {
             use SpeculativeRejectReason::*;
             for reason in [IntegerConversion, RetryCondition, SymbolicValueEnumeration, RetryOperand] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let sym = solver.declare_bitvector(2, info());
@@ -12738,6 +13235,7 @@ fn zcaller(za, zb) {
                 };
                 let mut frame = make_frame(vec![instr]);
                 frame.set_speculation_mode(SpeculationMode::On);
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::new(&ctx);
                 let sink = CountingSink::default();
@@ -12762,6 +13260,7 @@ fn zcaller(za, zb) {
         fn speculation_rejects_single_sided_jump_and_unique_monomorphize() {
             for monomorphize in [false, true] {
                 for value in [false, true] {
+                    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                     let ctx = Context::new(Config::new());
                     let mut solver = Solver::new(&ctx);
                     let sym = solver.declare_const(smtlib::Ty::Bool, info());
@@ -12811,6 +13310,7 @@ fn zcaller(za, zb) {
         #[test]
         fn speculation_off_preserves_exact_fraction_and_checkpoint() {
             for monomorphize in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::new(&ctx);
                 let sym = solver.declare_const(smtlib::Ty::Bool, info());
@@ -12861,6 +13361,7 @@ fn zcaller(za, zb) {
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -12892,6 +13393,7 @@ fn zcaller(za, zb) {
         while let Some(mut task) = queue.pop() {
             let mut cfg = Config::new();
             cfg.set_param_value("model", "true");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(cfg);
             let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
             if let Some((def, event)) = task.fork_cond {
@@ -12955,6 +13457,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn branch_limit_truncate_reports_error_after_max_forks() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default().with_max_forks_per_branch(2).with_call_context_depth(0);
         let (instrs, shared_state) = repeated_call_fork_program(5);
         let results = run_all_with_shared_state(instrs, limits, shared_state);
@@ -12974,6 +13477,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn branch_limit_concretize_finishes_without_error() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default()
             .with_max_forks_per_branch(2)
             .with_call_context_depth(0)
@@ -12997,6 +13501,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn branch_fork_count_is_inherited_by_both_successors() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame =
@@ -13005,6 +13510,7 @@ fn zcaller(za, zb) {
         let child_fork_counts = std::sync::Mutex::new(Vec::new());
         let fork_sink = ForkCountCaptureSink { child_fork_counts: &child_fork_counts };
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -13023,11 +13529,13 @@ fn zcaller(za, zb) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
+        assert!(!frame.has_sampled_branch(), "unlimited symbolic fork must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
     #[test]
     fn repeated_runs_from_one_task_state_do_not_share_branch_budget() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let task_state =
@@ -13039,6 +13547,7 @@ fn zcaller(za, zb) {
             let child_fork_counts = std::sync::Mutex::new(Vec::new());
             let fork_sink = ForkCountCaptureSink { child_fork_counts: &child_fork_counts };
             let mut task_fraction = Fraction::one();
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::new(&ctx);
 
@@ -13063,6 +13572,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_fork_count_is_inherited_by_both_successors() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame = make_frame(vec![
@@ -13075,6 +13585,7 @@ fn zcaller(za, zb) {
         let child_fork_counts = std::sync::Mutex::new(Vec::new());
         let fork_sink = ForkCountCaptureSink { child_fork_counts: &child_fork_counts };
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -13093,11 +13604,13 @@ fn zcaller(za, zb) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 1);
+        assert!(!frame.has_sampled_branch(), "unlimited monomorphize must remain complete");
         assert_eq!(*child_fork_counts.lock().unwrap(), vec![1]);
     }
 
     #[test]
     fn monomorphize_path_limit_can_keep_current_model_without_forking() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame = make_frame(vec![
@@ -13112,6 +13625,7 @@ fn zcaller(za, zb) {
         let child_fork_counts = std::sync::Mutex::new(Vec::new());
         let fork_sink = ForkCountCaptureSink { child_fork_counts: &child_fork_counts };
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -13130,11 +13644,17 @@ fn zcaller(za, zb) {
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
         assert_eq!(frame.forks(), 0);
+        assert!(frame.has_sampled_branch(), "kept current model drops a satisfiable remainder");
+        assert!(
+            unfreeze_frame(&freeze_frame(&frame)).has_sampled_branch(),
+            "scheduler snapshots must retain incomplete sampling"
+        );
         assert!(child_fork_counts.lock().unwrap().is_empty());
     }
 
     #[test]
     fn monomorphize_path_limit_truncates_before_child_submission() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame = make_frame(vec![
@@ -13146,6 +13666,7 @@ fn zcaller(za, zb) {
         let child_fork_counts = std::sync::Mutex::new(Vec::new());
         let fork_sink = ForkCountCaptureSink { child_fork_counts: &child_fork_counts };
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -13169,6 +13690,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_does_not_submit_an_unsatisfiable_remainder_child() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let results = run_all_with_shared_state(
             vec![
@@ -13187,6 +13709,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_branch_local_limit_keeps_one_model_inside_selected_region() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let selected = SourceLoc::new(1, 20, 0, 20, 8);
         let results = run_all_with_shared_state(
@@ -13209,6 +13732,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_branch_local_limit_does_not_apply_outside_selected_region() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let selected = SourceLoc::new(1, 20, 0, 20, 8);
         let outside = SourceLoc::new(2, 20, 0, 20, 8);
@@ -13232,6 +13756,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_last_model_does_not_consume_path_fork_budget() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let results = run_all_with_shared_state(
             vec![
@@ -13250,6 +13775,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn monomorphize_enumerates_all_two_bit_models_with_three_path_forks() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let mut shared_state = empty_shared_state();
         shared_state.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let var = test_name(100);
@@ -13272,6 +13798,7 @@ fn zcaller(za, zb) {
         while let Some(mut task) = queue.pop() {
             let mut cfg = Config::new();
             cfg.set_param_value("model", "true");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(cfg);
             let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
             if let Some((def, event)) = task.fork_cond {
@@ -13308,6 +13835,7 @@ fn zcaller(za, zb) {
     #[cfg(feature = "tracetool")]
     #[test]
     fn execution_limit_concretize_records_itrace_summary() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let var = test_name(100);
         let mut frame =
@@ -13317,6 +13845,7 @@ fn zcaller(za, zb) {
         );
         let queue = Worker::new_lifo();
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -13334,7 +13863,7 @@ fn zcaller(za, zb) {
         );
 
         assert!(matches!(result, Ok(Run::Finished(Val::Unit))));
-        assert!(frame.itrace_path.records().iter().any(|record| {
+        assert!(frame.trace_path.records().any(|record| {
             record.summary.as_deref().map_or(false, |summary| {
                 summary.contains("execution limit: max_path_depth exceeded")
                     && summary.contains("action=sample_branch_condition")
@@ -13345,11 +13874,13 @@ fn zcaller(za, zb) {
     #[cfg(feature = "tracetool")]
     #[test]
     fn execution_limit_truncate_records_itrace_summary() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let mut frame = make_frame(vec![Instr::Goto(0)]);
         let task_state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_max_path_depth(0));
         let queue = Worker::new_lifo();
         let mut task_fraction = Fraction::one();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
 
@@ -13367,7 +13898,7 @@ fn zcaller(za, zb) {
         );
 
         assert!(matches!(result, Err(ExecError::DepthLimitReached)));
-        assert!(frame.itrace_path.records().iter().any(|record| {
+        assert!(frame.trace_path.records().any(|record| {
             record.summary.as_deref().map_or(false, |summary| {
                 summary.contains("execution limit: max_path_depth exceeded") && summary.contains("action=truncate")
             })
@@ -13376,6 +13907,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn depth_limit_reports_error_after_max_steps() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default().with_max_path_depth(2);
         let result = run_with_limits(vec![Instr::Goto(1), Instr::Goto(2), Instr::Goto(3), Instr::End], limits);
 
@@ -13387,6 +13919,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn loop_limit_reports_error_after_max_backjumps() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let limits = ExecutionLimits::default().with_max_backjumps_per_loop(2);
         let result = run_with_limits(vec![Instr::Goto(0)], limits);
 
@@ -13401,6 +13934,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn loop_sampling_truncates_when_exit_direction_becomes_unsatisfiable() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let var = test_name(100);
         let info = info();
         let seed = (0..1024)
@@ -13448,6 +13982,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn path_fork_limit_truncates_serial_if_else_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state) = repeated_call_fork_program(5);
         let limits = ExecutionLimits::default().with_max_forks_per_branch(100).with_max_forks_per_path(2);
         let results = run_all_with_shared_state(instrs, limits, shared_state);
@@ -13467,6 +14002,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn path_fork_limit_concretize_finishes_serial_if_else_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state) = repeated_call_fork_program(5);
         let limits = ExecutionLimits::default()
             .with_max_forks_per_branch(100)
@@ -13480,6 +14016,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn real_ir_path_forks_limit_register_read_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state, regs, lets) = real_zrx_program();
         let zrx = shared_state.symtab.lookup("zrX");
         let limits = ExecutionLimits::default().with_max_forks_per_branch(100).with_max_forks_per_path(5);
@@ -13500,6 +14037,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn real_ir_per_branch_cannot_detect_serial_chain() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state, regs, lets) = real_zrx_program();
         let limits = ExecutionLimits::default().with_max_forks_per_branch(2);
         let results = run_all_with_bindings(instrs, limits, shared_state, regs, lets);
@@ -13510,6 +14048,7 @@ fn zcaller(za, zb) {
 
     #[test]
     fn real_ir_concretize_continues_register_read() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (instrs, shared_state, regs, lets) = real_zrx_program();
         let limits = ExecutionLimits::default()
             .with_max_forks_per_branch(100)
@@ -13532,6 +14071,7 @@ fn zcaller(za, zb) {
     ///    界内 ⟺ size >= 0x1008）。
     #[test]
     fn symbolic_pma_region_size_forks_matching_range() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let (shared_state, mut regs, lets) = shared_state_and_bindings_from_ir(SYMBOLIC_PMA_REGIONS_IR);
         let symtab = &shared_state.symtab;
         let zpma = symtab.get(&zencode::encode("pma_regions")).expect("夹具缺 zpma_regions 寄存器");
@@ -13540,6 +14080,7 @@ fn zcaller(za, zb) {
 
         // 构造与 apply_pma_regions_to_config 同形状的值，仅 zsizze 换成符号常量。
         let cfg = Config::new();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(cfg);
         let mut solver = Solver::new(&ctx);
         let size_sym = solver.declare_const(smtlib::Ty::BitVec(64), info());
@@ -13577,6 +14118,7 @@ fn zcaller(za, zb) {
         while let Some(mut task) = queue.pop() {
             let mut cfg = Config::new();
             cfg.set_param_value("model", "true");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(cfg);
             let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
             if let Some((def, event)) = task.fork_cond {
@@ -13630,6 +14172,7 @@ fn zcaller(za, zb) {
     // 故 max_path_depth 不会触发；改动后透传生效，第二条 goto 触发 DepthLimitReached。
     #[test]
     fn entry_function_respects_passed_task_state_limits() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         const STEPT_IR: &str = r#"
 val zsteptest : (%unit) -> %unit
 fn zsteptest(zu) {
@@ -13668,6 +14211,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn entry_function_timeout_returns_through_collector() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         const STEPT_IR: &str = r#"
 val zsteptest : (%unit) -> %unit
 fn zsteptest(zu) {
@@ -13705,6 +14249,7 @@ fn zsteptest(zu) {
 
     #[test]
     fn multi_thread_entry_injects_initial_memory() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         const MEM_IR: &str = r#"
 val zmemtest : (%unit) -> %unit
 fn zmemtest(zu) {
@@ -13751,6 +14296,7 @@ fn zmemtest(zu) {
 
     #[test]
     fn multi_thread_entry_none_keeps_default_memory() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         const MEM_IR: &str = r#"
 val zmemtest : (%unit) -> %unit
 fn zmemtest(zu) {
@@ -13790,6 +14336,7 @@ fn zmemtest(zu) {
 
     #[test]
     fn multi_thread_read_mem_symbolic_region_event() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         // read_mem primop 读 concrete 地址 0x1000（落入注入 Memory 的 0x1000..0x2000
         // symbol region），断言 solver trace 产生 region 为 "symbolic" 的 ReadMem 事件，
         // 锁定 注入 → primop → Memory::read → read_symbolic → Event 链路。
@@ -13842,6 +14389,7 @@ fn zmemread(zu) {
 
     #[test]
     fn multi_thread_read_mem_event_survives_fork() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         // fork 后再 read_mem：两条 Finished 路径中 false 分支做了读，
         // 断言该路径 collector 收到的 solver.trace() 仍含 ReadMem 事件
         // （锁定 checkpoint/fork 不丢访存事件，对应 solve-state 物化链路）。
@@ -13866,6 +14414,7 @@ fn zmemreadfork(zu) {
         let collected: Arc<std::sync::Mutex<(u32, u32)>> = Arc::new(std::sync::Mutex::new((0, 0)));
 
         let cfg = crate::smt::Config::new();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = crate::smt::Context::new(cfg);
         let mut setup_solver = crate::smt::Solver::<B64>::new(&ctx);
         for _ in 0..3 {
@@ -13917,6 +14466,7 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn start_single_timeout_none_is_unlimited() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let task_state = TaskState::new();
         let timeout_hits = std::sync::Mutex::new(0);
@@ -13954,6 +14504,7 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn completed_path_wins_over_zero_timeout_at_the_completion_boundary() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
         let task_state = TaskState::new();
         let completed = std::sync::Mutex::new(false);
@@ -13973,6 +14524,63 @@ fn zmemreadfork(zu) {
     }
 
     #[test]
+    fn completed_frame_retains_final_smt_statistics_for_continuation() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let task_state = TaskState::new();
+        let completed = Mutex::new(false);
+        // 最后一次分叉以后仍可能求解，完成帧不能只保留上次fork时的统计。
+        let query: crate::primop::Unary<B64> = |value, solver, source| {
+            assert!(matches!(solver.check_sat(source), SmtResult::Sat));
+            Ok(value)
+        };
+        let frame = make_frame(vec![Instr::PrimopUnary(Loc::Id(RETURN), query, Exp::Unit, info()), Instr::End]);
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &task_state, Checkpoint::new()),
+            &shared_state,
+            &completed,
+            &|_, _, result, _, _, completed| {
+                let Ok((Run::Finished(Val::Unit), frame)) = result else { panic!("测试路径应正常完成") };
+                assert!(frame.path_smt_stats.calls > 0, "完成帧遗漏了最后一次SMT求解");
+                assert_eq!(frame.path_smt_stats, crate::smt::path_smt_stats());
+                *completed.lock().unwrap() = true;
+            },
+        );
+        assert!(*completed.lock().unwrap());
+    }
+
+    #[test]
+    fn multi_collector_can_queue_ir_frames_and_borrow_local_configuration() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared_state = empty_shared_state();
+        let task_state = TaskState::new();
+        // frame 固定借用静态 IR，collector 仍应能只在本次调用中借用局部配置。
+        let queued: Mutex<Vec<LocalFrame<'static, B64>>> = Mutex::new(Vec::new());
+        let local_configuration = String::from("本次续执行");
+        let collector =
+            |_: usize,
+             _: TaskId,
+             result: Result<(Run<B64>, LocalFrame<'static, B64>), (ExecError, LocalFrame<'static, B64>)>,
+             _: &SharedState<'static, B64>,
+             _: Solver<B64>,
+             _: &()| {
+                assert_eq!(local_configuration, "本次续执行");
+                let Ok((Run::Finished(Val::Unit), frame)) = result else { panic!("测试路径应正常完成") };
+                queued.lock().unwrap().push(frame);
+            };
+        let frame = make_frame(vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()), Instr::End]);
+        start_multi(
+            2,
+            None,
+            vec![frame.task_with_checkpoint(TaskId::fresh(), &task_state, Checkpoint::new())],
+            &shared_state,
+            Arc::new(()),
+            &collector,
+        );
+        assert_eq!(queued.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn single_fork_sink_submits_the_child_task() {
         let state = TaskState::new();
         let frame = make_frame(Vec::new());
@@ -13983,6 +14591,22 @@ fn zmemreadfork(zu) {
         let child = queue.pop().expect("forked task was not submitted");
 
         assert_eq!(child.id, TaskId::from_usize(0));
+    }
+
+    #[test]
+    fn multi_runtime_propagates_collector_panic() {
+        let shared_state = empty_shared_state();
+        let instrs = vec![Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()), Instr::End];
+        let ret_ty = Ty::Bool;
+        let frame = LocalFrame::new(test_name(25), &[], &ret_ty, None, &instrs);
+        let task_state = TaskState::new();
+        let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            start_multi(1, None, vec![task], &shared_state, Arc::new(()), &|_, _, _, _, _, _| {
+                panic!("collector regression panic");
+            });
+        }));
+        assert!(result.is_err());
     }
 
     fn worker_invariant_branch_prefix() -> (Vec<Instr<Name, B64>>, Name, Name) {
@@ -14110,6 +14734,7 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn execution_limits_have_identical_single_and_multi_worker_semantics() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let expected = vec![
             ("finished:false".to_string(), 2),
             ("finished:false".to_string(), 2),
@@ -14126,6 +14751,7 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn path_local_sampling_is_stable_across_worker_counts() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         // 返回值编码 (marker, 受限分支抽到的方向)：{0,1} 是抽到 false 的两条路径，{2,3} 是抽到
         // true 的两条路径。两条兄弟路径的签名在第一个分支点就分叉，因此必然一条落在 {0,1}、
         // 另一条落在 {2,3}；同时这个结果不随 worker 数变化。
@@ -14147,6 +14773,7 @@ fn zmemreadfork(zu) {
                 for amount in [i128::MIN, -256, -8, -1, 0, 1, 7, 8, 256, i128::MAX] {
                     for value in [1, 0x80] {
                         for symbolic_bits in [false, true] {
+                            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                             let ctx = Context::new(Config::new());
                             let mut solver = Solver::<B64>::new(&ctx);
                             let bits = B64::new(value, 8);
@@ -14177,6 +14804,7 @@ fn zmemreadfork(zu) {
 
         #[test]
         fn constructor_tags_and_payloads() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let a = test_name(180);
@@ -14228,6 +14856,7 @@ fn zmemreadfork(zu) {
         #[test]
         fn unsigned_concrete_and_symbolic_range() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let unsigned = *crate::primop::unary_primops::<B129>().get("sail_unsigned").unwrap();
@@ -14263,6 +14892,7 @@ fn zmemreadfork(zu) {
 
         #[test]
         fn pow_symbolic_base_values_and_exponent_retry() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let base = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -14302,6 +14932,7 @@ fn zmemreadfork(zu) {
         #[test]
         fn vector_access_index_widths() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for data_width in [8, 64, 128, 129] {
@@ -14353,6 +14984,7 @@ fn zmemreadfork(zu) {
         #[test]
         fn wide_bitvector_shift_amounts() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             for (data_width, shift_width, amount) in
@@ -14383,6 +15015,7 @@ fn zmemreadfork(zu) {
 
         #[test]
         fn vector_update_nested_elements_preserves_selected_index() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let mut frame = make_frame(vec![Instr::End]);
@@ -14473,6 +15106,7 @@ fn zmemreadfork(zu) {
             for (op, amount, left, right) in
                 [("shiftr", -1, 1, 2), ("shiftl", -1, 4, 8), ("arith_shiftr", 256, 0x80, 0x81)]
             {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B64>::new(&ctx);
                 let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -14513,6 +15147,7 @@ fn zmemreadfork(zu) {
 
         #[test]
         fn adversarial_review_bits_shift_equivalence() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -14655,6 +15290,7 @@ fn zmemreadfork(zu) {
 
         #[test]
         fn adversarial_review_unsigned_128_sign() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -14666,6 +15302,7 @@ fn zmemreadfork(zu) {
         #[test]
         fn review_wide_vector_access_crash() {
             use crate::bitvector::b129::B129;
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -14691,6 +15328,7 @@ fn zmemreadfork(zu) {
 
     #[test]
     fn review7_unsigned_128_preserves_nonnegative() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let bits = solver.declare_const(smtlib::Ty::BitVec(128), info());
@@ -15335,6 +15973,7 @@ fn zmemreadfork(zu) {
     #[test]
     fn review3_lazy_read_must_keep_identity() {
         let shared = empty_shared_state();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15400,6 +16039,7 @@ fn zmemreadfork(zu) {
         let enum_name = test_name(122);
         let shared =
             shared_state_from_defs(vec![crate::ir::Def::Enum(enum_name, vec![test_name(123), test_name(124)])]);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15420,6 +16060,7 @@ fn zmemreadfork(zu) {
     fn review3_successful_merge_must_preserve_register_reads() {
         let mut shared = empty_shared_state();
         let reg = shared.symtab.intern("zregister");
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15447,6 +16088,7 @@ fn zmemreadfork(zu) {
     fn review3_relaxed_register_must_keep_intermediate_writes() {
         let mut shared = empty_shared_state();
         let reg = shared.symtab.intern("zregister");
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15771,6 +16413,7 @@ fn zmemreadfork(zu) {
         let mut shared = empty_shared_state();
         let reg = shared.symtab.intern("zreg");
         let field = shared.symtab.intern("zfield");
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15805,6 +16448,7 @@ fn zmemreadfork(zu) {
     fn review4_lazy_register_read_taint() {
         let mut shared = empty_shared_state();
         let reg = shared.symtab.intern("zreg");
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15834,6 +16478,7 @@ fn zmemreadfork(zu) {
         for symmetric in [true, false] {
             let mut shared = empty_shared_state();
             let reg = shared.symtab.intern("zreg");
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15871,6 +16516,7 @@ fn zmemreadfork(zu) {
         let enum_name = test_name(122);
         let shared =
             shared_state_from_defs(vec![crate::ir::Def::Enum(enum_name, vec![test_name(123), test_name(124)])]);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let tx = solver.start_transaction();
@@ -15968,6 +16614,7 @@ fn zmemreadfork(zu) {
             Vec::new(),
             Vec::new(),
         );
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&ctx);
         let condition = solver.declare_const(smtlib::Ty::Bool, info());
@@ -15999,6 +16646,7 @@ fn zmemreadfork(zu) {
     #[test]
     fn review5_constructor_condition_truth_table() {
         use crate::smt::smtlib::Exp as SExp;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let c = solver.declare_const(smtlib::Ty::Bool, info());
@@ -16071,6 +16719,7 @@ fn zmemreadfork(zu) {
     fn review5_nary_register_history() {
         let mut shared = empty_shared_state();
         let reg = shared.symtab.intern("zreg");
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let mut regs = RegisterBindings::new();

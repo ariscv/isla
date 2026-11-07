@@ -466,6 +466,7 @@ mod tests {
     #[test]
     fn components_两两可行不能证明三分量独立() {
         use Formula::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let x = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());
@@ -564,6 +565,7 @@ mod tests {
     #[test]
     fn components_派生ite保留条件依赖且求解器拒绝伪独立组合() {
         use Formula::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let x = solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown());

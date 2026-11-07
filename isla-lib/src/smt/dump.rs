@@ -1,4 +1,4 @@
-//! SMT timeout 诊断 dump 的构造与 SMT-LIB2 物化。
+//! SMT timeout 诊断 dump 的构造与 SMT-LIB2 文本生成。
 
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
@@ -102,6 +102,7 @@ mod tests {
 
     #[test]
     fn checkpoint_dump_preserves_temporary_assumption_as_replayable_command() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let var = solver.declare_const(Ty::Bool, SourceLoc::unknown());
@@ -117,6 +118,7 @@ mod tests {
 
     #[test]
     fn checkpoint_dump_without_worker_uses_replayable_datatype_symbols() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let enum_id = solver.get_enum(Name::from_u32(2097), 5);
@@ -132,6 +134,7 @@ mod tests {
 
     #[test]
     fn checkpoint_dump_uses_shared_state_names_without_changing_local_symbols() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let local_text = crate::zencode::encode("local_value");
         let enum_text = crate::zencode::encode("colour");
         let red_text = crate::zencode::encode("red");
@@ -148,6 +151,7 @@ mod tests {
         let mut names = SmtDumpNames::from_shared_state(&shared_state);
         names.bind_symbol_to_ir_name(symbol.id, local.as_u32());
 
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let enum_id = solver.get_enum(enum_name, 2);

@@ -47,6 +47,7 @@ impl CustomRegion<B64> for UnreachableDevice {
 
 #[test]
 fn 设备可见范围决定是否拆分且完全遮蔽时保持读写一致性() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     for fully_shadowed in [false, true] {
         let ctx = Context::new(Config::new());
@@ -138,6 +139,7 @@ fn 设备可见范围决定是否拆分且完全遮蔽时保持读写一致性()
 
 #[test]
 fn 遮蔽生成器不得执行或约束当前数组() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
@@ -157,6 +159,7 @@ fn 遮蔽生成器不得执行或约束当前数组() {
 
 #[test]
 fn 关联生成器初值与局部写入在宽地址下保持一致() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     for width in [32, 64, 65, 129] {
         let ctx = Context::new(Config::new());
@@ -224,7 +227,8 @@ fn 关联生成器初值与局部写入在宽地址下保持一致() {
 }
 
 #[test]
-fn 整数绝对值极值保持具体与符号结果一致() {
+fn 整数绝对值保留具体溢出与符号位向量契约() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
@@ -232,7 +236,11 @@ fn 整数绝对值极值保持具体与符号结果一致() {
     for (input, expected) in
         [(i128::MIN, i128::MIN), (i128::MIN + 1, i128::MAX), (-1, 1), (0, 0), (1, 1), (i128::MAX, i128::MAX)]
     {
-        assert_eq!(abs(Val::I128(input), &mut solver, info).unwrap(), Val::I128(expected));
+        if input == i128::MIN {
+            assert!(matches!(abs(Val::I128(input), &mut solver, info), Err(ExecError::Overflow)));
+        } else {
+            assert_eq!(abs(Val::I128(input), &mut solver, info).unwrap(), Val::I128(expected));
+        }
         let input = solver.define_const(smt_i128(input), info);
         let result = abs(Val::Symbolic(input), &mut solver, info).unwrap();
         assert!(solver.check_sat(info).is_sat().unwrap());

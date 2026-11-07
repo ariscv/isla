@@ -172,7 +172,7 @@ pub fn isa_state<B: BV>(
             Val::Bits(_) | Val::Bool(_) | Val::Enum(_) | Val::MixedBits(_) => {
                 FmtVal::from_val(original, model).map(Some)
             }
-            _ => Ok(None),
+            _ => FmtVal::from_val(original, model).map(Some),
         }
     }
     let mut state = BTreeMap::new();
@@ -204,6 +204,7 @@ mod tests {
         use isla_lib::ir::Symtab;
         use isla_lib::smt::{smtlib, Config, Context, Model, Solver};
         use isla_lib::source_loc::SourceLoc;
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&context);
         let mut symtab = Symtab::new();
@@ -224,7 +225,6 @@ mod tests {
                 Val::Symbolic(solver.declare_bitvector(64, SourceLoc::unknown())),
             )])),
         );
-        target.pre_state_mut().insert(list, Val::List(vec![Val::Unit]));
         // 非零高位与枚举覆盖格式化位序；符号 PMA 大小仍走模型接口。
         let Val::Symbolic(wide_symbol) = target.pre_state().get(&wide).unwrap() else {
             panic!("宽值必须符号化");
@@ -264,6 +264,11 @@ mod tests {
         let expected = target.solve_pre_state(&mut model, &shared).unwrap();
         let actual = isa_state(&target, &sample, &mut model, &shared).unwrap();
         assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+        target.pre_state_mut().insert(list, Val::List(vec![Val::Unit]));
+        let mut sample = sample;
+        sample.pre_registers.insert("list".into(), serde_json::json!({"list":[{"unit":true}]}));
+        assert!(target.solve_pre_state(&mut model, &shared).is_err());
+        assert!(isa_state(&target, &sample, &mut model, &shared).is_err(), "样本也必须传播无法格式化的前态错误");
     }
 
     #[test]
@@ -325,6 +330,7 @@ mod tests {
         use isla_lib::smt::smtlib::{bits64, Exp, Ty};
         use isla_lib::smt::{Config, Context, ReadOpts, Solver};
         use isla_lib::source_loc::SourceLoc;
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let info = SourceLoc::unknown();

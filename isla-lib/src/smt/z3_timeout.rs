@@ -435,7 +435,9 @@ mod smtperf_tests {
 
     #[test]
     fn smtperf_generic_wrapper_records_operation() {
-        let result = interruptible_z3_call!(SmtOperation::ModelEval, SourceLoc::unknown(), std::ptr::null_mut(), true);
+        let context = Context::new(Config::new());
+        assert!(!context.z3_ctx.is_null());
+        let result = interruptible_z3_call!(SmtOperation::ModelEval, SourceLoc::unknown(), context.z3_ctx, true);
 
         assert_eq!(result, Ok(true));
         let report = take_smtperf_report();
@@ -445,6 +447,7 @@ mod smtperf_tests {
 
     #[test]
     fn smtperf_solver_wrapper_collects_check_sat() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
 

@@ -7,6 +7,7 @@ fn 宽地址普通写独占写和带标签写必须一致检查排除区域() {
     for width in [65, 128, 129] {
         for exclusive in [false, true] {
             for tagged in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B129>::new(&ctx);
                 let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -60,6 +61,7 @@ fn 宽位单态化必须完整枚举候选并维持检查点约束() {
                 Vec::new(),
                 Vec::new(),
             );
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B129>::new(&ctx);
             let source = solver.declare_bitvector(width, info());
@@ -427,6 +429,7 @@ fn 符号访存长度拆分必须覆盖每一个合法地址() {
 fn 宽位合并后的算术切片与具体执行逐值相同() {
     use crate::bitvector::b129::B129;
     for width in [1, 2, 8, 63, 64, 65, 127, 128, 129] {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B129>::new(&ctx);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());

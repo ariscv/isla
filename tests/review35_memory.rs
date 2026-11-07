@@ -34,22 +34,27 @@ fn read_with_width(width: u32) {
 }
 #[test]
 fn review35_seq_width_64() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     read_with_width(64);
 }
 #[test]
 fn review35_seq_width_65() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     read_with_width(65);
 }
 #[test]
 fn review35_seq_width_129() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     read_with_width(129);
 }
 #[test]
 fn review35_seq_width_1024() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     read_with_width(1024);
 }
 #[test]
 fn review35_seq_concrete_wide_read() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B129>::new(&ctx);
     let mut memory = Memory::new();
@@ -61,6 +66,7 @@ fn review35_seq_concrete_wide_read() {
 }
 #[test]
 fn review35_seq_initial_and_write_read_matrix() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let info = SourceLoc::unknown();
     for sw in [false, true] {
         for sr in [false, true] {
@@ -100,6 +106,7 @@ fn review35_seq_initial_and_write_read_matrix() {
 
 #[test]
 fn review35_named_tlb_dependency_baseline_comparison() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::executor::{start_single, LocalFrame, Run, TaskId, TaskState};
     use isla_lib::ir::{Exp as IrExp, IRTypeInfo, Instr, Loc, SharedState, Symtab, Ty as IrTy, UVal, RETURN};
     use std::{collections::HashSet, sync::Mutex};
@@ -156,17 +163,21 @@ fn write_with_width(width: u32) {
 }
 #[test]
 fn review35_seq_write_width_64() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     write_with_width(64);
 }
 #[test]
 fn review35_seq_write_width_65() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     write_with_width(65);
 }
 #[test]
 fn review35_seq_write_width_129() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     write_with_width(129);
 }
 #[test]
 fn review35_seq_write_width_1024() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     write_with_width(1024);
 }

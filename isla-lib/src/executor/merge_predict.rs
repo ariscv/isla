@@ -374,6 +374,7 @@ mod tests {
 
     #[test]
     fn predict_256组合精确域乘积与估计区间覆盖真值() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let input = solver.declare_bitvector(8, SourceLoc::unknown());
@@ -415,6 +416,7 @@ mod tests {
     #[test]
     fn predict_隐藏xor耦合不能把边际域乘积当真值() {
         use Formula::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let vars: Vec<_> = (0..3).map(|_| Var(solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown()))).collect();
@@ -435,6 +437,7 @@ mod tests {
     #[test]
     fn predict_保存点探测与固定事件迹前缀参照逐次等价() {
         use Formula::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let vars: Vec<_> = (0..5).map(|_| Var(solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown()))).collect();
@@ -470,6 +473,7 @@ mod tests {
     #[test]
     fn predict_不平衡三叶树探测按分支概率加权() {
         use Formula::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let x = Var(solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown()));

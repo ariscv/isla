@@ -346,6 +346,20 @@
 - **配套**：`BV` trait 新增 `unsigned_cmp`（B64 按 u64、B129 按 `(tag,bits)` 字典序，tag 是第 129 位 MSB）；具体有符号比较走既有 `signed()`（B129 已正确处理 128/129）。`sail_signed` 放宽 length==128 为恒等返回（符号化 %i 本就是 128 位 BV，`SignExtend(0)`≡恒等）；`sail_unsigned` 保留 panic（无符号 128 位确无 %i 表示，诚实暴露），其余调用方（zrem 等）不受影响。
 - **zAMO 端到端**（riscv64_difftest_mem_excluded_pma.toml + limits_b12 + 600s 盒 + -T 24）：rc=0、23s、670 gen JSON 落盘（修复前 rc=134、0 产物）。`amominu.q.aq x31,x31,(x15)` → Retire_Success + 16B 独占读写事件 + 2×8B post-memory，原 panic 形态复现通过。宽度 {b,h,w,d,q}、aq/rl/aqrl 变体、Addr_Align×4、Access_Fault×408、Retire_Success×258；min/max 家族 9 条（含 minu.q）。AMOCAS 0 条（预算内未探索到，非缺陷）。
 - **环境坑**：/tmp 用户配额满时 `println` 写失败 panic→`panic="abort"`（release profile）→ SIGABRT 且 panic 信息也写不出（空 stderr），现象酷似引擎 abort；跑批产物目录放 /data1 下。产物：`/data1/baiyifan/tmp/isla-memimpl-w20-20260928/`。
+## difftest-xiangshan pipeline 的 trap-aware PoC 结构（2026-09-18）
+
+- `difftest-xiangshan/pipeline.py` 的 `make_assembly` 现按 `ret_val` 前缀（`Illegal_Instruction`/`Memory_Exception`，`expects_trap()`）区分两种模板；`prepare-json --ret-val-regex` 可按 ret_val 筛选条目并给每条注入 `source_file`。
+- trap 模板三要素：初始化清零 `medeleg`（emu 默认 0x1444，bit2=1 会把 U-mode 非法指令委托到 stvec=0）；`mtvec=trap_handler`；payload 指令前必须用独立标签 `payload_ins:`——`payload:` 标签在标量设置之前，而 trap 的 mepc 是 payload 指令地址，两者在有 x1..x31 上下文的条目上不相等。
+- oracle 分层：RTL vs NEMU 一致性由 difftest 内建；"未按 Isla 预期 trap"由全零哨兵非法指令暴露（payload 未 trap → 哨兵必 trap → handler 中 mepc≠payload_ins → 死循环 → 超时记 failure）；ABORT 类第一跑 stdout 已含 `different at`/REF dump，无需重跑 trace，只有 timeout 才值得 `--dump-commit-trace` 重跑定位停点。
+- 区分"RTL 问题"与"difftest 工具问题"的复核手段：同 ELF 用 `--no-diff` 纯 RTL 复跑；纯 RTL GOODTRAP 而 --diff 停摆的是 NEMU 同步问题（#5279/#5426 范畴），纯 RTL 也停摆才是 RTL 活性问题。
+- 结果增量记录在 `<cases>/results.ndjson`（每条一行、逐条 flush、支持续跑跳过已完成 id；追加前若残留半行先补换行隔断）。
+- Isla `make solve` JSON 的 trap 条目特征：`Illegal_Instruction` 条目全部无 `vr*` 初值、上下文可由 vsetvli 重建；约一半 `vstart>VLMAX`（不可达 vstart，Sail 报 illegal 而 RTL/NEMU 不实现该检查，#6298）。
+
+## DiffTest 满载 timeout 假象与空载复证纪律(2026-09-18)
+
+- `difftest-xiangshan` 批量 DiffTest 以 `-j48` 满载 + `timeout 30s` 运行时,单条 emu 的初始化+执行会被 CPU 争抢拖慢:461 条 timeout 中 **399 条是满载假超时**(空载 `--diff` 复测全部 GOODTRAP),只有 62 条空载 `--no-diff`/`--diff` 双重仍挂才是真挂死。
+- 因此 **timeout 类 failure 判定必须先空载复证再定案**;ABORT(returncode≠0)与"payload 已 commit 后哨兵暴露"类判定不受负载影响。
+- 本次还确认 XiangShan 译码层存在 `vstartIllegal = isVArith && vstart≠0` 检查(`VecExceptionGen.scala:279`),但 `FuType.vecArith = vecOPI++vecOPF` 不含 vshf/vppu/vfix 等族:检查覆盖内的族超界 vstart 正常 EX_II,未覆盖的族会真正执行并因 vstart 重启机制挂死。
 
 
 ## 2026-10-30 JSON范围与IR同步修订
@@ -442,3 +456,10 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 重建 `target_f8/release/isarch` 后，F9 原配置 Sv39 STORE（`-T 64`、枚举线程4、class_cap=512/path_cap=256）72.08秒退出0：**20路径、70类、4444组合**，逐路径和逐类计数均与F9一致；各分区类/组合数之和等于路径总数，每路径无重复守卫赋值。此比较不包含跨进程符号编号或代表值。明细见 `output/f13/acceptance/regression.json`，命令与配置同目录。
 - `make solve-MRET`（独立 `output/f13/mret` 目录，`-f scripts/run.mk -o build-isarch` 复用本轮显式 target_f8 构建，`-T 64`）：2.42秒退出0，**4用例**。汇总与F12完全相同，仍为 `partial` / `unfinished-paths=1`（Poison 路径的既有现象），不是全路径完成；详见 `output/f13/mret/regression.json`。
 - 已运行 `cargo fmt --all` 和 `git diff --check`。全部新增日志、缓存、历史快照及构建产物位于 `/data1`，无 git 写操作。
+
+## 枚举与内存分支合流接口（2026-11-07）
+
+- 合流基线为 `fff25fa` 与 `4d085b14`。完成路径的枚举与完整样本必须在 `src/isarch/exec.rs` 的编码候选筛选、有限域代表值钉选之前执行；新版结果收集器随后保留完整前后态及同一模型的具体返回值。`LocalFrame::new_call` 已同时复制寄存器、内存、预算、路径身份、纯定义区间和合并记录，可直接承载 ExecuteAs 续执行。
+- 新版 SMT 在入口显式配置策略；枚举的固定种子应复用同一已配置策略，执行器和预测器不能另行配置 Qfaufbv。单独运行测试时也须显式初始化，不能依赖其他测试先运行。
+- 混合位串作为内存地址时，区域重试必须先通过 `replace_mixed_bits` 得到完整地址的符号表达式，不能把某个拼接片段当作整个地址计算区域边界；其他消费者继续沿用各自原有操作数协议。
+- 固定 ecfg3 的 Sv39 LOAD 新旧均728条；对方 `280ef32` 加入 `fcsr` 后，完整 samples v1 增加前态、后态、展示三个字段。其余原始字节一致，但完整文件 SHA 不同。原始 `4d085b14` 与合并版还均复现 MRET 在 qfaufbv 下译码 Poison、default 下4条的行为。证据与验收边界见 [合流状态](enum_on_memory_merge/status.md)。

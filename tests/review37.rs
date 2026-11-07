@@ -17,6 +17,7 @@ fn info() -> SourceLoc {
 }
 #[test]
 fn review37_constrained_write_read_coherence() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let mut mismatches = vec![];
     for sw in [false, true] {
         for sr in [false, true] {
@@ -52,6 +53,7 @@ fn review37_constrained_write_read_coherence() {
 }
 #[test]
 fn review37_abs_min_differential() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut s = Solver::<B129>::new(&ctx);
     let f = primop::unary_primops()["abs_int"];
@@ -66,6 +68,7 @@ fn review37_abs_min_differential() {
 }
 #[test]
 fn review37_b129_arithmetic_differential() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut s = Solver::<B129>::new(&ctx);
     for width in [0, 1, 7, 63, 64, 65, 127, 128, 129] {
@@ -99,6 +102,7 @@ fn review37_b129_arithmetic_differential() {
 }
 #[test]
 fn review37_set_slice_integer_empty_boundary() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut s = Solver::<B129>::new(&ctx);
     let instrs = [Instr::End];
@@ -113,6 +117,7 @@ fn review37_set_slice_integer_empty_boundary() {
 }
 #[test]
 fn review37_shadowed_generator_does_not_block_array_reads() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut s = Solver::<B64>::new(&ctx);
     let mut m = Memory::new();
@@ -134,6 +139,7 @@ fn review37_shadowed_generator_does_not_block_array_reads() {
 }
 #[test]
 fn review37_fp_from_integer_preserves_target_format() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut s = Solver::<B129>::new(&ctx);
     let u = primop::unary_primops();
@@ -164,6 +170,7 @@ fn review37_fp_from_integer_preserves_target_format() {
 }
 #[test]
 fn review37_shadowed_generator_end_to_end_preserves_paths() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::executor::{start_multi, ExecutionLimits, Run, TaskId, TaskState};
     use isla_lib::ir::{Exp as IrExp, Loc, SharedState, Symtab, UVal, RETURN};
     use isla_lib::smt::checkpoint;
@@ -257,6 +264,7 @@ fn review37_shadowed_generator_end_to_end_preserves_paths() {
 }
 #[test]
 fn review37_diamond_extremes_preserve_values_and_register_dependencies() {
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     use isla_lib::executor::{start_single, ExecutionLimits, Run, TaskId, TaskState};
     use isla_lib::ir::{Exp as IrExp, Loc, SharedState, Symtab, UVal, RETURN};
     use isla_lib::smt::Event;

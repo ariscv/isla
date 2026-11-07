@@ -662,6 +662,7 @@ mod tests {
     /// None；无内置维度表的 clause 声明分片硬失败。
     #[test]
     fn 分片批计划_装配与冲突() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let shared_state = mini_shared_state();
         // 寄存器绑定表按真实初始化形态预置（decode_register_bindings 只对已存在
         // 的寄存器 assign，与 setup_pre_state 同一约定）

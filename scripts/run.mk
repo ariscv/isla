@@ -76,6 +76,7 @@ VMTYPE VSRETYPE VSSEGTYPE VSSSEGTYPE VSXSEGTYPE ZICBOM ZICBOP ZICBOZ \
 FENCE FENCEI FENCE_TSO SFENCE_INVAL_IR SFENCE_VMA SFENCE_W_INVAL SINVAL_VMA
 
 ACTIVE_ALL=$(filter-out $(FD_FLOAT) $(MEMORY),$(ALL))
+FD_NONMEM_RV64 = $(filter-out $(MEMORY) FMVH_X_D FMVP_D_X,$(FD_FLOAT))
 
 # 进度计数器：make solve 开始时重置为 0，每个 solve-% 启动时用 flock 原子自增取号，
 # 配合下面的 TOTAL 打印形如 [3/243] solve-REM 的进度（类似 ninja/cmake 的 [n/total]）。
@@ -87,15 +88,110 @@ THREADS ?= 64
 IR_FILE ?= ./rv64d.ir
 # solve 使用的 ISA 配置；默认与既有行为一致。内存符号化验收用：
 # `make solve-C_LD SOLVE_CONFIG=./configs/riscv64_difftest_mem.toml`
-SOLVE_CONFIG ?= ./configs/riscv64_difftest.toml
+SOLVE_CONFIG ?=
+ISA_CONFIG ?= ./configs/riscv64_difftest.toml
 # itrace 默认关闭；需要调试时使用 `make solve-XXX ITRACE=1` 开启。
 ITRACE ?= 0
-CARGO_ITRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE)),--features itrace,)
-# 可选 Z3 tactic；例如 `make solve-VVTYPE TASTIC=qfaufbv`。
+FTRACE ?= 0
+BTRACE ?= 0
+CARGO_TRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE) $(FTRACE) $(BTRACE)),--features tracetool,)
+# 使用官方已修复枚举/浮点 default 分发的 Z3（提交 1fd1d3613）。
+# z3-sys 通过 -lz3 链接，构建时与运行时都固定到同一版本化前缀；可用 Z3_PREFIX 覆盖。
+Z3_PREFIX ?= $(HOME)/.local/opt/z3-official-1fd1d3613
+Z3_RUSTFLAGS = -L native=$(Z3_PREFIX)/lib -C link-arg=-Wl,-rpath,$(Z3_PREFIX)/lib
+# 命令行不传 --tastic 时由 Isla 使用 default；make 为已有 Clause 写明具体策略。
+# 浮点计算使用 qffp；其余（含浮点访存）保留 qfaufbv。命令行 TASTIC=... 可覆盖。
 TASTIC ?=
-# 可选的独立 execution-limit TOML；VVTYPE 默认加载专用 workaround，其它 clause 不加载。
+$(addprefix solve-,$(ALL)): TASTIC = qfaufbv
+$(addprefix solve-,$(filter-out $(MEMORY),$(FD_FLOAT))): TASTIC = qffp
+# 可选的独立 execution-limit TOML；下方从 Sail-RISC-V 加载各 clause 的 workaround。
 EXECUTION_LIMITS_CONFIG ?=
 solve-VVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvtype.toml
+solve-MASKTYPEI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/masktypei.toml
+solve-MASKTYPEV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/masktypev.toml
+solve-MASKTYPEX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/masktypex.toml
+solve-MVVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/mvvtype.toml
+solve-MVXTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/mvxtype.toml
+solve-VXTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vxtype.toml
+solve-VXTYPE: OUTER_TIMEOUT = 90m
+solve-VXTYPE: SOLVE_TIMEOUT = 85m
+solve-MVXMATYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/mvxmatype.toml
+solve-NISTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/nistype.toml
+solve-NITYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/nitype.toml
+solve-VITYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vitype.toml
+solve-VIMSTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vimstype.toml
+solve-VICMPTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vicmptype.toml
+solve-VVCMPTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvcmptype.toml
+solve-VXCMPTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vxcmptype.toml
+solve-VXMTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vxmtype.toml
+solve-VXSG: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vxsg.toml
+solve-NVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/nvtype.toml
+solve-NXSTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/nxstype.toml
+solve-NXTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/nxtype.toml
+solve-VIMTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vimtype.toml
+solve-VIMCTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vimctype.toml
+solve-VVMCTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvmctype.toml
+solve-VXMCTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vxmctype.toml
+solve-VXMSTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vxmstype.toml
+solve-VVMSTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvmstype.toml
+solve-VVMTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vvmtype.toml
+solve-VMTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vmtype.toml
+solve-VISG: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/visg.toml
+solve-MVVCOMPRESS: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/mvvcompress.toml
+solve-VMVRTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vmvrtype.toml
+solve-VEXTTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vexttype.toml
+solve-RIVVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/rivvtype.toml
+solve-RMVVTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/rmvvtype.toml
+solve-VANDN_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vandn_vv.toml
+solve-VANDN_VX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vandn_vx.toml
+solve-VCLMULH_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vclmulh_vv.toml
+solve-VCLMULH_VX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vclmulh_vx.toml
+solve-VCLMUL_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vclmul_vv.toml
+solve-VCLMUL_VX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vclmul_vx.toml
+solve-VBREV_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vbrev_v.toml
+solve-VBREV8_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vbrev8_v.toml
+solve-VREV8_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vrev8_v.toml
+solve-VCLZ_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vclz_v.toml
+solve-VCTZ_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vctz_v.toml
+solve-VROL_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vrol_vv.toml
+solve-VROL_VX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vrol_vx.toml
+solve-VROR_VI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vror_vi.toml
+solve-VROR_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vror_vv.toml
+solve-VROR_VX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vror_vx.toml
+solve-VWSLL_VI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vwsll_vi.toml
+solve-VWSLL_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vwsll_vv.toml
+solve-VWSLL_VX: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vwsll_vx.toml
+solve-VAESDF: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vaesdf.toml
+solve-VAESDM: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vaesdm.toml
+solve-VAESEF: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vaesef.toml
+solve-VAESEM: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vaesem.toml
+solve-VAESKF1_VI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vaeskf1_vi.toml
+solve-VAESKF2_VI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vaeskf2_vi.toml
+solve-VGHSH_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vghsh_vv.toml
+solve-VGMUL_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vgmul_vv.toml
+solve-VSM3C_VI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vsm3c_vi.toml
+solve-VSM3ME_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vsm3me_vv.toml
+solve-VSM4K_VI: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vsm4k_vi.toml
+solve-VSHA2MS_VV: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vsha2ms_vv.toml
+solve-ZVKSHA2TYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/zvksha2type.toml
+solve-ZVKSM4RTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/zvksm4rtype.toml
+solve-ZVABDTYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/zvabdtype.toml
+solve-ZVABDTYPE: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
+solve-ZVWABDATYPE: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/zvwabdatatype.toml
+solve-ZVWABDATYPE: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
+solve-VFMERGE: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VFMV: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VFMVFS: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VFMVSF: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
+solve-VCPOP_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vcpop_v.toml
+solve-VCPOP_M: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vcpop_m.toml
+solve-VFIRST_M: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vfirst_m.toml
+solve-VMSBF_M: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vmsbf_m.toml
+solve-VMSIF_M: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vmsif_m.toml
+solve-VMSOF_M: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vmsof_m.toml
+solve-VIOTA_M: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/viota_m.toml
+solve-VABS_V: EXECUTION_LIMITS_CONFIG = ../sail-riscv/configs/isla/workarounds/vabs_v.toml
+solve-VABS_V: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
 # Z3 timeout wrapper 的实现由构建 feature 选择。
 Z3_TIMEOUT_IMPL ?= thread_interrupt
 ifeq ($(Z3_TIMEOUT_IMPL),direct)
@@ -117,10 +213,11 @@ TIMEOUT_SMT_OUTPUT ?=
 TIMEOUT_SMT_DIR ?=
 TOTAL_ACTIVE_ALL=$(words $(ACTIVE_ALL))
 TOTAL_FD_FLOAT=$(words $(FD_FLOAT))
+TOTAL_FD_NONMEM_RV64=$(words $(FD_NONMEM_RV64))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
-	cargo build --release --bin isarch $(CARGO_ITRACE_FEATURE) $(CARGO_SMT_FEATURE)
+	RUSTFLAGS="$(RUSTFLAGS) $(Z3_RUSTFLAGS)" cargo build --release --bin isarch $(CARGO_TRACE_FEATURE) $(CARGO_SMT_FEATURE)
 
 # 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
 #
@@ -128,28 +225,22 @@ build-isarch:
 # 通过 make 变量 SOLVE_TOTAL 透传进来；首行打印 [n/TOTAL] solve-$*。
 solve-%: build-isarch
 	@mkdir -p output/log output/trace outputs
-	@$(SOLVE_TRAP)n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
+	@n=$$(flock $(COUNTER) sh -c 'v=$$(cat $(COUNTER) 2>/dev/null || echo 0); v=$$((v+1)); echo $$v > $(COUNTER); echo $$v'); \
 	echo "[$$n/$(SOLVE_TOTAL)] solve-$*"; \
-	RUST_BACKTRACE=1 timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
-		-A $(IR_FILE) -C $(SOLVE_CONFIG) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
-		> output/log/$*.log 2>&1; \
-	status=$$?; \
-	if [ $$status -eq 124 ]; then \
-		echo "$* timeout" >> output/status.timeout.log; \
-	elif [ $$status -eq 0 ]; then \
-		echo "$* intime" >> output/status.intime.log; \
-	else \
-		echo "$* failed ($$status)" >> output/status.failed.log; \
-	fi; \
-	exit $$status
+	RUST_BACKTRACE=1 exec /usr/bin/python3 scripts/solve_process.py run --clause "$*" -- timeout --signal=TERM --kill-after=10s $(OUTER_TIMEOUT) ./target/release/isarch \
+		-A $(IR_FILE) -C $(if $(SOLVE_CONFIG),$(SOLVE_CONFIG),$(ISA_CONFIG)) $(if $(EXECUTION_LIMITS_CONFIG),--execution-limits-config $(EXECUTION_LIMITS_CONFIG),) --verbose --debug=fmlgcsra --probe-all --trace-all $(if $(filter 1 yes true on,$(ITRACE)),--itrace=output/trace/itrace_$*.txt,) $(if $(filter 1 yes true on,$(FTRACE)),--ftrace,) $(if $(filter 1 yes true on,$(BTRACE)),--btrace,) $(if $(filter 1 yes true on,$(FTRACE) $(BTRACE)),--trace-output=output/trace/itrace_$*.txt,) -T $(THREADS) $(if $(SOLVE_TIMEOUT),--timeout $(SOLVE_TIMEOUT),) $(if $(SMT_TIMEOUT),--smt-timeout $(SMT_TIMEOUT),) $(if $(TASTIC),--tastic $(TASTIC),) $(if $(TIMEOUT_SMT_OUTPUT),--timeout-smt-output $(TIMEOUT_SMT_OUTPUT),) $(if $(TIMEOUT_SMT_DIR),--timeout-smt-dir $(TIMEOUT_SMT_DIR),) solve-state --clause=$* \
+		> output/log/$*.log 2>&1
 
 SOLVE_TARGETS=$(addprefix solve-,$(ACTIVE_ALL))
 FD_FLOAT_SOLVE_TARGETS=$(addprefix solve-,$(FD_FLOAT))
+FD_NONMEM_SOLVE_TARGETS = $(addprefix solve-,$(FD_NONMEM_RV64))
 MEMORY_SOLVE_TARGETS=$(addprefix solve-,$(MEMORY))
 
-.PHONY: build-isarch solve solve-fd-float solve-memory
-# Ctrl-C 清理是【可选插件】：scripts/run_ctrl_c.mk 若存在，会给 solve-% 注入 Ctrl-C 清理逻辑
-# （pkill 掉后台 isarch）；缺失则不影响。-include 保证缺失不报错。
+# FD/浮点 clause 需要启用 F/D 扩展的专用配置（sys_enable_fdext + mstatus FS=Dirty）。
+$(FD_FLOAT_SOLVE_TARGETS): ISA_CONFIG := ./configs/riscv64_difftest_fd.toml
+
+.PHONY: build-isarch solve solve-fd-float solve-fd-nonmem solve-memory
+# 自动清理由每条 recipe 的 solve_process.py 负责；可选文件仅提供显式 PID 手动入口。
 -include scripts/run_ctrl_c.mk
 
 # solve-pre 作为所有 solve-XXX 的【真前置依赖】：make 的拓扑顺序保证它先跑完（重置进度
@@ -159,12 +250,14 @@ solve-pre:
 	@mkdir -p output/log output/trace outputs && echo 0 > $(COUNTER)
 .PHONY: solve-pre
 
-# 三个入口各自把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
+# 各入口把对应的 SOLVE_TOTAL 作为 target-specific 变量传给依赖的 solve-% pattern rule，
 # 然后【直接依赖】目标——单 make 进程并行跑（-j 正常生效、jobserver 不丢），无需递归 make。
 # （此前用“递归 make 注入 SOLVE_TOTAL”的写法会断 jobserver、降级串行，故弃用。）
 solve: SOLVE_TOTAL := $(TOTAL_ACTIVE_ALL)
 solve: $(SOLVE_TARGETS)
 solve-fd-float: SOLVE_TOTAL := $(TOTAL_FD_FLOAT)
 solve-fd-float: $(FD_FLOAT_SOLVE_TARGETS)
+solve-fd-nonmem: SOLVE_TOTAL := $(TOTAL_FD_NONMEM_RV64)
+solve-fd-nonmem: $(FD_NONMEM_SOLVE_TARGETS)
 solve-memory: SOLVE_TOTAL := $(TOTAL_MEMORY)
 solve-memory: $(MEMORY_SOLVE_TARGETS)

@@ -1,6 +1,7 @@
 # AGENTS.md
 
 - 所有的回答、书写的文档都必须使用中文
+- 中英文术语对照和符号值具体化的命名统一以 [TRANSLATOR.md](TRANSLATOR.md) 为准。
 - 测试策略为TDD（先写测试再写代码）；`make solve`为最终验收功能使用的命令，输出在output/，推荐`rm -rf output/ && make solve-MRET`先清理日志再smoke test，并行参数-j加多少根据运行的主机性能、cpu核心数、已有进程占用合理分配核心数，优先使用用户提供的。
 - 不要额外地在未使用的变量前面加下划线
 - 修改文件后运行`cargo fmt`保持rust代码格式对齐

@@ -4,6 +4,7 @@ use super::*;
 fn 超宽地址重叠区域必须保持分派优先级和完整事件地址() {
     for width in [1, 8, 64, 65, 129, 257, 1024] {
         for fetch in [false, true] {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
             let ctx = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&ctx);
             let address = solver.declare_bitvector(width, info());
@@ -172,6 +173,7 @@ fn review34_检查符号构造子解包(through_field: bool) {
         let b = shared.symtab.intern("zreview34_B");
         let value = test_name(850);
         let field = test_name(851);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let flag = solver.declare_const(smtlib::Ty::Bool, info());
@@ -236,6 +238,7 @@ fn review34_臂条件能证明标签正确时允许合流且不得泄漏条件()
     let a = shared.symtab.intern("zreview34_safe_A");
     let b = shared.symtab.intern("zreview34_safe_B");
     let value = test_name(852);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let flag = solver.declare_const(smtlib::Ty::Bool, info());
@@ -326,6 +329,7 @@ fn review34_臂内标签仍有正确与错误候选时必须拒绝合流并回�
         let b = shared.symtab.intern("zreview34_mixed_B");
         let value = test_name(868);
         let field = test_name(869);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let condition = solver.declare_const(smtlib::Ty::Bool, info());

@@ -123,6 +123,7 @@ fn 具体区和受约束区的符号宽地址读事件必须保留原始地址()
     for width in [65, 129, 256] {
         for constrained in [false, true] {
             for fetch in [false, true] {
+                crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
                 let ctx = Context::new(Config::new());
                 let mut solver = Solver::<B129>::new(&ctx);
                 let address = solver.declare_bitvector(width, info());
@@ -269,6 +270,7 @@ fn 相关符号长度与超宽取指地址必须保留合法组合和完整轨�
     use std::collections::BTreeSet;
     for width in [8, 64, 129, 256] {
         let shared = empty_shared_state();
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
         let address = solver.declare_bitvector(width, info());

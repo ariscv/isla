@@ -10,13 +10,13 @@ use std::sync::Arc;
 pub struct TimeoutSmtOutput {
     pub file: bool,
     pub stdout: bool,
-    pub itrace: bool,
+    pub trace: bool,
 }
 
 impl TimeoutSmtOutput {
-    pub fn new(file: bool, stdout: bool, itrace: bool) -> Self {
-        assert!(file || stdout || itrace, "timeout SMT output must select at least one destination");
-        TimeoutSmtOutput { file, stdout, itrace }
+    pub fn new(file: bool, stdout: bool, trace: bool) -> Self {
+        assert!(file || stdout || trace, "timeout SMT output must select at least one destination");
+        TimeoutSmtOutput { file, stdout, trace }
     }
 }
 
@@ -37,8 +37,8 @@ impl TimeoutReporter {
         TimeoutReporter { config, next_file_sequence: Arc::new(AtomicU64::new(1)) }
     }
 
-    pub(super) fn itrace_enabled(&self) -> bool {
-        self.config.output.itrace
+    pub(super) fn trace_enabled(&self) -> bool {
+        self.config.output.trace
     }
 
     pub(super) fn report_error(&self, clause: &str, error: &ExecError) {

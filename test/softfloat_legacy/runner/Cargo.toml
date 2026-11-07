@@ -1,0 +1,9 @@
+[package]
+name = "isla-softfloat-legacy-regression"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+isla-lib = { path = "../../../isla-lib" }
