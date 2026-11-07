@@ -60,6 +60,9 @@ impl<B: BV> Mutator for SolverMutator<'_, '_, '_, B> {
                 &mut || rng.next_u64(),
             )
             .expect("求解器变异失败");
+        if std::env::var_os("ISLA_MUTATION_PROFILE").is_some() {
+            eprintln!("[FUZZ_SOLVER_PROFILE] {}", serde_json::to_string(&self.mutator.borrow().profile).unwrap());
+        }
         changed.map(|changed| {
             *self.changes.borrow_mut() = changed.changes;
             let mut sample = changed.sample;

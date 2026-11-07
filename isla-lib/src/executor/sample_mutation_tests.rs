@@ -45,6 +45,8 @@ fn mutation_a_blocks_previous_values_and_keeps_the_class() {
             "不能用未使用寄存器制造取值多样性"
         );
         assert_eq!(solver.transaction_depth(), 0);
+        assert!(mutator.profile.queries > 0);
+        assert!(mutator.profile.query_seconds <= mutator.profile.total_seconds);
     }
 }
 
@@ -71,7 +73,8 @@ fn mutation_b_opens_only_bits_related_to_different_guards() {
     parent.pre_registers.insert("x".into(), json!({"bits":"10100101"}));
     let records = vec![super::tests::judge_record(4, g)];
     let mut mutator = mutation::PathMutator::new(&path, &solver, &records);
-    let changed = mutator.generate(&path, &mut solver, &shared, &parent, "0", true, &mut || 0).unwrap().unwrap();
+    let changed = mutator.generate(&path, &mut solver, &shared, &parent, "0", true, &mut || u64::MAX).unwrap().unwrap();
+    assert!(mutator.profile.fixed_buckets > 0);
     assert_eq!(changed.sample.pre_registers["x"]["bits"], "10100100");
     assert_eq!(solver.transaction_depth(), 0);
     assert!(

@@ -1,5 +1,7 @@
 # 议题入口
 
+- [fuzz 第 4 步：并行生成与三方闭环](path_merge_call_support/fuzz-step4.md)：STORE/LOAD 生成约提速 26.2/22.1 倍；历史分歧 14/14 归类，正常 200/200 一致，真实 300 例为 251 一致、49 已知分歧、0 新分歧；Rust 1138 项通过。
+
 - [fuzz 第 3 步：路径引导与 DAG](path_merge_call_support/fuzz-step3.md)：11400 个 A/B 全部经认证命中目标，多样性 100%，两场景确定性及 DAG 重读通过，1134 项测试通过；当前生成串行，不接 emu。
 
 - [fuzz 第 2 步：正式入口与 P1b 回放](path_merge_call_support/fuzz-step2.md)：四场景 5000 个 mutant 零差异，2836 个 corpus entry 通过认证，60 个产物逐字节稳定，1128 项测试通过。

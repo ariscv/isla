@@ -20,6 +20,7 @@ pub struct Options {
     pub budget: usize,
     pub control_percent: usize,
     pub certify_all: bool,
+    pub difftest: Option<super::difftest::Config>,
 }
 impl Options {
     pub fn parse(matches: &getopts::Matches) -> Result<Self, String> {
@@ -58,7 +59,56 @@ impl Options {
                 .parse()
                 .map_err(|e| format!("对照比例无效：{e}"))?,
             certify_all: matches.opt_present("fuzz-certify-all"),
+            difftest: match matches.opt_str("executor").as_deref() {
+                None | Some("model") => None,
+                Some("difftest") => {
+                    let base = std::env::var("DIFFTEST_XIANGSHAN_DIR")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|_| {
+                            PathBuf::from(
+                                "/data1/baiyifan/workplace/isla-runner/.worktree/replay-p0/difftest-xiangshan",
+                            )
+                        })
+                        .parent()
+                        .unwrap()
+                        .join("output/ecfg4b");
+                    let path = |name: &str, default: PathBuf| -> Result<PathBuf, String> {
+                        let path = matches.opt_str(name).map(PathBuf::from).unwrap_or(default);
+                        std::fs::canonicalize(&path).map_err(|error| format!("--{name}: {error}（{}）", path.display()))
+                    };
+                    let workers = matches
+                        .opt_str("difftest-workers")
+                        .unwrap_or_else(|| "8".into())
+                        .parse::<usize>()
+                        .map_err(|e| e.to_string())?;
+                    let timeout = matches
+                        .opt_str("difftest-timeout")
+                        .unwrap_or_else(|| "120".into())
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?;
+                    if !(1..=12).contains(&workers) || !(1..=600).contains(&timeout) {
+                        return Err("emu 并发数必须为 1..12，单例超时为 1..600 秒".into());
+                    }
+                    Some(super::difftest::Config {
+                        worker: path(
+                            "difftest-worker",
+                            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/fuzz/paging_worker.py"),
+                        )?,
+                        profile: path("difftest-profile", base.join("profile.json"))?,
+                        lock: path("difftest-lock", base.join("profile.lock.json"))?,
+                        files: path("difftest-files", base.join("files.json"))?,
+                        observer: path("difftest-observer", base.join("nemu_native_observer.so"))?,
+                        output: PathBuf::from(required("fuzz-output")?).join("difftest"),
+                        workers,
+                        timeout,
+                    })
+                }
+                Some(_) => return Err("--executor 必须为 model 或 difftest".into()),
+            },
         };
+        if options.difftest.is_some() && !matches!(options.mode, Mode::Campaign) {
+            return Err("--executor difftest 仅用于 campaign".into());
+        }
         if options.scenario.is_empty() || options.batch_size == 0 {
             return Err("场景 id 不得为空，批量大小必须大于零".into());
         }

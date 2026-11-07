@@ -2,7 +2,23 @@
 use super::*;
 use crate::executor::merge_record::{context, guard_order, model_guards, Atoms, Support};
 use crate::smt::smtlib::{bits64, Def, Ty};
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::time::Instant;
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct MutationProfile {
+    pub total_seconds: f64,
+    pub parent_seconds: f64,
+    pub query_seconds: f64,
+    pub materialize_seconds: f64,
+    pub queries: usize,
+    pub bucket_rejections: usize,
+    pub fixed_buckets: usize,
+}
+thread_local! {
+    static QUERY_PROFILE: RefCell<MutationProfile> = RefCell::new(MutationProfile::default());
+}
 
 struct Field {
     name: String,
@@ -19,6 +35,7 @@ pub struct Mutation {
 }
 
 pub struct PathMutator<B: BV> {
+    pub profile: MutationProfile,
     fields: Vec<Field>,
     guards: Vec<Exp<Sym>>,
     guard_atoms: Vec<Atoms>,
@@ -38,7 +55,14 @@ fn different(a: Exp<Sym>, b: Exp<Sym>) -> Exp<Sym> {
 }
 
 fn query<B: BV>(solver: &mut Solver<B>, condition: &Exp<Sym>) -> Result<bool, ExecError> {
-    match solver.check_sat_with(condition, SourceLoc::unknown()) {
+    let started = Instant::now();
+    let result = solver.check_sat_with(condition, SourceLoc::unknown());
+    QUERY_PROFILE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.queries += 1;
+        p.query_seconds += started.elapsed().as_secs_f64();
+    });
+    match result {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
         SmtResult::Unknown => Err(ExecError::Z3Unknown),
@@ -169,7 +193,16 @@ impl<B: BV> PathMutator<B> {
                 Field { name, expression, active, width, atoms, mutable }
             })
             .collect();
-        Self { fields, guards, guard_atoms, constraints, history: BTreeMap::new(), records: records.to_vec(), order }
+        Self {
+            profile: MutationProfile::default(),
+            fields,
+            guards,
+            guard_atoms,
+            constraints,
+            history: BTreeMap::new(),
+            records: records.to_vec(),
+            order,
+        }
     }
 
     pub fn generate(
@@ -182,8 +215,27 @@ impl<B: BV> PathMutator<B> {
         neighbor: bool,
         random: &mut impl FnMut() -> u64,
     ) -> Result<Option<Mutation>, ExecError> {
+        QUERY_PROFILE.with(|p| *p.borrow_mut() = MutationProfile::default());
+        let started = Instant::now();
+        let result = self.generate_inner(path, solver, shared, parent, target, neighbor, random);
+        self.profile = QUERY_PROFILE.with(|p| p.borrow().clone());
+        self.profile.total_seconds = started.elapsed().as_secs_f64();
+        result
+    }
+
+    fn generate_inner(
+        &mut self,
+        path: &SamplePath<B>,
+        solver: &mut Solver<B>,
+        shared: &SharedState<B>,
+        parent: &Sample,
+        target: &str,
+        neighbor: bool,
+        random: &mut impl FnMut() -> u64,
+    ) -> Result<Option<Mutation>, ExecError> {
         assert_eq!(solver.transaction_depth(), 0);
         assert_eq!(target.len(), self.guards.len(), "目标守卫长度与路径不同");
+        let parent_started = Instant::now();
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let baseline = (|| {
             assert!(path.bind(solver, shared, parent)?, "父 corpus entry 必须被原路径接纳");
@@ -204,6 +256,7 @@ impl<B: BV> PathMutator<B> {
         })();
         solver.rollback_transaction(tx);
         let (baseline, active, parent_vector) = baseline?;
+        QUERY_PROFILE.with(|p| p.borrow_mut().parent_seconds = parent_started.elapsed().as_secs_f64());
         let class = conjunction(self.guards.iter().zip(target.bytes()).map(|(g, bit)| {
             assert!(bit == b'0' || bit == b'1');
             if bit == b'1' {
@@ -330,7 +383,7 @@ impl<B: BV> PathMutator<B> {
                     conditions.push(Exp::Eq(Box::new(field.expression.clone()), Box::new(baseline[i].clone())));
                 }
             }
-            let mut condition = conjunction(conditions);
+            let mut condition = Exp::Var(solver.define_const(conjunction(conditions), SourceLoc::unknown()));
             if !query(solver, &condition)? {
                 continue;
             }
@@ -344,11 +397,14 @@ impl<B: BV> PathMutator<B> {
                 }
                 if let Some(width) = field.width {
                     let mut open = (0..width as usize).filter(|b| masks[i][*b] || !active[i]).collect::<Vec<_>>();
-                    for j in (1..open.len()).rev() {
+                    // 相邻位组成桶，避免把固定的高位与可变低位打散。
+                    // 桶顺序和桶内极性仍由该 mutant 的独立随机流选择。
+                    let mut buckets = open.chunks_mut(8).collect::<Vec<_>>();
+                    for j in (1..buckets.len()).rev() {
                         let k = (random() % (j as u64 + 1)) as usize;
-                        open.swap(j, k);
+                        buckets.swap(j, k);
                     }
-                    for bucket in open.chunks(8) {
+                    for bucket in buckets {
                         let preferred = random();
                         let choices = bucket
                             .iter()
@@ -366,12 +422,39 @@ impl<B: BV> PathMutator<B> {
                             .collect::<Vec<_>>();
                         let trial = conjunction(std::iter::once(condition.clone()).chain(choices.iter().cloned()));
                         if query(solver, &trial)? {
-                            condition = trial;
+                            condition = Exp::Var(solver.define_const(trial, SourceLoc::unknown()));
                         } else {
+                            QUERY_PROFILE.with(|p| p.borrow_mut().bucket_rejections += 1);
+                            // 先证明整个桶只有一个取值；只有证明成功才复用模型值。
+                            // 即使缓存模型来自更早的 Sat 查询，此处的反例查询也保证健全。
+                            let concrete = {
+                                let mut model = Model::new(solver);
+                                model.set_complete_model(true);
+                                bits(&model.get_exp(&field.expression)?.unwrap_exp())
+                            };
+                            let fixed = conjunction(bucket.iter().map(|bit| {
+                                Exp::Eq(
+                                    Box::new(Exp::Extract(
+                                        *bit as u32,
+                                        *bit as u32,
+                                        Box::new(field.expression.clone()),
+                                    )),
+                                    Box::new(bits64(concrete[*bit] as u64, 1)),
+                                )
+                            }));
+                            if !query(solver, &conjunction([condition.clone(), Exp::Not(Box::new(fixed.clone()))]))? {
+                                QUERY_PROFILE.with(|p| p.borrow_mut().fixed_buckets += 1);
+                                condition = Exp::Var(
+                                    solver.define_const(conjunction([condition, fixed]), SourceLoc::unknown()),
+                                );
+                                continue;
+                            }
                             for choice in choices {
                                 let trial = conjunction([condition.clone(), choice.clone()]);
                                 let accepted = if query(solver, &trial)? { choice } else { Exp::Not(Box::new(choice)) };
-                                condition = conjunction([condition, accepted]);
+                                condition = Exp::Var(
+                                    solver.define_const(conjunction([condition, accepted]), SourceLoc::unknown()),
+                                );
                             }
                         }
                     }
@@ -381,16 +464,17 @@ impl<B: BV> PathMutator<B> {
                             let preference =
                                 Exp::Eq(Box::new(field.expression.clone()), Box::new(Exp::Bool(random() & 1 != 0)));
                             let trial = conjunction([condition.clone(), preference.clone()]);
-                            condition = conjunction([
-                                condition,
-                                if query(solver, &trial)? { preference } else { Exp::Not(Box::new(preference)) },
-                            ]);
+                            let accepted =
+                                if query(solver, &trial)? { preference } else { Exp::Not(Box::new(preference)) };
+                            condition =
+                                Exp::Var(solver.define_const(conjunction([condition, accepted]), SourceLoc::unknown()));
                         }
                         _ => panic!("当前变异器只支持位向量及布尔自由字段"),
                     }
                 }
             }
             assert!(query(solver, &condition)?, "取值偏好不得破坏可满足性");
+            let materialize_started = Instant::now();
             let mut model = Model::new(solver);
             model.set_complete_model(true);
             let values = self
@@ -406,6 +490,7 @@ impl<B: BV> PathMutator<B> {
             }
             let sample = path.materialize(&mut model, shared, "merge", parent.path_signature, None)?;
             self.history.entry(target.into()).or_default().push(values);
+            QUERY_PROFILE.with(|p| p.borrow_mut().materialize_seconds = materialize_started.elapsed().as_secs_f64());
             return Ok(Some(Mutation { sample, changes }));
         }
         Ok(None)

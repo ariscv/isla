@@ -1,6 +1,6 @@
 use super::*;
 use rand::RngCore;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[test]
 fn campaign_scheduler_rotates_and_balances_class_attempts() {
@@ -126,6 +126,7 @@ fn p1b_path_aliases_start_at_one() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        difftest: None,
     };
     let record = json!({"sample_id":0,"operator":"M1","parent_path_signature":123,"parent_class_id":0});
     let judged = json!({"path_signature":123,"guard_vector":"0","sample":{"result":{"ctor":"Retire_Success"}}});
@@ -207,6 +208,7 @@ fn mutation_metadata_identifies_current_corpus_entry() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        difftest: None,
     };
     let mut record = record;
     record["operator"] = json!("M1");
@@ -246,6 +248,7 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        difftest: None,
     };
     let row = json!({"path_signature":123,"guard_vector":"0","sample":{"result":{"ctor":"Retire_Success"}}});
     super::report::write(
@@ -259,4 +262,49 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
     let ledger: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(output.join("ledger.json")).unwrap()).unwrap();
     assert_eq!(ledger[0]["status"], "accepted");
+}
+
+#[test]
+fn generation_routes_each_target_in_number_order() {
+    use super::generation::owner;
+    for threads in [1, 2, 32] {
+        let mut queues = vec![Vec::new(); threads];
+        for id in 0..100 {
+            let target = (id * 7) % 11;
+            queues[owner(target, threads)].push((target, id));
+        }
+        for target in 0..11 {
+            let ids = queues[owner(target, threads)]
+                .iter()
+                .filter(|(t, _)| *t == target)
+                .map(|(_, id)| *id)
+                .collect::<Vec<_>>();
+            assert_eq!(ids, (0..100).filter(|id| (id * 7) % 11 == target).collect::<Vec<_>>());
+        }
+    }
+}
+
+#[test]
+fn generation_drains_in_number_order() {
+    super::generation::test_executor_order();
+}
+
+#[test]
+fn difftest_oracle_keeps_unknown_causes_and_counts_rule_identity() {
+    let oracle = super::oracle::ThreeWayOracle;
+    let expected = json!({"isla_cause":15});
+    let observed = json!({"agree":false,"bucket":"xs!=nemu","phase":"execute","isla_cause":15,"xs_cause":7,"nemu_cause":15,"isla_consistent_side":"nemu","mismatch":{"filtered":true,"known_rule":"xs_leaf_ppn_af_over_permission_pf","group_key":{"ptes":[]}}});
+    let finding = oracle.compare(&expected, &observed).unwrap();
+    assert_eq!(finding["fields"], json!(["cause"]));
+    assert_eq!(finding["rule_id"], "R-XS-001");
+    let mut unknown = observed.clone();
+    unknown["mismatch"]["filtered"] = json!(false);
+    unknown["mismatch"]["known_rule"] = Value::Null;
+    assert_eq!(oracle.compare(&expected, &unknown).unwrap()["rule_id"], Value::Null);
+    let mut agree = observed;
+    agree["agree"] = json!(true);
+    agree["isla_consistent_side"] = json!("both");
+    agree["xs_cause"] = json!(15);
+    agree["nemu_cause"] = json!(15);
+    assert!(oracle.compare(&expected, &agree).is_none());
 }

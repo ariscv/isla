@@ -168,11 +168,12 @@ pub fn run<B: BV>(
                 target,
                 &mut executor,
                 &mut feedback,
+                threads,
             )
         } else {
             let (samples, records, audit) = super::replay::prepare(options, &session.corpus);
             write_json(&output.join("input-audit.json"), &audit);
-            let judged = classify(&mut executor, &samples, false, options.batch_size);
+            let judged = classify(&mut executor, &samples, options.certify_all, options.batch_size);
             (samples, records, judged, Value::Null)
         };
         let judge_seconds = started.elapsed().as_secs_f64();

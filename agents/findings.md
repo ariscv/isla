@@ -498,3 +498,11 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 枚举器的 `Support::collect` 可按位展开 `DefineConst`，并保守处理未证明可逐位传播的运算；路径引导变异直接复用它，沿断言扩展相关输入位。已调整可见性，没有复制依赖算法。
 - `SamplePath::materialize` 在同一模型中重算活动读取、动态地址、前态字节及后态。PTE 指向变化后应复用它生成输入，再调用已有 classify/judge，不能直接沿用父 corpus entry 的读取地址或后态。
 - `Trace::to_vec()` 是逆执行顺序，DAG 导出需反向遍历；`write_events_in_context` 可复用原定义输出器及类型推断，保存原始 Def 次序。格式与限制见 [DAG 导出](path_merge_call_support/fuzz-dag-export.md)，实验见 [第 3 步](path_merge_call_support/fuzz-step3.md)。
+
+
+## fuzz 并行生成与硬件进程管理（2026-11-08）
+
+- `PathMutator` 的排重历史按目标规范守卫向量分离。批内先按编号预约目标，再把相同目标送到同一个队列，可以并行处理不同目标，同时保留线程数无关的输出；300 个跨批次输入已验证。
+- 逐位随机极性选择的实际 Z3 查询占生成主要成本。相邻位组成桶，先证明整桶固定，再复用具体值，可减少被约束高位的逐位查询；不能直接采用未证明唯一的任意求解模型。
+- 既有 `run_probe` 会把 emu 放进独立会话。只 kill Python 所在进程组不能清理 emu；worker 必须跟踪这些会话并清理 fork 后代。Rust 的父进程退出信号、Python 子进程收养及两层超时共同覆盖本轮取消与超时场景。
+- `paging_fuzz.MismatchTable` 已负责调用窄规则；薄入口直接复用它，无需在 Rust 复制 PTE 条件。完整测量、适用范围与验收见 [第 4 步](path_merge_call_support/fuzz-step4.md)。

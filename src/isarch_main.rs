@@ -117,7 +117,7 @@ fn print_usage(opts: &getopts::Options, code: i32) -> ! {
     eprintln!(
         "campaign：--fuzz-budget 2000 --fuzz-control-percent 0；形态 A 固定类换取值，形态 B 选择同一路径的邻近类。"
     );
-    eprintln!("第 0 步认证 corpus，mutant 使用快档；--fuzz-certify-all 供认证对拍。探索后导出 dag/，本阶段不接 emu。");
+    eprintln!("第 0 步认证 corpus，mutant 使用快档；--fuzz-certify-all 供认证对拍。探索后导出 dag/；--executor difftest 连接 Python worker，默认 8 路 emu。");
     // M0 原型参数参与解析，但不进入公共帮助。
     for line in opts.usage(brief).lines().filter(|line| !line.contains("--judge-resident")) {
         eprintln!("{line}");
@@ -459,6 +459,18 @@ fn isla_main() -> i32 {
         "campaign 从 replay-log 记录池抽取对照的百分比，默认 5；纯路径引导设 0",
         "<number>",
     );
+    opts.optopt("", "executor", "campaign 执行器：model 或 difftest，默认 model", "<executor>");
+    opts.optopt("", "difftest-workers", "emu 并发数，默认 8，上限 12", "<number>");
+    opts.optopt("", "difftest-timeout", "单例 emu 超时秒数，默认 120，上限 600", "<seconds>");
+    for (name, help) in [
+        ("worker", "Python 薄入口"),
+        ("profile", "平台描述"),
+        ("lock", "平台锁"),
+        ("files", "外部工具路径 JSON"),
+        ("observer", "独立 NEMU 观察器"),
+    ] {
+        opts.optopt("", &format!("difftest-{name}"), help, "<path>");
+    }
     opts.optflag("", "fuzz-certify-all", "验收审计：所有接纳的 mutant 再经认证档，与快档逐字段对拍");
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
