@@ -18,10 +18,14 @@ pub struct SampleOptions {
     pub judge: Option<PathBuf>,
     pub resident: Option<PathBuf>,
     pub resident_out: Option<PathBuf>,
+    pub resident_fast: bool,
 }
 
 impl SampleOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.resident_fast && self.resident.is_none() {
+            return Err("--judge-resident-fast 需要 --judge-resident".into());
+        }
         if self.resident.is_some() != self.resident_out.is_some() {
             return Err("--judge-resident 与 --judge-resident-out 必须同时指定".into());
         }
@@ -58,6 +62,7 @@ pub struct SampleSession {
     pub checker: Option<SampleChecker>,
     pub resident: Option<SampleChecker>,
     pub retain_solutions: bool,
+    pub resident_fast: bool,
 }
 impl SampleSession {
     pub fn new(options: &SampleOptions, enumeration: Option<&MergeEnumerationConfig>) -> Result<Self, String> {
@@ -111,7 +116,13 @@ impl SampleSession {
             Some(limit) => SampleOutputs::open_budget(&configured, limit),
             None => SampleOutputs::open(&configured),
         });
-        Ok(Self { writer, checker, resident, retain_solutions: outputs.is_empty() })
+        Ok(Self {
+            writer,
+            checker,
+            resident,
+            retain_solutions: outputs.is_empty(),
+            resident_fast: options.resident_fast,
+        })
     }
     pub fn enabled(&self) -> bool {
         self.writer.is_some() || self.checker.is_some() || self.resident.is_some()
@@ -243,6 +254,19 @@ pub fn isa_state<B: BV>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resident_fast_requires_resident_input() {
+        assert!(SampleOptions { resident_fast: true, ..Default::default() }.validate().is_err());
+        assert!(SampleOptions {
+            resident_fast: true,
+            resident: Some("in.jsonl".into()),
+            resident_out: Some("out.jsonl".into()),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
+    }
+
     #[test]
     fn samples_f5_复用前态格式化字节与模型查询一致() {
         use isla_lib::bitvector::b129::B129;

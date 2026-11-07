@@ -151,3 +151,8 @@ corpus 真值为 `../isla-judge/output/judge/judge/sv39-store/judged.jsonl`；�
 完整场景使用初次 release 构建（build.log）；之后仅修改共享 `--help` 的文字过滤（src/opts.rs），未改参数解析、路径保存、恢复或 judge。最终构建与帮助检查另留 build-final.log、test-final.log、help-check.json，不能将帮助修正说成新的求解器实验。
 
 最终二进制的 [64 线程冒烟](../../output/fuzz-m0/final-smoke/verification.json)复用输入 0、1380、1381、1382；一条正例与完整批次的输出逐字段一致，三个负对照仍零接纳。原始退出 1、partial／errors=5 保留。最终构建通过、全工作区测试 1109 通过／0 失败／6 项既有忽略，格式检查与帮助隐藏检查通过。所有产物在本工作树；没有 git 写操作、其他工作树修改或额外哈希核对。
+
+
+## 后续：第 1 步快档（2026-11-08）
+
+M0 的上述性能结果保留为原型历史。[fuzz-step1.md](fuzz-step1.md) 记录随后增加的分阶段计时、静态证明与独立快档：同一 380 个 corpus entry＋1000 个 mutant 在 1／32 线程下与认证档逐字段零差异，三个负对照零接纳，整批纯判定墙钟提速 8.30／65.75 倍；完整认证流程仍可用。

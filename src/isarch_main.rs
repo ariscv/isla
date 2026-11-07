@@ -435,6 +435,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "check-samples-judge", "输出接纳路径、规范守卫向量和唯一后态 JSON Lines", "<path>");
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
+    opts.optflag("", "judge-resident-fast", "");
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
@@ -706,6 +707,7 @@ fn isla_main() -> i32 {
                 judge: matches.opt_str("check-samples-judge").map(std::path::PathBuf::from),
                 resident: matches.opt_str("judge-resident").map(std::path::PathBuf::from),
                 resident_out: matches.opt_str("judge-resident-out").map(std::path::PathBuf::from),
+                resident_fast: matches.opt_present("judge-resident-fast"),
             };
             if let Err(error) = sample_options.validate() {
                 eprintln!("{error}");

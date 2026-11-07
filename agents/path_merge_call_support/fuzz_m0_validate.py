@@ -155,7 +155,7 @@ def verify(threads):
             tag, data = line.split(' ', 1)
             assert tag not in tags
             tags[tag] = json.loads(data)
-    assert len(tags) == 4, list(tags)
+    assert len(tags) >= 4, list(tags)
     report = tags['[JUDGE_RESIDENT_REPORT]']
     assert report['sample_total'] == 1383
     assert report['unaccepted_sample_ids'] == [1380, 1381, 1382]

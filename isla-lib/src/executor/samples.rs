@@ -16,8 +16,15 @@ use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
 
+#[path = "sample_fast.rs"]
+pub mod fast;
+#[cfg(test)]
+#[path = "sample_fast_tests.rs"]
+mod fast_tests;
 #[path = "sample_outputs.rs"]
 pub mod outputs;
+#[path = "sample_profile.rs"]
+pub mod profile;
 
 fn concrete_bits<B: BV>(value: B) -> Value {
     json!({"bits": (0..value.len()).rev().map(|i| if value.slice(i,1).unwrap().lower_u64()==1 {'1'} else {'0'}).collect::<String>()})
@@ -397,6 +404,45 @@ impl<B: BV> SamplePath<B> {
         Ok(true)
     }
 
+    fn concretize_judged(
+        &self,
+        solver: &mut Solver<B>,
+        shared: &SharedState<B>,
+        sample_id: u64,
+        records: &[super::RegionMergeRecord<B>],
+        signature: u64,
+        mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
+    ) -> Result<(JudgedSample, Exp<Sym>), ExecError> {
+        let timing = profile::Span::new("concretize");
+        let order = super::merge_record::guard_order(records);
+        let mut model = Model::new(solver);
+        let mode = if records.is_empty() { "fork" } else { "merge" };
+        let mut sample = self.materialize(&mut model, shared, mode, signature, None)?;
+        sample.sample_id = sample_id;
+        let guards = super::merge_record::model_guards(&mut model, records, &order)?;
+        consume(&mut sample, &mut model)?;
+        drop(model);
+        drop(timing);
+        Ok((
+            JudgedSample {
+                schema_version: 1,
+                sample_id,
+                path_signature: signature,
+                guard_order: order.iter().map(|index| records[*index].record_id).collect(),
+                guard_vector: guards.values.iter().map(|value| if *value { '1' } else { '0' }).collect(),
+                guard_assignment: order
+                    .iter()
+                    .zip(&guards.values)
+                    .map(|(index, value)| (records[*index].record_id.to_string(), *value))
+                    .collect(),
+                guard_unique: true,
+                post_unique: true,
+                sample,
+            },
+            guards.different,
+        ))
+    }
+
     pub fn judge(
         &self,
         solver: &mut Solver<B>,
@@ -414,18 +460,19 @@ impl<B: BV> SamplePath<B> {
         assert_eq!(solver.transaction_depth(), 0, "judge 必须在路径结束后运行");
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let outcome = (|| {
-            if !self.bind(solver, shared, input)? {
+            let accepted = {
+                let timing = profile::Span::new("bind");
+                let accepted = self.bind(solver, shared, input)?;
+                drop(timing);
+                accepted
+            };
+            if !accepted {
                 return Ok(None);
             }
-            let order = super::merge_record::guard_order(records);
-            let mut model = Model::new(solver);
-            let mode = if records.is_empty() { "fork" } else { "merge" };
-            let mut sample = self.materialize(&mut model, shared, mode, signature, None)?;
-            sample.sample_id = input.sample_id;
-            let guards = super::merge_record::model_guards(&mut model, records, &order)?;
-            consume(&mut sample, &mut model)?;
-            drop(model);
-            match solver.check_sat_with(&guards.different, SourceLoc::unknown()) {
+            let (judged, different) =
+                self.concretize_judged(solver, shared, input.sample_id, records, signature, &mut consume)?;
+            let timing = profile::Span::new("guard_unique");
+            match solver.check_sat_with(&different, SourceLoc::unknown()) {
                 SmtResult::Unsat => (),
                 SmtResult::Sat => {
                     return Err(ExecError::Type("类不唯一：前态未确定活动守卫".into(), SourceLoc::unknown()))
@@ -433,23 +480,12 @@ impl<B: BV> SamplePath<B> {
                 SmtResult::Unknown => return Err(ExecError::Z3Unknown),
                 SmtResult::Error(error) => return Err(ExecError::Smt(error)),
             }
-            Ok(Some(JudgedSample {
-                schema_version: 1,
-                sample_id: input.sample_id,
-                path_signature: signature,
-                guard_order: order.iter().map(|index| records[*index].record_id).collect(),
-                guard_vector: guards.values.iter().map(|value| if *value { '1' } else { '0' }).collect(),
-                guard_assignment: order
-                    .iter()
-                    .zip(&guards.values)
-                    .map(|(index, value)| (records[*index].record_id.to_string(), *value))
-                    .collect(),
-                guard_unique: true,
-                post_unique: true,
-                sample,
-            }))
+            drop(timing);
+            Ok(Some(judged))
         })();
+        let timing = profile::Span::new("rollback");
         solver.rollback_transaction(tx);
+        drop(timing);
         let judged = outcome?;
         if let Some(judged) = &judged {
             match self.check(solver, shared, &judged.sample)? {
@@ -472,9 +508,13 @@ impl<B: BV> SamplePath<B> {
         assert_eq!(solver.transaction_depth(), 0, "成员检查必须在路径结束后运行");
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let outcome = (|| {
-            if !self.bind(solver, shared, sample)? {
+            let timing = profile::Span::new("recheck_bind");
+            let accepted = self.bind(solver, shared, sample)?;
+            drop(timing);
+            if !accepted {
                 return Ok(None);
             }
+            let timing = profile::Span::new("post_prepare");
             let accesses = self.accesses();
             let mut checks = Vec::new();
             checks.push(equal(&self.result, &sample.result, shared, solver)?);
@@ -511,6 +551,7 @@ impl<B: BV> SamplePath<B> {
                 });
                 checks.push(Exp::Or(Box::new(Exp::Not(Box::new(commit.clone()))), Box::new(covered)));
             }
+            drop(timing);
             for condition in checks {
                 if let Exp::Bool(known) = condition {
                     if known {
@@ -519,7 +560,11 @@ impl<B: BV> SamplePath<B> {
                         return Ok(Some(false));
                     }
                 }
-                match solver.check_sat_with(&Exp::Not(Box::new(condition)), SourceLoc::unknown()) {
+                let timing = profile::Span::new("post_unique");
+                let result = solver.check_sat_with(&Exp::Not(Box::new(condition)), SourceLoc::unknown());
+                drop(timing);
+                match result {
+                    // 后态取反查询保持原有逐字段顺序。
                     SmtResult::Unsat => (),
                     SmtResult::Sat => return Ok(Some(false)),
                     SmtResult::Unknown => return Err(ExecError::Z3Unknown),
@@ -528,7 +573,9 @@ impl<B: BV> SamplePath<B> {
             }
             Ok(Some(true))
         })();
+        let timing = profile::Span::new("rollback");
         solver.rollback_transaction(tx);
+        drop(timing);
         outcome
     }
     #[cfg(test)]
@@ -679,7 +726,12 @@ impl SampleChecker {
     }
     /// 常驻原型允许输入省略期望后态；J1 的严格加载保持不变。
     pub fn load_judge_inputs(path: &std::path::Path) -> Result<Self, String> {
-        Self::load_mode(path, None, true)
+        profile::reset();
+        let timing = profile::Span::new("json_read");
+        let result = Self::load_mode(path, None, true);
+        drop(timing);
+        eprintln!("[JUDGE_RESIDENT_INPUT] {}", serde_json::to_string(&profile::take()).unwrap());
+        result
     }
     fn load_mode(path: &std::path::Path, limit: Option<usize>, judge_only: bool) -> Result<Self, String> {
         let file = std::fs::File::open(path).map_err(|error| format!("读取样本失败：{error}"))?;
@@ -732,19 +784,54 @@ impl SampleChecker {
         consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<Option<JudgedSample>, ExecError> {
         let judged = path.judge(solver, shared, &self.samples[index], records, signature, consume)?;
-        if let Some(judged) = &judged {
+        self.record_judged(index, judged.as_ref(), false)?;
+        Ok(judged)
+    }
+
+    pub fn classify_only<B: BV>(
+        &self,
+        index: usize,
+        path: &SamplePath<B>,
+        solver: &mut Solver<B>,
+        shared: &SharedState<B>,
+        signature: u64,
+        records: &[super::RegionMergeRecord<B>],
+        facts: &fast::FastFacts,
+        consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
+    ) -> Result<Option<JudgedSample>, ExecError> {
+        let judged = path.classify(solver, shared, &self.samples[index], records, signature, facts, consume)?;
+        self.record_judged(index, judged.as_ref(), true)?;
+        Ok(judged)
+    }
+
+    fn record_judged(&self, index: usize, judged: Option<&JudgedSample>, buffered: bool) -> Result<(), ExecError> {
+        if let Some(judged) = judged {
+            let timing = profile::Span::new("json_write");
+            let line = (buffered && self.judge_output.is_some()).then(|| {
+                let mut line = serde_json::to_vec(judged).expect("judge 输出序列化失败");
+                line.push(b'\n');
+                line
+            });
             let mut counts = self.counts.lock().unwrap();
             if counts[index].0 != 0 {
                 return Err(ExecError::Type(format!("多条路径接纳输入：{}", judged.sample_id), SourceLoc::unknown()));
             }
             counts[index].0 += 1;
+            if buffered {
+                drop(counts);
+            }
             if let Some(output) = &self.judge_output {
                 let mut output = output.lock().unwrap();
-                serde_json::to_writer(&mut *output, judged).expect("judge 输出序列化失败");
-                output.write_all(b"\n").expect("写入 judge 输出失败");
+                if let Some(line) = &line {
+                    output.write_all(line).expect("写入 judge 输出失败");
+                } else {
+                    serde_json::to_writer(&mut *output, judged).expect("judge 输出序列化失败");
+                    output.write_all(b"\n").expect("写入 judge 输出失败");
+                }
             }
+            drop(timing);
         }
-        Ok(judged)
+        Ok(())
     }
 
     pub fn check_path<B: BV>(
@@ -846,7 +933,7 @@ mod tests {
         std::fs::remove_file(file).unwrap();
     }
 
-    fn judge_record(id: usize, condition: Sym) -> super::super::RegionMergeRecord<B64> {
+    pub(super) fn judge_record(id: usize, condition: Sym) -> super::super::RegionMergeRecord<B64> {
         super::super::RegionMergeRecord {
             record_id: id,
             parent_record: None,
@@ -863,6 +950,35 @@ mod tests {
             single_arm_reads: Vec::new(),
             memory_reads: Vec::new(),
         }
+    }
+
+    #[test]
+    fn samples_judge_profile_separates_proofs_and_recheck() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        let path = SamplePath {
+            pre: BTreeMap::new(),
+            post: BTreeMap::new(),
+            result: Val::Bool(true),
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        assert!(sat(&mut solver).unwrap());
+        let mut model = Model::new(&solver);
+        let input = path.materialize(&mut model, &shared, "fork", 1, None).unwrap();
+        drop(model);
+        profile::reset();
+        assert!(path.judge(&mut solver, &shared, &input, &[], 1, |_, _| Ok(())).unwrap().is_some());
+        let timings = profile::take();
+        assert_eq!(timings["bind"].calls, 1);
+        assert_eq!(timings["recheck_bind"].calls, 1);
+        assert_eq!(timings["concretize"].calls, 1);
+        assert_eq!(timings["guard_unique"].calls, 1);
+        assert_eq!(timings["post_prepare"].calls, 1);
+        assert_eq!(timings["rollback"].calls, 2);
+        assert_eq!(solver.transaction_depth(), 0);
     }
 
     #[test]
@@ -1212,6 +1328,7 @@ mod tests {
             }],
         };
         assert!(sat(&mut solver).unwrap());
+        assert!(sat(&mut solver).unwrap());
         let mut model = Model::new(&solver);
         let reference = path.materialize_per_byte(&mut model, &shared, "merge", 1, Some(0)).unwrap();
         let actual = path.materialize(&mut model, &shared, "merge", 1, Some(0)).unwrap();
@@ -1252,7 +1369,9 @@ mod tests {
             drop(model);
             assert_eq!(sample.pre_memory.len(), 1);
             assert_eq!(sample.pre_memory[0].address, if direction { 0x1000 } else { 0x1008 });
+            let timing = profile::Span::new("rollback");
             solver.rollback_transaction(tx);
+            drop(timing);
             assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
         }
     }

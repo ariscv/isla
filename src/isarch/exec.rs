@@ -2626,6 +2626,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             target,
             num_threads,
             exploration_seconds,
+            samples.resident_fast,
         );
     }
     // collector 的引用不再使用后释放，随后才能取得 result 的唯一所有权。
