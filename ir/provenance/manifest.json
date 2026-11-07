@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "model_commit": "bf861b3e687894480aec701a886a38d4e50b8a99",
+  "model_commit": "d79d8b320beec68b596e5e01e69cc353eb78f7a4",
   "model_dirty": false,
   "sail_version": "Sail 0.20.1 (feat/float-support @ f4f8e4584a70588c66c9e7a6286cc20211618f18)",
   "sail_binary_sha256": "373a37c268779bad65381b98c3dc13d56c3db9db90102d28d6f410278b23d45a",
@@ -58,9 +58,9 @@
         "rv64d.ir",
         "ir/rv64d_v128_e64.ir"
       ],
-      "sha256": "40f34f706963afcca7dfbf8504ee888bdd004cd0c437712f097b7dda64a705c9",
+      "sha256": "1220297d0e7dc202c43bb0cee1d95941c4bc3cf62be6fd141d35dbd5a3ad2059",
       "config": "rv64d.json",
-      "config_sha256": "89923ebff21718bb382df38bf246207cbb1eb5ae0cd314d078d87c0ab2b9f625",
+      "config_sha256": "a9d750021e225c710d35a3a7d20e3316c3f84348a9dcbbe6a4ff3ac86534c469",
       "model_files": {
         "CMakeLists.txt": {
           "sha256": "4484f9fa90680f7e963da70dc490cc7518440e7a6e70eb086df79a42a4631806"
@@ -87,7 +87,7 @@
           "sha256": "6080057a394646845feb19564e3b3db5c128c76ec082c4a3454b219cafdd0bf0"
         },
         "core/extensions.sail": {
-          "sha256": "d9f17ada13e2da6bc6af26bbd18a18213c048aba4414d77aa26fb1205f8ee26f"
+          "sha256": "7ca06554104a270a17fbc9d33e959d16952192df107d2b29e158ad5d7c73caa4"
         },
         "core/flen.sail": {
           "sha256": "a4064983a16764246f1e0296938fe1be8de4ae760c1b798b4795b5bf13a82618"
@@ -144,7 +144,7 @@
           "sha256": "9edf65a14c7dd711042eeb3d75e2ebcfc5c3be4a50370b53af567a3f5958f05f"
         },
         "core/sys_regs.sail": {
-          "sha256": "d8d71b7feb3703d656dc23ddc14b57cff228324f19d25770ac3e16306bff3de8"
+          "sha256": "9a487b728d6273d5df9b271959d35a7af2786a36068c575f35079191d702313d"
         },
         "core/types.sail": {
           "sha256": "f03155c262ebac3c038b0c5b30f00a3fefa9e9a1c43a314a39083aed6983ddff"
@@ -327,7 +327,7 @@
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
         },
         "extensions/V/vext_mem_insts.sail": {
-          "sha256": "7406a316457f6bb78f89ffd6c8881daded282461f39d746265013c7150fe8d6b"
+          "sha256": "6c7ae6ca4f482a2e624205ce7e2b504ce991a089e39a9305f51f0d7f97c80de5"
         },
         "extensions/V/vext_red_insts.sail": {
           "sha256": "ee8da37266bb9abf6352ae5eea9cc1cb2964bae85d2a78c28269b4adcb7df3b2"
@@ -507,7 +507,7 @@
           "sha256": "283b6f3e21cacadef056fd5b6ae6de037374ea94f7430a7415f30261fa0a92ac"
         },
         "postlude/validate_config.sail": {
-          "sha256": "6d883ec44a7d5cb6abed3f7ea02bc712afb25586a38768a78af61185bc484df6"
+          "sha256": "2bb84c963d94281783593e3fc3a892706e60df51738866f10e92a69100b0413e"
         },
         "prelude/errors.sail": {
           "sha256": "15e18a7c470778d4ec4453b37ec398cec6677c403990e84d77874b9c12d3c2b6"
@@ -543,10 +543,10 @@
           "sha256": "6bc97b0e9fe4d6b11308b77152188ac4f32aec16c09040f08ad21ac2cd45896c"
         },
         "sys/vmem.sail": {
-          "sha256": "fb7e8842da809aff9bfa50af44871cab67a02b3d436e3682fa7c80c1ca0e25ea"
+          "sha256": "1005cdad3b6e1aa5db9a4469155e06eb95d7739651ddbfe056513a65d542f7ee"
         },
         "sys/vmem_pte.sail": {
-          "sha256": "41def837993e7535c12e8ac04bba4d8f11fe713148073dad598cd1f19d294638"
+          "sha256": "ae21041fababbc8fe0857c5e3391a07d86de9eb6a82b35104318b9e0188373fe"
         },
         "sys/vmem_ptw.sail": {
           "sha256": "cc7a4d4c1ce7dcc6f3991659398057ae837ccefc50ae36659ddedd210676e463"
@@ -561,15 +561,17 @@
           "sha256": "fe275a5aa5660fffc88e395f5f8180f99a4229da8bb6f0b779ff14811bd43cbc"
         }
       },
-      "generation_seconds": 350.53174072597176
+      "generation_seconds": 481.07195419602795,
+      "provenance": "generation-rv64d_v128_e64.json",
+      "provenance_sha256": "252c446701ece3048a35293b7d02a014e8fca8b54e1f1215f95434c8a8926892"
     },
     {
       "paths": [
         "rv32d.ir"
       ],
-      "sha256": "2387c44ed3890816c8373b9fd63c797642ea3a8d09f8b5dbe3d6c2c0b278bc66",
+      "sha256": "8ecc13f8f346b53efdd9598833cca8d2c5759ca99009130d8db358fbd61dca8e",
       "config": "rv32d.json",
-      "config_sha256": "bf36f1d84bc96d1229d546eefe3cae0b7282a03cea5064ade904eb1d90a23b30",
+      "config_sha256": "83868f714e6f79929f035453812addbabbb236dda3d0e5f1f27b85b989ef602a",
       "model_files": {
         "CMakeLists.txt": {
           "sha256": "4484f9fa90680f7e963da70dc490cc7518440e7a6e70eb086df79a42a4631806"
@@ -596,7 +598,7 @@
           "sha256": "6080057a394646845feb19564e3b3db5c128c76ec082c4a3454b219cafdd0bf0"
         },
         "core/extensions.sail": {
-          "sha256": "d9f17ada13e2da6bc6af26bbd18a18213c048aba4414d77aa26fb1205f8ee26f"
+          "sha256": "7ca06554104a270a17fbc9d33e959d16952192df107d2b29e158ad5d7c73caa4"
         },
         "core/flen.sail": {
           "sha256": "a4064983a16764246f1e0296938fe1be8de4ae760c1b798b4795b5bf13a82618"
@@ -653,7 +655,7 @@
           "sha256": "9edf65a14c7dd711042eeb3d75e2ebcfc5c3be4a50370b53af567a3f5958f05f"
         },
         "core/sys_regs.sail": {
-          "sha256": "d8d71b7feb3703d656dc23ddc14b57cff228324f19d25770ac3e16306bff3de8"
+          "sha256": "9a487b728d6273d5df9b271959d35a7af2786a36068c575f35079191d702313d"
         },
         "core/types.sail": {
           "sha256": "f03155c262ebac3c038b0c5b30f00a3fefa9e9a1c43a314a39083aed6983ddff"
@@ -836,7 +838,7 @@
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
         },
         "extensions/V/vext_mem_insts.sail": {
-          "sha256": "7406a316457f6bb78f89ffd6c8881daded282461f39d746265013c7150fe8d6b"
+          "sha256": "6c7ae6ca4f482a2e624205ce7e2b504ce991a089e39a9305f51f0d7f97c80de5"
         },
         "extensions/V/vext_red_insts.sail": {
           "sha256": "ee8da37266bb9abf6352ae5eea9cc1cb2964bae85d2a78c28269b4adcb7df3b2"
@@ -1016,7 +1018,7 @@
           "sha256": "283b6f3e21cacadef056fd5b6ae6de037374ea94f7430a7415f30261fa0a92ac"
         },
         "postlude/validate_config.sail": {
-          "sha256": "6d883ec44a7d5cb6abed3f7ea02bc712afb25586a38768a78af61185bc484df6"
+          "sha256": "2bb84c963d94281783593e3fc3a892706e60df51738866f10e92a69100b0413e"
         },
         "prelude/errors.sail": {
           "sha256": "15e18a7c470778d4ec4453b37ec398cec6677c403990e84d77874b9c12d3c2b6"
@@ -1052,10 +1054,10 @@
           "sha256": "6bc97b0e9fe4d6b11308b77152188ac4f32aec16c09040f08ad21ac2cd45896c"
         },
         "sys/vmem.sail": {
-          "sha256": "fb7e8842da809aff9bfa50af44871cab67a02b3d436e3682fa7c80c1ca0e25ea"
+          "sha256": "1005cdad3b6e1aa5db9a4469155e06eb95d7739651ddbfe056513a65d542f7ee"
         },
         "sys/vmem_pte.sail": {
-          "sha256": "41def837993e7535c12e8ac04bba4d8f11fe713148073dad598cd1f19d294638"
+          "sha256": "ae21041fababbc8fe0857c5e3391a07d86de9eb6a82b35104318b9e0188373fe"
         },
         "sys/vmem_ptw.sail": {
           "sha256": "cc7a4d4c1ce7dcc6f3991659398057ae837ccefc50ae36659ddedd210676e463"
@@ -1070,15 +1072,17 @@
           "sha256": "fe275a5aa5660fffc88e395f5f8180f99a4229da8bb6f0b779ff14811bd43cbc"
         }
       },
-      "generation_seconds": 350.7895912140375
+      "generation_seconds": 481.28114763100166,
+      "provenance": "generation-rv32d.json",
+      "provenance_sha256": "14de04cde45d7597418d2e4eeba6bf7cb7895084210ce4974f9cd921ab1f5d0f"
     },
     {
       "paths": [
         "ir/rv64d_v256_e64.ir"
       ],
-      "sha256": "598ed3a004b609b7dd5821af84f1ef56fa6a9085e08947aab26fb6b0a3a486d9",
+      "sha256": "99f5efb054b5171fe060ad7815401ba3ec9ec6ca20550ac511e2f5eb1259ac86",
       "config": "rv64d_v256_e64.json",
-      "config_sha256": "e28ac77273be6a31c544db6b196914dfb55b3b9fb72295ae7ef6cfc7b99dfc47",
+      "config_sha256": "0e2945efb32e55b31cf2bf37636173de5d551b17f285d82f55e20357936be456",
       "model_files": {
         "CMakeLists.txt": {
           "sha256": "4484f9fa90680f7e963da70dc490cc7518440e7a6e70eb086df79a42a4631806"
@@ -1105,7 +1109,7 @@
           "sha256": "6080057a394646845feb19564e3b3db5c128c76ec082c4a3454b219cafdd0bf0"
         },
         "core/extensions.sail": {
-          "sha256": "d9f17ada13e2da6bc6af26bbd18a18213c048aba4414d77aa26fb1205f8ee26f"
+          "sha256": "7ca06554104a270a17fbc9d33e959d16952192df107d2b29e158ad5d7c73caa4"
         },
         "core/flen.sail": {
           "sha256": "a4064983a16764246f1e0296938fe1be8de4ae760c1b798b4795b5bf13a82618"
@@ -1162,7 +1166,7 @@
           "sha256": "9edf65a14c7dd711042eeb3d75e2ebcfc5c3be4a50370b53af567a3f5958f05f"
         },
         "core/sys_regs.sail": {
-          "sha256": "d8d71b7feb3703d656dc23ddc14b57cff228324f19d25770ac3e16306bff3de8"
+          "sha256": "9a487b728d6273d5df9b271959d35a7af2786a36068c575f35079191d702313d"
         },
         "core/types.sail": {
           "sha256": "f03155c262ebac3c038b0c5b30f00a3fefa9e9a1c43a314a39083aed6983ddff"
@@ -1345,7 +1349,7 @@
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
         },
         "extensions/V/vext_mem_insts.sail": {
-          "sha256": "7406a316457f6bb78f89ffd6c8881daded282461f39d746265013c7150fe8d6b"
+          "sha256": "6c7ae6ca4f482a2e624205ce7e2b504ce991a089e39a9305f51f0d7f97c80de5"
         },
         "extensions/V/vext_red_insts.sail": {
           "sha256": "ee8da37266bb9abf6352ae5eea9cc1cb2964bae85d2a78c28269b4adcb7df3b2"
@@ -1525,7 +1529,7 @@
           "sha256": "283b6f3e21cacadef056fd5b6ae6de037374ea94f7430a7415f30261fa0a92ac"
         },
         "postlude/validate_config.sail": {
-          "sha256": "6d883ec44a7d5cb6abed3f7ea02bc712afb25586a38768a78af61185bc484df6"
+          "sha256": "2bb84c963d94281783593e3fc3a892706e60df51738866f10e92a69100b0413e"
         },
         "prelude/errors.sail": {
           "sha256": "15e18a7c470778d4ec4453b37ec398cec6677c403990e84d77874b9c12d3c2b6"
@@ -1561,10 +1565,10 @@
           "sha256": "6bc97b0e9fe4d6b11308b77152188ac4f32aec16c09040f08ad21ac2cd45896c"
         },
         "sys/vmem.sail": {
-          "sha256": "fb7e8842da809aff9bfa50af44871cab67a02b3d436e3682fa7c80c1ca0e25ea"
+          "sha256": "1005cdad3b6e1aa5db9a4469155e06eb95d7739651ddbfe056513a65d542f7ee"
         },
         "sys/vmem_pte.sail": {
-          "sha256": "41def837993e7535c12e8ac04bba4d8f11fe713148073dad598cd1f19d294638"
+          "sha256": "ae21041fababbc8fe0857c5e3391a07d86de9eb6a82b35104318b9e0188373fe"
         },
         "sys/vmem_ptw.sail": {
           "sha256": "cc7a4d4c1ce7dcc6f3991659398057ae837ccefc50ae36659ddedd210676e463"
@@ -1579,15 +1583,17 @@
           "sha256": "fe275a5aa5660fffc88e395f5f8180f99a4229da8bb6f0b779ff14811bd43cbc"
         }
       },
-      "generation_seconds": 353.18537100800313
+      "generation_seconds": 485.0835558580002,
+      "provenance": "generation-rv64d_v256_e64.json",
+      "provenance_sha256": "b6600ef2ac7ed06e2ce7f5c2f90de58b2894c31c308603197fc043f677d038de"
     },
     {
       "paths": [
         "ir/rv64d_v512_e64.ir"
       ],
-      "sha256": "c5fed455a865bcc7ac481395a784cf20b7dc231d46185335c20e3a65be842bf1",
+      "sha256": "e8fe8b380e6bac3563d4a0da52de02b5b9e5273c7ccf296a52d6a01787db34b3",
       "config": "rv64d_v512_e64.json",
-      "config_sha256": "9b32561d0d880d01732da669769237d8fc881e5de3e4b6384073c928ef3c3ff1",
+      "config_sha256": "70805f9c63ecd66f841490ca167365bc69f25ac3a2fa8ea40193467cb3c3e860",
       "model_files": {
         "CMakeLists.txt": {
           "sha256": "4484f9fa90680f7e963da70dc490cc7518440e7a6e70eb086df79a42a4631806"
@@ -1614,7 +1620,7 @@
           "sha256": "6080057a394646845feb19564e3b3db5c128c76ec082c4a3454b219cafdd0bf0"
         },
         "core/extensions.sail": {
-          "sha256": "d9f17ada13e2da6bc6af26bbd18a18213c048aba4414d77aa26fb1205f8ee26f"
+          "sha256": "7ca06554104a270a17fbc9d33e959d16952192df107d2b29e158ad5d7c73caa4"
         },
         "core/flen.sail": {
           "sha256": "a4064983a16764246f1e0296938fe1be8de4ae760c1b798b4795b5bf13a82618"
@@ -1671,7 +1677,7 @@
           "sha256": "9edf65a14c7dd711042eeb3d75e2ebcfc5c3be4a50370b53af567a3f5958f05f"
         },
         "core/sys_regs.sail": {
-          "sha256": "d8d71b7feb3703d656dc23ddc14b57cff228324f19d25770ac3e16306bff3de8"
+          "sha256": "9a487b728d6273d5df9b271959d35a7af2786a36068c575f35079191d702313d"
         },
         "core/types.sail": {
           "sha256": "f03155c262ebac3c038b0c5b30f00a3fefa9e9a1c43a314a39083aed6983ddff"
@@ -1854,7 +1860,7 @@
           "sha256": "29ba360f713a3248a50fd466b9e6a3eeb852ffc385022da777f2026a7c10dd87"
         },
         "extensions/V/vext_mem_insts.sail": {
-          "sha256": "7406a316457f6bb78f89ffd6c8881daded282461f39d746265013c7150fe8d6b"
+          "sha256": "6c7ae6ca4f482a2e624205ce7e2b504ce991a089e39a9305f51f0d7f97c80de5"
         },
         "extensions/V/vext_red_insts.sail": {
           "sha256": "ee8da37266bb9abf6352ae5eea9cc1cb2964bae85d2a78c28269b4adcb7df3b2"
@@ -2034,7 +2040,7 @@
           "sha256": "283b6f3e21cacadef056fd5b6ae6de037374ea94f7430a7415f30261fa0a92ac"
         },
         "postlude/validate_config.sail": {
-          "sha256": "6d883ec44a7d5cb6abed3f7ea02bc712afb25586a38768a78af61185bc484df6"
+          "sha256": "2bb84c963d94281783593e3fc3a892706e60df51738866f10e92a69100b0413e"
         },
         "prelude/errors.sail": {
           "sha256": "15e18a7c470778d4ec4453b37ec398cec6677c403990e84d77874b9c12d3c2b6"
@@ -2070,10 +2076,10 @@
           "sha256": "6bc97b0e9fe4d6b11308b77152188ac4f32aec16c09040f08ad21ac2cd45896c"
         },
         "sys/vmem.sail": {
-          "sha256": "fb7e8842da809aff9bfa50af44871cab67a02b3d436e3682fa7c80c1ca0e25ea"
+          "sha256": "1005cdad3b6e1aa5db9a4469155e06eb95d7739651ddbfe056513a65d542f7ee"
         },
         "sys/vmem_pte.sail": {
-          "sha256": "41def837993e7535c12e8ac04bba4d8f11fe713148073dad598cd1f19d294638"
+          "sha256": "ae21041fababbc8fe0857c5e3391a07d86de9eb6a82b35104318b9e0188373fe"
         },
         "sys/vmem_ptw.sail": {
           "sha256": "cc7a4d4c1ce7dcc6f3991659398057ae837ccefc50ae36659ddedd210676e463"
@@ -2088,17 +2094,70 @@
           "sha256": "fe275a5aa5660fffc88e395f5f8180f99a4229da8bb6f0b779ff14811bd43cbc"
         }
       },
-      "generation_seconds": 353.1853662079666
+      "generation_seconds": 486.00335244403686,
+      "provenance": "generation-rv64d_v512_e64.json",
+      "provenance_sha256": "13bab8c8304f7e301136836a2453eb9915ca0ce24dc63190669787110da017ea"
     }
   ],
   "sail_reported_commit": "f4f8e4584a70588c66c9e7a6286cc20211618f18",
   "sail_launcher_sha256": "2e89d5f5467195ea0a2fb4b072133a0ee73933db3e8808b8a6518c7ef59ec807",
   "model_source_tree": "sail-riscv",
   "generation_audit": {
-    "path": "agents/float_memory_merge_20261103/validation/generation/merge-bf861b3e-20261104/independent-input-audit.json",
-    "sha256": "457532b696b585307b5ca4313951a2e2e66a670de33252ef1159cd70b499263b",
+    "path": "isla/ir/provenance/generation-inputs-20261107.json",
+    "sha256": "0c610b15afa65ff85817fc2f11c2d267e4ae75d4f28feb464ae191d560d7148f",
     "model_file_count": 166,
     "tool_file_count": 149
   },
-  "change": "float 向 memory 合流：从合并模型生成并安装四配置 IR"
+  "change": "枚举分支含区域合并/枚举并已合入4d085b14；模型增加Svnapot、Svpbmt、非叶PTE U/A/D检查，含70b4d10全寄存器访存早退修复",
+  "isla_commit": "d7c259938a35aa9b712cb44b350a6f122bc020ef",
+  "isla_commit_role": "生成插件/执行器源码基准；本轮IR及四配置补项尚未提交",
+  "isla_generation_config_dirty": true,
+  "isla_ir_installation_pending_commit": true,
+  "isla_source_branch": "feat/postprocess-enumeration",
+  "model_source_branch": "feat/sail-riscv-memory-by-model-20261022",
+  "generated": "2026-11-07",
+  "publication_status": "待发布",
+  "history": [
+    {
+      "model_commit": "bf861b3e687894480aec701a886a38d4e50b8a99",
+      "manifest_sha256": "8e06ec617ca8378d965f8d9b2f0f882e7262520e9ac5cb488604f7470949268b",
+      "isla_commit": "4d085b14aa0f987436b86d72f41fab1df9e9a132",
+      "artifacts": [
+        {
+          "paths": [
+            "rv64d.ir",
+            "ir/rv64d_v128_e64.ir"
+          ],
+          "sha256": "40f34f706963afcca7dfbf8504ee888bdd004cd0c437712f097b7dda64a705c9",
+          "config": "rv64d.json",
+          "config_sha256": "89923ebff21718bb382df38bf246207cbb1eb5ae0cd314d078d87c0ab2b9f625"
+        },
+        {
+          "paths": [
+            "rv32d.ir"
+          ],
+          "sha256": "2387c44ed3890816c8373b9fd63c797642ea3a8d09f8b5dbe3d6c2c0b278bc66",
+          "config": "rv32d.json",
+          "config_sha256": "bf36f1d84bc96d1229d546eefe3cae0b7282a03cea5064ade904eb1d90a23b30"
+        },
+        {
+          "paths": [
+            "ir/rv64d_v256_e64.ir"
+          ],
+          "sha256": "598ed3a004b609b7dd5821af84f1ef56fa6a9085e08947aab26fb6b0a3a486d9",
+          "config": "rv64d_v256_e64.json",
+          "config_sha256": "e28ac77273be6a31c544db6b196914dfb55b3b9fb72295ae7ef6cfc7b99dfc47"
+        },
+        {
+          "paths": [
+            "ir/rv64d_v512_e64.ir"
+          ],
+          "sha256": "c5fed455a865bcc7ac481395a784cf20b7dc231d46185335c20e3a65be842bf1",
+          "config": "rv64d_v512_e64.json",
+          "config_sha256": "9b32561d0d880d01732da669769237d8fc881e5de3e4b6384073c928ef3c3ff1"
+        }
+      ],
+      "note": "旧合流来源与PASS只适用4d085b14/bf861b3e；历史报告保留原结论"
+    }
+  ]
 }

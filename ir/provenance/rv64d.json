@@ -447,6 +447,12 @@
     "Svinval": {
       "supported": true
     },
+    "Svpbmt": {
+      "supported": true
+    },
+    "Svnapot": {
+      "supported": true
+    },
     "Svrsw60t59b": {
       "supported": true
     },
