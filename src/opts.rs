@@ -68,7 +68,10 @@ pub fn print_usage(opts: &Options, free: &str, code: i32) -> ! {
         None => "[tool]".to_string(),
     };
     let brief = format!("Usage: {} [options]{}{}", tool, if free.is_empty() { "" } else { " " }, free);
-    eprint!("{}", opts.usage(&brief));
+    // isarch 的 M0 原型参数不进入共享解析器输出的公共帮助。
+    for line in opts.usage(&brief).lines().filter(|line| !line.contains("--judge-resident")) {
+        eprintln!("{line}");
+    }
     exit(code)
 }
 

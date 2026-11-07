@@ -417,6 +417,7 @@ dependencies = [
  "isla-elf",
  "isla-lib",
  "isla-mml",
+ "libc",
  "pretty",
  "rand",
  "serde",

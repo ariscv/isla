@@ -468,3 +468,11 @@ timeout --signal=TERM --kill-after=5s 590s \
 
 - `samples.rs` 的 `bind()` 只绑定前态寄存器、活动读取与 `pre_memory`，并检查可满足性；输入期望由原 `check()` 独立核对。judge 在事务中使用同一模型具体化输出，回滚后再以完整生成样本调用 `check()`，复用 J1 的后态取反检查。
 - 规范守卫向量按 `guard_order` 的父链前序输出；非活动守卫恒记 false。唯一性反例只包含当前活动守卫的取反析取；比较全部裸守卫会被未执行分支中的自由读值误导。DFS 与 judge 共用归一化函数，相关红绿测试覆盖了此边界。详情见 [judge 说明](path_merge_call_support/judge-mode.md)。
+
+
+## M0 完成路径检查点与常驻判定（2026-11-08）
+
+- `smt.rs::checkpoint()` 保存轨迹和 `next_var`；`Solver::from_checkpoint()` 在新 Context 重放轨迹后恢复 `next_var`，可继续创建绑定所需的符号，不需要改 SMT 恢复机制。它没有保存 Z3 的学习状态，不能从耗时相同推导语义等价。
+- `src/isarch/exec.rs` 的完成路径样本收集点位于有限域代表值钉选、编码筛选之前，适合保存检查点及 SamplePath；ExecuteAs 中间返回继续走原续执行，不作为终态保存。
+- `SampleChecker::judge_only()` 直接复用 `SamplePath::judge()`；后者已经包含前态绑定、规范守卫和后态唯一性检查，无需先用输入期望跑 `check()`。J1 原入口保持独立。
+- Sv39 STORE 的常驻原型在 32/1 线程下，380 个 corpus entry 与 1000 个变异体的完整 judge JSON 对照差异为 0，三个负对照均零接纳；这是本批范围的恢复等价证据。完整对照和测量详见 [M0 记录](path_merge_call_support/fuzz-m0.md)。

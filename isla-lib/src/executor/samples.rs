@@ -141,6 +141,7 @@ pub struct MemoryCell {
 }
 
 /// 每条访问拆成小端字节；前后内存与 isarch 既有重放规则一致。
+#[derive(Clone)]
 pub struct SamplePath<B: BV> {
     pub pre: BTreeMap<String, Val<B>>,
     pub post: BTreeMap<String, Val<B>>,
@@ -674,14 +675,37 @@ impl SampleChecker {
         Ok(self)
     }
     pub fn load(path: &std::path::Path, limit: Option<usize>) -> Result<Self, String> {
+        Self::load_mode(path, limit, false)
+    }
+    /// 常驻原型允许输入省略期望后态；J1 的严格加载保持不变。
+    pub fn load_judge_inputs(path: &std::path::Path) -> Result<Self, String> {
+        Self::load_mode(path, None, true)
+    }
+    fn load_mode(path: &std::path::Path, limit: Option<usize>, judge_only: bool) -> Result<Self, String> {
         let file = std::fs::File::open(path).map_err(|error| format!("读取样本失败：{error}"))?;
         let samples = std::io::BufReader::new(file)
             .lines()
             .take(limit.unwrap_or(usize::MAX))
             .enumerate()
             .map(|(line, text)| {
-                let sample: Sample = serde_json::from_str(&text.map_err(|error| error.to_string())?)
-                    .map_err(|error| format!("样本第{}行：{error}", line + 1))?;
+                let text = text.map_err(|error| error.to_string())?;
+                let sample: Sample = if judge_only {
+                    let mut input: Value =
+                        serde_json::from_str(&text).map_err(|error| format!("样本第{}行：{error}", line + 1))?;
+                    let fields = input.as_object_mut().ok_or("输入必须是 JSON 对象")?;
+                    for (name, value) in [
+                        ("post_registers", json!({})),
+                        ("post_memory", json!([])),
+                        ("result", Value::Null),
+                        ("ret_val", json!("")),
+                    ] {
+                        fields.insert(name.into(), value);
+                    }
+                    serde_json::from_value(input)
+                } else {
+                    serde_json::from_str(&text)
+                }
+                .map_err(|error| format!("样本第{}行：{error}", line + 1))?;
                 if sample.schema_version != 1 {
                     return Err("不支持的样本版本".into());
                 }
@@ -696,6 +720,33 @@ impl SampleChecker {
         }
         Ok(Self::new(samples))
     }
+    /// 只按前态判定一个输入，不读取输入期望；全体路径共用计数以拒绝重复接纳。
+    pub fn judge_only<B: BV>(
+        &self,
+        index: usize,
+        path: &SamplePath<B>,
+        solver: &mut Solver<B>,
+        shared: &SharedState<B>,
+        signature: u64,
+        records: &[super::RegionMergeRecord<B>],
+        consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
+    ) -> Result<Option<JudgedSample>, ExecError> {
+        let judged = path.judge(solver, shared, &self.samples[index], records, signature, consume)?;
+        if let Some(judged) = &judged {
+            let mut counts = self.counts.lock().unwrap();
+            if counts[index].0 != 0 {
+                return Err(ExecError::Type(format!("多条路径接纳输入：{}", judged.sample_id), SourceLoc::unknown()));
+            }
+            counts[index].0 += 1;
+            if let Some(output) = &self.judge_output {
+                let mut output = output.lock().unwrap();
+                serde_json::to_writer(&mut *output, judged).expect("judge 输出序列化失败");
+                output.write_all(b"\n").expect("写入 judge 输出失败");
+            }
+        }
+        Ok(judged)
+    }
+
     pub fn check_path<B: BV>(
         &self,
         path: &SamplePath<B>,
@@ -919,6 +970,46 @@ mod tests {
         let error = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).err().unwrap();
         assert!(error.to_string().contains("后态不唯一"));
         assert_eq!(solver.transaction_depth(), 0);
+    }
+
+    #[test]
+    fn samples_judge_only_classes_rejection_and_overlap() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let path = SamplePath {
+            pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
+            post: BTreeMap::new(),
+            result: Val::Symbolic(input),
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        assert!(sat(&mut solver).unwrap());
+        let mut sample = path.materialize(&mut Model::new(&solver), &shared, "merge", 1, None).unwrap();
+        sample.pre_registers.insert("x".into(), json!({"bool":false}));
+        sample.result = Value::Null;
+        let mut second = sample.clone();
+        second.sample_id = 1;
+        second.pre_registers.insert("x".into(), json!({"bool":true}));
+        let checker = SampleChecker::new(vec![sample, second]);
+        let records = vec![judge_record(12, input)];
+        let checkpoint = crate::smt::checkpoint(&mut solver);
+        let restored_context = Context::new(Config::new());
+        let mut restored = Solver::from_checkpoint(&restored_context, checkpoint);
+        for (index, vector) in ["0", "1"].iter().enumerate() {
+            let judged =
+                checker.judge_only(index, &path, &mut restored, &shared, 9, &records, |_, _| Ok(())).unwrap().unwrap();
+            assert_eq!(&judged.guard_vector, vector);
+            assert_eq!(judged.sample.result, json!({"bool":index == 1}));
+        }
+        let error = checker.judge_only(0, &path, &mut restored, &shared, 10, &records, |_, _| Ok(())).err().unwrap();
+        assert!(error.to_string().contains("多条路径接纳"));
+        let rejected = SampleChecker::new(vec![checker.samples[0].clone()]);
+        restored.assert(Exp::Var(input));
+        assert!(rejected.judge_only(0, &path, &mut restored, &shared, 9, &records, |_, _| Ok(())).unwrap().is_none());
+        assert_eq!(rejected.report()["samples"][0]["accepted_paths"], 0);
     }
 
     #[test]

@@ -107,7 +107,10 @@ fn print_usage(opts: &getopts::Options) -> ! {
                    --all                                Execute all clauses\n\
                  \n\
                  Options:\n";
-    eprint!("{}", opts.usage(brief));
+    // M0 原型参数参与解析，但不进入公共帮助。
+    for line in opts.usage(brief).lines().filter(|line| !line.contains("--judge-resident")) {
+        eprintln!("{line}");
+    }
     exit(1)
 }
 
@@ -430,6 +433,8 @@ fn isla_main() -> i32 {
     opts.optopt("", "check-samples-limit", "只检查前 N 个样本（正整数）", "<N>");
     opts.optopt("", "check-samples-report", "样本检查报告 JSON 文件；同时输出 stderr", "<path>");
     opts.optopt("", "check-samples-judge", "输出接纳路径、规范守卫向量和唯一后态 JSON Lines", "<path>");
+    opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
+    opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
@@ -699,6 +704,8 @@ fn isla_main() -> i32 {
                 },
                 report: matches.opt_str("check-samples-report").map(std::path::PathBuf::from),
                 judge: matches.opt_str("check-samples-judge").map(std::path::PathBuf::from),
+                resident: matches.opt_str("judge-resident").map(std::path::PathBuf::from),
+                resident_out: matches.opt_str("judge-resident-out").map(std::path::PathBuf::from),
             };
             if let Err(error) = sample_options.validate() {
                 eprintln!("{error}");

@@ -1774,6 +1774,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     // ExecuteAs 是同一机器指令的中间返回。new_call 保留该路径的寄存器、内存、
     // 路径身份、累计执行时间及分支预算；checkpoint 保留前段约束。
+    let resident_paths = Mutex::new(Vec::new());
     let continuations = Arc::new(Mutex::new(Vec::new()));
     let queued_continuations = continuations.clone();
     let target = &*target;
@@ -1864,6 +1865,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 ret_val,
                                 memory_events_chronological(solver.trace()).into_iter().cloned().collect(),
                             );
+                            if samples.resident.is_some() {
+                                resident_paths.lock().unwrap().push(super::resident::ResidentPath {
+                                    checkpoint: checkpoint(&mut solver),
+                                    path: sample_path.clone(),
+                                    records: frame.region_merge_records().to_vec(),
+                                    signature: frame.path_signature(),
+                                });
+                            }
                             if let Some(checker) = &samples.checker {
                                 checker
                                     .check_path_with_judge(
@@ -2595,6 +2604,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     if let Some(memory) = initial_memory {
         initial_frame.set_memory(memory);
     }
+    let exploration_started = std::time::Instant::now();
     let mut tasks = vec![initial_frame.task_with_checkpoint(TaskId::fresh(), &task_state, cp)];
     loop {
         isla_lib::executor::start_multi(num_threads, timeout, tasks, shared_state, result.clone(), collector);
@@ -2606,6 +2616,17 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .into_iter()
             .map(|(task_id, frame, checkpoint)| frame.task_with_checkpoint(task_id, &task_state, checkpoint))
             .collect();
+    }
+    let exploration_seconds = exploration_started.elapsed().as_secs_f64();
+    if let Some(checker) = &samples.resident {
+        super::resident::run(
+            resident_paths.into_inner().unwrap(),
+            checker,
+            shared_state,
+            target,
+            num_threads,
+            exploration_seconds,
+        );
     }
     // collector 的引用不再使用后释放，随后才能取得 result 的唯一所有权。
 

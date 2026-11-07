@@ -90,6 +90,7 @@ name = "smt_thread_interrupt"
 path = "test/smt/thread_interrupt.rs"
 
 [dependencies]
+libc = "0.2.5"
 crossbeam = "0.8.1"
 getopts = "0.2.21"
 toml = "0.5.5"

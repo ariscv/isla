@@ -1,5 +1,7 @@
 # 议题入口
 
+- [fuzz M0 常驻 judge](path_merge_call_support/fuzz-m0.md)：2026-11-08 完成；32/1 线程下 1380 正例零差异、三个负对照零接纳；恢复语义在本批一致，构建与 1109 项测试通过，整批未显著提速。
+
 - [枚举分量诊断与紧凑样本设计](path_merge_call_support/status.md)：2026-11-06 三场景完整 count；Sv39 候选守卫域可乘，Sv48 各有 6 条路径被原求解器反例否定；仅测量和设计。
 
 - [可选执行统计](execution_stats/status.md)：2026-11-05 合并尝试／拒绝原因和分叉位置直方图已实现，cargo check 与 9 个定向测试通过，未跑 Sv39。

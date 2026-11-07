@@ -1364,3 +1364,5 @@ mod tests {
         assert!(matches!(result, Err(ExecError::AssertionFailure(_, _))), "失败的编码断言必须传播: {result:?}");
     }
 }
+
+mod resident;

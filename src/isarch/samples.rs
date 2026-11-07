@@ -16,10 +16,20 @@ pub struct SampleOptions {
     pub limit: Option<usize>,
     pub report: Option<PathBuf>,
     pub judge: Option<PathBuf>,
+    pub resident: Option<PathBuf>,
+    pub resident_out: Option<PathBuf>,
 }
 
 impl SampleOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.resident.is_some() != self.resident_out.is_some() {
+            return Err("--judge-resident 与 --judge-resident-out 必须同时指定".into());
+        }
+        if let Some(input) = &self.resident {
+            if self.resident_out.as_ref() == Some(input) || self.check.is_some() || self.judge.is_some() {
+                return Err("常驻 judge 必须使用独立输入输出，且不得与 J1 同时运行".into());
+            }
+        }
         if self.check.is_none() && (self.limit.is_some() || self.report.is_some()) {
             return Err("--check-samples-limit/--check-samples-report 需要 --check-samples".into());
         }
@@ -46,6 +56,7 @@ impl SampleOptions {
 pub struct SampleSession {
     pub writer: Option<SampleOutputs>,
     pub checker: Option<SampleChecker>,
+    pub resident: Option<SampleChecker>,
     pub retain_solutions: bool,
 }
 impl SampleSession {
@@ -70,6 +81,18 @@ impl SampleSession {
         if options.judge.as_ref().is_some_and(|judge| configured.iter().any(|output| &output.path == judge)) {
             return Err("judge 输出不得覆盖样本输出".into());
         }
+        for path in [&options.resident, &options.resident_out].into_iter().flatten() {
+            if configured.iter().any(|output| &output.path == path) {
+                return Err("常驻 judge 输入输出不得与样本输出重叠".into());
+            }
+        }
+        let resident = options
+            .resident
+            .as_ref()
+            .map(|path| {
+                SampleChecker::load_judge_inputs(path)?.with_judge_output(options.resident_out.as_ref().unwrap())
+            })
+            .transpose()?;
         let checker = options
             .check
             .as_ref()
@@ -88,10 +111,10 @@ impl SampleSession {
             Some(limit) => SampleOutputs::open_budget(&configured, limit),
             None => SampleOutputs::open(&configured),
         });
-        Ok(Self { writer, checker, retain_solutions: outputs.is_empty() })
+        Ok(Self { writer, checker, resident, retain_solutions: outputs.is_empty() })
     }
     pub fn enabled(&self) -> bool {
-        self.writer.is_some() || self.checker.is_some()
+        self.writer.is_some() || self.checker.is_some() || self.resident.is_some()
     }
     pub fn finish(&self, options: &SampleOptions, completed: bool) {
         if let Some(writer) = &self.writer {
@@ -318,6 +341,7 @@ mod tests {
             limit: None,
             report: Some("same.bin".into()),
             judge: None,
+            ..Default::default()
         };
         let error = SampleSession::new(&options, Some(&outputs)).err().unwrap();
         assert!(error.contains("检查报告不得覆盖样本输出"));
@@ -359,14 +383,21 @@ mod tests {
     fn samples_options_validate_dependencies_and_limits() {
         assert!(SampleOptions::default().validate().is_ok());
         assert!(SampleOptions { limit: Some(10), ..Default::default() }.validate().is_err());
-        assert!(SampleOptions { check: Some("samples.jsonl".into()), limit: Some(0), report: None, judge: None }
-            .validate()
-            .is_err());
+        assert!(SampleOptions {
+            check: Some("samples.jsonl".into()),
+            limit: Some(0),
+            report: None,
+            judge: None,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
         assert!(SampleOptions {
             check: Some("samples.jsonl".into()),
             limit: Some(10),
             report: Some("samples.jsonl".into()),
-            judge: None
+            judge: None,
+            ..Default::default()
         }
         .validate()
         .is_err());
@@ -374,7 +405,8 @@ mod tests {
             check: Some("samples.jsonl".into()),
             limit: Some(10),
             report: Some("report.json".into()),
-            judge: None
+            judge: None,
+            ..Default::default()
         }
         .validate()
         .is_ok());
