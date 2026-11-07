@@ -1,0 +1,5304 @@
+{
+  "scope": "F16 新配置；按路径累加的被测位组合，隐藏变量存在量化",
+  "inputs": {
+    "config-xs.toml": "40d728925731cd7a8d7308b4f1f0b0f61940a79881ad4955780c48a366704129",
+    "rv64d.ir": "c0e4661a73888c56438a6f76059370667d141a026502d0511291586067bd31c0",
+    "isarch": "610df5395219d4202a0dc347d05104737f521562d85dd47a70fbe25d8d31a3db"
+  },
+  "scenarios": {
+    "sv39-load": {
+      "exact": "332144680109393789376138014863778140",
+      "lower_bound": "332144680109393789376138014863778140",
+      "upper_bound": "332144680109393789376138014863778140",
+      "paths": 20,
+      "guard_classes": 2404,
+      "f16_mean": 2.843225811631223e+35,
+      "f16_interval": [
+        2.183304338941613e+35,
+        3.503147284320833e+35
+      ],
+      "exact_relative_to_f16_mean": 1.1681966263482775,
+      "inside_f16_approximate_interval": true,
+      "memory_equivalence_proved_paths": 20,
+      "f16_small_exact_paths": 4,
+      "f16_small_exact_classes": 54,
+      "compared_version_paths": 20,
+      "capture": {
+        "exit": 0,
+        "seconds": 11.848306147992844,
+        "dumps": 20
+      },
+      "count_path_seconds_sum": 10.446429546020227,
+      "validation_path_seconds_sum": 9.546195582021028,
+      "path_results": [
+        {
+          "signature": "10451216379200822465",
+          "exact": "256",
+          "projected_bits": 8,
+          "guards": 8,
+          "guard_classes": 10,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.13627893399097957,
+          "components": [
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 48,
+              "count": "64"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "2dc8f920901cfbd5592e949b488b6a4c98d40252856fba87ac4ede0ad0e3292c"
+        },
+        {
+          "signature": "10637179611784840037",
+          "exact": "8",
+          "projected_bits": 10,
+          "guards": 19,
+          "guard_classes": 4,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.16667231998872012,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 580,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "4c0aa705d3be14cedad5c8ff055a88e54175464d57ee205e65026c8dbfad359c"
+        },
+        {
+          "signature": "12041149045941709759",
+          "exact": "64",
+          "projected_bits": 12,
+          "guards": 22,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.17080859901034273,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 542,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "c12fd1eed010453fef037681037e59edf6574c89b8a4c24bfd4e9650e181fc0f"
+        },
+        {
+          "signature": "12271438732188395442",
+          "exact": "332104145006706936430968704400883712",
+          "projected_bits": 164,
+          "guards": 52,
+          "guard_classes": 768,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.9621244580193888,
+          "components": [
+            {
+              "bits": 154,
+              "hidden": 50,
+              "nodes": 11465,
+              "count": "41513018125838367053871088050110464"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "1a27fc0fcfa9a75147edb238e0e2aef7afe0f7c57a7b488849668fcccff8adbf"
+        },
+        {
+          "signature": "12363878372900898510",
+          "exact": "37765094553376809549824",
+          "projected_bits": 101,
+          "guards": 38,
+          "guard_classes": 256,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5317527339793742,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1655,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 539,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 35,
+              "hidden": 0,
+              "nodes": 742,
+              "count": "34355545088"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 15,
+          "smt_sha256": "1d4043c1b9901c2d00fde65732264d0f7a34201be40856c5d778986b19e996ca"
+        },
+        {
+          "signature": "13518721048086275240",
+          "exact": "2198486122496",
+          "projected_bits": 61,
+          "guards": 20,
+          "guard_classes": 20,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.37429510400397703,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1720,
+              "count": "8386559"
+            },
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 50,
+              "count": "64"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 12,
+          "smt_sha256": "0f8649ade16422579ce6f4905191e697841197f33e2482634acdd0bd8b181026"
+        },
+        {
+          "signature": "14273580478652762596",
+          "exact": "40535101380419453033473122500608",
+          "projected_bits": 164,
+          "guards": 52,
+          "guard_classes": 384,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.3031364670023322,
+          "components": [
+            {
+              "bits": 154,
+              "hidden": 114,
+              "nodes": 31297,
+              "count": "5066887672552431629184140312576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "9a9df1224c650e4e9a26dd44bcb57989601b7d882d1c265233d833433bef92cc"
+        },
+        {
+          "signature": "15220128886027568558",
+          "exact": "137405382656",
+          "projected_bits": 64,
+          "guards": 32,
+          "guard_classes": 16,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.41648509897640906,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1641,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 577,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 14,
+          "smt_sha256": "7a76456b5fb19d8b997368ca6f2d967c66641d66ebc9937efad3cf0a2de10e6e"
+        },
+        {
+          "signature": "15337294027415708823",
+          "exact": "2360029896755980140544",
+          "projected_bits": 118,
+          "guards": 46,
+          "guard_classes": 48,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8277205400227103,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 96,
+              "nodes": 9307,
+              "count": "295003737094497517568"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "36b891344abda0cc4355f943e0defbca96ded0701ec379e04a19bb4e4bc4421e"
+        },
+        {
+          "signature": "1560237527141136542",
+          "exact": "4294443136",
+          "projected_bits": 38,
+          "guards": 24,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.2647676939959638,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 542,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 25,
+              "hidden": 0,
+              "nodes": 632,
+              "count": "33550337"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 5,
+          "smt_sha256": "6f1a79f048e36db5b0bf97367b3cf823395732cccec983a4b50fa3e70e802c9e"
+        },
+        {
+          "signature": "15750014256193343950",
+          "exact": "343513456640",
+          "projected_bits": 63,
+          "guards": 23,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.4031998279970139,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 2097,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 13,
+          "smt_sha256": "e6f8df3cbfd03a7e89ea2f3fb93c163755e122917f91bbb442eecf10ba3f5cb8"
+        },
+        {
+          "signature": "16970506114320330013",
+          "exact": "1099243061248",
+          "projected_bits": 66,
+          "guards": 35,
+          "guard_classes": 128,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.42017697999835946,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1678,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 540,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 15,
+          "smt_sha256": "ab4445214be752a098d4ec5207b9657be366b8d4c2e52f225108f636bbf4a261"
+        },
+        {
+          "signature": "2752876776965356570",
+          "exact": "20",
+          "projected_bits": 9,
+          "guards": 10,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.13689350499771535,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "086d129bb1ad703b7a6ae67117416b9c52867146df171f4dc925bd15fe9c85b1"
+        },
+        {
+          "signature": "3021853842726066451",
+          "exact": "524160",
+          "projected_bits": 38,
+          "guards": 24,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.3571472460171208,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 540,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 25,
+              "hidden": 0,
+              "nodes": 585,
+              "count": "4095"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 5,
+          "smt_sha256": "20d025fc3a2ec90fab696eb5e6e4a8f540f444034e11804a4dae69d8987fdd90"
+        },
+        {
+          "signature": "499923463869755939",
+          "exact": "1208483025708057905594368",
+          "projected_bits": 107,
+          "guards": 26,
+          "guard_classes": 16,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5279584470263217,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1495,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 44,
+              "hidden": 0,
+              "nodes": 767,
+              "count": "17590039085056"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 13,
+          "smt_sha256": "d03b4fb3be944ec9eda396761c1eef0c9210c0b8bc009c699251c23f9a104e5c"
+        },
+        {
+          "signature": "5612635667498903607",
+          "exact": "4609432844626952192",
+          "projected_bits": 101,
+          "guards": 38,
+          "guard_classes": 128,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7633997520024423,
+          "components": [
+            {
+              "bits": 89,
+              "hidden": 74,
+              "nodes": 8173,
+              "count": "72022388197296128"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 538,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "0e92b4612edc7efc5b23533bc4542e50b834ff3853d9226ea98674c322b5711e"
+        },
+        {
+          "signature": "6973640434494283890",
+          "exact": "37760478348095682248704",
+          "projected_bits": 115,
+          "guards": 34,
+          "guard_classes": 80,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7980487429886125,
+          "components": [
+            {
+              "bits": 106,
+              "hidden": 66,
+              "nodes": 8618,
+              "count": "9440119587023920562176"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "930d62e2224feee3fefbdcfc22170c37836fd62e4253dd72bd241dde124a6662"
+        },
+        {
+          "signature": "7003519055933742230",
+          "exact": "1180014948515395452928",
+          "projected_bits": 117,
+          "guards": 37,
+          "guard_classes": 24,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8050274520064704,
+          "components": [
+            {
+              "bits": 107,
+              "hidden": 65,
+              "nodes": 9841,
+              "count": "147501868564424431616"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "b0b3381411149d883a1fa4b5f908fad8e7f3502585d434bac9c8014a414cd224"
+        },
+        {
+          "signature": "8917986596743865391",
+          "exact": "18880239174047841124352",
+          "projected_bits": 120,
+          "guards": 49,
+          "guard_classes": 384,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8312513559940271,
+          "components": [
+            {
+              "bits": 110,
+              "hidden": 94,
+              "nodes": 9150,
+              "count": "2360029896755980140544"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "5d7027fa369057cb27f1654829958a62c2bda8a3af110121881ae6471af5b01d"
+        },
+        {
+          "signature": "933929842286410705",
+          "exact": "70360156340224",
+          "projected_bits": 53,
+          "guards": 12,
+          "guard_classes": 2,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.24928428800194524,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 25,
+              "hidden": 0,
+              "nodes": 440,
+              "count": "33550337"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 21,
+          "smt_sha256": "dfca9db9d61e27c9bca4c94bdaaea9eb0cd5dca5e76bc6f76d53cefc147db89f"
+        }
+      ]
+    },
+    "sv39-store": {
+      "exact": "83036170028299945185146712422637916",
+      "lower_bound": "83036170028299945185146712422637916",
+      "upper_bound": "83036170028299945185146712422637916",
+      "paths": 20,
+      "guard_classes": 1204,
+      "f16_mean": 7.327009575583576e+34,
+      "f16_interval": [
+        5.845041126050227e+34,
+        8.808978025116926e+34
+      ],
+      "exact_relative_to_f16_mean": 1.1332886789858787,
+      "inside_f16_approximate_interval": true,
+      "memory_equivalence_proved_paths": 20,
+      "f16_small_exact_paths": 4,
+      "f16_small_exact_classes": 54,
+      "compared_version_paths": 20,
+      "capture": {
+        "exit": 0,
+        "seconds": 11.315224377001869,
+        "dumps": 20
+      },
+      "count_path_seconds_sum": 10.05723804293666,
+      "validation_path_seconds_sum": 7.742639625939773,
+      "path_results": [
+        {
+          "signature": "10451216379200822465",
+          "exact": "256",
+          "projected_bits": 8,
+          "guards": 8,
+          "guard_classes": 10,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.13669568701880053,
+          "components": [
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 48,
+              "count": "64"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "8a695c8bcaf913c0c9095c1dbab167ed25020308cb7f87b37796ed00f1fd9538"
+        },
+        {
+          "signature": "10637179611784840037",
+          "exact": "24",
+          "projected_bits": 10,
+          "guards": 19,
+          "guard_classes": 12,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.16311042101006024,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 585,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "838bbfbbe4ae7015a3bc2628e447ef3e3386c72df50d760ab3d049660f28d04a"
+        },
+        {
+          "signature": "12041149045941709759",
+          "exact": "48",
+          "projected_bits": 12,
+          "guards": 24,
+          "guard_classes": 24,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.1718975059920922,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 548,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 7,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "065130e29fb06ecd831cd6ced1cc123da5b987b21380380eafd3fb322cff62e2"
+        },
+        {
+          "signature": "12271438732188395442",
+          "exact": "83026036251676734107742176100220928",
+          "projected_bits": 164,
+          "guards": 54,
+          "guard_classes": 192,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.9489137279742863,
+          "components": [
+            {
+              "bits": 154,
+              "hidden": 50,
+              "nodes": 11734,
+              "count": "10378254531459591763467772012527616"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "5dc5f0295d6ed52582048306a810509da7201ffea354363a231089963dfe165b"
+        },
+        {
+          "signature": "12363878372900898510",
+          "exact": "9441273638344202387456",
+          "projected_bits": 101,
+          "guards": 40,
+          "guard_classes": 64,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5259217790153343,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1889,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 546,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 35,
+              "hidden": 0,
+              "nodes": 671,
+              "count": "34355545088"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 14,
+          "smt_sha256": "8f036b804d8c57f44113d0fa39f8e37bede4b4dc0053fcd288345c96c7f72c4a"
+        },
+        {
+          "signature": "13518721048086275240",
+          "exact": "2198486122496",
+          "projected_bits": 61,
+          "guards": 20,
+          "guard_classes": 20,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.37300290999701247,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 2018,
+              "count": "8386559"
+            },
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 50,
+              "count": "64"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 12,
+          "smt_sha256": "edc5b7c697e2cc878de30aaf494094e9f3ee8a77a1514fe3732fa56bb1807b10"
+        },
+        {
+          "signature": "14273580478652762596",
+          "exact": "10133775345104863258368280625152",
+          "projected_bits": 164,
+          "guards": 54,
+          "guard_classes": 96,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 1.1306999519874807,
+          "components": [
+            {
+              "bits": 154,
+              "hidden": 50,
+              "nodes": 16077,
+              "count": "1266721918138107907296035078144"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "02785a14e3ffbd2873dd5b032dffea5ea33c08cd60be3a137426add391d78d55"
+        },
+        {
+          "signature": "15220128886027568558",
+          "exact": "412216147968",
+          "projected_bits": 64,
+          "guards": 32,
+          "guard_classes": 48,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.4080209969833959,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1702,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 584,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 14,
+          "smt_sha256": "5d18929d806b4bd79ca5babfaea50f00b5892e037de601f7894bdb8744ccfcfe"
+        },
+        {
+          "signature": "15337294027415708823",
+          "exact": "7080089690267940421632",
+          "projected_bits": 118,
+          "guards": 46,
+          "guard_classes": 144,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8089620840037242,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 96,
+              "nodes": 9506,
+              "count": "885011211283492552704"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "966285d708eabf3f02ca91eaeb589d3fa5a8b9654e3d559fa2c8ad5f45daac3d"
+        },
+        {
+          "signature": "1560237527141136542",
+          "exact": "1073610784",
+          "projected_bits": 38,
+          "guards": 26,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.2714689879794605,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 549,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 25,
+              "hidden": 0,
+              "nodes": 528,
+              "count": "33550337"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "eecc0b49e39d687ba97e11e35c61cdbc87bdd71cfc93aae46b0be8f59dd32a4d"
+        },
+        {
+          "signature": "15750014256193343950",
+          "exact": "343513456640",
+          "projected_bits": 63,
+          "guards": 23,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.38508951201220043,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1732,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 13,
+          "smt_sha256": "c95965c980f67598f1b51d84c27c970d27e23f1260db09da907a8ec5be1363d2"
+        },
+        {
+          "signature": "16970506114320330013",
+          "exact": "824432295936",
+          "projected_bits": 66,
+          "guards": 37,
+          "guard_classes": 96,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.4134864959924016,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1871,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 548,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 7,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 14,
+          "smt_sha256": "314aab03a00fdf2c38795ef10c3eee6cb743303397ed9ca7a456c1dd8ba12b19"
+        },
+        {
+          "signature": "2752876776965356570",
+          "exact": "20",
+          "projected_bits": 9,
+          "guards": 10,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.13783579599112272,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "62c55fc9e4edd7c5d22f6e50a5d662a09b63cd1773d028e6dfcfc70e34e9bbc0"
+        },
+        {
+          "signature": "3021853842726066451",
+          "exact": "131040",
+          "projected_bits": 38,
+          "guards": 26,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.34275128500303254,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 548,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 25,
+              "hidden": 0,
+              "nodes": 870,
+              "count": "4095"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "f428638a14fe710b5ad9143a7614c2ae86feadd7e01a89cb6701876c1494d1ff"
+        },
+        {
+          "signature": "499923463869755939",
+          "exact": "1208483025708057905594368",
+          "projected_bits": 107,
+          "guards": 26,
+          "guard_classes": 16,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5172613390022889,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1242,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 44,
+              "hidden": 0,
+              "nodes": 869,
+              "count": "17590039085056"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 13,
+          "smt_sha256": "8ce85255df2a3b1f1dadad8c87a3771a7b4fd5dbb58548d2955a285bee8c495c"
+        },
+        {
+          "signature": "5612635667498903607",
+          "exact": "1152358211156738048",
+          "projected_bits": 101,
+          "guards": 40,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.691215436992934,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 36,
+              "hidden": 0,
+              "nodes": 1868,
+              "count": "8386559"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 548,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 35,
+              "hidden": 0,
+              "nodes": 2845,
+              "count": "4193279"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 14,
+          "smt_sha256": "66ea9fa673445bd41faa5f138acba8341a92da3f8b21e623028cfcb6ae1e2eab"
+        },
+        {
+          "signature": "6973640434494283890",
+          "exact": "37760478348095682248704",
+          "projected_bits": 115,
+          "guards": 34,
+          "guard_classes": 80,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7782092790002935,
+          "components": [
+            {
+              "bits": 106,
+              "hidden": 66,
+              "nodes": 8627,
+              "count": "9440119587023920562176"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "2083ce95fdb924dbea2a99226ca8097ff6eb7d2854f2a9df80c0e6074c48053f"
+        },
+        {
+          "signature": "7003519055933742230",
+          "exact": "1180014948515395452928",
+          "projected_bits": 117,
+          "guards": 37,
+          "guard_classes": 24,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7868606839911081,
+          "components": [
+            {
+              "bits": 107,
+              "hidden": 65,
+              "nodes": 10177,
+              "count": "147501868564424431616"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "c0a5dc4a1004a9b29d14df5a2534c60b14295f8f2a8038fd06bc6e13369a1bb0"
+        },
+        {
+          "signature": "8917986596743865391",
+          "exact": "14160179380535880843264",
+          "projected_bits": 120,
+          "guards": 51,
+          "guard_classes": 288,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.81431216999772,
+          "components": [
+            {
+              "bits": 110,
+              "hidden": 94,
+              "nodes": 9236,
+              "count": "1770022422566985105408"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "467b75c47d208bb1738acc9f0f3fe13b4369abf88e23fd912ae3c8dfb6d24661"
+        },
+        {
+          "signature": "933929842286410705",
+          "exact": "70360156340224",
+          "projected_bits": 53,
+          "guards": 12,
+          "guard_classes": 2,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.25152199299191125,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 25,
+              "hidden": 0,
+              "nodes": 492,
+              "count": "33550337"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 21,
+          "smt_sha256": "617afe8cae8b849c92441539266bb225f467e99bb513e714a36421d7966c9397"
+        }
+      ]
+    },
+    "sv48-load": {
+      "exact": "5704808353133930814591640390286476702485901468",
+      "lower_bound": "5704808353133930814591640390286476702485901468",
+      "upper_bound": "5704808353133930814591640390286476702485901468",
+      "paths": 27,
+      "guard_classes": 6918,
+      "f16_mean": 4.4273286352957136e+45,
+      "f16_interval": [
+        3.2387005788834166e+45,
+        5.6159566917080106e+45
+      ],
+      "exact_relative_to_f16_mean": 1.2885441364469412,
+      "inside_f16_approximate_interval": false,
+      "memory_equivalence_proved_paths": 27,
+      "f16_small_exact_paths": 5,
+      "f16_small_exact_classes": 86,
+      "compared_version_paths": 27,
+      "capture": {
+        "exit": 0,
+        "seconds": 21.3280845299887,
+        "dumps": 27
+      },
+      "count_path_seconds_sum": 20.60604274709476,
+      "validation_path_seconds_sum": 27.14581631895271,
+      "path_results": [
+        {
+          "signature": "10451216379200822465",
+          "exact": "256",
+          "projected_bits": 8,
+          "guards": 8,
+          "guard_classes": 10,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.1364696999953594,
+          "components": [
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 48,
+              "count": "64"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "2dc8f920901cfbd5592e949b488b6a4c98d40252856fba87ac4ede0ad0e3292c"
+        },
+        {
+          "signature": "10637179611784840037",
+          "exact": "8",
+          "projected_bits": 10,
+          "guards": 19,
+          "guard_classes": 4,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.172157763998257,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 578,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "96bb7ef74c5e7cb4799443be6e759ab07645c4c0dcaaf1c323738a04f96259ce"
+        },
+        {
+          "signature": "1072519218002616177",
+          "exact": "20267550676049547136750301937472",
+          "projected_bits": 171,
+          "guards": 51,
+          "guard_classes": 64,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.285361310990993,
+          "components": [
+            {
+              "bits": 161,
+              "hidden": 75,
+              "nodes": 38587,
+              "count": "2533443834506193392093787742184"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "ec6c1fcb747dfde77f0d8319005166602724766c17b88bea0d742ffc79a513d4"
+        },
+        {
+          "signature": "10904690414256131709",
+          "exact": "20756509062919183527498425275777024",
+          "projected_bits": 161,
+          "guards": 40,
+          "guard_classes": 48,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.9136780030094087,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 8121,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 44,
+              "hidden": 0,
+              "nodes": 747,
+              "count": "17590039085056"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "3d5c2db8eb2f6f4db94fd79ab8fc22fda2072f8bedbf7b65aa5f7e6a04c8f358"
+        },
+        {
+          "signature": "12041149045941709759",
+          "exact": "64",
+          "projected_bits": 12,
+          "guards": 22,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.17498770900419913,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 541,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "e4c803744a4ee9727a633de9e41f5378aa3a0a1eae0b88bc09404f3b1971b080"
+        },
+        {
+          "signature": "12363878372900898510",
+          "exact": "73759950265208536064",
+          "projected_bits": 92,
+          "guards": 38,
+          "guard_classes": 128,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.6515649000066333,
+          "components": [
+            {
+              "bits": 92,
+              "hidden": 68,
+              "nodes": 9393,
+              "count": "73759950265208536064"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "4e3f219936ff79e18bda7c34871063bdd54663779fdc8c3052df49dab37cb1e0"
+        },
+        {
+          "signature": "13086966537797452360",
+          "exact": "18880239174047841124864",
+          "projected_bits": 120,
+          "guards": 49,
+          "guard_classes": 384,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8201771379972342,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 8385,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 543,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "f1159e78f1f038c448660fef26adaa5751821d47f6efa531343bdd7cfc19a5ea"
+        },
+        {
+          "signature": "13518721048086275240",
+          "exact": "2198486121472",
+          "projected_bits": 61,
+          "guards": 21,
+          "guard_classes": 20,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5199979220051318,
+          "components": [
+            {
+              "bits": 61,
+              "hidden": 67,
+              "nodes": 5261,
+              "count": "2198486121472"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "f86a273dcd44b578f6421b5070f2aab37f945242b4a624bb0145d938df5fee45"
+        },
+        {
+          "signature": "14426264662589570334",
+          "exact": "324280810741271797491813466501120",
+          "projected_bits": 174,
+          "guards": 63,
+          "guard_classes": 1024,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.321557779010618,
+          "components": [
+            {
+              "bits": 164,
+              "hidden": 104,
+              "nodes": 27145,
+              "count": "40535101342658974686476683312640"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "f1109f1733aa2f8219c13d36fd0a064be2c499506ba24cc4d124b03ad4355521"
+        },
+        {
+          "signature": "14947180895222177486",
+          "exact": "648640908216224485234325789868032",
+          "projected_bits": 155,
+          "guards": 52,
+          "guard_classes": 768,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.9385041299974546,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 8197,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 543,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 35,
+              "hidden": 0,
+              "nodes": 670,
+              "count": "34355545088"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "b721f219ea993f8d672f7df391bc9a8b4fa93e2b6c4a48aa64d4799695e49c8e"
+        },
+        {
+          "signature": "15220128886027568558",
+          "exact": "137405382592",
+          "projected_bits": 64,
+          "guards": 33,
+          "guard_classes": 16,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5617650009808131,
+          "components": [
+            {
+              "bits": 64,
+              "hidden": 96,
+              "nodes": 7390,
+              "count": "137405382592"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "fdf0e19e2bae38bde82f728f2f7223d2be5388ffaf68ed1731021e474d52598b"
+        },
+        {
+          "signature": "1560237527141136542",
+          "exact": "8387648",
+          "projected_bits": 29,
+          "guards": 24,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.22270259499782696,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 541,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 17,
+              "hidden": 0,
+              "nodes": 347,
+              "count": "131057"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "d5468629e3a444daf4e6f834f94b091322692cb57b4a5925c745474446bbb0f8"
+        },
+        {
+          "signature": "15750014256193343950",
+          "exact": "343513456480",
+          "projected_bits": 63,
+          "guards": 24,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5289928990241606,
+          "components": [
+            {
+              "bits": 63,
+              "hidden": 65,
+              "nodes": 5102,
+              "count": "343513456480"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "348b6240bc8c3fda17cc831c111bf2bf4daf7f52d664f622bf473a35f8d3226e"
+        },
+        {
+          "signature": "16970506114320330013",
+          "exact": "1099243060736",
+          "projected_bits": 66,
+          "guards": 36,
+          "guard_classes": 128,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5565194850205444,
+          "components": [
+            {
+              "bits": 66,
+              "hidden": 94,
+              "nodes": 6883,
+              "count": "1099243060736"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "f6a846db285044470e49f4fd5b809818bcc72b7b1858b18e9fe32a5d0d16c30f"
+        },
+        {
+          "signature": "2752876776965356570",
+          "exact": "20",
+          "projected_bits": 9,
+          "guards": 10,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.1373408890212886,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "7b3cb05e696e75b1e9ed480903290abb76782002117bfbc47ff9fa4d2c78075a"
+        },
+        {
+          "signature": "3021853842726066451",
+          "exact": "960",
+          "projected_bits": 29,
+          "guards": 24,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.2619969100051094,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 541,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 17,
+              "hidden": 0,
+              "nodes": 390,
+              "count": "15"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "0a6fea2520747d7583b3ceeb2b58322c5de2736b857dafd711397a0c9724bcd7"
+        },
+        {
+          "signature": "3434120644046094660",
+          "exact": "5900074741889950351520",
+          "projected_bits": 117,
+          "guards": 37,
+          "guard_classes": 96,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7770130209974013,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 8244,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "86a4f66d37d1c3cc4a798af16e3217522fd639d73584fd41858a9db593ec9f84"
+        },
+        {
+          "signature": "3556644003697749754",
+          "exact": "79170110443512157184228589056",
+          "projected_bits": 155,
+          "guards": 52,
+          "guard_classes": 384,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.2490016620140523,
+          "components": [
+            {
+              "bits": 143,
+              "hidden": 84,
+              "nodes": 32860,
+              "count": "1237032975679877456003571704"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 543,
+              "count": "4"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 4,
+          "smt_sha256": "10481a10f66ccb5790e8817952413901f667ac7195cdd1747baedc3025fefdec"
+        },
+        {
+          "signature": "3852488296513071771",
+          "exact": "40535101342658974686476683312640",
+          "projected_bits": 172,
+          "guards": 60,
+          "guard_classes": 128,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.3368648600007873,
+          "components": [
+            {
+              "bits": 162,
+              "hidden": 106,
+              "nodes": 27915,
+              "count": "5066887667832371835809585414080"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "d296c1bc952e6d44f70b8db1bb9922e9f2544083c263730e39b6999091a0672d"
+        },
+        {
+          "signature": "499923463869755939",
+          "exact": "1208483025145176654872576",
+          "projected_bits": 107,
+          "guards": 26,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.6367703010037076,
+          "components": [
+            {
+              "bits": 107,
+              "hidden": 21,
+              "nodes": 5895,
+              "count": "1208483025145176654872576"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "9c19065d31217ecd5385cf11d4e471003de5bed4bdda32af2cd00d8035ca6414"
+        },
+        {
+          "signature": "5308746120572720046",
+          "exact": "648561621482543594983626933002240",
+          "projected_bits": 169,
+          "guards": 48,
+          "guard_classes": 240,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.2498303210013546,
+          "components": [
+            {
+              "bits": 160,
+              "hidden": 76,
+              "nodes": 33631,
+              "count": "162140405370635898745906733250560"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "08f797c2088f3b663d989d6813c08fdb8adb56ff85f51ab425bf060dc18dbfff"
+        },
+        {
+          "signature": "5486192723457138630",
+          "exact": "696217638873474474163493287374378610196480",
+          "projected_bits": 218,
+          "guards": 66,
+          "guard_classes": 1024,
+          "guard_functional": true,
+          "memory": {
+            "reads": 5,
+            "consistency_pairs": 10
+          },
+          "seconds": 2.045783872017637,
+          "components": [
+            {
+              "bits": 208,
+              "hidden": 124,
+              "nodes": 139649,
+              "count": "87027204859184309270436660921797326274560"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "d6bf25cca631f1ea6ba5712cbd369edeb10845b55fb55b8c98fd2a924b65f31b"
+        },
+        {
+          "signature": "5612635667498903607",
+          "exact": "9002800667427840",
+          "projected_bits": 92,
+          "guards": 38,
+          "guard_classes": 128,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7886956960137468,
+          "components": [
+            {
+              "bits": 92,
+              "hidden": 132,
+              "nodes": 20483,
+              "count": "9002800667427840"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "3d016c50589048c2b00bc513a53d7055d0ee9fc1531a43853030b516892fc798"
+        },
+        {
+          "signature": "6973640434494283890",
+          "exact": "37760478348095682250752",
+          "projected_bits": 115,
+          "guards": 34,
+          "guard_classes": 80,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.7647780389816035,
+          "components": [
+            {
+              "bits": 107,
+              "hidden": 21,
+              "nodes": 8045,
+              "count": "147501868547248758792"
+            },
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 51,
+              "count": "64"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "3294411e760f5fa80327ee31de54cceca81fa7598c9d06d542cf648c500e610e"
+        },
+        {
+          "signature": "933929842286410705",
+          "exact": "70360156340224",
+          "projected_bits": 53,
+          "guards": 13,
+          "guard_classes": 4,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.26807272699079476,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 44,
+              "hidden": 0,
+              "nodes": 521,
+              "count": "17590039085056"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "03c1911911f74b13101759276fd3f2e43e7da59c9357999c87b7fa1b1d48e196"
+        },
+        {
+          "signature": "9711230084785329577",
+          "exact": "2360029896755980140608",
+          "projected_bits": 118,
+          "guards": 46,
+          "guard_classes": 48,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8151872750022449,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 8265,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 580,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "cbb0ac5637f18ebaf13f0e330e05825d5ab1f66c992e1d9e48a8b4dfa2f05708"
+        },
+        {
+          "signature": "9735951877877319656",
+          "exact": "5704112135472618465890715063943580550399262720",
+          "projected_bits": 218,
+          "guards": 66,
+          "guard_classes": 2048,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.4702708380063996,
+          "components": [
+            {
+              "bits": 208,
+              "hidden": 60,
+              "nodes": 34994,
+              "count": "713014016934077308236339382992947568799907840"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "c53f7fb14d3a0e52d6e51a0dfb30dc4fc42c3d827b79781274ed52522789d787"
+        }
+      ]
+    },
+    "sv48-store": {
+      "exact": "1426202088299825319259236416038502073801699868",
+      "lower_bound": "1426202088299825319259236416038502073801699868",
+      "upper_bound": "1426202088299825319259236416038502073801699868",
+      "paths": 27,
+      "guard_classes": 3510,
+      "f16_mean": 1.4720126462644667e+45,
+      "f16_interval": [
+        9.87336289805165e+44,
+        1.9566890027237684e+45
+      ],
+      "exact_relative_to_f16_mean": 0.9688789644023134,
+      "inside_f16_approximate_interval": true,
+      "memory_equivalence_proved_paths": 27,
+      "f16_small_exact_paths": 5,
+      "f16_small_exact_classes": 62,
+      "compared_version_paths": 27,
+      "capture": {
+        "exit": 0,
+        "seconds": 19.27153592099785,
+        "dumps": 27
+      },
+      "count_path_seconds_sum": 20.899923889985075,
+      "validation_path_seconds_sum": 20.804390567995142,
+      "path_results": [
+        {
+          "signature": "10451216379200822465",
+          "exact": "256",
+          "projected_bits": 8,
+          "guards": 8,
+          "guard_classes": 10,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.1500736759917345,
+          "components": [
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 48,
+              "count": "64"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "8a695c8bcaf913c0c9095c1dbab167ed25020308cb7f87b37796ed00f1fd9538"
+        },
+        {
+          "signature": "10637179611784840037",
+          "exact": "24",
+          "projected_bits": 10,
+          "guards": 19,
+          "guard_classes": 12,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.18228072300553322,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 586,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "84bc80af85aa9a2da6c5b6ae60202f5968bedc41ee6db085a442c6f4a6009839"
+        },
+        {
+          "signature": "1072519218002616177",
+          "exact": "20267550676049547136750301937472",
+          "projected_bits": 171,
+          "guards": 51,
+          "guard_classes": 64,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.3383301559952088,
+          "components": [
+            {
+              "bits": 161,
+              "hidden": 75,
+              "nodes": 36571,
+              "count": "2533443834506193392093787742184"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "1bb09903a56153b8ffda8d04d87b4aa36d9bc50f5929c0944a6380b53977580a"
+        },
+        {
+          "signature": "10904690414256131709",
+          "exact": "20756509062919183527498425275777024",
+          "projected_bits": 161,
+          "guards": 40,
+          "guard_classes": 48,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.9585372419969644,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 7691,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 44,
+              "hidden": 0,
+              "nodes": 806,
+              "count": "17590039085056"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "38586a30b7aa21306672e014cbac3d510d2084653a57c7091bfcf23f97474240"
+        },
+        {
+          "signature": "12041149045941709759",
+          "exact": "48",
+          "projected_bits": 12,
+          "guards": 24,
+          "guard_classes": 24,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.20635865899384953,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 549,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 7,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "5f7f3ced57b8bfc1e4241d2200f9d101201d4ef6179e9a2ab10410e8d47c5f28"
+        },
+        {
+          "signature": "12363878372900898510",
+          "exact": "18439987566302134016",
+          "projected_bits": 92,
+          "guards": 40,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.6814295370131731,
+          "components": [
+            {
+              "bits": 92,
+              "hidden": 68,
+              "nodes": 8894,
+              "count": "18439987566302134016"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "33073a581434ff51b20b473e86f131d236e71edc33c9ec89cae5fd305f5ff5fb"
+        },
+        {
+          "signature": "13086966537797452360",
+          "exact": "14160179380535880843648",
+          "projected_bits": 120,
+          "guards": 51,
+          "guard_classes": 288,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8320541780267376,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 7743,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 547,
+              "count": "2"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 7,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "afd87cce115965619788ba01a2b99576242d4456ff2be07fb8414344644a52df"
+        },
+        {
+          "signature": "13518721048086275240",
+          "exact": "2198486121472",
+          "projected_bits": 61,
+          "guards": 21,
+          "guard_classes": 20,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5535308139806148,
+          "components": [
+            {
+              "bits": 61,
+              "hidden": 67,
+              "nodes": 4944,
+              "count": "2198486121472"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "09a5300d19af70cab54d58a6780f14fe5ac8ca76dbfde0b92877e9c6667a4889"
+        },
+        {
+          "signature": "14426264662589570334",
+          "exact": "243210608055953848118860099875840",
+          "projected_bits": 174,
+          "guards": 65,
+          "guard_classes": 768,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.356871534982929,
+          "components": [
+            {
+              "bits": 164,
+              "hidden": 104,
+              "nodes": 26697,
+              "count": "30401326006994231014857512484480"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "e050cdd36c3968cce72932a1d45d08c3ab9852595ddaf8b43c02a1bd040506af"
+        },
+        {
+          "signature": "14947180895222177486",
+          "exact": "162160227054056121308581447467008",
+          "projected_bits": 155,
+          "guards": 54,
+          "guard_classes": 192,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.9730527409992646,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 7793,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 547,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 35,
+              "hidden": 0,
+              "nodes": 679,
+              "count": "34355545088"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "4daf2d7d7669f3831e552e0996b730e12d2234113139dbb926c583485bde2fb6"
+        },
+        {
+          "signature": "15220128886027568558",
+          "exact": "412216147776",
+          "projected_bits": 64,
+          "guards": 33,
+          "guard_classes": 48,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.583303071995033,
+          "components": [
+            {
+              "bits": 64,
+              "hidden": 96,
+              "nodes": 6762,
+              "count": "412216147776"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "7de0d5ec64ee84372ff96c90ae01d4fb6e09496a8ab7e9ea316f23cd767a313e"
+        },
+        {
+          "signature": "1560237527141136542",
+          "exact": "2096912",
+          "projected_bits": 29,
+          "guards": 26,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.24270837401854806,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 544,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 17,
+              "hidden": 0,
+              "nodes": 409,
+              "count": "131057"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "eeea704be320d5c0b684eb01a79360bb077e63aac95e6e769014a19ac7f27bd4"
+        },
+        {
+          "signature": "15750014256193343950",
+          "exact": "343513456480",
+          "projected_bits": 63,
+          "guards": 24,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5779321270238142,
+          "components": [
+            {
+              "bits": 63,
+              "hidden": 65,
+              "nodes": 4500,
+              "count": "343513456480"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "1e9b3dc510e0bc598a5f15ec1d52f7216e35d49ae2b5af74f127c7656bbf1725"
+        },
+        {
+          "signature": "16970506114320330013",
+          "exact": "824432295552",
+          "projected_bits": 66,
+          "guards": 38,
+          "guard_classes": 96,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.5923855830042157,
+          "components": [
+            {
+              "bits": 66,
+              "hidden": 94,
+              "nodes": 6287,
+              "count": "824432295552"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "c98e77e12fd00d97a56bd40744f9be9495c5e00a42d5467d33a6fb4c18ad088c"
+        },
+        {
+          "signature": "2752876776965356570",
+          "exact": "20",
+          "projected_bits": 9,
+          "guards": 10,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.14494914398528636,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "4015d58de70ff4b9f1850ad67104e070a546a9c7091b5940ac2ed79d04a1deea"
+        },
+        {
+          "signature": "3021853842726066451",
+          "exact": "240",
+          "projected_bits": 29,
+          "guards": 26,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.2880078899906948,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 544,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 17,
+              "hidden": 0,
+              "nodes": 415,
+              "count": "15"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "8d6a8fe55d746721f732b24a68110bc839b1816c68f0ed294aa83e55b9ffd755"
+        },
+        {
+          "signature": "3434120644046094660",
+          "exact": "5900074741889950351520",
+          "projected_bits": 117,
+          "guards": 37,
+          "guard_classes": 96,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8259161559981294,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 7743,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 0,
+              "nodes": 16,
+              "count": "5"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "fefc3a759587906559a08d2b99d6fa7f335b92a7e06244c1c39ecbd11f09fd45"
+        },
+        {
+          "signature": "3556644003697749754",
+          "exact": "19792527610878039296057147264",
+          "projected_bits": 155,
+          "guards": 54,
+          "guard_classes": 96,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 1.1095754679990932,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 7740,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 547,
+              "count": "2"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 35,
+              "hidden": 0,
+              "nodes": 2164,
+              "count": "4193279"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "7bff0797ec708819a00b32f04d7298a085d30b9ffbd76946c4a362a597a38dac"
+        },
+        {
+          "signature": "3852488296513071771",
+          "exact": "121605304027976924059430049937920",
+          "projected_bits": 172,
+          "guards": 60,
+          "guard_classes": 384,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.3232495799893513,
+          "components": [
+            {
+              "bits": 162,
+              "hidden": 106,
+              "nodes": 26712,
+              "count": "15200663003497115507428756242240"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "4f473b31e9409806c3177cc9f5951a630454967dc478a6ae3979e0d81131c12a"
+        },
+        {
+          "signature": "499923463869755939",
+          "exact": "1208483025145176654872576",
+          "projected_bits": 107,
+          "guards": 26,
+          "guard_classes": 8,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.7355415660131257,
+          "components": [
+            {
+              "bits": 107,
+              "hidden": 21,
+              "nodes": 5283,
+              "count": "1208483025145176654872576"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "9c08b0e00ca0aa090f748abfc2ce6d287648a5c8b3e3d4be3535379313988d6f"
+        },
+        {
+          "signature": "5308746120572720046",
+          "exact": "648561621482543594983626933002240",
+          "projected_bits": 169,
+          "guards": 48,
+          "guard_classes": 240,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.3346858950098976,
+          "components": [
+            {
+              "bits": 160,
+              "hidden": 76,
+              "nodes": 33118,
+              "count": "162140405370635898745906733250560"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "50de51274ceb4189ce9bca3a8773e6418935aebcdb92e5c7b90cba0f0b9741e2"
+        },
+        {
+          "signature": "5486192723457138630",
+          "exact": "174054409718368618540873321843594652549120",
+          "projected_bits": 218,
+          "guards": 68,
+          "guard_classes": 256,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.7055185459903441,
+          "components": [
+            {
+              "bits": 208,
+              "hidden": 60,
+              "nodes": 47425,
+              "count": "21756801214796077317609165230449331568640"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "7a3cd898eb91eb3f3375267a8ef4e4dec595d5ad8c138fba6f698522cd4f38fd"
+        },
+        {
+          "signature": "5612635667498903607",
+          "exact": "2250700166856960",
+          "projected_bits": 92,
+          "guards": 40,
+          "guard_classes": 32,
+          "guard_functional": true,
+          "memory": {
+            "reads": 2,
+            "consistency_pairs": 1
+          },
+          "seconds": 0.7604640889912844,
+          "components": [
+            {
+              "bits": 92,
+              "hidden": 68,
+              "nodes": 8546,
+              "count": "2250700166856960"
+            }
+          ],
+          "unconstrained_bits": 0,
+          "smt_sha256": "71b047785074b3dea51a2919dc2c01d39784edc9b5ba5f1ce987bbed72d2c940"
+        },
+        {
+          "signature": "6973640434494283890",
+          "exact": "37760478348095682250752",
+          "projected_bits": 115,
+          "guards": 34,
+          "guard_classes": 80,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8260413969983347,
+          "components": [
+            {
+              "bits": 107,
+              "hidden": 21,
+              "nodes": 7667,
+              "count": "147501868547248758792"
+            },
+            {
+              "bits": 6,
+              "hidden": 5,
+              "nodes": 48,
+              "count": "64"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "33b96ce04952d5ef5489412249698c0afb03e33f24cc000de61c14b55bfe6b7e"
+        },
+        {
+          "signature": "933929842286410705",
+          "exact": "70360156340224",
+          "projected_bits": 53,
+          "guards": 13,
+          "guard_classes": 4,
+          "guard_functional": true,
+          "memory": {
+            "reads": 1,
+            "consistency_pairs": 0
+          },
+          "seconds": 0.28580355999292806,
+          "components": [
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 44,
+              "hidden": 0,
+              "nodes": 501,
+              "count": "17590039085056"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 2,
+          "smt_sha256": "412dcd8ce9d28d7d178f300bda3fac39f7098c905acc06b05c01afd19853ee2c"
+        },
+        {
+          "signature": "9711230084785329577",
+          "exact": "7080089690267940421824",
+          "projected_bits": 118,
+          "guards": 46,
+          "guard_classes": 144,
+          "guard_functional": true,
+          "memory": {
+            "reads": 3,
+            "consistency_pairs": 3
+          },
+          "seconds": 0.8560703439870849,
+          "components": [
+            {
+              "bits": 108,
+              "hidden": 20,
+              "nodes": 7769,
+              "count": "295003737094497517576"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 3,
+              "hidden": 32,
+              "nodes": 584,
+              "count": "3"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "ba4aa566690be2b0fa795e043baf87659d9dd2b8a7e6a5d940d1143b41cf1c78"
+        },
+        {
+          "signature": "9735951877877319656",
+          "exact": "1426028033868154616472678765985895137599815680",
+          "projected_bits": 218,
+          "guards": 68,
+          "guard_classes": 512,
+          "guard_functional": true,
+          "memory": {
+            "reads": 4,
+            "consistency_pairs": 6
+          },
+          "seconds": 1.4752518380119,
+          "components": [
+            {
+              "bits": 208,
+              "hidden": 60,
+              "nodes": 36847,
+              "count": "178253504233519327059084845748236892199976960"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 3,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 2,
+              "hidden": 0,
+              "nodes": 9,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            },
+            {
+              "bits": 1,
+              "hidden": 0,
+              "nodes": 4,
+              "count": "1"
+            }
+          ],
+          "unconstrained_bits": 3,
+          "smt_sha256": "189938d79bb12ab87e62b0b3a8e4ef86ca9d1df02168f881f9e2b7dbbe665b4a"
+        }
+      ]
+    }
+  }
+}
