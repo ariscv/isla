@@ -208,3 +208,9 @@ MRET 使用默认 `rv64d.ir`（SHA-256 `c65b26c8518042c67bfcb48c9feaf2a13a6eb7d7
 全部 path_truncated=false；片段类内域并未完整枚举。两两／全分量抽样 SAT 查询分别为 5841/1024、14411/1472、14081/1472；Sv39 全部 SAT，LOAD Sv48 各有 1 个 UNSAT，STORE 抽样全部 SAT 但明确缺失组合有 6 个 UNSAT。只完成测量和设计，无生产加速或离线展开实现。
 
 3 项诊断测试通过；最终开启诊断的 isla-lib 全量 **709 通过、12 失败、6 忽略**，与 `output/stride-validation/full-lib-final-default.log` 逐名比较无新增／缺失失败项。cargo fmt、cargo fmt --check、git diff --check 和指定 target_f7 release 构建通过。原始证据为指定 scratchpad/components/final/ 三场景及 full-lib-final-enabled.log；[受测哈希和全部路径机器记录](../agents/path_merge_call_support/component-results.json)、[前六条胖路径与设计](../agents/path_merge_call_support/enumeration.md)、[当前状态](../agents/path_merge_call_support/status.md)。
+
+## 2026-11-07 judge 模式（ae1a335 加本轮未提交改动）
+
+格式化、release 构建及 `cargo test --workspace --offline -j 8` 通过：1108 通过、0 失败、6 项既有忽略。基线新 IR 与配置只读沿用 replay-p0/ecfg4b；四场景 2836 种子的路径唯一接纳、指定后态字段相同、守卫和后态唯一、守卫向量排序类号、J1 新旧完整报告一致五项全部通过，生成的 2836 行完整样本外部再喂入 J1 也全部通过。三个负对照各接纳 0 条路径。
+
+保留原始退出 1、partial 和 errors=5/5/7/7，本轮未重做旧观察器的排除域逐查询证明；四场景无超时或未完成路径。Make MRET 退出 0、4 条，保留既有 unfinished=1。没有修改其他工作树或执行 git 写操作。完整命令、逐项结果、限制及日志位置见 [judge 说明](../agents/path_merge_call_support/judge-mode.md)，机器结果为 `output/judge/verification.json`。

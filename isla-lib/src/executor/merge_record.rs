@@ -4,6 +4,7 @@ use super::*;
 mod merge_enumeration;
 use crate::ir::regions::RegionPoint;
 use crate::primop::Effect;
+pub(crate) use merge_enumeration::{guard_order, model_guards};
 
 static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 

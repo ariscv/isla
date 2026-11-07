@@ -19,7 +19,7 @@ mod predict;
 type SampleConsumer<'a, B> = dyn Fn(usize, usize, &[String], bool, &mut Model<B>) -> Result<(), ExecError> + Sync + 'a;
 type ClassConsumer<'a> = dyn Fn(usize, &Value) -> Result<(), ExecError> + Sync + 'a;
 
-fn guard_order<B>(records: &[RegionMergeRecord<B>]) -> Vec<usize> {
+pub(crate) fn guard_order<B>(records: &[RegionMergeRecord<B>]) -> Vec<usize> {
     let positions: HashMap<_, _> =
         records.iter().enumerate().map(|(index, record)| (record.record_id, index)).collect();
     let mut order: Vec<_> = (0..records.len()).collect();
@@ -38,7 +38,7 @@ fn guard_order<B>(records: &[RegionMergeRecord<B>]) -> Vec<usize> {
     order
 }
 
-fn context<B>(
+pub(crate) fn context<B>(
     record: &RegionMergeRecord<B>,
     records: &HashMap<usize, &RegionMergeRecord<B>>,
     visiting: &mut HashSet<usize>,
@@ -67,6 +67,69 @@ fn context<B>(
     visiting.remove(&record.record_id);
     contexts.insert(record.record_id, result.clone());
     result
+}
+
+/// 模型中的规范守卫取值；非活动守卫统一为 false，唯一性只约束活动守卫。
+pub(crate) struct GuardValues {
+    pub values: Vec<bool>,
+    pub active: Vec<bool>,
+    pub different: Formula<Sym>,
+}
+
+fn packed_guards<B>(records: &[RegionMergeRecord<B>]) -> Option<Formula<Sym>> {
+    use Formula::*;
+    records
+        .iter()
+        .map(|record| {
+            Ite(Box::new(Var(record.condition)), Box::new(smtlib::bits64(1, 1)), Box::new(smtlib::bits64(0, 1)))
+        })
+        .reduce(|high, low| Concat(Box::new(high), Box::new(low)))
+}
+
+pub(crate) fn model_guards<B: BV>(
+    model: &mut Model<B>,
+    records: &[RegionMergeRecord<B>],
+    order: &[usize],
+) -> Result<GuardValues, ExecError> {
+    let raw = packed_guards(records)
+        .map(|packed| model.get_exp(&packed).map(|value| bits_text(&value.unwrap_exp())))
+        .transpose()?;
+    Ok(normalize_guards(records, order, raw.as_deref().unwrap_or("")))
+}
+
+fn normalize_guards<B>(records: &[RegionMergeRecord<B>], order: &[usize], raw: &str) -> GuardValues {
+    use Formula::*;
+    let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
+    assert_eq!(by_id.len(), records.len(), "帧内记录编号必须唯一");
+    assert_eq!(order.len(), records.len(), "守卫顺序必须覆盖所有记录");
+    let positions: HashMap<_, _> =
+        order.iter().enumerate().map(|(position, index)| (records[*index].record_id, position)).collect();
+    let mut values = Vec::<bool>::new();
+    let mut activities = Vec::new();
+    let mut different = Bool(false);
+    for index in order {
+        let record = &records[*index];
+        let mut current = record;
+        let mut active = true;
+        while let Some(parent) = current.parent_record {
+            let value = values[positions[&parent]];
+            active &= match current.arm {
+                "then" => value,
+                "else" => !value,
+                arm => panic!("无效的记录臂 {arm}"),
+            };
+            current = by_id[&parent];
+        }
+        assert_eq!(current.arm, "root", "根记录不得属于某个分支臂");
+        let value = active && raw.as_bytes()[2 + *index] == b'1';
+        values.push(value);
+        activities.push(active);
+        if active {
+            let changed = if value { Not(Box::new(Var(record.condition))) } else { Var(record.condition) };
+            different = Or(Box::new(different), Box::new(changed));
+        }
+    }
+    GuardValues { values, active: activities, different }
 }
 
 /// 沿定义依赖扫描实际 Extract 项，保留一般派生符号的 AST 语义。
@@ -286,8 +349,6 @@ impl<B: BV> LocalFrame<'_, B> {
         // 提交历史通常子记录在前；按父链的原始位置做字典序排序，
         // 得到每棵守卫树的前序，整棵子树先于下一根，而非按深度广度遍历。
         let order = guard_order(records);
-        let positions: HashMap<_, _> =
-            order.iter().enumerate().map(|(position, index)| (records[*index].record_id, position)).collect();
         let mut tested = Vec::new();
         let mut expressions = Vec::new();
         let mut bits = std::collections::BTreeSet::new();
@@ -305,12 +366,7 @@ impl<B: BV> LocalFrame<'_, B> {
             }
         }
         // 一次取回所有裸守卫，再按父链规范化；不为每个守卫单独抽取模型。
-        let packed_guards = records
-            .iter()
-            .map(|record| {
-                Ite(Box::new(Var(record.condition)), Box::new(smtlib::bits64(1, 1)), Box::new(smtlib::bits64(0, 1)))
-            })
-            .reduce(|high, low| Concat(Box::new(high), Box::new(low)));
+        let packed_guards = packed_guards(records);
         let bit_predicates: Vec<_> = bits
             .iter()
             .map(|(symbol, bit)| {
@@ -544,20 +600,11 @@ impl<B: BV> LocalFrame<'_, B> {
                         .map(|packed| model.get_exp(packed).map(|value| bits_text(&value.unwrap_exp())))
                         .transpose()?;
                     drop(model);
-                    let mut values = Vec::<bool>::new();
+                    let guards = normalize_guards(records, &order, raw.as_deref().unwrap_or(""));
                     let mut split = None;
                     for (position, index) in order.iter().enumerate() {
-                        let record = &records[*index];
-                        let mut current = record;
-                        let mut active = true;
-                        while let Some(parent) = current.parent_record {
-                            let value = values[positions[&parent]];
-                            active &= if current.arm == "then" { value } else { !value };
-                            current = by_id[&parent];
-                        }
-                        values.push(active && raw.as_ref().unwrap().as_bytes()[2 + *index] == b'1');
-                        if position >= guard_depth && active && split_guards[*index] {
-                            split = Some((position, Var(record.condition)));
+                        if position >= guard_depth && guards.active[position] && split_guards[*index] {
+                            split = Some((position, Var(records[*index].condition)));
                             break;
                         }
                     }
@@ -587,17 +634,12 @@ impl<B: BV> LocalFrame<'_, B> {
                         };
                         // 当前模型已证明沿其取值的全部后续分支可行，直接走到叶子。
                         // 相反分支压栈，后续从最深未访问前缀开始 Sat 剪枝。
+                        let guards = normalize_guards(records, &order, &raw);
+                        assignment = guards.values;
                         for (position, index) in order.iter().enumerate() {
                             let record = &records[*index];
-                            let mut current = record;
-                            let mut active = true;
-                            while let Some(parent) = current.parent_record {
-                                let value = assignment[positions[&parent]];
-                                active &= if current.arm == "then" { value } else { !value };
-                                current = by_id[&parent];
-                            }
-                            let value = active && raw.as_bytes()[2 + *index] == b'1';
-                            assignment.push(value);
+                            let active = guards.active[position];
+                            let value = assignment[position];
                             if partition.is_none() && position >= guard_depth && active && split_guards[*index] {
                                 let selected =
                                     if value { Var(record.condition) } else { Not(Box::new(Var(record.condition))) };

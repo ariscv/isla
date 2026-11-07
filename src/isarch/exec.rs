@@ -1866,7 +1866,18 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             );
                             if let Some(checker) = &samples.checker {
                                 checker
-                                    .check_path(&sample_path, &mut solver, shared_state, frame.path_signature())
+                                    .check_path_with_judge(
+                                        &sample_path,
+                                        &mut solver,
+                                        shared_state,
+                                        frame.path_signature(),
+                                        frame.region_merge_records(),
+                                        |sample, model| {
+                                            sample.isa_state =
+                                                super::samples::isa_state(target, sample, model, shared_state)?;
+                                            Ok(())
+                                        },
+                                    )
                                     .expect("样本成员检查失败");
                             }
                             let output_path =

@@ -15,6 +15,7 @@ pub struct SampleOptions {
     pub check: Option<PathBuf>,
     pub limit: Option<usize>,
     pub report: Option<PathBuf>,
+    pub judge: Option<PathBuf>,
 }
 
 impl SampleOptions {
@@ -22,12 +23,20 @@ impl SampleOptions {
         if self.check.is_none() && (self.limit.is_some() || self.report.is_some()) {
             return Err("--check-samples-limit/--check-samples-report 需要 --check-samples".into());
         }
+        if self.check.is_none() && self.judge.is_some() {
+            return Err("--check-samples-judge 需要 --check-samples".into());
+        }
         if self.limit == Some(0) {
             return Err("--check-samples-limit 必须大于零".into());
         }
         if let Some(path) = &self.check {
             if self.report.as_ref() == Some(path) {
                 return Err("检查报告不得覆盖样本输入".into());
+            }
+        }
+        if let Some(judge) = &self.judge {
+            if self.check.as_ref() == Some(judge) || self.report.as_ref() == Some(judge) {
+                return Err("judge 输出不得覆盖样本输入或检查报告".into());
             }
         }
         Ok(())
@@ -58,7 +67,20 @@ impl SampleSession {
         if options.report.as_ref().is_some_and(|report| configured.iter().any(|output| &output.path == report)) {
             return Err("检查报告不得覆盖样本输出".into());
         }
-        let checker = options.check.as_ref().map(|path| SampleChecker::load(path, options.limit)).transpose()?;
+        if options.judge.as_ref().is_some_and(|judge| configured.iter().any(|output| &output.path == judge)) {
+            return Err("judge 输出不得覆盖样本输出".into());
+        }
+        let checker = options
+            .check
+            .as_ref()
+            .map(|path| {
+                let checker = SampleChecker::load(path, options.limit)?;
+                match &options.judge {
+                    Some(judge) => checker.with_judge_output(judge),
+                    None => Ok(checker),
+                }
+            })
+            .transpose()?;
         if enumeration.and_then(|config| config.max_output_bytes).is_some_and(|limit| limit < 1024) {
             return Err("max_output_bytes 至少为1024，必须容纳文件头和正常结束标记".into());
         }
@@ -291,8 +313,12 @@ mod tests {
             outputs: vec![SampleOutputConfig { format: SampleOutputFormat::Binary, path: "same.bin".into() }],
             ..Default::default()
         };
-        let options =
-            SampleOptions { check: Some("unused-input.jsonl".into()), limit: None, report: Some("same.bin".into()) };
+        let options = SampleOptions {
+            check: Some("unused-input.jsonl".into()),
+            limit: None,
+            report: Some("same.bin".into()),
+            judge: None,
+        };
         let error = SampleSession::new(&options, Some(&outputs)).err().unwrap();
         assert!(error.contains("检查报告不得覆盖样本输出"));
         let counting = MergeEnumerationConfig { enabled: true, mode: MergeEnumerationMode::Count, ..outputs };
@@ -301,23 +327,54 @@ mod tests {
     }
 
     #[test]
+    fn samples_judge_options_require_check_and_distinct_outputs() {
+        assert!(SampleOptions { judge: Some("judged.jsonl".into()), ..Default::default() }.validate().is_err());
+        for (judge, report, valid) in [
+            ("input.jsonl", "report.json", false),
+            ("report.json", "report.json", false),
+            ("judged.jsonl", "report.json", true),
+        ] {
+            assert_eq!(
+                SampleOptions {
+                    check: Some("input.jsonl".into()),
+                    report: Some(report.into()),
+                    judge: Some(judge.into()),
+                    ..Default::default()
+                }
+                .validate()
+                .is_ok(),
+                valid
+            );
+        }
+        let outputs = MergeEnumerationConfig {
+            outputs: vec![SampleOutputConfig { format: SampleOutputFormat::Binary, path: "same.bin".into() }],
+            ..Default::default()
+        };
+        let options =
+            SampleOptions { check: Some("unused.jsonl".into()), judge: Some("same.bin".into()), ..Default::default() };
+        assert!(SampleSession::new(&options, Some(&outputs)).err().unwrap().contains("judge 输出不得覆盖样本输出"));
+    }
+
+    #[test]
     fn samples_options_validate_dependencies_and_limits() {
         assert!(SampleOptions::default().validate().is_ok());
         assert!(SampleOptions { limit: Some(10), ..Default::default() }.validate().is_err());
-        assert!(SampleOptions { check: Some("samples.jsonl".into()), limit: Some(0), report: None }
+        assert!(SampleOptions { check: Some("samples.jsonl".into()), limit: Some(0), report: None, judge: None }
             .validate()
             .is_err());
         assert!(SampleOptions {
             check: Some("samples.jsonl".into()),
             limit: Some(10),
-            report: Some("samples.jsonl".into())
+            report: Some("samples.jsonl".into()),
+            judge: None
         }
         .validate()
         .is_err());
         assert!(SampleOptions {
             check: Some("samples.jsonl".into()),
             limit: Some(10),
-            report: Some("report.json".into())
+            report: Some("report.json".into()),
+            judge: None
         }
         .validate()
         .is_ok());

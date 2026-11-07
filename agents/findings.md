@@ -463,3 +463,8 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 新版 SMT 在入口显式配置策略；枚举的固定种子应复用同一已配置策略，执行器和预测器不能另行配置 Qfaufbv。单独运行测试时也须显式初始化，不能依赖其他测试先运行。
 - 混合位串作为内存地址时，区域重试必须先通过 `replace_mixed_bits` 得到完整地址的符号表达式，不能把某个拼接片段当作整个地址计算区域边界；其他消费者继续沿用各自原有操作数协议。
 - 固定 ecfg3 的 Sv39 LOAD 新旧均728条；对方 `280ef32` 加入 `fcsr` 后，完整 samples v1 增加前态、后态、展示三个字段。其余原始字节一致，但完整文件 SHA 不同。原始 `4d085b14` 与合并版还均复现 MRET 在 qfaufbv 下译码 Poison、default 下4条的行为。证据与验收边界见 [合流状态](enum_on_memory_merge/status.md)。
+
+## judge 与 J1 共用前态绑定（2026-11-07）
+
+- `samples.rs` 的 `bind()` 只绑定前态寄存器、活动读取与 `pre_memory`，并检查可满足性；输入期望由原 `check()` 独立核对。judge 在事务中使用同一模型具体化输出，回滚后再以完整生成样本调用 `check()`，复用 J1 的后态取反检查。
+- 规范守卫向量按 `guard_order` 的父链前序输出；非活动守卫恒记 false。唯一性反例只包含当前活动守卫的取反析取；比较全部裸守卫会被未执行分支中的自由读值误导。DFS 与 judge 共用归一化函数，相关红绿测试覆盖了此边界。详情见 [judge 说明](path_merge_call_support/judge-mode.md)。

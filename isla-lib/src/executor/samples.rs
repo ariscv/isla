@@ -357,6 +357,111 @@ impl<B: BV> SamplePath<B> {
         })
     }
 
+    /// 在调用方的事务中绑定前态；与 J1 共用完全相同的读取绑定和可满足性检查。
+    fn bind(&self, solver: &mut Solver<B>, shared: &SharedState<B>, sample: &Sample) -> Result<bool, ExecError> {
+        for (name, value) in &sample.pre_registers {
+            let expr = equal(self.pre.get(name).expect("路径缺少样本前置输入"), value, shared, solver)?;
+            match expr {
+                Exp::Bool(true) => (),
+                Exp::Bool(false) => return Ok(false),
+                expr => solver.assert(expr),
+            }
+        }
+        let accesses = self.accesses();
+        for (address, value, commit, read) in &accesses {
+            if !read {
+                continue;
+            }
+            let condition = sample.pre_memory.iter().filter_map(|cell| cell.value.map(|byte| (cell, byte))).fold(
+                Exp::Bool(false),
+                |condition, (cell, byte)| {
+                    assert_eq!(cell.bytes, 1, "内部内存单元必须按字节规范化");
+                    Exp::Or(
+                        Box::new(condition),
+                        Box::new(Exp::And(
+                            Box::new(Exp::Eq(
+                                Box::new(address.clone()),
+                                Box::new(Exp::Bits64(B64::new(cell.address, 64))),
+                            )),
+                            Box::new(Exp::Eq(Box::new(value.clone()), Box::new(Exp::Bits64(B64::new(byte as u64, 8))))),
+                        )),
+                    )
+                },
+            );
+            solver.assert(Exp::Or(Box::new(Exp::Not(Box::new(commit.clone()))), Box::new(condition)));
+        }
+        if !sat(solver)? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    pub fn judge(
+        &self,
+        solver: &mut Solver<B>,
+        shared: &SharedState<B>,
+        input: &Sample,
+        records: &[super::RegionMergeRecord<B>],
+        signature: u64,
+        mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
+    ) -> Result<Option<JudgedSample>, ExecError> {
+        for name in self.pre.keys() {
+            if !input.pre_registers.contains_key(name) {
+                return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
+            }
+        }
+        assert_eq!(solver.transaction_depth(), 0, "judge 必须在路径结束后运行");
+        let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
+        let outcome = (|| {
+            if !self.bind(solver, shared, input)? {
+                return Ok(None);
+            }
+            let order = super::merge_record::guard_order(records);
+            let mut model = Model::new(solver);
+            let mode = if records.is_empty() { "fork" } else { "merge" };
+            let mut sample = self.materialize(&mut model, shared, mode, signature, None)?;
+            sample.sample_id = input.sample_id;
+            let guards = super::merge_record::model_guards(&mut model, records, &order)?;
+            consume(&mut sample, &mut model)?;
+            drop(model);
+            match solver.check_sat_with(&guards.different, SourceLoc::unknown()) {
+                SmtResult::Unsat => (),
+                SmtResult::Sat => {
+                    return Err(ExecError::Type("类不唯一：前态未确定活动守卫".into(), SourceLoc::unknown()))
+                }
+                SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+                SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+            }
+            Ok(Some(JudgedSample {
+                schema_version: 1,
+                sample_id: input.sample_id,
+                path_signature: signature,
+                guard_order: order.iter().map(|index| records[*index].record_id).collect(),
+                guard_vector: guards.values.iter().map(|value| if *value { '1' } else { '0' }).collect(),
+                guard_assignment: order
+                    .iter()
+                    .zip(&guards.values)
+                    .map(|(index, value)| (records[*index].record_id.to_string(), *value))
+                    .collect(),
+                guard_unique: true,
+                post_unique: true,
+                sample,
+            }))
+        })();
+        solver.rollback_transaction(tx);
+        let judged = outcome?;
+        if let Some(judged) = &judged {
+            match self.check(solver, shared, &judged.sample)? {
+                Some(true) => (),
+                Some(false) => {
+                    return Err(ExecError::Type("后态不唯一：同一前态存在不同结果或后态".into(), SourceLoc::unknown()))
+                }
+                None => panic!("judge 具体化的样本必须被原路径接纳"),
+            }
+        }
+        Ok(judged)
+    }
+
     pub fn check(
         &self,
         solver: &mut Solver<B>,
@@ -366,43 +471,10 @@ impl<B: BV> SamplePath<B> {
         assert_eq!(solver.transaction_depth(), 0, "成员检查必须在路径结束后运行");
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let outcome = (|| {
-            for (name, value) in &sample.pre_registers {
-                let expr = equal(self.pre.get(name).expect("路径缺少样本前置输入"), value, shared, solver)?;
-                match expr {
-                    Exp::Bool(true) => (),
-                    Exp::Bool(false) => return Ok(None),
-                    expr => solver.assert(expr),
-                }
-            }
-            let accesses = self.accesses();
-            for (address, value, commit, read) in &accesses {
-                if !read {
-                    continue;
-                }
-                let condition = sample.pre_memory.iter().filter_map(|cell| cell.value.map(|byte| (cell, byte))).fold(
-                    Exp::Bool(false),
-                    |condition, (cell, byte)| {
-                        assert_eq!(cell.bytes, 1, "内部内存单元必须按字节规范化");
-                        Exp::Or(
-                            Box::new(condition),
-                            Box::new(Exp::And(
-                                Box::new(Exp::Eq(
-                                    Box::new(address.clone()),
-                                    Box::new(Exp::Bits64(B64::new(cell.address, 64))),
-                                )),
-                                Box::new(Exp::Eq(
-                                    Box::new(value.clone()),
-                                    Box::new(Exp::Bits64(B64::new(byte as u64, 8))),
-                                )),
-                            )),
-                        )
-                    },
-                );
-                solver.assert(Exp::Or(Box::new(Exp::Not(Box::new(commit.clone()))), Box::new(condition)));
-            }
-            if !sat(solver)? {
+            if !self.bind(solver, shared, sample)? {
                 return Ok(None);
             }
+            let accesses = self.accesses();
             let mut checks = Vec::new();
             checks.push(equal(&self.result, &sample.result, shared, solver)?);
             for (name, value) in &sample.post_registers {
@@ -512,6 +584,20 @@ impl<B: BV> SamplePath<B> {
     }
 }
 
+/// 每个（输入样本，接纳路径）一行；类号由使用方按规范守卫向量反查。
+#[derive(Serialize)]
+pub struct JudgedSample {
+    pub schema_version: u32,
+    pub sample_id: u64,
+    pub path_signature: u64,
+    pub guard_order: Vec<usize>,
+    pub guard_vector: String,
+    pub guard_assignment: BTreeMap<String, bool>,
+    pub guard_unique: bool,
+    pub post_unique: bool,
+    pub sample: Sample,
+}
+
 pub struct SampleWriter {
     path: std::path::PathBuf,
     file: Mutex<(std::fs::File, u64)>,
@@ -571,10 +657,21 @@ pub struct SampleChecker {
     pub samples: Vec<Sample>,
     counts: Mutex<Vec<(usize, usize, usize)>>,
     inconsistent: Mutex<Vec<(u64, u64)>>,
+    judge_output: Option<Mutex<std::fs::File>>,
 }
 impl SampleChecker {
     pub fn new(samples: Vec<Sample>) -> Self {
-        Self { counts: Mutex::new(vec![(0, 0, 0); samples.len()]), samples, inconsistent: Mutex::new(Vec::new()) }
+        Self {
+            counts: Mutex::new(vec![(0, 0, 0); samples.len()]),
+            samples,
+            inconsistent: Mutex::new(Vec::new()),
+            judge_output: None,
+        }
+    }
+    pub fn with_judge_output(mut self, path: &std::path::Path) -> Result<Self, String> {
+        self.judge_output =
+            Some(Mutex::new(std::fs::File::create(path).map_err(|error| format!("创建 judge 输出失败：{error}"))?));
+        Ok(self)
     }
     pub fn load(path: &std::path::Path, limit: Option<usize>) -> Result<Self, String> {
         let file = std::fs::File::open(path).map_err(|error| format!("读取样本失败：{error}"))?;
@@ -606,8 +703,35 @@ impl SampleChecker {
         shared: &SharedState<B>,
         signature: u64,
     ) -> Result<(), ExecError> {
+        assert!(self.judge_output.is_none(), "judge 输出必须提供合并记录和 ISA 状态回调");
+        self.check_path_with_judge(path, solver, shared, signature, &[], |_, _| Ok(()))
+    }
+    pub fn check_path_with_judge<B: BV>(
+        &self,
+        path: &SamplePath<B>,
+        solver: &mut Solver<B>,
+        shared: &SharedState<B>,
+        signature: u64,
+        records: &[super::RegionMergeRecord<B>],
+        mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
+    ) -> Result<(), ExecError> {
         for (index, sample) in self.samples.iter().enumerate() {
+            if self.judge_output.is_some() {
+                for name in path.pre.keys() {
+                    if !sample.pre_registers.contains_key(name) {
+                        return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
+                    }
+                }
+            }
             if let Some(consistent) = path.check(solver, shared, sample)? {
+                if let Some(output) = &self.judge_output {
+                    let judged = path
+                        .judge(solver, shared, sample, records, signature, &mut consume)?
+                        .expect("J1 接纳的输入必须可被 judge 接纳");
+                    let mut output = output.lock().unwrap();
+                    serde_json::to_writer(&mut *output, &judged).expect("judge 输出序列化失败");
+                    output.write_all(b"\n").expect("写入 judge 输出失败");
+                }
                 let mut counts = self.counts.lock().unwrap();
                 counts[index].0 += 1;
                 if consistent {
@@ -671,6 +795,132 @@ mod tests {
         std::fs::remove_file(file).unwrap();
     }
 
+    fn judge_record(id: usize, condition: Sym) -> super::super::RegionMergeRecord<B64> {
+        super::super::RegionMergeRecord {
+            record_id: id,
+            parent_record: None,
+            arm: "root",
+            function: crate::ir::TOP_LEVEL_LET,
+            branch_pc: 0,
+            join: crate::ir::regions::RegionPoint::FunctionExit,
+            condition,
+            source_loc: SourceLoc::unknown(),
+            depth: 1,
+            dead: false,
+            value_symbols: Default::default(),
+            input_symbols: Default::default(),
+            single_arm_reads: Vec::new(),
+            memory_reads: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn samples_judge_distinguishes_classes_and_preserves_j1() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let path = SamplePath {
+            pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
+            post: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
+            result: Val::Symbolic(input),
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        assert!(sat(&mut solver).unwrap());
+        let mut sample = path.materialize(&mut Model::new(&mut solver), &shared, "merge", 7, Some(99)).unwrap();
+        let records = vec![judge_record(12, input)];
+        let mut vectors = Vec::new();
+        for value in [false, true] {
+            sample.pre_registers.insert("x".into(), json!({"bool":value}));
+            sample.post_registers.insert("x".into(), json!({"bool":value}));
+            sample.result = json!({"bool":value});
+            assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
+            let before = solver.trace().to_vec().len();
+            let judged = path
+                .judge(&mut solver, &shared, &sample, &records, 8, |sample, _| {
+                    sample.isa_state.insert("callback".into(), "ok".into());
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(judged.guard_assignment["12"], value);
+            assert_eq!(judged.guard_order, vec![12]);
+            assert!(judged.guard_unique && judged.post_unique);
+            assert_eq!(judged.sample.class_id, None);
+            assert_eq!(judged.sample.path_signature, 8);
+            assert_eq!(judged.sample.isa_state["callback"], "ok");
+            assert_eq!(path.check(&mut solver, &shared, &judged.sample).unwrap(), Some(true));
+            assert_eq!(solver.transaction_depth(), 0);
+            assert_eq!(solver.trace().to_vec().len(), before);
+            let mut wrong = sample.clone();
+            wrong.result = json!({"bool":!value});
+            assert_eq!(path.check(&mut solver, &shared, &wrong).unwrap(), Some(false));
+            vectors.push(judged.guard_vector);
+        }
+        assert_eq!(vectors, vec!["0", "1"]);
+    }
+
+    #[test]
+    fn samples_judge_rejects_free_active_guard_but_ignores_inactive_guard() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let root = solver.define_const(Exp::Bool(false), SourceLoc::unknown());
+        let free = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let path = SamplePath {
+            pre: BTreeMap::new(),
+            post: BTreeMap::new(),
+            result: Val::Unit,
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        assert!(sat(&mut solver).unwrap());
+        let sample = path.materialize(&mut Model::new(&mut solver), &shared, "merge", 1, None).unwrap();
+        let error =
+            path.judge(&mut solver, &shared, &sample, &[judge_record(12, free)], 1, |_, _| Ok(())).err().unwrap();
+        assert!(error.to_string().contains("类不唯一"));
+        assert_eq!(solver.transaction_depth(), 0);
+        let mut child = judge_record(13, free);
+        child.parent_record = Some(12);
+        child.arm = "then";
+        // 提交顺序子在前，输出仍按父链顺序，非活动自由守卫不能导致误报。
+        let judged = path
+            .judge(&mut solver, &shared, &sample, &[child, judge_record(12, root)], 1, |_, _| Ok(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(judged.guard_order, vec![12, 13]);
+        assert_eq!(judged.guard_vector, "00");
+    }
+
+    #[test]
+    fn samples_judge_rejects_missing_pre_register_and_nonunique_post() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let mut path = SamplePath {
+            pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
+            post: BTreeMap::new(),
+            result: Val::Symbolic(input),
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        assert!(sat(&mut solver).unwrap());
+        let mut sample = path.materialize(&mut Model::new(&mut solver), &shared, "fork", 1, None).unwrap();
+        sample.pre_registers.clear();
+        let error = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).err().unwrap();
+        assert!(error.to_string().contains("缺少前态寄存器：x"));
+        assert_eq!(solver.transaction_depth(), 0);
+        path.pre.clear();
+        let error = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).err().unwrap();
+        assert!(error.to_string().contains("后态不唯一"));
+        assert_eq!(solver.transaction_depth(), 0);
+    }
+
     #[test]
     fn samples_membership_and_wrong_result() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
@@ -699,11 +949,30 @@ mod tests {
         wrong.sample_id = 2;
         wrong.result = serde_json::json!({"bool":false});
         assert_eq!(path.check(&mut solver, &shared, &wrong).unwrap(), Some(false));
-        let checker = SampleChecker::new(vec![good, bad, wrong]);
+        let checker = SampleChecker::new(vec![good.clone(), bad.clone(), wrong.clone()]);
         checker.check_path(&path, &mut solver, &shared, 9).unwrap();
         let report = checker.report();
         assert_eq!(report["unaccepted_sample_ids"], serde_json::json!([1]));
         assert_eq!(report["inconsistent"].as_array().unwrap().len(), 1);
+        let output = std::env::temp_dir().join(format!("judge-j1-regression-{}.jsonl", std::process::id()));
+        let judged_checker = SampleChecker::new(vec![good, bad, wrong]).with_judge_output(&output).unwrap();
+        judged_checker
+            .check_path_with_judge(&path, &mut solver, &shared, 9, &[judge_record(12, input)], |sample, _| {
+                sample.isa_state.insert("callback".into(), "ok".into());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(judged_checker.report(), report, "开启 judge 不得改变输入期望的 J1 核对结果");
+        let rows: Vec<Value> =
+            std::fs::read_to_string(&output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.len(), 2, "只写接纳输入，不丢弃期望错误的接纳输入");
+        assert_eq!(rows[1]["sample_id"], 2);
+        for row in rows {
+            assert_eq!(row["sample"]["result"], json!({"bool":true}), "后态必须由模型计算");
+            let sample = serde_json::from_value(row["sample"].clone()).unwrap();
+            assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
+        }
+        std::fs::remove_file(output).unwrap();
         assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
     }
     #[test]
