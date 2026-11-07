@@ -120,3 +120,5 @@ edee95d 加只读诊断，指定 target_f7、count、-T 64：Sv39 LOAD 20 路径
 Sv39 条件估算为 16592→308 个守卫域见证、60036→416 次域枚举查询；不是完整状态生成求解量或已测加速。片段域未穷举，骨架＋仅守卫／片段差量不足以保证完整样本；设计要求补齐输入见证并重算动态内存／后态。未实现生产优化或离线展开。最终开启诊断的 isla-lib 全量 709 通过、既有 12 失败、6 忽略；fmt 和指定 release 构建通过。
 
 [详细结果与设计](enumeration.md)、[机器记录](component-results.json)、[实施范围](component-plan.md)。下一步：解释 Sv48 跨组耦合，分别评估在线格式化省略与完整输入组合的正确性／收益。
+
+**2026-11-07 分支对齐（`feat/postprocess-enumeration` = `39d4231`）**：该分支原与根仓库 memory 固定的 Isla `4d085b14`（`feat/memory-consistency`）自 `bdd047bc` 分叉（我方 86 提交、对方 62 提交）。现已把 `4d085b14` 合入（`d824ec2`，9 个文件冲突逐个解决，详见 [enum_on_memory_merge](../enum_on_memory_merge/status.md)），又并入 F16 精确位组合数（`39d4231`）。合并后构建、`cargo test`（271）通过；Sv39 LOAD 仍导出 728 类，但样本字节与合并前不同——仅因对方新增 `fcsr` 寄存器（`isa_state`/`pre_registers`/`post_registers` 各多一项），剥掉 `fcsr` 后 728 个样本逐个相同（2026-11-07 独立复核）。`ecfg3` 的 2836 类基线与所有已导出种子的字节哈希因此在形式上失效，换用新二进制重导时须同时重算 `platform_gen_sha256`；旧结果保留为历史。另：新版 Sv39 LOAD 导出对 5 条既有执行错误以退出码 1 结束（旧版同样 5 条但不传播），依赖退出码的脚本需调整。
