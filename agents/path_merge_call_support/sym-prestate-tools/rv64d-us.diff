@@ -1,0 +1,27 @@
+--- ecfg4b/rv64d.ir
++++ sym-prestate/rv64d-us.ir
+@@ -58566,6 +58566,10 @@
+ }
+ 
+ val zexecute : (%union zinstruction) ->  %union zExecutionResult
++
++val zsym_prestate_execute_body : (%union zinstruction) ->  %union zExecutionResult
++
++val zsym_prestate_assume = "assume" : (%bool) -> %unit
+ 
+ val zassembly_forwards : (%union zinstruction) ->  %string
+ 
+@@ -288184,6 +288188,13 @@
+ }
+ 
+ fn zexecute(zmergez3var) {
++  zsym_prestate_constraint : %unit;
++  zsym_prestate_constraint = zsym_prestate_assume(@or(@eq(zcur_privilege, zUser), @eq(zcur_privilege, zSupervisor)));
++  return = zsym_prestate_execute_body(zmergez3var);
++  end;
++}
++
++fn zsym_prestate_execute_body(zmergez3var) {
+   zz40 : %union zExecutionResult `76 36:0-64:1;
+   jump zmergez3var is zZICBOP goto 110 `76 36:24-36:49;
+   zz41 : %enum zcbop_zzicbop `76 36:31-36:35;

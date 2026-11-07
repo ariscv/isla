@@ -1,0 +1,295 @@
+# E-cfg：保留原始非区域设置；内容区和 PMA 对齐 XS DRAM。
+
+pc = "PC"
+
+zero_announce_exit = true
+
+default_sizeof = 4
+
+in_program_order = ["sail_barrier"]
+
+# 低端设备内容层排除；CLINT 专用回调关闭。
+clint_enabled = false
+
+# 执行限制不再放在通用 ISA 配置中。需要时由命令行
+# --execution-limits-config 加载 configs/workarounds/ 下的独立 TOML。
+
+[[toolchain]]
+name = "macos-riscv64"
+os = "macos"
+arch = "aarch64"
+assembler = "riscv64-elf-as"
+objdump = "riscv64-elf-objdump"
+nm = "riscv64-elf-nm"
+linker = "riscv64-elf-ld"
+
+[[toolchain]]
+name = "default"
+assembler = "riscv64-linux-gnu-as -march=rv64imac"
+objdump = "riscv64-linux-gnu-objdump"
+linker = "riscv64-linux-gnu-ld"
+nm = "riscv64-linux-gnu-nm"
+
+# Currently not used for RISC-V
+[mmu]
+page_table_base = "0x300000"
+page_size = "4096"
+s2_page_table_base = "0x300000"
+s2_page_size = "4096"
+
+[threads]
+base = "0x80100000"
+top = "0x80300000"
+stride = "0x10000"
+
+[symbolic_addrs]
+base = "0x80310000"
+top = "0x80410000"
+stride = "0x10"
+
+[registers]
+
+[registers.defaults]
+cur_privilege = "Supervisor"
+"__isla_vector_gpr" = true
+"__isla_vector_vpr" = true
+"__isla_vector_fpr" = true
+"__isla_use_extra_ops" = true
+satp = "0x0000000000000000"
+misa = "{ bits = 0x800000000034112f }"
+mcountinhibit = " { bits = 0x00000000 }"
+mcyclecfg = "{ bits = 0x0000000000000000 }"
+minstretcfg = "{ bits = 0x0000000000000000 }"
+mtimecmp = "0x0000000000000000"
+stimecmp = "0x0000000000000000"
+__isla_always_aligned = "true"
+# W14（②）：PMP 关闭态钉死。IR 中 PMP 是族寄存器（rv64d.ir）：
+#   register zpmpcfg_n  : %fvec(64, %struct zPmpcfg_ent)   （zbits: %bv8）
+#   register zpmpaddr_n : %fvec(64, %bv64)
+# 未给默认值时二者在 solve-state 初始状态为符号变量，pmpCheck 可走"PMP 拒绝"
+# 分支产出图内假 AccessFault（W13 c015/c030，green 全量 107/2479 同因）。
+# 注意：不能全部钉 A=OFF——IR 里 let sys_pmp_count = 16（config_primop 的
+# sys_pmp_count=0 是死配置，它是 let 不是 primop），pmpControl 循环结构性
+# 生效，全 OFF 空匹配后 U/S 态 fallthrough 必产 AccessFault（pmp_control.sail
+# 循环尾部 priv == Machine ? None : Some(AccessFault)）。故钉 NAPOT-全1-RWX
+# （cfg 字节 0x1f = L0|A=11|RWX，addr 全 1 → entry0 匹配全地址空间），与 emu
+# 重放侧（pmpaddr0=-1/pmpcfg0=0x1f）语义一致，pmpCheck 恒 None。
+"pmpcfg_n" = "[ { bits = 0x1f } ; 64 ]"
+"pmpaddr_n" = "[ 0xffffffffffffffff ; 64 ]"
+
+[const_primops]
+get_config_print_reg = false
+get_config_print_instr = false
+get_config_print_platform = false
+get_config_print_mem = false
+sys_enable_fdext = false
+sys_enable_zfinx = false
+sys_enable_rvc = true
+sys_enable_next = false
+sys_enable_vext = true
+sys_enable_writable_fiom = true
+sys_enable_writable_misa = true
+sys_enable_bext = false
+sys_enable_experimental_extensions = false
+sys_pmp_count = "0 : %i64"
+plat_enable_pmp = false
+plat_enable_dirty_update = false
+plat_enable_misaligned_access = false
+plat_mtval_has_illegal_inst_bits = false
+plat_insns_per_tick = 10
+plat_ram_base = "0x0000000080000000"
+plat_ram_size = "0x0000000004000000"
+plat_rom_base = "0x0000000000001000"
+plat_rom_size = "0x0000000000000100"
+plat_clint_base = "0x0000000002000000"
+plat_htif_tohost = "0x0000000040001000"
+plat_get_16_random_bits = "undefined : %bv16"
+plat_term_write = "()"
+print_reg = "()"
+print_platform = "()"
+print_instr = "()"
+print_mem_access = "()"
+speculate_conditional = "undefined : %bool"
+match_reservation = "true"
+cancel_reservation = "()"
+load_reservation = "()"
+csr_full_write_callback = "()"
+mem_read_callback = "()"
+xreg_full_write_callback = "()"
+mem_write_callback = "()"
+mem_exception_callback = "()"
+pc_write_callback = "()"
+get_config_rvfi = "false"
+plat_enable_htif = "false"
+get_config_use_abi_names = "false"
+
+[[memory_regions]]
+name = "ram_before_pt"
+base = "0x80100000"
+size = "0x100000"
+region_type = "symbolic"
+
+[[memory_regions]]
+name = "ram_after_pt"
+base = "0x80203000"
+size = "0x7ff7fdfd000"
+region_type = "symbolic"
+
+
+#
+# Page table configuration — pre-populate page tables
+# [page_table_config]
+# mode = "sv39"         # "sv39" or "sv48"
+# preset = "identity"   # "identity", "offset", "protected", "symbolic"
+# base = "0x300000"     # page table physical base address
+# page_size = 4096
+# offset = "0x10000000" # only for "offset" preset
+#
+# Optional: add protected ranges when using the "protected" preset
+# protected_ranges = [
+# #   { base = "0x80000000", size = "0x1000", flags = "rx" },
+# ]
+#
+# PMP (Physical Memory Protection) configuration
+# [pmp]
+# symbolic = false
+#
+# [[pmp.rules]]
+# index = 0
+# mode = "tor"
+# base = "0x80000000"
+# permissions = "rw"
+# locked = false
+#
+# [[pmp.rules]]
+# index = 1
+# mode = "napot"
+# base = "0x80200000"
+# size = "0x200000"
+# permissions = "rwx"
+# locked = true
+
+# === W10（S1）：配置化 PMA 地图（W14 ① 修订尺寸） ===
+# 在 riscv64_difftest_mem_excluded.toml 基础上把模型寄存器 zpma_regions 从
+# IR 固化地图（ROM [0x1000,0x2000) + MMIO [0x02000000,0x04000000) + RAM
+# [0x80000000,0x100000000)）替换为 RAM-only 地图。
+# W10 初版 size=0x10000000（[0x80000000,0x90000000)，源自 difftest csrc 的
+# DRAM 256MB 假设）；W13 实测+源码证伪：借用的 isla-xiangshanv2 emu
+# （@f86f50b83）实际 RAM=[0x80000000,0x80000000000) 8TB——SoC.scala:335
+# memRange、Parameters.scala:568 SimMemSize=8190GB "same as PMA
+# (0x80000000,0x80000000000)"，探针实测 0x90000000..0x1000000000 放行、
+# 0x80000000000 顶界 fault。"DRAM 256MB"结论对该 emu 不适用，地图以
+# SimMemSize/实测为准。W14 起 size 对齐 8TB 顶界。
+# W15 勘误：W13/W14 写的 size=0x7FFF80000000（12 位十六进制）多了一个 F，
+# base+size=0x800000000000=2^47，实际地图成了 [0x80000000,2^47) 128TB；
+# 顶界 0x80000000000=2^43（8TB）对应的 size 是 11 位的 0x7FF80000000
+# （=SimMemSize 8190GiB=2^43-2^31）。W14 观察到的"2^47 fault 而 2^43+
+# 任意偏移放行"非单调异常即此因（当时 top_exact 等探针钉的是 2^47，被
+# 误读为 2^43），模型 range_subset 求值本身无误（W15 全探针手算对表吻合）。
+# PMA 管访问属性；symbolic 内容区覆盖 harness 之后的 DRAM，page_tables 单列。
+[[pma_regions]]
+name = "ram"
+base = "0x80000000"
+size = "0x7FF80000000"
+attr = "ram"
+
+[[memory_regions]]
+name = "page_tables"
+base = "0x80200000"
+size = "0x3000"
+region_type = "symbolic"
+
+# harness 仅在内容层判死，PMA 仍保留完整 DRAM。
+[[memory_regions]]
+name = "harness"
+base = "0x80000000"
+size = "0x100000"
+region_type = "excluded"
+
+# SoC.scala PMAConfigs；设备/DECERR 均不进入重放。
+[[pma_regions]]
+name = "low_rw"
+base = "0x0"
+size = "0x10000000"
+attr = "mmio"
+executable = false
+
+[[memory_regions]]
+name = "low_rw"
+base = "0x0"
+size = "0x10000000"
+region_type = "excluded"
+
+# SoC.scala PMAConfigs；设备/DECERR 均不进入重放。
+[[pma_regions]]
+name = "flash"
+base = "0x10000000"
+size = "0x10000000"
+attr = "mmio"
+executable = true
+
+[[memory_regions]]
+name = "flash"
+base = "0x10000000"
+size = "0x10000000"
+region_type = "excluded"
+
+# SoC.scala PMAConfigs；设备/DECERR 均不进入重放。
+[[pma_regions]]
+name = "mid_rw"
+base = "0x20000000"
+size = "0x18020000"
+attr = "mmio"
+executable = false
+
+[[memory_regions]]
+name = "mid_rw"
+base = "0x20000000"
+size = "0x18020000"
+region_type = "excluded"
+
+# SoC.scala PMAConfigs；设备/DECERR 均不进入重放。
+[[pma_regions]]
+name = "debug"
+base = "0x38020000"
+size = "0x1000"
+attr = "mmio"
+executable = true
+
+[[memory_regions]]
+name = "debug"
+base = "0x38020000"
+size = "0x1000"
+region_type = "excluded"
+
+# SoC.scala PMAConfigs；设备/DECERR 均不进入重放。
+[[pma_regions]]
+name = "upper_rw"
+base = "0x38021000"
+size = "0xfe1000"
+attr = "mmio"
+executable = false
+
+[[memory_regions]]
+name = "upper_rw"
+base = "0x38021000"
+size = "0xfe1000"
+region_type = "excluded"
+
+# SoC.scala PMAConfigs；设备/DECERR 均不进入重放。
+[[pma_regions]]
+name = "high_rw"
+base = "0x3a000000"
+size = "0x46000000"
+attr = "mmio"
+executable = false
+
+[[memory_regions]]
+name = "high_rw"
+base = "0x3a000000"
+size = "0x46000000"
+region_type = "excluded"
+
+[symbolic_registers.mstatus]
+pin_mask = "0xfffffffffff3ffff"
+pin_value = "0x0000000a00000000"
