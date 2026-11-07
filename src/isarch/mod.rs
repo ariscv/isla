@@ -4,6 +4,7 @@ pub mod clause;
 mod encoding;
 pub mod encoding_slices;
 pub mod exec;
+pub mod fuzz;
 pub mod memory_builder;
 pub mod memory_model;
 mod representation;

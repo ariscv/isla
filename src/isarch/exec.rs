@@ -1865,7 +1865,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 ret_val,
                                 memory_events_chronological(solver.trace()).into_iter().cloned().collect(),
                             );
-                            if samples.resident.is_some() {
+                            if samples.resident.is_some() || samples.fuzz.is_some() {
                                 resident_paths.lock().unwrap().push(super::resident::ResidentPath {
                                     checkpoint: checkpoint(&mut solver),
                                     path: sample_path.clone(),
@@ -2618,7 +2618,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .collect();
     }
     let exploration_seconds = exploration_started.elapsed().as_secs_f64();
-    if let Some(checker) = &samples.resident {
+    if let Some(session) = &samples.fuzz {
+        super::fuzz::run(
+            session,
+            resident_paths.into_inner().unwrap(),
+            shared_state,
+            target,
+            num_threads,
+            exploration_seconds,
+        );
+    } else if let Some(checker) = &samples.resident {
         super::resident::run(
             resident_paths.into_inner().unwrap(),
             checker,

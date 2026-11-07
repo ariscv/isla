@@ -420,6 +420,7 @@ dependencies = [
  "libc",
  "pretty",
  "rand",
+ "rand_chacha",
  "serde",
  "serde-saphyr",
  "serde_json",

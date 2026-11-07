@@ -290,3 +290,18 @@ isarch list-instructions 实际输出
 2. **actual ⊆ expected 语义**：expected_data 来自 sail-riscv 的笛卡尔积解析，是助记符的上界；CLI 实际输出经 IR 合法性过滤是子集，因此验证只检查实际输出不超出预期范围
 3. **zencode 解码**：`list_instructions` 输出时对 clause 名做 `zencode::decode`，使输出与 sail-riscv 源码中的原始名称一致（如 `ADDIW` 而非 `zADDIW`）
 4. **按扩展目录组织**：expected_data 按 sail-riscv 的扩展目录分模块，便于增量更新和 review
+
+### `fuzz`
+
+与 `solve-state` 共用全部探索参数、指令与前态设置。每个进程针对一个场景，先用当前模型完整认证 corpus，再用常驻快档判定 mutant。
+
+```sh
+isarch [原 J1 探索参数] \
+  --fuzz-mode judge-only --fuzz-scenario <场景配置id> \
+  --fuzz-corpus <samples.jsonl> --fuzz-inputs <mutants.jsonl> \
+  --fuzz-output <绝对路径的新目录> fuzz --clause <指令>
+```
+
+回放 P1b 使用 `--fuzz-mode replay-log --fuzz-mutations <mutations.json>`；原始输入从同目录 `judge-batches.json` 定位，也可用 `--fuzz-inputs` 显式指定。`--fuzz-seed` 指定随机数初值（默认 0），`--fuzz-batch-size` 指定批量大小（默认 256）。`campaign` 预留但尚未实现，本阶段不接 emu。
+
+输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。

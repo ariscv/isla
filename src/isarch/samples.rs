@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct SampleOptions {
+    pub fuzz: Option<super::fuzz::Options>,
     pub check: Option<PathBuf>,
     pub limit: Option<usize>,
     pub report: Option<PathBuf>,
@@ -58,6 +59,7 @@ impl SampleOptions {
 }
 
 pub struct SampleSession {
+    pub fuzz: Option<super::fuzz::Session>,
     pub writer: Option<SampleOutputs>,
     pub checker: Option<SampleChecker>,
     pub resident: Option<SampleChecker>,
@@ -117,6 +119,7 @@ impl SampleSession {
             None => SampleOutputs::open(&configured),
         });
         Ok(Self {
+            fuzz: options.fuzz.as_ref().map(super::fuzz::Session::new).transpose()?,
             writer,
             checker,
             resident,
@@ -125,7 +128,7 @@ impl SampleSession {
         })
     }
     pub fn enabled(&self) -> bool {
-        self.writer.is_some() || self.checker.is_some() || self.resident.is_some()
+        self.fuzz.is_some() || self.writer.is_some() || self.checker.is_some() || self.resident.is_some()
     }
     pub fn finish(&self, options: &SampleOptions, completed: bool) {
         if let Some(writer) = &self.writer {

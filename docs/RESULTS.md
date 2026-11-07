@@ -237,3 +237,8 @@ Sv39 STORE 同一新 IR／config-xs、380 个 corpus entry＋1000 个 mutant＋�
 快档对当前路径一次性证明守卫、后态及访存足迹由输入决定；本场景 26/26 通过。静态条件不足调用完整 judge，仍扫描全部路径，未启用接纳即停。格式、release 构建、1115 项工作区测试（0 失败、6 项既有忽略）、64 线程两档冒烟和 Make MRET 4 条用例通过。首轮全量五个新增测试的进程级策略冲突仅修测试初始化后复验通过；旧 1109 项无退化。
 
 保留四批原始退出 1、partial／errors=5 和零超时／未完成／待处理批次；MRET 保留 partial／unfinished=1。没有重做排除域证明，无 Git 写操作、其他工作树改动或哈希门槛。阶段表、适用范围、完整复现命令及原始产物见 [第 1 步记录](../agents/path_merge_call_support/fuzz-step1.md)。
+
+
+## 2026-11-08 fuzz 第 2 步
+
+基线 `cab2d4c` 加本轮改动：正式 `fuzz` 共用 solve-state 探索参数，四场景 2836 个 corpus entry 认证通过、5000 个 mutant 与 P1b 的账本、完整判定、统计及转移零差异；两轮 60 个正式产物逐字节相同。1128 通过、0 失败、6 项既有忽略，Make MRET 4 条与只判定三种负对照通过。保留原始 partial/errors=5/7 和退出1，未接硬件、未做 Git 写操作；完整范围、耗时与命令见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)。

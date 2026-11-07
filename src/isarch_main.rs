@@ -58,7 +58,9 @@ enum Subcommand {
     ListInstructions,
     /// 显示指令执行路径树
     Tree { instruction: String },
-    /// 求解具体 ISA 状态值，支持通过 clause/扩展/指令名筛选
+    /// 复用 solve-state 的探索条件，常驻判定或回放变异记录。
+    Fuzz { clauses: Vec<String>, extensions: Vec<String>, instruction_names: Vec<String>, run_all: bool },
+    /// 求解具体 ISA 状态值，支持通过 clause/扩展/指令名筛选。
     SolveState { clauses: Vec<String>, extensions: Vec<String>, instruction_names: Vec<String>, run_all: bool },
 }
 
@@ -75,12 +77,16 @@ fn parse_subcommand(matches: &getopts::Matches) -> Result<Subcommand, String> {
             }
             Ok(Subcommand::Tree { instruction: matches.free[1].clone() })
         }
-        "solve-state" => {
+        "solve-state" | "fuzz" => {
             let clauses = matches.opt_strs("clause");
             let extensions = matches.opt_strs("extension");
             let instruction_names = matches.opt_strs("instruction-name");
             let run_all = matches.opt_present("all");
-            Ok(Subcommand::SolveState { clauses, extensions, instruction_names, run_all })
+            if matches.free[0] == "fuzz" {
+                Ok(Subcommand::Fuzz { clauses, extensions, instruction_names, run_all })
+            } else {
+                Ok(Subcommand::SolveState { clauses, extensions, instruction_names, run_all })
+            }
         }
         other => Err(format!("未知命令 '{}'", other)),
     }
@@ -92,26 +98,28 @@ fn main() {
     exit(code)
 }
 
-fn print_usage(opts: &getopts::Options) -> ! {
-    let brief = "Usage: isarch [options] <command> [args]\n\
-                 Commands:\n\
-                   list-instructions                    List all available instructions\n\
-                   tree <instruction>                   Show execution path tree\n\
-                   solve-state [--clause|--extension|--instruction-name|--all]\n\
-                                                        Solve for concrete ISA state values\n\
-                 \n\
-                 solve-state filters:\n\
-                   --clause <name>                      Specify clause(s) to execute (repeatable)\n\
-                   --extension <ext>                    Specify extension (i, m, c, etc.) (repeatable)\n\
-                   --instruction-name <name>            Specify assembly instruction name (repeatable)\n\
-                   --all                                Execute all clauses\n\
-                 \n\
-                 Options:\n";
+fn print_usage(opts: &getopts::Options, code: i32) -> ! {
+    let brief = "用法：isarch [选项] <子命令> [参数]\n\
+                 子命令：\n\
+                   list-instructions   列出可用指令\n\
+                   tree <instruction>  显示指令路径树\n\
+                   solve-state         求解具体 ISA 状态\n\
+                   fuzz                常驻判定与变异记录回放\n\
+                 solve-state / fuzz 共用筛选参数：\n\
+                   --clause <name>             指定 clause，可重复\n\
+                   --extension <ext>           指定扩展，可重复\n\
+                   --instruction-name <name>   指定汇编指令名，可重复\n\
+                   --all                       执行全部 clause\n\
+                 选项：\n";
+    eprintln!("fuzz 与 solve-state 共用全部探索参数，必须保留原 J1 的 IR、配置、指令和前态。");
+    eprintln!("用法：isarch [探索参数] --fuzz-mode judge-only --fuzz-scenario ID --fuzz-corpus samples.jsonl --fuzz-inputs mutants.jsonl --fuzz-output /绝对路径/新目录 fuzz --clause STORE");
+    eprintln!("回放：将模式改为 replay-log，指定 --fuzz-mutations mutations.json；原始输入由同目录 judge-batches.json 定位，也可指定 --fuzz-inputs。");
+    eprintln!("第 0 步认证 corpus，mutant 使用快档。本阶段不接 emu，campaign 尚未实现。");
     // M0 原型参数参与解析，但不进入公共帮助。
     for line in opts.usage(brief).lines().filter(|line| !line.contains("--judge-resident")) {
         eprintln!("{line}");
     }
-    exit(1)
+    exit(code)
 }
 
 /* fn cmd_list_instructions<B: isla_lib::bitvector::BV>(
@@ -433,6 +441,14 @@ fn isla_main() -> i32 {
     opts.optopt("", "check-samples-limit", "只检查前 N 个样本（正整数）", "<N>");
     opts.optopt("", "check-samples-report", "样本检查报告 JSON 文件；同时输出 stderr", "<path>");
     opts.optopt("", "check-samples-judge", "输出接纳路径、规范守卫向量和唯一后态 JSON Lines", "<path>");
+    opts.optopt("", "fuzz-mode", "fuzz 模式：judge-only、replay-log；campaign 预留", "<mode>");
+    opts.optopt("", "fuzz-scenario", "场景配置 id，须区分不同 IR、配置、指令和前态语义", "<id>");
+    opts.optopt("", "fuzz-corpus", "需要当前模型重新认证的 corpus（samples v1）", "<samples.jsonl>");
+    opts.optopt("", "fuzz-inputs", "mutant 输入（samples v1）；回放时可由 judge-batches.json 定位", "<mutants.jsonl>");
+    opts.optopt("", "fuzz-mutations", "Python 变异记录；读取父 corpus entry 并逐字节应用改动", "<mutations.json>");
+    opts.optopt("", "fuzz-output", "新建输出目录（绝对路径），输出 samples v1 / judged v1", "<directory>");
+    opts.optopt("", "fuzz-seed", "随机数初值，每个 mutant 按场景与编号派生独立随机流，默认 0", "<u64>");
+    opts.optopt("", "fuzz-batch-size", "批量大小，整批完成后更新调度，默认 256", "<number>");
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
     opts.optflag("", "judge-resident-fast", "");
@@ -449,6 +465,9 @@ fn isla_main() -> i32 {
     opts.optflag("", "btrace", "输出静态分支清单和实际条件分支轨迹");
     opts.optopt("", "trace-output", "ftrace/btrace 的输出文件；与 --itrace 共用时路径须一致", "<path>");
 
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage(&opts, 0);
+    }
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
     let trace_options = match parse_trace_options(&matches) {
@@ -493,17 +512,28 @@ fn isla_main() -> i32 {
         .unwrap_or_else(|| std::path::PathBuf::from("output/timeout-smt"));
 
     if matches.free.is_empty() {
-        print_usage(&opts);
+        print_usage(&opts, 1);
     }
 
     let subcommand = match parse_subcommand(&matches) {
         Ok(cmd) => cmd,
         Err(e) => {
             eprintln!("Error: {}", e);
-            print_usage(&opts);
+            print_usage(&opts, 1);
         }
     };
 
+    let fuzz_options = if matches!(subcommand, Subcommand::Fuzz { .. }) {
+        match isarch::fuzz::Options::parse(&matches) {
+            Ok(options) => Some(options),
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
     let execution_limits_override = if let Some(path) = matches.opt_str("execution-limits-config") {
         match ExecutionLimitsConfig::from_file(&path) {
             Ok(config) => Some(config),
@@ -521,7 +551,7 @@ fn isla_main() -> i32 {
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
-    if matches!(subcommand, Subcommand::SolveState { .. }) {
+    if matches!(subcommand, Subcommand::SolveState { .. } | Subcommand::Fuzz { .. }) {
         // solve-state 必须同时保留符号 assert 的 true/false 两臂。
         if !matches.opt_present("fork-assertions") {
             isla_lib::ir::assertions_to_jumps(&mut arch);
@@ -641,7 +671,8 @@ fn isla_main() -> i32 {
             0
         }
         Subcommand::Tree { .. } => cmd_tree(matches, shared_state, regs, lets, iarch_config, source_path),
-        Subcommand::SolveState { clauses, extensions, instruction_names, run_all } => {
+        Subcommand::SolveState { clauses, extensions, instruction_names, run_all }
+        | Subcommand::Fuzz { clauses, extensions, instruction_names, run_all } => {
             // P2 编码分片：独立 TOML 叠加（[[encoding_slices]] 可与主配置分离维护）
             let mut encoding_slices = isa_config.encoding_slices.clone();
             if let Some(slices_file) = matches.opt_str("encoding-slices-config") {
@@ -694,6 +725,7 @@ fn isla_main() -> i32 {
             }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
             let sample_options = isarch::samples::SampleOptions {
+                fuzz: fuzz_options,
                 check: matches.opt_str("check-samples").map(std::path::PathBuf::from),
                 limit: match matches.opt_str("check-samples-limit").map(|text| text.parse::<usize>()) {
                     Some(Ok(limit)) => Some(limit),
@@ -815,6 +847,20 @@ fn isla_main() -> i32 {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn fuzz_inherits_solve_state_filters() {
+        let args = ["fuzz", "--clause", "STORE", "--extension", "i", "--instruction-name", "sd"];
+        assert_eq!(
+            parse_subcommand(&make_matches(&args)).unwrap(),
+            Subcommand::Fuzz {
+                clauses: vec!["STORE".into()],
+                extensions: vec!["i".into()],
+                instruction_names: vec!["sd".into()],
+                run_all: false
+            }
+        );
+    }
 
     fn make_matches(args: &[&str]) -> getopts::Matches {
         let mut opts = opts::common_opts();

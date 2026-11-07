@@ -1,5 +1,7 @@
 # 议题入口
 
+- [fuzz 第 2 步：正式入口与 P1b 回放](path_merge_call_support/fuzz-step2.md)：四场景 5000 个 mutant 零差异，2836 个 corpus entry 通过认证，60 个产物逐字节稳定，1128 项测试通过。
+
 - [fuzz 第 1 步：耗时与快档](path_merge_call_support/fuzz-step1.md)：2026-11-08 完成；1380 例两档零差异、负对照零接纳；1／32 线程墙钟提速 8.30／65.75 倍，1115 项测试通过。
 
 - [fuzz M0 常驻 judge](path_merge_call_support/fuzz-m0.md)：2026-11-08 完成；32/1 线程下 1380 正例零差异、三个负对照零接纳；恢复语义在本批一致，构建与 1109 项测试通过，整批未显著提速。

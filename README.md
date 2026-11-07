@@ -1,5 +1,7 @@
 # Isla
 
+`isarch fuzz` 支持 corpus 认证、只判定与历史变异记录回放。用法见 [命令说明](specs/isarch-cli.md#fuzz)，完整回放和验收见 [fuzz 第 2 步](agents/path_merge_call_support/fuzz-step2.md)。
+
 ![Ubuntu-20.04](https://github.com/rems-project/isla/actions/workflows/ubuntu_22_04.yml/badge.svg)
 
 Isla is a symbolic execution engine for
