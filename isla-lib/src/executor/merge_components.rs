@@ -5,17 +5,17 @@ use super::*;
 mod glue;
 
 // 自由 BV 按位区分；数组、布尔及函数符号作为不可拆原子。
-type Atom = (u32, Option<u32>);
-type Atoms = std::collections::BTreeSet<Atom>;
+pub(crate) type Atom = (u32, Option<u32>);
+pub(crate) type Atoms = std::collections::BTreeSet<Atom>;
 
-struct Support {
+pub(crate) struct Support {
     definitions: HashMap<Sym, Formula<Sym>>,
     types: HashMap<Sym, smtlib::Ty>,
     cache: HashMap<(Sym, Option<(u32, u32)>), Atoms>,
 }
 
 impl Support {
-    fn new(definitions: HashMap<Sym, Formula<Sym>>, types: HashMap<Sym, smtlib::Ty>) -> Self {
+    pub(crate) fn new(definitions: HashMap<Sym, Formula<Sym>>, types: HashMap<Sym, smtlib::Ty>) -> Self {
         Self { definitions, types, cache: HashMap::new() }
     }
 
@@ -46,7 +46,7 @@ impl Support {
         }
     }
 
-    fn collect(&mut self, exp: &Formula<Sym>, range: Option<(u32, u32)>) -> Atoms {
+    pub(crate) fn collect(&mut self, exp: &Formula<Sym>, range: Option<(u32, u32)>) -> Atoms {
         use Formula::*;
         match exp {
             Var(v) => {

@@ -1,5 +1,7 @@
 # 当前任务
 
+- 2026-11-08 [fuzz 第 3 步](../agents/path_merge_call_support/fuzz-step3.md)：A/B 11400/11400 经认证命中目标、多样性 100%；两场景三初值的覆盖对照、同初值逐字节复验及 DAG 重读完成；1134 项测试通过，普通循环 STORE/LOAD 为 993.1/982.0 秒每千个。未接 emu、未改 Python；后续为 worker 闭环，生成串行是当前瓶颈。
+
 - 2026-11-08 [fuzz 第 2 步](../agents/path_merge_call_support/fuzz-step2.md)：正式子命令、五个 trait、corpus 认证和 P1b 回放完成；四场景 2836 个 corpus entry、5000 个 mutant 与 P1b 零差异，60 个产物重复运行逐字节相同；1128 项测试通过，保留 partial／errors=5/7；未接 emu。 后续为架构第 3 步。
 
 - 2026-11-08 [fuzz 第 1 步](../agents/path_merge_call_support/fuzz-step1.md)：完成耗时拆分、当前路径静态证明、快档与输入队列并行。380 个 corpus entry＋1000 个 mutant 两档在 1／32 线程下逐字段零差异，三个负对照均零接纳；整批纯判定墙钟提速 8.30／65.75 倍，CPU 成本缩减 8.35／5.95 倍，1115 通过／0 失败／6 项既有忽略。仍保留全部路径扫描、条件不足时调用认证档及原 partial／errors=5；后续为架构第 2 步，本轮不扩功能。

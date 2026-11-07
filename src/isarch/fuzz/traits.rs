@@ -10,6 +10,9 @@ pub trait Scheduler {
 
 pub trait Mutator {
     fn mutate(&self, parent: &Sample, record: &Value, rng: &mut ChaCha8Rng) -> Sample;
+    fn try_mutate(&self, parent: &Sample, record: &Value, rng: &mut ChaCha8Rng) -> Option<Sample> {
+        Some(self.mutate(parent, record, rng))
+    }
 }
 
 /// submit 接受整批任务，drain 按编号返回全部结果；后续可接异步 worker 队列。

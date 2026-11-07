@@ -1,7 +1,10 @@
 //! 常驻 fuzz 骨架：一次探索、corpus 认证、确定性批次与 v1 输出。
+mod campaign;
 mod classifier;
 mod corpus;
+mod dag;
 mod io;
+mod mutator;
 mod options;
 mod replay;
 mod report;

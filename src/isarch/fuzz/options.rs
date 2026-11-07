@@ -17,6 +17,9 @@ pub struct Options {
     pub output: PathBuf,
     pub random_seed: u64,
     pub batch_size: usize,
+    pub budget: usize,
+    pub control_percent: usize,
+    pub certify_all: bool,
 }
 impl Options {
     pub fn parse(matches: &getopts::Matches) -> Result<Self, String> {
@@ -26,9 +29,6 @@ impl Options {
             Some("campaign") => Mode::Campaign,
             _ => return Err("--fuzz-mode 必须是 judge-only、replay-log 或 campaign".into()),
         };
-        if matches!(mode, Mode::Campaign) {
-            return Err("campaign 已预留接口，本阶段尚未实现变异算子".into());
-        }
         let required = |name: &str| matches.opt_str(name).ok_or_else(|| format!("fuzz 需要 --{name}"));
         let options = Self {
             mode,
@@ -47,9 +47,29 @@ impl Options {
                 .unwrap_or_else(|| "256".into())
                 .parse()
                 .map_err(|e| format!("批量大小无效：{e}"))?,
+            budget: matches
+                .opt_str("fuzz-budget")
+                .unwrap_or_else(|| "2000".into())
+                .parse()
+                .map_err(|e| format!("预算无效：{e}"))?,
+            control_percent: matches
+                .opt_str("fuzz-control-percent")
+                .unwrap_or_else(|| "5".into())
+                .parse()
+                .map_err(|e| format!("对照比例无效：{e}"))?,
+            certify_all: matches.opt_present("fuzz-certify-all"),
         };
         if options.scenario.is_empty() || options.batch_size == 0 {
             return Err("场景 id 不得为空，批量大小必须大于零".into());
+        }
+        if options.budget == 0 || options.control_percent > 100 {
+            return Err("预算必须大于零，对照百分比必须在 0 到 100 之间".into());
+        }
+        if matches!(options.mode, Mode::Campaign) && options.control_percent > 0 && options.mutations.is_none() {
+            return Err(
+                "campaign 的对照使用 replay-log 记录池，需要 --fuzz-mutations；纯路径引导可设 --fuzz-control-percent 0"
+                    .into(),
+            );
         }
         if matches!(options.mode, Mode::JudgeOnly) && options.inputs.is_none() {
             return Err("judge-only 需要 --fuzz-inputs mutants.jsonl".into());

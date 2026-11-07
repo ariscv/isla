@@ -1,12 +1,12 @@
 //! corpus 的有效性由当前模型重新认证；类号只是兼容输出中的目录名次。
 use super::io::write_json;
 use isla_lib::executor::samples::Sample;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ClassIdentity {
     pub scenario_config_id: String,
     pub path_signature: u64,

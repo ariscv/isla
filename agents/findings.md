@@ -491,3 +491,10 @@ timeout --signal=TERM --kill-after=5s 590s \
 - `fuzz` 与 `solve-state` 共用匹配分支及探索参数，完成路径仍用 `ResidentPath`；直接复用 `SamplePath::judge/classify`，无需第二套判定器。认证与快档在线程内共用一次恢复的求解器。
 - P1b 的变异记录不包含新读取填值与最终读取范围，精确回放还需 `judge-batches.json` 指向的原始 samples v1。历史父编号只作来源，当前 corpus entry 按认证后的路径／规范守卫类映射；不要直接拿旧文件编号索引新 corpus。四场景共 5000 条回放已逐字节核对输入。
 - 规范守卫向量是稳定坐标；将 judged 的进程内编号换为向量下标并同步 assignment，可保持 v1 结构及跨进程字节稳定。本次四场景两轮共 60 个产物逐字节相同；详细范围与限制见 [第 2 步](path_merge_call_support/fuzz-step2.md)。
+
+## 2026-11-08 fuzz 第 3 步的可复用接口
+
+- `executor::merge_record` 已有 `guard_order`、`context`、`model_guards`；约束使用父链活动条件与原守卫的合取，读取规范向量复用打包接口。不要把非活动守卫的原始值当作类身份。
+- 枚举器的 `Support::collect` 可按位展开 `DefineConst`，并保守处理未证明可逐位传播的运算；路径引导变异直接复用它，沿断言扩展相关输入位。已调整可见性，没有复制依赖算法。
+- `SamplePath::materialize` 在同一模型中重算活动读取、动态地址、前态字节及后态。PTE 指向变化后应复用它生成输入，再调用已有 classify/judge，不能直接沿用父 corpus entry 的读取地址或后态。
+- `Trace::to_vec()` 是逆执行顺序，DAG 导出需反向遍历；`write_events_in_context` 可复用原定义输出器及类型推断，保存原始 Def 次序。格式与限制见 [DAG 导出](path_merge_call_support/fuzz-dag-export.md)，实验见 [第 3 步](path_merge_call_support/fuzz-step3.md)。

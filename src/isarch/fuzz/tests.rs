@@ -3,6 +3,32 @@ use rand::RngCore;
 use serde_json::json;
 
 #[test]
+fn campaign_scheduler_rotates_and_balances_class_attempts() {
+    let mut scheduler = super::campaign::ClassScheduler::new(3, 8);
+    assert_eq!(scheduler.next_batch(2), vec![0, 1]);
+    assert_eq!(scheduler.next_batch(2), vec![0, 1]);
+    scheduler.on_batch_end(2);
+    assert_eq!(scheduler.next_batch(4), vec![2, 0, 1, 2]);
+    scheduler.on_batch_end(4);
+    assert_eq!(scheduler.next_batch(4), vec![0, 1]);
+    scheduler.on_batch_end(2);
+    assert!(scheduler.next_batch(1).is_empty());
+}
+
+#[test]
+fn campaign_neighbor_distance_precedes_hit_count_and_excludes_other_dags() {
+    use super::corpus::ClassIdentity;
+    let key = |path, guards: &str| ClassIdentity {
+        scenario_config_id: "场景".into(),
+        path_signature: path,
+        guard_vector: guards.into(),
+    };
+    let parent = key(1, "00");
+    let classes = vec![parent.clone(), key(1, "01"), key(1, "11"), key(2, "01")];
+    assert_eq!(super::campaign::neighbors(&parent, &classes, &[0, 9, 0, 0]), vec![1, 2]);
+}
+
+#[test]
 fn mutant_random_stream_is_independent_of_order() {
     let mut first = random_stream(42, "sv39-store", 7);
     let expected = first.next_u64();
@@ -97,6 +123,9 @@ fn p1b_path_aliases_start_at_one() {
         output: output.clone(),
         random_seed: 0,
         batch_size: 2,
+        budget: 20,
+        control_percent: 0,
+        certify_all: false,
     };
     let record = json!({"sample_id":0,"operator":"M1","parent_path_signature":123,"parent_class_id":0});
     let judged = json!({"path_signature":123,"guard_vector":"0","sample":{"result":{"ctor":"Retire_Success"}}});
@@ -175,6 +204,9 @@ fn mutation_metadata_identifies_current_corpus_entry() {
         output: output.clone(),
         random_seed: 0,
         batch_size: 2,
+        budget: 20,
+        control_percent: 0,
+        certify_all: false,
     };
     let mut record = record;
     record["operator"] = json!("M1");
@@ -211,6 +243,9 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
         output: output.clone(),
         random_seed: 0,
         batch_size: 2,
+        budget: 20,
+        control_percent: 0,
+        certify_all: false,
     };
     let row = json!({"path_signature":123,"guard_vector":"0","sample":{"result":{"ctor":"Retire_Success"}}});
     super::report::write(

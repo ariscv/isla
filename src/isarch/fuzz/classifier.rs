@@ -1,7 +1,7 @@
 //! 从已有检查点恢复一次，认证与快档共用同一批常驻求解器。
 use super::corpus::Directory;
 use super::io::{canonical_coordinates, write_json, write_lines};
-use super::{Executor, LogFeedback, ReplayScheduler, Scheduler, Session};
+use super::{Executor, LogFeedback, Mode, ReplayScheduler, Scheduler, Session};
 use crate::isarch::resident::ResidentPath;
 use crate::isarch::target::Target;
 use isla_lib::bitvector::BV;
@@ -11,8 +11,8 @@ use isla_lib::smt::{Config, Context, Solver};
 use serde_json::{json, Value};
 use std::time::Instant;
 
-type Job = (usize, Sample, bool);
-type Outcome = (usize, Option<Value>);
+pub(super) type Job = (usize, Sample, bool);
+pub(super) type Outcome = (usize, Option<Value>);
 struct ModelExecutor {
     input: crossbeam::channel::Sender<Job>,
     output: crossbeam::channel::Receiver<Outcome>,
@@ -36,7 +36,7 @@ impl Executor for ModelExecutor {
     }
 }
 
-fn classify(
+pub(super) fn classify(
     executor: &mut impl Executor<Input = Job, Output = Outcome>,
     samples: &[Sample],
     certified: bool,
@@ -80,6 +80,7 @@ pub fn run<B: BV>(
         let mut config = Config::new();
         config.set_param_value("model", "true");
         let context = Context::new(config);
+        super::dag::export(&paths, &context, shared, output);
         paths
             .iter()
             .map(|p| {
@@ -155,17 +156,31 @@ pub fn run<B: BV>(
             &output.join("corpus-judged.jsonl"),
             &corpus_rows.iter().map(|r| r.as_ref().unwrap()).collect::<Vec<_>>(),
         );
-        let (samples, records, audit) = super::replay::prepare(options, &session.corpus);
-        write_json(&output.join("input-audit.json"), &audit);
-        write_lines(&output.join("mutants.jsonl"), &samples);
+        let mut feedback = LogFeedback::default();
         let started = Instant::now();
-        let mut judged = classify(&mut executor, &samples, false, options.batch_size);
+        let (samples, records, mut judged, campaign_timing) = if matches!(options.mode, Mode::Campaign) {
+            super::campaign::run(
+                options,
+                &session.corpus,
+                &directory,
+                &paths,
+                shared,
+                target,
+                &mut executor,
+                &mut feedback,
+            )
+        } else {
+            let (samples, records, audit) = super::replay::prepare(options, &session.corpus);
+            write_json(&output.join("input-audit.json"), &audit);
+            let judged = classify(&mut executor, &samples, false, options.batch_size);
+            (samples, records, judged, Value::Null)
+        };
         let judge_seconds = started.elapsed().as_secs_f64();
+        write_lines(&output.join("mutants.jsonl"), &samples);
         for row in judged.iter_mut().flatten() {
             let identity = directory.identity(&options.scenario, row);
             row["sample"]["class_id"] = json!(directory.classes.get(&identity).map(|(class_id, _)| class_id));
         }
-        let mut feedback = LogFeedback::default();
         super::report::write(options, &directory, &samples, &records, &judged, &mut feedback);
         write_lines(&output.join("judged.jsonl"), &judged.iter().flatten().collect::<Vec<_>>());
         write_lines(
@@ -175,7 +190,7 @@ pub fn run<B: BV>(
         write_lines(&output.join("observations.jsonl"), &feedback.rows);
         write_json(
             &output.join("timing.json"),
-            &json!({"threads":threads,"exploration_seconds":exploration_seconds,"index_seconds":index_seconds,"restore_seconds":restore_seconds,"reconfirm_seconds":reconfirm_seconds,"judge_seconds":judge_seconds}),
+            &json!({"threads":threads,"exploration_seconds":exploration_seconds,"index_seconds":index_seconds,"restore_seconds":restore_seconds,"reconfirm_seconds":reconfirm_seconds,"judge_seconds":judge_seconds,"loop_seconds":started.elapsed().as_secs_f64(),"campaign":campaign_timing}),
         );
         eprintln!(
             "[FUZZ_COMPLETE] {}",

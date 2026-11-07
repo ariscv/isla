@@ -104,7 +104,7 @@ fn print_usage(opts: &getopts::Options, code: i32) -> ! {
                    list-instructions   列出可用指令\n\
                    tree <instruction>  显示指令路径树\n\
                    solve-state         求解具体 ISA 状态\n\
-                   fuzz                常驻判定与变异记录回放\n\
+                   fuzz                路径引导变异、常驻判定与变异记录回放\n\
                  solve-state / fuzz 共用筛选参数：\n\
                    --clause <name>             指定 clause，可重复\n\
                    --extension <ext>           指定扩展，可重复\n\
@@ -114,7 +114,10 @@ fn print_usage(opts: &getopts::Options, code: i32) -> ! {
     eprintln!("fuzz 与 solve-state 共用全部探索参数，必须保留原 J1 的 IR、配置、指令和前态。");
     eprintln!("用法：isarch [探索参数] --fuzz-mode judge-only --fuzz-scenario ID --fuzz-corpus samples.jsonl --fuzz-inputs mutants.jsonl --fuzz-output /绝对路径/新目录 fuzz --clause STORE");
     eprintln!("回放：将模式改为 replay-log，指定 --fuzz-mutations mutations.json；原始输入由同目录 judge-batches.json 定位，也可指定 --fuzz-inputs。");
-    eprintln!("第 0 步认证 corpus，mutant 使用快档。本阶段不接 emu，campaign 尚未实现。");
+    eprintln!(
+        "campaign：--fuzz-budget 2000 --fuzz-control-percent 0；形态 A 固定类换取值，形态 B 选择同一路径的邻近类。"
+    );
+    eprintln!("第 0 步认证 corpus，mutant 使用快档；--fuzz-certify-all 供认证对拍。探索后导出 dag/，本阶段不接 emu。");
     // M0 原型参数参与解析，但不进入公共帮助。
     for line in opts.usage(brief).lines().filter(|line| !line.contains("--judge-resident")) {
         eprintln!("{line}");
@@ -441,7 +444,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "check-samples-limit", "只检查前 N 个样本（正整数）", "<N>");
     opts.optopt("", "check-samples-report", "样本检查报告 JSON 文件；同时输出 stderr", "<path>");
     opts.optopt("", "check-samples-judge", "输出接纳路径、规范守卫向量和唯一后态 JSON Lines", "<path>");
-    opts.optopt("", "fuzz-mode", "fuzz 模式：judge-only、replay-log；campaign 预留", "<mode>");
+    opts.optopt("", "fuzz-mode", "fuzz 模式：judge-only、replay-log、campaign", "<mode>");
     opts.optopt("", "fuzz-scenario", "场景配置 id，须区分不同 IR、配置、指令和前态语义", "<id>");
     opts.optopt("", "fuzz-corpus", "需要当前模型重新认证的 corpus（samples v1）", "<samples.jsonl>");
     opts.optopt("", "fuzz-inputs", "mutant 输入（samples v1）；回放时可由 judge-batches.json 定位", "<mutants.jsonl>");
@@ -449,6 +452,14 @@ fn isla_main() -> i32 {
     opts.optopt("", "fuzz-output", "新建输出目录（绝对路径），输出 samples v1 / judged v1", "<directory>");
     opts.optopt("", "fuzz-seed", "随机数初值，每个 mutant 按场景与编号派生独立随机流，默认 0", "<u64>");
     opts.optopt("", "fuzz-batch-size", "批量大小，整批完成后更新调度，默认 256", "<number>");
+    opts.optopt("", "fuzz-budget", "campaign 的 mutant 预算，默认 2000", "<number>");
+    opts.optopt(
+        "",
+        "fuzz-control-percent",
+        "campaign 从 replay-log 记录池抽取对照的百分比，默认 5；纯路径引导设 0",
+        "<number>",
+    );
+    opts.optflag("", "fuzz-certify-all", "验收审计：所有接纳的 mutant 再经认证档，与快档逐字段对拍");
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
     opts.optflag("", "judge-resident-fast", "");

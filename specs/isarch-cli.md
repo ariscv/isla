@@ -302,6 +302,10 @@ isarch [原 J1 探索参数] \
   --fuzz-output <绝对路径的新目录> fuzz --clause <指令>
 ```
 
-回放 P1b 使用 `--fuzz-mode replay-log --fuzz-mutations <mutations.json>`；原始输入从同目录 `judge-batches.json` 定位，也可用 `--fuzz-inputs` 显式指定。`--fuzz-seed` 指定随机数初值（默认 0），`--fuzz-batch-size` 指定批量大小（默认 256）。`campaign` 预留但尚未实现，本阶段不接 emu。
+回放 P1b 使用 `--fuzz-mode replay-log --fuzz-mutations <mutations.json>`；原始输入从同目录 `judge-batches.json` 定位，也可用 `--fuzz-inputs` 显式指定。`--fuzz-seed` 指定随机数初值（默认 0），`--fuzz-batch-size` 指定批量大小（默认 256）。本阶段不接 emu。
+
+路径引导使用 `--fuzz-mode campaign --fuzz-budget 2000`。形态 A 固定父类，在活动输入字段的 8 位切片中换满足约束的值；形态 B 在同一条完成路径的规范向量目录中选择距离近、命中少的类，仅放开差异守卫及关联约束涉及的位。默认 5% 对照从 `--fuzz-mutations` 与原始输入构成的 replay-log 记录池抽样，统一在 A/B 之后生成；不提供对照池时显式设 `--fuzz-control-percent 0`。普通 campaign 只对新增类的 corpus 候选做认证；验收使用 `--fuzz-certify-all` 对全部接纳输入做两档逐字段比较。
+
+所有 fuzz 模式都将路径 DAG 写到 `dag/`，重读检查结果写到 `dag-manifest.json`。格式见 [DAG 导出](../agents/path_merge_call_support/fuzz-dag-export.md)，本轮实验与限制见 [第 3 步记录](../agents/path_merge_call_support/fuzz-step3.md)。
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。

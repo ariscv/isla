@@ -5,6 +5,7 @@ mod merge_enumeration;
 use crate::ir::regions::RegionPoint;
 use crate::primop::Effect;
 pub(crate) use merge_enumeration::{context, guard_order, model_guards};
+pub(crate) use merge_enumeration::{Atoms, Support};
 
 static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 

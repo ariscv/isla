@@ -6,6 +6,7 @@ use smtlib::Exp as Formula;
 
 #[path = "merge_components.rs"]
 mod components;
+pub(crate) use components::{Atoms, Support};
 
 #[path = "merge_parallel.rs"]
 mod parallel;

@@ -16,11 +16,18 @@ use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
 
+#[path = "sample_dag.rs"]
+mod dag;
 #[path = "sample_fast.rs"]
 pub mod fast;
 #[cfg(test)]
 #[path = "sample_fast_tests.rs"]
 mod fast_tests;
+#[path = "sample_mutation.rs"]
+pub mod mutation;
+#[cfg(test)]
+#[path = "sample_mutation_tests.rs"]
+mod mutation_tests;
 #[path = "sample_outputs.rs"]
 pub mod outputs;
 #[path = "sample_profile.rs"]
