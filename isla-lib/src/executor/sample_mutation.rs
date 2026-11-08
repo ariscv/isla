@@ -347,6 +347,10 @@ impl<B: BV> PathMutator<B> {
                         masks[i][lo as usize..hi as usize].fill(true);
                         candidates.push((Some(i), masks));
                     }
+                } else if matches!(baseline[i], Exp::Enum(_)) {
+                    let mut masks = self.fields.iter().map(|f| vec![false; f.atoms.len()]).collect::<Vec<_>>();
+                    masks[i][0] = true;
+                    candidates.push((Some(i), masks));
                 }
             }
             for i in (1..candidates.len()).rev() {
@@ -469,7 +473,35 @@ impl<B: BV> PathMutator<B> {
                             condition =
                                 Exp::Var(solver.define_const(conjunction([condition, accepted]), SourceLoc::unknown()));
                         }
-                        _ => panic!("当前变异器只支持位向量及布尔自由字段"),
+                        Exp::Enum(member) => {
+                            // 沿用规范见证的声明成员顺序，再由本 mutant 的随机流打散。
+                            // 每个候选仍须满足原允许集合、目标守卫及已固定字段。
+                            let mut members =
+                                (0..shared.type_info.enums[&member.enum_id.to_name()].len()).collect::<Vec<_>>();
+                            for j in (1..members.len()).rev() {
+                                let k = (random() % (j as u64 + 1)) as usize;
+                                members.swap(j, k);
+                            }
+                            let mut selected = None;
+                            for index in members {
+                                let value =
+                                    Exp::Enum(crate::smt::EnumMember { enum_id: member.enum_id, member: index });
+                                let trial = conjunction([
+                                    condition.clone(),
+                                    Exp::Eq(Box::new(field.expression.clone()), Box::new(value)),
+                                ]);
+                                if query(solver, &trial)? {
+                                    selected = Some(trial);
+                                    break;
+                                }
+                            }
+                            condition =
+                                Exp::Var(solver.define_const(
+                                    selected.expect("可满足枚举必须存在允许的成员"),
+                                    SourceLoc::unknown(),
+                                ));
+                        }
+                        _ => panic!("当前变异器只支持位向量、布尔及枚举自由字段"),
                     }
                 }
             }

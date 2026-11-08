@@ -5,6 +5,62 @@ use crate::smt::{
 };
 
 #[test]
+fn mutation_enum_keeps_allowed_domain_and_selects_deterministically() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut shared = SharedState::empty(crate::ir::Symtab::new());
+    let name = shared.symtab.intern("zPrivilege");
+    let members = ["zUser", "zSupervisor", "zMachine"].map(|n| shared.symtab.intern(n));
+    shared.type_info.enums.insert(name, members.to_vec());
+    for (index, member) in members.iter().enumerate() {
+        shared.type_info.enum_members.insert(*member, (index, members.len(), name));
+    }
+    for neighbor in [false, true] {
+        let run = || {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let id = solver.get_enum(name, members.len());
+            let privilege = solver.declare_const(Ty::Enum(id), SourceLoc::unknown());
+            let machine = crate::smt::EnumMember { enum_id: id, member: 2 };
+            let allowed = Exp::Neq(Box::new(Exp::Var(privilege)), Box::new(Exp::Enum(machine)));
+            solver.assert(allowed.clone());
+            let guard = if neighbor {
+                Exp::Eq(Box::new(Exp::Var(privilege)), Box::new(Exp::Enum(id.first_member())))
+            } else {
+                allowed
+            };
+            let guard = solver.define_const(guard, SourceLoc::unknown());
+            let records = vec![super::tests::judge_record(4, guard)];
+            let path = SamplePath {
+                pre: BTreeMap::from([("cur_privilege".into(), Val::Symbolic(privilege))]),
+                post: BTreeMap::new(),
+                result: Val::Unit,
+                memory: Vec::new(),
+                memory_guards: BTreeMap::new(),
+            };
+            assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+            let mut parent = path.materialize(&mut Model::new(&solver), &shared, "merge", 1, Some(0)).unwrap();
+            parent.pre_registers.insert("cur_privilege".into(), json!({"enum":"User"}));
+            let mut mutator = mutation::PathMutator::new(&path, &solver, &records);
+            let target = if neighbor { "0" } else { "1" };
+            let changed = mutator
+                .generate(&path, &mut solver, &shared, &parent, target, neighbor, &mut || 1)
+                .unwrap()
+                .expect("允许集合中的另一成员必须可生成");
+            assert_eq!(changed.sample.pre_registers["cur_privilege"], json!({"enum":"Supervisor"}));
+            let judged =
+                path.judge(&mut solver, &shared, &changed.sample, &records, 1, |_, _| Ok(())).unwrap().unwrap();
+            assert_eq!(judged.guard_vector, target);
+            assert!(mutator
+                .generate(&path, &mut solver, &shared, &parent, target, neighbor, &mut || 1)
+                .unwrap()
+                .is_none());
+            serde_json::to_value(changed.sample).unwrap()
+        };
+        assert_eq!(run(), run());
+    }
+}
+
+#[test]
 fn mutation_a_blocks_previous_values_and_keeps_the_class() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());

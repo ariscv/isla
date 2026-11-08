@@ -12,11 +12,47 @@ spec.loader.exec_module(worker)
 
 
 class WorkerTests(unittest.TestCase):
+    def test_cancel_marker_only_signals_own_campaign_parent(self):
+        import json
+        import signal
+        import sys
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'fuzz/difftest/input-000000'
+            output.parent.mkdir(parents=True)
+            (output.parent/'CANCEL').touch()
+            command = b'isarch\0--fuzz-output\0'+str(output.parent.parent).encode()+b'\0'
+            arguments = ['paging_worker.py', '--input', '输入', '--profile', '平台', '--lock', '锁',
+                         '--files', '工具', '--observer', '观察器', '--output', str(output)]
+            with patch.object(sys, 'argv', arguments), patch.object(Path, 'read_bytes', return_value=command), \
+                    patch.object(worker.os, 'getppid', return_value=123), patch.object(worker.os, 'kill') as kill, \
+                    patch.object(worker, 'run') as run:
+                with self.assertRaises(InterruptedError):
+                    worker.main()
+                kill.assert_called_once_with(123, signal.SIGTERM)
+                run.assert_not_called()
+            self.assertEqual(json.loads((output/'result.json').read_text())['bucket'], 'worker-error')
+            with patch.object(sys, 'argv', arguments), \
+                    patch.object(Path, 'read_bytes', return_value=b'other\0--fuzz-output\0/other\0'), \
+                    patch.object(worker.os, 'kill') as kill, patch.object(worker, 'run') as run:
+                with self.assertRaises(AssertionError):
+                    worker.main()
+                kill.assert_not_called()
+                run.assert_not_called()
+
+    def test_symbolic_prestate_context_survives_worker_result(self):
+        fuzz = Mock()
+        fuzz.observe_run.return_value = dict(xs_cause=13, nemu_cause=13, isla_consistent_side='both')
+        context = dict(privilege='User', effective_privilege='User', sum=False, mxr=True,
+                       mprv=False, mpp=0)
+        case = dict(expected={'cause': 13}, sample={'sample_id': 7}, prestate_context=context)
+        actual = worker.finish_result(case, dict(agree=True, bucket='agree'), [], '日志', fuzz)
+        self.assertEqual(actual['prestate_context'], context)
+
     def test_three_way_result_calls_existing_narrow_rule(self):
         fuzz = Mock()
         fuzz.observe_run.return_value = dict(xs_cause=7, nemu_cause=15, isla_consistent_side='nemu')
         fuzz.MismatchTable.return_value.record.return_value = dict(filtered=True, known_rule='xs_leaf_ppn_af_over_permission_pf', group_key={'ptes': []})
-        case = dict(expected={'cause': 15}, sample={'sample_id': 4})
+        case = dict(expected={'cause': 15}, sample={'sample_id': 4}, prestate_context={})
         result = dict(agree=False, bucket='xs!=nemu', abort=True, log='difftest.log', elf_sha256='recorded')
         actual = worker.finish_result(case, result, [], '日志', fuzz)
         self.assertEqual((actual['isla_cause'], actual['xs_cause'], actual['nemu_cause']), (15, 7, 15))
@@ -27,14 +63,14 @@ class WorkerTests(unittest.TestCase):
     def test_agreement_requires_all_three_sides(self):
         fuzz = Mock()
         fuzz.observe_run.return_value = dict(xs_cause=0, nemu_cause=0, isla_consistent_side='both')
-        actual = worker.finish_result(dict(expected={'cause': 0}, sample={'sample_id': 1}), dict(agree=True, bucket='agree'), [], '日志', fuzz)
+        actual = worker.finish_result(dict(expected={'cause': 0}, sample={'sample_id': 1}, prestate_context={}), dict(agree=True, bucket='agree'), [], '日志', fuzz)
         self.assertTrue(actual['agree'])
         self.assertEqual(actual['mismatch'], dict(filtered=False, known_rule=None, group_key=None))
         fuzz.MismatchTable.return_value.record.assert_not_called()
 
     def test_timeout_does_not_invent_causes(self):
         fuzz = Mock()
-        actual = worker.finish_result(dict(expected={'cause': 13}, sample={'sample_id': 1}), dict(agree=False, bucket='timeout'), [], '', fuzz)
+        actual = worker.finish_result(dict(expected={'cause': 13}, sample={'sample_id': 1}, prestate_context={}), dict(agree=False, bucket='timeout'), [], '', fuzz)
         self.assertIsNone(actual['xs_cause'])
         self.assertIsNone(actual['nemu_cause'])
         fuzz.observe_run.assert_not_called()

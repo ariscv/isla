@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--scenario', required=True, choices=['sv39-store', 'sv39-load', 'sv48-store', 'sv48-load'])
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--source', type=Path, default=Path('../replay-p0/output'))
+    parser.add_argument('--e2-experiment', type=Path, help='第 6a 步 E2 导出根目录；使用新的场景配置 id')
     parser.add_argument('--budget', type=int, default=300)
     parser.add_argument('--threads', type=int, choices=[1, 32], default=32)
     parser.add_argument('--random-seed', type=int, default=42)
@@ -22,16 +23,27 @@ def main():
     args, extra = parser.parse_known_args()
     root, output, source = Path.cwd(), args.output.resolve(), args.source.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    argv = json.loads((source / 'ecfg4b' / (args.scenario + '-j1') / 'done.json').read_text())['command']
-    argv[0] = str(root / 'target/release/isarch')
-    for flag in ['--check-samples', '--check-samples-report']:
-        index = argv.index(flag)
-        del argv[index:index+2]
+    if args.e2_experiment:
+        from e2_campaign import prepare
+        argv, corpus, mutations = prepare(root, args.e2_experiment.resolve(), source / 'ecfg4b',
+                                         args.scenario, output, args.random_seed)
+        extra += ['--fuzz-inputs', str(output / 'control-inputs.jsonl')]
+        for flag, name in [('profile', 'profile.json'), ('lock', 'profile.lock.json'), ('files', 'files.json')]:
+            extra += ['--difftest-'+flag, str(output / name)]
+        scenario_id = args.scenario+'-e2'
+    else:
+        argv = json.loads((source / 'ecfg4b' / (args.scenario + '-j1') / 'done.json').read_text())['command']
+        argv[0] = str(root / 'target/release/isarch')
+        for flag in ['--check-samples', '--check-samples-report']:
+            index = argv.index(flag)
+            del argv[index:index+2]
+        corpus = source / 'ecfg4b' / args.scenario / 'samples.jsonl'
+        mutations = source / 'fuzz-p1b' / args.scenario / 'mutations.json'
+        scenario_id = args.scenario
     argv[argv.index('solve-state')] = 'fuzz'
     argv[argv.index('-T')+1] = str(args.threads)
-    argv += ['--fuzz-mode', 'campaign', '--fuzz-scenario', args.scenario,
-             '--fuzz-corpus', str(source / 'ecfg4b' / args.scenario / 'samples.jsonl'),
-             '--fuzz-mutations', str(source / 'fuzz-p1b' / args.scenario / 'mutations.json'),
+    argv += ['--fuzz-mode', 'campaign', '--fuzz-scenario', scenario_id,
+             '--fuzz-corpus', str(corpus), '--fuzz-mutations', str(mutations),
              '--fuzz-output', str(output / 'fuzz'), '--fuzz-budget', str(args.budget),
              '--fuzz-seed', str(args.random_seed), '--executor', args.executor]
     if args.certify_all:

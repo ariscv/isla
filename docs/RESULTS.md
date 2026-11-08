@@ -258,3 +258,14 @@ Sv39 STORE 同一新 IR／config-xs、380 个 corpus entry＋1000 个 mutant＋�
 ## 2026-11-08 fuzz 第 2 步
 
 基线 `cab2d4c` 加本轮改动：正式 `fuzz` 共用 solve-state 探索参数，四场景 2836 个 corpus entry 认证通过、5000 个 mutant 与 P1b 的账本、完整判定、统计及转移零差异；两轮 60 个正式产物逐字节相同。1128 通过、0 失败、6 项既有忽略，Make MRET 4 条与只判定三种负对照通过。保留原始 partial/errors=5/7 和退出1，未接硬件、未做 Git 写操作；完整范围、耗时与命令见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)。
+
+
+## 2026-11-08 fuzz 第 7 步：E2 四场景闭环
+
+基线 `19897328` 加本轮修改；复用只读 ecfg4b 原 IR、各场景 E2 配置和泛化重放接口。四场景 5000 个 corpus entry 重新认证通过，初值 1、反馈 none、每场景 1000 个 mutant（950 A/B、50 编码空间对照）、八路 emu：3093 agree、907 条原始 mismatch 全部命中既有 R-XS-001、0 新分歧。3800 个 A/B 的目标命中及同目标类字段/前态唯一比例均 100%，覆盖 128816 个类取值桶、新增 12496 个。
+
+四场景独立模型复跑的 mutants.jsonl、judged.jsonl 全部逐字段、逐字节相同；九个运行目录无所属残留进程。Rust 1149 通过、0 失败、6 既有忽略；Python 外部 142、本树 9 通过；fmt、release 构建、diff 检查和 Make MRET 冒烟通过。保留原 partial/退出 1、Sv39 errors=5/Sv48 errors=7，未重新证明排除域，不宣称全域探索完成。
+
+首次 Sv48 STORE 在共享主机高负载时有 3 个 120 秒超时，取消后另有 16 个未完成；失败原件保留，没有改算通过。原前 8 个输入单独八路回放全部正常结束；随后按相同初值与输入完整重跑 1000 例，64 个对应前态逐字段相同。最终驱动将模型复跑与硬件分阶段串行，没有增加 emu 并发、增加超时、改规则或跳过失败。超时根因未确定。
+
+没有追加初值 42、真 U 指令入口或全量 make solve，没有 Git 写操作。详细四场景表、权限位比例、复现命令和边界见 [第 7 步记录](../agents/path_merge_call_support/fuzz-step7.md)，机器验收为本树 `output/fuzz-step7/acceptance.json`。

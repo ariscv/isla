@@ -519,3 +519,9 @@ timeout --signal=TERM --kill-after=5s 590s \
 - `[symbolic_registers.<name>].allowed` 的解析在 `isla-lib/src/config.rs::get_symbolic_registers`，成员类型核对及集合约束在 `src/isarch/target.rs::Target::apply_symbolic_csrs_to_registers`。它复用 `setup_pre_state` 已建立的符号，并通过 `EnumMember::from_name` 和 `smt_value` 构造成员等式的析取；执行寄存器与输出前态共用同一值。不在 `reg_list` 的声明仍通过已有 `symbolic` 抽象建立。
 - 固定机器字的译码使用独立求解器，不能直接读执行求解器的符号寄存器。`src/isarch/exec.rs::decode_register_bindings` 对枚举允许集合显式取首项作为具体译码上下文，执行时保留完整集合。不能用同名 `registers.defaults` 或 `--prestate` 补译码值，这两种冲突仍报错。需选择能译出目标指令的首项；没有声明集合时沿用既有译码环境。
 - 枚举类型成员必须按寄存器的 `Ty::Enum` 与 `IRTypeInfo.enums` 核对，仅在符号表里找到名字不足以证明它属于该枚举。配置的 `allowed` 与位约束互斥；空集合、重复或成员类型错误均拒绝。
+
+## E2 符号前态闭环接线（2026-11-08）
+
+- 只读 `replay_symbolic_prestate` 已有 `scenario_inputs/scenario_profile/bound_template`，分别选择完整 E2 导出、声明四场景 U/S 与 SUM/MXR 域、拒绝错配模板；worker 继续调用 `paging_replay.platform_case` 即可沿用 MPRV+MPP 入口，无需另写分页或汇编逻辑。
+- E0 的 M1/M2/M5 记录绑定原父类和前态，不能直接拿到 E2 目录回放。应复用 `paging_fuzz.mutate` 从 E2 corpus 重新生成记录，再由当前模型认证。
+- 原 `PathMutator` 的形态 A 仅挑位向量字段，形态 B 放开枚举则直接终止；放开特权枚举前态时需补有限枚举取值选择。枚举成员沿用 `EnumMember` 和 `shared.type_info.enums`，逐个候选做 SAT 查询，才能同时保留允许集合、目标守卫和确定性。实现与验收见 [第 7 步](path_merge_call_support/fuzz-step7.md)。

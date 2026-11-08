@@ -23,6 +23,7 @@ def finish_result(case, result, trace, log, fuzz):
     merged = dict(result, sample_id=case['sample']['sample_id'], isla_cause=case['expected']['cause'],
                   xs_cause=None, nemu_cause=None, isla_consistent_side='unobserved',
                   mismatch=dict(filtered=False, known_rule=None, group_key=None))
+    merged['prestate_context'] = case['prestate_context']
     if result['bucket'] in {'timeout', 'limit', 'framework-abort', 'other-failure'}:
         return merged
     observation = fuzz.observe_run(case, result, trace, log)
@@ -135,6 +136,14 @@ def main():
     args = parser.parse_args()
     assert 0 < args.timeout <= 600
     try:
+        if (args.output.parent / 'CANCEL').exists():
+            # 启动器所在进程环境可能已退出；只通知持有本输出目录的 Rust 父进程。
+            parent = os.getppid()
+            command = Path(f'/proc/{parent}/cmdline').read_bytes().split(b'\0')
+            index = command.index(b'--fuzz-output')
+            assert Path(os.fsdecode(command[index+1])).resolve() == args.output.parent.parent.resolve()
+            os.kill(parent, signal.SIGTERM)
+            raise InterruptedError('本 campaign 已请求取消')
         run(args)
     except BaseException as error:
         # 写取证记录后继续抛错，不把内部错误变成正常重放结果。
