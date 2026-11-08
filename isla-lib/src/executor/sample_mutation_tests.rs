@@ -206,3 +206,98 @@ fn dag_export_keeps_definition_order_guards_and_state_references() {
     assert_eq!(reread["state"]["pre"]["flag"]["symbol"], format!("v{x}"));
     assert_eq!(reread["state"]["post"]["flag"]["symbol"], format!("v{y}"));
 }
+
+#[test]
+fn mutation_ppn_preference_is_soft_and_only_changes_active_leaves() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for neighbor in [false, true] {
+        for required in [false, true] {
+            for enabled in [false, true] {
+                let run = || {
+                    let context = Context::new(Config::new());
+                    let mut solver = Solver::<B64>::new(&context);
+                    let pte = solver.declare_bitvector(64, SourceLoc::unknown());
+                    let data = solver.declare_bitvector(64, SourceLoc::unknown());
+                    let inactive = solver.declare_bitvector(64, SourceLoc::unknown());
+                    let pointer = solver.declare_bitvector(64, SourceLoc::unknown());
+                    // 叶、非叶和未活动读取都依赖守卫；数据读取不依赖守卫。
+                    let leaf = solver.define_const(
+                        Exp::Eq(Box::new(Exp::Extract(3, 0, Box::new(Exp::Var(pte)))), Box::new(bits64(3, 4))),
+                        SourceLoc::unknown(),
+                    );
+                    let nonleaf = solver.define_const(
+                        Exp::Eq(Box::new(Exp::Extract(3, 0, Box::new(Exp::Var(pointer)))), Box::new(bits64(1, 4))),
+                        SourceLoc::unknown(),
+                    );
+                    let unused = solver.define_const(
+                        Exp::Eq(Box::new(Exp::Extract(0, 0, Box::new(Exp::Var(inactive)))), Box::new(bits64(1, 1))),
+                        SourceLoc::unknown(),
+                    );
+                    let overflow = solver.define_const(
+                        Exp::Neq(Box::new(Exp::Extract(53, 46, Box::new(Exp::Var(pte)))), Box::new(bits64(0, 8))),
+                        SourceLoc::unknown(),
+                    );
+                    let mut records = vec![
+                        super::tests::judge_record(0, leaf),
+                        super::tests::judge_record(1, nonleaf),
+                        super::tests::judge_record(2, unused),
+                    ];
+                    if required {
+                        records.push(super::tests::judge_record(3, overflow));
+                    }
+                    let read = |value, address| Event::ReadMem {
+                        value: Val::Symbolic(value),
+                        read_kind: Val::Unit,
+                        address: Val::Bits(B64::new(address, 64)),
+                        bytes: 8,
+                        tag_value: None,
+                        opts: Default::default(),
+                        region: "mem",
+                    };
+                    let path = SamplePath {
+                        pre: BTreeMap::new(),
+                        post: BTreeMap::new(),
+                        result: Val::Unit,
+                        memory: vec![read(pte, 4096), read(data, 8192), read(inactive, 12288), read(pointer, 16384)],
+                        memory_guards: BTreeMap::from([(2, Exp::Bool(false))]),
+                    };
+                    let shared = SharedState::empty(crate::ir::Symtab::new());
+                    let parent_leaf = if neighbor { 9 } else { 3 };
+                    solver.assert(Exp::Eq(Box::new(Exp::Var(data)), Box::new(bits64(0xffffffffffffff03, 64))));
+                    solver.assert(Exp::Eq(Box::new(Exp::Var(pointer)), Box::new(bits64(0xffffffffffffff01, 64))));
+                    solver.assert(Exp::Eq(Box::new(Exp::Var(inactive)), Box::new(bits64((1u64 << 50) | 3, 64))));
+                    let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
+                    solver.assert(Exp::Eq(Box::new(Exp::Var(pte)), Box::new(bits64((1u64 << 50) | parent_leaf, 64))));
+                    // 用事务生成父输入，再恢复原路径。
+                    assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+                    let parent = path.materialize(&mut Model::new(&solver), &shared, "merge", 1, Some(0)).unwrap();
+                    solver.rollback_transaction(tx);
+                    let mut mutator = mutation::PathMutator::new(&path, &solver, &records);
+                    mutator.avoid_known_ppn_overflow = enabled;
+                    let target = if required { "1111" } else { "111" };
+                    let changed = mutator
+                        .generate(&path, &mut solver, &shared, &parent, target, neighbor, &mut || u64::MAX)
+                        .unwrap()
+                        .unwrap();
+                    let value = |address| {
+                        changed
+                            .sample
+                            .pre_memory
+                            .iter()
+                            .filter(|c| (address..address + 8).contains(&c.address))
+                            .fold(0u64, |v, c| v | (c.value.unwrap() as u64) << (8 * (c.address - address)))
+                    };
+                    assert_eq!((value(4096) >> 46) & 255 == 0, enabled && !required);
+                    assert_eq!(mutator.ppn_overflow_retained_for_class, enabled && required);
+                    assert_eq!(value(8192), 0xffffffffffffff03, "数据读取不能被当作 PTE");
+                    assert_eq!(value(16384), 0xffffffffffffff01, "非叶 PTE 的高位保持父值");
+                    let judged =
+                        path.judge(&mut solver, &shared, &changed.sample, &records, 1, |_, _| Ok(())).unwrap().unwrap();
+                    assert_eq!(judged.guard_vector, target);
+                    serde_json::to_value(changed.sample).unwrap()
+                };
+                assert_eq!(run(), run());
+            }
+        }
+    }
+}

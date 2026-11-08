@@ -20,6 +20,9 @@ thread_local! {
     static QUERY_PROFILE: RefCell<MutationProfile> = RefCell::new(MutationProfile::default());
 }
 
+#[path = "sample_mutation_ppn.rs"]
+mod ppn;
+
 struct Field {
     name: String,
     expression: Exp<Sym>,
@@ -36,6 +39,8 @@ pub struct Mutation {
 
 pub struct PathMutator<B: BV> {
     pub profile: MutationProfile,
+    pub avoid_known_ppn_overflow: bool,
+    pub ppn_overflow_retained_for_class: bool,
     fields: Vec<Field>,
     guards: Vec<Exp<Sym>>,
     guard_atoms: Vec<Atoms>,
@@ -195,6 +200,8 @@ impl<B: BV> PathMutator<B> {
             .collect();
         Self {
             profile: MutationProfile::default(),
+            avoid_known_ppn_overflow: false,
+            ppn_overflow_retained_for_class: false,
             fields,
             guards,
             guard_atoms,
@@ -215,6 +222,7 @@ impl<B: BV> PathMutator<B> {
         neighbor: bool,
         random: &mut impl FnMut() -> u64,
     ) -> Result<Option<Mutation>, ExecError> {
+        self.ppn_overflow_retained_for_class = false;
         QUERY_PROFILE.with(|p| *p.borrow_mut() = MutationProfile::default());
         let started = Instant::now();
         let result = self.generate_inner(path, solver, shared, parent, target, neighbor, random);
@@ -266,7 +274,21 @@ impl<B: BV> PathMutator<B> {
             }
         }));
         let previous = self.history.get(target).cloned().unwrap_or_default();
-        let mut common = vec![class];
+        let mut common = vec![class.clone()];
+        let mut ppn_preferences = Vec::new();
+        if self.avoid_known_ppn_overflow {
+            ppn_preferences = self.leaf_ppn_preferences();
+            let preferred =
+                conjunction(std::iter::once(class.clone()).chain(ppn_preferences.iter().map(|(_, _, p)| p.clone())));
+            if query(solver, &preferred)? {
+                common.push(preferred);
+            } else {
+                // 只用目标类判定，不把父值绑定或排重导致的失败记成类要求。
+                assert!(query(solver, &class)?, "目标类必须可满足");
+                self.ppn_overflow_retained_for_class = true;
+                ppn_preferences.clear();
+            }
+        }
         // 整解排重只计活动字段；未活动读取不是输入。
         for solution in &previous {
             let same = conjunction(self.fields.iter().zip(solution).filter(|(f, _)| f.mutable).map(|(f, value)| {
@@ -358,8 +380,27 @@ impl<B: BV> PathMutator<B> {
                 candidates.swap(i, j);
             }
         }
-        for (selected, masks) in candidates {
+        for (selected, mut masks) in candidates {
             let mut conditions = common.clone();
+            for (i, leaf, _) in &ppn_preferences {
+                // 允许清除父输入的超宽高位；非叶仍遵守原来的父值绑定。
+                for bit in 46..54 {
+                    if active[*i] && !masks[*i][bit] {
+                        conditions.push(Exp::Or(
+                            Box::new(leaf.clone()),
+                            Box::new(Exp::Eq(
+                                Box::new(Exp::Extract(
+                                    bit as u32,
+                                    bit as u32,
+                                    Box::new(self.fields[*i].expression.clone()),
+                                )),
+                                Box::new(bits64(bits(&baseline[*i])[bit] as u64, 1)),
+                            )),
+                        ));
+                    }
+                    masks[*i][bit] = true;
+                }
+            }
             if let Some(i) = selected {
                 conditions.push(different(self.fields[i].expression.clone(), baseline[i].clone()));
                 for solution in &previous {

@@ -2,6 +2,8 @@
 
 `isarch fuzz` 支持路径引导 campaign、corpus 认证、只判定与历史变异记录回放，支持确定性并行生成与 `--executor difftest` 三方闭环，并导出路径 DAG。默认用类内字段桶和不一致签名驱动 corpus 增长与调度，`--fuzz-feedback none` 切回轮转基线；公式与评估见 [第 5 步](agents/path_merge_call_support/fuzz-step5.md)。第 4 步的接口、验收与复现见 [闭环记录](agents/path_merge_call_support/fuzz-step4.md)。用法见 [命令说明](specs/isarch-cli.md#fuzz)，回放见 [第 2 步](agents/path_merge_call_support/fuzz-step2.md)，路径引导实验见 [第 3 步](agents/path_merge_call_support/fuzz-step3.md)。
 
+可选 `--fuzz-avoid-known-ppn-overflow`（默认关闭）使分页 A/B 优先清零活动叶 PTE[53:46]；目标类要求超宽时保留并计数，编码空间对照不受影响。设计和对比见 [第 8 步](agents/path_merge_call_support/fuzz-step8.md)。
+
 E2 符号前态闭环使用 `tools/fuzz/run_campaign.py --e2-experiment <第6a步导出根目录>`：按场景选择完整 corpus、同组配置和 U/S、SUM、MXR profile，使用 `sv39-load-e2` 等新场景配置 id 重新认证；编码空间对照也从 E2 corpus 重新生成。四场景执行、指标和复现见 [第 7 步](agents/path_merge_call_support/fuzz-step7.md)。
 
 ![Ubuntu-20.04](https://github.com/rems-project/isla/actions/workflows/ubuntu_22_04.yml/badge.svg)

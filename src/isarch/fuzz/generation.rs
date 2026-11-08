@@ -76,6 +76,8 @@ impl GenerationPool {
                         let sample = mutator
                             .try_mutate(&job.parent, &job.record, &mut job.rng)
                             .expect("预约目标类的可变空间已耗尽");
+                        job.record["ppn_overflow_retained_for_class"] =
+                            json!(*mutator.ppn_overflow_retained_for_class.borrow());
                         job.record["changes"] = json!(*mutator.changes.borrow());
                         output_tx.send((sample.sample_id, sample, job.record)).unwrap();
                     }

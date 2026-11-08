@@ -328,6 +328,8 @@ isarch [原 J1 探索参数] \
 
 路径引导使用 `--fuzz-mode campaign --fuzz-budget 2000`。形态 A 固定父类，在活动输入字段的 8 位切片中换满足约束的值；形态 B 在同一条完成路径的规范向量目录中选择距离近的类，仅放开差异守卫及关联约束涉及的位。默认 `--fuzz-feedback coverage` 用实际类的 PTE 字段桶及未知不一致签名接纳 corpus entry，并在批次边界更新父输入和目标类的评分；`--fuzz-feedback none` 保留既有轮转基线。字段桶复用已有 Python 分页覆盖接口，评分公式见 [第 5 步](../agents/path_merge_call_support/fuzz-step5.md)。默认 5% 对照从 `--fuzz-mutations` 与原始输入构成的 replay-log 记录池抽样，统一在 A/B 之后生成；不提供对照池时显式设 `--fuzz-control-percent 0`。新 corpus entry 必须先认证；验收使用 `--fuzz-certify-all` 对全部接纳输入做两档逐字段比较。
 
+`--fuzz-avoid-known-ppn-overflow` 默认关闭。开启后，分页 A/B 优先令活动叶 PTE[53:46]=0；若目标类要求超宽，则撤下本次偏好，保留取值并在 `ppn-preference-summary.json` 计数。它不约束编码空间对照，不改变模型和窄规则；详见 [第 8 步](../agents/path_merge_call_support/fuzz-step8.md)。
+
 生成遵循 `-T`，每个目标类的排重历史按编号处理；批内先预约目标，输出与线程完成顺序无关。普通 `--executor model` 不连接硬件。`--executor difftest` 对要送硬件的输入先做完整认证，再提交有界 worker 池；默认 `--difftest-workers 8`，允许 1 到 12，单例 `--difftest-timeout 120` 秒，允许 1 到 600。Python worker 外层额外保留 30 秒用于构建与清理。支持 SIGINT/SIGTERM 取消、整进程组及独立子会话清理。
 
 `--difftest-worker/profile/lock/files/observer` 分别指定 Python 入口、平台描述、平台锁、工具路径 JSON 和独立 NEMU 观察器。默认入口是当前仓库的 `tools/fuzz/paging_worker.py`；外部只读目录由 `DIFFTEST_XIANGSHAN_DIR` 选择，默认来源与 [第 4 步记录](../agents/path_merge_call_support/fuzz-step4.md) 一致。`PT_DECODE_DIR` 选择既有解码器。平台锁只记录 isarch 身份，样本有效性由当前模型认证决定。

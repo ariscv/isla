@@ -20,6 +20,7 @@ pub struct Options {
     pub budget: usize,
     pub control_percent: usize,
     pub certify_all: bool,
+    pub avoid_known_ppn_overflow: bool,
     pub feedback: bool,
     pub difftest: Option<super::difftest::Config>,
 }
@@ -60,6 +61,7 @@ impl Options {
                 .parse()
                 .map_err(|e| format!("对照比例无效：{e}"))?,
             certify_all: matches.opt_present("fuzz-certify-all"),
+            avoid_known_ppn_overflow: matches.opt_present("fuzz-avoid-known-ppn-overflow"),
             feedback: match matches.opt_str("fuzz-feedback").as_deref() {
                 None | Some("coverage") => true,
                 Some("none") => false,

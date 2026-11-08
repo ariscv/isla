@@ -22,14 +22,14 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n')
 
 
-def run_one(args, scene, initial, executor):
+def run_one(args, scene, initial, executor, extra=()):
     root = Path.cwd()
     directory = args.output / f'{scene}-{initial}-{executor}'
     command = ['python3', str(root/'tools/fuzz/run_campaign.py'), '--scenario', scene,
         '--e2-experiment', str(args.experiment), '--budget', str(args.budget),
         '--random-seed', str(initial), '--threads', '32', '--executor', executor,
         '--output', str(directory), '--fuzz-feedback', 'none', '--fuzz-batch-size', '64',
-        '--difftest-workers', '8', '--certify-all']
+        '--difftest-workers', '8', '--certify-all'] + list(extra)
     with (args.output/(directory.name+'.log')).open('w') as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         try:

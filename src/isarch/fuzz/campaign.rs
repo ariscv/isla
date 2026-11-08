@@ -285,6 +285,7 @@ pub(super) fn run<B: BV>(
                 let identity = &classes[target_index];
                 let neighbor = target_index != *parent_index;
                 let mut record = json!({"sample_id":id,"operator":if neighbor {"B"} else {"A"},"form":if neighbor {"neighbor"} else {"within_class"},"parent_sample_id":parent.sample_id,"parent_path_signature":parent.path_signature,"parent_class_id":parent.class_id,"target_identity":identity});
+                record["avoid_known_ppn_overflow"] = json!(options.avoid_known_ppn_overflow);
                 record["parent_corpus_entry"] = json!({"identity":parent_identity,"input_id":entry.input_id});
                 if use_neighbor && !neighbor {
                     record["schedule_reason"] = json!("邻类额度已用完");
@@ -482,6 +483,10 @@ pub(super) fn run<B: BV>(
                 json!({"mutants":samples.len(),"budget":options.budget,"attempts":attempts,"exhausted":exhausted,"seconds":started.elapsed().as_secs_f64()})
             );
         }
+        super::io::write_json(
+            &options.output.join("ppn-preference-summary.json"),
+            &json!({"enabled":options.avoid_known_ppn_overflow,"guided_requests":attempts,"retained_for_class":records.iter().filter(|r| r["ppn_overflow_retained_for_class"] == true).count()}),
+        );
         super::io::write_lines(&options.output.join("certified.jsonl"), &certifications);
         super::io::write_lines(&options.output.join("corpus-added.jsonl"), &corpus_added);
         (

@@ -525,3 +525,9 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 只读 `replay_symbolic_prestate` 已有 `scenario_inputs/scenario_profile/bound_template`，分别选择完整 E2 导出、声明四场景 U/S 与 SUM/MXR 域、拒绝错配模板；worker 继续调用 `paging_replay.platform_case` 即可沿用 MPRV+MPP 入口，无需另写分页或汇编逻辑。
 - E0 的 M1/M2/M5 记录绑定原父类和前态，不能直接拿到 E2 目录回放。应复用 `paging_fuzz.mutate` 从 E2 corpus 重新生成记录，再由当前模型认证。
 - 原 `PathMutator` 的形态 A 仅挑位向量字段，形态 B 放开枚举则直接终止；放开特权枚举前态时需补有限枚举取值选择。枚举成员沿用 `EnumMember` 和 `shared.type_info.enums`，逐个候选做 SAT 查询，才能同时保留允许集合、目标守卫和确定性。实现与验收见 [第 7 步](path_merge_call_support/fuzz-step7.md)。
+
+## fuzz 叶 PPN 软偏好与对照输入语义（2026-11-08）
+
+- 叶 PPN 偏好须先只针对目标类检查可满足性，再加入父值绑定和历史排重；否则会把父 corpus entry 的超宽固定值或排重冲突误记成类要求。生成时条件开放叶高位，非叶仍复用原父值绑定。
+- 当前分页 LOAD/STORE 中参与守卫判定的 64 位读取对应 PTE，普通数据读取只进入结果；复用已有按位依赖即可构造叶高位偏好。此结论不推广到任意程序。
+- `SamplePath::bind` 只约束活动读取的初始内存；写入但不读取的初始字节在认证输出中可以为 null。M5 对照会初始化这些字节，不能以全 pre_memory 字节表示不同判定其语义失效；须由同一输入认证并严格核对实际读取值。详见 [第 8 步](path_merge_call_support/fuzz-step8.md)。

@@ -19,6 +19,7 @@ pub struct SolverMutator<'a, 'ctx, 'ir, B: BV> {
     solver: RefCell<Solver<'ctx, B>>,
     mutator: RefCell<PathMutator<B>>,
     pub changes: RefCell<Vec<Value>>,
+    pub ppn_overflow_retained_for_class: RefCell<bool>,
 }
 impl<'a, 'ctx, 'ir, B: BV> SolverMutator<'a, 'ctx, 'ir, B> {
     pub fn new(
@@ -36,6 +37,7 @@ impl<'a, 'ctx, 'ir, B: BV> SolverMutator<'a, 'ctx, 'ir, B> {
             solver: RefCell::new(solver),
             mutator: RefCell::new(mutator),
             changes: RefCell::new(Vec::new()),
+            ppn_overflow_retained_for_class: RefCell::new(false),
         }
     }
 }
@@ -47,6 +49,8 @@ impl<B: BV> Mutator for SolverMutator<'_, '_, '_, B> {
         let identity: ClassIdentity = serde_json::from_value(record["target_identity"].clone()).unwrap();
         assert_eq!(identity.path_signature, self.path.signature);
         let mut solver = self.solver.borrow_mut();
+        self.mutator.borrow_mut().avoid_known_ppn_overflow =
+            record["avoid_known_ppn_overflow"].as_bool().expect("A/B 请求必须携带 PPN 偏好开关");
         let changed = self
             .mutator
             .borrow_mut()
@@ -63,6 +67,7 @@ impl<B: BV> Mutator for SolverMutator<'_, '_, '_, B> {
         if std::env::var_os("ISLA_MUTATION_PROFILE").is_some() {
             eprintln!("[FUZZ_SOLVER_PROFILE] {}", serde_json::to_string(&self.mutator.borrow().profile).unwrap());
         }
+        *self.ppn_overflow_retained_for_class.borrow_mut() = self.mutator.borrow().ppn_overflow_retained_for_class;
         changed.map(|changed| {
             *self.changes.borrow_mut() = changed.changes;
             let mut sample = changed.sample;

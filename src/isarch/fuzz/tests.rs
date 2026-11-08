@@ -198,6 +198,7 @@ fn p1b_path_aliases_start_at_one() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        avoid_known_ppn_overflow: false,
         feedback: true,
         difftest: None,
     };
@@ -281,6 +282,7 @@ fn mutation_metadata_identifies_current_corpus_entry() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        avoid_known_ppn_overflow: false,
         feedback: true,
         difftest: None,
     };
@@ -322,6 +324,7 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        avoid_known_ppn_overflow: false,
         feedback: true,
         difftest: None,
     };

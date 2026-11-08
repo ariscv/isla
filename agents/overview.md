@@ -1,5 +1,7 @@
 # 议题入口
 
+- 2026-11-08 [fuzz 第 8 步](path_merge_call_support/fuzz-step8.md)：PPN 软偏好默认关闭，A/B 优先清零叶 PTE[53:46]、类要求时显式保留并计数；四场景×两初值×开关各 500 例，已知 emu 时间占比 27.28%→0.05%，开启组 1 条 R-XS-001、0 新分歧；覆盖下降照实列出。A/B 命中与唯一性 100%，42 的八组确定性通过；Rust 1150、Python 142+11，无所属残留。
+
 - 2026-11-08 [fuzz 第 7 步](path_merge_call_support/fuzz-step7.md)：E2 四场景各 1000 例完成：3093 agree、907 条 R-XS-001、0 新分歧；5000 个 corpus entry 重新认证、3800 个 A/B 命中与唯一性均 100%，四场景确定性通过；Rust 1149、Python 142+9 通过，九个运行目录无所属残留；首次 Sv48 STORE 的 3 个超时、16 个取消原件保留并完整重跑。
 
 - 2026-11-08 [fuzz 第 6a 步](path_merge_call_support/fuzz-step6a.md)：枚举允许集合已实现；四场景 E2 5000 个 corpus entry 的第 0 步与独立检查全通过，122 条 DAG 重读一致；Sv39 LOAD 1359/200/26，E0 samples 逐字节一致，Rust 1148/0/6；Sv48 LOAD 首轮超时、单进程 64 线程完成。
