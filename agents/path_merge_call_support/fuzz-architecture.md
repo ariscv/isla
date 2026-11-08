@@ -59,6 +59,8 @@
 - **回放链要改的点**（清单见 `sym-prestate.md`）：`platform_case` 的 R1 不再拒绝 U 态；`predict_sample` 去掉 S-only 断言并按有效权限区分；`check_command` 换成本轮实际 IR 与约束。现有 MPRV 入口已把 U→MPP=0、S→MPP=1，不必另造物理页表布局。真 U 执行（`mret` 进入）需要单独补一次成功和一次页异常的对照。
 - **“同一类里 SUM 只出现 0”这类现象不是缺陷**：守卫类不等于状态网格，不能用 `class_cap=1` 宣称所有前态位组合都被见证，这些靠第 3 步的类内变异（形态 A）补。
 
+- 2026-11-08 Isla 配置实现与新 corpus 的当前结果见 [第 6a 步](fuzz-step6a.md)；上述 IR 包装仍是历史实验方法，当前入口已支持 `[symbolic_registers].allowed`。
+
 ## 原则
 
 有效性靠语义重新确认而不靠哈希（见 AGENTS.md 规则 6）；不改 Sail 标准行为；不屏蔽差异，靠窄规则过滤；结果如实写通过、失败或未测。

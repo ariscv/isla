@@ -1,5 +1,7 @@
 # 议题入口
 
+- 2026-11-08 [fuzz 第 6a 步](path_merge_call_support/fuzz-step6a.md)：枚举允许集合已实现；四场景 E2 5000 个 corpus entry 的第 0 步与独立检查全通过，122 条 DAG 重读一致；Sv39 LOAD 1359/200/26，E0 samples 逐字节一致，Rust 1148/0/6；Sv48 LOAD 首轮超时、单进程 64 线程完成。
+
 - [fuzz 第 5 步：字段覆盖反馈与真实对照](path_merge_call_support/fuzz-step5.md)：8000 例完成，0 新分歧；STORE 降低已知耗时但新增桶减少，LOAD 新增桶略增但已知耗时占比上升，收益目标未同时达成；Rust 1142、Python 127+6 通过，1000 例硬件重跑的 50 个产物逐字节相同，无所属进程残留。
 
 - [fuzz 第 4 步：并行生成与三方闭环](path_merge_call_support/fuzz-step4.md)：STORE/LOAD 生成约提速 26.2/22.1 倍；历史分歧 14/14 归类，正常 200/200 一致，真实 300 例为 251 一致、49 已知分歧、0 新分歧；Rust 1138 项通过。

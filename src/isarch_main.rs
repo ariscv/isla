@@ -118,6 +118,10 @@ fn print_usage(opts: &getopts::Options, code: i32) -> ! {
         "campaign：--fuzz-budget 2000 --fuzz-control-percent 0；形态 A 固定类换取值，形态 B 选择同一路径的邻近类。"
     );
     eprintln!("第 0 步认证 corpus，mutant 使用快档；--fuzz-certify-all 供认证对拍。探索后导出 dag/；--executor difftest 连接 Python worker，默认 8 路 emu。");
+    eprintln!(
+        r#"配置枚举符号前态：-C TOML 的 [symbolic_registers] 中写 cur_privilege = {{ allowed = ["User", "Supervisor"] }}；固定编码译码借用首项，执行保留完整集合。"#
+    );
+    eprintln!("allowed 必须是该枚举的非空、不重复成员名集合，不能与位约束混用；与 --prestate 或 registers.defaults 同名仍报错。");
     // M0 原型参数参与解析，但不进入公共帮助。
     for line in opts.usage(brief).lines().filter(|line| !line.contains("--judge-resident")) {
         eprintln!("{line}");

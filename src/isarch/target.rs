@@ -102,7 +102,8 @@ where
     /// 然后覆盖执行帧寄存器并同步 pre_state 记录（沿用 setup_pre_state 的
     /// "执行与输出同一变量"约定）。只支持底层 64 位以内位向量的
     /// 平铺形状：`Ty::Bits(w)` 或单 `bits(w)` 字段的 struct（mstatus
-    /// `struct zMstatus { zbits: %bv64 }` 即后者）；其余形状硬 panic。
+    /// `struct zMstatus { zbits: %bv64 }` 即后者）；`allowed` 支持枚举成员集合。
+    /// 枚举约束复用初态符号，类型或成员配置错误直接报错，其余内部形状错误硬 panic。
     fn apply_symbolic_csrs_to_registers<'ir>(
         &mut self,
         regs: &mut RegisterBindings<'ir, B>,
@@ -119,6 +120,50 @@ where
                 .registers
                 .get(&name)
                 .unwrap_or_else(|| panic!("防御性编程：符号化 CSR {} 不是寄存器", csr.name));
+            if let Some(allowed) = &csr.allowed {
+                let Ty::Enum(enum_name) = ty else {
+                    return Err(ExecError::Type(
+                        format!("symbolic_registers.{}.allowed 只支持枚举寄存器", csr.name),
+                        SourceLoc::unknown(),
+                    ));
+                };
+                let members = shared_state.type_info.enums.get(enum_name).expect("枚举寄存器缺少类型定义");
+                let mut choices = Vec::new();
+                for member in allowed {
+                    let member_name = symtab
+                        .get(&zencode::encode(member))
+                        .filter(|name| members.contains(name))
+                        .ok_or_else(|| {
+                            ExecError::Type(
+                                format!("symbolic_registers.{}.allowed：{} 不是该寄存器的枚举成员", csr.name, member),
+                                SourceLoc::unknown(),
+                            )
+                        })?;
+                    choices.push(EnumMember::from_name(member_name, shared_state));
+                }
+                // 复用初态符号；不在 reg_list 中的声明沿用 symbolic 抽象创建。
+                let value = match self.pre_state().get(&name) {
+                    Some(Val::Symbolic(sym)) => Val::Symbolic(*sym),
+                    Some(other) => {
+                        return Err(ExecError::Type(
+                            format!("符号化寄存器 {} 与具体初态 {:?} 冲突", csr.name, other),
+                            SourceLoc::unknown(),
+                        ))
+                    }
+                    None => symbolic(ty, shared_state, solver, SourceLoc::unknown())?,
+                };
+                let exp = smt_value(&value, SourceLoc::unknown())?;
+                solver.assert(
+                    choices
+                        .into_iter()
+                        .map(|member| smtlib::Exp::Eq(Box::new(exp.clone()), Box::new(smtlib::Exp::Enum(member))))
+                        .reduce(|lhs, rhs| smtlib::Exp::Or(Box::new(lhs), Box::new(rhs)))
+                        .expect("配置解析已拒绝空枚举允许集合"),
+                );
+                regs.assign(name, value.clone(), shared_state);
+                self.pre_state_mut().insert(name, value);
+                continue;
+            }
             // 平铺形状解包：struct{bits(w)} 与 bits(w) 统一到 (宽度, 包装字段名)
             let (width, wrap_field) = match ty {
                 Ty::Bits(width) => (*width, None),
@@ -2791,6 +2836,7 @@ mod tests {
             pin_value,
             nonzero_groups: groups,
             derive_bit: derive,
+            allowed: None,
         }
     }
 
@@ -3185,6 +3231,7 @@ mod initial_state_tests {
             pin_value: 1,
             nonzero_groups: Vec::new(),
             derive_bit: None,
+            allowed: None,
         }];
         target.setup_pre_state(&mut regs, &Bindings::default(), &shared, &mut solver, &HashMap::new()).unwrap();
         target.apply_symbolic_csrs_to_registers(&mut regs, &shared, &mut solver).unwrap();
@@ -3314,5 +3361,139 @@ mod initial_state_tests {
             assert_eq!(target.pre_state.len(), 0);
             assert!(regs.get_last_if_initialized(name).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod symbolic_enum_tests {
+    use super::*;
+    use isla_lib::bitvector::b64::B64;
+    use isla_lib::smt::{Config, Context};
+
+    #[test]
+    fn symbolic_enum_allowed_reuses_prestate_and_excludes_other_members() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for selected in 0..5 {
+            let mut symtab = Symtab::new();
+            let register = symtab.intern("zcur_privilege");
+            let enum_name = symtab.intern("zPrivilege");
+            let members = vec![
+                symtab.intern("zUser"),
+                symtab.intern("zSupervisor"),
+                symtab.intern("zMachine"),
+                symtab.intern("zVirtualUser"),
+                symtab.intern("zVirtualSupervisor"),
+            ];
+            let mut shared = SharedState::empty(symtab);
+            shared.registers.insert(register, Ty::Enum(enum_name));
+            for (index, member) in members.iter().enumerate() {
+                shared.type_info.enum_members.insert(*member, (index, members.len(), enum_name));
+            }
+            shared.type_info.enums.insert(enum_name, members);
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let mut target = RV64::<B64>::default();
+            target.symbolic_csrs = vec![SymbolicRegisterConfig {
+                name: "cur_privilege".into(),
+                pin_mask: 0,
+                pin_value: 0,
+                nonzero_groups: vec![],
+                derive_bit: None,
+                allowed: Some(vec!["User".into(), "Supervisor".into()]),
+            }];
+            let mut regs = RegisterBindings::new();
+            regs.insert(register, false, UVal::Uninit(shared.registers.get(&register).unwrap()));
+            target.setup_pre_state(&mut regs, &Bindings::default(), &shared, &mut solver, &HashMap::new()).unwrap();
+            let before = target.pre_state().get(&register).unwrap().clone();
+            target.apply_symbolic_csrs_to_registers(&mut regs, &shared, &mut solver).unwrap();
+            assert_eq!(target.pre_state().get(&register), Some(&before));
+            assert_eq!(regs.get_last_if_initialized(register), Some(&before));
+            let enum_id = EnumId::from_name(enum_name);
+            solver.assert_eq(
+                smt_value(&before, SourceLoc::unknown()).unwrap(),
+                smtlib::Exp::Enum(EnumMember { enum_id, member: selected }),
+            );
+            assert_eq!(
+                solver.check_sat(SourceLoc::unknown()),
+                if selected < 2 { SmtResult::Sat } else { SmtResult::Unsat }
+            );
+            if selected < 2 {
+                let mut model = Model::new(&solver);
+                let state = target.solve_pre_state(&mut model, &shared).unwrap();
+                assert_eq!(state["cur_privilege"], if selected == 0 { "User" } else { "Supervisor" });
+                let gate = target.concretize_symbolic_csrs(&regs, &mut model, &shared).unwrap();
+                assert_eq!(
+                    gate.get_last_if_initialized(register),
+                    Some(&Val::Enum(EnumMember { enum_id, member: selected }))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn symbolic_enum_rejects_wrong_type_unknown_and_foreign_members() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        for (enum_register, member) in [(true, "Unknown"), (true, "Foreign"), (false, "User")] {
+            let mut symtab = Symtab::new();
+            let register = symtab.intern("zcur_privilege");
+            let enum_name = symtab.intern("zPrivilege");
+            let user = symtab.intern("zUser");
+            let other_enum = symtab.intern("zOther");
+            let foreign = symtab.intern("zForeign");
+            let mut shared = SharedState::empty(symtab);
+            shared.registers.insert(register, if enum_register { Ty::Enum(enum_name) } else { Ty::Bits(64) });
+            shared.type_info.enums.insert(enum_name, vec![user]);
+            shared.type_info.enums.insert(other_enum, vec![foreign]);
+            shared.type_info.enum_members.insert(user, (0, 1, enum_name));
+            shared.type_info.enum_members.insert(foreign, (0, 1, other_enum));
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let mut target = RV64::<B64>::default();
+            target.symbolic_csrs = vec![SymbolicRegisterConfig {
+                name: "cur_privilege".into(),
+                pin_mask: 0,
+                pin_value: 0,
+                nonzero_groups: vec![],
+                derive_bit: None,
+                allowed: Some(vec![member.into()]),
+            }];
+            let error = target
+                .apply_symbolic_csrs_to_registers(&mut RegisterBindings::new(), &shared, &mut solver)
+                .unwrap_err();
+            assert!(
+                matches!(error, ExecError::Type(ref message, _) if message.contains("symbolic_registers.cur_privilege.allowed"))
+            );
+        }
+    }
+
+    #[test]
+    fn symbolic_enum_outside_reg_list_is_included() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let register = symtab.intern("zextra_mode");
+        let enum_name = symtab.intern("zMode");
+        let member = symtab.intern("zEnabled");
+        let mut shared = SharedState::empty(symtab);
+        shared.registers.insert(register, Ty::Enum(enum_name));
+        shared.type_info.enums.insert(enum_name, vec![member]);
+        shared.type_info.enum_members.insert(member, (0, 1, enum_name));
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut target = RV64::<B64>::default();
+        target.symbolic_csrs = vec![SymbolicRegisterConfig {
+            name: "extra_mode".into(),
+            pin_mask: 0,
+            pin_value: 0,
+            nonzero_groups: vec![],
+            derive_bit: None,
+            allowed: Some(vec!["Enabled".into()]),
+        }];
+        let mut regs = RegisterBindings::new();
+        regs.insert(register, false, UVal::Uninit(shared.registers.get(&register).unwrap()));
+        target.setup_pre_state(&mut regs, &Bindings::default(), &shared, &mut solver, &HashMap::new()).unwrap();
+        target.apply_symbolic_csrs_to_registers(&mut regs, &shared, &mut solver).unwrap();
+        assert!(target.pre_state().get(&register).is_some());
+        assert_eq!(target.pre_state().get(&register), regs.get_last_if_initialized(register));
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
     }
 }

@@ -26,6 +26,28 @@ isarch [全局选项] <子命令> [子命令参数]
 | `-g/--graphviz` | Graphviz 输出格式（tree 命令） |
 | `--timeout <n>` | 超时时间（秒） |
 
+## 枚举符号前态
+
+枚举寄存器可以在同一节配置允许成员：
+
+```toml
+[symbolic_registers]
+cur_privilege = { allowed = ["User", "Supervisor"] }
+
+[symbolic_registers.mstatus]
+pin_mask = "0xfffffffffff3ffff"
+pin_value = "0x0000000a00000000"
+```
+
+此例让当前特权级在 U/S 中求解，mstatus 仅 SUM[18]、MXR[19] 自由，其余位保持指定值。
+`allowed` 也支持 `[symbolic_registers.cur_privilege]` 子表写法；成员名须与 IR 中的 Sail 名称完全一致。
+集合为空、重复、成员拼错、成员属于另一枚举、目标不是枚举、与任何位约束混用都会报错。
+与 `--prestate` 或 `[registers.defaults]` 同名仍报错，不能用具体默认值为这个寄存器补译码上下文。
+使用 `--instruction-bits` 时，独立译码采用允许集合的首项作为具体上下文；需要选择能译出目标指令的首项。
+这只服务固定机器字的译码，执行时仍对整个允许集合求解。各执行样本的编码和汇编沿用已有模型检查。
+约束沿用 `setup_pre_state` 之后、checkpoint 之前的符号寄存器注入，执行值与输出前态共用同一个符号；没有改 IR。
+未使用 `allowed` 的配置保持原有行为。
+
 ## 子命令
 
 ### `list-instructions`

@@ -329,8 +329,8 @@ attr = "ram"
 `[symbolic_registers]` 把 CSR 从 defaults 摘除、改挂符号声明，注入时机
 镜像 W17 符号 PMA：solve-state 启动、`setup_pre_state` 之后、checkpoint
 之前，对每个声明的 CSR 按其 IR 类型（`bits(w)` 或单 `bits(w)` 字段的
-struct，如 mstatus `struct zMstatus { zbits: %bv64 }`，w≤64）声明 solver
-符号常量，附加位级钉死与位组域约束断言，覆盖执行帧并同步 pre_state
+struct，如 mstatus `struct zMstatus { zbits: %bv64 }`，w≤64；枚举用 `allowed`）
+复用或声明 solver 符号常量，附加配置约束，覆盖执行帧并同步 pre_state
 记录（输出走 pre_state 主通道，模型值直接出现在 isa-state）。物化门则
 按当前路径模型把符号 CSR 具象化后评估（`concretize_symbolic_csrs`），
 守卫的真实性由路径模型承载。
@@ -388,6 +388,27 @@ SD/FS/UXL/SXL/MBE/SBE 自洽违例 0、物化 100%。见 W22 验收产物 RESULT
 mtimecmp/stimecmp/PMP 族：符号化/部分钉死/保持钉死三档建议 + PMP 与
 satp 两个两难）见 W21 验收产物目录中的 `csr-audit.md`（路径登记于
 议题状态文档，见上仓 `agents/` 对应议题）。
+
+
+枚举寄存器可以在同一节配置允许成员：
+
+```toml
+[symbolic_registers]
+cur_privilege = { allowed = ["User", "Supervisor"] }
+
+[symbolic_registers.mstatus]
+pin_mask = "0xfffffffffff3ffff"
+pin_value = "0x0000000a00000000"
+```
+
+此例让当前特权级在 U/S 中求解，mstatus 仅 SUM[18]、MXR[19] 自由，其余位保持指定值。
+`allowed` 也支持 `[symbolic_registers.cur_privilege]` 子表写法；成员名须与 IR 中的 Sail 名称完全一致。
+集合为空、重复、成员拼错、成员属于另一枚举、目标不是枚举、与任何位约束混用都会报错。
+与 `--prestate` 或 `[registers.defaults]` 同名仍报错，不能用具体默认值为这个寄存器补译码上下文。
+使用 `--instruction-bits` 时，独立译码采用允许集合的首项作为具体上下文；需要选择能译出目标指令的首项。
+这只服务固定机器字的译码，执行时仍对整个允许集合求解。各执行样本的编码和汇编沿用已有模型检查。
+约束沿用 `setup_pre_state` 之后、checkpoint 之前的符号寄存器注入，执行值与输出前态共用同一个符号；没有改 IR。
+未使用 `allowed` 的配置保持原有行为。
 
 ### 值域 signposting：`[[value_hints]]`（P1）
 

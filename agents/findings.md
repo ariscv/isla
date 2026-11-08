@@ -513,3 +513,9 @@ timeout --signal=TERM --kill-after=5s 590s \
 - `tools/fuzz/value_features.py` 直接复用已有 `paging_fuzz.Coverage` 和标准分页解码器，不在 Rust 重写 PTE 或 PPN 分桶。其字段范围数量是桶数上界，不能当成逐类可达桶总数。
 - `campaign.rs` 在整批生成、认证及三方结果收齐后，按编号提交反馈和 corpus；调度次数仍用批次开始时的评分提交，再更新下一批评分。新 corpus entry 的身份是完整类身份与本轮输入标识，父引用单独保存，不以兼容类号为身份。
 - fuzz 的 DAG 文件接口从版本 2 起把守卫 `record_id` 规范化为 `coordinate`；原始 SMT 定义及通用 `SamplePath::export_dag` 的版本 1 接口不变。仅内部追加编号受线程顺序影响时，不应改写原始表达式或定义顺序来获得确定性。
+
+## 枚举符号前态与固定编码译码
+
+- `[symbolic_registers.<name>].allowed` 的解析在 `isla-lib/src/config.rs::get_symbolic_registers`，成员类型核对及集合约束在 `src/isarch/target.rs::Target::apply_symbolic_csrs_to_registers`。它复用 `setup_pre_state` 已建立的符号，并通过 `EnumMember::from_name` 和 `smt_value` 构造成员等式的析取；执行寄存器与输出前态共用同一值。不在 `reg_list` 的声明仍通过已有 `symbolic` 抽象建立。
+- 固定机器字的译码使用独立求解器，不能直接读执行求解器的符号寄存器。`src/isarch/exec.rs::decode_register_bindings` 对枚举允许集合显式取首项作为具体译码上下文，执行时保留完整集合。不能用同名 `registers.defaults` 或 `--prestate` 补译码值，这两种冲突仍报错。需选择能译出目标指令的首项；没有声明集合时沿用既有译码环境。
+- 枚举类型成员必须按寄存器的 `Ty::Enum` 与 `IRTypeInfo.enums` 核对，仅在符号表里找到名字不足以证明它属于该枚举。配置的 `allowed` 与位约束互斥；空集合、重复或成员类型错误均拒绝。

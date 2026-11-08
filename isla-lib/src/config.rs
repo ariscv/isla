@@ -446,6 +446,7 @@ pub struct DerivedBitConfig {
 ///   `currentlyEnabled` 恒假；把 FS≠0 声明为取值域是对 decode 守卫语义的
 ///   最小复刻）。组内位不得与 pin_mask 重叠（钉死位的组约束是恒真或恒假，
 ///   配置歧义，硬失败）。
+/// - `allowed`：枚举寄存器的允许成员名集合；与位约束互斥，不能为空或重复。
 /// - `derive_bit`（W22）：派生位等价约束，见 [DerivedBitConfig]。派生位与
 ///   组内位都不得与 pin_mask 重叠，派生位不得出现在任何组内（自引用退化）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,6 +456,8 @@ pub struct SymbolicRegisterConfig {
     pub pin_value: u64,
     pub nonzero_groups: Vec<Vec<u32>>,
     pub derive_bit: Option<DerivedBitConfig>,
+    /// 枚举允许成员；与所有位约束互斥，保持配置顺序供固定编码译码使用。
+    pub allowed: Option<Vec<String>>,
 }
 
 /// P1（plan-bughunt 值域 signposting）：`[[value_hints]]` 声明的维度类别。
@@ -1190,6 +1193,7 @@ fn get_clint_enabled(config: &Value) -> Result<Option<bool>, String> {
 /// ```toml
 /// [symbolic_registers]
 /// mstatus = "symbolic"                    # 整寄存器符号化，无位约束
+/// cur_privilege = { allowed = ["User", "Supervisor"] }  # 枚举取值域
 ///
 /// [symbolic_registers.mstatus]            # 表形式：位级钉死 + 位组域 + 派生位
 /// pin_mask  = "0x0000183C00000000"        # MBE(37)|SBE(36)|UXL(44:43)|SXL(35:34)
@@ -1227,6 +1231,7 @@ fn get_symbolic_registers<B: BV>(
         let mut pin_value = 0;
         let mut nonzero_groups = Vec::new();
         let mut derive_bit = None;
+        let mut allowed = None;
         match entry {
             Value::String(text) if text == "symbolic" => (),
             Value::String(other) => {
@@ -1239,8 +1244,31 @@ fn get_symbolic_registers<B: BV>(
                 allowed_table_keys(
                     sub,
                     &format!("symbolic_registers.{}", name),
-                    &["pin_mask", "pin_value", "nonzero_groups", "derive_bit"],
+                    &["pin_mask", "pin_value", "nonzero_groups", "derive_bit", "allowed"],
                 )?;
+                if let Some(value) = sub.get("allowed") {
+                    if sub.len() != 1 {
+                        return Err(format!("symbolic_registers.{}.allowed 不能与位约束混用", name));
+                    }
+                    let members = value
+                        .as_array()
+                        .filter(|members| !members.is_empty())
+                        .ok_or_else(|| format!("symbolic_registers.{}.allowed 必须是非空成员名数组", name))?;
+                    let mut names = Vec::new();
+                    for member in members {
+                        let member = member
+                            .as_str()
+                            .ok_or_else(|| format!("symbolic_registers.{}.allowed 只接受成员名字符串", name))?;
+                        if symtab.get(&zencode::encode(member)).is_none() {
+                            return Err(format!("symbolic_registers.{}.allowed：当前 IR 不存在成员 {}", name, member));
+                        }
+                        if names.iter().any(|existing| existing == member) {
+                            return Err(format!("symbolic_registers.{}.allowed 重复成员 {}", name, member));
+                        }
+                        names.push(member.to_string());
+                    }
+                    allowed = Some(names);
+                }
                 if let Some(value) = sub.get("pin_mask") {
                     pin_mask = parse_u64_value(value, &format!("symbolic_registers.{}.pin_mask", name))?;
                     pin_value = match sub.get("pin_value") {
@@ -1308,6 +1336,7 @@ fn get_symbolic_registers<B: BV>(
             pin_value,
             nonzero_groups,
             derive_bit,
+            allowed,
         });
     }
     // toml 表迭代按字典序：显式排序保证注入次序与输出确定性
@@ -3715,6 +3744,37 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_registers_parses_enum_allowed() {
+        let (symtab, defaults) = symbolic_registers_fixture(&["cur_privilege", "User", "Supervisor"]);
+        let value = r#"[symbolic_registers]
+cur_privilege = { allowed = ["User", "Supervisor"] }
+"#
+        .parse::<Value>()
+        .unwrap();
+        let registers = get_symbolic_registers(&value, &symtab, &defaults).unwrap();
+        assert_eq!(registers.len(), 1);
+        assert_eq!(registers[0].name, "cur_privilege");
+    }
+
+    #[test]
+    fn symbolic_registers_rejects_invalid_allowed() {
+        for entry in [
+            r#"{ allowed = [] }"#,
+            r#"{ allowed = "User" }"#,
+            r#"{ allowed = [1] }"#,
+            r#"{ allowed = ["Usr"] }"#,
+            r#"{ allowed = ["User", "User"] }"#,
+            r#"{ allowed = ["User"], pin_mask = 0, pin_value = 0 }"#,
+            r#"{ allowed = ["User"], nonzero_groups = [] }"#,
+            r#"{ allowed = ["User"], derive_bit = {bit = 1, groups = [[2]]} }"#,
+        ] {
+            let (symtab, defaults) = symbolic_registers_fixture(&["cur_privilege", "User"]);
+            let value = format!("[symbolic_registers]\ncur_privilege = {entry}").parse::<Value>().unwrap();
+            assert!(get_symbolic_registers(&value, &symtab, &defaults).is_err(), "应拒绝 {entry}");
+        }
+    }
+
+    #[test]
     fn symbolic_registers_absent_returns_empty() {
         let (symtab, defaults) = symbolic_registers_fixture(&["mstatus"]);
         let value = "[registers]\n".parse::<Value>().unwrap();
@@ -3745,6 +3805,7 @@ mod tests {
                     pin_value: 0,
                     nonzero_groups: vec![vec![13, 14]],
                     derive_bit: None,
+                    allowed: None,
                 },
                 SymbolicRegisterConfig {
                     name: "satp".to_string(),
@@ -3752,6 +3813,7 @@ mod tests {
                     pin_value: 0,
                     nonzero_groups: vec![],
                     derive_bit: None,
+                    allowed: None,
                 },
             ]
         );
@@ -3779,6 +3841,7 @@ mod tests {
                 pin_value: 0x0000_1008_0000_0000,
                 nonzero_groups: vec![vec![13, 14]],
                 derive_bit: Some(DerivedBitConfig { bit: 63, groups: vec![vec![14, 13], vec![10, 9], vec![16, 15]] }),
+                allowed: None,
             }]
         );
     }

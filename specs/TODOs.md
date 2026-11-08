@@ -1,5 +1,7 @@
 # 当前任务
 
+- 2026-11-08 [fuzz 第 6a 步](../agents/path_merge_call_support/fuzz-step6a.md)：枚举允许集合已实现；四场景 E2 5000 个 corpus entry 的第 0 步与独立检查全通过，122 条 DAG 重读一致；Sv39 LOAD 1359/200/26，E0 samples 逐字节一致，Rust 1148/0/6；Sv48 LOAD 首轮超时、单进程 64 线程完成。
+
 - 2026-11-08 [fuzz 第 5 步](../agents/path_merge_call_support/fuzz-step5.md)：实现与 8000 例对照完成，0 新分歧、0 基础设施失败；两个场景均未同时达成新增桶与已知问题耗时两项收益目标，未调参过拟合；Rust 1142、Python 127+6 通过，1000 例硬件重跑的 50 个正式产物逐字节相同，无所属进程残留。
 
 - 2026-11-08 [fuzz 第 4 步](../agents/path_merge_call_support/fuzz-step4.md)：确定性并行生成完成，STORE/LOAD 的 2000 例验收每千个生成 37.5/43.9 秒，约提速 26.2/22.1 倍；300 例跨线程逐字节相同；历史分歧 14/14 窄规则命中、正常 corpus entry 200/200 agree，真实 300 例为 251 agree、49 已知分歧、0 新分歧；Rust 1138、Python 原有 127 与新增 6 项通过，取消和超时清理通过。

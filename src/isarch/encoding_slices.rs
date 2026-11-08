@@ -361,7 +361,7 @@ pub fn slice_instruction_bits<B: BV + Send + Sync>(
     lets: &Bindings<B>,
 ) -> Result<FixedInstruction, String> {
     let ctor = build_clause_ctor(clause, layout, assignment, shared_state)?;
-    let decode_regs = decode_register_bindings(regs, prestate, shared_state);
+    let decode_regs = decode_register_bindings(regs, prestate, shared_state, &[]);
     let encoded = concrete_function_result("zencdec_forwards", ctor, shared_state, &decode_regs, lets)?;
     let Val::Bits(bits) = encoded else {
         return Err(format!("编码分片 {} 重新编码未得到位向量", format_assignment_label(assignment)));

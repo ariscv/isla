@@ -165,14 +165,30 @@ pub(crate) fn concrete_function_result<'ir, B: BV + Send + Sync>(
 /// （zencdec_backwards 分支经 zcurrentlyEnabled 读 zmstatus/zmisa）对这些符号
 /// 做 neq 时，符号从未在译码 solver 里声明，translate_exp 直接 panic。译码
 /// 语义只依赖固定编码位与用户钉定的架构状态，因此改用初始具体表加钉值：
-/// 未钉值寄存器取 IR/config 初始化的具体默认值（如 mstatus.VS=Off，向量
+/// 枚举允许集合使用首项供固定编码译码；其他未钉值寄存器取 IR/config 初始化的具体默认值。
+/// 如 mstatus.VS=Off，向量
 /// 编码需按 E 线先例用 --prestate 钉 mstatus/cur_privilege 打开扩展域）。
 pub(crate) fn decode_register_bindings<'ir, B: BV>(
     regs: &RegisterBindings<'ir, B>,
     prestate: &HashMap<Name, Val<B>>,
     shared_state: &SharedState<'ir, B>,
+    symbolic_registers: &[isla_lib::config::SymbolicRegisterConfig],
 ) -> RegisterBindings<'ir, B> {
     let mut decode_regs = regs.clone();
+    // 固定编码需在独立求解器中具体译码；显式使用允许集合首项，不缩减执行域。
+    // 调用前已由符号初态注入验证类型和成员；不接受同名具体前态。
+    for register in symbolic_registers {
+        if let Some(allowed) = &register.allowed {
+            let name = shared_state.symtab.lookup(&zencode::encode(&register.name));
+            assert!(!prestate.contains_key(&name), "枚举符号初态与具体前态冲突");
+            let member = shared_state.symtab.lookup(&zencode::encode(allowed.first().expect("允许集合不能为空")));
+            decode_regs.assign(
+                name,
+                Val::Enum(isla_lib::smt::EnumMember::from_name(member, shared_state)),
+                shared_state,
+            );
+        }
+    }
     for (&name, value) in prestate {
         decode_regs.assign(name, value.clone(), shared_state);
     }
@@ -1744,7 +1760,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             shared_state,
             // 译码环境用初始具体表 + 钉值（见 decode_register_bindings 的根因说明），
             // 不传主求解的 symbolic_regs——其中的符号声明只存在于主 solver。
-            &decode_register_bindings(regs, &fixed_inputs.prestate, shared_state),
+            &decode_register_bindings(regs, &fixed_inputs.prestate, shared_state, target.symbolic_csrs()),
             lets,
         )
         .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?
@@ -2808,6 +2824,36 @@ mod tests {
     /// 未钉值寄存器保留初始具体值（不被主求解的符号化污染），钉值寄存器按
     /// CLI/分片注入的具体值覆盖。
     #[test]
+    fn decode_register_bindings枚举集合首项仅供译码() {
+        let mut symtab = Symtab::new();
+        let register = symtab.intern("zcur_privilege");
+        let enum_name = symtab.intern("zPrivilege");
+        let user = symtab.intern("zUser");
+        let supervisor = symtab.intern("zSupervisor");
+        let mut shared = SharedState::empty(symtab);
+        shared.registers.insert(register, Ty::Enum(enum_name));
+        shared.type_info.enums.insert(enum_name, vec![user, supervisor]);
+        shared.type_info.enum_members.insert(user, (0, 2, enum_name));
+        shared.type_info.enum_members.insert(supervisor, (1, 2, enum_name));
+        let mut regs = RegisterBindings::<B64>::new();
+        regs.insert(register, false, UVal::Uninit(shared.registers.get(&register).unwrap()));
+        let config = isla_lib::config::SymbolicRegisterConfig {
+            name: "cur_privilege".into(),
+            pin_mask: 0,
+            pin_value: 0,
+            nonzero_groups: vec![],
+            derive_bit: None,
+            allowed: Some(vec!["User".into(), "Supervisor".into()]),
+        };
+        let decoded = decode_register_bindings(&regs, &HashMap::new(), &shared, &[config]);
+        assert_eq!(
+            decoded.get_last_if_initialized(register),
+            Some(&Val::Enum(isla_lib::smt::EnumMember::from_name(user, &shared)))
+        );
+        assert!(regs.get_last_if_initialized(register).is_none());
+    }
+
+    #[test]
     fn decode_register_bindings初始值加钉值() {
         let (mut shared_state, mstatus_name) = decode_probe_shared_state();
         let x6_text = zencode::encode("x6");
@@ -2819,7 +2865,7 @@ mod tests {
 
         let pinned = Val::Bits(B64::new(0x8000_1000, 64));
         let prestate = HashMap::from([(x6_name, pinned.clone())]);
-        let decode_regs = decode_register_bindings(&regs, &prestate, &shared_state);
+        let decode_regs = decode_register_bindings(&regs, &prestate, &shared_state, &[]);
         assert_eq!(decode_regs.get_last_if_initialized(x6_name), Some(&pinned), "钉值寄存器被覆盖");
         assert_eq!(
             decode_regs.get_last_if_initialized(mstatus_name),
@@ -4609,7 +4655,7 @@ mod tests {
             &lets,
         )
         .unwrap();
-        let decode_regs = decode_register_bindings(&regs, &fixed, &shared);
+        let decode_regs = decode_register_bindings(&regs, &fixed, &shared, &[]);
         let load = shared.symtab.lookup("zLOAD");
         let bits = Val::Bits(B129::new(0x0000b103, 32));
         for merge in [false, true] {
