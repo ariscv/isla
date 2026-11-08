@@ -20,6 +20,7 @@ pub struct Options {
     pub budget: usize,
     pub control_percent: usize,
     pub certify_all: bool,
+    pub feedback: bool,
     pub difftest: Option<super::difftest::Config>,
 }
 impl Options {
@@ -59,6 +60,11 @@ impl Options {
                 .parse()
                 .map_err(|e| format!("对照比例无效：{e}"))?,
             certify_all: matches.opt_present("fuzz-certify-all"),
+            feedback: match matches.opt_str("fuzz-feedback").as_deref() {
+                None | Some("coverage") => true,
+                Some("none") => false,
+                Some(_) => return Err("--fuzz-feedback 必须为 coverage 或 none".into()),
+            },
             difftest: match matches.opt_str("executor").as_deref() {
                 None | Some("model") => None,
                 Some("difftest") => {

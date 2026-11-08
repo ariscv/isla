@@ -47,8 +47,10 @@ pub fn write(
         };
         let mut metadata = record.clone();
         metadata.as_object_mut().unwrap().remove("prediction_seconds");
-        metadata["parent_corpus_entry"] =
-            json!(parent.as_ref().map(|key| json!({"sample_id":directory.classes[key].1,"identity":key})));
+        if metadata["parent_corpus_entry"].is_null() {
+            metadata["parent_corpus_entry"] =
+                json!(parent.as_ref().map(|key| json!({"sample_id":directory.classes[key].1,"identity":key})));
+        }
         mutation_rows.push(metadata);
         let actual = row.as_ref().map(|r| directory.identity(scene, r));
         let status = match &actual {

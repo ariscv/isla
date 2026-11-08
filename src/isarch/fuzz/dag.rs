@@ -16,7 +16,12 @@ pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &Shar
     let mut guards = 0;
     for path in paths {
         let solver = Solver::from_checkpoint(context, path.checkpoint.clone());
-        let value = path.path.export_dag(&solver, shared, &path.records, path.signature);
+        let mut value = path.path.export_dag(&solver, shared, &path.records, path.signature);
+        // 与 judged 的守卫坐标一致；进程内编号不进入确定性数据接口。
+        value["schema_version"] = json!(2);
+        for guard in value["guards"].as_array_mut().unwrap() {
+            guard["record_id"] = guard["coordinate"].clone();
+        }
         let name = format!("path-{}.json", path.signature);
         write_json(&directory.join(&name), &value);
         let reread: Value =
@@ -30,6 +35,6 @@ pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &Shar
     assert_eq!(manifest.len(), paths.len());
     write_json(
         &output.join("dag-manifest.json"),
-        &json!({"schema_version":1,"paths":paths.len(),"guards":guards,"reread_consistent":true,"entries":manifest}),
+        &json!({"schema_version":2,"paths":paths.len(),"guards":guards,"reread_consistent":true,"entries":manifest}),
     );
 }

@@ -4,6 +4,7 @@ mod classifier;
 mod corpus;
 mod dag;
 mod difftest;
+mod feedback;
 mod generation;
 mod io;
 mod mutator;

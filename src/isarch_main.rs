@@ -472,6 +472,7 @@ fn isla_main() -> i32 {
         opts.optopt("", &format!("difftest-{name}"), help, "<path>");
     }
     opts.optflag("", "fuzz-certify-all", "验收审计：所有接纳的 mutant 再经认证档，与快档逐字段对拍");
+    opts.optopt("", "fuzz-feedback", "campaign 反馈：coverage（默认）或 none（轮转基线）", "<mode>");
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
     opts.optflag("", "judge-resident-fast", "");

@@ -3,6 +3,78 @@ use rand::RngCore;
 use serde_json::{json, Value};
 
 #[test]
+fn feedback_tracks_actual_class_buckets_and_only_unknown_signatures_are_novel() {
+    use super::feedback::{CoverageFeedback, Feature};
+    let mut feedback = CoverageFeedback::default();
+    let mut feature = Feature::example("0", "[0,\"PPN\",\"dram_low\"]");
+    assert!(feedback.is_novel(&feature));
+    feedback.observe(0, &feature);
+    assert!(!feedback.is_novel(&feature));
+    feature.mismatch =
+        Some(json!({"fields":["cause"],"phase":"execute","filtered":true,"rule_id":"R-XS-001","infrastructure":false}));
+    assert!(!feedback.is_novel(&feature));
+    feedback.observe(1, &feature);
+    feature.mismatch.as_mut().unwrap()["filtered"] = json!(false);
+    feature.mismatch.as_mut().unwrap()["rule_id"] = Value::Null;
+    assert!(feedback.is_novel(&feature));
+    feedback.observe(2, &feature);
+    assert!(!feedback.is_novel(&feature));
+    feature.identity.guard_vector = "1".into();
+    assert!(feedback.is_novel(&feature));
+}
+
+#[test]
+fn feedback_downweights_only_known_stale_classes_and_rewards_missing_buckets() {
+    use super::feedback::{CoverageFeedback, Feature};
+    let mut feedback = CoverageFeedback::default();
+    let mut known = Feature::example("0", "a");
+    let normal = Feature::example("1", "a");
+    feedback.observe(0, &known);
+    feedback.observe(1, &normal);
+    known.mismatch =
+        Some(json!({"fields":["cause"],"phase":"execute","filtered":true,"rule_id":"R-XS-001","infrastructure":false}));
+    feedback.observe(2, &known);
+    feedback.end_batch();
+    feedback.end_batch();
+    assert!(feedback.score(&known) < feedback.score(&normal));
+    known.buckets.insert("b".into());
+    feedback.observe(3, &known);
+    assert!(feedback.score(&known) > 1.0);
+    let previous = feedback.score(&normal);
+    let mut more = normal.clone();
+    more.buckets.insert("b".into());
+    feedback.observe(4, &more);
+    assert!(feedback.score(&more) < previous);
+}
+
+#[test]
+fn feedback_scheduler_scores_are_frozen_until_batch_commit() {
+    use super::campaign::FeedbackScheduler;
+    let mut scheduler = FeedbackScheduler::new(vec![1.0, 4.0], 20);
+    let batch = scheduler.next_batch(10);
+    assert_eq!(batch, scheduler.next_batch(10));
+    assert!(batch.iter().filter(|i| **i == 1).count() > batch.iter().filter(|i| **i == 0).count());
+    scheduler.on_batch_end(10);
+    scheduler.set_scores(vec![8.0, 1.0]);
+    let next = scheduler.next_batch(10);
+    assert!(next.iter().filter(|i| **i == 0).count() > next.iter().filter(|i| **i == 1).count());
+    scheduler.on_batch_end(10);
+    assert!(scheduler.next_batch(1).is_empty());
+}
+
+#[test]
+fn feedback_infrastructure_without_buckets_is_not_coverage() {
+    use super::feedback::{CoverageFeedback, Feature};
+    let feedback = CoverageFeedback::default();
+    let mut feature = Feature::example("0", "a");
+    feature.buckets.clear();
+    feature.mismatch = Some(
+        json!({"fields":["infrastructure"],"phase":"worker","filtered":false,"rule_id":null,"infrastructure":true}),
+    );
+    assert!(!feedback.is_novel(&feature));
+}
+
+#[test]
 fn campaign_scheduler_rotates_and_balances_class_attempts() {
     let mut scheduler = super::campaign::ClassScheduler::new(3, 8);
     assert_eq!(scheduler.next_batch(2), vec![0, 1]);
@@ -126,6 +198,7 @@ fn p1b_path_aliases_start_at_one() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        feedback: true,
         difftest: None,
     };
     let record = json!({"sample_id":0,"operator":"M1","parent_path_signature":123,"parent_class_id":0});
@@ -208,6 +281,7 @@ fn mutation_metadata_identifies_current_corpus_entry() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        feedback: true,
         difftest: None,
     };
     let mut record = record;
@@ -248,6 +322,7 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
         budget: 20,
         control_percent: 0,
         certify_all: false,
+        feedback: true,
         difftest: None,
     };
     let row = json!({"path_signature":123,"guard_vector":"0","sample":{"result":{"ctor":"Retire_Success"}}});

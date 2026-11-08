@@ -506,3 +506,10 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 逐位随机极性选择的实际 Z3 查询占生成主要成本。相邻位组成桶，先证明整桶固定，再复用具体值，可减少被约束高位的逐位查询；不能直接采用未证明唯一的任意求解模型。
 - 既有 `run_probe` 会把 emu 放进独立会话。只 kill Python 所在进程组不能清理 emu；worker 必须跟踪这些会话并清理 fork 后代。Rust 的父进程退出信号、Python 子进程收养及两层超时共同覆盖本轮取消与超时场景。
 - `paging_fuzz.MismatchTable` 已负责调用窄规则；薄入口直接复用它，无需在 Rust 复制 PTE 条件。完整测量、适用范围与验收见 [第 4 步](path_merge_call_support/fuzz-step4.md)。
+
+## fuzz 的字段覆盖、评分与确定性导出
+
+- `src/isarch/fuzz/feedback.rs` 的 `CoverageFeedback` 使用实际 `ClassIdentity`、PTE 层级、字段和桶作为覆盖键；不一致签名使用实际目标类、字段及阶段。规则命中只绑定具体实例，同一签名后来出现未归类实例时仍可构成新颖性。
+- `tools/fuzz/value_features.py` 直接复用已有 `paging_fuzz.Coverage` 和标准分页解码器，不在 Rust 重写 PTE 或 PPN 分桶。其字段范围数量是桶数上界，不能当成逐类可达桶总数。
+- `campaign.rs` 在整批生成、认证及三方结果收齐后，按编号提交反馈和 corpus；调度次数仍用批次开始时的评分提交，再更新下一批评分。新 corpus entry 的身份是完整类身份与本轮输入标识，父引用单独保存，不以兼容类号为身份。
+- fuzz 的 DAG 文件接口从版本 2 起把守卫 `record_id` 规范化为 `coordinate`；原始 SMT 定义及通用 `SamplePath::export_dag` 的版本 1 接口不变。仅内部追加编号受线程顺序影响时，不应改写原始表达式或定义顺序来获得确定性。

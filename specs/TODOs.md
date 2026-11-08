@@ -1,5 +1,7 @@
 # 当前任务
 
+- 2026-11-08 [fuzz 第 5 步](../agents/path_merge_call_support/fuzz-step5.md)：实现与 8000 例对照完成，0 新分歧、0 基础设施失败；两个场景均未同时达成新增桶与已知问题耗时两项收益目标，未调参过拟合；Rust 1142、Python 127+6 通过，1000 例硬件重跑的 50 个正式产物逐字节相同，无所属进程残留。
+
 - 2026-11-08 [fuzz 第 4 步](../agents/path_merge_call_support/fuzz-step4.md)：确定性并行生成完成，STORE/LOAD 的 2000 例验收每千个生成 37.5/43.9 秒，约提速 26.2/22.1 倍；300 例跨线程逐字节相同；历史分歧 14/14 窄规则命中、正常 corpus entry 200/200 agree，真实 300 例为 251 agree、49 已知分歧、0 新分歧；Rust 1138、Python 原有 127 与新增 6 项通过，取消和超时清理通过。
 
 - 2026-11-08 [fuzz 第 3 步](../agents/path_merge_call_support/fuzz-step3.md)：A/B 11400/11400 经认证命中目标、多样性 100%；两场景三初值的覆盖对照、同初值逐字节复验及 DAG 重读完成；1134 项测试通过，普通循环 STORE/LOAD 为 993.1/982.0 秒每千个。未接 emu、未改 Python；后续为 worker 闭环，生成串行是当前瓶颈。

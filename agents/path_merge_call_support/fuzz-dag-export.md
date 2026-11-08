@@ -2,9 +2,11 @@
 
 探索结束后，每条完成路径写入 `dag/path-<path_signature>.json`，目录索引为 `dag-manifest.json`。三种 fuzz 模式都写出。数据直接来自当前检查点的 Isla 执行迹与 `SamplePath`，没有经 Z3 化简，也不使用来源哈希判定有效性。
 
+第 5 步起，fuzz 的文件接口使用 `schema_version=2`：守卫的 `record_id` 改用规范坐标，与 judged 的既有重编号方式一致，避免进程内追加编号受线程顺序影响。原始 SMT 定义、守卫表达式和父坐标不变。通用 `SamplePath::export_dag` 仍返回原始版本 1；仅 fuzz 落盘适配层转为版本 2。历史版本 1 保存的是进程内编号，不能据此要求跨进程字节相同。
+
 ## 格式
 
-顶层 `schema_version=1`，字段如下。
+顶层 `schema_version=2`，字段如下。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -22,7 +24,7 @@
 
 状态中的具体叶值沿用 samples v1；符号叶值形如 `{"symbol":"v0","smtlib":"v0","type":{"kind":"bool"}}`，混合位串保存表达式和类型。结构体、构造子、向量、列表递归保留。尚未确定的构造子保存 `discriminant` 及各 `possibilities`。
 
-守卫含规范 `coordinate`、原 `record_id`、`parent_coordinate`、所属 `arm`、原条件 `condition`、父链活动条件 `active`、`canonical=active && condition`，以及函数、分支位置和死亡标志。非活动守卫的规范值因此为 false，与 judge 的规则相同。原记录编号可能随进程变化，跨进程使用规范坐标及完整类身份。
+守卫含规范 `coordinate`、以规范坐标重编号的 `record_id`、`parent_coordinate`、所属 `arm`、原条件 `condition`、父链活动条件 `active`、`canonical=active && condition`，以及函数、分支位置和死亡标志。非活动守卫的规范值因此为 false，与 judge 的规则相同。版本 2 的文件内记录编号就是规范坐标；探索诊断中的原进程内编号仍可能变化，跨进程使用规范坐标及完整类身份。
 
 ## 小例子
 
@@ -30,14 +32,14 @@
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "path_signature": 42,
   "definitions": [
     {"sequence":0,"trace_index":0,"kind":"declare_const","symbol":"v0","type":{"kind":"bool"},"smtlib":"(declare-const v0 Bool)"},
     {"sequence":1,"trace_index":1,"kind":"define_const","symbol":"v1","type":{"kind":"bool"},"references":["v0"],"smtlib":"(define-const v1 Bool (not v0))"},
     {"sequence":2,"trace_index":2,"kind":"assert","type":{"kind":"bool"},"references":["v1"],"smtlib":"(assert v1)"}
   ],
-  "guards":[{"coordinate":0,"record_id":10,"parent_coordinate":null,"arm":"root","condition":{"smtlib":"v1","type":{"kind":"bool"}},"active":{"smtlib":"true","type":{"kind":"bool"}},"canonical":{"smtlib":"(and true v1)","type":{"kind":"bool"}}}],
+  "guards":[{"coordinate":0,"record_id":0,"parent_coordinate":null,"arm":"root","condition":{"smtlib":"v1","type":{"kind":"bool"}},"active":{"smtlib":"true","type":{"kind":"bool"}},"canonical":{"smtlib":"(and true v1)","type":{"kind":"bool"}}}],
   "state":{"pre":{"flag":{"symbol":"v0","smtlib":"v0","type":{"kind":"bool"}}},"post":{"flag":{"symbol":"v1","smtlib":"v1","type":{"kind":"bool"}}},"result":{"bool":true},"memory":[]}
 }
 ```
