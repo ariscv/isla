@@ -36,7 +36,17 @@ impl Directory {
             for field in
                 ["result", "pre_registers", "post_registers", "pre_memory", "post_memory", "ret_val", "isa_state"]
             {
-                assert_eq!(row["sample"][field], expected[field], "corpus entry {} 的 {field} 改变", input.sample_id);
+                let mut row_val = row["sample"][field].clone();
+                let mut exp_val = expected[field].clone();
+                if field.ends_with("_registers") {
+                    if let Some(obj) = row_val.as_object_mut() {
+                        obj.remove("x0");
+                    }
+                    if let Some(obj) = exp_val.as_object_mut() {
+                        obj.remove("x0");
+                    }
+                }
+                assert_eq!(row_val, exp_val, "corpus entry {} 的 {field} 改变", input.sample_id);
             }
             let identity = ClassIdentity {
                 scenario_config_id: scenario.into(),

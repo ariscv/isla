@@ -3782,6 +3782,25 @@ cur_privilege = { allowed = ["User", "Supervisor"] }
     }
 
     #[test]
+    fn symbolic_registers_x1_without_bit_constraints() {
+        let (symtab, defaults) = symbolic_registers_fixture(&["x1"]);
+        let value = r#"
+            [symbolic_registers]
+            x1 = "symbolic"
+        "#
+        .parse::<Value>()
+        .unwrap();
+        let registers = get_symbolic_registers(&value, &symtab, &defaults).unwrap();
+        assert_eq!(registers.len(), 1);
+        assert_eq!(registers[0].name, "x1");
+        assert_eq!(registers[0].pin_mask, 0);
+        assert_eq!(registers[0].pin_value, 0);
+        assert!(registers[0].nonzero_groups.is_empty());
+        assert_eq!(registers[0].derive_bit, None);
+        assert_eq!(registers[0].allowed, None);
+    }
+
+    #[test]
     fn symbolic_registers_parses_string_and_table_forms() {
         let (symtab, defaults) = symbolic_registers_fixture(&["mstatus", "satp"]);
         let satp = symtab.get(&zencode::encode("satp")).unwrap();

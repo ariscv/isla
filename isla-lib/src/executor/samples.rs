@@ -375,7 +375,10 @@ impl<B: BV> SamplePath<B> {
     /// 在调用方的事务中绑定前态；与 J1 共用完全相同的读取绑定和可满足性检查。
     fn bind(&self, solver: &mut Solver<B>, shared: &SharedState<B>, sample: &Sample) -> Result<bool, ExecError> {
         for (name, value) in &sample.pre_registers {
-            let expr = equal(self.pre.get(name).expect("路径缺少样本前置输入"), value, shared, solver)?;
+            let Some(reg) = self.pre.get(name) else {
+                continue;
+            };
+            let expr = equal(reg, value, shared, solver)?;
             match expr {
                 Exp::Bool(true) => (),
                 Exp::Bool(false) => return Ok(false),

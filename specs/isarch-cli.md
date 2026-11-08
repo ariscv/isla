@@ -48,6 +48,28 @@ pin_value = "0x0000000a00000000"
 约束沿用 `setup_pre_state` 之后、checkpoint 之前的符号寄存器注入，执行值与输出前态共用同一个符号；没有改 IR。
 未使用 `allowed` 的配置保持原有行为。
 
+通用符号探索直接指定 clause，不传固定机器码：
+
+```sh
+isarch -A <ir> -C <config> --path-merging solve-state --clause=LOAD
+isarch -A <ir> -C <config> --path-merging solve-state --clause=STORE
+```
+
+`symbolic_args_from_types` 为指令全部字段建立自由符号变量，包括 rs1、rd/rs2、立即数和访问宽度；
+`setup_pre_state` 已为 x1–x31 建立独立初态符号，x0 遵循模型的常零语义。
+无需额外声明某个通用寄存器，也不传固定通用寄存器的 `--prestate` 或附加地址掩码。
+`--instruction-bits` 仍供用户明确要求固定机器码时使用，通用探索脚本不依赖它。
+探索优先启用路径合并，
+重复分叉使用现有 `branch_region_limits` 预算；预算截断必须报告为探索不完整。
+当符号下标引起算子重试拆分时，默认沿用求解模型的候选顺序；该顺序不能用来跨进程标识路径。
+需要重复导出及 fuzz 第 0 步认证时，在导出和判定共用的执行配置中启用路径合并：
+
+```toml
+[execution_limits]
+strict = false
+path_merging = true
+```
+
 ## 子命令
 
 ### `list-instructions`

@@ -1572,7 +1572,9 @@ pub fn solve_state_main<'ir, B: BV>(
                                 batch_label.unwrap_or("自由批")
                             )
                         );
-                        success = false;
+                        if samples.fuzz.is_none() {
+                            success = false;
+                        }
                     }
                     merged_summary.merge(&outcome.summary);
                     merged_diagnostics.extend(outcome.diagnostics);

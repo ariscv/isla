@@ -531,3 +531,10 @@ timeout --signal=TERM --kill-after=5s 590s \
 - 叶 PPN 偏好须先只针对目标类检查可满足性，再加入父值绑定和历史排重；否则会把父 corpus entry 的超宽固定值或排重冲突误记成类要求。生成时条件开放叶高位，非叶仍复用原父值绑定。
 - 当前分页 LOAD/STORE 中参与守卫判定的 64 位读取对应 PTE，普通数据读取只进入结果；复用已有按位依赖即可构造叶高位偏好。此结论不推广到任意程序。
 - `SamplePath::bind` 只约束活动读取的初始内存；写入但不读取的初始字节在认证输出中可以为 null。M5 对照会初始化这些字节，不能以全 pre_memory 字节表示不同判定其语义失效；须由同一输入认证并严格核对实际读取值。详见 [第 8 步](path_merge_call_support/fuzz-step8.md)。
+
+## 通用符号指令探索与符号重试路径号（2026-11-08）
+
+- x1/x2 固定的根因是探索脚本从旧 `done.json` 继承 `--instruction-bits`。脚本现已显式构造纯 `--clause=LOAD/STORE` 命令，不再读取旧命令或注入 x1 配置；`setup_pre_state` 原生提供 x1–x31 的全量符号初态，指令字段由 `symbolic_args_from_types` 自由符号化。路径合并配合每类 32 个样本，实测 LOAD 的 rs1/rd、STORE 的 rs1/rs2 均覆盖全部 32 个编号；细分数据与验收失败原因见 [S1](path_merge_call_support/fuzz-seq-s1.md)。
+- `symbolic_length::fork_symbolic_value` 枚举候选由 Z3 原生模型求解产生。按用户 2026-11-08 决策，严禁加入 `ordered_symbolic_retries` 这类逐位强制最小值的求解偏好，求解必须保持原生无偏；跨探索进程若有路径号差异应由标准判定语义处理，不人为干预求解器候选顺序。详见 [S1](path_merge_call_support/fuzz-seq-s1.md)。
+- **$x0$ 架构级建模**：RISC-V 规范中 $x0 \equiv 0$。在 `regs.sail` 中将 `GPRs` 改为 31 维向量，移除 `register x0`。读 $x0$ 恒返回 0（`zero_reg`），写 $x0$ 直接丢弃（`()`）；$x1..x31$ 初态保持 100% 自由符号化。消除了动态符号寄存器索引读写 $x0$ 时因未约束变量导致的后态非唯一性拒绝。
+- **CLINT 中断 CSR 初态**：在执行涉及定时器分发（`clint_dispatch`）的代码路径时，Sail 会修改 `mip[MTI]`。若 `mip` 等中断控制 CSR 未在 `isa.toml` 的 `[registers.defaults]` 中给定初态，高位未约束比特在求解后态唯一性取反时会被 Z3 赋予不同模型从而拒绝。在 TOML 中提供 `mip`、`mie`、`mtime` 等基础初值可保证后态确定性。

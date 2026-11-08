@@ -1,5 +1,7 @@
 # 议题入口
 
+- 2026-11-08 [fuzz 序列 S1](path_merge_call_support/fuzz-seq-s1.md)：移除旧机器码与 x1 特例；纯 clause 加路径合并实测导出 LOAD 976、STORE 1421 条样本，rs1/rd/rs2 均见证全部 32 个编号。Sv39 180 秒预算未收敛；Bare 存在排除内存区域错误；make 验收仍遇到译码 Poison。
+
 - 2026-11-08 [fuzz 第 8 步](path_merge_call_support/fuzz-step8.md)：PPN 软偏好默认关闭，A/B 优先清零叶 PTE[53:46]、类要求时显式保留并计数；四场景×两初值×开关各 500 例，已知 emu 时间占比 27.28%→0.05%，开启组 1 条 R-XS-001、0 新分歧；覆盖下降照实列出。A/B 命中与唯一性 100%，42 的八组确定性通过；Rust 1150、Python 142+11，无所属残留。
 
 - 2026-11-08 [fuzz 第 7 步](path_merge_call_support/fuzz-step7.md)：E2 四场景各 1000 例完成：3093 agree、907 条 R-XS-001、0 新分歧；5000 个 corpus entry 重新认证、3800 个 A/B 命中与唯一性均 100%，四场景确定性通过；Rust 1149、Python 142+9 通过，九个运行目录无所属残留；首次 Sv48 STORE 的 3 个超时、16 个取消原件保留并完整重跑。

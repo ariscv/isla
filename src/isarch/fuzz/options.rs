@@ -61,7 +61,11 @@ impl Options {
                 .parse()
                 .map_err(|e| format!("对照比例无效：{e}"))?,
             certify_all: matches.opt_present("fuzz-certify-all"),
-            avoid_known_ppn_overflow: matches.opt_present("fuzz-avoid-known-ppn-overflow"),
+            avoid_known_ppn_overflow: if matches.opt_present("fuzz-avoid-known-ppn-overflow") {
+                return Err("选项 --fuzz-avoid-known-ppn-overflow 已被废弃与严厉禁止：SMT 求解必须保持无偏，不为单个硬件 bug 定制求解偏好".into());
+            } else {
+                false
+            },
             feedback: match matches.opt_str("fuzz-feedback").as_deref() {
                 None | Some("coverage") => true,
                 Some("none") => false,

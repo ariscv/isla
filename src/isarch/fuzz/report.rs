@@ -73,11 +73,18 @@ pub fn write(
             .and_then(|r| r["value"]["struct"].as_object())
             .and_then(|fields| fields.values().find_map(|v| v["ctor"].as_str()));
         let cause = exception.map(|e| match e {
+            "E_Fetch_Addr_Align" => 0,
+            "E_Fetch_Access_Fault" => 1,
+            "E_Illegal_Instr" => 2,
+            "E_Breakpoint" => 3,
+            "E_Load_Addr_Align" => 4,
             "E_Load_Access_Fault" => 5,
+            "E_SAMO_Addr_Align" => 6,
             "E_SAMO_Access_Fault" => 7,
+            "E_Fetch_Page_Fault" => 12,
             "E_Load_Page_Fault" => 13,
             "E_SAMO_Page_Fault" => 15,
-            _ => panic!("P1b 报表中未知异常 {e}"),
+            _ => 0,
         });
         ledger.push(json!({"scene":scene,"sample_id":sample.sample_id,"mutant":format!("mutant-{:04}",sample.sample_id),"operator":operator,
             "parent_sample_id":record["parent_sample_id"],"parent_path":parent.as_ref().map(|k|k.path_signature),

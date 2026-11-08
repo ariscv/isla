@@ -915,7 +915,7 @@ impl<B: BV> Target<B> for RV32<B> {
         &self.symbolic_csrs
     }
     fn reg_list(&self) -> Vec<String> {
-        let mut regs: Vec<String> = (0..32).map(|r| format!("x{}", r)).collect();
+        let mut regs: Vec<String> = (1..32).map(|r| format!("x{}", r)).collect();
         regs.extend((0..32).map(|r| format!("f{}", r)));
         regs.extend((0..32).map(|r| format!("vr{}", r)));
         regs.push("PC".to_string());
@@ -2837,6 +2837,56 @@ mod tests {
             nonzero_groups: groups,
             derive_bit: derive,
             allowed: None,
+        }
+    }
+
+    /// 纯符号 x1 复用初态变量，所有地址位及未对齐地址均可取。
+    #[test]
+    fn symbolic_x1_all_bits_reuse_pre_state() {
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let name = symtab.intern(intern_static(&zencode::encode("x1")));
+        let mut shared_state = SharedState::empty(symtab);
+        shared_state.registers.insert(name, Ty::Bits(64));
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut regs = RegisterBindings::new();
+        let ty = Ty::Bits(64);
+        regs.insert(name, false, UVal::Uninit(&ty));
+        let mut target = rv64();
+        target.setup_pre_state(&mut regs, &Bindings::default(), &shared_state, &mut solver, &HashMap::new()).unwrap();
+        let sym = match target.pre_state().get(&name).unwrap() {
+            Val::Symbolic(sym) => *sym,
+            value => panic!("x1 初态应为符号值，实际 {:?}", value),
+        };
+        target.symbolic_csrs = vec![symbolic_csr("x1", 0, 0, vec![], None)];
+        target.apply_symbolic_csrs_to_registers(&mut regs, &shared_state, &mut solver).unwrap();
+        assert_eq!(target.pre_state().get(&name), Some(&Val::Symbolic(sym)));
+        assert_eq!(regs.get_last_if_initialized(name), Some(&Val::Symbolic(sym)));
+        for concrete_x1 in [0, 1, 7, 8, 0x2000_0000, u64::MAX] {
+            assert_eq!(
+                solver.check_sat_with(
+                    &smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(sym)), Box::new(smtlib::bits64(concrete_x1, 64))),
+                    SourceLoc::unknown(),
+                ),
+                SmtResult::Sat,
+                "x1 应允许具体值 {:#x}",
+                concrete_x1
+            );
+        }
+        for bit in 0..64 {
+            assert_eq!(
+                solver.check_sat_with(
+                    &smtlib::Exp::Eq(
+                        Box::new(smtlib::Exp::Var(sym)),
+                        Box::new(smtlib::bits64(0x2000_0000 ^ (1 << bit), 64))
+                    ),
+                    SourceLoc::unknown(),
+                ),
+                SmtResult::Sat,
+                "地址位 {} 必须允许独立变化",
+                bit
+            );
         }
     }
 

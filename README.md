@@ -320,7 +320,7 @@ attr = "ram"
 > 在该模型的边界取值下界内/界外）与固定平台（emu 实际 RAM）重放的匹配，
 > 属 pipeline 预分类/重放阶段的职责，本仓库当前不处理。
 
-### CSR 符号化：`[symbolic_registers]`（W21）
+### 寄存器符号化：`[symbolic_registers]`（W21）
 
 原则：**所有 CSR 原则上都应符号化，只有无探索意义的 bitfield 可钉死**。
 `[registers.defaults]` 的具体值对 CSR 的效果是双重的：执行帧初值被钉死，
@@ -413,6 +413,13 @@ pin_value = "0x0000000a00000000"
 这只服务固定机器字的译码，执行时仍对整个允许集合求解。各执行样本的编码和汇编沿用已有模型检查。
 约束沿用 `setup_pre_state` 之后、checkpoint 之前的符号寄存器注入，执行值与输出前态共用同一个符号；没有改 IR。
 未使用 `allowed` 的配置保持原有行为。
+
+通用符号探索使用 `solve-state --clause=LOAD` 或 `--clause=STORE`，不传 `--instruction-bits`，
+也不固定通用寄存器的 `--prestate`。指令的寄存器索引、立即数等字段由原生接口建立符号变量；
+`setup_pre_state` 已将 x1–x31 的初值全量符号化，无需额外声明某个通用寄存器。
+探索配置优先启用
+`[execution_limits] path_merging = true`，重复分叉预算沿用区域分支限制。
+当符号下标引起算子重试拆分时，沿用求解器原生无偏的模型候选顺序，严禁强加任何确定性重试偏好；跨进程由判定阶段的标准语义识别。完整语法及边界见 [CLI 规范](specs/isarch-cli.md)。
 
 ### 值域 signposting：`[[value_hints]]`（P1）
 

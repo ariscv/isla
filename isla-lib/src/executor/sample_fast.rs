@@ -267,8 +267,9 @@ impl<B: BV> SamplePath<B> {
         let timing = profile::Span::new("fast_bind");
         let mut condition = Exp::Bool(true);
         for (name, value) in &input.pre_registers {
-            condition =
-                and(condition, input_equal(self.pre.get(name).expect("路径缺少样本前置输入"), value, shared, solver)?);
+            if let Some(reg) = self.pre.get(name) {
+                condition = and(condition, input_equal(reg, value, shared, solver)?);
+            }
         }
         // 一次绑定整次读取，等价于原来的逐字节析取；候选基址必须覆盖全部字节。
         for (index, event) in self.memory.iter().enumerate() {

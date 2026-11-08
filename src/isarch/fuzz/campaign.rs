@@ -136,7 +136,19 @@ pub(super) fn run<B: BV>(
             .iter()
             .map(|sample| classes.iter().find(|key| directory.classes[*key].1 == sample.sample_id).unwrap().clone())
             .collect::<Vec<_>>();
-        let initial_features = super::feedback::extract(corpus, &initial_identities, &options.output);
+        let initial_features = if options.feedback {
+            super::feedback::extract(corpus, &initial_identities, &options.output)
+        } else {
+            initial_identities
+                .iter()
+                .map(|id| super::feedback::Feature {
+                    identity: id.clone(),
+                    buckets: std::collections::BTreeSet::new(),
+                    potential: 0,
+                    mismatch: None,
+                })
+                .collect()
+        };
         let mut coverage = CoverageFeedback::default();
         let mut entries = classes.iter().map(|_| Vec::<CorpusEntry>::new()).collect::<Vec<_>>();
         for ((sample, identity), feature) in corpus.iter().zip(&initial_identities).zip(initial_features) {
@@ -314,11 +326,24 @@ pub(super) fn run<B: BV>(
                 .collect::<Vec<Sample>>();
             let feature_identities =
                 accepted.iter().map(|(_, row)| directory.identity(&options.scenario, row)).collect::<Vec<_>>();
-            let mut features = accepted
-                .iter()
-                .map(|(i, _)| begin + i)
-                .zip(super::feedback::extract(&feature_samples, &feature_identities, &options.output))
-                .collect::<BTreeMap<_, _>>();
+            let mut features = if options.feedback && !feature_samples.is_empty() {
+                accepted
+                    .iter()
+                    .map(|(i, _)| begin + i)
+                    .zip(super::feedback::extract(&feature_samples, &feature_identities, &options.output))
+                    .collect::<BTreeMap<_, _>>()
+            } else {
+                accepted
+                    .iter()
+                    .map(|(i, _)| begin + i)
+                    .zip(feature_identities.into_iter().map(|id| super::feedback::Feature {
+                        identity: id,
+                        buckets: std::collections::BTreeSet::new(),
+                        potential: 0,
+                        mismatch: None,
+                    }))
+                    .collect::<BTreeMap<_, _>>()
+            };
             let certification_indices = rows
                 .iter()
                 .enumerate()

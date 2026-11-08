@@ -1,5 +1,9 @@
 # 当前任务
 
+- 2026-11-08 [isarch 原生 fuzz 闭环烟雾测试](../agents/path_merge_call_support/fuzz-isarch-loop-smoke.md)：Sv39 generic STORE 原生闭环跑通（PASS）。完成 216 条 DAG 导出（12,690 守卫）；初始 corpus 认证 20/20 达成 100%；形态 A（16 例）与形态 B（4 例）全部成功生成并经快档与认证档双重接纳；退出码 0，总耗时 198.79s（变异判定循环 6.92s）。彻底封禁 `--fuzz-avoid-known-ppn-overflow` 与 `ordered_symbolic_retries`，修复初态 $x0$ 非唯一性与退出码逻辑。
+
+- 2026-11-08 [fuzz 序列 S1](../agents/path_merge_call_support/fuzz-seq-s1.md)：移除旧机器码与 x1 特例；纯 clause 加路径合并已见证全部 32 个寄存器编号。待处理：通用构造子原始样本含不可编码宽度、排除内存区域错误、make 验收译码 Poison；Sv39 180 秒预算未收敛。
+
 - 2026-11-08 [fuzz 第 8 步](../agents/path_merge_call_support/fuzz-step8.md)：PPN 软偏好默认关闭，A/B 优先清零叶 PTE[53:46]、类要求时显式保留并计数；四场景×两初值×开关各 500 例，已知 emu 时间占比 27.28%→0.05%，开启组 1 条 R-XS-001、0 新分歧；覆盖下降照实列出。A/B 命中与唯一性 100%，42 的八组确定性通过；Rust 1150、Python 142+11，无所属残留。
 
 - 2026-11-08 [fuzz 第 7 步](../agents/path_merge_call_support/fuzz-step7.md)：E2 四场景各 1000 例完成：3093 agree、907 条 R-XS-001、0 新分歧；5000 个 corpus entry 重新认证、3800 个 A/B 命中与唯一性均 100%，四场景确定性通过；Rust 1149、Python 142+9 通过，九个运行目录无所属残留；首次 Sv48 STORE 的 3 个超时、16 个取消原件保留并完整重跑。
