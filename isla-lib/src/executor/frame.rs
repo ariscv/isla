@@ -172,25 +172,24 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
-        execution_limit_state: (*frame.execution_limit_state).clone(),
-        local_state: (*frame.local_state).clone(),
-        memory: (*frame.memory).clone(),
+        execution_limit_state: Arc::clone(&frame.execution_limit_state),
+        local_state: Arc::clone(&frame.local_state),
+        memory: Memory::fork_for_frame(&frame.memory),
         instrs: frame.instrs,
-        stack_vars: (*frame.stack_vars).clone(),
+        stack_vars: Arc::clone(&frame.stack_vars),
         stack_call: frame.stack_call.clone(),
-        backtrace: (*frame.backtrace).clone(),
-        function_assumptions: (*frame.function_assumptions).clone(),
-        pc_counts: (*frame.pc_counts).clone(),
-        taken_interrupts: (*frame.taken_interrupts).clone(),
+        backtrace: Arc::clone(&frame.backtrace),
+        function_assumptions: Arc::clone(&frame.function_assumptions),
+        pc_counts: Arc::clone(&frame.pc_counts),
+        taken_interrupts: Arc::clone(&frame.taken_interrupts),
         #[cfg(feature = "tracetool")]
-        trace_path: (*frame.trace_path).clone(),
+        trace_path: Arc::clone(&frame.trace_path),
     }
 }
 
 /// A `LocalFrame` is a mutable frame which is used by a currently
 /// executing thread. It is turned into an immutable `Frame` when the
 /// control flow forks on a choice, which can be shared by threads.
-#[derive(Clone)]
 pub struct LocalFrame<'ir, B> {
     pub(super) path_timing: PathTiming,
     pub(super) path_smt_stats: SmtCallStats,
@@ -203,16 +202,16 @@ pub struct LocalFrame<'ir, B> {
     pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
     // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
-    pub(super) execution_limit_state: ExecutionLimitPathState,
-    pub(super) local_state: LocalState<'ir, B>,
-    pub(super) memory: Memory<B>,
+    pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
+    pub(super) local_state: Arc<LocalState<'ir, B>>,
+    pub(super) memory: Arc<Memory<B>>,
     pub(super) instrs: &'ir [Instr<Name, B>],
-    pub(super) stack_vars: Vec<Bindings<'ir, B>>,
+    pub(super) stack_vars: Arc<Vec<Bindings<'ir, B>>>,
     pub(super) stack_call: Stack<'ir, B>,
-    pub(super) backtrace: Backtrace,
-    pub(super) function_assumptions: HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>,
-    pub(super) pc_counts: HashMap<B, usize>,
-    pub(super) taken_interrupts: Vec<(TaskId, u8)>,
+    pub(super) backtrace: Arc<Backtrace>,
+    pub(super) function_assumptions: Arc<HashMap<Name, Vec<(Vec<Val<B>>, Val<B>)>>>,
+    pub(super) pc_counts: Arc<HashMap<B, usize>>,
+    pub(super) taken_interrupts: Arc<Vec<(TaskId, u8)>>,
     /*
      * ATTENTION git-block:
      * 不要恢复旧字段 `pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>,`。
@@ -227,7 +226,36 @@ pub struct LocalFrame<'ir, B> {
      */
     // pub(super) branch_conditions: Vec<crate::smt::smtlib::Exp<crate::smt::Sym>>, // git-block: use trace_path
     #[cfg(feature = "tracetool")]
-    pub(super) trace_path: TracePerPath,
+    pub(super) trace_path: Arc<TracePerPath>,
+}
+
+// 内存读取可能通过内部可变性更新路径状态，不能直接派生共享 Arc 的 Clone。
+impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
+    fn clone(&self) -> Self {
+        Self {
+            path_timing: self.path_timing.clone(),
+            path_smt_stats: self.path_smt_stats.clone(),
+            function_name: self.function_name,
+            pc: self.pc,
+            speculation_mode: self.speculation_mode,
+            region_replay: self.region_replay,
+            region_execution: self.region_execution.clone(),
+            region_merge_records: self.region_merge_records.clone(),
+            pending_retry_operand: self.pending_retry_operand.clone(),
+            execution_limit_state: self.execution_limit_state.clone(),
+            local_state: self.local_state.clone(),
+            memory: Memory::fork_for_frame(&self.memory),
+            instrs: self.instrs,
+            stack_vars: self.stack_vars.clone(),
+            stack_call: self.stack_call.clone(),
+            backtrace: self.backtrace.clone(),
+            function_assumptions: self.function_assumptions.clone(),
+            pc_counts: self.pc_counts.clone(),
+            taken_interrupts: self.taken_interrupts.clone(),
+            #[cfg(feature = "tracetool")]
+            trace_path: self.trace_path.clone(),
+        }
+    }
 }
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
@@ -241,18 +269,18 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
-        execution_limit_state: Arc::new(frame.execution_limit_state.clone()),
-        local_state: Arc::new(frame.local_state.clone()),
-        memory: Arc::new(frame.memory.clone()),
+        execution_limit_state: Arc::clone(&frame.execution_limit_state),
+        local_state: Arc::clone(&frame.local_state),
+        memory: Memory::fork_for_frame(&frame.memory),
         instrs: frame.instrs,
-        stack_vars: Arc::new(frame.stack_vars.clone()),
+        stack_vars: Arc::clone(&frame.stack_vars),
         stack_call: frame.stack_call.clone(),
-        backtrace: Arc::new(frame.backtrace.clone()),
-        function_assumptions: Arc::new(frame.function_assumptions.clone()),
-        pc_counts: Arc::new(frame.pc_counts.clone()),
-        taken_interrupts: Arc::new(frame.taken_interrupts.clone()),
+        backtrace: Arc::clone(&frame.backtrace),
+        function_assumptions: Arc::clone(&frame.function_assumptions),
+        pc_counts: Arc::clone(&frame.pc_counts),
+        taken_interrupts: Arc::clone(&frame.taken_interrupts),
         #[cfg(feature = "tracetool")]
-        trace_path: Arc::new(frame.trace_path.clone()),
+        trace_path: Arc::clone(&frame.trace_path),
     }
 }
 
@@ -312,7 +340,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         let mut names = SmtDumpNames::from_shared_state(shared_state);
         Self::add_binding_dump_names(&mut names, &self.local_state.vars);
         Self::add_binding_dump_names(&mut names, &self.local_state.lets);
-        for bindings in &self.stack_vars {
+        for bindings in self.stack_vars.iter() {
             Self::add_binding_dump_names(&mut names, bindings);
         }
         for (name, register) in self.local_state.regs.iter() {
@@ -334,7 +362,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn vars_mut(&mut self) -> &mut Bindings<'ir, B> {
-        &mut self.local_state.vars
+        &mut Arc::make_mut(&mut self.local_state).vars
     }
 
     pub fn vars(&self) -> &Bindings<'ir, B> {
@@ -369,7 +397,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
-        &mut self.local_state.regs
+        &mut Arc::make_mut(&mut self.local_state).regs
     }
 
     pub fn regs(&self) -> &RegisterBindings<'ir, B> {
@@ -378,13 +406,13 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn add_regs(&mut self, regs: &RegisterBindings<'ir, B>) -> &mut Self {
         for (k, v) in regs {
-            self.local_state.regs.insert_register(*k, v.clone())
+            Arc::make_mut(&mut self.local_state).regs.insert_register(*k, v.clone())
         }
         self
     }
 
     pub fn lets_mut(&mut self) -> &mut Bindings<'ir, B> {
-        &mut self.local_state.lets
+        &mut Arc::make_mut(&mut self.local_state).lets
     }
 
     pub fn lets(&self) -> &Bindings<'ir, B> {
@@ -393,7 +421,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn add_lets(&mut self, lets: &Bindings<'ir, B>) -> &mut Self {
         for (k, v) in lets {
-            self.local_state.lets.insert(*k, v.clone());
+            Arc::make_mut(&mut self.local_state).lets.insert(*k, v.clone());
         }
         self
     }
@@ -420,11 +448,11 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn memory_mut(&mut self) -> &mut Memory<B> {
-        &mut self.memory
+        Arc::make_mut(&mut self.memory)
     }
 
     pub fn set_memory(&mut self, memory: Memory<B>) -> &mut Self {
-        self.memory = memory;
+        self.memory = Arc::new(memory);
         self
     }
 
@@ -471,8 +499,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             region_replay: None,
             region_merge_records: Vec::new(),
             pending_retry_operand: None,
-            execution_limit_state: ExecutionLimitPathState::default(),
-            local_state: LocalState {
+            execution_limit_state: Arc::new(ExecutionLimitPathState::default()),
+            local_state: Arc::new(LocalState {
                 vars,
                 regs,
                 lets,
@@ -482,22 +510,22 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 enumerate_merges: false,
                 expression_values: HashMap::new(),
                 expression_retry_operands: None,
-            },
-            memory: Memory::new(),
+            }),
+            memory: Arc::new(Memory::new()),
             instrs,
-            stack_vars: Vec::new(),
+            stack_vars: Arc::new(Vec::new()),
             stack_call: None,
-            backtrace: Vec::new(),
-            function_assumptions: HashMap::new(),
-            pc_counts: HashMap::new(),
-            taken_interrupts: Vec::new(),
+            backtrace: Arc::new(Vec::new()),
+            function_assumptions: Arc::new(HashMap::new()),
+            pc_counts: Arc::new(HashMap::new()),
+            taken_interrupts: Arc::new(Vec::new()),
             #[cfg(feature = "tracetool")]
-            trace_path: TracePerPath::default(),
+            trace_path: Arc::new(TracePerPath::default()),
         }
     }
 
     pub fn write_set_mut(&mut self) -> Option<&mut WriteSet> {
-        self.local_state.speculative_access.as_mut().map(|access| &mut access.writes)
+        Arc::make_mut(&mut self.local_state).speculative_access.as_mut().map(|access| &mut access.writes)
     }
 
     pub fn write_set(&self) -> Option<&WriteSet> {
@@ -514,7 +542,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             self.region_merge_records.is_empty() && self.local_state.pure_definitions.is_empty(),
             "只向新帧恢复合并历史"
         );
-        (self.region_merge_records, self.local_state.pure_definitions) = history;
+        (self.region_merge_records, Arc::make_mut(&mut self.local_state).pure_definitions) = history;
     }
 
     pub fn new_call(
@@ -530,15 +558,15 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.region_execution = self.region_execution.clone();
         new_frame.region_replay = self.region_replay;
         new_frame.region_merge_records = self.region_merge_records.clone();
-        new_frame.local_state.speculative_access = self.local_state.speculative_access.clone();
-        new_frame.local_state.pure_definitions = self.local_state.pure_definitions.clone();
-        new_frame.local_state.enumerate_merges = self.local_state.enumerate_merges;
+        Arc::make_mut(&mut new_frame.local_state).speculative_access = self.local_state.speculative_access.clone();
+        Arc::make_mut(&mut new_frame.local_state).pure_definitions = self.local_state.pure_definitions.clone();
+        Arc::make_mut(&mut new_frame.local_state).enumerate_merges = self.local_state.enumerate_merges;
         new_frame.path_timing = self.path_timing.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
-        new_frame.local_state.regs = self.local_state.regs.clone();
-        new_frame.local_state.lets = self.local_state.lets.clone();
-        new_frame.memory = self.memory.clone();
+        Arc::make_mut(&mut new_frame.local_state).regs = self.local_state.regs.clone();
+        Arc::make_mut(&mut new_frame.local_state).lets = self.local_state.lets.clone();
+        new_frame.memory = Memory::fork_for_frame(&self.memory);
         #[cfg(feature = "tracetool")]
         {
             new_frame.trace_path = self.trace_path.clone();
@@ -577,7 +605,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             self.backtrace.iter().any(|(n, _)| shared_state.probe_functions.contains(n))
         };
 
-        self.local_state.probes.probe_this_function = should_probe_here
+        Arc::make_mut(&mut self.local_state).probes.probe_this_function = should_probe_here
     }
 }
 
@@ -602,11 +630,11 @@ impl<'ir, B: BV> Frame<'ir, B> {
 pub(super) fn push_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
     let mut vars = HashMap::default();
     mem::swap(&mut vars, frame.vars_mut());
-    frame.stack_vars.push(vars)
+    Arc::make_mut(&mut frame.stack_vars).push(vars)
 }
 
 pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
-    if let Some(mut vars) = frame.stack_vars.pop() {
+    if let Some(mut vars) = Arc::make_mut(&mut frame.stack_vars).pop() {
         mem::swap(&mut vars, frame.vars_mut())
     }
 }
@@ -618,6 +646,218 @@ mod timing_tests {
     use crate::source_loc::SourceLoc;
     use crate::timeout::{SmtCallStats, SmtOperation};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn frozen_and_resumed_frames_share_heavy_state_until_written() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Frame<'static, B64>>();
+        assert_send_sync::<LocalFrame<'static, B64>>();
+
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let mut parent = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+        let variable = Name::from_u32(42);
+        parent.vars_mut().insert(variable, UVal::Init(Val::Bool(false)));
+        let snapshot = freeze_frame(&parent);
+        let mut first = unfreeze_frame(&snapshot);
+        let second = unfreeze_frame(&snapshot);
+
+        assert!(Arc::ptr_eq(&parent.execution_limit_state, &snapshot.execution_limit_state));
+        assert!(Arc::ptr_eq(&parent.local_state, &snapshot.local_state));
+        assert!(Arc::ptr_eq(&parent.memory, &snapshot.memory));
+        assert!(Arc::ptr_eq(&parent.stack_vars, &snapshot.stack_vars));
+        assert!(Arc::ptr_eq(&parent.backtrace, &snapshot.backtrace));
+        assert!(Arc::ptr_eq(&parent.function_assumptions, &snapshot.function_assumptions));
+        assert!(Arc::ptr_eq(&parent.pc_counts, &snapshot.pc_counts));
+        assert!(Arc::ptr_eq(&parent.taken_interrupts, &snapshot.taken_interrupts));
+        #[cfg(feature = "tracetool")]
+        assert!(Arc::ptr_eq(&parent.trace_path, &snapshot.trace_path));
+
+        assert!(Arc::ptr_eq(&snapshot.execution_limit_state, &first.execution_limit_state));
+        assert!(std::ptr::eq(&*snapshot.local_state, &*first.local_state));
+        assert!(std::ptr::eq(&*snapshot.local_state, &*second.local_state));
+        assert!(std::ptr::eq(&*snapshot.memory, &*first.memory));
+        assert!(std::ptr::eq(&*snapshot.stack_vars, &*first.stack_vars));
+        assert!(std::ptr::eq(&*snapshot.backtrace, &*first.backtrace));
+        assert!(std::ptr::eq(&*snapshot.function_assumptions, &*first.function_assumptions));
+        assert!(std::ptr::eq(&*snapshot.pc_counts, &*first.pc_counts));
+        assert!(std::ptr::eq(&*snapshot.taken_interrupts, &*first.taken_interrupts));
+        #[cfg(feature = "tracetool")]
+        assert!(Arc::ptr_eq(&snapshot.trace_path, &first.trace_path));
+
+        first.vars_mut().insert(variable, UVal::Init(Val::Bool(true)));
+        assert!(!std::ptr::eq(&*snapshot.local_state, &*first.local_state));
+        assert!(matches!(parent.vars().get(&variable), Some(UVal::Init(Val::Bool(false)))));
+        assert!(matches!(second.vars().get(&variable), Some(UVal::Init(Val::Bool(false)))));
+        assert!(matches!(snapshot.local_state.vars.get(&variable), Some(UVal::Init(Val::Bool(false)))));
+
+        first.memory_mut().add_symbolic_region(0..8);
+        assert_eq!(first.memory().regions().len(), 1);
+        assert!(parent.memory().regions().is_empty());
+        assert!(second.memory().regions().is_empty());
+        assert!(!Arc::ptr_eq(&snapshot.memory, &first.memory));
+
+        push_call_stack(&mut first);
+        assert_eq!(first.stack_vars.len(), 1);
+        assert!(snapshot.stack_vars.is_empty());
+        assert!(second.stack_vars.is_empty());
+        assert!(!Arc::ptr_eq(&snapshot.stack_vars, &first.stack_vars));
+    }
+
+    #[test]
+    fn unique_local_frame_writes_in_place() {
+        let instrs: Vec<Instr<Name, B64>> = vec![];
+        let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+        let state_ptr = Arc::as_ptr(&local.local_state);
+        let memory_ptr = Arc::as_ptr(&local.memory);
+
+        local.vars_mut().insert(Name::from_u32(42), UVal::Init(Val::Bool(true)));
+        local.memory_mut().add_symbolic_region(0..8);
+
+        assert_eq!(state_ptr, Arc::as_ptr(&local.local_state));
+        assert_eq!(memory_ptr, Arc::as_ptr(&local.memory));
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingReader(std::sync::atomic::AtomicU64);
+
+    impl Clone for CountingReader {
+        fn clone(&self) -> Self {
+            Self(std::sync::atomic::AtomicU64::new(self.0.load(std::sync::atomic::Ordering::SeqCst)))
+        }
+    }
+
+    impl crate::memory::CustomRegion<B64> for CountingReader {
+        fn read(&self, _: Val<B64>, _: u64, _: u32, _: &mut Solver<B64>, _: bool) -> Result<Val<B64>, ExecError> {
+            Ok(Val::Bits(B64::new(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 64)))
+        }
+        fn write(
+            &mut self,
+            _: Val<B64>,
+            _: u64,
+            _: Val<B64>,
+            _: &mut Solver<B64>,
+            _: Option<Val<B64>>,
+        ) -> Result<Val<B64>, ExecError> {
+            panic!("本测试不写设备")
+        }
+        fn initial_value(&self, _: u64, _: u32) -> Option<B64> {
+            None
+        }
+        fn region_name(&self) -> &'static str {
+            "读计数设备"
+        }
+        fn clone_dyn(&self) -> Box<dyn Send + Sync + crate::memory::CustomRegion<B64>> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl crate::memory::MemoryCallbacks<B64> for CountingReader {
+        fn handles_concrete_reads(&self) -> bool {
+            true
+        }
+        fn symbolic_read(
+            &self,
+            _: &[crate::memory::Region<B64>],
+            solver: &mut Solver<B64>,
+            value: &Val<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: u32,
+            _: &Option<Val<B64>>,
+            _: &crate::smt::ReadOpts,
+        ) -> bool {
+            let Val::Symbolic(value) = value else { panic!("回调必须收到符号读值") };
+            let count = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            solver.assert_eq(crate::smt::smtlib::Exp::Var(*value), crate::smt::smtlib::bits64(count, 64));
+            false
+        }
+        fn symbolic_write(
+            &mut self,
+            _: &[crate::memory::Region<B64>],
+            _: &mut Solver<B64>,
+            _: Sym,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: u32,
+            _: &Option<Val<B64>>,
+            _: &crate::smt::WriteOpts,
+        ) -> bool {
+            panic!("本测试不写数组内存")
+        }
+        fn symbolic_write_tag(
+            &mut self,
+            _: &[crate::memory::Region<B64>],
+            _: &mut Solver<B64>,
+            _: Sym,
+            _: &Val<B64>,
+            _: &Val<B64>,
+            _: &Val<B64>,
+        ) {
+            panic!("本测试不写标签")
+        }
+    }
+
+    fn assert_counting_read(frame: &LocalFrame<B64>, expected: u64) {
+        use crate::smt::smtlib::{bits64, Exp};
+        let ctx = crate::smt::Context::new(crate::smt::Config::new());
+        let mut solver = Solver::new(&ctx);
+        let value = frame
+            .memory()
+            .read(
+                Val::Unit,
+                Val::Bits(B64::new(0, 64)),
+                Val::I128(8),
+                &mut solver,
+                false,
+                crate::smt::ReadOpts::default(),
+            )
+            .unwrap();
+        match value {
+            Val::Bits(bits) => assert_eq!(bits.lower_u64(), expected),
+            Val::Symbolic(value) => {
+                assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+                assert!(solver
+                    .check_sat_with(
+                        &Exp::Neq(Box::new(Exp::Var(value)), Box::new(bits64(expected, 64))),
+                        SourceLoc::unknown()
+                    )
+                    .is_unsat()
+                    .unwrap());
+            }
+            _ => panic!("预期位向量读取"),
+        }
+    }
+
+    #[test]
+    fn impure_readers_keep_path_state_across_all_frame_copy_entries() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        for custom_region in [true, false] {
+            let instrs = vec![];
+            let mut parent = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
+            if custom_region {
+                parent
+                    .memory_mut()
+                    .add_region(crate::memory::Region::Custom(0..8, Box::new(CountingReader::default())));
+            } else {
+                parent.memory_mut().add_symbolic_region(0..8);
+                parent.memory_mut().set_client_info(Box::new(CountingReader::default()));
+            }
+            assert_counting_read(&parent, 0);
+            let frozen = freeze_frame(&parent);
+            let cloned = parent.clone();
+            let called = parent.new_call(Name::from_u32(1), &[], &Ty::Unit, None, &instrs);
+            assert_counting_read(&parent, 1);
+            let first = unfreeze_frame(&frozen);
+            let second = unfreeze_frame(&frozen);
+            for child in [&first, &second, &cloned, &called] {
+                assert_counting_read(child, 1);
+                assert_counting_read(child, 2);
+            }
+            assert_counting_read(&parent, 2);
+            assert_counting_read(&unfreeze_frame(&frozen.clone()), 1);
+        }
+    }
 
     #[test]
     fn frozen_frames_store_only_settled_path_timing_totals() {
@@ -688,8 +928,8 @@ mod tests {
 
         let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, instrs_ref);
 
-        local.trace_path.record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
-        local.trace_path.record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
+        Arc::make_mut(&mut local.trace_path).record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
+        Arc::make_mut(&mut local.trace_path).record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
         assert_eq!(local.trace_path.record_count(), 2);
 
         let frozen = freeze_frame(&local);
@@ -702,9 +942,9 @@ mod tests {
         let mut fork_a = unfreeze_frame(&frozen);
         let mut fork_b = unfreeze_frame(&frozen);
 
-        fork_a.trace_path.record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
-        fork_b.trace_path.record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
-        fork_b.trace_path.record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
+        Arc::make_mut(&mut fork_a.trace_path).record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
+        Arc::make_mut(&mut fork_b.trace_path).record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
+        Arc::make_mut(&mut fork_b.trace_path).record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
 
         assert_eq!(fork_a.trace_path.record_count(), 3);
         assert_eq!(fork_b.trace_path.record_count(), 4);
@@ -735,9 +975,9 @@ mod tests {
         let caller = symtab.intern("zsharing_caller");
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let mut parent = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
-        parent.trace_path.record_summary(function, vec![(caller, 8)], 0, "parent-summary");
-        parent.trace_path.push_branch_condition(smtlib::Exp::Bool(true));
-        parent.trace_path.record_branch_edge(function, vec![(caller, 8)], 0, 7, true);
+        Arc::make_mut(&mut parent.trace_path).record_summary(function, vec![(caller, 8)], 0, "parent-summary");
+        Arc::make_mut(&mut parent.trace_path).push_branch_condition(smtlib::Exp::Bool(true));
+        Arc::make_mut(&mut parent.trace_path).record_branch_edge(function, vec![(caller, 8)], 0, 7, true);
         let identity = parent.trace_path.prefix_identity_for_test();
         assert!(identity.iter().all(|pointer| !pointer.is_null()));
         let frozen = freeze_frame(&parent);
@@ -746,12 +986,12 @@ mod tests {
         for path in [&*frozen.trace_path, &left.trace_path, &right.trace_path] {
             assert_eq!(path.prefix_identity_for_test(), identity);
         }
-        left.trace_path.record_summary(function, vec![(caller, 9)], 7, "left-summary");
-        left.trace_path.push_branch_condition(smtlib::Exp::Bool(false));
-        left.trace_path.record_branch_edge(function, vec![(caller, 9)], 7, 8, false);
-        right.trace_path.record_summary(function, vec![(caller, 10)], 7, "right-summary");
-        right.trace_path.push_branch_condition(smtlib::Exp::Bool(true));
-        right.trace_path.record_branch_edge(function, vec![(caller, 10)], 7, 12, true);
+        Arc::make_mut(&mut left.trace_path).record_summary(function, vec![(caller, 9)], 7, "left-summary");
+        Arc::make_mut(&mut left.trace_path).push_branch_condition(smtlib::Exp::Bool(false));
+        Arc::make_mut(&mut left.trace_path).record_branch_edge(function, vec![(caller, 9)], 7, 8, false);
+        Arc::make_mut(&mut right.trace_path).record_summary(function, vec![(caller, 10)], 7, "right-summary");
+        Arc::make_mut(&mut right.trace_path).push_branch_condition(smtlib::Exp::Bool(true));
+        Arc::make_mut(&mut right.trace_path).record_branch_edge(function, vec![(caller, 10)], 7, 12, true);
         let filename = std::env::temp_dir().join(format!("itrace_shared_frame_{}.txt", std::process::id()));
         let handler = TraceHandler::default();
         handler.set_path(Some(filename.clone()));
@@ -797,7 +1037,7 @@ mod tests {
     fn new_call_carries_trace_path() {
         let instrs: Vec<Instr<Name, B64>> = vec![];
         let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
-        local.trace_path.record(Name::from_u32(1), vec![], 10);
+        Arc::make_mut(&mut local.trace_path).record(Name::from_u32(1), vec![], 10);
 
         let callee = local.new_call(Name::from_u32(99), &[], &Ty::Unit, None, &instrs);
         assert_eq!(callee.trace_path.record_count(), 1);

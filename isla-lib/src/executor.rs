@@ -916,7 +916,12 @@ pub fn interrupt_pending<'ir, B: BV>(
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
     for interrupt in &task_state.interrupts {
-        let triggered = match frame.local_state.regs.get(interrupt.trigger_register, shared_state, solver, info)? {
+        let triggered = match Arc::make_mut(&mut frame.local_state).regs.get(
+            interrupt.trigger_register,
+            shared_state,
+            solver,
+            info,
+        )? {
             Some(Val::Bits(reg_value)) => *reg_value == interrupt.trigger_value,
             Some(Val::Symbolic(sym)) => {
                 let equal = smtlib::Exp::Eq(
@@ -942,7 +947,7 @@ pub fn interrupt_pending<'ir, B: BV>(
                 }
             }
 
-            frame.taken_interrupts.push((task_id, interrupt.id));
+            Arc::make_mut(&mut frame.taken_interrupts).push((task_id, interrupt.id));
 
             log_from!(tid, log::VERBOSE, "Injecting pending interrupt");
             for (loc, reset) in &interrupt.reset {
@@ -951,7 +956,7 @@ pub fn interrupt_pending<'ir, B: BV>(
                 assign_with_accessor(
                     loc,
                     value.clone(),
-                    &mut frame.local_state,
+                    Arc::make_mut(&mut frame.local_state),
                     shared_state,
                     solver,
                     &mut accessor,
@@ -983,14 +988,14 @@ pub fn reset_registers<'ir, B: BV>(
             assign_with_accessor(
                 loc,
                 value.clone(),
-                &mut frame.local_state,
+                Arc::make_mut(&mut frame.local_state),
                 shared_state,
                 solver,
                 &mut accessor,
                 info,
             )?;
             let reg_id = loc.id();
-            frame.local_state.regs.synchronize_register(reg_id);
+            Arc::make_mut(&mut frame.local_state).regs.synchronize_register(reg_id);
             // Note that these are just the assumptions from reset_registers; there
             // may also be assumptions from default register values, recorded at the
             // top level.
@@ -1000,7 +1005,15 @@ pub fn reset_registers<'ir, B: BV>(
     for (loc, reset) in &task_state.reset_registers {
         let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
         let mut accessor = Vec::new();
-        assign_with_accessor(loc, value.clone(), &mut frame.local_state, shared_state, solver, &mut accessor, info)?;
+        assign_with_accessor(
+            loc,
+            value.clone(),
+            Arc::make_mut(&mut frame.local_state),
+            shared_state,
+            solver,
+            &mut accessor,
+            info,
+        )?;
         solver.add_event(Event::AssumeReg(loc.id(), accessor, value));
     }
     if !shared_state.reset_constraints.is_empty() {
@@ -1009,7 +1022,7 @@ pub fn reset_registers<'ir, B: BV>(
                 Some(loc) => {
                     let value = get_loc_and_initialize(
                         &loc,
-                        &mut frame.local_state,
+                        Arc::make_mut(&mut frame.local_state),
                         shared_state,
                         solver,
                         &mut Vec::new(),
@@ -1037,7 +1050,7 @@ pub fn reset_registers<'ir, B: BV>(
             Some(loc) => {
                 let value = get_loc_and_initialize(
                     &loc,
-                    &mut frame.local_state,
+                    Arc::make_mut(&mut frame.local_state),
                     shared_state,
                     solver,
                     &mut Vec::new(),
@@ -1068,7 +1081,7 @@ pub fn reset_registers<'ir, B: BV>(
         let val_result = smt_exp_to_value(smt_result, solver)?;
         let f_name = shared_state.symtab.lookup(f);
         solver.add_event(Event::AssumeFun { name: f_name, args: val_args.clone(), return_value: val_result.clone() });
-        let asms = frame.function_assumptions.entry(f_name).or_default();
+        let asms = Arc::make_mut(&mut frame.function_assumptions).entry(f_name).or_default();
         asms.push((val_args, val_result));
     }
     Ok(())
@@ -1119,14 +1132,14 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     frame.capture_path_smt_stats();
     #[cfg(feature = "tracetool")]
     if shared_state.trace.ftrace_enabled() {
-        frame.trace_path.capture_function_trace(solver.trace());
+        Arc::make_mut(&mut frame.trace_path).capture_function_trace(solver.trace());
     }
 
     match result {
         Ok(run) => Ok((run, frame)),
         Err(err) => {
             err.assert_normal_execution();
-            frame.backtrace.push((frame.function_name, frame.pc));
+            Arc::make_mut(&mut frame.backtrace).push((frame.function_name, frame.pc));
             Err((err, frame))
         }
     }
@@ -1377,7 +1390,7 @@ fn run_special_primop<'ir, B: BV>(
                     tid,
                     loc,
                     Val::Vector(vec![Val::Poison; usize::try_from(len).map_err(|_| ExecError::Overflow)?]),
-                    &mut frame.local_state,
+                    Arc::make_mut(&mut frame.local_state),
                     shared_state,
                     solver,
                     info,
@@ -1390,22 +1403,22 @@ fn run_special_primop<'ir, B: BV>(
     } else if f == INTERNAL_VECTOR_UPDATE && args.len() == 3 {
         let args = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
         let vector = primop::vector_update(args, solver, frame, info)?;
-        assign(tid, loc, vector, &mut frame.local_state, shared_state, solver, info)?;
+        assign(tid, loc, vector, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if f == RESET_REGISTERS {
         reset_registers(tid, frame, task_state, shared_state, solver, info)?;
         frame.regs_mut().synchronize();
-        assign(tid, loc, Val::Unit, &mut frame.local_state, shared_state, solver, info)?;
+        assign(tid, loc, Val::Unit, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if f == INTERRUPT_PENDING {
         let pending = interrupt_pending(tid, task_id, frame, task_state, shared_state, solver, info)?;
-        assign(tid, loc, Val::Bool(pending), &mut frame.local_state, shared_state, solver, info)?;
+        assign(tid, loc, Val::Bool(pending), Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if f == ITE_PHI {
         let mut true_value = None;
         let mut symbolics = Vec::new();
         for cond in args.chunks_exact(2) {
-            let cond_var = match eval_exp(&cond[0], &mut frame.local_state, shared_state, solver, info) {
+            let cond_var = match eval_exp(&cond[0], Arc::make_mut(&mut frame.local_state), shared_state, solver, info) {
                 Ok(cond_var) => cond_var.into_owned(),
                 // A variable not found error indicates that the block associated with this condition variable
                 // has not been executed
@@ -1414,8 +1427,10 @@ fn run_special_primop<'ir, B: BV>(
             };
             match cond_var {
                 Val::Bool(true) => {
-                    true_value =
-                        Some(eval_exp(&cond[1], &mut frame.local_state, shared_state, solver, info)?.into_owned())
+                    true_value = Some(
+                        eval_exp(&cond[1], Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?
+                            .into_owned(),
+                    )
                 }
                 Val::Bool(false) => (),
                 Val::Symbolic(sym) => symbolics.push((sym, &cond[1])),
@@ -1423,30 +1438,36 @@ fn run_special_primop<'ir, B: BV>(
             }
         }
         if let Some(true_value) = true_value {
-            assign(tid, loc, true_value, &mut frame.local_state, shared_state, solver, info)?
+            assign(tid, loc, true_value, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?
         } else {
             let symbolics = symbolics
                 .iter()
                 .map(|(sym, arg)| {
-                    Ok((*sym, eval_exp(arg, &mut frame.local_state, shared_state, solver, info)?.into_owned()))
+                    Ok((
+                        *sym,
+                        eval_exp(arg, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?.into_owned(),
+                    ))
                 })
                 .collect::<Result<Vec<(Sym, Val<B>)>, _>>()?;
             let result = ite_phi(&symbolics[0], &symbolics[1..], solver, info)?;
-            assign(tid, loc, result, &mut frame.local_state, shared_state, solver, info)?
+            assign(tid, loc, result, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?
         }
         frame.pc += 1
     } else if f == REG_DEREF && args.len() == 1 {
-        if let Val::Ref(reg) = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned() {
+        if let Val::Ref(reg) =
+            eval_exp(&args[0], Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?.into_owned()
+        {
             let value = frame
                 .regs_mut()
                 .get(reg, shared_state, solver, info)?
                 .cloned()
                 .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
-            let publish = region_merge::record_read(&mut frame.local_state, reg, Vec::new(), value.clone())?;
+            let publish =
+                region_merge::record_read(Arc::make_mut(&mut frame.local_state), reg, Vec::new(), value.clone())?;
             if publish {
                 solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
             }
-            assign(tid, loc, value, &mut frame.local_state, shared_state, solver, info)?;
+            assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         } else {
             return Err(ExecError::Type(format!("reg_deref (not a register) {:?}", &f), info));
         };
@@ -1454,7 +1475,9 @@ fn run_special_primop<'ir, B: BV>(
     } else if (f == ABSTRACT_CALL || f == ABSTRACT_PRIMOP) && !args.is_empty() {
         let mut args = args
             .iter()
-            .map(|arg| eval_exp(arg, &mut frame.local_state, shared_state, solver, info).map(Cow::into_owned))
+            .map(|arg| {
+                eval_exp(arg, Arc::make_mut(&mut frame.local_state), shared_state, solver, info).map(Cow::into_owned)
+            })
             .collect::<Result<Vec<Val<B>>, _>>()?;
         let abstracted_fn = match args.pop().unwrap() {
             Val::Ref(f) => f,
@@ -1472,15 +1495,16 @@ fn run_special_primop<'ir, B: BV>(
             args,
             return_value: return_value.clone(),
         });
-        assign(tid, loc, return_value, &mut frame.local_state, shared_state, solver, info)?;
+        assign(tid, loc, return_value, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if f == READ_REGISTER_FROM_VECTOR {
         assert!(args.len() == 2);
         let mut operands = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
         let regs = operands.pop().unwrap();
         let n = operands.pop().unwrap();
-        let value = read_register_from_vector(n, regs, &mut frame.local_state, shared_state, solver, info)?;
-        assign(tid, loc, value, &mut frame.local_state, shared_state, solver, info)?;
+        let value =
+            read_register_from_vector(n, regs, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
+        assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if f == WRITE_REGISTER_FROM_VECTOR {
         assert!(args.len() == 3);
@@ -1488,17 +1512,17 @@ fn run_special_primop<'ir, B: BV>(
         let regs = operands.pop().unwrap();
         let value = operands.pop().unwrap();
         let n = operands.pop().unwrap();
-        write_register_from_vector(n, value, regs, &mut frame.local_state, shared_state, solver, info)?;
-        assign(tid, loc, Val::Unit, &mut frame.local_state, shared_state, solver, info)?;
+        write_register_from_vector(n, value, regs, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
+        assign(tid, loc, Val::Unit, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if f == INSTR_ANNOUNCE {
         assert!(args.len() == 1);
         let opcode = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?.pop().unwrap();
         if let Some((arch_pc, limit)) = task_state.pc_limit {
-            if let Some(reg) = frame.local_state.regs.get(arch_pc, shared_state, solver, info)? {
+            if let Some(reg) = Arc::make_mut(&mut frame.local_state).regs.get(arch_pc, shared_state, solver, info)? {
                 match reg {
                     Val::Bits(bv) => {
-                        let count = frame.pc_counts.entry(*bv).or_insert(0);
+                        let count = Arc::make_mut(&mut frame.pc_counts).entry(*bv).or_insert(0);
                         *count += 1;
                         if *count > limit {
                             return Err(ExecError::PCLimitReached(bv.lower_u64()));
@@ -1522,7 +1546,7 @@ fn run_special_primop<'ir, B: BV>(
                         if solver.check_sat_with(&uniqueness, info).is_sat()? {
                             panic!("指令公告前必须将符号 PC 拆分为唯一候选");
                         }
-                        let count = frame.pc_counts.entry(bv).or_insert(0);
+                        let count = Arc::make_mut(&mut frame.pc_counts).entry(bv).or_insert(0);
                         *count += 1;
                         if *count > limit {
                             return Err(ExecError::PCLimitReached(bv.lower_u64()));
@@ -1554,12 +1578,20 @@ fn run_special_primop<'ir, B: BV>(
             _ => (),
         };
         solver.add_event(Event::Instr(opcode));
-        assign(tid, loc, Val::Unit, &mut frame.local_state, shared_state, solver, info)?;
+        assign(tid, loc, Val::Unit, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         frame.pc += 1
     } else if shared_state.type_info.union_ctors.contains(&f) {
         assert!(args.len() == 1);
-        let arg = eval_exp(&args[0], &mut frame.local_state, shared_state, solver, info)?.into_owned();
-        assign(tid, loc, Val::Ctor(f, Box::new(arg)), &mut frame.local_state, shared_state, solver, info)?;
+        let arg = eval_exp(&args[0], Arc::make_mut(&mut frame.local_state), shared_state, solver, info)?.into_owned();
+        assign(
+            tid,
+            loc,
+            Val::Ctor(f, Box::new(arg)),
+            Arc::make_mut(&mut frame.local_state),
+            shared_state,
+            solver,
+            info,
+        )?;
         frame.pc += 1
     } else {
         // 配置常量和已注册原语在加载期已改写为 Primop；函数体和特殊调用
@@ -1668,7 +1700,7 @@ macro_rules! btrace_push_branch_condition {
     ($frame:expr, $condition:expr) => {{
         #[cfg(feature = "tracetool")]
         {
-            $frame.trace_path.push_branch_condition($condition);
+            Arc::make_mut(&mut $frame.trace_path).push_branch_condition($condition);
         }
         #[cfg(not(feature = "tracetool"))]
         {
@@ -1681,7 +1713,7 @@ macro_rules! trace_fork_frame_with_branch_condition {
     ($frame:expr, $pc:expr, $condition:expr) => {{
         #[cfg(feature = "tracetool")]
         {
-            let mut trace_path = $frame.trace_path.clone();
+            let mut trace_path = (*$frame.trace_path).clone();
             trace_path.push_branch_condition($condition);
             Frame { pc: $pc, trace_path: Arc::new(trace_path), ..freeze_frame($frame) }
         }
@@ -1699,9 +1731,9 @@ macro_rules! btrace_record_jump {
     ($frame:expr, $pc:expr, $taken:expr, $state:expr) => {{
         #[cfg(feature = "tracetool")]
         if $state.trace.btrace_enabled() {
-            $frame.trace_path.record_jump(
+            Arc::make_mut(&mut $frame.trace_path).record_jump(
                 $frame.function_name,
-                $frame.backtrace.clone(),
+                (*$frame.backtrace).clone(),
                 $pc as u64,
                 $frame.pc as u64,
                 $taken,
@@ -1736,7 +1768,12 @@ fn report_path_timeout<'ir, B: BV>(
         log_from!(tid, log::SYM_EXEC, line);
     }
     #[cfg(feature = "tracetool")]
-    frame.trace_path.record_summary(frame.function_name, frame.backtrace.clone(), frame.pc as u64, lines.join("\n"));
+    Arc::make_mut(&mut frame.trace_path).record_summary(
+        frame.function_name,
+        (*frame.backtrace).clone(),
+        frame.pc as u64,
+        lines.join("\n"),
+    );
     #[cfg(not(feature = "tracetool"))]
     let _ = frame;
 }
@@ -1775,9 +1812,9 @@ fn record_execution_limit<B: BV>(frame: &mut LocalFrame<'_, B>, reason: Executio
                 format!("max_path_depth exceeded: control_flow_steps={}, max_path_depth={}", actual, max)
             }
         };
-        frame.trace_path.record_summary(
+        Arc::make_mut(&mut frame.trace_path).record_summary(
             frame.function_name,
-            frame.backtrace.clone(),
+            (*frame.backtrace).clone(),
             frame.pc as u64,
             format!("execution limit: {}, action={}", detail, action),
         );
@@ -1870,7 +1907,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
     crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
     loop {
-        frame.local_state.expression_retry_operands = None;
+        Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
         let error = match run_loop_inner(
             tid,
             task_id,
@@ -1936,11 +1973,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         }
         if matches!(&frame.pending_retry_operand, Some((pc, Val::Unit)) if *pc != frame.pc) {
             frame.pending_retry_operand = None;
-            frame.local_state.expression_values.clear();
-            frame.local_state.expression_retry_operands = None;
+            Arc::make_mut(&mut frame.local_state).expression_values.clear();
+            Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
         }
         if frame.pending_retry_operand.is_none() {
-            frame.local_state.expression_values.clear();
+            Arc::make_mut(&mut frame.local_state).expression_values.clear();
         }
         // Completion is checked before the soft timeout. Therefore a path that
         // finished its last IR instruction is reported as finished even if its
@@ -1965,9 +2002,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         };
 
         #[cfg(feature = "tracetool")]
-        frame.trace_path.record_instruction(
+        Arc::make_mut(&mut frame.trace_path).record_instruction(
             frame.function_name,
-            frame.backtrace.clone(),
+            (*frame.backtrace).clone(),
             frame.pc as u64,
             &frame.instrs[frame.pc],
             &shared_state.trace,
@@ -1975,7 +2012,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
         match &frame.instrs[frame.pc] {
             Instr::Decl(v, ty, _) => {
-                if let Some(access) = &mut frame.local_state.speculative_access {
+                if let Some(access) = &mut Arc::make_mut(&mut frame.local_state).speculative_access {
                     access.initial_variables.remove(&(access.call_scope, frame.function_name, *v));
                 }
                 frame.vars_mut().insert(*v, UVal::Uninit(ty));
@@ -1983,22 +2020,24 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
 
             Instr::Init(var, _, exp, info) => {
-                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                region_merge::record_write(&mut frame.local_state, *var, false)?;
+                let value =
+                    eval_exp(exp, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
+                region_merge::record_write(Arc::make_mut(&mut frame.local_state), *var, false)?;
                 frame.vars_mut().insert(*var, UVal::Init(value));
                 frame.pc += 1;
             }
 
             Instr::Jump(exp, target, info) => {
                 // 条件可能要求分叉重试；求值成功后再计入控制流和回跳预算。
-                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
+                let value =
+                    eval_exp(exp, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
                 frame.pending_retry_operand = None;
-                frame.local_state.expression_values.clear();
-                frame.local_state.expression_retry_operands = None;
+                Arc::make_mut(&mut frame.local_state).expression_values.clear();
+                Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
                 let jump_pc = frame.pc;
                 let decision = match limit_handler.as_ref() {
                     Some(handler) => handler.on_conditional_jump(
-                        &mut frame.execution_limit_state,
+                        Arc::make_mut(&mut frame.execution_limit_state),
                         frame.function_name,
                         frame.pc,
                         *target,
@@ -2006,7 +2045,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         *info,
                     ),
                     None => {
-                        frame.execution_limit_state.advance_control_flow();
+                        Arc::make_mut(&mut frame.execution_limit_state).advance_control_flow();
                         ExecutionLimitDecision::Continue
                     }
                 };
@@ -2023,7 +2062,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
                             let handler = limit_handler.as_ref().expect("limit decision requires active handler");
                             branch_decision(frame, task_state, SpeculativeRejectReason::LimitSampling)?;
-                            handler.commit_sample(&mut frame.execution_limit_state, &sample);
+                            handler.commit_sample(Arc::make_mut(&mut frame.execution_limit_state), &sample);
                             record_execution_limit(frame, reason, "sample_branch_condition");
                             let concrete_bool = if loop_limit_target(reason).is_some() {
                                 match concretize_loop_branch_with_sampling(v, solver, *info, &sample)? {
@@ -2124,15 +2163,15 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
                             let decision = match limit_handler.as_ref() {
                                 Some(handler) => handler.on_branch_fork(
-                                    &mut frame.execution_limit_state,
+                                    Arc::make_mut(&mut frame.execution_limit_state),
                                     frame.function_name,
                                     frame.pc,
                                     &frame.backtrace,
                                     *info,
                                 ),
-                                None => {
-                                    ExecutionLimitDecision::Fork { fork_id: frame.execution_limit_state.record_fork() }
-                                }
+                                None => ExecutionLimitDecision::Fork {
+                                    fork_id: Arc::make_mut(&mut frame.execution_limit_state).record_fork(),
+                                },
                             };
                             let fork_id = match decision {
                                 ExecutionLimitDecision::Fork { fork_id } => fork_id,
@@ -2145,7 +2184,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     let handler =
                                         limit_handler.as_ref().expect("limit decision requires active handler");
                                     branch_decision(frame, task_state, SpeculativeRejectReason::LimitSampling)?;
-                                    handler.commit_sample(&mut frame.execution_limit_state, &sample);
+                                    handler.commit_sample(Arc::make_mut(&mut frame.execution_limit_state), &sample);
                                     record_execution_limit(frame, reason, "sample_branch_condition");
                                     let concrete_bool = concretize_branch_with_sampling(v, solver, *info, &sample)?;
                                     if concrete_bool {
@@ -2186,7 +2225,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             // 父子路径的采样签名从这次 fork 起分叉，受限分支的具体化抽样
                             // 才会在不同路径上抽到不同方向。
                             Arc::make_mut(&mut frozen.execution_limit_state).advance_path_signature(false);
-                            frame.execution_limit_state.advance_path_signature(true);
+                            Arc::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
                             task_fraction.halve();
                             fork_sink.submit(Task {
                                 id: task_id,
@@ -2234,14 +2273,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Instr::Goto(target) => {
                 let decision = match limit_handler.as_ref() {
                     Some(handler) => handler.on_goto(
-                        &mut frame.execution_limit_state,
+                        Arc::make_mut(&mut frame.execution_limit_state),
                         frame.function_name,
                         frame.pc,
                         *target,
                         &frame.backtrace,
                     ),
                     None => {
-                        frame.execution_limit_state.advance_control_flow();
+                        Arc::make_mut(&mut frame.execution_limit_state).advance_control_flow();
                         ExecutionLimitDecision::Continue
                     }
                 };
@@ -2261,8 +2300,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 frame.pc = *target;
             }
             Instr::Copy(loc, exp, info) => {
-                let value = eval_exp(exp, &mut frame.local_state, shared_state, solver, *info)?.into_owned();
-                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                let value =
+                    eval_exp(exp, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
+                assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
@@ -2314,7 +2354,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                 };
                 frame.pending_retry_operand = None;
-                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
@@ -2391,7 +2431,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                 };
                 frame.pending_retry_operand = None;
-                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
@@ -2432,7 +2472,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                 };
                 frame.pending_retry_operand = None;
-                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
@@ -2440,7 +2480,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let value = merge_record::evaluate_primop(frame, solver, Some(*effect), |solver, frame| {
                     reset(&frame.memory, shared_state.typedefs(), solver)
                 })?;
-                assign(tid, loc, value, &mut frame.local_state, shared_state, solver, *info)?;
+                assign(tid, loc, value, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
                 frame.pc += 1;
             }
 
@@ -2451,9 +2491,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     ExecutionLimitDecision::Continue
                 } else {
                     match limit_handler.as_ref() {
-                        Some(handler) => handler.on_call(&mut frame.execution_limit_state),
+                        Some(handler) => handler.on_call(Arc::make_mut(&mut frame.execution_limit_state)),
                         None => {
-                            frame.execution_limit_state.advance_control_flow();
+                            Arc::make_mut(&mut frame.execution_limit_state).advance_control_flow();
                             ExecutionLimitDecision::Continue
                         }
                     }
@@ -2489,7 +2529,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         };
                         if *f == INSTR_ANNOUNCE {
                             if let Some((arch_pc, _)) = task_state.pc_limit {
-                                let pc = frame.local_state.regs.get(arch_pc, shared_state, solver, *info)?.cloned();
+                                let pc = Arc::make_mut(&mut frame.local_state)
+                                    .regs
+                                    .get(arch_pc, shared_state, solver, *info)?
+                                    .cloned();
                                 if let Some(Val::Symbolic(sym)) = pc {
                                     if solver.check_sat(*info).is_unsat()? {
                                         return Ok(Run::Dead);
@@ -2514,8 +2557,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         }
                         if *f == INTERRUPT_PENDING {
                             for interrupt in &task_state.interrupts {
-                                let reg = frame
-                                    .local_state
+                                let reg = Arc::make_mut(&mut frame.local_state)
                                     .regs
                                     .get(interrupt.trigger_register, shared_state, solver, *info)?
                                     .cloned();
@@ -2644,7 +2686,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let mut args = args
                             .iter()
                             .map(|arg| {
-                                eval_exp(arg, &mut frame.local_state, shared_state, solver, *info).map(Cow::into_owned)
+                                eval_exp(arg, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)
+                                    .map(Cow::into_owned)
                             })
                             .collect::<Result<Vec<Val<B>>, _>>()?;
 
@@ -2707,7 +2750,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         tid,
                                         loc,
                                         result.clone(),
-                                        &mut frame.local_state,
+                                        Arc::make_mut(&mut frame.local_state),
                                         shared_state,
                                         solver,
                                         *info,
@@ -2723,16 +2766,17 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             }
                         }
 
-                        let caller_scope = frame.local_state.speculative_access.as_mut().map(|access| {
-                            let caller = access.call_scope;
-                            access.call_scope = region_merge::fresh_call_scope();
-                            caller
-                        });
+                        let caller_scope =
+                            Arc::make_mut(&mut frame.local_state).speculative_access.as_mut().map(|access| {
+                                let caller = access.call_scope;
+                                access.call_scope = region_merge::fresh_call_scope();
+                                caller
+                            });
                         let caller_pc = frame.pc;
                         let caller_instrs = frame.instrs;
                         let caller_stack_call = frame.stack_call.clone();
                         push_call_stack(frame);
-                        frame.backtrace.push((frame.function_name, caller_pc));
+                        Arc::make_mut(&mut frame.backtrace).push((frame.function_name, caller_pc));
                         frame.function_name = *f;
                         frame.vars_mut().insert(RETURN, UVal::Uninit(ret_ty));
 
@@ -2742,21 +2786,29 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             pop_call_stack(frame);
                             frame.set_probes(shared_state);
                             // could avoid putting caller_pc into the stack?
-                            if let Some((name, _)) = frame.backtrace.pop() {
+                            if let Some((name, _)) = Arc::make_mut(&mut frame.backtrace).pop() {
                                 frame.function_name = name;
                             }
                             frame.pc = caller_pc + 1;
                             frame.instrs = caller_instrs;
                             frame.stack_call = caller_stack_call.clone();
                             if let Some(execution) = &frame.region_execution {
-                                let access = frame.local_state.speculative_access.as_mut().unwrap();
+                                let access = Arc::make_mut(&mut frame.local_state).speculative_access.as_mut().unwrap();
                                 access.call_scope = caller_scope.expect("推演返回必须恢复调用作用域");
                                 access.writes_allowed = frame.backtrace.len() == execution.write_depth;
                                 access.function = frame.function_name;
                                 access.pc = caller_pc;
                                 access.location = *info;
                             }
-                            assign(tid, &loc.clone(), ret, &mut frame.local_state, shared_state, solver, *info)
+                            assign(
+                                tid,
+                                &loc.clone(),
+                                ret,
+                                Arc::make_mut(&mut frame.local_state),
+                                shared_state,
+                                solver,
+                                *info,
+                            )
                         }));
 
                         for (i, arg) in args.drain(..).enumerate() {
@@ -2808,7 +2860,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Instr::Monomorphize(id, ty, info) => {
                 let val = get_id_and_initialize(
                     *id,
-                    &mut frame.local_state,
+                    Arc::make_mut(&mut frame.local_state),
                     shared_state,
                     solver,
                     &mut Vec::new(),
@@ -2823,7 +2875,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             tid,
                             &Loc::Id(*id),
                             normalized.clone(),
-                            &mut frame.local_state,
+                            Arc::make_mut(&mut frame.local_state),
                             shared_state,
                             solver,
                             *info,
@@ -2938,18 +2990,20 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
                         let decision = match limit_handler.as_ref() {
                             Some(handler) => handler.on_monomorphize_fork_at(
-                                &mut frame.execution_limit_state,
+                                Arc::make_mut(&mut frame.execution_limit_state),
                                 frame.function_name,
                                 frame.pc,
                                 &frame.backtrace,
                                 *info,
                             ),
-                            None => ExecutionLimitDecision::Fork { fork_id: frame.execution_limit_state.record_fork() },
+                            None => ExecutionLimitDecision::Fork {
+                                fork_id: Arc::make_mut(&mut frame.execution_limit_state).record_fork(),
+                            },
                         };
                         let fork_id = match decision {
                             ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
                             ExecutionLimitDecision::KeepCurrentModel { reason } => {
-                                frame.execution_limit_state.record_kept_current_model();
+                                Arc::make_mut(&mut frame.execution_limit_state).record_kept_current_model();
                                 record_execution_limit(frame, reason, "keep_current_model");
                                 None
                             }
@@ -2974,7 +3028,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame.capture_path_smt_stats();
                             let mut child_frame = freeze_frame(frame);
                             Arc::make_mut(&mut child_frame.execution_limit_state).advance_path_signature(false);
-                            frame.execution_limit_state.advance_path_signature(true);
+                            Arc::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
                             fork_sink.submit(Task {
                                 id: task_id,
                                 fraction: child_frac,
@@ -2991,7 +3045,15 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
                     solver.assert_eq(Var(v), result_exp);
 
-                    assign(tid, &Loc::Id(*id), result_val, &mut frame.local_state, shared_state, solver, *info)?;
+                    assign(
+                        tid,
+                        &Loc::Id(*id),
+                        result_val,
+                        Arc::make_mut(&mut frame.local_state),
+                        shared_state,
+                        solver,
+                        *info,
+                    )?;
                 }
                 frame.pc += 1
             }
@@ -3035,8 +3097,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         if matches!(&frame.pending_retry_operand, Some((_, Val::Unit))) {
             frame.pending_retry_operand = None;
         }
-        frame.local_state.expression_values.clear();
-        frame.local_state.expression_retry_operands = None;
+        Arc::make_mut(&mut frame.local_state).expression_values.clear();
+        Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
     }
 }
 
@@ -3080,7 +3142,7 @@ pub fn submit_trace_for_local_frame_with_diagnostics<'ir, B: BV>(
                 dump.configure_names(frame.smt_dump_names(shared_state));
             }
         }
-        let mut completed = crate::tracetool::TraceCompletedPath::without_diagnostics(frame.trace_path.clone());
+        let mut completed = crate::tracetool::TraceCompletedPath::without_diagnostics((*frame.trace_path).clone());
         for (diagnostic, include_smt_dump) in diagnostics {
             completed.push_diagnostic_with_dump(diagnostic, include_smt_dump);
         }
@@ -5425,7 +5487,7 @@ mod tests {
                                 index.clone(),
                                 Val::Bits(B129::new(7, 8)),
                                 refs,
-                                &mut frame.local_state,
+                                Arc::make_mut(&mut frame.local_state),
                                 &shared,
                                 &mut solver,
                                 info(),
@@ -5434,7 +5496,7 @@ mod tests {
                             read_register_from_vector(
                                 index.clone(),
                                 refs,
-                                &mut frame.local_state,
+                                Arc::make_mut(&mut frame.local_state),
                                 &shared,
                                 &mut solver,
                                 info(),
@@ -5599,7 +5661,7 @@ mod tests {
                             Val::I64(2),
                             Val::Bits(B64::new(7, 8)),
                             refs,
-                            &mut frame.local_state,
+                            Arc::make_mut(&mut frame.local_state),
                             &shared,
                             &mut solver,
                             info(),
@@ -5608,7 +5670,7 @@ mod tests {
                         read_register_from_vector(
                             Val::I64(2),
                             refs,
-                            &mut frame.local_state,
+                            Arc::make_mut(&mut frame.local_state),
                             &shared,
                             &mut solver,
                             info(),
@@ -5646,14 +5708,21 @@ mod tests {
                         index,
                         Val::Bits(B129::new(7, 8)),
                         refs,
-                        &mut frame.local_state,
+                        Arc::make_mut(&mut frame.local_state),
                         &shared,
                         &mut solver,
                         info(),
                     )
                 } else {
-                    read_register_from_vector(index, refs, &mut frame.local_state, &shared, &mut solver, info())
-                        .map(|_| ())
+                    read_register_from_vector(
+                        index,
+                        refs,
+                        Arc::make_mut(&mut frame.local_state),
+                        &shared,
+                        &mut solver,
+                        info(),
+                    )
+                    .map(|_| ())
                 };
                 eprintln!("具体65位索引2^64，写入={write}，结果={result:?}");
                 if write {
@@ -6074,7 +6143,7 @@ mod tests {
                             Val::Symbolic(index),
                             Val::Bits(B64::new(7, 8)),
                             refs,
-                            &mut frame.local_state,
+                            Arc::make_mut(&mut frame.local_state),
                             &shared,
                             &mut solver,
                             info(),
@@ -6083,7 +6152,7 @@ mod tests {
                         read_register_from_vector(
                             Val::Symbolic(index),
                             refs,
-                            &mut frame.local_state,
+                            Arc::make_mut(&mut frame.local_state),
                             &shared,
                             &mut solver,
                             info(),
@@ -6102,7 +6171,11 @@ mod tests {
                     if result.is_err() {
                         for reg in regs {
                             assert_eq!(
-                                frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap(),
+                                Arc::make_mut(&mut frame.local_state)
+                                    .regs
+                                    .get(reg, &shared, &mut solver, info())
+                                    .unwrap()
+                                    .unwrap(),
                                 &Val::Bits(B64::new(42, 8))
                             );
                         }
@@ -6143,7 +6216,7 @@ mod tests {
             let result = read_register_from_vector(
                 Val::Symbolic(index),
                 Val::Vector(vec![Val::Ref(reg)]),
-                &mut frame.local_state,
+                Arc::make_mut(&mut frame.local_state),
                 &shared,
                 &mut solver,
                 info(),
@@ -6177,7 +6250,7 @@ mod tests {
                 Val::Symbolic(index),
                 Val::Bits(B64::new(7, 8)),
                 Val::Vector(vec![Val::Ref(reg)]),
-                &mut frame.local_state,
+                Arc::make_mut(&mut frame.local_state),
                 &shared,
                 &mut solver,
                 info(),
@@ -6188,7 +6261,7 @@ mod tests {
                 "混合索引必须触发自适应分叉，保留索引 0 的合法路径"
             );
             assert_eq!(
-                frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap(),
+                Arc::make_mut(&mut frame.local_state).regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap(),
                 &Val::Bits(B64::new(42, 8)),
                 "等待索引拆分时不得提前修改寄存器"
             );
@@ -6349,7 +6422,7 @@ mod tests {
                     let read = read_register_from_vector(
                         Val::Symbolic(sym),
                         refs.clone(),
-                        &mut frame.local_state,
+                        Arc::make_mut(&mut frame.local_state),
                         &shared,
                         &mut solver,
                         info(),
@@ -6358,7 +6431,7 @@ mod tests {
                         Val::Symbolic(sym),
                         Val::Bits(B64::new(7, 8)),
                         refs,
-                        &mut frame.local_state,
+                        Arc::make_mut(&mut frame.local_state),
                         &shared,
                         &mut solver,
                         info(),
@@ -6371,7 +6444,11 @@ mod tests {
                         assert!(matches!(write, Err(ExecError::Type(..))));
                     }
                     assert_eq!(
-                        frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap(),
+                        Arc::make_mut(&mut frame.local_state)
+                            .regs
+                            .get(reg, &shared, &mut solver, info())
+                            .unwrap()
+                            .unwrap(),
                         &Val::Bits(B64::new(if index == 0 { 7 } else { 42 }, 8)),
                     );
                     let events = solver.trace().to_vec();
@@ -7867,19 +7944,24 @@ mod tests {
             let shared = empty_shared_state();
             let reg = test_name(460);
             let mut frame = make_frame(vec![]);
-            frame.local_state.regs.insert(reg, false, UVal::Init(Val::I128(0)));
+            Arc::make_mut(&mut frame.local_state).regs.insert(reg, false, UVal::Init(Val::I128(0)));
             let index = solver.declare_const(smtlib::Ty::BitVec(1), info());
             write_register_from_vector(
                 Val::Symbolic(index),
                 Val::I128(7),
                 Val::Vector(vec![Val::Ref(reg), Val::Ref(reg)]),
-                &mut frame.local_state,
+                Arc::make_mut(&mut frame.local_state),
                 &shared,
                 &mut solver,
                 info(),
             )
             .unwrap();
-            let result = frame.local_state.regs.get(reg, &shared, &mut solver, info()).unwrap().unwrap().clone();
+            let result = Arc::make_mut(&mut frame.local_state)
+                .regs
+                .get(reg, &shared, &mut solver, info())
+                .unwrap()
+                .unwrap()
+                .clone();
             assert!(
                 solver
                     .check_sat_with(
@@ -10363,8 +10445,9 @@ mod tests {
                 merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
-            let value =
-                eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+            let value = eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                .unwrap()
+                .into_owned();
             let result = add(value, Val::I128(1), &mut solver, info());
             assert!(result.is_ok());
         }
@@ -10493,8 +10576,9 @@ mod tests {
                 merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
-            let value =
-                eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+            let value = eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                .unwrap()
+                .into_owned();
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
             let result = Model::new(&solver).get_val(&value).unwrap();
             eprintln!("合并结果物化：{result:?}，原始值域={{1,2}}");
@@ -10520,7 +10604,9 @@ mod tests {
             ]);
             frame.regs_mut().insert(reg, false, UVal::Uninit(&Ty::Bool));
             let cond_value =
-                eval_exp(&Exp::Id(reg), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+                eval_exp(&Exp::Id(reg), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                    .unwrap()
+                    .into_owned();
             let Val::Symbolic(cond) = cond_value else { panic!("条件必须是符号布尔值") };
             assert_eq!(
                 merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
@@ -10624,7 +10710,9 @@ mod tests {
                 Some(4)
             );
             let result =
-                eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+                eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                    .unwrap()
+                    .into_owned();
             let Val::Symbolic(result) = result else { panic!("必须是符号结果") };
             solver.add_event(Event::Fork(1, result, 0, info()));
             let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
@@ -10776,8 +10864,9 @@ mod tests {
                 merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
                 Some(4)
             );
-            let value =
-                eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+            let value = eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                .unwrap()
+                .into_owned();
             let shift = *crate::primop::binary_primops::<B64>().get("shiftr").unwrap();
             for n in [1, 2] {
                 assert_eq!(
@@ -12308,7 +12397,7 @@ fn zcaller(za, zb) {
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let function = shared_state.symtab.lookup("zcache_ok");
         let mut frame = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
-        frame.trace_path.record(function, Vec::new(), 0);
+        Arc::make_mut(&mut frame.trace_path).record(function, Vec::new(), 0);
 
         btrace_push_branch_condition!(&mut frame, smtlib::Exp::<Sym>::Bool(true));
         let forked = trace_fork_frame_with_branch_condition!(&frame, 7, smtlib::Exp::<Sym>::Bool(false));
@@ -12338,7 +12427,7 @@ fn zcaller(za, zb) {
 
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let mut frame = LocalFrame::new(shared_state.symtab.lookup("zcache_ok"), &[], &Ty::Unit, None, &instrs);
-        frame.trace_path.record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
+        Arc::make_mut(&mut frame.trace_path).record(shared_state.symtab.lookup("zcache_ok"), Vec::new(), 3);
 
         submit_trace_for_local_frame(&frame, &shared_state);
         shared_state.trace.dump();
@@ -12368,14 +12457,14 @@ fn zcaller(za, zb) {
         let zpc_lookup = shared_state.symtab.lookup("zpc_lookup");
 
         let mut first_frame = LocalFrame::new(zcache_ok, &[], &Ty::Unit, None, &instrs);
-        first_frame.trace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(true));
-        first_frame.trace_path.record(zcache_ok, Vec::new(), 0);
-        first_frame.trace_path.record(zcache_ok, Vec::new(), 3);
+        Arc::make_mut(&mut first_frame.trace_path).push_branch_condition(smtlib::Exp::<Sym>::Bool(true));
+        Arc::make_mut(&mut first_frame.trace_path).record(zcache_ok, Vec::new(), 0);
+        Arc::make_mut(&mut first_frame.trace_path).record(zcache_ok, Vec::new(), 3);
 
         let mut error_like_frame = LocalFrame::new(zpc_lookup, &[], &Ty::Unit, None, &instrs);
-        error_like_frame.trace_path.push_branch_condition(smtlib::Exp::<Sym>::Bool(false));
-        error_like_frame.trace_path.record(zpc_lookup, Vec::new(), 1);
-        error_like_frame.trace_path.record(zpc_lookup, Vec::new(), 5);
+        Arc::make_mut(&mut error_like_frame.trace_path).push_branch_condition(smtlib::Exp::<Sym>::Bool(false));
+        Arc::make_mut(&mut error_like_frame.trace_path).record(zpc_lookup, Vec::new(), 1);
+        Arc::make_mut(&mut error_like_frame.trace_path).record(zpc_lookup, Vec::new(), 5);
         let frozen_error_like_frame = freeze_frame(&error_like_frame);
 
         submit_trace_for_local_frame(&first_frame, &shared_state);
@@ -12708,7 +12797,11 @@ fn zcaller(za, zb) {
         .unwrap();
         let names: Vec<Name> = (100..104).map(test_name).collect();
         for (i, name) in names.iter().enumerate() {
-            frame.local_state.regs.insert(*name, false, UVal::Init(Val::Bits(B64::new(i as u64, 8))));
+            Arc::make_mut(&mut frame.local_state).regs.insert(
+                *name,
+                false,
+                UVal::Init(Val::Bits(B64::new(i as u64, 8))),
+            );
         }
         let refs = Val::Vector(names.iter().map(|name| Val::Ref(*name)).collect());
         if write {
@@ -12716,7 +12809,7 @@ fn zcaller(za, zb) {
                 n,
                 Val::Bits(B64::new(99, 8)),
                 refs,
-                &mut frame.local_state,
+                Arc::make_mut(&mut frame.local_state),
                 &shared,
                 &mut solver,
                 info(),
@@ -12730,7 +12823,8 @@ fn zcaller(za, zb) {
             }
         } else {
             let actual =
-                read_register_from_vector(n, refs, &mut frame.local_state, &shared, &mut solver, info()).unwrap();
+                read_register_from_vector(n, refs, Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                    .unwrap();
             assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat);
             assert_eq!(Model::new(&solver).get_val(&actual).unwrap(), Val::Bits(B64::new(2, 8)));
         }
@@ -15125,8 +15219,9 @@ fn zmemreadfork(zu) {
                     Some(4)
                 );
                 let f = *crate::primop::binary_primops::<B64>().get(op).unwrap();
-                let input =
-                    eval_exp(&Exp::Id(x), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+                let input = eval_exp(&Exp::Id(x), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                    .unwrap()
+                    .into_owned();
                 let actual = f(input, Val::I128(amount), &mut solver, info()).unwrap();
                 let expected_then = f(Val::Bits(B64::new(right, 8)), Val::I128(amount), &mut solver, info()).unwrap();
                 let expected_else = f(Val::Bits(B64::new(left, 8)), Val::I128(amount), &mut solver, info()).unwrap();
@@ -15992,8 +16087,12 @@ fn zmemreadfork(zu) {
             merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
             Some(4)
         );
-        let xv = eval_exp(&Exp::Id(x), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
-        let yv = eval_exp(&Exp::Id(y), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+        let xv = eval_exp(&Exp::Id(x), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+            .unwrap()
+            .into_owned();
+        let yv = eval_exp(&Exp::Id(y), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+            .unwrap()
+            .into_owned();
         let unequal = smtlib::Exp::Neq(
             Box::new(crate::primop_util::smt_value(&xv, info()).unwrap()),
             Box::new(crate::primop_util::smt_value(&yv, info()).unwrap()),
@@ -16464,8 +16563,9 @@ fn zmemreadfork(zu) {
             merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
             Some(4)
         );
-        let result =
-            eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+        let result = eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+            .unwrap()
+            .into_owned();
         let trace = solver.trace().to_vec();
         let refs = crate::simplify::EventReferences::from_events(&trace);
         let taints = refs.value_taints(&result, &trace);
@@ -16493,9 +16593,10 @@ fn zmemreadfork(zu) {
             let merged = merge_region_for_test(cond, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
             if symmetric {
                 assert_eq!(merged, Some(4));
-                let value = eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info())
-                    .unwrap()
-                    .into_owned();
+                let value =
+                    eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+                        .unwrap()
+                        .into_owned();
                 let rv = frame.regs().get_last_if_initialized(reg).unwrap();
                 let unequal = smtlib::Exp::Neq(
                     Box::new(crate::primop_util::smt_value(&value, info()).unwrap()),
@@ -16637,8 +16738,9 @@ fn zmemreadfork(zu) {
             merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
             Some(4)
         );
-        let merged =
-            eval_exp(&Exp::Id(result), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+        let merged = eval_exp(&Exp::Id(result), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+            .unwrap()
+            .into_owned();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsigned(merged, &mut solver, info())));
         assert!(result.is_ok(), "两个合法的 128 位常量经合并后不能使 unsigned 转换 panic");
     }

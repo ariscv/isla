@@ -29,9 +29,14 @@ fn 符号构造子的直接与字段解包必须检查标签可满足性() {
             } else {
                 Exp::Id(value)
             };
-            let result =
-                eval_exp(&Exp::Unwrap(tag_a, Box::new(exp)), &mut frame.local_state, &shared, &mut solver, info())
-                    .map(Cow::into_owned);
+            let result = eval_exp(
+                &Exp::Unwrap(tag_a, Box::new(exp)),
+                Arc::make_mut(&mut frame.local_state),
+                &shared,
+                &mut solver,
+                info(),
+            )
+            .map(Cow::into_owned);
             if selected_tag == Some(tag_b) {
                 assert!(matches!(result, Err(ExecError::Type(..))), "标签不可匹配时必须保留类型错误");
             } else if selected_tag.is_none() {

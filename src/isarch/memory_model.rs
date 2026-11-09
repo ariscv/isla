@@ -102,6 +102,11 @@ impl SeqMemory {
 }
 
 impl<B: BV> MemoryCallbacks<B> for SeqMemory {
+    // 读取只向调用方的 solver 添加约束，区域／回调自身的路径状态不变。
+    fn is_pure_reader(&self) -> bool {
+        true
+    }
+
     fn constrains_symbolic_writes(&self) -> bool {
         true
     }
@@ -328,6 +333,38 @@ mod tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
     use isla_lib::smt::{Config, Context, Event, SmtResult};
+
+    #[test]
+    fn 数组回调在执行帧共享后写入必须隔离兄弟路径() {
+        use isla_lib::executor::{freeze_frame, unfreeze_frame, LocalFrame};
+        use isla_lib::ir::{Name, Ty as IrTy};
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let instrs = vec![];
+        let mut parent = LocalFrame::new(Name::from_u32(0), &[], &IrTy::Unit, None, &instrs);
+        parent.memory_mut().add_zero_region(0x1000..0x1008);
+        install_seq_memory(parent.memory_mut(), 64, &mut solver);
+        assert!(parent.memory().is_pure_reader());
+        let frozen = freeze_frame(&parent);
+        let mut first = unfreeze_frame(&frozen);
+        let second = unfreeze_frame(&frozen);
+        assert!(std::ptr::eq(parent.memory(), first.memory()));
+        assert!(std::ptr::eq(parent.memory(), second.memory()));
+        let address = Val::Bits(B64::new(0x1000, 64));
+        let written = write_bytes(first.memory_mut(), &mut solver, address.clone(), B64::new(0xa5, 8));
+        assert_write_success(&mut solver, &written);
+        assert!(!std::ptr::eq(parent.memory(), first.memory()));
+        for (frame, expected) in [(&first, 0xa5), (&second, 0), (&parent, 0)] {
+            let value = read_bytes(frame.memory(), &mut solver, address.clone(), 1);
+            assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+            expect_unsat(
+                &mut solver,
+                Exp::Neq(Box::new(smt_value(&value, SourceLoc::unknown()).unwrap()), Box::new(bits64(expected, 8))),
+                "帧分叉后数组读写必须相互隔离",
+            );
+        }
+    }
 
     #[test]
     fn 数组索引投影必须保留多字节初值写后读与原始事件地址() {

@@ -56,7 +56,17 @@ use crate::source_loc::SourceLoc;
 /// For now, we assume that we only deal with 64-bit architectures.
 pub type Address = u64;
 
+/// 自定义区域的读取默认视为可能修改路径私有状态。
+/// 声明纯读取后，`read`／`initial_value` 必须是纯符号观察：可以修改传入的
+/// 路径私有 solver，但不能通过 Atomic、Mutex 等改变影响路径执行结果的内部状态。
+/// 与执行结果无关且线程安全的统计不受此限制；Clone 必须没有影响执行结果的副作用。
 pub trait CustomRegion<B> {
+    /// 只有满足上述契约才能返回 true，允许执行帧在写入前共享该区域。
+    /// 默认 false 保持旧扩展的深拷贝行为；有状态读取由 `clone_dyn` 隔离。
+    fn is_pure_reader(&self) -> bool {
+        false
+    }
+
     fn read(
         &self,
         read_kind: Val<B>,
@@ -87,6 +97,8 @@ pub trait CustomRegion<B> {
     /// require a method that allows us to implement clone ourselves
     /// for types containing `Box<dyn T>`. The implementation will
     /// nearly always be just `Box::new(self.clone())`.
+    /// 克隆必须复制路径私有状态；不得仅克隆包裹该状态的 Arc<Atomic/Mutex>。
+    /// 只读数据可以共享，克隆本身不得改变执行结果。
     fn clone_dyn(&self) -> Box<dyn Send + Sync + CustomRegion<B>>;
 }
 
@@ -175,7 +187,17 @@ impl<B> Region<B> {
 // was used more generally then it would be better to parametrise the
 // Memory struct instead.
 
+/// 内存回调与 CustomRegion 使用相同的纯符号观察契约。
+/// `symbolic_read(&self)` 仅可改变传入 solver 的路径约束，不能改变影响执行
+/// 结果的内部路径状态。若读取有副作用，保留默认 false，并用 Clone 深拷贝该状态。
+/// 纯读取回调的写入通过 `&mut self` 完成，执行帧会在写前分离共享内存。
 pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync {
+    /// 显式确认全部共享读取与克隆满足纯读取契约，才允许写时复制。
+    /// 默认 false，使未适配的第三方回调继续在帧复制时克隆。
+    fn is_pure_reader(&self) -> bool {
+        false
+    }
+
     /// 回调若会用区域约束排除非符号内存的写入，可直接处理尚未收窄的符号地址。
     /// Custom 区域始终先经 Memory 检查，唯一地址调用设备，否则拆分重试。
     /// 默认仍由 Memory 提前检查可能与具体区域重叠的地址。
@@ -239,6 +261,8 @@ pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync
     );
 }
 
+/// `clone_box`（及其使用的 Clone）须独立复制路径私有可变状态，且无执行副作用。
+/// 错误声明纯读取或共享路径私有 Atomic/Mutex 不满足本契约，运行时无法自动识别。
 pub trait MemoryCallbacksClone<B> {
     fn clone_box(&self) -> Box<dyn MemoryCallbacks<B>>;
 }
@@ -276,6 +300,30 @@ static DEFAULT_REGION_NAME: &str = "default";
 enum Overlap {
     Unique(u64),
     NoOverlap,
+}
+
+impl<B> Memory<B> {
+    /// 只有所有自定义读取都明确满足纯观察契约，才允许共享整个内存容器。
+    /// Constrained 的任意闭包没有纯读取声明接口，保守地保留原帧复制行为。
+    pub fn is_pure_reader(&self) -> bool {
+        self.client_info.as_ref().map_or(true, |client| client.is_pure_reader())
+            && self.regions.iter().all(|region| match region {
+                Region::Custom(_, reader) => reader.is_pure_reader(),
+                Region::Constrained(_, _) => false,
+                _ => true,
+            })
+    }
+}
+
+impl<B: Clone> Memory<B> {
+    /// 冻结、恢复、直接克隆与新调用必须使用同一内存隔离策略。
+    pub(crate) fn fork_for_frame(memory: &Arc<Self>) -> Arc<Self> {
+        if memory.is_pure_reader() {
+            Arc::clone(memory)
+        } else {
+            Arc::new((**memory).clone())
+        }
+    }
 }
 
 impl<B: BV> Memory<B> {

@@ -907,6 +907,11 @@ impl<B: BV> ImmutablePageTables<B> {
 }
 
 impl<B: BV> CustomRegion<B> for ImmutablePageTables<B> {
+    // 读取只向调用方的 solver 添加约束，区域／回调自身的路径状态不变。
+    fn is_pure_reader(&self) -> bool {
+        true
+    }
+
     fn read(
         &self,
         read_kind: Val<B>,

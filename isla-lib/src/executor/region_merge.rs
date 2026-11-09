@@ -204,7 +204,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
         return Err(reject(frame, SpeculativeRejectReason::StepBudget));
     }
     let location = frame.instrs.get(frame.pc).and_then(stats::instr_source_loc).unwrap_or(SourceLoc::unknown());
-    let log = frame.local_state.speculative_access.as_mut().expect("区域推演必须启用访问记录");
+    let log = Arc::make_mut(&mut frame.local_state).speculative_access.as_mut().expect("区域推演必须启用访问记录");
     log.function = frame.function_name;
     log.pc = frame.pc;
     log.location = location;
@@ -518,7 +518,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     base.region_execution = Some(execution);
     base.speculation_mode = SpeculationMode::On;
     if base.local_state.speculative_access.is_none() {
-        base.local_state.speculative_access = Some(AccessLog {
+        Arc::make_mut(&mut base.local_state).speculative_access = Some(AccessLog {
             writes: WriteSet::default(),
             reads: Vec::new(),
             published_reads: Vec::new(),
@@ -539,7 +539,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
         let mut arm = base.clone();
         arm.pc = pc;
-        let access = arm.local_state.speculative_access.as_mut().unwrap();
+        let access = Arc::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
         access.guard = Some(match access.guard.take() {
             Some(parent) => smtlib::Exp::And(Box::new(parent), Box::new(guard.clone())),
             None => guard.clone(),
@@ -567,7 +567,8 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 solver.commit_transaction();
                 // 首臂惰性初始化的前置寄存器在另臂复用；无读事件的提升不扩大足迹。
                 let access = arm.local_state.speculative_access.as_ref().unwrap();
-                base.local_state.speculative_access.as_mut().unwrap().published_reads = access.published_reads.clone();
+                Arc::make_mut(&mut base.local_state).speculative_access.as_mut().unwrap().published_reads =
+                    access.published_reads.clone();
                 for (reg, initial) in &access.initial_registers {
                     if base.regs().get_last_if_initialized(*reg).is_none() {
                         assert_initial_type(initial, solver);
@@ -710,14 +711,14 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             record.value_symbols.extend(value.symbolic_variables());
         }
     }
-    merged.local_state.speculative_access.as_mut().unwrap().guard =
+    Arc::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard =
         frame.local_state.speculative_access.as_ref().and_then(|access| access.guard.clone());
     merged.region_execution = parent;
     merged.speculation_mode = frame.speculation_mode;
     if merged.region_execution.is_none() {
         // 仅前置状态/访问足迹可信，需要逐条精确读写顺序时不可信。
         // 读取在真实读取处缓冲，提交时按并集发布；此处补发以 ITE 保留原值的条件写入。
-        let access = merged.local_state.speculative_access.take().unwrap();
+        let access = Arc::make_mut(&mut merged.local_state).speculative_access.take().unwrap();
         for reg in access.writes.register_write_order {
             if zencode::decode(shared.symtab.to_str(reg)) != "_TLB" {
                 solver.add_event(Event::WriteReg(
@@ -913,9 +914,8 @@ fn merge_states<'ir, B: BV>(
         petgraph::algo::toposort(&graph, None).map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?;
     let mut access = lhs.clone();
     access.published_reads = rhs.published_reads.clone();
-    merged.local_state.pure_definitions = left.local_state.pure_definitions.clone();
-    merged
-        .local_state
+    Arc::make_mut(&mut merged.local_state).pure_definitions = left.local_state.pure_definitions.clone();
+    Arc::make_mut(&mut merged.local_state)
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
@@ -952,7 +952,7 @@ fn merge_states<'ir, B: BV>(
     access.writes.read_regs.extend(&rhs.writes.read_regs);
     access.writes.modified_regs.extend(&rhs.writes.modified_regs);
     access.writes.register_write_order = write_order.into_iter().map(|node| graph[node]).collect();
-    merged.local_state.speculative_access = Some(access);
+    Arc::make_mut(&mut merged.local_state).speculative_access = Some(access);
     merged.pc = left.pc;
     let prefix = base.region_merge_records.len();
     merged.region_merge_records.extend(left.region_merge_records[prefix..].iter().cloned());

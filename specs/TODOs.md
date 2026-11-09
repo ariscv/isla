@@ -44,3 +44,5 @@
 ## 2026-11-06 分量诊断（测量与设计完成）
 
 edee95d + 只读环境变量诊断，count/-T 64：Sv39 LOAD 16592 类（49s）、Sv48 LOAD 122654 类（454s）、Sv48 STORE 51638 类（97s），全部完整结束。原约束图每路径 1 分量；候选分组 Sv39 20/20 路径守卫域可乘，两个 Sv48 场景各 6 条路径不可乘，均有原求解器确认的缺失组合 UNSAT。未实现生产分解或紧凑输出；片段域与完整状态组合仍待验证。isla-lib 709 通过／既有 12 失败／6 忽略，格式检查与指定 target_f7 构建通过。[结果与设计](../agents/path_merge_call_support/enumeration.md)、[机器记录](../agents/path_merge_call_support/component-results.json)、[状态和下一步](../agents/path_merge_call_support/status.md)。
+
+- 2026-11-09 [执行帧 CoW 与回调隔离](../agents/cow-local-frame/status.md)：候选实现与限定验证完成，原仓库主线引用待可写环境快进。

@@ -257,7 +257,7 @@ pub(super) fn evaluate_primop<'ir, B: BV>(
     let result = evaluate(solver, frame);
     if let Some(start) = start {
         let end = solver.fresh();
-        frame.local_state.pure_definitions.push((start.id, end.id));
+        Arc::make_mut(&mut frame.local_state).pure_definitions.push((start.id, end.id));
     }
     result
 }

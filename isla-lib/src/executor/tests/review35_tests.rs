@@ -91,7 +91,7 @@ fn review35_unwrap_must_not_succeed_for_wrong_symbolic_tag() {
         };
         let actual = eval_exp(
             &Exp::Unwrap(a, Box::new(exp)),
-            &mut frame.local_state,
+            Arc::make_mut(&mut frame.local_state),
             &empty_shared_state(),
             &mut solver,
             info(),
@@ -124,15 +124,22 @@ fn review35_vector_register_access_must_filter_tlb() {
                 Val::I128(0),
                 Val::Bits(B64::new(1, 8)),
                 refs,
-                &mut frame.local_state,
+                Arc::make_mut(&mut frame.local_state),
                 &shared,
                 &mut solver,
                 info(),
             )
             .unwrap();
         } else {
-            read_register_from_vector(Val::I128(0), refs, &mut frame.local_state, &shared, &mut solver, info())
-                .unwrap();
+            read_register_from_vector(
+                Val::I128(0),
+                refs,
+                Arc::make_mut(&mut frame.local_state),
+                &shared,
+                &mut solver,
+                info(),
+            )
+            .unwrap();
         }
         let recorded = solver
             .trace()

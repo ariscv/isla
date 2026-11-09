@@ -188,7 +188,7 @@ fn 寄存器解引用与向量单项符号索引必须保留事件() {
         read_register_from_vector(
             Val::Symbolic(index),
             refs.clone(),
-            &mut frame.local_state,
+            Arc::make_mut(&mut frame.local_state),
             &shared,
             &mut solver,
             info(),
@@ -198,7 +198,7 @@ fn 寄存器解引用与向量单项符号索引必须保留事件() {
             Val::Symbolic(index),
             Val::Bits(B64::new(9, 8)),
             refs,
-            &mut frame.local_state,
+            Arc::make_mut(&mut frame.local_state),
             &shared,
             &mut solver,
             info(),

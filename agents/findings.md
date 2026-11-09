@@ -538,3 +538,8 @@ timeout --signal=TERM --kill-after=5s 590s \
 - `symbolic_length::fork_symbolic_value` 枚举候选由 Z3 原生模型求解产生。按用户 2026-11-08 决策，严禁加入 `ordered_symbolic_retries` 这类逐位强制最小值的求解偏好，求解必须保持原生无偏；跨探索进程若有路径号差异应由标准判定语义处理，不人为干预求解器候选顺序。详见 [S1](path_merge_call_support/fuzz-seq-s1.md)。
 - **$x0$ 架构级建模**：RISC-V 规范中 $x0 \equiv 0$。在 `regs.sail` 中将 `GPRs` 改为 31 维向量，移除 `register x0`。读 $x0$ 恒返回 0（`zero_reg`），写 $x0$ 直接丢弃（`()`）；$x1..x31$ 初态保持 100% 自由符号化。消除了动态符号寄存器索引读写 $x0$ 时因未约束变量导致的后态非唯一性拒绝。
 - **CLINT 中断 CSR 初态**：在执行涉及定时器分发（`clint_dispatch`）的代码路径时，Sail 会修改 `mip[MTI]`。若 `mip` 等中断控制 CSR 未在 `isa.toml` 的 `[registers.defaults]` 中给定初态，高位未约束比特在求解后态唯一性取反时会被 Z3 赋予不同模型从而拒绝。在 TOML 中提供 `mip`、`mie`、`mtime` 等基础初值可保证后态确定性。
+
+
+## 2026-11-09 执行帧 CoW 的回调隔离
+
+冻结／恢复以外，LocalFrame::clone 与 new_call 也会复制内存；有状态 &self 回调必须在这四个入口隔离。默认关闭未知回调的共享，SeqMemory／ImmutablePageTables 显式确认纯读取。Clone 必须独立复制路径私有状态。详见 [实现与测试](cow-local-frame/status.md)。

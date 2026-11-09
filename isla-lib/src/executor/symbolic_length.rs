@@ -34,7 +34,8 @@ pub(super) fn eval_operands<'exp, 'ir, B: BV>(
     operands
         .into_iter()
         .map(|operand| {
-            super::eval_exp(operand, &mut frame.local_state, shared_state, solver, info).map(|v| v.into_owned())
+            super::eval_exp(operand, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)
+                .map(|v| v.into_owned())
         })
         .collect()
 }
@@ -484,18 +485,18 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
     branch_decision(frame, task_state, SpeculativeRejectReason::RetryOperand)?;
     let decision = match task_state.execution_limits.as_ref() {
         Some(limits) => ExecutionLimitHandler::new(limits).on_monomorphize_fork_at(
-            &mut frame.execution_limit_state,
+            Arc::make_mut(&mut frame.execution_limit_state),
             frame.function_name,
             frame.pc,
             &frame.backtrace,
             info,
         ),
-        None => ExecutionLimitDecision::Fork { fork_id: frame.execution_limit_state.record_fork() },
+        None => ExecutionLimitDecision::Fork { fork_id: Arc::make_mut(&mut frame.execution_limit_state).record_fork() },
     };
     let fork_id = match decision {
         ExecutionLimitDecision::Fork { fork_id } => Some(fork_id),
         ExecutionLimitDecision::KeepCurrentModel { reason } => {
-            frame.execution_limit_state.record_kept_current_model();
+            Arc::make_mut(&mut frame.execution_limit_state).record_kept_current_model();
             record_execution_limit(frame, reason, "keep_current_model");
             None
         }
@@ -517,7 +518,7 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
         frame.capture_path_smt_stats();
         let mut child = trace_fork_frame_with_branch_condition!(frame, frame.pc, remainder.clone());
         Arc::make_mut(&mut child.execution_limit_state).advance_path_signature(false);
-        frame.execution_limit_state.advance_path_signature(true);
+        Arc::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
         let child_fraction = task_fraction.min_split(6);
         fork_sink.submit(Task {
             id: task_id,

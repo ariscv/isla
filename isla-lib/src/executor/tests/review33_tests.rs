@@ -253,7 +253,9 @@ fn review34_臂条件能证明标签正确时允许合流且不得泄漏条件()
     ]);
     frame.vars_mut().insert(value, UVal::Init(ctor));
     assert_eq!(merge_region_for_test(flag, 3, &mut frame, &shared, &mut solver, info(), None, None).unwrap(), Some(4));
-    let result = eval_exp(&Exp::Id(RETURN), &mut frame.local_state, &shared, &mut solver, info()).unwrap().into_owned();
+    let result = eval_exp(&Exp::Id(RETURN), Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info())
+        .unwrap()
+        .into_owned();
     for (condition, expected) in
         [(smtlib::Exp::Var(flag), 11), (smtlib::Exp::Not(Box::new(smtlib::Exp::Var(flag))), 22)]
     {

@@ -275,3 +275,5 @@ Sv39 STORE 同一新 IR／config-xs、380 个 corpus entry＋1000 个 mutant＋�
 2026-11-08 [fuzz 第 8 步](../agents/path_merge_call_support/fuzz-step8.md)：PPN 软偏好默认关闭，A/B 优先清零叶 PTE[53:46]、类要求时显式保留并计数；四场景×两初值×开关各 500 例，已知 emu 时间占比 27.28%→0.05%，开启组 1 条 R-XS-001、0 新分歧；覆盖下降照实列出。A/B 命中与唯一性 100%，42 的八组确定性通过；Rust 1150、Python 142+11，无所属残留。
 
 预算缩至每设置 500 例，真实 6000 例加历史抽样 2000 例；每组命令和统计在本树 output/fuzz-step8/。只记录新分歧，不新增或放宽规则。
+
+- 2026-11-09 执行帧 CoW 候选（基线849900a6）：默认frame6通过，tracetool执行器498通过/5忽略，数组内存34通过，axiomatic检查通过；无新增性能或make验收。[范围与命令](../agents/cow-local-frame/status.md)。
