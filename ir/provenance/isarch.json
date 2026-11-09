@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "model_commit": "34903a1e127780cccaaf157992a5c07ce0662210",
+  "artifacts": [
+    {
+      "paths": [
+        "rv64d.ir",
+        "ir/rv64d_v128_e64.ir"
+      ],
+      "ir_sha256": "3d4de1379301ddb188114e250a511daed2dc7f6af14b360605de96799a4d2f2e",
+      "config": "rv64d.json",
+      "generation": "generation-isarch-rv64d.json"
+    }
+  ],
+  "historical_manifest": "manifest.json",
+  "scope": "仅 v128/ELEN64 已按 isarch 模型重生；其他 IR 保留旧来源，未重新验证"
+}
