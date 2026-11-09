@@ -1907,7 +1907,9 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
     crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
     loop {
-        Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+        if frame.local_state.expression_retry_operands.is_some() {
+            Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+        }
         let error = match run_loop_inner(
             tid,
             task_id,
@@ -1973,10 +1975,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         }
         if matches!(&frame.pending_retry_operand, Some((pc, Val::Unit)) if *pc != frame.pc) {
             frame.pending_retry_operand = None;
-            Arc::make_mut(&mut frame.local_state).expression_values.clear();
-            Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+            if frame.local_state.expression_retry_operands.is_some() {
+                Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+            }
         }
-        if frame.pending_retry_operand.is_none() {
+        if frame.pending_retry_operand.is_none() && !frame.local_state.expression_values.is_empty() {
             Arc::make_mut(&mut frame.local_state).expression_values.clear();
         }
         // Completion is checked before the soft timeout. Therefore a path that
@@ -2032,8 +2035,12 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let value =
                     eval_exp(exp, Arc::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
                 frame.pending_retry_operand = None;
-                Arc::make_mut(&mut frame.local_state).expression_values.clear();
-                Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+                if !frame.local_state.expression_values.is_empty() {
+                    Arc::make_mut(&mut frame.local_state).expression_values.clear();
+                }
+                if frame.local_state.expression_retry_operands.is_some() {
+                    Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+                }
                 let jump_pc = frame.pc;
                 let decision = match limit_handler.as_ref() {
                     Some(handler) => handler.on_conditional_jump(
@@ -3097,8 +3104,12 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         if matches!(&frame.pending_retry_operand, Some((_, Val::Unit))) {
             frame.pending_retry_operand = None;
         }
-        Arc::make_mut(&mut frame.local_state).expression_values.clear();
-        Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+        if !frame.local_state.expression_values.is_empty() {
+            Arc::make_mut(&mut frame.local_state).expression_values.clear();
+        }
+        if frame.local_state.expression_retry_operands.is_some() {
+            Arc::make_mut(&mut frame.local_state).expression_retry_operands = None;
+        }
     }
 }
 
@@ -3906,6 +3917,7 @@ mod tests {
     // dc76449 固定的 IR 契约：@unsigned/@signed 参数是目标机器整数位宽（64），
     // 源位宽由操作数决定；宽输入、负数与溢出测试不能将源位宽传作该参数。
     mod boundary_regression_tests;
+    mod cow_tests;
     mod pma_enum_tests;
     mod region_merge_tests;
     mod review27_tests;
@@ -4688,7 +4700,7 @@ mod tests {
             use crate::memory::Region;
 
             let regions = [
-                Region::Concrete(0..1, HashMap::from([(0, 42)])),
+                Region::Concrete(0..1, Arc::new(HashMap::from([(0, 42)]))),
                 Region::Excluded(0..1),
                 Region::Constrained(0..1, Arc::new(|solver| solver.define_bitvector(smtlib::bits64(42, 8), info()))),
                 Region::Custom(0..1, Box::new(super::review15_tests::AuditDevice { value: 42 })),

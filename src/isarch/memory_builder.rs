@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use super::target::{RiscvPte, RISCV};
 use isla_lib::bitvector::BV;
@@ -326,7 +327,7 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
             }
         }
 
-        Ok(Region::Concrete(config.base..config.base + self.sv39_table_size(), pte_bytes))
+        Ok(Region::Concrete(config.base..config.base + self.sv39_table_size(), Arc::new(pte_bytes)))
     }
 
     /// SV48 three-level page table: L3(root) -> L2 -> L1(megapage leaves, 2MiB each).
@@ -367,7 +368,7 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
             }
         }
 
-        Ok(Region::Concrete(config.base..config.base + self.sv48_table_size(), pte_bytes))
+        Ok(Region::Concrete(config.base..config.base + self.sv48_table_size(), Arc::new(pte_bytes)))
     }
 
     fn flags_for_va(&self, config: &PageTableConfig, va: u64) -> Result<u64, String> {

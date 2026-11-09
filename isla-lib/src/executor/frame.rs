@@ -640,7 +640,7 @@ pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
 }
 
 #[cfg(test)]
-mod timing_tests {
+mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::source_loc::SourceLoc;
@@ -749,6 +749,42 @@ mod timing_tests {
         fn clone_dyn(&self) -> Box<dyn Send + Sync + crate::memory::CustomRegion<B64>> {
             Box::new(self.clone())
         }
+    }
+
+    #[test]
+    fn 非纯读设备触发内存克隆时仍共享具体字节直到写入() {
+        use crate::memory::Region;
+
+        let mut memory = Memory::<B64>::new();
+        memory.add_concrete_region(0x1000..0x2000, HashMap::from([(0x1000, 42)]));
+        memory.add_concrete_region(0x2000..0x3000, HashMap::from([(0x2000, 7)]));
+        memory.add_region(Region::Custom(0x3000..0x3008, Box::new(CountingReader::default())));
+        let parent = Arc::new(memory);
+        let mut child = Memory::fork_for_frame(&parent);
+        let sibling = Memory::fork_for_frame(&parent);
+
+        assert!(!Arc::ptr_eq(&parent, &child));
+        assert!(!Arc::ptr_eq(&parent, &sibling));
+        for index in 0..2 {
+            let Region::Concrete(_, parent_bytes) = &parent.regions()[index] else { panic!("预期具体区域") };
+            let Region::Concrete(_, child_bytes) = &child.regions()[index] else { panic!("预期具体区域") };
+            let Region::Concrete(_, sibling_bytes) = &sibling.regions()[index] else { panic!("预期具体区域") };
+            assert!(Arc::ptr_eq(parent_bytes, child_bytes));
+            assert!(Arc::ptr_eq(parent_bytes, sibling_bytes));
+        }
+
+        Arc::make_mut(&mut child).write_byte(0x1000, 99);
+        assert_eq!(child.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(99, 8)));
+        assert_eq!(parent.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(42, 8)));
+        assert_eq!(sibling.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(42, 8)));
+        let Region::Concrete(_, parent_bytes) = &parent.regions()[0] else { panic!("预期具体区域") };
+        let Region::Concrete(_, child_bytes) = &child.regions()[0] else { panic!("预期具体区域") };
+        let Region::Concrete(_, sibling_bytes) = &sibling.regions()[0] else { panic!("预期具体区域") };
+        assert!(!Arc::ptr_eq(parent_bytes, child_bytes));
+        assert!(Arc::ptr_eq(parent_bytes, sibling_bytes));
+        let Region::Concrete(_, parent_bytes) = &parent.regions()[1] else { panic!("预期具体区域") };
+        let Region::Concrete(_, child_bytes) = &child.regions()[1] else { panic!("预期具体区域") };
+        assert!(Arc::ptr_eq(parent_bytes, child_bytes));
     }
 
     impl crate::memory::MemoryCallbacks<B64> for CountingReader {
@@ -917,7 +953,7 @@ mod timing_tests {
 }
 
 #[cfg(all(test, feature = "tracetool"))]
-mod tests {
+mod trace_tests {
     use super::*;
     use crate::bitvector::b64::B64;
 

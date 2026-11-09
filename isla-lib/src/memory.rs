@@ -112,8 +112,8 @@ pub enum Region<B> {
     Symbolic(Range<Address>),
     /// A read only region of arbitrary symbolic locations intended for code
     SymbolicCode(Range<Address>),
-    /// A region of concrete read-only memory
-    Concrete(Range<Address>, HashMap<Address, u8>),
+    /// 具体内存的字节表按区域共享，写入时仅分离目标区域。
+    Concrete(Range<Address>, Arc<HashMap<Address, u8>>),
     /// 判死区域（W9 语义）：声明"这一段不关心"。任何访问（读或写，符号或
     /// 具体地址）与该区域重叠即判死该执行路径——具体地址直接 BadRead/
     /// BadWrite；符号地址由回调追加 NOT(与判死区域并集重叠) 约束，与路径
@@ -130,7 +130,7 @@ impl<B> Clone for Region<B> {
             Constrained(r, contents) => Constrained(r.clone(), contents.clone()),
             Symbolic(r) => Symbolic(r.clone()),
             SymbolicCode(r) => SymbolicCode(r.clone()),
-            Concrete(r, contents) => Concrete(r.clone(), contents.clone()),
+            Concrete(r, contents) => Concrete(r.clone(), Arc::clone(contents)),
             Excluded(r) => Excluded(r.clone()),
             Custom(r, contents) => Custom(r.clone(), contents.clone_dyn()),
         }
@@ -398,7 +398,7 @@ impl<B: BV> Memory<B> {
     }
 
     pub fn add_concrete_region(&mut self, range: Range<Address>, contents: HashMap<Address, u8>) {
-        self.regions.push(Region::Concrete(range, contents))
+        self.regions.push(Region::Concrete(range, Arc::new(contents)))
     }
 
     pub fn add_excluded_region(&mut self, range: Range<Address>) {
@@ -406,7 +406,7 @@ impl<B: BV> Memory<B> {
     }
 
     pub fn add_zero_region(&mut self, range: Range<Address>) {
-        self.regions.push(Region::Concrete(range, HashMap::new()))
+        self.add_concrete_region(range, HashMap::new())
     }
 
     pub fn set_client_info(&mut self, info: Box<dyn MemoryCallbacks<B>>) {
@@ -417,13 +417,13 @@ impl<B: BV> Memory<B> {
         for region in &mut self.regions {
             match region {
                 Region::Concrete(range, contents) if range.contains(&address) => {
-                    contents.insert(address, byte);
+                    Arc::make_mut(contents).insert(address, byte);
                     return;
                 }
                 _ => (),
             }
         }
-        self.regions.push(Region::Concrete(address..address, vec![(address, byte)].into_iter().collect()))
+        self.add_concrete_region(address..address, vec![(address, byte)].into_iter().collect())
     }
 
     fn read_initial_byte(&self, address: Address) -> Result<u8, ExecError> {
@@ -1429,6 +1429,34 @@ mod tests {
     use crate::error::ExecError;
     use crate::smt::smtlib::{bits64, Def, Exp, Ty};
     use crate::smt::{Config, Context, Solver, Sym};
+
+    #[test]
+    fn 纯读内存写入只分离目标具体区域() {
+        let mut memory = Memory::<B64>::new();
+        memory.add_concrete_region(0x1000..0x2000, HashMap::from([(0x1000, 42)]));
+        memory.add_concrete_region(0x2000..0x3000, HashMap::from([(0x2000, 7)]));
+        memory.add_zero_region(0x3000..0x4000);
+        let parent = Arc::new(memory);
+        let mut child = Memory::fork_for_frame(&parent);
+        assert!(Arc::ptr_eq(&parent, &child));
+
+        Arc::make_mut(&mut child).write_byte(0x1000, 99);
+        assert!(!Arc::ptr_eq(&parent, &child));
+        assert_eq!(child.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(99, 8)));
+        assert_eq!(parent.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(42, 8)));
+        for index in 0..3 {
+            let Region::Concrete(_, parent_bytes) = &parent.regions()[index] else { panic!("预期具体区域") };
+            let Region::Concrete(_, child_bytes) = &child.regions()[index] else { panic!("预期具体区域") };
+            assert_eq!(Arc::ptr_eq(parent_bytes, child_bytes), index != 0);
+        }
+
+        Arc::make_mut(&mut child).write_byte(0x3000, 5);
+        assert_eq!(child.read_initial(0x3000, 1).unwrap(), Val::Bits(B64::new(5, 8)));
+        assert_eq!(parent.read_initial(0x3000, 1).unwrap(), Val::Bits(B64::new(0, 8)));
+        let Region::Concrete(_, parent_bytes) = &parent.regions()[2] else { panic!("预期具体区域") };
+        let Region::Concrete(_, child_bytes) = &child.regions()[2] else { panic!("预期具体区域") };
+        assert!(!Arc::ptr_eq(parent_bytes, child_bytes));
+    }
 
     #[derive(Clone, Debug)]
     struct ConstrainingReads;

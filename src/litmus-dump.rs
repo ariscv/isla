@@ -1491,7 +1491,7 @@ where
                     Line,
                     range.prettyp(coqpp),
                     Line,
-                    coqpp.intmap(contents, 64).prettyp(coqpp)
+                    coqpp.intmap(contents.iter(), 64).prettyp(coqpp)
                 ]
             }
             Region::Custom(range, _) => parens![coqpp.alloc, parens, "Custom", Line, range.prettyp(coqpp)],
