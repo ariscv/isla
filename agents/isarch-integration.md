@@ -1,3 +1,5 @@
+> 后续状态：模型已推进到cbb4766f并重生当前v128 IR，见[std-gaps对齐](isarch-std-gaps-merge.md)。下文记录std-gaps合并前的34903a1e版本。
+
 # isarch 模型与 IR 对齐
 
 本分支直接继承 `a8b610dd`，完整包含 path merge 的 `78b04e3d`、`d824ec21`、`ff975203`，未删除其代码、提交或 fuzz 资产。

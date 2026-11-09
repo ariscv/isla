@@ -1,17 +1,18 @@
 {
   "schema": 1,
-  "model_commit": "34903a1e127780cccaaf157992a5c07ce0662210",
+  "model_commit": "cbb4766f95370c405bf9070e459045ce5aaa281e",
   "artifacts": [
     {
       "paths": [
         "rv64d.ir",
         "ir/rv64d_v128_e64.ir"
       ],
-      "ir_sha256": "3d4de1379301ddb188114e250a511daed2dc7f6af14b360605de96799a4d2f2e",
+      "ir_sha256": "b58088565e771ea2f3e771d08f60b2ad155b80a10b0b6827dd9915b767bf22a1",
       "config": "rv64d.json",
-      "generation": "generation-isarch-rv64d.json"
+      "generation": "generation-isarch-std-gaps-rv64d.json"
     }
   ],
   "historical_manifest": "manifest.json",
-  "scope": "仅 v128/ELEN64 已按 isarch 模型重生；其他 IR 保留旧来源，未重新验证"
+  "scope": "仅 v128/ELEN64 已按 isarch 模型重生；其他 IR 保留旧来源，未重新验证",
+  "previous_isarch_model": "34903a1e127780cccaaf157992a5c07ce0662210"
 }
