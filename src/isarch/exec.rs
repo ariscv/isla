@@ -1826,6 +1826,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     // 构造指令值
 
+    // 先区分互相矛盾的前态与真正的空编码域，求解不确定仍作为错误传播。
+    match solver.check_sat(SourceLoc::unknown()) {
+        isla_lib::smt::SmtResult::Sat => (),
+        isla_lib::smt::SmtResult::Unsat => {
+            return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
+        }
+        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+        isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+    }
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
     // 复用真实编码映射的载荷和守卫；执行入口只接受当前配置中可编码的指令域。
@@ -3071,6 +3080,7 @@ mod tests {
         ExecuteAs,
         MergeExecuteAs,
         EntryGuard,
+        ContradictoryPrestate,
     }
 
     /// 内联 collector 夹具的译码器：原夹具只检查编码路径，这里补回环所需的
@@ -3101,6 +3111,7 @@ mod tests {
         struct EncodingTarget {
             pre_state: PreStateCtx<B64>,
             impossible: bool,
+            contradictory: bool,
         }
         impl Target<B64> for EncodingTarget {
             fn arch_name(&self) -> &'static str {
@@ -3127,6 +3138,9 @@ mod tests {
                 shared: &SharedState<'ir, B64>,
                 solver: &mut Solver<B64>,
             ) -> Result<(), ExecError> {
+                if self.contradictory {
+                    solver.assert(smtlib::Exp::Bool(false));
+                }
                 if self.impossible {
                     let value = self.pre_state.get_from_str("mstatus", &shared.symtab).unwrap();
                     solver.assert_eq(
@@ -3344,8 +3358,11 @@ mod tests {
         );
         let mut regs = RegisterBindings::new();
         regs.insert(mstatus, false, UVal::Init(Val::Bits(B64::zeros(64))));
-        let mut target =
-            EncodingTarget { pre_state: PreStateCtx::new(), impossible: matches!(mode, EncodingFixture::Impossible) };
+        let mut target = EncodingTarget {
+            pre_state: PreStateCtx::new(),
+            impossible: matches!(mode, EncodingFixture::Impossible),
+            contradictory: matches!(mode, EncodingFixture::ContradictoryPrestate),
+        };
         let reporter = TimeoutReporter::new(TimeoutReportConfig {
             output: TimeoutSmtOutput::new(false, false, true),
             directory: PathBuf::new(),
@@ -3374,6 +3391,10 @@ mod tests {
             None,
             &super::super::samples::SampleSession::new(&Default::default(), None).unwrap(),
         );
+        if matches!(mode, EncodingFixture::ContradictoryPrestate) {
+            assert!(matches!(execution, Err(ExecError::Unreachable(_))), "矛盾前态不得伪装成编码域不适用");
+            return;
+        }
         if matches!(mode, EncodingFixture::Assertion) {
             assert!(matches!(execution, Err(ExecError::AssertionFailure(_, _))));
             return;
@@ -3441,6 +3462,11 @@ mod tests {
             encodings.insert(encoding.to_string());
         }
         assert_eq!(encodings.len(), cases.len());
+    }
+
+    #[test]
+    fn collector_rejects_unsatisfiable_prestate_instead_of_not_applicable() {
+        check_encoding_fixture(EncodingFixture::ContradictoryPrestate);
     }
 
     #[test]

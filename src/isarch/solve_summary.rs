@@ -42,6 +42,7 @@ impl SolveSummary {
         value["status"] = json!(self.status());
         if self.status() == "not-applicable" {
             value["reason"] = json!("no-encoding-in-current-config");
+            value["scope"] = json!("current-config-prestate-and-input-domain");
         }
         value["model-coverage"] = json!("not-measured");
         value

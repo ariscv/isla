@@ -3384,10 +3384,6 @@ fn undefined_bitvector<B: BV>(sz: Val<B>, solver: &mut Solver<B>, info: SourceLo
     }
 }
 
-fn get_16_random_bits<B: BV>(_: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    undefined_bitvector(Val::I128(16), solver, info)
-}
-
 fn undefined_bit<B: BV>(_: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     solver.declare_bitvector(1, info).into()
 }
@@ -5363,7 +5359,6 @@ pub fn unary_primops<B: BV>() -> HashMap<String, Unary<B>> {
     primops.insert("isla_rev8".to_string(), isla_rev8 as Unary<B>);
     primops.insert("isla_vector_rev8".to_string(), isla_vector_rev8 as Unary<B>);
     primops.insert("undefined_bitvector".to_string(), undefined_bitvector as Unary<B>);
-    primops.insert("get_16_random_bits".to_string(), get_16_random_bits as Unary<B>);
     primops.insert("undefined_bit".to_string(), undefined_bit as Unary<B>);
     primops.insert("undefined_bool".to_string(), undefined_bool as Unary<B>);
     primops.insert("undefined_int".to_string(), undefined_int as Unary<B>);
@@ -5575,32 +5570,6 @@ mod tests {
     use crate::smt::Model;
     use crate::smt::{Config, Context, SmtResult, Solver};
     use crate::source_loc::SourceLoc;
-
-    #[test]
-    fn get_16_random_bits_returns_fresh_unconstrained_bitvectors() {
-        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
-        let ctx = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&ctx);
-        let info = SourceLoc::unknown();
-        let random = unary_primops::<B64>()["get_16_random_bits"];
-        let first = random(Val::Unit, &mut solver, info).unwrap();
-        let second = random(Val::Unit, &mut solver, info).unwrap();
-        assert!(matches!(first, Val::Symbolic(_)));
-        assert!(matches!(second, Val::Symbolic(_)));
-        assert_ne!(first, second, "每次调用必须声明新的符号值");
-        assert_eq!(length_bits(&first, &mut solver, info).unwrap(), 16);
-        assert_eq!(length_bits(&second, &mut solver, info).unwrap(), 16);
-        for (left, right) in [(0, 0xffff), (0xffff, 0), (0x1234, 0x1234)] {
-            let constraint = Exp::And(
-                Box::new(Exp::Eq(Box::new(smt_value(&first, info).unwrap()), Box::new(smt_sbits(B64::new(left, 16))))),
-                Box::new(Exp::Eq(
-                    Box::new(smt_value(&second, info).unwrap()),
-                    Box::new(smt_sbits(B64::new(right, 16))),
-                )),
-            );
-            assert_eq!(solver.check_sat_with(&constraint, info), SmtResult::Sat);
-        }
-    }
 
     #[test]
     fn review15_decimal_preserves_full_signed_width() -> Result<(), ExecError> {

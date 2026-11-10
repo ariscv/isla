@@ -256,7 +256,6 @@ pub fn effect(name: &str) -> Option<Effect> {
         | "address_announce" => Some(Effect::WritesState),
         // 新鲜的未定义值/选择不由输入决定；nat/range 还追加范围约束，保守拒绝。
         "undefined_bitvector"
-        | "get_16_random_bits"
         | "undefined_bit"
         | "undefined_bool"
         | "undefined_int"

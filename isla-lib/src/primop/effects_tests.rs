@@ -3,15 +3,6 @@ use super::*;
 use crate::bitvector::b129::B129;
 
 #[test]
-fn get_16_random_bits_has_undefined_bitvector_effect() {
-    assert_eq!(effect("get_16_random_bits"), Some(Effect::WritesState));
-    assert_eq!(effect("get_16_random_bits"), effect("undefined_bitvector"));
-    let random = unary_primops::<B129>()["get_16_random_bits"];
-    assert_eq!(unary_effect(random), Some(Effect::WritesState));
-    assert!(!is_pure_unary(random));
-}
-
-#[test]
 fn effect_classification_covers_all_registries() {
     let primops = Primops::<B129>::default();
     for name in primops.unary.keys().chain(primops.binary.keys()).chain(primops.variadic.keys()) {
