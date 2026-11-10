@@ -1261,10 +1261,12 @@ fn apply_case_quota(cases: Vec<CollectedCase>, quota: &CaseQuota) -> Vec<Collect
 }
 
 fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig>) -> ExecutionLimits {
-    match config {
+    let limits = match config {
         Some(config) => ExecutionLimits::default().with_config(config, symtab),
         None => ExecutionLimits::default(),
-    }
+    };
+    let global_state = limits.path_merging;
+    limits.with_region_global_state(global_state)
 }
 
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
@@ -4009,6 +4011,19 @@ mod tests {
             .expect_err("读取枚举模型失败必须向调用方传播");
 
         assert!(matches!(error, ExecError::Type(_, _)));
+    }
+
+    #[test]
+    fn solve_execution_limits_enables_global_state_only_with_path_merging() {
+        let symtab = Symtab::new();
+        assert!(!ExecutionLimits::default().with_path_merging(true).region_global_state);
+        assert!(!solve_execution_limits(&symtab, None).region_global_state);
+        for enabled in [false, true] {
+            let config = ExecutionLimitsConfig { path_merging: Some(enabled), ..ExecutionLimitsConfig::default() };
+            let limits = solve_execution_limits(&symtab, Some(&config));
+            assert_eq!(limits.region_global_state, enabled);
+            assert_eq!(limits.path_merging, enabled);
+        }
     }
 
     #[test]

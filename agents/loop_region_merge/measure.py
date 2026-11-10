@@ -110,6 +110,46 @@ def report():
               "cargo test -p isla-lib regions_loop_merge_real_ir_measurement -- --ignored --nocapture",
               "python3 agents/loop_region_merge/measure.py report", "```", "",
               "首次只测现状时，输入改为 `snapshots.json`、输出改为 `m0-baseline.json`，并设置 `ISLA_M0_BASELINE_ONLY=1`。", ""]
+    m2_path = DIRECTORY / "m2.json"
+    if m2_path.exists():
+        m2 = json.loads(m2_path.read_text())
+        lines += ["## M2 后预检", "",
+                  "沿用上面的同一 IR、配置、快照、入口和权重；仅打开 `region_global_state` 后重新计算静态效应摘要。"
+                  "区域分类保持不变。以下数字是静态可通过权重，不代表动态合并成功数。", ""]
+        reasons = sorted({reason for c in m2 for reason in c["preflight_weights"] if reason != "可通过"})
+        rows = []
+        totals = collections.Counter()
+        for old, new in zip(clauses, m2):
+            assert old["clause"] == new["clause"]
+            assert old["weights"] == new["weights"]
+            assert [(b["function"], b["branch_pc"], b["count"]) for b in old["branches"]] == [
+                (b["function"], b["branch_pc"], b["count"]) for b in new["branches"]]
+            before = old["preflight_weights"].get("可通过", 0)
+            after = new["preflight_weights"].get("可通过", 0)
+            rejected = sum(new["preflight_weights"].values()) - after
+            row = [before, after, after - before, rejected,
+                   *[new["preflight_weights"].get(reason, 0) for reason in reasons]]
+            totals.update(dict(enumerate(row)))
+            rows.append([new["clause"], *row])
+        rows.append(["合计", *[totals[i] for i in range(4 + len(reasons))]])
+        table(lines, ["clause", "M1 可通过", "M2 可通过", "新增可通过", "仍被拒", *reasons], rows)
+        evidence = collections.Counter()
+        for clause in m2:
+            for branch in clause["branches"]:
+                if branch.get("preflight") not in {None, "可通过"}:
+                    first = branch["preflight_rejections"][0]
+                    evidence[clause["clause"], first["reason"], first["rejected_function"],
+                             first["target_pc"], first["operation"]] += branch["count"]
+        lines += ["### 仍被拒的原因细分", ""]
+        table(lines, ["clause", "原因", "证据函数", "pc", "原语", "权重"], [
+            [*key, weight] for key, weight in sorted(evidence.items())])
+        lines += ["本次仍被拒的首个证据均为 `execute` 中的 `vector_update`。"
+                  "其现有效应分类为 `WritesState`，属于设计要求保持拒绝的其他写效应原语，本次不放宽。", ""]
+        lines += ["M2 保留地址写、其他写效应原语和内存写的拒绝。"
+                  "未实现的外部函数仍按原规则在实际到达时拒绝，不计入静态拒绝；"
+                  "relaxed 寄存器、历史写入和访问顺序冲突也需运行时判定。", "",
+                  "复现 M2：沿用上述测量命令，额外设置 `ISLA_M0_GLOBAL_STATE=1`，"
+                  "并将 `ISLA_M0_OUTPUT` 改为 `$PWD/agents/loop_region_merge/m2.json`，随后运行 `measure.py report`。", ""]
     (DIRECTORY / "m0.md").write_text("\n".join(lines))
 
 

@@ -853,6 +853,11 @@ fn assign_with_accessor<'ir, B: BV>(
         }
 
         Loc::Addr(loc) => {
+            if let Some(access) = &local_state.speculative_access {
+                if access.global_state {
+                    return Err(access.reject(SpeculativeRejectReason::StateEffect));
+                }
+            }
             if let Val::Ref(reg) = get_loc_and_initialize(loc, local_state, shared_state, solver, accessor, info, true)?
             {
                 assign_with_accessor(&Loc::Id(reg), v, local_state, shared_state, solver, accessor, info)?

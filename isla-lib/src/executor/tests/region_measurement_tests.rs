@@ -41,7 +41,8 @@ fn regions_loop_merge_real_ir_measurement() {
         );
     }
     eprintln!("M0：已核对 FVFTYPE 的 pc28821、pc29115；开始静态效应摘要");
-    let summaries = region_summary::function_effect_summaries(&shared);
+    let global_state = std::env::var_os("ISLA_M0_GLOBAL_STATE").is_some();
+    let summaries = region_summary::function_effect_summaries(&shared, global_state);
     let terminals: Vec<_> =
         summaries.iter().filter_map(|(name, effect)| effect.non_returning.then_some(*name)).collect();
     eprintln!("M0：静态效应摘要已完成");
@@ -122,8 +123,32 @@ fn regions_loop_merge_real_ir_measurement() {
                             "rejected_function": crate::zencode::decode(shared.symtab.to_str(rejection.function)),
                             "target_pc": rejection.pc,
                         });
+                        let writer = &shared.functions[&rejection.function].2[rejection.pc];
+                        let operation = match writer {
+                            Instr::PrimopUnary(_, f, ..) => primop::unary_primops::<B64>()
+                                .into_iter()
+                                .find(|(_, candidate)| std::ptr::fn_addr_eq(*candidate, *f))
+                                .unwrap()
+                                .0
+                                .to_owned(),
+                            Instr::PrimopBinary(_, f, ..) => primop::binary_primops::<B64>()
+                                .into_iter()
+                                .find(|(_, candidate)| std::ptr::fn_addr_eq(*candidate, *f))
+                                .unwrap()
+                                .0
+                                .to_owned(),
+                            Instr::PrimopVariadic(_, f, ..) => primop::variadic_primops::<B64>()
+                                .into_iter()
+                                .find(|(_, candidate)| std::ptr::fn_addr_eq(*candidate, *f))
+                                .unwrap()
+                                .0
+                                .to_owned(),
+                            Instr::Call(_, _, callee, ..) => crate::zencode::decode(shared.symtab.to_str(*callee)),
+                            Instr::PrimopReset(_, _, effect, _) => format!("配置原语：{effect:?}"),
+                            _ => "赋值".to_owned(),
+                        };
+                        evidence["operation"] = json!(operation);
                         if rejection.reason == SpeculativeRejectReason::CalleeStateWrite {
-                            let writer = &shared.functions[&rejection.function].2[rejection.pc];
                             let destination = match writer {
                                 Instr::Copy(loc, ..)
                                 | Instr::PrimopUnary(loc, ..)

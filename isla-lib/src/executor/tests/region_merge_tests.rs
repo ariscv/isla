@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 #[path = "region_loop_merge_tests.rs"]
 mod loop_merge_tests;
 
+#[path = "region_global_state_tests.rs"]
+mod global_state_tests;
+
 type Formula = smtlib::Exp<Sym>;
 
 struct Path {
@@ -13,6 +16,8 @@ struct Path {
     events: Vec<Event<B64>>,
     variables: Bindings<'static, B64>,
     registers: RegisterBindings<'static, B64>,
+    lets: Bindings<'static, B64>,
+    checkpoint: Checkpoint<B64>,
 }
 
 fn paths(instrs: Vec<Instr<Name, B64>>, shared: &SharedState<'static, B64>, inputs: usize, merge: bool) -> Vec<Path> {
@@ -25,6 +30,17 @@ fn paths_with_memory(
     inputs: usize,
     merge: bool,
     memory: crate::memory::Memory<B64>,
+) -> Vec<Path> {
+    paths_with_state(instrs, shared, inputs, ExecutionLimits::default().with_path_merging(merge), memory, |_| ())
+}
+
+fn paths_with_state(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>),
 ) -> Vec<Path> {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -39,7 +55,8 @@ fn paths_with_memory(
         let symbol = solver.declare_const(smtlib::Ty::Bool, info());
         frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
     }
-    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
+    configure(&mut frame);
+    let state = TaskState::new().with_execution_limits(limits);
     let output = Mutex::new(Vec::new());
     start_single(
         frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
@@ -53,6 +70,8 @@ fn paths_with_memory(
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
                     variables: frame.vars().clone(),
                     registers: frame.regs().clone(),
+                    lets: frame.lets().clone(),
+                    checkpoint: checkpoint(&mut solver),
                 }),
                 SmtResult::Unsat => (),
                 result => panic!("完成路径的可满足性查询失败：{result:?}"),
@@ -67,6 +86,11 @@ fn paths_with_memory(
 }
 
 fn import(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>) -> (Formula, Formula) {
+    let (condition, mut values) = import_values(path, inputs, solver, &[smt_value(&path.value, info()).unwrap()]);
+    (condition, values.pop().unwrap())
+}
+
+fn import_values(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>, values: &[Formula]) -> (Formula, Vec<Formula>) {
     use smtlib::Exp::*;
     // 确定性的辅助等式可无条件定义：辅助变量只在对应 guard 内使用。
     // 先消去这些变量再检查覆盖，避免把路径局部的新鲜量误当成外部输入。
@@ -137,7 +161,7 @@ fn import(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>) -> (Formula, Fo
             conditions = And(Box::new(conditions), Box::new(translate(exp)));
         }
     }
-    (conditions, translate(&smt_value(&path.value, info()).unwrap()))
+    (conditions, values.iter().map(translate).collect())
 }
 
 /// 同一组输入符号分别导入全部分叉迹和合并迹；Z3 同时检查返回关系与路径覆盖。
@@ -196,6 +220,62 @@ fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: b
 
 fn input(index: u32) -> Exp<Name> {
     Exp::Id(test_name(900 + index))
+}
+
+/// 每条分叉路径都与覆盖它的合并路径比较完整最终寄存器映射，结构字段递归展开。
+fn equivalent_register_paths(forked: &[Path], merged: &[Path], inputs: usize) {
+    use smtlib::Exp::*;
+    fn fields(value: &Val<B64>, result: &mut Vec<Formula>) {
+        match value {
+            Val::Struct(values) => {
+                let mut values: Vec<_> = values.iter().collect();
+                values.sort_by_key(|(name, _)| **name);
+                for (_, value) in values {
+                    fields(value, result);
+                }
+            }
+            _ => result.push(smt_value(value, info()).unwrap()),
+        }
+    }
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let symbols: Vec<_> = (0..inputs).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
+    let state = |path: &Path, solver: &mut Solver<B64>| {
+        let mut values = Vec::new();
+        let mut shape = Vec::new();
+        let mut registers: Vec<_> = path.registers.iter().collect();
+        registers.sort_by_key(|(name, _)| **name);
+        for (name, register) in registers {
+            let start = values.len();
+            if let Some(value) = register.read_last_if_initialized() {
+                fields(value, &mut values);
+            }
+            shape.push((*name, values.len() - start));
+        }
+        let (condition, values) = import_values(path, &symbols, solver, &values);
+        (condition, values, shape)
+    };
+    let merged: Vec<_> = merged.iter().map(|path| state(path, &mut solver)).collect();
+    for path in forked {
+        let (guard, values, shape) = state(path, &mut solver);
+        let mut covered = Bool(false);
+        for (condition, other, other_shape) in &merged {
+            assert_eq!(&shape, other_shape, "最终寄存器映射的名字、初始化状态和字段数必须一致");
+            let overlap = And(Box::new(guard.clone()), Box::new(condition.clone()));
+            covered = Or(Box::new(covered), Box::new(condition.clone()));
+            let different = values.iter().zip(other).fold(Bool(false), |acc, (a, b)| {
+                Or(Box::new(acc), Box::new(Neq(Box::new(a.clone()), Box::new(b.clone()))))
+            });
+            assert!(
+                solver.check_sat_with(&And(Box::new(overlap), Box::new(different)), info()).is_unsat().unwrap(),
+                "每条路径最终寄存器映射必须等价"
+            );
+        }
+        assert!(solver
+            .check_sat_with(&And(Box::new(guard), Box::new(Not(Box::new(covered)))), info())
+            .is_unsat()
+            .unwrap());
+    }
 }
 
 fn helper(shared: &mut SharedState<'static, B64>) -> Name {
@@ -264,7 +344,7 @@ fn region_merge_declared_union_constructors_are_pure() {
                 }
                 body.push(Instr::End);
                 shared.functions.get_mut(&function).unwrap().2 = Box::leak(body.into_boxed_slice());
-                let summaries = region_summary::function_effect_summaries(&shared);
+                let summaries = region_summary::function_effect_summaries(&shared, false);
                 assert_eq!(summaries[&function].effect, primop::Effect::Pure);
                 assert!(summaries[&function].rejection.is_none());
                 program.push(Instr::Call(Loc::Id(RETURN), false, function, vec![input(1)], info()));
@@ -286,7 +366,7 @@ fn region_merge_undeclared_call_rejected_only_when_reached() {
     let function = helper(&mut shared);
     let call = Instr::Call(Loc::Id(RETURN), false, unknown, vec![Exp::Unit], info());
     shared.functions.get_mut(&function).unwrap().2 = Box::leak(vec![call.clone(), Instr::End].into_boxed_slice());
-    let summaries = region_summary::function_effect_summaries(&shared);
+    let summaries = region_summary::function_effect_summaries(&shared, false);
     assert_eq!(summaries[&function].effect, primop::Effect::Unknown);
     for instr in [call, Instr::Call(Loc::Id(RETURN), false, function, vec![Exp::Bool(true)], info())] {
         assert!(region_summary::instruction_effect(TOP_LEVEL_LET, 0, &instr, &shared, &summaries).is_none());
@@ -344,7 +424,7 @@ fn region_merge_list_construction_and_pattern_matching() {
             Instr::End,
         ]);
         shared.functions.get_mut(&function).unwrap().2 = Box::leak(body.into_boxed_slice());
-        let summaries = region_summary::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared, false);
         assert_eq!(summaries[&function].effect, primop::Effect::Pure);
         assert!(summaries[&function].rejection.is_none());
         shared.function_regions.lock().unwrap().clear();
@@ -1074,7 +1154,7 @@ fn region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit()
         ]
         .into_boxed_slice(),
     );
-    let summaries = region_summary::function_effect_summaries(&shared);
+    let summaries = region_summary::function_effect_summaries(&shared, false);
     assert!(summaries[&throwing].non_returning);
     assert!(!summaries[&wrapper].non_returning);
     assert_eq!(summaries[&wrapper].effect, primop::Effect::Pure);
@@ -1140,7 +1220,7 @@ fn region_merge_non_returning_requires_all_paths_and_preserves_normal_writes() {
         ]
         .into_boxed_slice(),
     );
-    let summaries = region_summary::function_effect_summaries(&shared);
+    let summaries = region_summary::function_effect_summaries(&shared, false);
     assert!(!summaries[&function].non_returning);
     assert_eq!(summaries[&function].effect, primop::Effect::WritesState);
     let mut frame = make_frame(vec![
@@ -1218,7 +1298,7 @@ fn region_merge_non_returning_fixed_point_is_conservative_for_recursion_and_exce
     ] {
         shared.functions.insert(a, (Vec::new(), &Ty::Bool, Box::leak(body_a.into_boxed_slice())));
         shared.functions.insert(b, (Vec::new(), &Ty::Bool, Box::leak(body_b.into_boxed_slice())));
-        let summaries = region_summary::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared, false);
         assert_eq!(summaries[&a].non_returning, expected_a);
         assert_eq!(summaries[&b].non_returning, expected_b);
     }
@@ -1595,7 +1675,7 @@ fn region_merge_recursive_effect_least_fixed_point() {
     ] {
         shared.functions.insert(a, (Vec::new(), &Ty::Bool, Box::leak(body_a.into_boxed_slice())));
         shared.functions.insert(b, (Vec::new(), &Ty::Bool, Box::leak(body_b.into_boxed_slice())));
-        let summaries = region_summary::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared, false);
         assert_eq!(summaries[&a].effect, expected);
         if expected != Effect::Pure {
             assert_eq!(summaries[&b].effect, expected);
@@ -1647,7 +1727,7 @@ fn region_merge_real_ir_effects() {
             Vec::new(),
             Vec::new(),
         );
-        let summaries = region_summary::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared, false);
         for function in [
             "zinternal_errorzIozK",
             "zget_xLPE",
@@ -1905,7 +1985,7 @@ fn region_merge_effects_use_external_binding_and_reject_callee_vector_writes() {
     shared.externs.insert(alias, (&[], &Ty::Bool, "unregistered_effect"));
     shared.functions.get_mut(&caller).unwrap().2 =
         Box::leak(vec![Instr::Call(Loc::Id(RETURN), false, alias, Vec::new(), info()), Instr::End].into_boxed_slice());
-    assert_eq!(region_summary::function_effect_summaries(&shared)[&caller].effect, primop::Effect::Unknown);
+    assert_eq!(region_summary::function_effect_summaries(&shared, false)[&caller].effect, primop::Effect::Unknown);
     shared.functions.get_mut(&caller).unwrap().2 = Box::leak(
         vec![Instr::Call(Loc::Id(RETURN), false, WRITE_REGISTER_FROM_VECTOR, Vec::new(), info()), Instr::End]
             .into_boxed_slice(),
@@ -1966,7 +2046,7 @@ fn zcaller(zunit) {
             Vec::new(),
             Vec::new(),
         );
-        let summaries = region_summary::function_effect_summaries(&shared);
+        let summaries = region_summary::function_effect_summaries(&shared, false);
         assert_eq!(summaries[&shared.symtab.lookup("zcaller")].effect, expected, "配置条目：{entry}");
         if expected != primop::Effect::Unknown {
             let program = vec![
@@ -3757,7 +3837,7 @@ fn region_merge_f4_real_get_xlpe_diagnosis() {
     let shared = &initialized.shared_state;
     let function = shared.symtab.lookup("zget_xLPE");
     let (params, ret, body) = &shared.functions[&function];
-    let summaries = region_summary::function_effect_summaries(shared);
+    let summaries = region_summary::function_effect_summaries(shared, false);
     let terminals =
         summaries.iter().filter_map(|(name, summary)| summary.non_returning.then_some(*name)).collect::<Vec<_>>();
     let mut regions = crate::ir::regions::FunctionRegions::with_options(

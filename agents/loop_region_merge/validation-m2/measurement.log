@@ -1,0 +1,106 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+warning: methods `with_transaction_condition` and `order_transaction_register_reads` are never used
+   --> isla-lib/src/smt/transaction.rs:211:19
+    |
+ 52 | impl<'ctx, B: BV> Solver<'ctx, B> {
+    | --------------------------------- methods in this implementation
+...
+211 |     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+355 |     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla-lib` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.78s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-285b4b806b20695f)
+
+running 1 test
+No primop parse_hex_bits (Name { id: 2525 })
+No primop emulator_write_tag (Name { id: 2826 })
+No primop emulator_read_tag (Name { id: 2825 })
+No primop valid_reservation (Name { id: 4205 })
+M0：已核对 FVFTYPE 的 pc28821、pc29115；开始静态效应摘要
+M0：静态效应摘要已完成
+M0："FVFMATYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":1645} 预检={"state_effect":207,"可通过":1439}
+M0："FVFMTYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":3800} 预检={"state_effect":638,"可通过":3163}
+M0："FVFTYPE" 分类={"HasBackEdge":1,"M1 后无环":828,"现状已无环":378} 预检={"state_effect":171,"可通过":1035}
+M0："FVVMATYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":1011} 预检={"state_effect":130,"可通过":882}
+M0："FVVMTYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":1024} 预检={"state_effect":257,"可通过":768}
+M0："FVVTYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":691} 预检={"state_effect":282,"可通过":410}
+M0："FWFTYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":800} 预检={"state_effect":402,"可通过":399}
+M0："FWVFMATYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":633} 预检={"state_effect":163,"可通过":471}
+M0："FWVVMATYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":357} 预检={"state_effect":94,"可通过":264}
+M0："FWVVTYPE" 分类={"HasBackEdge":1,"M1 后无环":1,"现状已无环":209} 预检={"state_effect":72,"可通过":138}
+test executor::tests::region_measurement_tests::regions_loop_merge_real_ir_measurement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 836 filtered out; finished in 41.74s
+
+     Running tests/mixed_bits_consumers.rs (target/debug/deps/mixed_bits_consumers-f32347542ce51e6f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/mixed_bits_float_consumers.rs (target/debug/deps/mixed_bits_float_consumers-d78e4f5c96e83397)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/mixed_bits_memory.rs (target/debug/deps/mixed_bits_memory-eb534ff7c50c61bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/model_concretization.rs (target/debug/deps/model_concretization-e8e28dfcb4d60619)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/path_cache.rs (target/debug/deps/path_cache-fb7579d12b5ec8dc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/path_cache_golden.rs (target/debug/deps/path_cache_golden-6d500ba4692b83a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/path_cache_structure.rs (target/debug/deps/path_cache_structure-884fd96fcaf86e1c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/path_cache_variants.rs (target/debug/deps/path_cache_variants-7700f6a02a3afa3a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/smt_init.rs (target/debug/deps/smt_init-c036b81c1285817a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/smt_tactic.rs (target/debug/deps/smt_tactic-9a28f6cb28384a64)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/test_itrace.rs (target/debug/deps/test_itrace-1763946d79d6549a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

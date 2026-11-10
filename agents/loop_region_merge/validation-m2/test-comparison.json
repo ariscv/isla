@@ -1,0 +1,27 @@
+{
+  "基线": {
+    "isla-lib失败": [],
+    "顶层失败": [
+      "isarch::exec::tests::encdec_guard_f5_继承策略与固定前置权限",
+      "isarch::exec::tests::encdec_guard_压缩编码回环与构造子校验",
+      "isarch::exec::tests::encdec_guard_向量段store编码回环",
+      "isarch::exec::tests::encdec_guard_回环拒绝amoswapq非法编码",
+      "isarch::exec::tests::encdec_guard_回环拒绝ldu非法编码",
+      "isarch::exec::tests::encdec_guard_回环放行合法load编码",
+      "isarch::exec::tests::encdec_guard_非位向量编码报错"
+    ]
+  },
+  "M2": {
+    "isla-lib失败": [],
+    "顶层失败": [
+      "isarch::exec::tests::encdec_guard_f5_继承策略与固定前置权限",
+      "isarch::exec::tests::encdec_guard_压缩编码回环与构造子校验",
+      "isarch::exec::tests::encdec_guard_向量段store编码回环",
+      "isarch::exec::tests::encdec_guard_回环拒绝amoswapq非法编码",
+      "isarch::exec::tests::encdec_guard_回环拒绝ldu非法编码",
+      "isarch::exec::tests::encdec_guard_回环放行合法load编码",
+      "isarch::exec::tests::encdec_guard_非位向量编码报错"
+    ]
+  },
+  "新增失败": []
+}

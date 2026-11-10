@@ -60,7 +60,10 @@ fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effe
 
 /// 从格底 Pure 开始，按调用图的 SCC 逆拓扑序处理；分量内迭代到最小不动点。
 /// 递归边只传播已知效应，不凭空增加效应；实际递归仍受共享推演步数预算约束。
-pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashMap<Name, FunctionEffect> {
+pub(super) fn function_effect_summaries<B: BV>(
+    shared: &SharedState<B>,
+    global_state: bool,
+) -> HashMap<Name, FunctionEffect> {
     let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
     let nodes: HashMap<_, _> = shared.functions.keys().map(|function| (*function, graph.add_node(*function))).collect();
     for (function, (_, _, body)) in &shared.functions {
@@ -189,12 +192,19 @@ pub(super) fn function_effect_summaries<B: BV>(shared: &SharedState<B>) -> HashM
                 || destination.map_or(false, |loc| !locals.contains(&loc.id()) || matches!(loc, Loc::Addr(_)))
             {
                 effect = effect.max(Effect::WritesState);
-                rejection = Some(CachedReject {
-                    reason: SpeculativeRejectReason::CalleeStateWrite,
-                    function: *function,
-                    pc,
-                    location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
-                });
+                // 普通全局写和向量寄存器写都由访问日志跟踪；地址写仍不能推演。
+                let mut root = destination;
+                while let Some(Loc::Field(loc, _)) = root {
+                    root = Some(loc);
+                }
+                if !global_state || matches!(root, Some(Loc::Addr(_))) {
+                    rejection = Some(CachedReject {
+                        reason: SpeculativeRejectReason::CalleeStateWrite,
+                        function: *function,
+                        pc,
+                        location: stats::instr_source_loc(instr).unwrap_or(SourceLoc::unknown()),
+                    });
+                }
             }
             summary.join(FunctionEffect { effect, non_returning: false, rejection });
             if let Instr::Call(_, _, callee, _, _) = instr {

@@ -1,0 +1,37 @@
+{
+  "argv": [
+    "/usr/bin/python3",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/scripts/solve_process.py",
+    "run",
+    "--clause",
+    "FVFTYPE",
+    "--",
+    "timeout",
+    "--signal=TERM",
+    "--kill-after=10s",
+    "280s",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/target/release/isarch",
+    "-A",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/pathmerge-all-20261110/isla/rv64d.ir",
+    "-C",
+    "/data1/baiyifan/workplace/isla-runner/.worktree/pathmerge-cache-all-20261110/configs/riscv64_difftest_fd.toml",
+    "--verbose",
+    "-T",
+    "32",
+    "--path-merging",
+    "--timeout",
+    "5m",
+    "--smt-timeout",
+    "1m",
+    "--tastic",
+    "qffp",
+    "solve-state",
+    "--clause=FVFTYPE"
+  ],
+  "cwd": "/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/agents/loop_region_merge/smoke-m2",
+  "环境": {
+    "ISLA_STATS": "1",
+    "RUST_BACKTRACE": "1",
+    "TMPDIR": "/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/agents/loop_region_merge/validation-m2/tmp"
+  }
+}

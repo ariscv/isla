@@ -41,13 +41,21 @@ pub(super) struct AccessLog<B> {
     pub pc: usize,
     pub location: SourceLoc,
     pub writes_allowed: bool,
+    pub global_state: bool,
 }
 
 impl<B: BV> AccessLog<B> {
     /// 发布发生在真实读取处，保证读取先于使用它的 SMT 定义；第二臂复用已发布的同序号读取。
     /// 计数属于帧快照，死臂/拒绝回滚后不会抑制存活臂的事件。
     pub fn record_read(&mut self, reg: Name, accessor: Vec<Accessor>, value: Val<B>) -> Result<bool, ExecError> {
-        if !self.writes.register_write_order.is_empty() {
+        if self.global_state {
+            // 内部读取使用当前臂的值；前态足迹按寄存器和字段路径只记录一次。
+            if self.writes.modified_regs.contains(&reg)
+                || self.reads.iter().any(|(name, path, _)| *name == reg && *path == accessor)
+            {
+                return Ok(false);
+            }
+        } else if !self.writes.register_write_order.is_empty() {
             return Err(self.reject(SpeculativeRejectReason::RegisterReadAfterWrite));
         }
         let occurrence = self.reads.iter().filter(|(name, path, _)| *name == reg && *path == accessor).count();
@@ -136,18 +144,21 @@ pub(super) fn record_read<B: BV>(
 pub(super) fn record_write<B: BV>(state: &mut LocalState<B>, id: Name, register: bool) -> Result<(), ExecError> {
     if let Some(log) = &mut state.speculative_access {
         if register || state.lets.contains_key(&id) {
-            if !log.writes_allowed {
+            if !log.global_state && !log.writes_allowed {
                 return Err(log.reject(SpeculativeRejectReason::CalleeStateWrite));
             }
         }
         if register {
-            if !log.writes.modified_regs.insert(id) {
+            let first = log.writes.modified_regs.insert(id);
+            if !log.global_state && !first {
                 return Err(log.reject(SpeculativeRejectReason::RepeatedRegisterWrite));
             }
-            if log.writes.read_regs.contains(&id) {
+            if !log.global_state && log.writes.read_regs.contains(&id) {
                 return Err(log.reject(SpeculativeRejectReason::RegisterReadWrite));
             }
-            log.writes.register_write_order.push(id);
+            if first {
+                log.writes.register_write_order.push(id);
+            }
         } else {
             log.writes.modified_vars.insert(id);
         }
@@ -220,7 +231,8 @@ pub(super) fn preflight<B: BV>(
     if frame.region_execution.is_none() {
         return Ok(());
     }
-    let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared));
+    let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
+    let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state));
     if matches!(&frame.instrs[frame.pc], Instr::Call(_, _, callee, _, _) if summaries.get(callee).is_some_and(|summary| summary.non_returning))
     {
         // 此调用是静态 CFG 的异常出口，推演必须在执行其任何效应之前离开区域。
@@ -303,6 +315,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
     let mode = policy(frame, state, info);
+    let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     assert_ne!(mode, MergeMode::Off, "Off 不能进入区域合并");
     let nested = frame.region_execution.is_some();
     shared.execution_stats.merge_attempt();
@@ -331,23 +344,25 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 shared.execution_stats.merge_cache_hit();
                 Err(cached.error())
             }
-            None => {
-                region(frame, shared, state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)))
-                    .and_then(|region| {
-                        for pc in &region.nodes {
-                            if let Some(rejection) = instruction_effect(
-                                frame.function_name,
-                                *pc,
-                                &frame.instrs[*pc],
-                                shared,
-                                state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared)),
-                            ) {
-                                return Err(rejection.error());
-                            }
-                        }
-                        Ok(region)
-                    })
-            }
+            None => region(
+                frame,
+                shared,
+                state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state)),
+            )
+            .and_then(|region| {
+                for pc in &region.nodes {
+                    if let Some(rejection) = instruction_effect(
+                        frame.function_name,
+                        *pc,
+                        &frame.instrs[*pc],
+                        shared,
+                        state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state)),
+                    ) {
+                        return Err(rejection.error());
+                    }
+                }
+                Ok(region)
+            }),
         }
     };
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
@@ -533,6 +548,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             pc: frame.pc,
             location: info,
             writes_allowed: true,
+            global_state: state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state),
         });
     }
     let mut arms = Vec::new();
@@ -897,7 +913,7 @@ fn merge_states<'ir, B: BV>(
         .filter(|(reg, _, _)| shared_regs.contains(reg))
         .map(|(reg, accessor, _)| (reg, accessor))
         .collect();
-    if common_a != common_b {
+    if !lhs.global_state && common_a != common_b {
         return Err(reject(base, SpeculativeRejectReason::RegisterSequence));
     }
     // 合并两臂的写入偏序，拓扑序必须同时保持每一臂的先后关系；形成环则拒绝。
@@ -920,9 +936,38 @@ fn merge_states<'ir, B: BV>(
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
-    for source in [lhs, rhs] {
-        for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
-            if !shared_regs.contains(reg) {
+    if lhs.global_state {
+        // 与写入相同，前态读取按两臂首次访问的偏序合并；节点包含完整 accessor。
+        let mut graph = petgraph::graph::DiGraph::new();
+        let mut nodes = HashMap::new();
+        let mut reads = HashMap::new();
+        for source in [lhs, rhs] {
+            let mut previous = None;
+            for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
+                let key = (*reg, accessor.clone());
+                let node = *nodes.entry(key.clone()).or_insert_with(|| graph.add_node(key.clone()));
+                if let Some(previous) = previous {
+                    graph.update_edge(previous, node, ());
+                }
+                previous = Some(node);
+                reads
+                    .entry(key)
+                    .and_modify(|(_, old_guard): &mut (Val<B>, smtlib::Exp<Sym>)| {
+                        *old_guard = smtlib::Exp::Or(Box::new(old_guard.clone()), Box::new(guard.clone()));
+                    })
+                    .or_insert_with(|| (value.clone(), guard.clone()));
+            }
+        }
+        let order = petgraph::algo::toposort(&graph, None)
+            .map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?;
+        access.reads.clear();
+        access.read_guards.clear();
+        for node in order {
+            let (reg, accessor) = &graph[node];
+            let (value, guard) = reads.remove(&(*reg, accessor.clone())).unwrap();
+            let in_arm =
+                |source: &AccessLog<B>| source.reads.iter().any(|(name, path, _)| name == reg && path == accessor);
+            if !in_arm(lhs) || !in_arm(rhs) {
                 single_arm_reads.push(GuardedRegisterRead {
                     register: *reg,
                     accessor: accessor.clone(),
@@ -930,19 +975,35 @@ fn merge_states<'ir, B: BV>(
                     guard: guard.clone(),
                 });
             }
+            access.reads.push((*reg, accessor.clone(), value));
+            access.read_guards.push(guard);
         }
-    }
-    let mut right_common = rhs.reads.iter().zip(&rhs.read_guards).filter(|((reg, _, _), _)| shared_regs.contains(reg));
-    for ((reg, _, _), guard) in access.reads.iter().zip(&mut access.read_guards) {
-        if shared_regs.contains(reg) {
-            let (_, right_guard) = right_common.next().expect("共同读取序列必须对齐");
-            *guard = smtlib::Exp::Or(Box::new(guard.clone()), Box::new(right_guard.clone()));
+    } else {
+        for source in [lhs, rhs] {
+            for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
+                if !shared_regs.contains(reg) {
+                    single_arm_reads.push(GuardedRegisterRead {
+                        register: *reg,
+                        accessor: accessor.clone(),
+                        value: value.clone(),
+                        guard: guard.clone(),
+                    });
+                }
+            }
         }
-    }
-    for (read, guard) in rhs.reads.iter().zip(&rhs.read_guards) {
-        if !shared_regs.contains(&read.0) {
-            access.reads.push(read.clone());
-            access.read_guards.push(guard.clone());
+        let mut right_common =
+            rhs.reads.iter().zip(&rhs.read_guards).filter(|((reg, _, _), _)| shared_regs.contains(reg));
+        for ((reg, _, _), guard) in access.reads.iter().zip(&mut access.read_guards) {
+            if shared_regs.contains(reg) {
+                let (_, right_guard) = right_common.next().expect("共同读取序列必须对齐");
+                *guard = smtlib::Exp::Or(Box::new(guard.clone()), Box::new(right_guard.clone()));
+            }
+        }
+        for (read, guard) in rhs.reads.iter().zip(&rhs.read_guards) {
+            if !shared_regs.contains(&read.0) {
+                access.reads.push(read.clone());
+                access.read_guards.push(guard.clone());
+            }
         }
     }
     access.initial_registers.extend(rhs.initial_registers.clone());
@@ -986,7 +1047,8 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
                 if limits.merge_mode(*function, *info, None) == MergeMode::Force {
                     let mut cache = shared.function_regions.lock().unwrap();
                     let regions = cache.entry(*function).or_insert_with(|| {
-                        let summaries = summaries.get_or_init(|| function_effect_summaries(shared));
+                        let summaries =
+                            summaries.get_or_init(|| function_effect_summaries(shared, limits.region_global_state));
                         FunctionRegions::with_options(
                             body,
                             RegionOptions {
