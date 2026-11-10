@@ -1,0 +1,73 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.68s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-36d87c5a4a773f4c)
+
+running 65 tests
+test executor::tests::region_merge_tests::merge_enumeration_f5_单路径16384类且每类只消费一次模型 ... ignored, F5 万类压力验证，显式运行
+test executor::tests::region_merge_tests::merge_enumeration_real_ir_pte_is_invalid ... ignored, 需要 ISLA_REGIONS_IR 指向真实 rv64d.ir
+test executor::tests::region_merge_tests::region_merge_f4_real_get_xlpe_diagnosis ... ignored, 需要 ISLA_REGIONS_IR 指向真实 Sail IR
+test executor::tests::region_merge_tests::region_merge_real_ir_effects ... ignored, 需要外部 rv64d.ir；用 ISLA_REGIONS_IR 指定路径
+test executor::tests::region_merge_tests::samples_real_ir_pte_cross_mode ... ignored, 需要 ISLA_REGIONS_IR 指向真实 Sail IR
+test executor::tests::region_merge_tests::region_merge_f4_special_calls_still_rejected_statically ... ok
+test executor::tests::region_merge_tests::region_merge_force_static_validation_before_execution ... ok
+test executor::tests::region_merge_tests::region_merge_recursive_effect_least_fixed_point ... ok
+test executor::tests::region_merge_tests::region_merge_non_returning_fixed_point_is_conservative_for_recursion_and_exception_state ... ok
+test executor::tests::region_merge_tests::region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction ... ok
+test executor::tests::region_merge_tests::region_merge_f4_memory_constraints_are_guarded_and_reads_survive_checkpoint ... ok
+test executor::tests::region_merge_tests::region_merge_callee_have_exception_write_rejects ... ok
+test executor::tests::region_merge_tests::region_merge_f2_invalid_savepoint_panics_before_arm_commit - should panic ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_base_slot_survives_even_when_statically_dead ... ok
+test executor::tests::region_merge_tests::region_merge_effects_use_external_binding_and_reject_callee_vector_writes ... ok
+test executor::tests::region_merge_tests::region_merge_undeclared_call_rejected_only_when_reached ... ok
+test executor::tests::region_merge_tests::region_merge_non_returning_requires_all_paths_and_preserves_normal_writes ... ok
+test executor::tests::region_merge_tests::region_merge_f2_records_disabled_skips_scan ... ok
+test executor::tests::region_merge_tests::region_merge_nested_single_read_keeps_complete_guard ... ok
+test executor::tests::region_merge_tests::region_merge_force_toml_exits_with_rule_stats ... ok
+test executor::tests::region_merge_tests::region_merge_repeated_pure_calls_keep_distinct_local_initial_values ... ok
+test executor::tests::region_merge_tests::region_merge_partial_register_write_reuses_original_unwritten_fields ... ok
+test executor::tests::region_merge_tests::merge_enumeration_budget_边枚举边回调并正常截断回滚 ... ok
+test executor::tests::region_merge_tests::region_merge_f4_union_success_domain_unwrap ... ok
+test executor::tests::region_merge_tests::region_merge_unique_monomorphize_and_retry_in_real_arms ... ok
+test executor::tests::region_merge_tests::region_merge_f4_union_match_and_nested_tags ... ok
+test executor::tests::region_merge_tests::region_merge_f2_pow_before_region_inputs ... ok
+test executor::tests::region_merge_tests::region_merge_pure_call_and_short_circuit ... ok
+test executor::tests::region_merge_tests::region_merge_force_process_failure_and_off_conflict ... ok
+test executor::tests::region_merge_tests::merge_enumeration_结构字段分配与显示不依赖哈希迭代 ... ok
+test executor::tests::region_merge_tests::region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit ... ok
+test executor::tests::region_merge_tests::region_merge_f2_concrete_pessimistic_assert ... ok
+test executor::tests::region_merge_tests::region_merge_prior_fresh_definitions_remain_dependencies_after_next_merge ... ok
+test executor::tests::region_merge_tests::region_merge_single_arm_register_read_union_and_guard ... ok
+test executor::tests::region_merge_tests::region_merge_policy_inheritance_and_global_off ... ok
+test executor::tests::region_merge_tests::region_merge_list_construction_and_pattern_matching ... ok
+test executor::tests::region_merge_tests::region_merge_four_item_or_chain_differential ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_assignment_keeps_local_slot_and_register_events ... ok
+test executor::tests::region_merge_tests::region_merge_multiple_returns_common_virtual_exit ... ok
+test executor::tests::region_merge_tests::region_merge_f4_unreachable_unknown_extern ... ok
+test executor::tests::region_merge_tests::region_merge_declared_union_constructors_are_pure ... ok
+test executor::tests::region_merge_tests::region_merge_f4_memory_read_union ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_base_slot_and_late_entry_preserve_state ... ok
+test executor::tests::region_merge_tests::region_merge_configured_const_primop_effects ... ok
+test executor::tests::region_merge_tests::region_merge_pow_int_fresh_equations_and_local_variable ... ok
+test executor::tests::region_merge_tests::region_merge_records_json_lines_and_parallel_writes ... ok
+test executor::tests::region_merge_tests::region_merge_dead_arm_and_guarded_assume ... ok
+test executor::tests::region_merge_tests::region_merge_nested_same_join_and_single_feasible_jump ... ok
+test executor::tests::region_merge_tests::region_merge_f2_force_and_adaptive_errors ... ok
+test executor::tests::region_merge_tests::merge_enumeration_extract_of_derived_symbol ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_pessimistic_symbolic_assertion_is_rejected ... ok
+test executor::tests::region_merge_tests::region_merge_inner_commit_then_outer_rollback_with_assertion ... ok
+test executor::tests::region_merge_tests::merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规范最小值 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_coupled_slices_caps_and_failure_result ... ok
+test executor::tests::region_merge_tests::merge_enumeration_nested_context_and_fork_inheritance ... ok
+test executor::tests::region_merge_tests::region_merge_f2_nested_pessimistic_assert_success_domain ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_assertion_forms_and_dead_arms_differential ... ok
+test executor::tests::region_merge_tests::region_merge_seeded_random_pure_ir ... ok
+test executor::tests::region_merge_tests::merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度 ... ok
+test executor::tests::region_merge_tests::samples_two_arm_nested_cross_mode_and_roundtrip ... ok
+test executor::tests::region_merge_tests::region_merge_f2_union_initial_value_constraints ... ok
+test executor::tests::region_merge_tests::merge_enumeration_多分区耦合守卫规范编号与计数 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_budget_256组合及多线程守卫规范编号 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截断 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_stride_只消费dfs序号倍数且预算不变 ... ok
+
+test result: ok. 60 passed; 0 failed; 5 ignored; 0 measured; 761 filtered out; finished in 6.62s
+

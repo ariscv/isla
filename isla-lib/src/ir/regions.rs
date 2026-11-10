@@ -51,7 +51,7 @@ pub struct Region {
     /// 入口 Jump 与 join 均不包含在内，按原始 pc 排序。
     pub nodes: BTreeSet<usize>,
     pub kind: RegionKind,
-    /// 区域内 Decl/Init 且区域离开后不再读取的名字，可在提交处丢弃。
+    /// 区域内 Decl/Init 且区域离开后不再用到槽位的名字，可在提交处丢弃。
     pub local_variables: BTreeSet<Name>,
 }
 
@@ -65,8 +65,10 @@ pub enum RegionRejection {
 }
 
 /// `None` 保留异常边，供诊断和对比使用。`Some(name)` 按边的极性剔除。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RegionOptions<'a> {
+    /// 仅区域查询启用：计算正常完成路径的汇合点，断言失败作为死端。
+    pub filter_assertion_failures: bool,
     pub have_exception: Option<Name>,
     /// 原始 Call 形式的无返回函数（包括 Sail exit），由调用者解析名字。
     pub terminal_calls: &'a [Name],
@@ -86,6 +88,8 @@ pub struct RegionCfg {
     declarations: HashMap<Name, BTreeSet<usize>>,
     jump_pcs: HashSet<usize>,
     exception_pcs: HashSet<usize>,
+    assertion_dead_ends: HashSet<usize>,
+    assertion_tails: HashSet<usize>,
 }
 
 fn exception_polarity(exp: &Exp<Name>, name: Name) -> Option<bool> {
@@ -104,6 +108,7 @@ impl RegionCfg {
         let binary_primops = primop::binary_primops::<B>();
         let assertions = [binary_primops["optimistic_assert"], binary_primops["pessimistic_assert"]];
         let mut failure_pcs = HashSet::new();
+        let mut assertion_dead_ends = HashSet::new();
         let mut jump_pcs = HashSet::new();
         let mut exception_pcs = HashSet::new();
         let mut normalized = Vec::with_capacity(len + 1);
@@ -150,6 +155,9 @@ impl RegionCfg {
                 Instr::PrimopReset(loc, _, _, info) => Instr::Copy(loc.clone(), Exp::Unit, *info),
                 _ => instr.clone(),
             };
+            if matches!(normalized_instr, Instr::Exit(super::ExitCause::AssertionFailure, _)) {
+                assertion_dead_ends.insert(pc);
+            }
             normalized.push(LabeledInstr::Labeled(pc, normalized_instr));
         }
         normalized.push(LabeledInstr::Labeled(len, Instr::End));
@@ -202,16 +210,43 @@ impl RegionCfg {
             if source != exit
                 && matches!(cfg.graph[ix].terminator, Terminator::End | Terminator::Arbitrary | Terminator::Exit(..))
             {
+                if options.filter_assertion_failures
+                    && matches!(graph[source], RegionPoint::Instruction(pc) if assertion_dead_ends.contains(&pc))
+                {
+                    continue;
+                }
                 graph.add_edge(source, exit, EdgeKind::Terminate);
             }
         }
-        for pc in failure_pcs {
+        for pc in failure_pcs.into_iter().filter(|_| !options.filter_assertion_failures) {
             if !graph.contains_edge(pcs[pc], exit) {
                 graph.add_edge(pcs[pc], exit, EdgeKind::AssertionFailure);
             }
         }
+        // 只允许无法到达正常出口、但可到达断言失败的尾部进入区域闭包。
+        // 没有任何出口的循环仍保持 NoJoin；尾部中的环由 validate_region 拒绝。
+        let mut assertion_tails = HashSet::new();
+        if options.filter_assertion_failures {
+            let mut pending: Vec<_> = assertion_dead_ends.iter().map(|pc| pcs[*pc]).collect();
+            while let Some(ix) = pending.pop() {
+                let RegionPoint::Instruction(pc) = graph[ix] else { panic!("虚拟出口不能通向断言失败") };
+                if assertion_tails.insert(pc) {
+                    pending.extend(graph.neighbors_directed(ix, Direction::Incoming));
+                }
+            }
+        }
         let postdominators = simple_fast(Reversed(&graph), exit);
-        Self { graph, pcs, exit, postdominators, declarations, jump_pcs, exception_pcs }
+        Self {
+            graph,
+            pcs,
+            exit,
+            postdominators,
+            declarations,
+            jump_pcs,
+            exception_pcs,
+            assertion_dead_ends,
+            assertion_tails,
+        }
     }
 
     pub fn instruction_count(&self) -> usize {
@@ -369,6 +404,9 @@ impl RegionCfg {
             assert!(pc < self.pcs.len() && pc != branch_pc && !nodes.contains(&pc), "join 必须在区域外");
         }
         for pc in nodes.iter().copied().chain([branch_pc]) {
+            if self.successors(pc).next().is_none() && !self.assertion_dead_ends.contains(&pc) {
+                return Err(RegionRejection::NoJoin);
+            }
             for (to, _) in self.successors(pc) {
                 if to == join {
                     continue;
@@ -428,6 +466,7 @@ pub struct FunctionRegions<B> {
     // 拥有函数指令副本，使 SharedState 的并发缓存不引入生命周期不变性。
     instrs: Arc<[Instr<Name, B>]>,
     have_exception: Option<Name>,
+    filter_assertion_failures: bool,
     terminal_calls: Vec<Name>,
     analysis: OnceLock<FunctionAnalysis>,
     regions: HashMap<usize, Result<Arc<Region>, RegionRejection>>,
@@ -435,13 +474,21 @@ pub struct FunctionRegions<B> {
 
 impl<B: BV> FunctionRegions<B> {
     pub fn new(instrs: &[Instr<Name, B>], have_exception: Name) -> Self {
-        Self::with_options(instrs, RegionOptions { have_exception: Some(have_exception), terminal_calls: &[] })
+        Self::with_options(
+            instrs,
+            RegionOptions {
+                filter_assertion_failures: true,
+                have_exception: Some(have_exception),
+                terminal_calls: &[],
+            },
+        )
     }
 
     pub fn with_options(instrs: &[Instr<Name, B>], options: RegionOptions<'_>) -> Self {
         Self {
             instrs: Arc::from(instrs),
             have_exception: options.have_exception,
+            filter_assertion_failures: options.filter_assertion_failures,
             terminal_calls: options.terminal_calls.to_vec(),
             analysis: OnceLock::new(),
             regions: HashMap::new(),
@@ -462,12 +509,20 @@ impl<B: BV> FunctionRegions<B> {
         self.analysis.get_or_init(|| {
             let cfg = RegionCfg::new(
                 &self.instrs,
-                RegionOptions { have_exception: self.have_exception, terminal_calls: &self.terminal_calls },
+                RegionOptions {
+                    filter_assertion_failures: self.filter_assertion_failures,
+                    have_exception: self.have_exception,
+                    terminal_calls: &self.terminal_calls,
+                },
             );
             // 活跃性保留异常边；异常路径和绕行中的读也不能被误判为已死亡。
             let full_cfg = RegionCfg::new(
                 &self.instrs,
-                RegionOptions { have_exception: None, terminal_calls: &self.terminal_calls },
+                RegionOptions {
+                    filter_assertion_failures: false,
+                    have_exception: None,
+                    terminal_calls: &self.terminal_calls,
+                },
             );
             let mut reads = vec![HashSet::new(); self.instrs.len() + 1];
             let mut address_taken = HashSet::new();
@@ -499,9 +554,8 @@ impl<B: BV> FunctionRegions<B> {
                     Instr::Goto(_) | Instr::Exit(..) | Instr::Arbitrary => (),
                 }
                 if let Some(loc) = destination {
-                    if matches!(loc, Loc::Field(..) | Loc::Addr(_)) {
-                        reads[pc].insert(loc.id());
-                    }
+                    // 普通赋值、字段及间接写入都要求已有槽位，否则可能被解释为寄存器写。
+                    reads[pc].insert(loc.id());
                 }
                 for exp in expressions {
                     exp.collect_ids(&mut reads[pc]);
@@ -529,9 +583,9 @@ impl<B: BV> FunctionRegions<B> {
                     }
                 }
             }
-            // 名字级保守活跃性：live_in = reads ∪ ⋃ live_in(successor)。
-            // 不用赋值杀死名字，因为合并处删除的是局部槽位，而非某次定义的值。
-            // 工作队列向前驱传播至不动点，覆盖绕行、重定义和任意回边。
+            // 槽位活跃性：live_in = 用到 ∪ (⋃ live_in(successor) − 重新建槽)。
+            // 只在 Decl/Init 截断；Init 右侧读取已保留在本指令的用途中。
+            // 工作队列向前驱传播至不动点，覆盖绕行及任意回边。
             let mut queue: VecDeque<_> = full_cfg.graph.node_indices().collect();
             let mut queued = vec![true; reads.len()];
             while let Some(ix) = queue.pop_front() {
@@ -541,7 +595,15 @@ impl<B: BV> FunctionRegions<B> {
                     if source == target {
                         continue;
                     }
-                    let additions: Vec<_> = reads[source].difference(&reads[target]).copied().collect();
+                    let recreated = match &self.instrs[target] {
+                        Instr::Decl(name, ..) | Instr::Init(name, ..) => Some(name),
+                        _ => None,
+                    };
+                    let additions: Vec<_> = reads[source]
+                        .difference(&reads[target])
+                        .filter(|name| Some(*name) != recreated)
+                        .copied()
+                        .collect();
                     if !additions.is_empty() {
                         reads[target].extend(additions);
                         if !queued[target] {
@@ -584,7 +646,8 @@ impl<B: BV> FunctionRegions<B> {
                 continue;
             }
             let RegionPoint::Instruction(pc) = point else { panic!("虚拟出口不能越过后支配点") };
-            if cfg.postdominators.dominators(cfg.pcs[pc]).is_none() {
+            // 失败尾块可能无法到达正常出口，仍须保留并由闭包校验拒绝其中的环。
+            if cfg.postdominators.dominators(cfg.pcs[pc]).is_none() && !cfg.assertion_tails.contains(&pc) {
                 return Err(RegionRejection::NoJoin);
             }
             if nodes.insert(pc) {
@@ -656,7 +719,153 @@ mod tests {
         Instr::Decl(id, Ty::Bool, SourceLoc::unknown())
     }
     fn options() -> RegionOptions<'static> {
-        RegionOptions { have_exception: Some(HAVE_EXCEPTION), terminal_calls: &[] }
+        RegionOptions { filter_assertion_failures: false, have_exception: Some(HAVE_EXCEPTION), terminal_calls: &[] }
+    }
+
+    #[test]
+    fn regions_assertion_dead_end_shortens_loop_region_and_keeps_tail() {
+        let body = vec![
+            jump(4),
+            jump(7),
+            copy(name(1), Exp::Bool(true)),
+            Instr::Goto(5),
+            copy(name(1), Exp::Bool(false)),
+            jump(0),
+            Instr::End,
+            decl(name(2)),
+            Instr::Exit(ExitCause::AssertionFailure, SourceLoc::unknown()),
+        ];
+        let region = FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap();
+        assert_eq!(region.join, RegionPoint::Instruction(5));
+        assert_eq!(region.nodes, [1, 2, 3, 4, 7, 8].into_iter().collect());
+        // 完整图仍保留失败出口；区域过滤不得改变保守分析。
+        let full = RegionCfg::new(&body, options());
+        assert_eq!(full.successors(8).count(), 1);
+    }
+
+    #[test]
+    fn regions_direct_assertion_normal_paths_join_inside_loop() {
+        let info = SourceLoc::unknown();
+        let primops = primop::binary_primops::<B64>();
+        for condition in [Exp::Bool(true), Exp::Bool(false), Exp::Id(name(3))] {
+            for assertion in [
+                Instr::Call(
+                    Loc::Id(name(2)),
+                    false,
+                    SAIL_ASSERT,
+                    vec![condition.clone(), Exp::String("失败".into())],
+                    info,
+                ),
+                Instr::PrimopBinary(
+                    Loc::Id(name(2)),
+                    primops["optimistic_assert"],
+                    condition.clone(),
+                    Exp::String("失败".into()),
+                    info,
+                ),
+                Instr::PrimopBinary(
+                    Loc::Id(name(2)),
+                    primops["pessimistic_assert"],
+                    condition,
+                    Exp::String("失败".into()),
+                    info,
+                ),
+            ] {
+                let body =
+                    vec![jump(3), assertion, Instr::Goto(4), copy(name(1), Exp::Bool(false)), jump(0), Instr::End];
+                let region = FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap();
+                assert_eq!(
+                    region.join,
+                    if matches!(&body[1], Instr::Call(_, _, _, args, _) if matches!(args[0], Exp::Bool(false)))
+                        || matches!(&body[1], Instr::PrimopBinary(_, _, Exp::Bool(false), _, _))
+                    {
+                        RegionPoint::Instruction(3)
+                    } else {
+                        RegionPoint::Instruction(4)
+                    }
+                );
+                assert!(region.nodes.contains(&1));
+            }
+        }
+    }
+
+    #[test]
+    fn regions_assertion_filter_rejects_cycles_and_preserves_other_exits() {
+        let info = SourceLoc::unknown();
+        assert!(!RegionOptions::default().filter_assertion_failures);
+        for cause in [ExitCause::MatchFailure, ExitCause::Explicit] {
+            let body = vec![jump(3), Instr::Exit(cause, info), Instr::Goto(4), decl(name(1)), jump(0), Instr::End];
+            assert_eq!(FunctionRegions::new(&body, HAVE_EXCEPTION).region(0), Err(RegionRejection::HasBackEdge));
+        }
+        for body in [
+            // 死端之前存在环，仍必须拒绝。
+            vec![jump(4), jump(3), Instr::Goto(1), Instr::Exit(ExitCause::AssertionFailure, info), Instr::End],
+            // 一臂无正常出口且无限循环，不能视为断言失败。
+            vec![jump(2), Instr::Goto(1), Instr::End],
+            // 两臂均无正常出口。
+            vec![
+                jump(2),
+                Instr::Exit(ExitCause::AssertionFailure, info),
+                Instr::Exit(ExitCause::AssertionFailure, info),
+            ],
+            vec![jump(2), Instr::Goto(0), Instr::Exit(ExitCause::AssertionFailure, info)],
+        ] {
+            assert!(matches!(
+                FunctionRegions::new(&body, HAVE_EXCEPTION).region(0),
+                Err(RegionRejection::HasBackEdge | RegionRejection::NoJoin)
+            ));
+        }
+        let body =
+            vec![jump(3), Instr::Exit(ExitCause::AssertionFailure, info), Instr::Goto(4), decl(name(1)), Instr::End];
+        let mut filtered = FunctionRegions::new(&body, HAVE_EXCEPTION);
+        let region = filtered.region(0).unwrap();
+        assert_eq!(region.join, RegionPoint::Instruction(3));
+        assert_eq!(region.nodes, [1].into_iter().collect());
+        filtered.cfg().validate_region(0, region.join, &region.nodes).unwrap();
+        assert!(filtered.analysis().full_cfg.successors(1).any(|(to, _)| to == RegionPoint::FunctionExit));
+        assert_eq!(FunctionRegions::with_options(&body, options()).region(0).unwrap().join, RegionPoint::FunctionExit);
+    }
+
+    #[test]
+    fn regions_slot_liveness_stops_at_loop_redeclaration() {
+        let local = name(1);
+        let info = SourceLoc::unknown();
+        for declaration in [decl(local), Instr::Init(local, Ty::Bool, Exp::Bool(true), info)] {
+            let body = vec![
+                jump(5),
+                declaration,
+                copy(local, Exp::Bool(true)),
+                copy(RETURN, Exp::Id(local)),
+                Instr::Goto(6),
+                copy(RETURN, Exp::Bool(false)),
+                jump(0),
+                Instr::End,
+            ];
+            let regions = FunctionRegions::new(&body, HAVE_EXCEPTION);
+            assert!(!regions.analysis().future_reads[6].contains(&local), "下一轮建槽必须截断活跃性");
+            let mut regions = regions;
+            assert!(regions.region(0).unwrap().local_variables.contains(&local));
+        }
+        let body = vec![
+            jump(3),
+            Instr::Init(local, Ty::Bool, Exp::Id(local), info),
+            Instr::Goto(4),
+            decl(name(2)),
+            jump(0),
+            Instr::End,
+        ];
+        assert!(
+            !FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().local_variables.contains(&local),
+            "Init 右侧读自身时必须保留旧槽位"
+        );
+    }
+
+    #[test]
+    fn regions_slot_liveness_keeps_plain_assignment_destination() {
+        let local = name(1);
+        let body = vec![jump(3), decl(local), Instr::Goto(4), decl(name(2)), copy(local, Exp::Bool(false)), Instr::End];
+        let mut regions = FunctionRegions::new(&body, HAVE_EXCEPTION);
+        assert!(!regions.region(0).unwrap().local_variables.contains(&local), "普通赋值也需要现有槽位");
     }
 
     #[test]
@@ -788,8 +997,10 @@ mod tests {
                     if negated { EdgeKind::Jump(true) } else { EdgeKind::Jump(false) }
                 )]
             );
-            let mut unfiltered =
-                FunctionRegions::with_options(&body, RegionOptions { have_exception: None, terminal_calls: &[] });
+            let mut unfiltered = FunctionRegions::with_options(
+                &body,
+                RegionOptions { filter_assertion_failures: false, have_exception: None, terminal_calls: &[] },
+            );
             assert_eq!(unfiltered.region(0).unwrap().join, RegionPoint::FunctionExit);
         }
     }
@@ -808,7 +1019,11 @@ mod tests {
             let body = vec![jump(3), terminal, Instr::Goto(4), copy(RETURN, Exp::Bool(true)), Instr::End];
             let mut regions = FunctionRegions::with_options(
                 &body,
-                RegionOptions { have_exception: Some(HAVE_EXCEPTION), terminal_calls: &[name(9)] },
+                RegionOptions {
+                    filter_assertion_failures: false,
+                    have_exception: Some(HAVE_EXCEPTION),
+                    terminal_calls: &[name(9)],
+                },
             );
             let region = regions.region(0).unwrap();
             assert_eq!(region.join, RegionPoint::FunctionExit);
@@ -843,7 +1058,11 @@ mod tests {
         ];
         let mut regions = FunctionRegions::with_options(
             &body,
-            RegionOptions { have_exception: Some(HAVE_EXCEPTION), terminal_calls: &[callee] },
+            RegionOptions {
+                filter_assertion_failures: false,
+                have_exception: Some(HAVE_EXCEPTION),
+                terminal_calls: &[callee],
+            },
         );
         let region = regions.region(0).unwrap();
         assert_eq!(region.join, RegionPoint::FunctionExit);
@@ -958,7 +1177,7 @@ mod tests {
             ),
             Instr::End,
         ];
-        assert_eq!(FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().join, RegionPoint::FunctionExit);
+        assert_eq!(FunctionRegions::with_options(&body, options()).region(0).unwrap().join, RegionPoint::FunctionExit);
         let empty: Vec<Instr<Name, B64>> = vec![];
         assert_eq!(RegionCfg::new(&empty, options()).instruction_count(), 0);
         let trailing = vec![jump(2), decl(name(1)), copy(name(2), Exp::Bool(true))];
@@ -1020,7 +1239,7 @@ mod tests {
                     Instr::End,
                 ];
                 assert_eq!(
-                    FunctionRegions::new(&body, HAVE_EXCEPTION).region(0).unwrap().join,
+                    FunctionRegions::with_options(&body, options()).region(0).unwrap().join,
                     if successful { RegionPoint::Instruction(4) } else { RegionPoint::FunctionExit }
                 );
             }
@@ -1038,7 +1257,7 @@ mod tests {
             Instr::PrimopReset(Loc::Addr(Box::new(Loc::Id(local))), reset.clone(), primop::reset_effect(&reset), info),
             Instr::End,
         ];
-        let mut regions = FunctionRegions::new(&body, HAVE_EXCEPTION);
+        let mut regions = FunctionRegions::with_options(&body, options());
         assert_eq!(regions.region(0).unwrap().join, RegionPoint::Instruction(4));
         assert!(!regions.region(0).unwrap().local_variables.contains(&local));
     }
@@ -1109,8 +1328,10 @@ mod tests {
             assert_eq!(body.len(), expected_len);
             let exception = symtab.lookup("have_exception");
             let mut filtered = FunctionRegions::new(&body, exception);
-            let mut original =
-                FunctionRegions::with_options(&body, RegionOptions { have_exception: None, terminal_calls: &[] });
+            let mut original = FunctionRegions::with_options(
+                &body,
+                RegionOptions { filter_assertion_failures: false, have_exception: None, terminal_calls: &[] },
+            );
             for (pc, join) in joins {
                 assert_eq!(filtered.region(pc).unwrap().join, RegionPoint::Instruction(join), "{} pc {}", function, pc);
                 if function == "zpte_is_invalid" {

@@ -3094,7 +3094,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
 
             Instr::Exit(cause, info) => {
-                branch_decision(frame, task_state, SpeculativeRejectReason::Exit)?;
+                // 区域推演把断言失败交给臂事务处理；普通推演与其他终止仍须拒绝。
+                if !matches!(cause, ExitCause::AssertionFailure) || frame.region_execution.is_none() {
+                    branch_decision(frame, task_state, SpeculativeRejectReason::Exit)?;
+                }
                 return match cause {
                     ExitCause::MatchFailure => Err(ExecError::MatchFailure(*info)),
                     ExitCause::AssertionFailure => Err(ExecError::AssertionFailure(None, *info)),
@@ -3920,6 +3923,7 @@ mod tests {
     mod boundary_regression_tests;
     mod cow_tests;
     mod pma_enum_tests;
+    mod region_measurement_tests;
     mod region_merge_tests;
     mod review27_tests;
     mod review28_tests;

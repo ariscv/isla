@@ -1,0 +1,951 @@
+   Compiling log v0.4.21
+   Compiling syn v1.0.109
+   Compiling getrandom v0.1.16
+   Compiling id-arena v2.2.1
+   Compiling plain v0.2.3
+   Compiling ppv-lite86 v0.2.17
+   Compiling fallible-iterator v0.2.0
+   Compiling stable_deref_trait v1.2.0
+   Compiling isla v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110)
+   Compiling arrayvec v0.5.2
+   Compiling unicode-segmentation v1.11.0
+   Compiling typed-arena v2.0.2
+   Compiling getopts v0.2.21
+   Compiling ahash v0.8.11
+   Compiling ena v0.14.2
+   Compiling serde-saphyr v0.0.16
+   Compiling lalrpop v0.20.2
+   Compiling gimli v0.26.2
+   Compiling pretty v0.11.3
+   Compiling rand_core v0.5.1
+   Compiling rand_chacha v0.2.2
+   Compiling rand v0.7.3
+   Compiling scroll_derive v0.10.5
+   Compiling scroll v0.10.2
+   Compiling goblin v0.4.3
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+   Compiling isla-mml v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-mml)
+   Compiling isla-cat v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-cat)
+   Compiling isla-axiomatic v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-axiomatic)
+warning: methods `with_transaction_condition` and `order_transaction_register_reads` are never used
+   --> isla-lib/src/smt/transaction.rs:211:19
+    |
+ 52 | impl<'ctx, B: BV> Solver<'ctx, B> {
+    | --------------------------------- methods in this implementation
+...
+211 |     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+355 |     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling isla-elf v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-elf)
+warning: `isla-lib` (lib) generated 1 warning
+   Compiling isla-sexp v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-sexp)
+warning: `isla-lib` (lib) generated 1 warning (1 duplicate)
+warning: eliding a lifetime that's named elsewhere is confusing
+   --> isla-axiomatic/src/graph/gv_backend.rs:460:77
+    |
+460 |     fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&GVGridChild<'a>> {
+    |                        --                                                   ^^^^^^^^^^^^^--^
+    |                        |                                                    |            |
+    |                        |                                                    |            the same lifetime is named here
+    |                        the lifetime is named here                           the same lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: consistently use `'a`
+    |
+460 |     fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&'a GVGridChild<'a>> {
+    |                                                                              ++
+
+warning: unused import: `isla_lib::source_loc::SourceLoc`
+  --> src/isarch/encoding_slices.rs:16:5
+   |
+16 | use isla_lib::source_loc::SourceLoc;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla-axiomatic` (lib) generated 1 warning (run `cargo fix --lib -p isla-axiomatic` to apply 1 suggestion)
+warning: unused variable: `assembly_names`
+   --> src/isarch/args.rs:136:9
+    |
+136 |     let assembly_names = get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_assembly_names`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `out`
+   --> src/isarch/args.rs:153:9
+    |
+153 |     let out = ir_assembly_names_to_InstructionMap("zSTORE", shared_state, regs, lets);
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
+
+warning: unused variable: `vec`
+  --> src/isarch/args_yaml.rs:78:31
+   |
+78 |                     Exp::Bits(vec) => format!("{:?}", &exp),
+   |                               ^^^ help: if this is intentional, prefix it with an underscore: `_vec`
+
+warning: unused variable: `enum_member`
+  --> src/isarch/args_yaml.rs:80:31
+   |
+80 |                     Exp::Enum(enum_member) => format!("{:?}", &exp),
+   |                               ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enum_member`
+
+warning: unused variable: `b`
+  --> src/isarch/args_yaml.rs:81:31
+   |
+81 |                     Exp::Bool(b) => format!("{:?}", &exp),
+   |                               ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `sym`
+   --> src/isarch/args_yaml.rs:156:51
+    |
+156 | ...                   Val::Symbolic(sym) => val_sym_solve_str(v, &point, &shared_state),
+    |                                     ^^^ help: if this is intentional, prefix it with an underscore: `_sym`
+
+warning: unused variable: `clause_name`
+   --> src/isarch/args_yaml.rs:146:40
+    |
+146 |             let ArgStruct { arg_value, clause_name, checkpoint: point, shared_state } = arg_struct;
+    |                                        ^^^^^^^^^^^ help: try ignoring the field: `clause_name: _`
+
+warning: unused variable: `ty`
+   --> src/isarch/args_yaml.rs:230:13
+    |
+230 |     for (n, ty) in shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap().iter() {
+    |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: unused variable: `regs`
+    --> src/isarch/exec.rs:1631:5
+     |
+1631 |     regs: &RegisterBindings<B>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+    --> src/isarch/exec.rs:1632:5
+     |
+1632 |     lets: &Bindings<B>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `test`
+    --> src/isarch/exec.rs:2262:41
+     |
+2262 | ...                   let test = Sym::from_u32(6);
+     |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_test`
+
+warning: value assigned to `requested_instruction` is never read
+    --> src/isarch/exec.rs:2164:61
+     |
+2164 | ...                   let mut requested_instruction = String::new();
+     |                                                       ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `isa_state_complete` is never read
+    --> src/isarch/exec.rs:2165:58
+     |
+2165 | ...                   let mut isa_state_complete = BTreeMap::new();
+     |                                                    ^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `isa_state_post` is never read
+    --> src/isarch/exec.rs:2166:54
+     |
+2166 | ...                   let mut isa_state_post = BTreeMap::new();
+     |                                                ^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `test_ins` is never read
+    --> src/isarch/exec.rs:2167:48
+     |
+2167 | ...                   let mut test_ins = String::new();
+     |                                          ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `test_ins_encdec` is never read
+    --> src/isarch/exec.rs:2168:55
+     |
+2168 | ...                   let mut test_ins_encdec = String::new();
+     |                                                 ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src/isarch/memory_builder.rs:153:18
+    |
+153 |     pub fn build(mut self) -> Result<Memory<B>, String> {
+    |                  ----^^^^
+    |                  |
+    |                  help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reg_name`
+   --> src/isarch/target.rs:328:36
+    |
+328 |     fn must_output_register(&self, reg_name: &str) -> bool {
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reg_name`
+
+warning: unused variable: `thread`
+   --> src/isarch/mod.rs:131:11
+    |
+131 |         &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+    |           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_thread`
+
+warning: unused variable: `task_id`
+   --> src/isarch/mod.rs:131:19
+    |
+131 |         &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+    |                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:271:5
+    |
+271 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:272:5
+    |
+272 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:562:5
+    |
+562 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:563:5
+    |
+563 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `instruction_name`
+   --> src/isarch/mod.rs:812:5
+    |
+812 |     instruction_name: &str,
+    |     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_instruction_name`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:814:5
+    |
+814 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:815:5
+    |
+815 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: function `execute_as_instruction` is never used
+   --> src/isarch/exec.rs:662:4
+    |
+662 | fn execute_as_instruction<'a, B: BV>(ret_val: &'a Val<B>, shared_state: &SharedState<B>) -> Option<&'a Val<B>> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `new` is never used
+   --> src/isarch/exec.rs:876:8
+    |
+875 | impl SolveCollectorState {
+    | ------------------------ associated function in this implementation
+876 |     fn new() -> Self {
+    |        ^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/isarch/target.rs:50:17
+   |
+50 |     pub fn iter(&self) -> std::collections::hash_map::Iter<Name, Val<B>> {
+   |                 ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                 |
+   |                 the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+50 |     pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Name, Val<B>> {
+   |                                                            +++
+
+warning: unused variable: `ty`
+    --> src/isarch/exec.rs:2869:13
+     |
+2869 |         let ty = Ty::<Name>::Bits(64);
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: unused variable: `ty`
+    --> src/isarch/exec.rs:2885:13
+     |
+2885 |         let ty = Ty::<Name>::Bits(64);
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: variable does not need to be mutable
+    --> src/isarch/exec.rs:4684:13
+     |
+4684 |         let mut arch: &'static mut [Def<Name, B129>] = Box::leak(
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/isarch/memory_builder.rs:153:18
+    |
+153 |     pub fn build(mut self) -> Result<Memory<B>, String> {
+    |                  ----^^^^
+    |                  |
+    |                  help: remove this `mut`
+
+warning: `isla` (lib) generated 31 warnings (run `cargo fix --lib -p isla` to apply 24 suggestions)
+warning: field `source_path` is never read
+   --> src/opts.rs:165:9
+    |
+159 | pub struct CommonOpts<'ir, B> {
+    |            ---------- field in this struct
+...
+165 |     pub source_path: Option<PathBuf>,
+    |         ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `num_threads`, `type_info`, `isa_config`, and `source_path` are never read
+   --> src/opts.rs:160:9
+    |
+159 | pub struct CommonOpts<'ir, B> {
+    |            ---------- fields in this struct
+160 |     pub num_threads: usize,
+    |         ^^^^^^^^^^^
+...
+163 |     pub type_info: IRTypeInfo,
+    |         ^^^^^^^^^
+164 |     pub isa_config: ISAConfig<B>,
+    |         ^^^^^^^^^^
+165 |     pub source_path: Option<PathBuf>,
+    |         ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/isarch_main.rs:797:21
+    |
+796 |                     panic!("RV32 solve-state 暂不支持");
+    |                     ----------------------------------- any code following this expression is unreachable
+797 |                     let mut target = RV32::default();
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `shared_state`
+   --> src/isarch_main.rs:175:5
+    |
+175 |     shared_state: &&isla_lib::ir::SharedState<B>,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shared_state`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `regs`
+   --> src/isarch_main.rs:176:5
+    |
+176 |     regs: &isla_lib::register::RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch_main.rs:177:5
+    |
+177 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `iarch_config`
+   --> src/isarch_main.rs:178:5
+    |
+178 |     iarch_config: isla_lib::init::InitArchWithConfig<B>,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_iarch_config`
+
+warning: unused variable: `source_path`
+   --> src/isarch_main.rs:179:5
+    |
+179 |     source_path: Option<std::path::PathBuf>,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_path`
+
+warning: unused variable: `graphviz`
+   --> src/isarch_main.rs:182:9
+    |
+182 |     let graphviz = matches.opt_present("graphviz");
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_graphviz`
+
+warning: unused variable: `iarch`
+   --> src/isarch_main.rs:251:5
+    |
+251 |     iarch: &isla_lib::init::Initialized<B>,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_iarch`
+
+warning: unused variable: `arch`
+   --> src/isarch_main.rs:252:5
+    |
+252 |     arch: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_arch`
+
+warning: unused variable: `isa_config`
+   --> src/isarch_main.rs:253:5
+    |
+253 |     isa_config: isla_lib::config::ISAConfig<B>,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_isa_config`
+
+warning: unused variable: `source_path`
+   --> src/isarch_main.rs:254:5
+    |
+254 |     source_path: Option<std::path::PathBuf>,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_path`
+
+warning: unused variable: `init_isa_with_config`
+   --> src/isarch_main.rs:257:9
+    |
+257 |     let init_isa_with_config = matches.opt_present("init-isa-with-config");
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_isa_with_config`
+
+warning: `isla` (bin "isla-preprocess" test) generated 1 warning
+warning: `isla` (bin "isla-property" test) generated 1 warning
+warning: `isla` (bin "isla-property129" test) generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-execute-function" test) generated 1 warning (1 duplicate)
+warning: unused variable: `x6_name`
+   --> src/isarch/value_hints.rs:746:13
+    |
+746 |         let x6_name = symtab.intern(&x6_text);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_x6_name`
+
+warning: `isla` (bin "isla-preprocess129" test) generated 1 warning (1 duplicate)
+warning: function `判死区域内符号读立即BadRead无事件且Unsat` should have a snake case name
+   --> src/isarch/memory_model.rs:693:8
+    |
+693 |     fn 判死区域内符号读立即BadRead无事件且Unsat() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `判死区域内符号读立即_bad_read无事件且_unsat`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `判死区域内符号写立即BadWrite无事件且Unsat` should have a snake case name
+   --> src/isarch/memory_model.rs:722:8
+    |
+722 |     fn 判死区域内符号写立即BadWrite无事件且Unsat() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `判死区域内符号写立即_bad_write无事件且_unsat`
+
+warning: function `判死区域外符号读Sat事件可见且边界精确` should have a snake case name
+   --> src/isarch/memory_model.rs:758:8
+    |
+758 |     fn 判死区域外符号读Sat事件可见且边界精确() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `判死区域外符号读_sat事件可见且边界精确`
+
+warning: function `默认分层下与PMA断言矛盾的读写不被判死` should have a snake case name
+    --> src/isarch/memory_model.rs:1438:8
+     |
+1438 |     fn 默认分层下与PMA断言矛盾的读写不被判死() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `默认分层下与_pma断言矛盾的读写不被判死`
+
+warning: `isla` (bin "isla-client" test) generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-litmus-dump" test) generated 1 warning (1 duplicate)
+warning: `isla` (bin "isarch" test) generated 12 warnings (12 duplicates)
+warning: `isla` (bin "isla-preprocess") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-property129") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-litmus-dump") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-property") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-client") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-execute-function") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isla-preprocess129") generated 1 warning (1 duplicate)
+warning: `isla` (bin "isarch") generated 12 warnings (run `cargo fix --bin "isarch" -p isla` to apply 11 suggestions)
+warning: `isla` (lib test) generated 36 warnings (27 duplicates) (run `cargo fix --lib -p isla --tests` to apply 5 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 51.23s
+     Running unittests src/lib.rs (target/debug/deps/isla-258a353f91627e03)
+
+running 239 tests
+test isarch::clause::tests::normalize_clause_name_encodes_original_name ... ok
+test isarch::clause::tests::normalize_clause_name_encodes_special_chars_in_original_name ... ok
+test isarch::clause::tests::normalize_clause_name_keeps_existing_zname ... ok
+test isarch::clause::tests::normalize_clause_name_encodes_original_name_starting_with_uppercase_z ... ok
+test isarch::exec::tests::collect_symbolic_vars_sorts_struct_fields_by_name ... ok
+test isarch::exec::tests::case_quota_zero_discards_every_case_in_the_bucket ... ok
+test isarch::encoding_slices::tests::布局校验_类型漂移报错 ... ok
+test isarch::exec::tests::case_quota_same_signature_uses_canonical_json_tie_breaker ... ok
+test isarch::encoding_slices::tests::ctor构造_位置与类型 ... ok
+test isarch::encoding_slices::tests::维度展开_全枚举与显式钉值 ... ok
+test isarch::exec::tests::collector_preserves_first_error_including_non_smt ... ok
+test isarch::exec::tests::decode_register_bindings枚举集合首项仅供译码 ... ok
+test isarch::exec::tests::decode_register_bindings初始值加钉值 ... ok
+test isarch::exec::tests::execute_as_instruction_识别转换指令 ... ok
+test isarch::exec::tests::finalize_cases_不输出无指令的完成路径空壳 ... ok
+test isarch::exec::tests::finalize_cases_终值超时不能进入可重放gen ... ok
+test isarch::exec::tests::fixed_instruction_bits保留压缩和普通编码宽度 ... ok
+test isarch::exec::tests::error_diagnostic_records_timeout_with_frame_names ... ok
+test isarch::exec::tests::json_summary_marks_sampling_and_quota_as_partial ... ok
+test isarch::exec::tests::execute_as_instruction_载荷不是指令构造子时panic - should panic ... ok
+test isarch::exec::tests::memory_spans_合并连续字节并按已知性分段 ... ok
+test isarch::exec::tests::parse_allow_reserved_encodings_三态解析 ... ok
+test isarch::exec::tests::official_float_list_has_77_unique_clauses ... ok
+test isarch::exec::tests::merge_enumeration_默认关闭时逐字节保持旧字段 ... ok
+test isarch::exec::tests::parse_allow_reserved_encodings_非法值硬失败 - should panic ... ok
+test isarch::exec::tests::parse_model_timeout_ms_默认与显式值 ... ok
+test isarch::exec::tests::parse_model_timeout_ms_拒绝零与非数字 - should panic ... ok
+test isarch::exec::tests::replay_memory_写后再读同地址 ... ok
+test isarch::exec::tests::replay_memory_先读后写 ... ok
+test isarch::exec::tests::replay_memory_四字节写后读中间一字节 ... ok
+test isarch::exec::tests::replay_memory_无区域时地址按位向量回绕 ... ok
+test isarch::exec::tests::replay_memory_普通写返回假仍提交 ... ok
+test isarch::exec::tests::replay_memory_未知写结果不声称已提交 ... ok
+test isarch::exec::tests::replay_memory_未知分量计数 ... ok
+test isarch::exec::tests::replay_memory_独占失败写保留先前读取的字节 ... ok
+test isarch::exec::tests::solve_execution_limits_drops_region_limits_whose_file_is_unknown ... ok
+test isarch::exec::tests::solve_execution_limits_keeps_branch_budget_when_regions_filter_is_absent ... ok
+test isarch::exec::tests::solve_execution_limits_region_fork_limits_match_by_source_location ... ok
+test isarch::exec::tests::unfinished_path_collection_skips_dead_paths ... ok
+test isarch::exec::tests::solve_execution_limits_can_be_disabled_by_toml ... ok
+test isarch::exec::tests::solve_execution_limits_uses_only_the_supplied_toml_config ... ok
+test isarch::exec::tests::solve_execution_limits_passes_through_inline_region_limits ... ok
+test isarch::exec::tests::solve_execution_limits_missing_configured_region_keeps_path_limits_only ... ok
+test isarch::fuzz::tests::campaign_neighbor_distance_precedes_hit_count_and_excludes_other_dags ... ok
+test isarch::exec::tests::solve_execution_limits_without_toml_is_inactive ... ok
+test isarch::fuzz::tests::canonical_coordinates_do_not_depend_on_record_numbers ... ok
+test isarch::fuzz::tests::campaign_scheduler_rotates_and_balances_class_attempts ... ok
+test isarch::fuzz::tests::feedback_infrastructure_without_buckets_is_not_coverage ... ok
+test isarch::fuzz::tests::feedback_downweights_only_known_stale_classes_and_rewards_missing_buckets ... ok
+test isarch::fuzz::tests::feedback_observes_without_admitting_or_scoring_features ... ok
+test isarch::fuzz::tests::difftest_oracle_keeps_unknown_causes_and_counts_rule_identity ... ok
+test isarch::fuzz::tests::feedback_scheduler_scores_are_frozen_until_batch_commit ... ok
+test isarch::fuzz::tests::feedback_tracks_actual_class_buckets_and_only_unknown_signatures_are_novel ... ok
+test isarch::fuzz::tests::generation_routes_each_target_in_number_order ... ok
+test isarch::fuzz::tests::generation_drains_in_number_order ... ok
+test isarch::fuzz::tests::mutant_random_stream_is_independent_of_order ... ok
+test isarch::fuzz::tests::model_executor_drains_in_number_order ... ok
+test isarch::fuzz::tests::oracle_has_an_explicit_no_hardware_result ... ok
+test isarch::fuzz::tests::replay_m2_copies_page_and_m5_changes_only_recorded_bits ... ok
+test isarch::fuzz::tests::replay_mutator_applies_record_and_rejects_wrong_old_value ... ok
+test isarch::fuzz::tests::scheduler_updates_only_after_a_complete_batch ... ok
+test isarch::memory_builder::tests::builder_chaining ... ok
+test isarch::memory_builder::tests::adjacent_regions_allowed ... ok
+test isarch::fuzz::tests::reconfirm_rejects_changed_path_state_and_rank ... ok
+test isarch::memory_builder::tests::clint_custom_params ... ok
+test isarch::memory_builder::tests::ensure_solve_state_memory_已有符号区域时不变 ... ok
+test isarch::memory_builder::tests::ensure_solve_state_memory_开关打开时补默认ram ... ok
+test isarch::fuzz::tests::mutation_metadata_identifies_current_corpus_entry ... ok
+test isarch::memory_builder::tests::ensure_solve_state_memory_默认不补ram尊重零配置 ... ok
+test isarch::memory_builder::tests::clint_disabled ... ok
+test isarch::memory_builder::tests::excluded_region_overlap_clint_rejected ... ok
+test isarch::memory_builder::tests::excluded_region_overlap_rejected ... ok
+test isarch::memory_builder::tests::excluded_region_builds_and_coexists ... ok
+test isarch::memory_builder::tests::new_builder_defaults ... ok
+test isarch::memory_builder::tests::overlapping_regions_rejected ... ok
+test isarch::memory_builder::tests::pte_flags_in_page_table ... ok
+test isarch::memory_builder::tests::sv39_table_size_is_two_pages ... ok
+test isarch::memory_builder::tests::sv48_table_size_is_three_pages ... ok
+test isarch::memory_builder::tests::symbolic_mapping_config ... ok
+test isarch::fuzz::tests::p1b_path_aliases_start_at_one ... ok
+test isarch::fuzz::tests::judge_only_does_not_invent_a_parent_class_transition ... ok
+test isarch::path_cache::tests::混合批次必须拒绝 - should panic ... ok
+test isarch::path_cache::tests::残缺目录必须拒绝 - should panic ... ok
+test isarch::memory_builder::tests::build_identity_mapping_includes_page_table ... ok
+test isarch::memory_builder::tests::offset_mapping_config ... ok
+test isarch::memory_builder::tests::identity_mapping_creates_config ... ok
+test isarch::representation::tests::encoding_never_truncates - should panic ... ok
+test isarch::representation::tests::illegal_bf16_keeps_mnemonic_and_exact_encoding ... ok
+test isarch::representation::tests::missing_and_unsupported_encoding_are_incomplete ... ok
+test isarch::memory_builder::tests::protected_mapping_with_ranges ... ok
+test isarch::samples::tests::resident_fast_requires_resident_input ... ok
+test isarch::representation::tests::unresolved_encoding_is_explicitly_incomplete ... ok
+test isarch::representation::tests::compressed_keeps_width_and_leading_zeroes ... ok
+test isarch::samples::tests::samples_options_validate_dependencies_and_limits ... ok
+test isarch::samples::tests::samples_f9_报告不得覆盖后端文件 ... ok
+test isarch::samples::tests::samples_judge_options_require_check_and_distinct_outputs ... ok
+test isarch::samples::tests::samples_predict_配置后端也不创建样本文件 ... ok
+test isarch::target::tests::pa_from_ppn_aligned ... ok
+test isarch::target::tests::pma_regions_apply_to_config_registers ... ok
+test isarch::target::tests::pma_regions_list_value_alias_fields ... ok
+test isarch::target::tests::ppn_from_pa_strips_offset ... ok
+test isarch::target::tests::ppn_pa_roundtrip ... ok
+test isarch::target::tests::pte_flag_masks ... ok
+test isarch::target::tests::pte_individual_flags ... ok
+test isarch::target::tests::pte_new_and_extract ... ok
+test isarch::target::tests::pte_not_valid ... ok
+test isarch::target::tests::pte_roundtrip ... ok
+test isarch::target::tests::pte_to_bytes_little_endian ... ok
+test isarch::target::tests::riscv_state_registers_include_fcsr ... ok
+test isarch::target::tests::rv64_constants ... ok
+test isarch::target::tests::rv32_target_trait ... ok
+test isarch::target::tests::rv64_target_trait ... ok
+test isarch::target::tests::sv39_vpn_indices_known ... ok
+test isarch::target::tests::sv39_vpn_indices_max ... ok
+test isarch::target::tests::sv39_vpn_indices_zero ... ok
+test isarch::target::tests::sv48_vpn_indices_four_levels ... ok
+test isarch::target::tests::sv48_vpn_indices_zero ... ok
+test isarch::tests::nested_execution_timeout_uses_the_nested_frame_symbol_names ... ok
+test isarch::value_hints::tests::detect_prestate_conflicts_reports_overlap ... ok
+test isarch::value_hints::tests::hint_pin_sets_scope_and_dimensions ... ok
+test isarch::value_hints::tests::materialize_pins_widths_and_validation ... ok
+test isarch::value_hints::tests::pattern_expansion_boundaries_and_offsets ... ok
+test isarch::value_hints::tests::region_anchors_prefers_concrete_pma_and_skips_symbolic ... ok
+test isarch::timeout_report::tests::reporter_keeps_distinct_artifacts_for_repeated_operations ... ok
+test isarch::value_hints::tests::plan_solve_batches_free_first_and_materialized ... ok
+test isarch::exec::tests::encdec_guard_回环拒绝ldu非法编码 ... FAILED
+test isarch::exec::tests::encdec_guard_回环拒绝amoswapq非法编码 ... FAILED
+test isarch::exec::tests::encdec_guard_回环放行合法load编码 ... FAILED
+test isarch::exec::tests::encdec_guard_非位向量编码报错 ... FAILED
+test isarch::exec::tests::encdec_guard_向量段store编码回环 ... FAILED
+test isarch::exec::tests::encdec_guard_压缩编码回环与构造子校验 ... FAILED
+test isarch::exec::tests::encdec_guard_f5_继承策略与固定前置权限 ... FAILED
+test isarch::target::symbolic_enum_tests::symbolic_enum_rejects_wrong_type_unknown_and_foreign_members ... ok
+test isarch::exec::tests::concrete_function_result外部solver符号寄存器硬失败 - should panic ... ok
+test isarch::memory_model::tests::数组回调在执行帧共享后写入必须隔离兄弟路径 ... ok
+test isarch::memory_model::tests::克隆路径的写入不污染另一条路径 ... ok
+test isarch::target::tests::pma_regions_symbolic_injection_assigns_register_and_records_syms ... ok
+test isarch::memory_model::tests::判死区域对ifetch读同样生效 ... ok
+test isarch::memory_model::tests::判死区域内符号写立即BadWrite无事件且Unsat ... ok
+test isarch::target::tests::setup_pre_state_resolves_vector_anybits_from_vlen ... ok
+test isarch::memory_model::tests::未配置区域时符号地址不受限 ... ok
+test isarch::memory_model::tests::判死区域内符号读立即BadRead无事件且Unsat ... ok
+test isarch::target::symbolic_enum_tests::symbolic_enum_allowed_reuses_prestate_and_excludes_other_members ... ok
+test isarch::memory_model::tests::判死区域不改变concrete区域具体读取 ... ok
+test isarch::memory_model::tests::独占符号写提交后读值与先前读取解耦 ... ok
+test isarch::exec::tests::diversify_unconstrained_finite_domains_diversifies_bool_and_bitvectors ... ok
+test isarch::memory_model::tests::独占写事件按模型语义必已提交_bool钉为真 ... ok
+test isarch::tests::nested_mapping_match_failure_is_not_a_top_level_rejection ... ok
+test isarch::exec::tests::diversify_unconstrained_finite_domains_preserves_constrained_fields ... ok
+test isarch::target::tests::solve_pre_state_serializes_all_arbitrary_vector_context_registers ... ok
+test isarch::target::tests::complete_state_formats_sail_bitfield_structs ... ok
+test isarch::exec::tests::真实memory回调事件可物化普通假返回写的前后态 ... ok
+test isarch::target::tests::setup_pre_state固定值覆盖寄存器且同步输出 ... ok
+test isarch::target::tests::setup_pre_state_overrides_initialized_non_anybits_register ... ok
+test isarch::memory_model::tests::review33_自约束数组在具体区域内必须保持符号写后读一致性 ... ok
+test isarch::memory_model::tests::独占写失败分支在注入后不可表达 ... ok
+test isarch::exec::tests::materialize_le_bytes_物化符号与具体值 ... ok
+test isarch::target::initial_state_tests::initial_state_rejects_missing_register ... ok
+test isarch::target::initial_state_tests::initial_state_rejects_unsupported_types_before_symbolization ... ok
+test isarch::exec::tests::materialize_le_bytes_宽混合位串不截断高位 ... ok
+test isarch::memory_model::tests::写四字节后读中间一字节等于对应字节 ... ok
+test isarch::memory_model::tests::六十四位地址高位不与低位别名 ... ok
+test isarch::exec::tests::concrete_function_result具体寄存器环境成功 ... ok
+test isarch::memory_model::tests::判死区域外符号读Sat事件可见且边界精确 ... ok
+test isarch::target::tests::struct_setup_and_symbolic_post_write_preserve_pre_state ... ok
+test isarch::exec::tests::memory_events_chronological_跨段恢复执行顺序 ... ok
+test isarch::memory_model::tests::具体地址写concrete区域不再被白名单拒绝 ... ok
+test isarch::memory_model::tests::多判死区域并集生效 ... ok
+test isarch::exec::tests::memory_events_chronological_段内恢复执行顺序 ... ok
+test isarch::target::tests::complete_state_rejects_unformattable_register ... ok
+test isarch::memory_model::tests::零符号区域时符号写不被空or链判死 ... ok
+test isarch::target::tests::rv64_domain_rejects_capability_probe_with_register_dependency - should panic ... ok
+test isarch::target::tests::symbolic_csrs_derive_bit_rejects_out_of_width_bits ... ok
+test isarch::exec::tests::memory_witness_is_atomic_and_preserves_unobserved_write_first_prestate ... ok
+test isarch::target::tests::complete_pre_and_post_state_share_one_model ... ok
+test isarch::target::tests::post_state_requires_initialized_target_register - should panic ... ok
+test isarch::memory_model::tests::零配置全符号化读写不受区域约束且事件可见 ... ok
+test isarch::memory_model::tests::写八字节后读同地址等于写数据 ... ok
+test isarch::target::initial_state_tests::initial_state_and_symbolic_csr_share_the_same_fcsr_value ... ok
+test isarch::exec::tests::diversify_unconstrained_finite_domains_skips_non_target_smt_types ... ok
+test isarch::exec::tests::diversify_unconstrained_finite_domains_propagates_model_errors ... ok
+test isarch::memory_model::tests::默认分层下配置sym_ram符号写不被区域圈定 ... ok
+test isarch::target::tests::symbolic_x1_all_bits_reuse_pre_state ... ok
+test isarch::memory_model::tests::克隆内存保留数组模型回调 ... ok
+test isarch::samples::tests::samples_f5_复用前态格式化字节与模型查询一致 ... ok
+test isarch::exec::tests::diversify_unconstrained_finite_domains_diversifies_wide_bitvectors ... ok
+test isarch::memory_model::tests::普通写返回布尔假仍提交数据 ... ok
+test isarch::target::symbolic_enum_tests::symbolic_enum_outside_reg_list_is_included ... ok
+test isarch::target::tests::complete_pre_state_keeps_arbitrary_fcsr_and_mstatus ... ok
+test isarch::tests::failed_encoder_assertion_is_not_default_rejection ... ok
+test isarch::samples::tests::samples_f4_array_reads_keep_constraints_under_arm_guard ... ok
+test isarch::memory_model::tests::数组模型下未约束符号读地址不被具体区域预检查拒绝 ... ok
+test isarch::target::tests::vector_context_smt_constraint_accepts_only_legal_vtype_and_vl_pairs ... ok
+test isarch::target::tests::solve_pre_state_outputs_symbolic_csr_model_value ... ok
+test isarch::target::tests::symbolic_csrs_concretize_for_gate ... ok
+test isarch::tests::inline_mapping_match_failure_is_not_default_rejection ... ok
+test isarch::memory_model::tests::同地址两次读模型值一致 ... ok
+test isarch::memory_model::tests::默认分层下配置sym_ram符号读不被区域圈定 ... ok
+test isarch::target::tests::fcsr_rounding_mode_and_flags_are_not_fixed_by_setup ... ok
+test isarch::tests::assembly_mapping_success_cannot_hide_an_error_branch ... ok
+test isarch::target::tests::symbolic_csrs_rejects_unsupported_shapes ... ok
+test isarch::tests::asserted_default_encoder_reaches_compressed_encoder ... ok
+test isarch::target::tests::solve_pre_state_serializes_arbitrary_fpr_and_vpr_registers ... ok
+test isarch::memory_model::tests::默认内存具体区域重叠写入必须请求地址拆分且不提交事件 ... ok
+test isarch::target::tests::symbolic_csrs_derive_bit_equivalence_is_bidirectional ... ok
+test isarch::target::tests::rv64_domain_rejects_symbolic_capability_result - should panic ... ok
+test isarch::memory_model::tests::判死约束与既有路径断言矛盾时符号读立即判死 ... ok
+test isarch::memory_model::tests::判死约束与既有路径断言矛盾时符号写立即判死 ... ok
+test isarch::memory_model::tests::默认配置内存经装配后符号读写可满足且事件可见 ... ok
+test isarch::memory_model::tests::判死与symbolic声明并存时仅判死生效 ... ok
+test isarch::memory_model::tests::默认分层下与PMA断言矛盾的读写不被判死 ... ok
+test isarch::target::tests::symbolic_csrs_injection_shapes_and_constraints ... ok
+test isarch::target::tests::rv64_domain_respects_absent_s_and_u_capabilities ... ok
+test isarch::memory_model::tests::数组索引投影必须保留多字节初值写后读与原始事件地址 ... ok
+test isarch::memory_model::tests::具体地址落在判死区域直接拒绝 ... ok
+test isarch::target::initial_state_tests::initial_state_whole_register_and_validation ... ok
+test isarch::target::tests::rv64_domain_keeps_fs_vs_runtime_variation_and_rejects_bad_xlen_fields ... ok
+test isarch::target::tests::rv64_domain_excludes_only_reserved_mpp_encoding ... ok
+test isarch::encoding_slices::tests::分片批计划_装配与冲突 ... ok
+test isarch::encoding::tests::instruction_guard_prunes_auxiliary_candidates_but_keeps_state_variants ... ok
+test isarch::encoding::tests::isolated_candidates_keep_only_full_execution_feasible_encodings ... ok
+test isarch::target::tests::rv64_domain_allows_real_modes_and_rejects_virtual_modes ... ok
+test isarch::memory_model::tests::review34_具体内容初值与两种地址表示的写后读必须一致 ... ok
+test isarch::target::initial_state_tests::initial_state_pins_only_selected_bits ... ok
+test isarch::target::tests::rv64_mpp_domain_matches_hart_capabilities_and_manifest ... ok
+test isarch::exec::tests::collector_keeps_other_encodings_after_assembly_rejection ... ok
+test isarch::exec::tests::collector_propagates_encoder_assertion_failure ... ok
+test isarch::exec::tests::collector_reports_fully_unencodable_retire_path ... ok
+test isarch::exec::tests::collector_uses_compressed_only_in_normal_rejection_domain ... ok
+test isarch::exec::tests::collector_finds_encodable_alternative_pre_state ... ok
+test isarch::exec::tests::collector_keeps_enumeration_through_execute_as ... ok
+test isarch::exec::tests::collector_executes_execute_as_payload_without_resetting_state ... ok
+test isarch::exec::tests::collector_preserves_multiple_symbolic_encodings ... ok
+test isarch::path_cache::tests::阶段日志立即落盘并保留顺序 ... ok
+test isarch::exec::tests::collector_concretizes_wide_vector_pre_and_post_state ... ok
+test isarch::path_cache::tests::双编码_完整快照_target_与文件损坏检查 ... ok
+test isarch::exec::tests::collector_preserves_finished_results_and_concretization_failures ... ok
+test isarch::exec::tests::collector_preserves_constrained_fs_vs_and_encoding_output ... ok
+test isarch::fuzz::difftest::tests::executor_orders_results_and_cancels_independent_process_groups ... ok
+
+failures:
+
+---- isarch::exec::tests::encdec_guard_回环拒绝ldu非法编码 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_回环拒绝ldu非法编码' (7335) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- isarch::exec::tests::encdec_guard_回环拒绝amoswapq非法编码 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_回环拒绝amoswapq非法编码' (7334) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- isarch::exec::tests::encdec_guard_回环放行合法load编码 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_回环放行合法load编码' (7336) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- isarch::exec::tests::encdec_guard_非位向量编码报错 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_非位向量编码报错' (7337) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- isarch::exec::tests::encdec_guard_向量段store编码回环 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_向量段store编码回环' (7333) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- isarch::exec::tests::encdec_guard_压缩编码回环与构造子校验 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_压缩编码回环与构造子校验' (7332) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- isarch::exec::tests::encdec_guard_f5_继承策略与固定前置权限 stdout ----
+
+thread 'isarch::exec::tests::encdec_guard_f5_继承策略与固定前置权限' (7331) panicked at src/isarch/exec.rs:4681:49:
+测试需要从仓库根目录运行，读 rv64d.ir: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+
+failures:
+    isarch::exec::tests::encdec_guard_f5_继承策略与固定前置权限
+    isarch::exec::tests::encdec_guard_压缩编码回环与构造子校验
+    isarch::exec::tests::encdec_guard_向量段store编码回环
+    isarch::exec::tests::encdec_guard_回环拒绝amoswapq非法编码
+    isarch::exec::tests::encdec_guard_回环拒绝ldu非法编码
+    isarch::exec::tests::encdec_guard_回环放行合法load编码
+    isarch::exec::tests::encdec_guard_非位向量编码报错
+
+test result: FAILED. 232 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.96s
+
+error: test failed, to rerun pass `--lib`
+     Running unittests src/isarch_main.rs (target/debug/deps/isarch-c464128e2d806595)
+
+running 27 tests
+test tests::parse_smt_duration_supports_query_units ... ok
+test tests::fuzz_inherits_solve_state_filters ... ok
+test tests::parse_tastic_option ... ok
+test tests::parse_smt_timeout_rejects_values_outside_u64_milliseconds ... ok
+test tests::parse_timeout_defaults_to_seconds ... ok
+test tests::parse_timeout_rejects_invalid_values ... ok
+test tests::parse_timeout_accepts_minutes_and_hours ... ok
+test tests::parse_timeout_smt_output_accepts_combinations_and_rejects_unknown_values ... ok
+test tests::non_strict_execution_limits_warns_changed_ir ... ok
+test tests::test_debug_instruction_removed ... ok
+test tests::test_debug_clause_args_yaml_removed ... ok
+test tests::test_debug_clause_args_removed ... ok
+test tests::test_list_instructions ... ok
+test tests::test_no_subcommand ... ok
+test tests::test_solve_state_no_filter ... ok
+test tests::test_solve_state_with_all ... ok
+test tests::test_solve_state_with_clause ... ok
+test tests::test_solve_state_with_extension ... ok
+test tests::strict_execution_limits_rejects_changed_ir ... ok
+test tests::test_solve_state_with_instruction_name ... ok
+test tests::test_solve_state_with_multiple_filters ... ok
+test tests::test_tree_missing_instruction ... ok
+test tests::test_tree_with_instruction ... ok
+test tests::timeout_smt_output_defaults_to_file_and_enabled_itrace ... ok
+test tests::test_unknown_command ... ok
+test tests::trace_cli_composes_and_rejects_incomplete_options ... ok
+test tests::loaded_merge_policy_rejects_missing_function_and_unmatched_strict_region ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/axiomatic.rs (target/debug/deps/isla_axiomatic-fa305895b0ae2d17)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/client.rs (target/debug/deps/isla_client-17b8b34441a86498)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/execute-function.rs (target/debug/deps/isla_execute_function-550f5e8b27d13cfd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/footprint.rs (target/debug/deps/isla_footprint-5995ceec2254bb47)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/litmus-dump.rs (target/debug/deps/isla_litmus_dump-6216a7798721d7e8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/preprocess.rs (target/debug/deps/isla_preprocess-b19659e3a425e89f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/preprocess129.rs (target/debug/deps/isla_preprocess129-0e32b3956e0aa24b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/property.rs (target/debug/deps/isla_property-681bb1175b744cbd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/property129.rs (target/debug/deps/isla_property129-3fa5fd0cf7076798)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/zencode.rs (target/debug/deps/zencode-7ddf51d5ad2f4e9d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review34_memory.rs (target/debug/deps/review34_memory-d78b903ff25f25c9)
+
+running 1 test
+test review34_自约束内存的具体区域读不能因菱形合流变为任意值 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/review35_memory.rs (target/debug/deps/review35_memory-972fbe7e5671da68)
+
+running 11 tests
+test review35_seq_concrete_wide_read ... ok
+test review35_seq_write_width_65 ... ok
+test review35_seq_width_65 ... ok
+test review35_seq_width_64 ... ok
+test review35_seq_write_width_64 ... ok
+test review35_named_tlb_dependency_baseline_comparison ... ok
+test review35_seq_width_129 ... ok
+test review35_seq_write_width_1024 ... ok
+test review35_seq_width_1024 ... ok
+test review35_seq_initial_and_write_read_matrix ... ok
+test review35_seq_write_width_129 ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/review36.rs (target/debug/deps/review36-e41638e1389fb8f3)
+
+running 8 tests
+test review36_b64_subtract_min_must_match_symbolic ... ok
+test review36_get_slice_int_concrete_129_must_match_symbolic ... ok
+test review36_seq_constrained_region_must_match_concrete_address ... ok
+test review36_signed_fp_conversion_markers_all_widths ... ok
+test review36_seq_wrapped_access_must_not_touch_excluded_byte ... ok
+test review36_seq_custom_diamond_write_must_reach_device ... ok
+test review36_b129_ripple_oracle_all_widths ... ok
+test review36_seq_constrained_diamond_must_preserve_values ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/review36_boundaries.rs (target/debug/deps/review36_boundaries-caece9bffed80e2a)
+
+running 6 tests
+test 窄位向量减去整数极值按模截断 ... ok
+test 具体区域遮蔽生成器时符号读取仍保留数组更新 ... ok
+test 整数切片全宽度逐位核对符号扩展 ... ok
+test 设备符号唯一地址执行副作用而混合地址先拆分 ... ok
+test 多字节生成器保持整区域读取约束和原始地址 ... ok
+test 回绕排除约束保留合法候选并独立验证读写 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/review37.rs (target/debug/deps/review37-5121e67f0b8318c5)
+
+running 8 tests
+test review37_abs_min_differential ... ok
+test review37_set_slice_integer_empty_boundary ... ok
+test review37_constrained_write_read_coherence ... ok
+test review37_shadowed_generator_does_not_block_array_reads ... ok
+test review37_fp_from_integer_preserves_target_format ... ok
+test review37_b129_arithmetic_differential ... ok
+test review37_diamond_extremes_preserve_values_and_register_dependencies ... ok
+test review37_shadowed_generator_end_to_end_preserves_paths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/review37_boundaries.rs (target/debug/deps/review37_boundaries-4d3bfab3da509ff3)
+
+running 4 tests
+test 整数绝对值保留具体溢出与符号位向量契约 ... ok
+test 遮蔽生成器不得执行或约束当前数组 ... ok
+test 关联生成器初值与局部写入在宽地址下保持一致 ... ok
+test 设备可见范围决定是否拆分且完全遮蔽时保持读写一致性 ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running test/smt/contract.rs (target/debug/deps/smt_contract-54fba5b129448857)
+
+running 1 test
+test solver_and_model_obey_the_common_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running test/smt/thread_interrupt.rs (target/debug/deps/smt_thread_interrupt-2f248ed8e998aaf7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests isla
+
+running 1 test
+test src/isarch/args_yaml.rs - isarch::args_yaml::Vec<HashMap<K,V>> (line 24) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+error: 1 target failed:
+    `--lib`

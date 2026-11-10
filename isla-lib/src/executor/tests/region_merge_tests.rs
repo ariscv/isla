@@ -2,12 +2,17 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[path = "region_loop_merge_tests.rs"]
+mod loop_merge_tests;
+
 type Formula = smtlib::Exp<Sym>;
 
 struct Path {
     records: Vec<RegionMergeRecord<B64>>,
     value: Val<B64>,
     events: Vec<Event<B64>>,
+    variables: Bindings<'static, B64>,
+    registers: RegisterBindings<'static, B64>,
 }
 
 fn paths(instrs: Vec<Instr<Name, B64>>, shared: &SharedState<'static, B64>, inputs: usize, merge: bool) -> Vec<Path> {
@@ -46,6 +51,8 @@ fn paths_with_memory(
                     records: frame.region_merge_records().to_vec(),
                     value,
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
+                    variables: frame.vars().clone(),
+                    registers: frame.regs().clone(),
                 }),
                 SmtResult::Unsat => (),
                 result => panic!("完成路径的可满足性查询失败：{result:?}"),
@@ -140,12 +147,17 @@ fn differential(
     inputs: usize,
     complete: bool,
 ) -> (usize, usize) {
-    use smtlib::Exp::*;
     let forked = paths(instrs.clone(), shared, inputs, false);
     let merged = paths(instrs, shared, inputs, true);
     if merged.len() == 1 {
         assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并，不能仅普通剪枝");
     }
+    equivalent_paths(&forked, &merged, inputs, complete)
+}
+
+/// 也供预期拒绝合并的用例复用等价判据，拒绝行为由用例另外检查。
+fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: bool) -> (usize, usize) {
+    use smtlib::Exp::*;
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
@@ -690,75 +702,109 @@ pub(super) fn check_region_read_after_write_location() {
 
 #[test]
 fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
-    let mut shared = empty_shared_state();
-    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
-    let asserted = shared.symtab.intern("zasserted");
-    let parameter = test_name(971);
-    let body = Box::leak(
-        vec![
-            Instr::PrimopBinary(
-                Loc::Id(RETURN),
-                primop::binary_primops()["optimistic_assert"],
-                Exp::Id(parameter),
-                Exp::String("条件".into()),
-                info(),
-            ),
+    for jumps in [false, true] {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let asserted = shared.symtab.intern("zasserted");
+        let parameter = test_name(971);
+        let body = Box::leak(
+            vec![
+                Instr::PrimopBinary(
+                    Loc::Id(RETURN),
+                    primop::binary_primops()["optimistic_assert"],
+                    Exp::Id(parameter),
+                    Exp::String("条件".into()),
+                    info(),
+                ),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+                Instr::End,
+            ]
+            .into_boxed_slice(),
+        );
+        shared.functions.insert(asserted, (vec![(parameter, &Ty::Bool)], &Ty::Bool, body));
+        let reg = shared.symtab.intern("zregister");
+        shared.registers.insert(reg, Ty::Bool);
+        let unit = test_name(970);
+        let mut program = vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(11),
+            Instr::Jump(input(1), 7, info()),
+            Instr::Decl(unit, Ty::Unit, info()),
+            Instr::Call(Loc::Id(RETURN), false, asserted, vec![input(2)], info()),
+            Instr::Goto(8),
             Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::Goto(11),
             Instr::End,
-        ]
-        .into_boxed_slice(),
-    );
-    shared.functions.insert(asserted, (vec![(parameter, &Ty::Bool)], &Ty::Bool, body));
-    let reg = shared.symtab.intern("zregister");
-    shared.registers.insert(reg, Ty::Bool);
-    let unit = test_name(970);
-    let program = vec![
-        Instr::Jump(input(0), 3, info()),
-        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
-        Instr::Goto(11),
-        Instr::Jump(input(1), 7, info()),
-        Instr::Decl(unit, Ty::Unit, info()),
-        Instr::Call(Loc::Id(RETURN), false, asserted, vec![input(2)], info()),
-        Instr::Goto(8),
-        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
-        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
-        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
-        Instr::Goto(11),
-        Instr::End,
-    ];
-    // 寄存器由入口初始化；外层的写后读只能在内层已提交之后触发拒绝。
-    // 此处先用真实执行直接检查拒绝不会泄漏到调度边界。
-    assert_eq!(differential(program.clone(), &shared, 3, false), (3, 2));
-    let mut frame = make_frame(program);
-    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
-    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
-    let context = Context::new(Config::new());
-    let mut solver = Solver::new(&context);
-    for index in 0..3 {
-        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
-        frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(symbol)));
-    }
-    assert!(merge_region_for_test(Sym { id: 0 }, 3, &mut frame, &shared, &mut solver, info(), None, None)
-        .unwrap()
-        .is_none());
-    assert!(frame.region_merge_records().is_empty(), "内层提交后外层回滚必须丢弃全部新记录");
-    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
-    let output = Mutex::new(0);
-    start_single(
-        frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
-        &shared,
-        &output,
-        &|_, _, result, _, solver, output| {
-            assert_eq!(solver.transaction_depth(), 0);
-            match result {
-                Ok((Run::Finished(_), _)) => *output.lock().unwrap() += 1,
-                Err((ExecError::AssertionFailure(..), _)) => (),
-                _ => panic!("拒绝必须在区域边界回滚"),
+        ];
+        if jumps {
+            program[5] =
+                Instr::Call(Loc::Id(unit), false, SAIL_ASSERT, vec![input(2), Exp::String("内层断言".into())], info());
+            program.insert(6, Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()));
+            for instr in &mut program {
+                match instr {
+                    Instr::Jump(_, target, _) | Instr::Goto(target) if *target >= 6 => *target += 1,
+                    _ => (),
+                }
             }
-        },
-    );
-    assert_eq!(*output.lock().unwrap(), 2);
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["register_read_after_write"].as_u64().unwrap() > 0);
+            let mut definitions = vec![crate::ir::Def::Fn(TOP_LEVEL_LET, vec![], program)];
+            crate::ir::assertions_to_jumps(&mut definitions);
+            let crate::ir::Def::Fn(_, _, body) = definitions.pop().unwrap() else { unreachable!() };
+            program = body;
+        }
+        // 寄存器由入口初始化；外层的写后读只能在内层已提交之后触发拒绝。
+        // 此处先用真实执行直接检查拒绝不会泄漏到调度边界。
+        let counts = differential(program.clone(), &shared, 3, false);
+        assert_eq!(counts, (3, 2));
+        let mut frame = make_frame(program);
+        frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        for index in 0..3 {
+            let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+            frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(symbol)));
+        }
+        let before = solver.trace().to_vec().len();
+        shared.execution_stats.reset();
+        assert!(merge_region_for_test(Sym { id: 0 }, 3, &mut frame, &shared, &mut solver, info(), None, None)
+            .unwrap()
+            .is_none());
+        assert!(frame.region_merge_records().is_empty(), "内层提交后外层回滚必须丢弃全部新记录");
+        assert!(shared.execution_stats.merge_json()["successes"].as_u64().unwrap() > 0, "外层回滚前内层必须实际提交");
+        assert_eq!(solver.transaction_depth(), 0);
+        assert_eq!(solver.trace().to_vec().len(), before, "回滚不得泄漏断言、定义或寄存器事件");
+        assert_eq!(frame.regs().get_last_if_initialized(reg), Some(&Val::Bool(false)));
+        assert!(!frame.vars().contains_key(&unit), "内层局部槽位不得泄漏");
+        assert!(
+            solver
+                .check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(Sym { id: 2 }))), info())
+                .is_sat()
+                .unwrap(),
+            "内层断言不得限制回滚后的输入域"
+        );
+        let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+        let output = Mutex::new(0);
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+            &shared,
+            &output,
+            &|_, _, result, _, solver, output| {
+                assert_eq!(solver.transaction_depth(), 0);
+                match result {
+                    Ok((Run::Finished(_), _)) => *output.lock().unwrap() += 1,
+                    Err((ExecError::AssertionFailure(..), _)) => (),
+                    _ => panic!("拒绝必须在区域边界回滚"),
+                }
+            },
+        );
+        assert_eq!(*output.lock().unwrap(), 2);
+        assert!(
+            shared.execution_stats.merge_json()["failure_reasons"]["register_read_after_write"].as_u64().unwrap() > 0
+        );
+    }
 }
 
 fn policy_limits(shared: &SharedState<B64>, rules: Vec<(Name, crate::config::MergeMode)>) -> ExecutionLimits {
@@ -3716,7 +3762,11 @@ fn region_merge_f4_real_get_xlpe_diagnosis() {
         summaries.iter().filter_map(|(name, summary)| summary.non_returning.then_some(*name)).collect::<Vec<_>>();
     let mut regions = crate::ir::regions::FunctionRegions::with_options(
         body,
-        crate::ir::regions::RegionOptions { have_exception: Some(HAVE_EXCEPTION), terminal_calls: &terminals },
+        crate::ir::regions::RegionOptions {
+            filter_assertion_failures: false,
+            have_exception: Some(HAVE_EXCEPTION),
+            terminal_calls: &terminals,
+        },
     );
     for pc in [1, 6, 11, 26] {
         assert!(regions.region(pc).is_ok(), "match 跳转链必须能识别 pc={pc}");

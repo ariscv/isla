@@ -256,6 +256,7 @@ fn region<'ir, B: BV>(
         FunctionRegions::with_options(
             frame.instrs,
             RegionOptions {
+                filter_assertion_failures: true,
                 have_exception: Some(shared.symtab.lookup(shared.symtab.to_str(HAVE_EXCEPTION))),
                 terminal_calls: &summaries
                     .iter()
@@ -989,6 +990,7 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
                         FunctionRegions::with_options(
                             body,
                             RegionOptions {
+                                filter_assertion_failures: true,
                                 have_exception: Some(HAVE_EXCEPTION),
                                 terminal_calls: &summaries
                                     .iter()

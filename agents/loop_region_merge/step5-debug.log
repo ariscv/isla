@@ -1,0 +1,48 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+warning: methods `with_transaction_condition` and `order_transaction_register_reads` are never used
+   --> isla-lib/src/smt/transaction.rs:211:19
+    |
+ 52 | impl<'ctx, B: BV> Solver<'ctx, B> {
+    | --------------------------------- methods in this implementation
+...
+211 |     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+355 |     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla-lib` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.16s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-36d87c5a4a773f4c)
+
+running 1 test
+循环差分：jumps=false, condition=Bool(true), other=Bool(true)
+路径数 1；合并统计 {"attempts":3,"successes":3,"failures":0,"candidate_attempts":3,"negative_cache_hits":0,"rules":{},"failure_reasons":{}}
+循环差分：jumps=false, condition=Bool(false), other=Bool(true)
+路径数 1；合并统计 {"attempts":1,"successes":1,"failures":0,"candidate_attempts":1,"negative_cache_hits":0,"rules":{},"failure_reasons":{}}
+循环差分：jumps=false, condition=Id(Name { id: 902 }), other=Bool(true)
+路径数 1；合并统计 {"attempts":3,"successes":3,"failures":0,"candidate_attempts":3,"negative_cache_hits":0,"rules":{},"failure_reasons":{}}
+循环差分：jumps=false, condition=Bool(false), other=Bool(false)
+路径数 0；合并统计 {"attempts":1,"successes":0,"failures":1,"candidate_attempts":0,"negative_cache_hits":0,"rules":{},"failure_reasons":{"no_join":1}}
+循环差分：jumps=false, condition=Id(Name { id: 902 }), other=Call(Not, [Id(Name { id: 902 })])
+路径数 1；合并统计 {"attempts":3,"successes":3,"failures":0,"candidate_attempts":3,"negative_cache_hits":0,"rules":{},"failure_reasons":{}}
+循环差分：jumps=true, condition=Bool(true), other=Bool(true)
+路径数 1；合并统计 {"attempts":3,"successes":3,"failures":0,"candidate_attempts":3,"negative_cache_hits":0,"rules":{},"failure_reasons":{}}
+循环差分：jumps=true, condition=Bool(false), other=Bool(true)
+路径数 1；合并统计 {"attempts":1,"successes":0,"failures":1,"candidate_attempts":1,"negative_cache_hits":0,"rules":{},"failure_reasons":{"exit":1}}
+
+thread 'executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_assertion_forms_and_dead_arms_differential' (2887) panicked at isla-lib/src/executor/tests/region_merge_tests.rs:154:9:
+单路径用例必须实际完成区域合并，不能仅普通剪枝
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_assertion_forms_and_dead_arms_differential ... FAILED
+
+failures:
+
+failures:
+    executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_assertion_forms_and_dead_arms_differential
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 823 filtered out; finished in 0.90s
+
+error: test failed, to rerun pass `-p isla-lib --lib`
