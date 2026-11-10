@@ -702,6 +702,8 @@ impl<B: BV> Run<B> {
 pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_summary::SolveSummary {
     let field = |value: u64| value.try_into().expect("缓存执行摘要越界");
     super::solve_summary::SolveSummary {
+        applicable_batches: 1,
+        inapplicable_batches: 0,
         sampled_paths: field(summary.sampled_paths),
         errors: field(summary.errors),
         execution_timeouts: field(summary.execution_timeouts),

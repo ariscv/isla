@@ -674,7 +674,9 @@ fcsr = "0b000_?????"
 
 `?` 和 `x` 目前求解语义相同，不增加关注度或输出过滤机制；同一位多次读取保持一致。执行语义仍可以约束这些符号位，完整见证输出仍会从最终模型取得具体值。
 
-本分支默认关闭额外的 RV64 privilege/SXL/UXL/MPP 初态域限制。需要旧限制时，在 TOML **顶层**（任何表之前）添加 `initial_state_rv64_domain = true`；它与本配置共同生效，冲突时无可满足结果。已有 RVV `vtype/vl` 约束继续保留。
+通用 `ISAConfig` 默认关闭额外的 RV64 privilege/SXL/UXL/MPP 初态域限制；isarch 默认启用。isarch 用户可在 TOML **顶层**（任何表之前）添加 `initial_state_rv64_domain = false` 关闭它，显式 `true` 则启用。该域根据模型静态能力限定合法状态，与其他初态配置共同生效；约束冲突时报错。已有 RVV `vtype/vl` 约束继续保留。
+
+isarch 在执行前检查正常／压缩编码映射。只有当前配置、初态和输入约束下的合法编码域可证为空时，才输出 `summary.status = "not-applicable"` 和 `reason = "no-encoding-in-current-config"`；该结论仅适用于本次配置和输入域，不表示这个 clause 在所有环境都不适用。前态自身矛盾、求解 Unknown、超时和模型异常均报错。RISC-V 平台熵接口的无函数体声明仅由 isarch 接入，每次调用声明新的自由 16 位值；模型已有函数体继续执行原实现。
 
 ### 求解策略
 
@@ -690,8 +692,9 @@ fcsr = "0b000_?????"
 ### 本工作区的官方 Z3 链接版本
 
 `make build-isarch` 和 `make solve-*` 默认使用用户前缀
-`~/.local/opt/z3-official-1fd1d3613` 中的官方 Z3，源码提交为
-`1fd1d3613c1f34c4dff36cba3209b2234f6c6d2b`。需先将该官方构建安装到此前缀，
+`~/.local/opt/z3-official-d6c9b4fbb` 中的官方 Z3，源码提交为
+`d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f`（版本 5.4.0.0）。所有 Isla 程序首次创建 Z3 上下文时检查运行时版本，
+低于 5.4.0.0 会 panic，并报告实际版本和最低版本。需先将该官方构建安装到此前缀，
 或用 `make build-isarch Z3_PREFIX=/path/to/installed/z3` 指定实际安装位置。
 Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/release/isarch --version`
 可确认实际加载版本。CLI 的默认策略和 Make 的各 Clause 策略保持独立。

@@ -1,0 +1,292 @@
+warning: methods `with_transaction_condition` and `order_transaction_register_reads` are never used
+   --> isla-lib/src/smt/transaction.rs:211:19
+    |
+ 52 | impl<'ctx, B: BV> Solver<'ctx, B> {
+    | --------------------------------- methods in this implementation
+...
+211 |     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+355 |     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla-lib` (lib) generated 1 warning
+warning: `isla-lib` (lib) generated 1 warning (1 duplicate)
+warning: eliding a lifetime that's named elsewhere is confusing
+   --> isla-axiomatic/src/graph/gv_backend.rs:460:77
+    |
+460 |     fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&GVGridChild<'a>> {
+    |                        --                                                   ^^^^^^^^^^^^^--^
+    |                        |                                                    |            |
+    |                        |                                                    |            the same lifetime is named here
+    |                        the lifetime is named here                           the same lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: consistently use `'a`
+    |
+460 |     fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&'a GVGridChild<'a>> {
+    |                                                                              ++
+
+warning: `isla-axiomatic` (lib) generated 1 warning (run `cargo fix --lib -p isla-axiomatic` to apply 1 suggestion)
+   Compiling isla v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-quickfail-20261110)
+warning: unused variable: `assembly_names`
+   --> src/isarch/args.rs:136:9
+    |
+136 |     let assembly_names = get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_assembly_names`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `out`
+   --> src/isarch/args.rs:153:9
+    |
+153 |     let out = ir_assembly_names_to_InstructionMap("zSTORE", shared_state, regs, lets);
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
+
+warning: unused variable: `vec`
+  --> src/isarch/args_yaml.rs:78:31
+   |
+78 |                     Exp::Bits(vec) => format!("{:?}", &exp),
+   |                               ^^^ help: if this is intentional, prefix it with an underscore: `_vec`
+
+warning: unused variable: `enum_member`
+  --> src/isarch/args_yaml.rs:80:31
+   |
+80 |                     Exp::Enum(enum_member) => format!("{:?}", &exp),
+   |                               ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enum_member`
+
+warning: unused variable: `b`
+  --> src/isarch/args_yaml.rs:81:31
+   |
+81 |                     Exp::Bool(b) => format!("{:?}", &exp),
+   |                               ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `sym`
+   --> src/isarch/args_yaml.rs:156:51
+    |
+156 | ...                   Val::Symbolic(sym) => val_sym_solve_str(v, &point, &shared_state),
+    |                                     ^^^ help: if this is intentional, prefix it with an underscore: `_sym`
+
+warning: unused variable: `clause_name`
+   --> src/isarch/args_yaml.rs:146:40
+    |
+146 |             let ArgStruct { arg_value, clause_name, checkpoint: point, shared_state } = arg_struct;
+    |                                        ^^^^^^^^^^^ help: try ignoring the field: `clause_name: _`
+
+warning: unused variable: `ty`
+   --> src/isarch/args_yaml.rs:230:13
+    |
+230 |     for (n, ty) in shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap().iter() {
+    |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: unused variable: `regs`
+    --> src/isarch/exec.rs:1638:5
+     |
+1638 |     regs: &RegisterBindings<B>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+    --> src/isarch/exec.rs:1639:5
+     |
+1639 |     lets: &Bindings<B>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `test`
+    --> src/isarch/exec.rs:2295:41
+     |
+2295 | ...                   let test = Sym::from_u32(6);
+     |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_test`
+
+warning: value assigned to `requested_instruction` is never read
+    --> src/isarch/exec.rs:2197:61
+     |
+2197 | ...                   let mut requested_instruction = String::new();
+     |                                                       ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `isa_state_complete` is never read
+    --> src/isarch/exec.rs:2198:58
+     |
+2198 | ...                   let mut isa_state_complete = BTreeMap::new();
+     |                                                    ^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `isa_state_post` is never read
+    --> src/isarch/exec.rs:2199:54
+     |
+2199 | ...                   let mut isa_state_post = BTreeMap::new();
+     |                                                ^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `test_ins` is never read
+    --> src/isarch/exec.rs:2200:48
+     |
+2200 | ...                   let mut test_ins = String::new();
+     |                                          ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `test_ins_encdec` is never read
+    --> src/isarch/exec.rs:2201:55
+     |
+2201 | ...                   let mut test_ins_encdec = String::new();
+     |                                                 ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `ty`
+    --> src/isarch/exec.rs:2907:13
+     |
+2907 |         let ty = Ty::<Name>::Bits(64);
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: unused variable: `ty`
+    --> src/isarch/exec.rs:2923:13
+     |
+2923 |         let ty = Ty::<Name>::Bits(64);
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_ty`
+
+warning: variable does not need to be mutable
+    --> src/isarch/exec.rs:4762:13
+     |
+4762 |         let mut arch: &'static mut [Def<Name, B129>] = Box::leak(
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/isarch/memory_builder.rs:153:18
+    |
+153 |     pub fn build(mut self) -> Result<Memory<B>, String> {
+    |                  ----^^^^
+    |                  |
+    |                  help: remove this `mut`
+
+warning: unused variable: `reg_name`
+   --> src/isarch/target.rs:328:36
+    |
+328 |     fn must_output_register(&self, reg_name: &str) -> bool {
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reg_name`
+
+warning: unused variable: `x6_name`
+   --> src/isarch/value_hints.rs:746:13
+    |
+746 |         let x6_name = symtab.intern(&x6_text);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_x6_name`
+
+warning: unused variable: `thread`
+   --> src/isarch/mod.rs:162:11
+    |
+162 |         &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+    |           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_thread`
+
+warning: unused variable: `task_id`
+   --> src/isarch/mod.rs:162:19
+    |
+162 |         &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+    |                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:302:5
+    |
+302 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:303:5
+    |
+303 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:593:5
+    |
+593 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:594:5
+    |
+594 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: unused variable: `instruction_name`
+   --> src/isarch/mod.rs:843:5
+    |
+843 |     instruction_name: &str,
+    |     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_instruction_name`
+
+warning: unused variable: `regs`
+   --> src/isarch/mod.rs:845:5
+    |
+845 |     regs: &RegisterBindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_regs`
+
+warning: unused variable: `lets`
+   --> src/isarch/mod.rs:846:5
+    |
+846 |     lets: &Bindings<B>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_lets`
+
+warning: function `判死区域内符号读立即BadRead无事件且Unsat` should have a snake case name
+   --> src/isarch/memory_model.rs:693:8
+    |
+693 |     fn 判死区域内符号读立即BadRead无事件且Unsat() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `判死区域内符号读立即_bad_read无事件且_unsat`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `判死区域内符号写立即BadWrite无事件且Unsat` should have a snake case name
+   --> src/isarch/memory_model.rs:722:8
+    |
+722 |     fn 判死区域内符号写立即BadWrite无事件且Unsat() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `判死区域内符号写立即_bad_write无事件且_unsat`
+
+warning: function `判死区域外符号读Sat事件可见且边界精确` should have a snake case name
+   --> src/isarch/memory_model.rs:758:8
+    |
+758 |     fn 判死区域外符号读Sat事件可见且边界精确() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `判死区域外符号读_sat事件可见且边界精确`
+
+warning: function `默认分层下与PMA断言矛盾的读写不被判死` should have a snake case name
+    --> src/isarch/memory_model.rs:1438:8
+     |
+1438 |     fn 默认分层下与PMA断言矛盾的读写不被判死() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `默认分层下与_pma断言矛盾的读写不被判死`
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/isarch/target.rs:50:17
+   |
+50 |     pub fn iter(&self) -> std::collections::hash_map::Iter<Name, Val<B>> {
+   |                 ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                 |
+   |                 the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+50 |     pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Name, Val<B>> {
+   |                                                            +++
+
+warning: `isla` (lib test) generated 36 warnings (run `cargo fix --lib -p isla --tests` to apply 27 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.07s
+     Running unittests src/lib.rs (target/debug/deps/isla-e7513de338ff003f)
+
+running 4 tests
+test isarch::platform::tests::isarch_rv64_domain_default_and_explicit_override ... ok
+test isarch::platform::tests::platform_adapter_preserves_model_body_and_unknown_declarations ... ok
+test isarch::platform::tests::platform_entropy_reaches_existing_loader_reset_channel ... ok
+test isarch::platform::tests::platform_entropy_uses_fresh_unconstrained_reset_for_val_and_extern ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.04s
+

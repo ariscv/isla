@@ -701,8 +701,23 @@ pub struct Context {
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
 
+// 最低运行时版本对应官方提交 d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f。
+const MIN_Z3_VERSION: (c_uint, c_uint, c_uint, c_uint) = (5, 4, 0, 0);
+
+fn z3_version_supported(version: (c_uint, c_uint, c_uint, c_uint)) -> bool {
+    version >= MIN_Z3_VERSION
+}
+
 impl Context {
     pub fn new(cfg: Config) -> Self {
+        static VERSION_CHECK: std::sync::Once = std::sync::Once::new();
+        VERSION_CHECK.call_once(|| {
+            let (mut major, mut minor, mut build, mut revision) = (0, 0, 0, 0);
+            unsafe { Z3_get_version(&mut major, &mut minor, &mut build, &mut revision) };
+            let (min_major, min_minor, min_build, min_revision) = MIN_Z3_VERSION;
+            assert!(z3_version_supported((major, minor, build, revision)),
+                "运行时 Z3 版本 {major}.{minor}.{build}.{revision} 低于最低版本 {min_major}.{min_minor}.{min_build}.{min_revision}");
+        });
         unsafe { Context { z3_ctx: Z3_mk_context_rc(cfg.z3_cfg), enum_cache: RefCell::new(HashMap::new()) } }
     }
 
@@ -3091,6 +3106,21 @@ pub fn z3_version() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn z3_version_comparison_covers_lower_equal_and_higher() {
+        for version in [(4, 99, 99, 99), (5, 3, 9, 9), (5, 4, 0, 0), (5, 4, 0, 1), (6, 0, 0, 0)] {
+            assert_eq!(z3_version_supported(version), version >= (5, 4, 0, 0));
+        }
+    }
+
+    #[test]
+    fn runtime_z3_version_accepts_installed_library() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<crate::bitvector::b64::B64>::new(&context);
+        assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+    }
+
     #[test]
     fn count增量查询退出后恢复原求解器与模型缓存() {
         use crate::bitvector::b64::B64;

@@ -1,0 +1,4 @@
+cargo-fmt-check=0
+isla-lib-RUSTFLAGS-plus-LD_LIBRARY_PATH=101 (3 doctest加载系统Z3 4.13.3)
+isla-lib-RUSTFLAGS-plus-RUSTDOCFLAGS=0 (完整通过)
+workspace-cargo-test=101 (240通过；7个既有测试缺少rv64d.ir)

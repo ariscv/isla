@@ -68,9 +68,11 @@ fn mapping_paths<B: BV>(
             }
             let outcome = match result {
                 Ok((Run::Dead, _)) => unreachable!("Dead 已在辅助域提前过滤"),
-                Ok((Run::Finished(Val::Poison), _)) => {
-                    Err(ExecError::Unreachable(format!("{} 返回 Poison", function_name)))
-                }
+                Ok((Run::Finished(Val::Poison), frame)) => Err(ExecError::Unreachable(format!(
+                    "{} {}",
+                    function_name,
+                    super::poison_diagnostic(&frame, shared_state)
+                ))),
                 Ok((Run::Finished(value), _)) => {
                     length_bits(&value, &mut solver, SourceLoc::unknown()).map(|_| Some(value))
                 }
@@ -150,6 +152,48 @@ mod tests {
     use isla_lib::smt::smtlib::{self, Exp as SmtExp};
     use isla_lib::smt::Tactic;
     use std::collections::HashSet;
+
+    #[test]
+    fn encoding_poison_preserves_sail_exception_and_source() {
+        isla_lib::smt::configure_tastic(Tactic::Qfaufbv);
+        let loc = SourceLoc::unknown();
+        let mut symtab = Symtab::new();
+        let normal = symtab.intern("zencdec_forwards");
+        let arg = symtab.intern("zargument");
+        let exception = symtab.intern("zcurrent_exception");
+        let defs: Vec<Def<Name, B64>> = vec![
+            Def::Register(exception, Ty::String, vec![]),
+            Def::Val(normal, vec![Ty::Unit], Ty::Bits(32)),
+            Def::Fn(
+                normal,
+                vec![arg],
+                vec![
+                    Instr::Copy(Loc::Id(exception), Exp::String("core/types.sail:61: 非法架构".to_string()), loc),
+                    Instr::Arbitrary,
+                ],
+            ),
+        ];
+        let shared = SharedState::new(
+            symtab,
+            &defs,
+            IRTypeInfo::new(&defs),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut regs = RegisterBindings::new();
+        regs.insert(exception, false, UVal::Init(Val::String(String::new())));
+        let error = encoding_paths(&Val::Unit, &shared, &regs, &Bindings::default(), Checkpoint::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("current_exception"), "{error}");
+        assert!(error.contains("core/types.sail:61"), "{error}");
+        assert!(error.contains("非法架构"), "{error}");
+    }
 
     #[test]
     fn isolated_candidates_keep_only_full_execution_feasible_encodings() {

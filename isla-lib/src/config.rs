@@ -4240,6 +4240,40 @@ mod initial_state_tests {
     use super::*;
 
     #[test]
+    fn library_config_keeps_rv64_domain_opt_in() {
+        let mut symtab = Symtab::new();
+        symtab.intern("zPC");
+        let types = IRTypeInfo::new::<crate::bitvector::b64::B64>(&[]);
+        let base = r#"pc = "PC"
+assembler = "as"
+objdump = "objdump"
+nm = "nm"
+linker = "ld"
+[mmu]
+page_table_base = "0"
+page_size = "4096"
+s2_page_table_base = "0"
+s2_page_size = "4096"
+[threads]
+base = "0"
+top = "4096"
+stride = "4096"
+[symbolic_addrs]
+base = "4096"
+top = "8192"
+stride = "16"
+"#;
+        for (prefix, expected) in
+            [("", false), ("initial_state_rv64_domain = true\n", true), ("initial_state_rv64_domain = false\n", false)]
+        {
+            let config =
+                ISAConfig::<crate::bitvector::b64::B64>::parse(&format!("{prefix}{base}"), None, &symtab, &types)
+                    .unwrap();
+            assert_eq!(config.initial_state_rv64_domain, expected);
+        }
+    }
+
+    #[test]
     fn initial_state_mixed_bits() {
         let config: Value = r#"[initial_state]
 mstatus = "0b?x11_?0x1"

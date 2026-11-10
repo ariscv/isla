@@ -1438,6 +1438,7 @@ pub(crate) fn insert_primops<B: BV>(
     mode: AssertionMode,
     isa_config: &ISAConfig<B>,
 ) {
+    let mut primops = Primops::default();
     let mut externs: HashMap<Name, (String, bool)> = HashMap::new();
     for def in defs.iter() {
         if let Def::Extern(f, is_abstract, ext, _, _) = def {
@@ -1467,8 +1468,6 @@ pub(crate) fn insert_primops<B: BV>(
             comparison_fns.insert(f, comparison);
         }
     }
-
-    let mut primops = Primops::default();
 
     for (primop, reset) in isa_config.const_primops.iter() {
         primops.consts.insert(primop.to_string(), reset.clone());
