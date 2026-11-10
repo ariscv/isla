@@ -85,6 +85,10 @@ impl Sym {
     pub fn from_u32(id: u32) -> Self {
         Sym { id }
     }
+
+    pub fn as_u32(self) -> u32 {
+        self.id
+    }
 }
 
 impl<B> From<Sym> for Result<Val<B>, ExecError> {
@@ -4019,3 +4023,53 @@ pub use z3_timeout::configure_z3_timeout;
 
 #[cfg(test)]
 mod transaction_tests;
+
+// 私有属性只通过缓存镜像受控进出，不向调用方暴露核心字段。
+impl From<DefAttrs> for crate::executor::path_cache::event::DefAttrs {
+    fn from(value: DefAttrs) -> Self {
+        Self { bits: value.attrs }
+    }
+}
+impl From<crate::executor::path_cache::event::DefAttrs> for DefAttrs {
+    fn from(value: crate::executor::path_cache::event::DefAttrs) -> Self {
+        assert_eq!(value.bits & !3, 0, "缓存定义属性包含未知位");
+        Self { attrs: value.bits }
+    }
+}
+impl From<ReadOpts> for crate::executor::path_cache::event::ReadOpts {
+    fn from(value: ReadOpts) -> Self {
+        Self { is_exclusive: value.is_exclusive, is_ifetch: value.is_ifetch }
+    }
+}
+impl From<crate::executor::path_cache::event::ReadOpts> for ReadOpts {
+    fn from(value: crate::executor::path_cache::event::ReadOpts) -> Self {
+        Self { is_exclusive: value.is_exclusive, is_ifetch: value.is_ifetch }
+    }
+}
+impl From<WriteOpts> for crate::executor::path_cache::event::WriteOpts {
+    fn from(value: WriteOpts) -> Self {
+        Self { is_exclusive: value.is_exclusive }
+    }
+}
+impl From<crate::executor::path_cache::event::WriteOpts> for WriteOpts {
+    fn from(value: crate::executor::path_cache::event::WriteOpts) -> Self {
+        Self { is_exclusive: value.is_exclusive }
+    }
+}
+
+impl<B> Checkpoint<B> {
+    pub(crate) fn path_cache_parts(&self) -> (usize, u32, &Arc<Option<Trace<B>>>) {
+        (self.num, self.next_var, &self.trace)
+    }
+    pub(crate) fn from_path_cache_parts(num: usize, next_var: u32, trace: Arc<Option<Trace<B>>>) -> Self {
+        Self { num, next_var, trace }
+    }
+}
+impl<B> Trace<B> {
+    pub(crate) fn path_cache_parts(&self) -> (usize, &[Event<B>], &Arc<Option<Trace<B>>>) {
+        (self.checkpoints, &self.head, &self.tail)
+    }
+    pub(crate) fn from_path_cache_parts(checkpoints: usize, head: Vec<Event<B>>, tail: Arc<Option<Trace<B>>>) -> Self {
+        Self { checkpoints, head, tail }
+    }
+}

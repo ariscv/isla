@@ -315,3 +315,14 @@ impl<B: BV> SamplePath<B> {
         }
     }
 }
+
+impl From<FastFacts> for crate::executor::path_cache::Facts {
+    fn from(value: FastFacts) -> Self {
+        Self { guard_unique: value.guard_unique, post_unique: value.post_unique, simple_pre: value.simple_pre }
+    }
+}
+impl From<crate::executor::path_cache::Facts> for FastFacts {
+    fn from(value: crate::executor::path_cache::Facts) -> Self {
+        Self { guard_unique: value.guard_unique, post_unique: value.post_unique, simple_pre: value.simple_pre }
+    }
+}

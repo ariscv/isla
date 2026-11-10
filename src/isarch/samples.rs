@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct SampleOptions {
+    pub path_cache: super::path_cache::Options,
     pub fuzz: Option<super::fuzz::Options>,
     pub check: Option<PathBuf>,
     pub limit: Option<usize>,
@@ -24,6 +25,15 @@ pub struct SampleOptions {
 
 impl SampleOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.path_cache.enabled() && self.resident.is_some() {
+            return Err("缓存选项不能与旧常驻 judge 同时运行".into());
+        }
+        if self.path_cache.read.is_some() && self.fuzz.is_none() {
+            return Err("--path-cache-read 需要 fuzz 子命令".into());
+        }
+        if self.path_cache.read.is_some() && (self.check.is_some() || self.resident.is_some()) {
+            return Err("缓存读回只进入 fuzz 流程，不能同时运行样本检查或旧常驻 judge".into());
+        }
         if self.resident_fast && self.resident.is_none() {
             return Err("--judge-resident-fast 需要 --judge-resident".into());
         }
@@ -59,6 +69,7 @@ impl SampleOptions {
 }
 
 pub struct SampleSession {
+    pub path_cache: super::path_cache::Options,
     pub fuzz: Option<super::fuzz::Session>,
     pub writer: Option<SampleOutputs>,
     pub checker: Option<SampleChecker>,
@@ -119,6 +130,7 @@ impl SampleSession {
             None => SampleOutputs::open(&configured),
         });
         Ok(Self {
+            path_cache: options.path_cache.clone(),
             fuzz: options.fuzz.as_ref().map(super::fuzz::Session::new).transpose()?,
             writer,
             checker,
@@ -128,7 +140,11 @@ impl SampleSession {
         })
     }
     pub fn enabled(&self) -> bool {
-        self.fuzz.is_some() || self.writer.is_some() || self.checker.is_some() || self.resident.is_some()
+        self.path_cache.enabled()
+            || self.fuzz.is_some()
+            || self.writer.is_some()
+            || self.checker.is_some()
+            || self.resident.is_some()
     }
     pub fn finish(&self, options: &SampleOptions, completed: bool) {
         if let Some(writer) = &self.writer {

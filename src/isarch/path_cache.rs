@@ -1,0 +1,716 @@
+//! isarch 缓存适配：来源、文件发布、Target 数据和常驻路径。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isla_lib::{bitvector::b64::B64, ir::Symtab};
+    #[test]
+    fn 阶段日志立即落盘并保留顺序() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("output/path-cache/stages-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let stages = Stages::new(Some(&directory), Instant::now());
+        stages.record("exploration", 1.0, json!({"paths": 2}));
+        stages.record("dag", 2.0, json!({}));
+        let rows = fs::read_to_string(directory.join("path-cache-stages.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.iter().map(|row| row["stage"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["exploration", "dag"]
+        );
+        assert_eq!(rows[0]["seconds"], 1.0);
+        assert!(rows.iter().all(|row| row["since_start"].as_f64().unwrap() >= 0.0));
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    #[should_panic(expected = "manifest")]
+    fn 残缺目录必须拒绝() {
+        let shared = SharedState::<B64>::empty(Symtab::new());
+        load::<B64>(
+            std::path::Path::new("output/path-cache/不存在的缓存"),
+            Encoding::Json,
+            false,
+            &shared,
+            "generic",
+            &Stages::new(None, Instant::now()),
+        );
+    }
+    #[test]
+    #[should_panic(expected = "批次")]
+    fn 混合批次必须拒绝() {
+        let envelope = Envelope { batch_id: "old".into(), entries: vec![1u32] };
+        let entry =
+            DataFile { file: "paths.json".into(), encoding: Encoding::Json, entries: 1, batch_id: "new".into() };
+        check_envelope(&envelope, &entry, "new");
+    }
+    #[test]
+    fn 双编码_完整快照_target_与文件损坏检查() {
+        use super::super::target::RV64;
+        use isla_lib::{
+            bitvector::BV,
+            executor::samples::SamplePath,
+            ir::Val,
+            smt::{self, checkpoint, smtlib::Ty},
+            source_loc::SourceLoc,
+        };
+        smt::configure_tastic(smt::Tactic::Qfaufbv);
+        let shared = SharedState::<B64>::empty(Symtab::new());
+        let mut target = RV64::default();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let symbol = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
+        target.pre_state_mut().insert(Name::from_u32(0), Val::Symbolic(symbol));
+        target.symbolic_pma_sizes_mut().push(("generic".into(), symbol));
+        let paths = vec![ResidentPath {
+            signature: 42,
+            checkpoint: checkpoint(&mut solver),
+            path: SamplePath {
+                pre: std::collections::BTreeMap::from([("value".into(), Val::Symbolic(symbol))]),
+                post: Default::default(),
+                result: Val::Bits(B64::new(7, 8)),
+                memory: vec![],
+                memory_guards: Default::default(),
+            },
+            records: vec![],
+        }];
+        let facts = vec![Facts { guard_unique: true, post_unique: false, simple_pre: true }.into()];
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "output/path-cache/unit-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let options = Options {
+            write: Some(directory.clone()),
+            format: vec![Encoding::Json, Encoding::Bin],
+            ..Default::default()
+        };
+        save(
+            &options,
+            "generic",
+            &paths,
+            &facts,
+            &shared,
+            &target,
+            &super::super::solve_summary::SolveSummary::default().json(),
+            &json!({"command":[],"inputs":{},"binary":{"path":"synthetic","sha256":"synthetic"}}),
+            &mut Timing::default(),
+            &Stages::new(None, Instant::now()),
+        );
+        let json =
+            load::<B64>(&directory, Encoding::Json, true, &shared, "generic", &Stages::new(None, Instant::now()));
+        let bin = load::<B64>(&directory, Encoding::Bin, true, &shared, "generic", &Stages::new(None, Instant::now()));
+        let encoded_manifest = bincode::serialize(&json.manifest).unwrap();
+        assert_eq!(json.manifest, bincode::deserialize(&encoded_manifest).unwrap());
+        let mut a = TraceWriter::default();
+        let mut b = TraceWriter::default();
+        assert_eq!(a.capture(&json.paths[0].checkpoint), b.capture(&bin.paths[0].checkpoint));
+        assert_eq!(a.segments, b.segments);
+        assert_eq!(json.facts, bin.facts);
+        let mut restored = RV64::default();
+        restore_target(&json.manifest, &mut restored);
+        assert_eq!(target.pre_state().get(&Name::from_u32(0)), restored.pre_state().get(&Name::from_u32(0)));
+        assert_eq!(target.symbolic_pma_sizes(), restored.symbolic_pma_sizes());
+        let reject = || {
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load::<B64>(
+                &directory,
+                Encoding::Json,
+                false,
+                &shared,
+                "generic",
+                &Stages::new(None, Instant::now()),
+            )))
+            .is_err())
+        };
+        let manifest = fs::read(directory.join("manifest.json")).unwrap();
+        let mut changed: Value = serde_json::from_slice(&manifest).unwrap();
+        changed["paths"][0]["entries"] = json!(2);
+        fs::write(directory.join("manifest.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+        reject();
+        fs::write(directory.join("manifest.json"), &manifest).unwrap();
+        let data = fs::read(directory.join("paths.json")).unwrap();
+        let mut changed: Value = serde_json::from_slice(&data).unwrap();
+        changed["batch_id"] = json!("mixed");
+        fs::write(directory.join("paths.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+        reject();
+        fs::write(directory.join("paths.json"), &data).unwrap();
+        fs::remove_file(directory.join("segments.bin")).unwrap();
+        reject();
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+use super::{resident::ResidentPath, target::Target};
+use isla_lib::{
+    bitvector::BV,
+    executor::{
+        path_cache::{self as dto, CachedPath, Facts, NameEnvironment, Segment, TraceReader, TraceWriter},
+        samples::fast::FastFacts,
+    },
+    ir::{Name, SharedState},
+    smt::{Config, Context, Solver, Sym},
+};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    fs::{self, File},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+
+/// 每个完成阶段立即追加一行，不依赖 campaign 的最终收尾。
+pub struct Stages {
+    started: Instant,
+    path: Option<PathBuf>,
+}
+impl Stages {
+    pub fn new(output: Option<&Path>, started: Instant) -> Self {
+        let path = output.map(|output| {
+            fs::create_dir_all(output).expect("创建阶段日志目录失败");
+            output.join("path-cache-stages.jsonl")
+        });
+        Self { started, path }
+    }
+    pub fn record(&self, stage: &str, seconds: f64, details: Value) {
+        let mut row = json!({"stage":stage,"seconds":seconds,"since_start":self.started.elapsed().as_secs_f64()});
+        for (key, value) in details.as_object().expect("阶段详情必须是对象") {
+            assert!(row.get(key).is_none(), "阶段详情覆盖固定字段：{key}");
+            row.as_object_mut().unwrap().insert(key.clone(), value.clone());
+        }
+        let text = serde_json::to_string(&row).expect("阶段日志编码失败");
+        if let Some(path) = &self.path {
+            let mut file = fs::OpenOptions::new().create(true).append(true).open(path).expect("打开阶段日志失败");
+            writeln!(file, "{text}").expect("追加阶段日志失败");
+            file.sync_data().expect("同步阶段日志失败");
+        }
+        eprintln!("[PATH_CACHE_STAGE] {text}");
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Encoding {
+    Json,
+    Bin,
+}
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    pub read: Option<PathBuf>,
+    pub write: Option<PathBuf>,
+    pub format: Vec<Encoding>,
+    pub encoding: Option<Encoding>,
+    pub crosscheck: bool,
+    pub export_dag: bool,
+    pub recompute_facts: bool,
+}
+impl Options {
+    pub fn enabled(&self) -> bool {
+        self.read.is_some() || self.write.is_some()
+    }
+    pub fn add_cli(opts: &mut getopts::Options) {
+        opts.optopt("", "path-cache-write", "探索完成后写出缓存（必须是新目录）", "<dir>");
+        opts.optopt("", "path-cache-read", "读回缓存并跳过探索", "<dir>");
+        opts.optopt("", "path-cache-format", "写出格式 json、bin、both，默认 both", "<format>");
+        opts.optopt("", "path-cache-encoding", "读入格式 json、bin，默认 json", "<encoding>");
+        opts.optflag("", "path-cache-crosscheck", "同时解码 JSON 和 bin，逐字段核对");
+        opts.optflag("", "path-cache-export-dag", "读缓存后重新导出 DAG");
+        opts.optflag("", "path-cache-recompute-facts", "读缓存后重新分析并核对静态事实");
+    }
+    pub fn parse(matches: &getopts::Matches) -> Self {
+        let read = matches.opt_str("path-cache-read").map(PathBuf::from);
+        let write = matches.opt_str("path-cache-write").map(PathBuf::from);
+        assert!(!(read.is_some() && write.is_some()), "缓存读写不能同时指定");
+        let format = match matches.opt_str("path-cache-format").as_deref().unwrap_or("both") {
+            "json" => vec![Encoding::Json],
+            "bin" => vec![Encoding::Bin],
+            "both" => vec![Encoding::Json, Encoding::Bin],
+            value => panic!("缓存写出格式无效：{value}"),
+        };
+        let encoding = match matches.opt_str("path-cache-encoding").as_deref().unwrap_or("json") {
+            "json" => Encoding::Json,
+            "bin" => Encoding::Bin,
+            value => panic!("缓存读取格式无效：{value}"),
+        };
+        for name in
+            ["path-cache-encoding", "path-cache-crosscheck", "path-cache-export-dag", "path-cache-recompute-facts"]
+        {
+            assert!(!matches.opt_present(name) || read.is_some(), "--{name} 需要 --path-cache-read");
+        }
+        assert!(
+            !matches.opt_present("path-cache-format") || write.is_some(),
+            "--path-cache-format 需要 --path-cache-write"
+        );
+        Self {
+            read,
+            write,
+            format,
+            encoding: Some(encoding),
+            crosscheck: matches.opt_present("path-cache-crosscheck"),
+            export_dag: matches.opt_present("path-cache-export-dag"),
+            recompute_facts: matches.opt_present("path-cache-recompute-facts"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DataFile {
+    pub file: String,
+    pub encoding: Encoding,
+    pub entries: u64,
+    pub batch_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Envelope<T> {
+    batch_id: String,
+    entries: Vec<T>,
+}
+// manifest 虽然只发布 JSON，也使用完整静态类型，避免引入 deserialize_any。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SourceFile {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SourceRecord {
+    pub command: Vec<String>,
+    pub inputs: std::collections::BTreeMap<String, SourceFile>,
+    pub binary: SourceFile,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ExplorationSummary {
+    pub sampled_paths: u64,
+    pub errors: u64,
+    pub execution_timeouts: u64,
+    pub smt_timeouts: u64,
+    pub unfinished_paths: u64,
+    pub assertion_filtered_paths: u64,
+    pub omitted_cases: u64,
+    pub model_query_timeouts: u64,
+    pub encoding_filtered_paths: u64,
+    pub pending_batches: u64,
+    pub status: String,
+    pub model_coverage: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Manifest<B> {
+    pub schema_version: u32,
+    pub bit_width: u32,
+    pub batch_id: String,
+    pub source: SourceRecord,
+    pub current_ir_review: String,
+    pub completeness: String,
+    pub errors: ExplorationSummary,
+    pub clause: String,
+    pub segments: Vec<DataFile>,
+    pub paths: Vec<DataFile>,
+    pub path_signatures: Vec<u64>,
+    pub pre_state: Vec<(Name, dto::value::Val<B>)>,
+    pub pma_sizes: Vec<(String, u32)>,
+    pub names: NameEnvironment,
+}
+
+#[derive(Default, Serialize)]
+pub struct Timing {
+    pub manifest_seconds: f64,
+    pub parse_seconds: f64,
+    pub crosscheck_seconds: f64,
+    pub rebuild_seconds: f64,
+    pub validate_seconds: f64,
+    pub capture_seconds: f64,
+    pub write_seconds: f64,
+    pub json_write_seconds: f64,
+    pub bin_write_seconds: f64,
+    pub json_bytes: u64,
+    pub bin_bytes: u64,
+    pub dag_seconds: f64,
+    pub dag_replay_seconds: f64,
+    pub facts_seconds: f64,
+    pub facts_replay_seconds: f64,
+    pub replay_seconds: f64,
+    pub to_campaign_seconds: f64,
+    pub paths: usize,
+    pub segments: usize,
+    pub unshared_segments: u64,
+}
+pub struct Loaded<B: BV> {
+    pub paths: Vec<ResidentPath<B>>,
+    pub facts: Vec<Facts>,
+    pub manifest: Manifest<B>,
+    pub timing: Timing,
+}
+
+fn check_envelope<T>(envelope: &Envelope<T>, file: &DataFile, batch: &str) {
+    assert_eq!(file.batch_id, batch, "缓存 manifest 混用批次");
+    assert_eq!(envelope.batch_id, batch, "缓存数据混用批次");
+    assert_eq!(envelope.entries.len() as u64, file.entries, "缓存数据条目数不一致");
+}
+fn read_data<T: DeserializeOwned>(dir: &Path, files: &[DataFile], encoding: Encoding, batch: &str) -> Vec<T> {
+    let candidates = files.iter().filter(|f| f.encoding == encoding).collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1, "缓存必须有且仅有一个指定编码的数据文件");
+    let entry = candidates[0];
+    assert!(
+        entry.file == format!("segments.{}", extension(encoding))
+            || entry.file == format!("paths.{}", extension(encoding)),
+        "缓存文件名无效"
+    );
+    let bytes = fs::read(dir.join(&entry.file)).expect("缓存数据文件缺失或不可读取");
+    let envelope: Envelope<T> = match encoding {
+        Encoding::Json => serde_json::from_slice(&bytes).expect("缓存 JSON 损坏"),
+        Encoding::Bin => {
+            use bincode::Options;
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .reject_trailing_bytes()
+                .deserialize(&bytes)
+                .expect("缓存 bincode 损坏")
+        }
+    };
+    check_envelope(&envelope, entry, batch);
+    envelope.entries
+}
+fn extension(encoding: Encoding) -> &'static str {
+    match encoding {
+        Encoding::Json => "json",
+        Encoding::Bin => "bin",
+    }
+}
+fn write_data<T: Serialize>(
+    dir: &Path,
+    name: &str,
+    entries: Vec<T>,
+    formats: &[Encoding],
+    batch: &str,
+    timing: &mut Timing,
+    stages: &Stages,
+) -> Vec<DataFile> {
+    let count = entries.len() as u64;
+    let envelope = Envelope { batch_id: batch.into(), entries };
+    formats
+        .iter()
+        .map(|encoding| {
+            let started = Instant::now();
+            let file = format!("{name}.{}", extension(*encoding));
+            let mut output = BufWriter::new(File::create(dir.join(&file)).expect("创建缓存数据失败"));
+            match encoding {
+                Encoding::Json => serde_json::to_writer_pretty(&mut output, &envelope).expect("写入缓存 JSON 失败"),
+                Encoding::Bin => bincode::serialize_into(&mut output, &envelope).expect("写入缓存 bincode 失败"),
+            }
+            output.flush().expect("刷新缓存数据失败");
+            output.get_ref().sync_all().expect("同步缓存数据失败");
+            let seconds = started.elapsed().as_secs_f64();
+            let bytes = output.get_ref().metadata().expect("读取缓存文件大小失败").len();
+            match encoding {
+                Encoding::Json => {
+                    timing.json_write_seconds += seconds;
+                    timing.json_bytes += bytes;
+                }
+                Encoding::Bin => {
+                    timing.bin_write_seconds += seconds;
+                    timing.bin_bytes += bytes;
+                }
+            }
+            stages.record(
+                &format!("cache_write_{}", extension(*encoding)),
+                seconds,
+                json!({"file":file,"bytes":bytes,"entries":count}),
+            );
+            DataFile { file, encoding: *encoding, entries: count, batch_id: batch.into() }
+        })
+        .collect()
+}
+
+pub fn current_source() -> Value {
+    use sha2::{Digest, Sha256};
+    let mut source = super::solve_summary::input_manifest();
+    let executable = std::env::current_exe().expect("读取可执行文件路径失败");
+    let bytes = fs::read(&executable).expect("读取可执行文件失败");
+    let mut digest = Sha256::new();
+    digest.input(bytes);
+    source["binary"] = json!({"path":executable,"sha256":format!("{:x}",digest.result())});
+    source
+}
+
+pub fn load<B: BV>(
+    dir: &Path,
+    encoding: Encoding,
+    crosscheck: bool,
+    shared: &SharedState<B>,
+    clause: &str,
+    stages: &Stages,
+) -> Loaded<B> {
+    let started = Instant::now();
+    let manifest: Manifest<B> =
+        serde_json::from_reader(File::open(dir.join("manifest.json")).expect("缓存 manifest 缺失，目录尚未发布"))
+            .expect("缓存 manifest 损坏");
+    assert_eq!(manifest.schema_version, 1, "缓存 schema 不兼容");
+    assert_eq!(manifest.bit_width, B::MAX_WIDTH, "缓存位宽不兼容");
+    assert_eq!(manifest.current_ir_review, "未做当前 IR 复核", "缓存 IR 复核标注无效");
+    assert!(matches!(manifest.completeness.as_str(), "complete" | "partial"), "缓存完整性标注无效");
+    assert_eq!(manifest.clause, clause, "缓存 clause 不一致");
+    let summary = restored_summary(&manifest.errors);
+    assert_eq!(manifest.errors.status, summary.status(), "缓存摘要状态不一致");
+    assert_eq!(
+        manifest.completeness,
+        if summary.status() == "finished" { "complete" } else { "partial" },
+        "缓存完整性与摘要不一致"
+    );
+    manifest.names.validate(&shared.symtab, &shared.type_info);
+    for entry in manifest.segments.iter().chain(&manifest.paths) {
+        assert_eq!(entry.batch_id, manifest.batch_id, "缓存 manifest 混用批次");
+        assert!(dir.join(&entry.file).is_file(), "缓存 manifest 声明的数据文件缺失");
+    }
+    let manifest_seconds = started.elapsed().as_secs_f64();
+    stages.record("cache_manifest", manifest_seconds, json!({}));
+    let parsing = Instant::now();
+    let segments: Vec<Segment<B>> = read_data(dir, &manifest.segments, encoding, &manifest.batch_id);
+    let paths: Vec<CachedPath<B>> = read_data(dir, &manifest.paths, encoding, &manifest.batch_id);
+    let parse_seconds = parsing.elapsed().as_secs_f64();
+    stages.record(
+        &format!("cache_read_{}", extension(encoding)),
+        parse_seconds,
+        json!({"primary":true,"paths":paths.len(),"segments":segments.len()}),
+    );
+    let checking = Instant::now();
+    if crosscheck {
+        let other = match encoding {
+            Encoding::Json => Encoding::Bin,
+            Encoding::Bin => Encoding::Json,
+        };
+        let other_segments = read_data(dir, &manifest.segments, other, &manifest.batch_id);
+        let other_paths = read_data(dir, &manifest.paths, other, &manifest.batch_id);
+        stages.record(
+            &format!("cache_read_{}", extension(other)),
+            checking.elapsed().as_secs_f64(),
+            json!({"primary":false,"paths":paths.len(),"segments":segments.len()}),
+        );
+        assert_eq!(segments, other_segments, "缓存两种编码的分段不同");
+        assert_eq!(paths, other_paths, "缓存两种编码的路径不同");
+        stages.record("cache_crosscheck", checking.elapsed().as_secs_f64(), json!({"equal":true}));
+    }
+    for entry in &manifest.segments {
+        assert_eq!(entry.entries, segments.len() as u64, "缓存分段条目数不一致");
+        assert_eq!(entry.file, format!("segments.{}", extension(entry.encoding)), "缓存分段文件名无效");
+    }
+    for entry in &manifest.paths {
+        assert_eq!(entry.entries, paths.len() as u64, "缓存路径条目数不一致");
+        assert_eq!(entry.file, format!("paths.{}", extension(entry.encoding)), "缓存路径文件名无效");
+    }
+    let mut timing = Timing {
+        manifest_seconds,
+        parse_seconds,
+        crosscheck_seconds: if crosscheck { checking.elapsed().as_secs_f64() } else { 0.0 },
+        paths: paths.len(),
+        segments: segments.len(),
+        unshared_segments: paths.iter().map(|p| p.checkpoint.num).sum(),
+        ..Default::default()
+    };
+    assert_eq!(
+        manifest.path_signatures,
+        paths.iter().map(|p| p.signature).collect::<Vec<_>>(),
+        "缓存 manifest 路径清单不同"
+    );
+    let started = Instant::now();
+    dto::validate_paths(&segments, &paths, &manifest.names, &manifest.pre_state, &manifest.pma_sizes);
+    timing.validate_seconds = started.elapsed().as_secs_f64();
+    stages.record("cache_validate", timing.validate_seconds, json!({"paths":paths.len(),"segments":segments.len()}));
+    let started = Instant::now();
+    let reader = TraceReader::new(&segments);
+    let mut facts = Vec::new();
+    let restored_paths: Vec<ResidentPath<B>> = paths
+        .iter()
+        .map(|p| {
+            facts.push(p.facts.clone());
+            ResidentPath {
+                signature: p.signature,
+                checkpoint: reader.restore(&p.checkpoint),
+                path: p.path.clone().into(),
+                records: p.records.iter().cloned().map(Into::into).collect(),
+            }
+        })
+        .collect();
+    let mut roundtrip = TraceWriter::default();
+    for ((expected, restored), fact) in paths.iter().zip(&restored_paths).zip(&facts) {
+        let actual = CachedPath {
+            signature: restored.signature,
+            checkpoint: roundtrip.capture(&restored.checkpoint),
+            path: restored.path.clone().into(),
+            records: restored.records.iter().cloned().map(Into::into).collect(),
+            facts: fact.clone(),
+        };
+        assert_eq!(*expected, actual, "缓存重建后的路径 DTO 不同");
+    }
+    assert_eq!(segments, roundtrip.segments, "缓存重建后的分段 DTO 不同");
+    timing.rebuild_seconds = started.elapsed().as_secs_f64();
+    stages.record(
+        "dto_rebuild",
+        timing.rebuild_seconds,
+        json!({"dto_equal":true,"paths":paths.len(),"segments":segments.len()}),
+    );
+    Loaded { paths: restored_paths, facts, manifest, timing }
+}
+
+pub fn restore_target<B: BV>(manifest: &Manifest<B>, target: &mut dyn Target<B>) {
+    assert_eq!(target.pre_state().len(), 0, "缓存读入前 Target 前态必须为空");
+    assert!(target.symbolic_pma_sizes().is_empty(), "缓存读入前 PMA 绑定必须为空");
+    for (name, value) in &manifest.pre_state {
+        assert!(target.pre_state_mut().insert(*name, value.clone().into()).is_none(), "缓存前态重复");
+    }
+    if !manifest.pma_sizes.is_empty() {
+        target.symbolic_pma_sizes_mut().extend(manifest.pma_sizes.iter().map(|(n, s)| (n.clone(), Sym::from_u32(*s))));
+    }
+}
+
+pub fn save<B: BV>(
+    options: &Options,
+    clause: &str,
+    paths: &[ResidentPath<B>],
+    facts: &[FastFacts],
+    shared: &SharedState<B>,
+    target: &dyn Target<B>,
+    summary: &Value,
+    source: &Value,
+    timing: &mut Timing,
+    stages: &Stages,
+) {
+    let started = Instant::now();
+    assert_eq!(paths.len(), facts.len(), "缓存事实与路径数不同");
+    let mut writer = TraceWriter::default();
+    let cached = paths
+        .iter()
+        .zip(facts)
+        .map(|(p, f)| CachedPath {
+            signature: p.signature,
+            checkpoint: writer.capture(&p.checkpoint),
+            path: p.path.clone().into(),
+            records: p.records.iter().cloned().map(Into::into).collect(),
+            facts: f.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let names = NameEnvironment::capture(&shared.symtab, &shared.type_info);
+    let mut pre_state = target.pre_state().iter().map(|(n, v)| (*n, v.clone().into())).collect::<Vec<_>>();
+    pre_state.sort_by_key(|(n, _)| *n);
+    let pma_sizes = target.symbolic_pma_sizes().iter().map(|(n, s)| (n.clone(), s.as_u32())).collect::<Vec<_>>();
+    dto::validate_paths(&writer.segments, &cached, &names, &pre_state, &pma_sizes);
+    timing.capture_seconds = started.elapsed().as_secs_f64();
+    timing.paths = paths.len();
+    timing.segments = writer.segments.len();
+    timing.unshared_segments = cached.iter().map(|p| p.checkpoint.num).sum();
+    let started = Instant::now();
+    let dir = options.write.as_ref().unwrap();
+    fs::create_dir_all(dir.parent().unwrap()).expect("创建缓存父目录失败");
+    fs::create_dir(dir).expect("缓存写出目录必须是新目录");
+    let batch_id =
+        format!("{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
+    let deduplication_rate = if timing.unshared_segments == 0 {
+        None
+    } else {
+        Some(1.0 - timing.segments as f64 / timing.unshared_segments as f64)
+    };
+    stages.record("cache_capture", timing.capture_seconds, json!({"paths":timing.paths,"segments":timing.segments,"unshared_segments":timing.unshared_segments,"deduplication_rate":deduplication_rate}));
+    let segments = write_data(dir, "segments", writer.segments, &options.format, &batch_id, timing, stages);
+    let path_signatures = cached.iter().map(|p| p.signature).collect();
+    let paths = write_data(dir, "paths", cached, &options.format, &batch_id, timing, stages);
+    let complete = summary["status"] == "finished"
+        && summary["errors"].as_u64() == Some(0)
+        && summary["unfinished-paths"].as_u64() == Some(0);
+    let manifest = Manifest {
+        schema_version: 1,
+        bit_width: B::MAX_WIDTH,
+        batch_id,
+        source: serde_json::from_value(source.clone()).expect("缓存来源记录字段无效"),
+        current_ir_review: "未做当前 IR 复核".into(),
+        completeness: if complete { "complete" } else { "partial" }.into(),
+        errors: serde_json::from_value(summary.clone()).expect("缓存执行摘要字段无效"),
+        clause: clause.into(),
+        segments,
+        paths,
+        path_signatures,
+        pre_state,
+        pma_sizes,
+        names,
+    };
+    let mut output = BufWriter::new(File::create(dir.join("manifest.pending")).expect("创建 manifest 失败"));
+    serde_json::to_writer_pretty(&mut output, &manifest).expect("写入 manifest 失败");
+    output.flush().unwrap();
+    output.get_ref().sync_all().unwrap();
+    drop(output);
+    fs::rename(dir.join("manifest.pending"), dir.join("manifest.json")).expect("发布 manifest 失败");
+    File::open(dir).unwrap().sync_all().unwrap();
+    timing.write_seconds = started.elapsed().as_secs_f64();
+    stages.record("cache_write", timing.write_seconds, json!({"json_seconds":timing.json_write_seconds,"bin_seconds":timing.bin_write_seconds,"json_bytes":timing.json_bytes,"bin_bytes":timing.bin_bytes,"paths":timing.paths,"segments":timing.segments,"unshared_segments":timing.unshared_segments,"deduplication_rate":deduplication_rate}));
+    eprintln!("[PATH_CACHE_WRITE] {}", serde_json::to_string(timing).unwrap());
+}
+
+pub fn analyze<B: BV>(paths: &[ResidentPath<B>], timing: &mut Timing) -> Vec<FastFacts> {
+    let mut config = Config::new();
+    config.set_param_value("model", "true");
+    let context = Context::new(config);
+    paths
+        .iter()
+        .map(|path| {
+            let started = Instant::now();
+            let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
+            timing.facts_replay_seconds += started.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let facts = FastFacts::analyze(&path.path, &mut solver, &path.records).expect("路径静态事实分析失败");
+            timing.facts_seconds += started.elapsed().as_secs_f64();
+            facts
+        })
+        .collect()
+}
+
+pub fn write_provenance<B>(output: &Path, manifest: Option<&Manifest<B>>, source: &Value, options: &Options) {
+    let path = output.join("provenance.json");
+    let mut provenance: Value = serde_json::from_reader(File::open(&path).unwrap()).expect("provenance 损坏");
+    provenance["validity"] = json!("缓存内部认证；未做当前 IR 复核");
+    provenance["current_ir_review"] = json!("未做当前 IR 复核");
+    provenance["path_cache"] =
+        json!({"read":options.read,"write":options.write,"source":manifest.map(|m|&m.source),"current_source":source});
+    if let Some(manifest) = manifest {
+        let current: SourceRecord = serde_json::from_value(source.clone()).expect("当前来源记录字段无效");
+        if manifest.source.inputs != current.inputs || manifest.source.binary.sha256 != current.binary.sha256 {
+            eprintln!("warning: 缓存来源记录与当前 IR、配置或二进制不同；未做当前 IR 复核");
+        }
+    }
+    fs::write(path, serde_json::to_vec_pretty(&provenance).unwrap()).unwrap();
+}
+
+/// 一次 clause 的缓存上下文；入口计时延续到 campaign 开始。
+pub struct Run<B: BV> {
+    pub options: Options,
+    pub clause: String,
+    pub summary: Value,
+    pub loaded: Option<Loaded<B>>,
+    pub started: Instant,
+    pub stages: Stages,
+}
+impl<B: BV> Run<B> {
+    pub fn new(options: &Options, clause: &str, output: &Path) -> Self {
+        let started = Instant::now();
+        Self {
+            options: options.clone(),
+            clause: clause.into(),
+            summary: Value::Null,
+            loaded: None,
+            started,
+            stages: Stages::new(Some(output), started),
+        }
+    }
+}
+pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_summary::SolveSummary {
+    let field = |value: u64| value.try_into().expect("缓存执行摘要越界");
+    super::solve_summary::SolveSummary {
+        sampled_paths: field(summary.sampled_paths),
+        errors: field(summary.errors),
+        execution_timeouts: field(summary.execution_timeouts),
+        smt_timeouts: field(summary.smt_timeouts),
+        unfinished_paths: field(summary.unfinished_paths),
+        assertion_filtered_paths: field(summary.assertion_filtered_paths),
+        omitted_cases: field(summary.omitted_cases),
+        model_query_timeouts: field(summary.model_query_timeouts),
+        encoding_filtered_paths: field(summary.encoding_filtered_paths),
+        pending_batches: field(summary.pending_batches),
+    }
+}

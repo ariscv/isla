@@ -1383,6 +1383,7 @@ pub fn solve_state_main<'ir, B: BV>(
         });
     }
     let num_clauses = clause_set.len();
+    assert!(!samples.path_cache.enabled() || num_clauses == 1, "缓存一次只能保存或恢复一个 clause");
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
     let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
     let timeout_reporter = TimeoutReporter::new(timeout_report_config);
@@ -1481,6 +1482,7 @@ pub fn solve_state_main<'ir, B: BV>(
                 }
             },
         };
+        assert!(!samples.path_cache.enabled() || batches.len() == 1, "缓存一次只能保存或恢复一个探索批次");
         if batches.len() > 1 {
             log!(
                 log::SYM_EXEC,
@@ -1681,6 +1683,42 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 ) -> Result<BatchOutcome, ExecError> {
     use isla_lib::smt::checkpoint;
 
+    let mut cache = super::path_cache::Run::new(
+        &samples.path_cache,
+        instruction_name,
+        samples.fuzz.as_ref().map_or(std::path::Path::new("output"), |session| session.output()),
+    );
+    if let Some(directory) = &samples.path_cache.read {
+        let mut loaded = super::path_cache::load(
+            directory,
+            samples.path_cache.encoding.unwrap(),
+            samples.path_cache.crosscheck,
+            shared_state,
+            instruction_name,
+            &cache.stages,
+        );
+        super::path_cache::restore_target(&loaded.manifest, target);
+        let summary = super::path_cache::restored_summary(&loaded.manifest.errors);
+        let paths = std::mem::take(&mut loaded.paths);
+        cache.summary = serde_json::to_value(&loaded.manifest.errors).unwrap();
+        cache.loaded = Some(loaded);
+        super::fuzz::run(
+            samples.fuzz.as_ref().expect("缓存读入需要 fuzz 会话"),
+            paths,
+            shared_state,
+            target,
+            num_threads,
+            0.0,
+            cache,
+        );
+        return Ok(BatchOutcome {
+            items: Vec::new(),
+            summary,
+            diagnostics: Vec::new(),
+            error: None,
+            encdec_guard_rejects: 0,
+        });
+    }
     let state_regs = target.reg_list();
 
     let mut cfg = Config::new();
@@ -1883,7 +1921,10 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 ret_val,
                                 memory_events_chronological(solver.trace()).into_iter().cloned().collect(),
                             );
-                            if samples.resident.is_some() || samples.fuzz.is_some() {
+                            if samples.resident.is_some()
+                                || samples.fuzz.is_some()
+                                || samples.path_cache.write.is_some()
+                            {
                                 resident_paths.lock().unwrap().push(super::resident::ResidentPath {
                                     checkpoint: checkpoint(&mut solver),
                                     path: sample_path.clone(),
@@ -2636,26 +2677,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .collect();
     }
     let exploration_seconds = exploration_started.elapsed().as_secs_f64();
-    if let Some(session) = &samples.fuzz {
-        super::fuzz::run(
-            session,
-            resident_paths.into_inner().unwrap(),
-            shared_state,
-            target,
-            num_threads,
-            exploration_seconds,
-        );
-    } else if let Some(checker) = &samples.resident {
-        super::resident::run(
-            resident_paths.into_inner().unwrap(),
-            checker,
-            shared_state,
-            target,
-            num_threads,
-            exploration_seconds,
-            samples.resident_fast,
-        );
-    }
+    cache.stages.record(
+        "exploration",
+        exploration_seconds,
+        serde_json::json!({"paths":resident_paths.lock().unwrap().len()}),
+    );
     // collector 的引用不再使用后释放，随后才能取得 result 的唯一所有权。
 
     // 提取字符串结果
@@ -2706,6 +2732,47 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     state.summary.omitted_cases = collected_count - items.len();
     state.summary.model_query_timeouts = state.model_query_timeouts;
     state.summary.encoding_filtered_paths = state.encdec_guard_rejects;
+    cache.summary = state.summary.json();
+    if let Some(session) = &samples.fuzz {
+        super::fuzz::run(
+            session,
+            resident_paths.into_inner().unwrap(),
+            shared_state,
+            target,
+            num_threads,
+            exploration_seconds,
+            cache,
+        );
+    } else if samples.path_cache.write.is_some() {
+        let mut paths = resident_paths.into_inner().unwrap();
+        paths.sort_by_key(|p| p.signature);
+        let mut timing = super::path_cache::Timing::default();
+        let facts_started = std::time::Instant::now();
+        let facts = super::path_cache::analyze(&paths, &mut timing);
+        cache.stages.record("fast_facts", facts_started.elapsed().as_secs_f64(), serde_json::json!({"z3_replay_seconds":timing.facts_replay_seconds,"analysis_seconds":timing.facts_seconds}));
+        super::path_cache::save(
+            &samples.path_cache,
+            instruction_name,
+            &paths,
+            &facts,
+            shared_state,
+            target,
+            &cache.summary,
+            &super::path_cache::current_source(),
+            &mut timing,
+            &cache.stages,
+        );
+    } else if let Some(checker) = &samples.resident {
+        super::resident::run(
+            resident_paths.into_inner().unwrap(),
+            checker,
+            shared_state,
+            target,
+            num_threads,
+            exploration_seconds,
+            samples.resident_fast,
+        );
+    }
     Ok(BatchOutcome {
         items,
         summary: state.summary,

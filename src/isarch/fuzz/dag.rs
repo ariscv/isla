@@ -9,13 +9,16 @@ use isla_lib::{
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &SharedState<B>, output: &Path) {
+pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &SharedState<B>, output: &Path) -> f64 {
     let directory = output.join("dag");
     std::fs::create_dir(&directory).unwrap();
     let mut manifest = Vec::new();
     let mut guards = 0;
+    let mut replay_seconds = 0.0;
     for path in paths {
+        let started = std::time::Instant::now();
         let solver = Solver::from_checkpoint(context, path.checkpoint.clone());
+        replay_seconds += started.elapsed().as_secs_f64();
         let mut value = path.path.export_dag(&solver, shared, &path.records, path.signature);
         // 与 judged 的守卫坐标一致；进程内编号不进入确定性数据接口。
         value["schema_version"] = json!(2);
@@ -37,4 +40,5 @@ pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &Shar
         &output.join("dag-manifest.json"),
         &json!({"schema_version":2,"paths":paths.len(),"guards":guards,"reread_consistent":true,"entries":manifest}),
     );
+    replay_seconds
 }

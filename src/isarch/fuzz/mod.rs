@@ -37,6 +37,9 @@ pub struct Session {
     corpus: Vec<Sample>,
 }
 impl Session {
+    pub fn output(&self) -> &std::path::Path {
+        &self.options.output
+    }
     pub fn new(options: &Options) -> Result<Self, String> {
         let corpus = SampleChecker::load(&options.corpus, None)?.samples;
         if corpus.is_empty() {

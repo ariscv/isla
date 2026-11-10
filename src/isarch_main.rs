@@ -428,6 +428,7 @@ fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool
 
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
+    isarch::path_cache::Options::add_cli(&mut opts);
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
     opts.optopt("", "timeout", "超时时间，默认秒；支持 s/m/h 后缀", "<n[s|m|h]>");
@@ -758,6 +759,7 @@ fn isla_main() -> i32 {
             }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
             let sample_options = isarch::samples::SampleOptions {
+                path_cache: isarch::path_cache::Options::parse(&matches),
                 fuzz: fuzz_options,
                 check: matches.opt_str("check-samples").map(std::path::PathBuf::from),
                 limit: match matches.opt_str("check-samples-limit").map(|text| text.parse::<usize>()) {

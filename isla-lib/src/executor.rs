@@ -61,6 +61,7 @@ use crate::zencode;
 mod execution_limits;
 mod frame;
 mod merge_record;
+pub mod path_cache;
 mod path_timing;
 mod region_merge;
 mod region_summary;

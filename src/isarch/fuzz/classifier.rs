@@ -69,6 +69,7 @@ pub fn run<B: BV>(
     target: &dyn Target<B>,
     threads: usize,
     exploration_seconds: f64,
+    mut cache: crate::isarch::path_cache::Run<B>,
 ) {
     assert!(!paths.is_empty(), "fuzz 没有完成路径");
     assert!(threads > 0);
@@ -76,19 +77,58 @@ pub fn run<B: BV>(
     let options = &session.options;
     let output = &options.output;
     let index_start = Instant::now();
-    let facts = {
-        let mut config = Config::new();
-        config.set_param_value("model", "true");
-        let context = Context::new(config);
-        super::dag::export(&paths, &context, shared, output);
-        paths
-            .iter()
-            .map(|p| {
-                let mut solver = Solver::from_checkpoint(&context, p.checkpoint.clone());
-                FastFacts::analyze(&p.path, &mut solver, &p.records).expect("路径静态事实分析失败")
-            })
-            .collect::<Vec<_>>()
+    let mut cache_timing = cache.loaded.as_mut().map(|loaded| std::mem::take(&mut loaded.timing)).unwrap_or_default();
+    cache_timing.paths = paths.len();
+    if cache.loaded.is_none() || cache.options.export_dag {
+        let context = Context::new(Config::new());
+        let started = Instant::now();
+        cache_timing.dag_replay_seconds = super::dag::export(&paths, &context, shared, output);
+        cache_timing.dag_seconds = started.elapsed().as_secs_f64() - cache_timing.dag_replay_seconds;
+        cache.stages.record("dag", started.elapsed().as_secs_f64(), json!({"paths":paths.len(),"z3_replay_seconds":cache_timing.dag_replay_seconds,"export_seconds":cache_timing.dag_seconds}));
+    }
+    let facts_started = Instant::now();
+    let facts = if let Some(loaded) = &cache.loaded {
+        assert_eq!(
+            paths.iter().map(|p| p.signature).collect::<Vec<_>>(),
+            loaded.manifest.path_signatures,
+            "缓存路径顺序变化"
+        );
+        if cache.options.recompute_facts {
+            let recomputed = crate::isarch::path_cache::analyze(&paths, &mut cache_timing);
+            assert_eq!(
+                loaded.facts,
+                recomputed.iter().cloned().map(Into::into).collect::<Vec<isla_lib::executor::path_cache::Facts>>(),
+                "缓存静态事实重新分析不一致"
+            );
+        }
+        loaded.facts.iter().cloned().map(Into::into).collect::<Vec<FastFacts>>()
+    } else {
+        crate::isarch::path_cache::analyze(&paths, &mut cache_timing)
     };
+    cache.stages.record("fast_facts", facts_started.elapsed().as_secs_f64(), json!({"paths":paths.len(),"recomputed":cache.loaded.is_none() || cache.options.recompute_facts,"z3_replay_seconds":cache_timing.facts_replay_seconds,"analysis_seconds":cache_timing.facts_seconds}));
+    if cache.options.enabled() {
+        let source = crate::isarch::path_cache::current_source();
+        if cache.options.write.is_some() {
+            crate::isarch::path_cache::save(
+                &cache.options,
+                &cache.clause,
+                &paths,
+                &facts,
+                shared,
+                target,
+                &cache.summary,
+                &source,
+                &mut cache_timing,
+                &cache.stages,
+            );
+        }
+        crate::isarch::path_cache::write_provenance(
+            output,
+            cache.loaded.as_ref().map(|l| &l.manifest),
+            &source,
+            &cache.options,
+        );
+    }
     write_json(
         &output.join("path-index.json"),
         &paths.iter().zip(&facts).map(|(p, f)| json!({"path_signature":p.signature,"facts":f})).collect::<Vec<_>>(),
@@ -143,6 +183,8 @@ pub fn run<B: BV>(
             ready_rx.recv().expect("恢复线程异常退出");
         }
         let restore_seconds = restore.elapsed().as_secs_f64();
+        cache_timing.replay_seconds = restore_seconds;
+        cache.stages.record("checkpoint_restore", restore_seconds, json!({"threads":threads,"paths":paths.len()}));
         let mut executor = ModelExecutor { input: input_tx, output: output_rx, pending: 0 };
         let started = Instant::now();
         let mut corpus_rows = classify(&mut executor, &session.corpus, true, options.batch_size);
@@ -156,7 +198,16 @@ pub fn run<B: BV>(
             &output.join("corpus-judged.jsonl"),
             &corpus_rows.iter().map(|r| r.as_ref().unwrap()).collect::<Vec<_>>(),
         );
+        cache.stages.record(
+            "corpus_certification",
+            started.elapsed().as_secs_f64(),
+            json!({"entries":session.corpus.len(),"certified":true}),
+        );
         let mut feedback = LogFeedback::default();
+        cache_timing.to_campaign_seconds = cache.started.elapsed().as_secs_f64();
+        write_json(&output.join("path-cache-timing.json"), &cache_timing);
+        eprintln!("[PATH_CACHE_READY] {}", serde_json::to_string(&cache_timing).unwrap());
+        cache.stages.record("campaign_start", 0.0, json!({"to_campaign_seconds":cache_timing.to_campaign_seconds}));
         let started = Instant::now();
         let (samples, records, mut judged, campaign_timing) = if matches!(options.mode, Mode::Campaign) {
             super::campaign::run(
@@ -192,6 +243,11 @@ pub fn run<B: BV>(
         write_json(
             &output.join("timing.json"),
             &json!({"threads":threads,"exploration_seconds":exploration_seconds,"index_seconds":index_seconds,"restore_seconds":restore_seconds,"reconfirm_seconds":reconfirm_seconds,"judge_seconds":judge_seconds,"loop_seconds":started.elapsed().as_secs_f64(),"campaign":campaign_timing}),
+        );
+        cache.stages.record(
+            "campaign_end",
+            started.elapsed().as_secs_f64(),
+            json!({"mutants":samples.len(),"corpus":session.corpus.len()}),
         );
         eprintln!(
             "[FUZZ_COMPLETE] {}",
