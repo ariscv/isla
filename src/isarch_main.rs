@@ -585,11 +585,6 @@ fn isla_main() -> i32 {
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
-    // 通用 ISAConfig 保留默认关闭；isarch 独立选择默认启用并尊重显式 false。
-    let config_contents = fs::read_to_string(matches.opt_str("config").expect("通用参数解析已要求配置文件"))
-        .expect("读取已解析的 ISA 配置失败");
-    let config_value: toml::Value = config_contents.parse().expect("ISA 配置已通过 TOML 解析");
-    isa_config.initial_state_rv64_domain = isarch::platform::rv64_domain_enabled(&config_value);
     isarch::platform::configure(&mut arch, &symtab, &mut isa_config);
 
     if matches!(subcommand, Subcommand::SolveState { .. } | Subcommand::Fuzz { .. }) {
@@ -839,7 +834,6 @@ fn isla_main() -> i32 {
                 64 => {
                     let mut target = RV64::default();
                     target.initial_state = isa_config.initial_state.clone();
-                    target.initial_state_rv64_domain = isa_config.initial_state_rv64_domain;
                     target.pmp_symbolic = pmp_symbolic;
                     if pma_size_symbolic {
                         target.symbolic_pma_regions =

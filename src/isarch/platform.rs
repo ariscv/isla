@@ -3,11 +3,6 @@ use isla_lib::bitvector::BV;
 use isla_lib::config::ISAConfig;
 use isla_lib::ir::{Def, Name, Symtab};
 
-/// isarch 默认使用架构合法域，配置中的显式 false 仍然有效。
-pub fn rv64_domain_enabled(config: &toml::Value) -> bool {
-    config.get("initial_state_rv64_domain").map_or(true, |value| value.as_bool().expect("ISA 配置已验证布尔类型"))
-}
-
 pub fn configure<B: BV>(defs: &mut [Def<Name, B>], symtab: &Symtab, config: &mut ISAConfig<B>) {
     let Some(name) = symtab.get("zget_16_random_bits") else {
         return;
@@ -77,15 +72,6 @@ stride = "16"
 "#;
         let config = ISAConfig::parse(text, None, &symtab, &types).unwrap();
         (symtab, defs, config)
-    }
-
-    #[test]
-    fn isarch_rv64_domain_default_and_explicit_override() {
-        for (text, expected) in
-            [("", true), ("initial_state_rv64_domain=true", true), ("initial_state_rv64_domain=false", false)]
-        {
-            assert_eq!(rv64_domain_enabled(&text.parse().unwrap()), expected);
-        }
     }
 
     #[test]

@@ -6,16 +6,14 @@ use isla_lib::config::{
     PmpMode, SymbolicRegisterConfig,
 };
 use isla_lib::error::ExecError;
-use isla_lib::executor::{execute_ir_function, Run};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::{Bindings, IRTypeInfo, Name, SharedState, Symtab, Ty, UVal, Val};
 use isla_lib::primop_util::{smt_value, symbolic};
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::Model;
-use isla_lib::smt::{smtlib, EnumId, EnumMember, Event, SmtResult, Solver, Sym};
+use isla_lib::smt::{smtlib, EnumId, EnumMember, Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
-use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct PreStateCtx<B: BV> {
@@ -477,7 +475,7 @@ where
             }
         }
 
-        // 通用符号化完成后，再由具体 Target 为 pre-state 补充架构特有的合法性约束，例如向量 vtype/vl 配对。
+        // 保留目标的通用注入钩子；配置约束在后续全部初态注入完成后施加。
         self.constrain_pre_state(lets, shared_state, solver)
     }
 
@@ -491,8 +489,13 @@ where
         Ok(())
     }
 
-    fn domain_manifest(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([("status".to_string(), "not-applicable".to_string())])
+    fn domain_manifest(&self, shared_state: &SharedState<B>) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("status".to_string(), "configured".to_string()),
+            ("constraint-source".to_string(), "ISA configuration".to_string()),
+            ("initial-constraint-count".to_string(), shared_state.initial_constraints.len().to_string()),
+            ("symbolic-register-count".to_string(), self.symbolic_csrs().len().to_string()),
+        ])
     }
 
     fn solve_pre_state<'state>(
@@ -942,84 +945,13 @@ impl<B: BV> RISCV<B> for RV32<B> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Rv64Domain {
-    supports_s: bool,
-    supports_u: bool,
-    supports_h: bool,
-}
-
-impl Rv64Domain {
-    fn mpp_values(&self) -> Vec<u64> {
-        // 现行 Sail 的 reset 将 MPP 初始化为 0，即使 U 未实现也不能删去该模型状态。
-        let mut allowed = vec![0];
-        if self.supports_s {
-            allowed.push(1);
-        }
-        allowed.push(3);
-        allowed
-    }
-
-    fn probe_hart_support<'ir, B: BV>(
-        extension: &str,
-        lets: &Bindings<'ir, B>,
-        shared_state: &SharedState<'ir, B>,
-    ) -> bool {
-        let member = EnumMember::from_name(shared_state.symtab.lookup(extension), shared_state);
-        let outcomes: Mutex<Vec<Result<bool, String>>> = Mutex::new(Vec::new());
-        execute_ir_function(
-            "zhartSupports",
-            &[Val::Enum(member)],
-            shared_state,
-            &RegisterBindings::new(),
-            lets,
-            &outcomes,
-            &|_, _, execution, _, mut solver, outcomes| {
-                let result = match execution {
-                    Ok((Run::Finished(Val::Bool(value)), frame)) => {
-                        if frame.forks() != 0 || frame.has_sampled_branch() {
-                            Err(format!("zhartSupports({}) 出现 fork 或采样", extension))
-                        } else if solver.trace().to_vec().into_iter().any(|event| {
-                            matches!(
-                                event,
-                                Event::ReadReg(..)
-                                    | Event::WriteReg(..)
-                                    | Event::ReadMem { .. }
-                                    | Event::WriteMem { .. }
-                                    | Event::Abstract { .. }
-                            )
-                        }) {
-                            Err(format!("zhartSupports({}) 依赖寄存器、内存或抽象事件", extension))
-                        } else {
-                            match solver.check_sat(SourceLoc::unknown()) {
-                                SmtResult::Sat => Ok(value),
-                                other => Err(format!("zhartSupports({}) 最终 SMT 状态为 {:?}", extension, other)),
-                            }
-                        }
-                    }
-                    Ok((_, _)) => Err(format!("zhartSupports({}) 非具体 Bool 正常结束", extension)),
-                    Err((error, _)) => Err(format!("zhartSupports({}) 执行失败: {}", extension, error)),
-                };
-                outcomes.lock().unwrap().push(result);
-            },
-        );
-        let mut outcomes = outcomes.into_inner().unwrap();
-        if outcomes.len() != 1 {
-            panic!("防御性编程：zhartSupports({}) 应有唯一终态，实际 {}", extension, outcomes.len());
-        }
-        outcomes.pop().unwrap().unwrap_or_else(|error| panic!("防御性编程：{}", error))
-    }
-}
-
 pub struct RV64<B: BV> {
     pub pmp_symbolic: bool,
     pub symbolic_pma_regions: Vec<PmaRegionConfig>,
     pub symbolic_pma_sizes: Vec<(String, Sym)>,
     pub symbolic_csrs: Vec<SymbolicRegisterConfig>,
     pub pre_state: PreStateCtx<B>,
-    domain: Option<Rv64Domain>,
     pub initial_state: Vec<InitialRegisterConfig>,
-    pub initial_state_rv64_domain: bool,
 }
 
 impl<B: BV> Default for RV64<B> {
@@ -1030,9 +962,7 @@ impl<B: BV> Default for RV64<B> {
             symbolic_pma_sizes: Vec::new(),
             symbolic_csrs: Vec::new(),
             pre_state: PreStateCtx::new(),
-            domain: None,
             initial_state: Vec::new(),
-            initial_state_rv64_domain: true,
         }
     }
 }
@@ -1088,209 +1018,6 @@ impl<B: BV> Target<B> for RV64<B> {
             && digits.len() <= 2
             && digits.bytes().all(|byte| byte.is_ascii_digit())
             && digits.parse::<u32>().map(|index| index < 32).unwrap_or(false)
-    }
-    fn constrain_pre_state<'ir>(
-        &mut self,
-        lets: &Bindings<'ir, B>,
-        shared_state: &SharedState<'ir, B>,
-        solver: &mut Solver<B>,
-    ) -> Result<(), ExecError> {
-        let symtab = &shared_state.symtab;
-        let privilege = self.pre_state.get_from_str("cur_privilege", symtab);
-        let mstatus = self.pre_state.get_from_str("mstatus", symtab);
-        match (privilege, mstatus) {
-            _ if !self.initial_state_rv64_domain => self.domain = None,
-            (Some(_), Some(_)) => {
-                if integer_let_from_lets(lets, symtab, "xlen") != 64 {
-                    panic!("防御性编程：RV64 pre-state 的 let xlen 不是 64");
-                }
-                let domain = Rv64Domain {
-                    supports_s: Rv64Domain::probe_hart_support("zExt_S", lets, shared_state),
-                    supports_u: Rv64Domain::probe_hart_support("zExt_U", lets, shared_state),
-                    supports_h: Rv64Domain::probe_hart_support("zExt_H", lets, shared_state),
-                };
-                self.domain = Some(domain);
-                let privilege_exp = smt_value(privilege.unwrap(), SourceLoc::unknown())?;
-                let mut allowed = vec!["zMachine"];
-                if domain.supports_s {
-                    allowed.push("zSupervisor");
-                }
-                if domain.supports_u {
-                    allowed.push("zUser");
-                }
-                if domain.supports_h && domain.supports_s {
-                    allowed.push("zVirtualSupervisor");
-                }
-                if domain.supports_h && domain.supports_u {
-                    allowed.push("zVirtualUser");
-                }
-                let allowed_exp = allowed
-                    .into_iter()
-                    .map(|member_name| {
-                        let member = EnumMember::from_name(symtab.lookup(member_name), shared_state);
-                        smtlib::Exp::Eq(Box::new(privilege_exp.clone()), Box::new(smtlib::Exp::Enum(member)))
-                    })
-                    .reduce(|lhs, rhs| smtlib::Exp::Or(Box::new(lhs), Box::new(rhs)))
-                    .unwrap();
-                solver.assert(allowed_exp);
-
-                let mut bits = mstatus.unwrap();
-                let mstatus_exp = loop {
-                    match bits {
-                        Val::Struct(fields) => {
-                            if fields.len() != 1 {
-                                panic!("防御性编程：mstatus 不是单字段 bitfield struct");
-                            }
-                            bits = fields.values().next().unwrap();
-                        }
-                        _ => break smt_value(bits, SourceLoc::unknown())?,
-                    }
-                };
-                for (high, low, enabled) in [(35, 34, domain.supports_s), (33, 32, domain.supports_u)] {
-                    solver.assert_eq(
-                        smtlib::Exp::Extract(high, low, Box::new(mstatus_exp.clone())),
-                        smtlib::bits64(if enabled { 2 } else { 0 }, 2),
-                    );
-                }
-                // 排除保留编码与未实现的 S 模式，同时保留现行 Sail 的 MPP=0 reset 初态。
-                let mpp_exp = smtlib::Exp::Extract(12, 11, Box::new(mstatus_exp));
-                let allowed_mpp = domain
-                    .mpp_values()
-                    .into_iter()
-                    .map(|value| smtlib::Exp::Eq(Box::new(mpp_exp.clone()), Box::new(smtlib::bits64(value, 2))))
-                    .reduce(|lhs, rhs| smtlib::Exp::Or(Box::new(lhs), Box::new(rhs)))
-                    .unwrap();
-                solver.assert(allowed_mpp);
-            }
-            (None, None) => self.domain = None,
-            _ => panic!("防御性编程：RV64 cur_privilege 与 mstatus 必须同时存在于 pre-state"),
-        }
-
-        // RV64 的向量状态要求 vtype 与 vl 成对合法，因此从已符号化的 pre-state 中取出二者。
-        let pre_state = self.pre_state();
-        let (Some(vtype), Some(vl)) = (pre_state.get_from_str("vtype", symtab), pre_state.get_from_str("vl", symtab))
-        else {
-            return Ok(());
-        };
-
-        // Sail 可能用单字段结构包装寄存器值；逐层取出实际位向量后再构造 SMT 表达式。
-        let mut vtype_value = vtype;
-        let vtype_exp = loop {
-            match vtype_value {
-                Val::Struct(fields) => {
-                    if fields.len() != 1 {
-                        panic!("防御性编程：向量上下文寄存器 vtype 的结构字段数为 {}，无法提取位向量", fields.len());
-                    }
-                    vtype_value = fields.values().next().expect("防御性编程：非空结构缺少字段值");
-                }
-                _ => break smt_value(vtype_value, SourceLoc::unknown())?,
-            }
-        };
-        let mut vl_value = vl;
-        let vl_exp = loop {
-            match vl_value {
-                Val::Struct(fields) => {
-                    if fields.len() != 1 {
-                        panic!("防御性编程：向量上下文寄存器 vl 的结构字段数为 {}，无法提取位向量", fields.len());
-                    }
-                    vl_value = fields.values().next().expect("防御性编程：非空结构缺少字段值");
-                }
-                _ => break smt_value(vl_value, SourceLoc::unknown())?,
-            }
-        };
-
-        // 枚举 RVV 允许的 SEW/LMUL 编码，先按 ELEN 排除会进入 vill 的组合，再根据 VLEN 计算 VLMAX。
-        let vlen_bits = u64::from(
-            u32::try_from(integer_let_from_lets(lets, symtab, "vlen"))
-                .unwrap_or_else(|err| panic!("防御性编程：let vlen 不能作为 bitvector 宽度: {}", err)),
-        );
-        let elen_bits = u64::try_from(integer_let_from_lets(lets, symtab, "elen"))
-            .unwrap_or_else(|err| panic!("防御性编程：let elen 不是有效的位宽: {}", err));
-        let mut bounds = Vec::new();
-        for vsew in 0_u64..=3 {
-            let sew = 1_u64 << (vsew + 3);
-            for vlmul in [0_u64, 1, 2, 3, 5, 6, 7] {
-                let (lmul_numerator, lmul_denominator) = match vlmul {
-                    0..=3 => (1_u64 << vlmul, 1),
-                    5 => (1, 8),
-                    6 => (1, 4),
-                    7 => (1, 2),
-                    _ => panic!("防御性编程：非法的 LMUL 编码 {}", vlmul),
-                };
-                // Sail/RVV 要求 SEW <= LMUL * ELEN；交叉相乘以精确处理分数 LMUL。
-                let sew_scaled = u128::from(sew) * u128::from(lmul_denominator);
-                let elen_scaled = u128::from(elen_bits) * u128::from(lmul_numerator);
-                if sew_scaled > elen_scaled {
-                    continue;
-                }
-                let numerator = vlen_bits * lmul_numerator;
-                let denominator = sew * lmul_denominator;
-                if numerator >= denominator {
-                    bounds.push(((vsew << 3) | vlmul, numerator / denominator));
-                }
-            }
-        }
-
-        // 普通状态要求 vtype 编码合法且 vl 不超过对应 VLMAX。
-        let legal_vtype = bounds
-            .into_iter()
-            .map(|(vtype_low_bits, vlmax)| {
-                smtlib::Exp::And(
-                    Box::new(smtlib::Exp::Eq(
-                        Box::new(smtlib::Exp::Bvand(Box::new(vtype_exp.clone()), Box::new(smtlib::bits64(0x3f, 64)))),
-                        Box::new(smtlib::bits64(vtype_low_bits, 64)),
-                    )),
-                    Box::new(smtlib::Exp::Bvule(Box::new(vl_exp.clone()), Box::new(smtlib::bits64(vlmax, 64)))),
-                )
-            })
-            .reduce(|lhs, rhs| smtlib::Exp::Or(Box::new(lhs), Box::new(rhs)))
-            .expect("防御性编程：当前 VLEN 不支持任何合法的 SEW/LMUL 组合");
-        let legal_context = smtlib::Exp::And(
-            Box::new(smtlib::Exp::Bvule(Box::new(vtype_exp.clone()), Box::new(smtlib::bits64(0xff, 64)))),
-            Box::new(legal_vtype),
-        );
-        // vill 状态只允许 vill 位置位，其余位为零，并要求 vl 同时为零。
-        let vill_context = smtlib::Exp::And(
-            Box::new(smtlib::Exp::Eq(Box::new(vtype_exp), Box::new(smtlib::bits64(1_u64 << 63, 64)))),
-            Box::new(smtlib::Exp::Eq(Box::new(vl_exp), Box::new(smtlib::bits64(0, 64)))),
-        );
-        // 将两类合法状态的并集加入求解器，排除当前执行路径上的非法向量 pre-state。
-        solver.assert(smtlib::Exp::Or(Box::new(legal_context), Box::new(vill_context)));
-
-        Ok(())
-    }
-    fn domain_manifest(&self) -> BTreeMap<String, String> {
-        let Some(domain) = self.domain else {
-            return BTreeMap::from([("status".to_string(), "not-applicable".to_string())]);
-        };
-        let mut allowed = vec!["Machine"];
-        if domain.supports_s {
-            allowed.push("Supervisor");
-        }
-        if domain.supports_u {
-            allowed.push("User");
-        }
-        if domain.supports_h && domain.supports_s {
-            allowed.push("VirtualSupervisor");
-        }
-        if domain.supports_h && domain.supports_u {
-            allowed.push("VirtualUser");
-        }
-        BTreeMap::from([
-            ("status".to_string(), "validated".to_string()),
-            ("xlen".to_string(), "64".to_string()),
-            ("hart-supports-S".to_string(), domain.supports_s.to_string()),
-            ("hart-supports-U".to_string(), domain.supports_u.to_string()),
-            ("hart-supports-H".to_string(), domain.supports_h.to_string()),
-            ("allowed-privileges".to_string(), allowed.join(",")),
-            ("mstatus-sxl".to_string(), if domain.supports_s { "2" } else { "0" }.to_string()),
-            ("mstatus-uxl".to_string(), if domain.supports_u { "2" } else { "0" }.to_string()),
-            ("mstatus-mpp".to_string(), domain.mpp_values().iter().map(u64::to_string).collect::<Vec<_>>().join(",")),
-            ("mstatus-mpp-reset-exception".to_string(), if domain.supports_u { "none" } else { "0" }.to_string()),
-            ("reserved-mpp".to_string(), "2-excluded".to_string()),
-            ("capability-source".to_string(), "zhartSupports".to_string()),
-            ("rule-source".to_string(), "sail-riscv/model/core/sys_regs.sail reset/legalize".to_string()),
-        ])
     }
     fn pre_state(&self) -> &PreStateCtx<B> {
         &self.pre_state
@@ -1630,7 +1357,6 @@ fn insert_symbolic_register<'ir, B: BV>(
 mod tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
-    use isla_lib::ir::{Exp, Instr, Loc, Op, RETURN};
     use isla_lib::smt::{Config, Context, SmtResult};
 
     fn rv64() -> RV64<B64> {
@@ -1640,240 +1366,6 @@ mod tests {
         RV32::default()
     }
 
-    fn rv64_domain_smt_result(
-        supports_s: bool,
-        supports_u: bool,
-        supports_h: bool,
-        privilege_name: &str,
-        mstatus_bits: u64,
-    ) -> (SmtResult, BTreeMap<String, String>) {
-        rv64_domain_smt_result_with_probe_error(
-            supports_s,
-            supports_u,
-            supports_h,
-            privilege_name,
-            mstatus_bits,
-            false,
-            false,
-        )
-    }
-
-    fn rv64_domain_smt_result_with_probe_error(
-        supports_s: bool,
-        supports_u: bool,
-        supports_h: bool,
-        privilege_name: &str,
-        mstatus_bits: u64,
-        probe_reads_register: bool,
-        probe_returns_symbolic: bool,
-    ) -> (SmtResult, BTreeMap<String, String>) {
-        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
-        let context = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&context);
-        let texts: Vec<String> = [
-            "zhartSupports",
-            "zextension",
-            "zExt_S",
-            "zExt_U",
-            "zExt_H",
-            "zextension_arg",
-            "zPrivilege",
-            "zUser",
-            "zVirtualUser",
-            "zSupervisor",
-            "zVirtualSupervisor",
-            "zMachine",
-            "zcur_privilege",
-            "zmstatus",
-            "zMstatus",
-            "zbits",
-            "zxlen",
-            "zprobe_register",
-        ]
-        .iter()
-        .map(|text| text.to_string())
-        .collect();
-        let mut symtab = Symtab::new();
-        let names: Vec<Name> = texts.iter().map(|text| symtab.intern(text)).collect();
-        let name = |text: &str| {
-            let index = texts.iter().position(|candidate| candidate == text).unwrap();
-            names[index]
-        };
-        let extension_ty = Ty::Enum(name("zextension"));
-        let return_ty = Ty::Bool;
-        let support_exp = [(supports_s, "zExt_S"), (supports_u, "zExt_U"), (supports_h, "zExt_H")]
-            .into_iter()
-            .filter_map(|(supported, member)| {
-                supported.then(|| Exp::Call(Op::Eq, vec![Exp::Id(name("zextension_arg")), Exp::Id(name(member))]))
-            })
-            .reduce(|lhs, rhs| Exp::Call(Op::Or, vec![lhs, rhs]))
-            .unwrap_or(Exp::Bool(false));
-        let body = vec![
-            Instr::Copy(
-                Loc::Id(RETURN),
-                if probe_reads_register {
-                    Exp::Id(name("zprobe_register"))
-                } else if probe_returns_symbolic {
-                    Exp::Undefined(Ty::Bool)
-                } else {
-                    support_exp
-                },
-                SourceLoc::unknown(),
-            ),
-            Instr::End,
-        ];
-        let mut shared_state = SharedState::empty(symtab);
-        for (enum_name, members) in [
-            ("zextension", vec!["zExt_S", "zExt_U", "zExt_H"]),
-            ("zPrivilege", vec!["zUser", "zVirtualUser", "zSupervisor", "zVirtualSupervisor", "zMachine"]),
-        ] {
-            let enum_id = name(enum_name);
-            let enum_members: Vec<Name> = members.iter().map(|member| name(member)).collect();
-            for (index, member) in enum_members.iter().enumerate() {
-                shared_state.type_info.enum_members.insert(*member, (index, enum_members.len(), enum_id));
-            }
-            shared_state.type_info.enums.insert(enum_id, enum_members);
-        }
-        shared_state
-            .functions
-            .insert(name("zhartSupports"), (vec![(name("zextension_arg"), &extension_ty)], &return_ty, &body));
-        shared_state.registers.insert(name("zcur_privilege"), Ty::Enum(name("zPrivilege")));
-        shared_state.registers.insert(name("zmstatus"), Ty::Struct(name("zMstatus")));
-        shared_state.registers.insert(name("zprobe_register"), Ty::Bool);
-        shared_state.type_info.structs.insert(name("zMstatus"), BTreeMap::from([(name("zbits"), Ty::Bits(64))]));
-        let mut regs = RegisterBindings::new();
-        let privilege_enum = solver.get_enum(name("zPrivilege"), 5);
-        let privilege_symbol = solver.declare_const(smtlib::Ty::Enum(privilege_enum), SourceLoc::unknown());
-        let mstatus_symbol = solver.declare_const(smtlib::Ty::BitVec(64), SourceLoc::unknown());
-        let mut mstatus_fields = ahash::HashMap::default();
-        mstatus_fields.insert(name("zbits"), Val::Symbolic(mstatus_symbol));
-        regs.insert(name("zcur_privilege"), false, UVal::Init(Val::Symbolic(privilege_symbol)));
-        regs.insert(name("zmstatus"), false, UVal::Init(Val::Struct(mstatus_fields)));
-        let mut lets = Bindings::default();
-        lets.insert(name("zxlen"), UVal::Init(Val::I64(64)));
-        let mut target = rv64();
-        target.initial_state_rv64_domain = true;
-
-        target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver, &HashMap::new()).unwrap();
-        let privilege = match target.pre_state().get(&name("zcur_privilege")).unwrap() {
-            Val::Symbolic(symbol) => *symbol,
-            value => panic!("防御性编程：privilege 未符号化: {:?}", value),
-        };
-        let mstatus = match target.pre_state().get(&name("zmstatus")).unwrap() {
-            Val::Struct(fields) => match fields.get(&name("zbits")).unwrap() {
-                Val::Symbolic(symbol) => *symbol,
-                value => panic!("防御性编程：mstatus.bits 未符号化: {:?}", value),
-            },
-            value => panic!("防御性编程：mstatus 未保持 struct: {:?}", value),
-        };
-        let enum_member = EnumMember::from_name(name(privilege_name), &shared_state);
-        solver.assert_eq(smtlib::Exp::Var(privilege), smtlib::Exp::Enum(enum_member));
-        solver.assert_eq(smtlib::Exp::Var(mstatus), smtlib::bits64(mstatus_bits, 64));
-        (solver.check_sat(SourceLoc::unknown()), target.domain_manifest())
-    }
-
-    #[test]
-    fn rv64_domain_allows_real_modes_and_rejects_virtual_modes() {
-        assert!(RV64::<B64>::default().initial_state_rv64_domain);
-        let mstatus = (2_u64 << 34) | (2_u64 << 32);
-        for privilege in ["zMachine", "zSupervisor", "zUser"] {
-            assert_eq!(rv64_domain_smt_result(true, true, false, privilege, mstatus).0, SmtResult::Sat);
-        }
-        for privilege in ["zVirtualSupervisor", "zVirtualUser"] {
-            assert_eq!(rv64_domain_smt_result(true, true, false, privilege, mstatus).0, SmtResult::Unsat);
-        }
-    }
-
-    #[test]
-    fn rv64_domain_keeps_fs_vs_runtime_variation_and_rejects_bad_xlen_fields() {
-        let xlen_fields = (2_u64 << 34) | (2_u64 << 32);
-        for runtime_bits in [0_u64, 1_u64 << 13, 3_u64 << 13, 1_u64 << 9, 3_u64 << 9] {
-            assert_eq!(
-                rv64_domain_smt_result(true, true, false, "zMachine", xlen_fields | runtime_bits).0,
-                SmtResult::Sat
-            );
-        }
-        assert_eq!(rv64_domain_smt_result(true, true, false, "zMachine", 0).0, SmtResult::Unsat);
-    }
-
-    #[test]
-    fn rv64_domain_excludes_only_reserved_mpp_encoding() {
-        let xlen_fields = (2_u64 << 34) | (2_u64 << 32);
-        for mpp in [0_u64, 1_u64, 3_u64] {
-            assert_eq!(
-                rv64_domain_smt_result(true, true, false, "zMachine", xlen_fields | (mpp << 11)).0,
-                SmtResult::Sat
-            );
-        }
-        assert_eq!(
-            rv64_domain_smt_result(true, true, false, "zMachine", xlen_fields | (2_u64 << 11)).0,
-            SmtResult::Unsat
-        );
-        assert_eq!(
-            rv64_domain_smt_result(true, true, false, "zMachine", xlen_fields | (3_u64 << 11) | (3_u64 << 13)).0,
-            SmtResult::Sat
-        );
-    }
-
-    #[test]
-    fn rv64_mpp_domain_matches_hart_capabilities_and_manifest() {
-        for supports_s in [false, true] {
-            for supports_u in [false, true] {
-                let xlen_fields =
-                    (if supports_s { 2_u64 << 34 } else { 0 }) | (if supports_u { 2_u64 << 32 } else { 0 });
-                let expected_mpp: Vec<u64> = [0, 1, 3]
-                    .into_iter()
-                    .filter(|mpp| match mpp {
-                        0 => true,
-                        1 => supports_s,
-                        3 => true,
-                        _ => unreachable!(),
-                    })
-                    .collect();
-                let expected_manifest = expected_mpp.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-                for mpp in 0..4 {
-                    let (actual, manifest) =
-                        rv64_domain_smt_result(supports_s, supports_u, false, "zMachine", xlen_fields | (mpp << 11));
-                    assert_eq!(
-                        actual,
-                        if expected_mpp.contains(&mpp) { SmtResult::Sat } else { SmtResult::Unsat },
-                        "S={supports_s}, U={supports_u}, MPP={mpp}"
-                    );
-                    assert_eq!(manifest["mstatus-mpp"], expected_manifest);
-                    assert_eq!(manifest["mstatus-mpp-reset-exception"], if supports_u { "none" } else { "0" });
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rv64_domain_respects_absent_s_and_u_capabilities() {
-        // 现行 Sail 从零初始化 mstatus，无 U 时仍存在 MPP=0 的 reset 初态。
-        let machine_mpp = 0;
-        let (result, manifest) = rv64_domain_smt_result(false, false, false, "zMachine", machine_mpp);
-        assert_eq!(result, SmtResult::Sat);
-        assert_eq!(manifest["hart-supports-S"], "false");
-        assert_eq!(manifest["hart-supports-U"], "false");
-        assert_eq!(manifest["allowed-privileges"], "Machine");
-        assert_eq!(rv64_domain_smt_result(false, false, false, "zSupervisor", machine_mpp).0, SmtResult::Unsat);
-        assert_eq!(rv64_domain_smt_result(false, false, false, "zUser", machine_mpp).0, SmtResult::Unsat);
-        assert_eq!(
-            rv64_domain_smt_result(false, false, false, "zMachine", (2_u64 << 34) | machine_mpp).0,
-            SmtResult::Unsat
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "zhartSupports")]
-    fn rv64_domain_rejects_capability_probe_with_register_dependency() {
-        rv64_domain_smt_result_with_probe_error(true, true, false, "zMachine", 0, true, false);
-    }
-
-    #[test]
-    #[should_panic(expected = "非具体 Bool")]
-    fn rv64_domain_rejects_symbolic_capability_result() {
-        rv64_domain_smt_result_with_probe_error(true, true, false, "zMachine", 0, false, true);
-    }
     #[test]
     fn pte_new_and_extract() {
         let pte = RiscvPte::new(0x1234, 0xF);
@@ -2359,6 +1851,11 @@ mod tests {
         let mut target = rv64();
 
         target.setup_pre_state(&mut regs, &lets, &shared_state, &mut solver, &HashMap::new()).unwrap();
+        let config: toml::Value = include_str!("../../configs/riscv64_difftest.toml").parse().unwrap();
+        let text = config["constraints"]["initial"][3].as_str().unwrap().replace("vtype.bits", "vtype");
+        let constraint = isla_lib::smt_parser::ExpParser::new().parse(&text).unwrap();
+        regs.apply_constraints(&[constraint], &shared_state, &mut solver, SourceLoc::unknown()).unwrap();
+
         let vtype = match target.pre_state().get(&vtype_name).unwrap() {
             Val::Symbolic(sym) => *sym,
             value => panic!("防御性编程：vtype 未被符号化: {:?}", value),
@@ -3260,7 +2757,7 @@ mod tests {
 mod initial_state_tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
-    use isla_lib::smt::{Config, Context};
+    use isla_lib::smt::{Config, Context, SmtResult};
 
     #[test]
     fn initial_state_and_symbolic_csr_share_the_same_fcsr_value() {
@@ -3314,8 +2811,6 @@ mod initial_state_tests {
             shared.registers.insert(name, Ty::Struct(wrapper));
             shared.type_info.structs.insert(wrapper, BTreeMap::from([(bits, Ty::Bits(64))]));
             let mut target = RV64::<B64>::default();
-            // 此夹具只有 mstatus，单独验证位约束，不提供架构初态域。
-            target.initial_state_rv64_domain = false;
             target.initial_state = vec![InitialRegisterConfig {
                 name: "mstatus".into(),
                 fields: vec![(Some((10, 9)), Some(3)), (Some((14, 13)), None), (Some((12, 11)), None)],
@@ -3421,7 +2916,7 @@ mod initial_state_tests {
 mod symbolic_enum_tests {
     use super::*;
     use isla_lib::bitvector::b64::B64;
-    use isla_lib::smt::{Config, Context};
+    use isla_lib::smt::{Config, Context, SmtResult};
 
     #[test]
     fn symbolic_enum_allowed_reuses_prestate_and_excludes_other_members() {
@@ -3446,8 +2941,6 @@ mod symbolic_enum_tests {
             let context = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&context);
             let mut target = RV64::<B64>::default();
-            // 此夹具只有特权枚举，单独验证枚举约束，不提供架构初态域。
-            target.initial_state_rv64_domain = false;
             target.symbolic_csrs = vec![SymbolicRegisterConfig {
                 name: "cur_privilege".into(),
                 pin_mask: 0,
@@ -3552,3 +3045,7 @@ mod symbolic_enum_tests {
         assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
     }
 }
+
+#[cfg(test)]
+#[path = "initial_constraints_tests.rs"]
+mod initial_constraints_tests;

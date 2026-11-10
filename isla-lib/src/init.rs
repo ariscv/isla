@@ -225,7 +225,7 @@ pub fn initialize_architecture<'ir, B: BV>(
     insert_monomorphize(arch);
     insert_primops(arch, &symtab, mode, isa_config);
 
-    let shared_state = SharedState::new(
+    let mut shared_state = SharedState::new(
         symtab,
         arch,
         type_info,
@@ -236,6 +236,8 @@ pub fn initialize_architecture<'ir, B: BV>(
         isa_config.reset_constraints.clone(),
         isa_config.function_assumptions.clone(),
     );
+
+    shared_state.initial_constraints = isa_config.initial_constraints.clone();
 
     let lets = Mutex::new(HashMap::default());
     let regs = Mutex::new(RegisterBindings::new());

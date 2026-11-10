@@ -320,6 +320,44 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         }
     }
 
+    /// 复用 SMT 配置表达式的寄存器与字段引用，在当前寄存器符号上施加约束。
+    pub fn apply_constraints(
+        &mut self,
+        constraints: &[crate::smt::smtlib::Exp<Loc<String>>],
+        shared_state: &SharedState<'ir, B>,
+        solver: &mut Solver<B>,
+        info: SourceLoc,
+    ) -> Result<(), ExecError> {
+        for constraint in constraints {
+            let assertion = constraint.map_var(&mut |reference| {
+                let loc = shared_state
+                    .symtab
+                    .get_loc(reference)
+                    .ok_or_else(|| ExecError::Unreachable(format!("初态约束引用不存在的位置 {reference}")))?;
+                let mut fields = Vec::new();
+                let mut root = &loc;
+                while let Loc::Field(parent, field) = root {
+                    fields.push(*field);
+                    root = parent;
+                }
+                let Loc::Id(name) = root else { panic!("初态约束不能读取地址位置") };
+                let mut value = self
+                    .get(*name, shared_state, solver, info)?
+                    .ok_or_else(|| ExecError::Unreachable(format!("初态约束引用非寄存器位置 {reference}")))?;
+                for field in fields.into_iter().rev() {
+                    let Val::Struct(members) = value else {
+                        panic!("初态约束的字段引用必须指向结构体")
+                    };
+                    value = members.get(&field).expect("初态约束引用的结构字段不存在");
+                }
+                crate::primop_util::smt_value(value, info)
+            })?;
+            solver.add_event(crate::smt::Event::Assume(constraint.clone()));
+            solver.assert(assertion);
+        }
+        Ok(())
+    }
+
     // A non-modifying way to inspect a register
     pub fn get_last_if_initialized(&self, id: Name) -> Option<&Val<B>> {
         if let Some(reg) = self.map.get(&id) {

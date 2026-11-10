@@ -1734,14 +1734,14 @@ fn get_reset_registers<B: BV>(config: &Value, symtab: &Symtab, type_info: &IRTyp
     }
 }
 
-fn get_reset_constraints(config: &Value) -> Result<Vec<Exp<Loc<String>>>, String> {
+fn get_constraints(config: &Value, phase: &str) -> Result<Vec<Exp<Loc<String>>>, String> {
     let reset_toml =
-        config.get("constraints").and_then(|section| section.as_table()).and_then(|section| section.get("reset"));
+        config.get("constraints").and_then(|section| section.as_table()).and_then(|section| section.get(phase));
     if let Some(toml) = reset_toml {
         let constraints = toml
             .as_array()
             .and_then(|vec| vec.iter().map(|item| item.as_str()).collect::<Option<Vec<_>>>())
-            .ok_or_else(|| "constraints.reset should be an array of constraint strings".to_string())?;
+            .ok_or_else(|| format!("constraints.{phase} 必须是约束字符串数组"))?;
         constraints
             .iter()
             .map(|constraint| smt_parser::ExpParser::new().parse(constraint).map_err(|err| err.to_string()))
@@ -2612,6 +2612,8 @@ pub struct ISAConfig<B> {
     pub reset_registers: Vec<(Loc<Name>, Reset<B>)>,
     /// Constraints that should hold at reset_registers
     pub reset_constraints: Vec<Exp<Loc<String>>>,
+    /// 所有初态注入完成后、编码预检前施加的通用约束。
+    pub initial_constraints: Vec<Exp<Loc<String>>>,
     /// 配置原语：分类随闭包保存，避免丢失配置值是否为 Uninit 的来源信息。
     pub const_primops: HashMap<String, (Reset<B>, crate::primop::Effect)>,
     /// Assumptions to use about function behaviour
@@ -2655,8 +2657,6 @@ pub struct ISAConfig<B> {
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
     pub execution_limits: Option<ExecutionLimitsConfig>,
     pub initial_state: Vec<InitialRegisterConfig>,
-    /// 显式开启旧 RV64 特权域限制；默认不限制。
-    pub initial_state_rv64_domain: bool,
 }
 
 impl<B: BV> ISAConfig<B> {
@@ -2708,7 +2708,8 @@ impl<B: BV> ISAConfig<B> {
             symbolic_addr_stride: get_table_value(&config, "symbolic_addrs", "stride")?,
             default_registers,
             reset_registers: get_reset_registers(&config, symtab, type_info)?,
-            reset_constraints: get_reset_constraints(&config)?,
+            reset_constraints: get_constraints(&config, "reset")?,
+            initial_constraints: get_constraints(&config, "initial")?,
             const_primops: get_const_primops(&config, symtab, type_info)?,
             function_assumptions: Vec::new(),
             register_renames: get_register_renames(&config, symtab)?,
@@ -2731,10 +2732,6 @@ impl<B: BV> ISAConfig<B> {
             clint_enabled: get_clint_enabled(&config)?,
             execution_limits: get_execution_limits_config(&config)?,
             initial_state: get_initial_state(&config)?,
-            initial_state_rv64_domain: match config.get("initial_state_rv64_domain") {
-                None => false,
-                Some(value) => value.as_bool().ok_or("initial_state_rv64_domain 必须是布尔值")?,
-            },
         })
     }
 
@@ -4240,7 +4237,7 @@ mod initial_state_tests {
     use super::*;
 
     #[test]
-    fn library_config_keeps_rv64_domain_opt_in() {
+    fn initial_constraints_default_empty_and_independent_from_reset() {
         let mut symtab = Symtab::new();
         symtab.intern("zPC");
         let types = IRTypeInfo::new::<crate::bitvector::b64::B64>(&[]);
@@ -4263,14 +4260,17 @@ base = "4096"
 top = "8192"
 stride = "16"
 "#;
-        for (prefix, expected) in
-            [("", false), ("initial_state_rv64_domain = true\n", true), ("initial_state_rv64_domain = false\n", false)]
-        {
-            let config =
-                ISAConfig::<crate::bitvector::b64::B64>::parse(&format!("{prefix}{base}"), None, &symtab, &types)
-                    .unwrap();
-            assert_eq!(config.initial_state_rv64_domain, expected);
-        }
+        let empty = ISAConfig::<crate::bitvector::b64::B64>::parse(base, None, &symtab, &types).unwrap();
+        assert!(empty.initial_constraints.is_empty());
+        let config = ISAConfig::<crate::bitvector::b64::B64>::parse(
+            &format!("{base}\n[constraints]\ninitial = [\"false\"]\nreset = [\"true\"]"),
+            None,
+            &symtab,
+            &types,
+        )
+        .unwrap();
+        assert_eq!(config.initial_constraints, vec![Exp::Bool(false)]);
+        assert_eq!(config.reset_constraints, vec![Exp::Bool(true)]);
     }
 
     #[test]
@@ -4326,6 +4326,25 @@ fcsr = "0b010_?????"
             "[initial_state.mstatus]\nVS = 3",
         ] {
             assert!(get_initial_state(&text.parse().unwrap()).is_err(), "{}", text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod initial_constraints_tests {
+    use super::*;
+    #[test]
+    fn initial_constraints_share_reset_parser_and_validate_input() {
+        let value: Value = r#"[constraints]
+initial = ["= ((_ extract 35 34) status.bits) #b10"]
+reset = ["= ((_ extract 35 34) status.bits) #b10"]
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(get_constraints(&value, "initial").unwrap(), get_constraints(&value, "reset").unwrap());
+        assert!(get_constraints(&"".parse().unwrap(), "initial").unwrap().is_empty());
+        for text in ["initial = true", "initial = [1]", r#"initial = ["(broken"]"#] {
+            assert!(get_constraints(&format!("[constraints]\n{text}").parse().unwrap(), "initial").is_err());
         }
     }
 }

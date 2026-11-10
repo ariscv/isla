@@ -1167,6 +1167,8 @@ pub struct SharedState<'ir, B> {
     /// `reset_constraints` are added as assertions at the reset_registers builtin
     /// derived from the ISA config
     pub reset_constraints: Vec<smtlib::Exp<Loc<String>>>,
+    /// 由入口在完成初态注入后施加，不参与模型 reset。
+    pub initial_constraints: Vec<smtlib::Exp<Loc<String>>>,
     /// `function_assumptions` are used to assume that a function applied to the
     /// given arguments has the given result, skipping execution
     /// derived from the ISA config
@@ -1263,6 +1265,7 @@ impl<'ir, B: BV> SharedState<'ir, B> {
             trace: TraceHandler::default(),
             reset_registers: Vec::new(),
             reset_constraints: Vec::new(),
+            initial_constraints: Vec::new(),
             function_assumptions: Vec::new(),
         }
     }
@@ -1325,6 +1328,7 @@ impl<'ir, B: BV> SharedState<'ir, B> {
             trace: TraceHandler::default(),
             reset_registers,
             reset_constraints,
+            initial_constraints: Vec::new(),
             function_assumptions,
         }
     }

@@ -186,3 +186,45 @@ name = "ram"
 base = "0x80000000"
 size = "0x7FF80000000"
 attr = "ram"
+
+# 初态合法域由配置声明。本批模型能力为 S=true、U=true、H=false。
+# Sail：model/core/types.sail:70-85；model/core/sys_regs.sail:284-294（不支持虚拟特权级）。
+[symbolic_registers.cur_privilege]
+allowed = ["Machine", "Supervisor", "User"]
+
+[constraints]
+initial = [
+    # Sail：model/core/sys_regs.sail:179-180,259-266，RV64 的 SXL/UXL 固定为 0b10。
+    "= ((_ extract 35 34) mstatus.bits) #b10",
+    "= ((_ extract 33 32) mstatus.bits) #b10",
+    # Sail：model/core/sys_regs.sail:159-166,237,259-266；MPP 为 U/S/M，保留 reset 的 0。
+    "or (= ((_ extract 12 11) mstatus.bits) #b00) (= ((_ extract 12 11) mstatus.bits) #b01) (= ((_ extract 12 11) mstatus.bits) #b11)",
+    # Sail：model/extensions/V/vext_regs.sail:317-334；vext_vset_insts.sail:95-133。
+    # 普通域：VLEN=128、ELEN=64，SEW<=LMUL*64，vl<=LMUL*128/SEW；vta/vma 保持自由。
+    # vill 域：vext_vset_insts.sail:52-62，仅 vill=1 且 vl=0，与普通域取并集。
+    """or
+      (and (bvule vtype.bits #x00000000000000ff) (or
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000000) (bvule vl #x0000000000000010))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000001) (bvule vl #x0000000000000020))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000002) (bvule vl #x0000000000000040))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000003) (bvule vl #x0000000000000080))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000005) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000006) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000007) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000008) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000009) (bvule vl #x0000000000000010))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000a) (bvule vl #x0000000000000020))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000b) (bvule vl #x0000000000000040))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000e) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000f) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000010) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000011) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000012) (bvule vl #x0000000000000010))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000013) (bvule vl #x0000000000000020))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000017) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000018) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000019) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000001a) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000001b) (bvule vl #x0000000000000010))))
+      (and (= vtype.bits #x8000000000000000) (= vl #x0000000000000000))""",
+]

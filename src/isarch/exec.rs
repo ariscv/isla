@@ -1611,7 +1611,7 @@ pub fn solve_state_main<'ir, B: BV>(
             }
             // 每批后增量落盘（覆写为已合并全集）：外层时间盒硬杀时，已完成批的
             // 产出不随进程丢失
-            let mut json = AssemGenJson::new(merged_items.clone(), target.domain_manifest());
+            let mut json = AssemGenJson::new(merged_items.clone(), target.domain_manifest(shared_state));
             merged_summary.pending_batches = batches.len() - batch_index - 1;
             json.summary = merged_summary.json();
             json.summary["target-clause"] = serde_json::json!(clause);
@@ -1797,10 +1797,28 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         target.symbolic_pma_sizes_mut().extend(records);
     }
 
+    // 所有初态注入共用执行寄存器中的符号；先施加配置约束，再做首次可满足性检查和编码预检。
+    symbolic_regs.apply_constraints(
+        &shared_state.initial_constraints,
+        shared_state,
+        &mut solver,
+        SourceLoc::unknown(),
+    )?;
+
     //不要删掉这个注释！！！留着以后改pmp的时候用
     /* if target.pmp_symbolic() {
         target.apply_symbolic_pmp_to_registers(&shared_state.symtab, &mut symbolic_regs, shared_state, &mut solver)?;
     } */
+
+    // 先区分互相矛盾的前态与真正的空编码域，求解不确定仍作为错误传播。
+    match solver.check_sat(SourceLoc::unknown()) {
+        isla_lib::smt::SmtResult::Sat => (),
+        isla_lib::smt::SmtResult::Unsat => {
+            return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
+        }
+        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+        isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+    }
 
     let instruction = if let Some(fixed) = fixed_inputs.instruction {
         decode_fixed_instruction(
@@ -1828,15 +1846,6 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     // 构造指令值
 
-    // 先区分互相矛盾的前态与真正的空编码域，求解不确定仍作为错误传播。
-    match solver.check_sat(SourceLoc::unknown()) {
-        isla_lib::smt::SmtResult::Sat => (),
-        isla_lib::smt::SmtResult::Unsat => {
-            return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
-        }
-        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
-        isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
-    }
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
     // 复用真实编码映射的载荷和守卫；执行入口只接受当前配置中可编码的指令域。
@@ -3112,8 +3121,6 @@ mod tests {
         use super::super::target::PreStateCtx;
         struct EncodingTarget {
             pre_state: PreStateCtx<B64>,
-            impossible: bool,
-            contradictory: bool,
         }
         impl Target<B64> for EncodingTarget {
             fn arch_name(&self) -> &'static str {
@@ -3133,24 +3140,6 @@ mod tests {
             }
             fn pre_state_mut(&mut self) -> &mut PreStateCtx<B64> {
                 &mut self.pre_state
-            }
-            fn constrain_pre_state<'ir>(
-                &mut self,
-                _: &Bindings<'ir, B64>,
-                shared: &SharedState<'ir, B64>,
-                solver: &mut Solver<B64>,
-            ) -> Result<(), ExecError> {
-                if self.contradictory {
-                    solver.assert(smtlib::Exp::Bool(false));
-                }
-                if self.impossible {
-                    let value = self.pre_state.get_from_str("mstatus", &shared.symtab).unwrap();
-                    solver.assert_eq(
-                        isla_lib::primop_util::smt_value(value, SourceLoc::unknown())?,
-                        smtlib::bits64(0, 64),
-                    );
-                }
-                Ok(())
             }
         }
         impl RISCV<B64> for EncodingTarget {
@@ -3347,7 +3336,7 @@ mod tests {
             Def::Fn(compressed, vec![argument], compressed_body),
         ];
         add_fixture_decoders(&mut symtab, &mut defs, instruction, requested);
-        let shared = SharedState::new(
+        let mut shared = SharedState::new(
             symtab,
             &defs,
             IRTypeInfo::new(&defs),
@@ -3360,11 +3349,16 @@ mod tests {
         );
         let mut regs = RegisterBindings::new();
         regs.insert(mstatus, false, UVal::Init(Val::Bits(B64::zeros(64))));
-        let mut target = EncodingTarget {
-            pre_state: PreStateCtx::new(),
-            impossible: matches!(mode, EncodingFixture::Impossible),
-            contradictory: matches!(mode, EncodingFixture::ContradictoryPrestate),
+        // 配置约束必须先于编码域判空；矛盾初态与空编码域使用不同路径。
+        let expression = match mode {
+            EncodingFixture::ContradictoryPrestate => Some("false"),
+            EncodingFixture::Impossible => Some("= mstatus #x0000000000000000"),
+            _ => None,
         };
+        if let Some(expression) = expression {
+            shared.initial_constraints.push(isla_lib::smt_parser::ExpParser::new().parse(expression).unwrap());
+        }
+        let mut target = EncodingTarget { pre_state: PreStateCtx::new() };
         let reporter = TimeoutReporter::new(TimeoutReportConfig {
             output: TimeoutSmtOutput::new(false, false, true),
             directory: PathBuf::new(),

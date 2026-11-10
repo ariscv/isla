@@ -674,7 +674,30 @@ fcsr = "0b000_?????"
 
 `?` 和 `x` 目前求解语义相同，不增加关注度或输出过滤机制；同一位多次读取保持一致。执行语义仍可以约束这些符号位，完整见证输出仍会从最终模型取得具体值。
 
-通用 `ISAConfig` 默认关闭额外的 RV64 privilege/SXL/UXL/MPP 初态域限制；isarch 默认启用。isarch 用户可在 TOML **顶层**（任何表之前）添加 `initial_state_rv64_domain = false` 关闭它，显式 `true` 则启用。该域根据模型静态能力限定合法状态，与其他初态配置共同生效；约束冲突时报错。已有 RVV `vtype/vl` 约束继续保留。
+初态约束使用 `[constraints].initial`，复用 `[constraints].reset` 的 SMT 表达式解析器和寄存器／字段引用语法：
+
+```toml
+[symbolic_registers.cur_privilege]
+allowed = ["Machine", "Supervisor", "User"]
+
+[constraints]
+initial = [
+    "= ((_ extract 35 34) mstatus.bits) #b10",
+    "= ((_ extract 33 32) mstatus.bits) #b10",
+    "or (= ((_ extract 12 11) mstatus.bits) #b00) (= ((_ extract 12 11) mstatus.bits) #b01) (= ((_ extract 12 11) mstatus.bits) #b11)",
+]
+```
+
+`initial` 默认为空。isarch 在普通寄存器、固定前态、符号寄存器和符号 PMA 全部注入后，
+对执行寄存器中的同一组符号施加这些约束，再进行首次可满足性检查、编码预检和不适用判定。
+初态矛盾沿用初态不可满足报错，不会标记为不适用。`reset` 仍只在模型调用寄存器复位时生效。
+结构体字段须显式写出（例如 `mstatus.bits`、`vtype.bits`）；未知寄存器或字段引用会报错。
+这些表达式本身不替代寄存器符号化，需要自由取值的额外寄存器仍应通过 `symbolic_registers` 声明。
+
+`configs/riscv64*.toml` 为本批模型声明 S/U 可用、H 不可用，以及 VLEN=128、ELEN=64 下的
+`vtype`／`vl` 普通域与 vill 域；每条规则的注释给出 Sail 源位置。换模型或更改静态参数时须同步配置，
+isarch 不再探测模型扩展能力或内置这些合法值。`domain-manifest` 只记录配置来源和声明数量。
+编码／译码映射名（如 `encdec_forwards`）的配置迁移登记为后续工作。
 
 isarch 在执行前检查正常／压缩编码映射。只有当前配置、初态和输入约束下的合法编码域可证为空时，才输出 `summary.status = "not-applicable"` 和 `reason = "no-encoding-in-current-config"`；该结论仅适用于本次配置和输入域，不表示这个 clause 在所有环境都不适用。前态自身矛盾、求解 Unknown、超时和模型异常均报错。RISC-V 平台熵接口的无函数体声明仅由 isarch 接入，每次调用声明新的自由 16 位值；模型已有函数体继续执行原实现。
 

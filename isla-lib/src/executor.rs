@@ -12182,6 +12182,7 @@ fn zcaller(za, zb) {
             encoding_slices: Vec::new(),
             reset_registers: Vec::new(),
             reset_constraints: Vec::new(),
+            initial_constraints: Vec::new(),
             const_primops: HashMap::new(),
             function_assumptions: Vec::new(),
             register_renames: HashMap::new(),
@@ -12201,7 +12202,6 @@ fn zcaller(za, zb) {
             clint_enabled: None,
             execution_limits: None,
             initial_state: Vec::new(),
-            initial_state_rv64_domain: false,
         }
     }
 
