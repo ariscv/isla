@@ -1438,10 +1438,31 @@ pub(crate) fn insert_primops<B: BV>(
     mode: AssertionMode,
     isa_config: &ISAConfig<B>,
 ) {
+    let mut primops = Primops::default();
+    let functions: HashSet<_> = defs
+        .iter()
+        .filter_map(|def| match def {
+            Def::Fn(name, _, _) => Some(*name),
+            _ => None,
+        })
+        .collect();
     let mut externs: HashMap<Name, (String, bool)> = HashMap::new();
     for def in defs.iter() {
-        if let Def::Extern(f, is_abstract, ext, _, _) = def {
-            externs.insert(*f, (ext.to_string(), *is_abstract));
+        match def {
+            Def::Extern(f, is_abstract, ext, _, _) => {
+                externs.insert(*f, (ext.to_string(), *is_abstract));
+            }
+            // Sail 平台声明可能没有 Isla 外部名；仅为无函数体且已注册的原语接线。
+            Def::Val(f, _, _) if !functions.contains(f) => {
+                let name = zencode::decode(symtab.to_str(*f));
+                if primops.unary.contains_key(&name)
+                    || primops.binary.contains_key(&name)
+                    || primops.variadic.contains_key(&name)
+                {
+                    externs.insert(*f, (name, false));
+                }
+            }
+            _ => (),
         }
     }
 
@@ -1467,8 +1488,6 @@ pub(crate) fn insert_primops<B: BV>(
             comparison_fns.insert(f, comparison);
         }
     }
-
-    let mut primops = Primops::default();
 
     for (primop, reset) in isa_config.const_primops.iter() {
         primops.consts.insert(primop.to_string(), reset.clone());

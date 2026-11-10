@@ -119,7 +119,10 @@ pub(crate) fn concrete_function_result<'ir, B: BV + Send + Sync>(
         regs,
         lets,
         &outcomes,
-        &|_, _, result, _, mut solver, outcomes| match result {
+        &|_, _, result, shared_state, mut solver, outcomes| match result {
+            Ok((Run::Finished(Val::Poison), frame)) => {
+                outcomes.lock().unwrap().push(Err(super::poison_diagnostic(&frame, shared_state)));
+            }
             Ok((Run::Finished(value), _)) => match solver.check_sat(SourceLoc::unknown()) {
                 isla_lib::smt::SmtResult::Sat => {
                     outcomes.lock().expect("decode outcomes mutex poisoned").push(Ok(value))
@@ -277,7 +280,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
             regs,
             lets,
             &sink,
-            &move |_, _, exec_result, _, mut solver, sink| match exec_result {
+            &move |_, _, exec_result, shared_state, mut solver, sink| match exec_result {
                 // MatchFailure 是"该编码在译码器里无可走分支"（守卫拒绝的
                 // 正常形态），静默保持 None——与 try_get_assembly_* 的处理
                 // 一致。
@@ -286,6 +289,9 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
                 }
                 Err((error, _)) => {
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(Err(error.to_string()));
+                }
+                Ok((Run::Finished(Val::Poison), frame)) => {
+                    sink.lock().unwrap().push(Err(super::poison_diagnostic(&frame, shared_state)));
                 }
                 Ok((Run::Finished(ret), frame)) => {
                     let outcome = if frame.has_sampled_branch() {
@@ -1541,14 +1547,15 @@ pub fn solve_state_main<'ir, B: BV>(
                 &samples,
             ) {
                 Ok(outcome) => {
-                    sample_paths_complete &= outcome.summary.status() == "finished";
+                    sample_paths_complete &= matches!(outcome.summary.status(), "finished" | "not-applicable");
                     log!(
                         log::SYM_EXEC,
                         &format!(
-                            "solve_state: {} 批 {}/{} 完成，产出 {} 条用例{}",
+                            "solve_state: {} 批 {}/{} status={}，产出 {} 条用例{}",
                             clause,
                             batch_index + 1,
                             batches.len(),
+                            outcome.summary.status(),
                             outcome.items.len(),
                             if outcome.error.is_some() { "（含执行错误，已保留部分产出）" } else { "" }
                         )
@@ -1821,10 +1828,22 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
+    // 复用真实编码映射的载荷和守卫；执行入口只接受当前配置中可编码的指令域。
+    let entry_encodings = encoding_paths(&fun_args[0], shared_state, &symbolic_regs, lets, cp)?;
+    if entry_encodings.is_empty() {
+        return Ok(BatchOutcome {
+            items: Vec::new(),
+            summary: SolveSummary { inapplicable_batches: 1, ..SolveSummary::default() },
+            diagnostics: Vec::new(),
+            error: None,
+            encdec_guard_rejects: 0,
+        });
+    }
 
     // 使用checkpoint执行函数，支持错误传播
     let result: Arc<Mutex<SolveCollectorState>> =
         Arc::new(Mutex::new(SolveCollectorState::with_case_quota(case_quota)));
+    result.lock().unwrap().summary.applicable_batches = 1;
 
     let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
 
@@ -1891,7 +1910,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             match &exec_result {
                 Ok((run, frame)) => match run {
                     Run::Finished(Val::Poison) => {
-                        log!(log::SYM_EXEC, &format!("警告: {}这个Ctor返回值是Poison，可能是相关扩展（如H扩展）造成的，因此产生了sail的_inner_error_", instruction_name))
+                        let reason = super::poison_diagnostic(frame, shared_state);
+                        eprintln!("{} 未完成路径: {}", instruction_name, reason);
+                        collected.lock().unwrap().diagnostics.push(serde_json::json!({
+                            "status": "incomplete", "reason": "sail-poison",
+                            "path-signature": frame.path_signature(), "detail": reason,
+                        }));
                     }
                     Run::Finished(ret_val) => {
                         // 检查原路径约束：必须早于有限域代表值钉选和 encdec/输出过滤。
@@ -2664,7 +2688,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         initial_frame.set_memory(memory);
     }
     let exploration_started = std::time::Instant::now();
-    let mut tasks = vec![initial_frame.task_with_checkpoint(TaskId::fresh(), &task_state, cp)];
+    let mut tasks = entry_encodings
+        .into_iter()
+        .map(|(_, encoding_checkpoint)| {
+            initial_frame.task_with_checkpoint(TaskId::fresh(), &task_state, encoding_checkpoint)
+        })
+        .collect();
     loop {
         isla_lib::executor::start_multi(num_threads, timeout, tasks, shared_state, result.clone(), collector);
         let next = std::mem::take(&mut *continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned"));
@@ -3041,6 +3070,7 @@ mod tests {
         PartialAssembly,
         ExecuteAs,
         MergeExecuteAs,
+        EntryGuard,
     }
 
     /// 内联 collector 夹具的译码器：原夹具只检查编码路径，这里补回环所需的
@@ -3277,6 +3307,16 @@ mod tests {
             prefix.extend(execute_body);
             execute_body = prefix;
         }
+        if matches!(mode, EncodingFixture::EntryGuard) {
+            let mut prefix = vec![Instr::Decl(bit, Ty::Bits(1), source), Instr::Decl(condition, Ty::Bool, source)];
+            prefix.extend(bit_guard(9));
+            prefix.extend([
+                Instr::Jump(isla_lib::ir::Exp::Id(condition), 6, source),
+                Instr::Exit(ExitCause::AssertionFailure, source),
+            ]);
+            prefix.extend(execute_body);
+            execute_body = prefix;
+        }
         let mut defs = vec![
             Def::Register(mstatus, Ty::Bits(64), vec![]),
             Def::Union(instruction, vec![(requested, Ty::Unit), (payload, Ty::Unit)]),
@@ -3334,14 +3374,20 @@ mod tests {
             None,
             &super::super::samples::SampleSession::new(&Default::default(), None).unwrap(),
         );
+        if matches!(mode, EncodingFixture::Assertion) {
+            assert!(matches!(execution, Err(ExecError::AssertionFailure(_, _))));
+            return;
+        }
         let execution = execution.unwrap();
         let data = batch_json(&execution);
-        if matches!(mode, EncodingFixture::Impossible | EncodingFixture::Assertion) {
-            assert!(execution.error.is_some(), "编码失败必须成为求解失败");
+        if matches!(mode, EncodingFixture::EntryGuard) {
+            assert_eq!(data["summary"]["assertion-filtered-paths"], 0, "编码守卫必须在执行前排除非法载荷");
+        }
+        if matches!(mode, EncodingFixture::Impossible) {
+            assert!(execution.error.is_none());
+            assert_eq!(data["summary"]["status"], "not-applicable");
+            assert_eq!(data["summary"]["reason"], "no-encoding-in-current-config");
             assert_eq!(data["gen"].as_array().unwrap().len(), 0);
-            if matches!(mode, EncodingFixture::Assertion) {
-                assert!(matches!(execution.error, Some(ExecError::AssertionFailure(_, _))));
-            }
             return;
         }
         assert!(execution.error.is_none());
@@ -3351,6 +3397,7 @@ mod tests {
             if matches!(
                 mode,
                 EncodingFixture::Guard
+                    | EncodingFixture::EntryGuard
                     | EncodingFixture::PartialAssembly
                     | EncodingFixture::ExecuteAs
                     | EncodingFixture::MergeExecuteAs
@@ -3397,6 +3444,11 @@ mod tests {
     }
 
     #[test]
+    fn collector_applies_encoding_guard_before_execute() {
+        check_encoding_fixture(EncodingFixture::EntryGuard);
+    }
+
+    #[test]
     fn collector_keeps_enumeration_through_execute_as() {
         check_encoding_fixture(EncodingFixture::MergeExecuteAs);
     }
@@ -3424,7 +3476,7 @@ mod tests {
     }
 
     #[test]
-    fn collector_reports_fully_unencodable_retire_path() {
+    fn collector_reports_empty_encoding_domain_as_not_applicable() {
         check_encoding_fixture(EncodingFixture::Impossible);
     }
     #[test]

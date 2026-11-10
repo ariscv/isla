@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
-pub(super) fn instr_source_loc<B>(instr: &Instr<Name, B>) -> Option<SourceLoc> {
+/// 取得 IR 指令携带的 Sail 源码位置，供执行统计与异常诊断共用。
+pub fn instr_source_loc<B>(instr: &Instr<Name, B>) -> Option<SourceLoc> {
     match instr {
         Instr::Decl(_, _, info)
         | Instr::Init(_, _, _, info)

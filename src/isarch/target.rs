@@ -1032,7 +1032,7 @@ impl<B: BV> Default for RV64<B> {
             pre_state: PreStateCtx::new(),
             domain: None,
             initial_state: Vec::new(),
-            initial_state_rv64_domain: false,
+            initial_state_rv64_domain: true,
         }
     }
 }
@@ -1774,6 +1774,7 @@ mod tests {
 
     #[test]
     fn rv64_domain_allows_real_modes_and_rejects_virtual_modes() {
+        assert!(RV64::<B64>::default().initial_state_rv64_domain);
         let mstatus = (2_u64 << 34) | (2_u64 << 32);
         for privilege in ["zMachine", "zSupervisor", "zUser"] {
             assert_eq!(rv64_domain_smt_result(true, true, false, privilege, mstatus).0, SmtResult::Sat);
@@ -3313,6 +3314,8 @@ mod initial_state_tests {
             shared.registers.insert(name, Ty::Struct(wrapper));
             shared.type_info.structs.insert(wrapper, BTreeMap::from([(bits, Ty::Bits(64))]));
             let mut target = RV64::<B64>::default();
+            // 此夹具只有 mstatus，单独验证位约束，不提供架构初态域。
+            target.initial_state_rv64_domain = false;
             target.initial_state = vec![InitialRegisterConfig {
                 name: "mstatus".into(),
                 fields: vec![(Some((10, 9)), Some(3)), (Some((14, 13)), None), (Some((12, 11)), None)],
@@ -3443,6 +3446,8 @@ mod symbolic_enum_tests {
             let context = Context::new(Config::new());
             let mut solver = Solver::<B64>::new(&context);
             let mut target = RV64::<B64>::default();
+            // 此夹具只有特权枚举，单独验证枚举约束，不提供架构初态域。
+            target.initial_state_rv64_domain = false;
             target.symbolic_csrs = vec![SymbolicRegisterConfig {
                 name: "cur_privilege".into(),
                 pin_mask: 0,

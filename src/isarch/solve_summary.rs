@@ -15,6 +15,8 @@ pub(super) struct SolveSummary {
     pub model_query_timeouts: usize,
     pub encoding_filtered_paths: usize,
     pub pending_batches: usize,
+    pub applicable_batches: usize,
+    pub inapplicable_batches: usize,
 }
 
 impl SolveSummary {
@@ -28,6 +30,8 @@ impl SolveSummary {
             > 0
         {
             "partial"
+        } else if self.inapplicable_batches > 0 && self.applicable_batches == 0 {
+            "not-applicable"
         } else {
             "finished"
         }
@@ -36,11 +40,16 @@ impl SolveSummary {
     pub fn json(&self) -> Value {
         let mut value = serde_json::to_value(self).unwrap();
         value["status"] = json!(self.status());
+        if self.status() == "not-applicable" {
+            value["reason"] = json!("no-encoding-in-current-config");
+        }
         value["model-coverage"] = json!("not-measured");
         value
     }
 
     pub fn merge(&mut self, other: &Self) {
+        self.applicable_batches += other.applicable_batches;
+        self.inapplicable_batches += other.inapplicable_batches;
         self.sampled_paths += other.sampled_paths;
         self.errors += other.errors;
         self.execution_timeouts += other.execution_timeouts;
@@ -86,4 +95,25 @@ pub(super) fn input_manifest() -> Value {
 /// 与求解摘要一同收尾；保持默认日志不变，统计使用单行 JSON 便于机器读取。
 pub(super) fn print_execution_stats<B>(shared_state: &isla_lib::ir::SharedState<'_, B>) {
     shared_state.execution_stats.print(shared_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_applicable_requires_empty_domain_without_errors_or_pending_work() {
+        let mut summary = SolveSummary { inapplicable_batches: 1, ..SolveSummary::default() };
+        assert_eq!(summary.status(), "not-applicable");
+        assert_eq!(summary.json()["reason"], "no-encoding-in-current-config");
+        summary.errors = 1;
+        assert_eq!(summary.status(), "partial");
+        summary.errors = 0;
+        summary.pending_batches = 1;
+        assert_eq!(summary.status(), "partial");
+        summary.pending_batches = 0;
+        summary.merge(&SolveSummary { applicable_batches: 1, ..SolveSummary::default() });
+        assert_eq!(summary.status(), "finished");
+        assert!(summary.json().get("reason").is_none());
+    }
 }

@@ -30,6 +30,36 @@ use isla_lib::{ir::*, smt};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+/// arbitrary 的 Poison 保留 Sail 异常值、源码调用位置及路径身份。
+fn poison_diagnostic<B: BV>(frame: &LocalFrame<B>, shared_state: &SharedState<B>) -> String {
+    let exception = shared_state
+        .symtab
+        .get("zcurrent_exception")
+        .and_then(|name| frame.regs().get_last_if_initialized(name))
+        .map(|value| value.to_str(shared_state));
+    let sources: Vec<_> = frame
+        .backtrace()
+        .iter()
+        .copied()
+        .chain(std::iter::once((frame.function_name(), frame.pc())))
+        .map(|(function, pc)| {
+            let (_, _, body) = shared_state.functions.get(&function).expect("Poison 调用栈函数必须存在");
+            let source = body
+                .iter()
+                .take(pc + 1)
+                .rev()
+                .find_map(isla_lib::executor::stats::instr_source_loc)
+                .map(|source| source.location_string(shared_state.symtab.files()));
+            format!("{}[{}] {:?}", zencode::decode(shared_state.symtab.to_str(function)), pc, source)
+        })
+        .collect();
+    format!(
+        "Poison: current_exception={exception:?}; 源码调用栈={}; 路径={:016x}",
+        sources.join(" → "),
+        frame.path_signature()
+    )
+}
+
 fn configure_nested_timeout_smt_dump<'ir, B: BV>(
     error: &ExecError,
     frame: &LocalFrame<'ir, B>,

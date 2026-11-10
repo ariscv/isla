@@ -690,8 +690,9 @@ fcsr = "0b000_?????"
 ### 本工作区的官方 Z3 链接版本
 
 `make build-isarch` 和 `make solve-*` 默认使用用户前缀
-`~/.local/opt/z3-official-1fd1d3613` 中的官方 Z3，源码提交为
-`1fd1d3613c1f34c4dff36cba3209b2234f6c6d2b`。需先将该官方构建安装到此前缀，
+`~/.local/opt/z3-official-d6c9b4fbb` 中的官方 Z3，源码提交为
+`d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f`（版本 5.4.0.0）。所有 Isla 程序首次创建 Z3 上下文时检查运行时版本，
+低于 5.4.0.0 会 panic，并报告实际版本和最低版本。需先将该官方构建安装到此前缀，
 或用 `make build-isarch Z3_PREFIX=/path/to/installed/z3` 指定实际安装位置。
 Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/release/isarch --version`
 可确认实际加载版本。CLI 的默认策略和 Make 的各 Clause 策略保持独立。

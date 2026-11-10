@@ -2732,7 +2732,7 @@ impl<B: BV> ISAConfig<B> {
             execution_limits: get_execution_limits_config(&config)?,
             initial_state: get_initial_state(&config)?,
             initial_state_rv64_domain: match config.get("initial_state_rv64_domain") {
-                None => false,
+                None => true,
                 Some(value) => value.as_bool().ok_or("initial_state_rv64_domain 必须是布尔值")?,
             },
         })
