@@ -87,7 +87,12 @@ pub(super) fn function_effect_summaries<B: BV>(
                     function,
                     RegionCfg::new(
                         shared.functions[&function].2,
-                        RegionOptions { filter_assertion_failures: false, have_exception: None, terminal_calls: &[] },
+                        RegionOptions {
+                            filter_assertion_failures: false,
+                            recreated_slot_liveness: false,
+                            have_exception: None,
+                            terminal_calls: &[],
+                        },
                     ),
                 )
             })
@@ -142,7 +147,12 @@ pub(super) fn function_effect_summaries<B: BV>(
             FunctionEffect { effect: Effect::Pure, non_returning: non_returning.contains(function), rejection: None };
         let cfg = RegionCfg::new(
             body,
-            RegionOptions { filter_assertion_failures: false, have_exception: None, terminal_calls: &terminal_calls },
+            RegionOptions {
+                filter_assertion_failures: false,
+                recreated_slot_liveness: false,
+                have_exception: None,
+                terminal_calls: &terminal_calls,
+            },
         );
         for pc in cfg.reachable_instructions() {
             let instr = &body[pc];

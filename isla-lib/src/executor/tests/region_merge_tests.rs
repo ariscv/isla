@@ -836,7 +836,11 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
         }
         // 寄存器由入口初始化；外层的写后读只能在内层已提交之后触发拒绝。
         // 此处先用真实执行直接检查拒绝不会泄漏到调度边界。
-        let counts = differential(program.clone(), &shared, 3, false);
+        let limits = ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true);
+        let forked = paths(program.clone(), &shared, 3, false);
+        let merged =
+            paths_with_state(program.clone(), &shared, 3, limits.clone(), crate::memory::Memory::new(), |_| ());
+        let counts = equivalent_paths(&forked, &merged, 3, false);
         assert_eq!(counts, (3, 2));
         let mut frame = make_frame(program);
         frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
@@ -849,9 +853,19 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
         }
         let before = solver.trace().to_vec().len();
         shared.execution_stats.reset();
-        assert!(merge_region_for_test(Sym { id: 0 }, 3, &mut frame, &shared, &mut solver, info(), None, None)
-            .unwrap()
-            .is_none());
+        let handler = ExecutionLimitHandler::new(&limits);
+        assert!(merge_region_for_test(
+            Sym { id: 0 },
+            3,
+            &mut frame,
+            &shared,
+            &mut solver,
+            info(),
+            Some(&handler),
+            None
+        )
+        .unwrap()
+        .is_none());
         assert!(frame.region_merge_records().is_empty(), "内层提交后外层回滚必须丢弃全部新记录");
         assert!(shared.execution_stats.merge_json()["successes"].as_u64().unwrap() > 0, "外层回滚前内层必须实际提交");
         assert_eq!(solver.transaction_depth(), 0);
@@ -865,7 +879,7 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
                 .unwrap(),
             "内层断言不得限制回滚后的输入域"
         );
-        let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+        let state = TaskState::new().with_execution_limits(limits);
         let output = Mutex::new(0);
         start_single(
             frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
@@ -3844,6 +3858,7 @@ fn region_merge_f4_real_get_xlpe_diagnosis() {
         body,
         crate::ir::regions::RegionOptions {
             filter_assertion_failures: false,
+            recreated_slot_liveness: false,
             have_exception: Some(HAVE_EXCEPTION),
             terminal_calls: &terminals,
         },

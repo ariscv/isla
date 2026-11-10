@@ -120,6 +120,8 @@ pub struct ExecutionLimits {
     pub path_merging: bool,
     /// 区域内按前态足迹合并全局状态；需要精确寄存器事件顺序的调用方保持关闭。
     pub region_global_state: bool,
+    /// 启用循环区域的断言死端过滤与重新声明槽位活跃性。
+    pub region_loop_analysis: bool,
     pub merge_enumeration: crate::config::MergeEnumerationConfig,
     merge_policy: Vec<MergePolicy>,
     pub on_limit_reached: LimitBehavior,
@@ -141,6 +143,7 @@ impl Default for ExecutionLimits {
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
             region_global_state: false,
+            region_loop_analysis: false,
             merge_enumeration: Default::default(),
             merge_policy: Vec::new(),
             on_limit_reached: LimitBehavior::Truncate,
@@ -167,6 +170,11 @@ impl ExecutionLimits {
 
     pub fn with_path_merging(mut self, enabled: bool) -> Self {
         self.path_merging = enabled;
+        self
+    }
+
+    pub fn with_region_loop_analysis(mut self, enabled: bool) -> Self {
+        self.region_loop_analysis = enabled;
         self
     }
 

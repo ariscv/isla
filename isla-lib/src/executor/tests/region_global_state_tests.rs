@@ -683,3 +683,65 @@ fn region_m2_status_callback_with_conditional_and_repeated_struct_writes() {
         .collect();
     assert_eq!(writes, vec![status, context_reg]);
 }
+
+#[test]
+fn region_m2_pre_state_read_after_nested_join_widens_footprint_guard() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zstate");
+    shared.registers.insert(reg, Ty::Bool);
+    let read = Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info());
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(8),
+        Instr::Jump(input(1), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(7),
+        read.clone(),
+        read,
+        Instr::End,
+    ];
+    let forked = run(program.clone(), &shared, 2, false, |_| ());
+    let merged = run(program, &shared, 2, true, |_| ());
+    assert_eq!(equivalent_paths(&forked, &merged, 2, true), (3, 1));
+    equivalent_register_paths(&forked, &merged, 2);
+    let root = merged[0].records.iter().find(|record| record.parent_record.is_none()).unwrap();
+    let read = root.single_arm_reads.iter().find(|read| read.register == reg).unwrap();
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let inputs: Vec<_> = (0..2).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
+    let (_, guards) = import_values(&merged[0], &inputs, &mut solver, &[read.guard.clone()]);
+    assert!(
+        solver
+            .check_sat_with(
+                &smtlib::Exp::Neq(Box::new(guards[0].clone()), Box::new(smtlib::Exp::Var(inputs[0]))),
+                info(),
+            )
+            .is_unsat()
+            .unwrap(),
+        "内层汇合后的前态读必须覆盖外层臂的全部输入"
+    );
+}
+
+#[test]
+fn region_m2_second_arm_pre_state_read_after_first_arm_internal_read() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zstate");
+    shared.registers.insert(reg, Ty::Bool);
+    let read = Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info());
+    let program =
+        diamond(vec![Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()), read.clone()], vec![read], vec![Instr::End]);
+    let paths = check(program, &shared, 1);
+    let reads: Vec<_> = paths[0]
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ReadReg(name, _, value) if *name == reg => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, vec![&Val::Bool(false)], "第二臂必须发布自己的前态，不能复用第一臂内部读");
+    let reads = &paths[0].records.last().unwrap().single_arm_reads;
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].value, Val::Bool(false));
+}

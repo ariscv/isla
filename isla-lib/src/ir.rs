@@ -1138,7 +1138,7 @@ pub struct IRTypeInfo {
 /// evaluation with a convenient view into that IR.
 pub struct SharedState<'ir, B> {
     /// 按函数惰性分析与缓存，所有执行线程共享。
-    pub(crate) function_regions: std::sync::Mutex<HashMap<Name, regions::FunctionRegions<B>>>,
+    pub(crate) function_regions: std::sync::Mutex<HashMap<(Name, bool), regions::FunctionRegions<B>>>,
     /// 可选执行统计；不随路径快照复制。
     pub execution_stats: std::sync::Arc<crate::executor::stats::ExecutionStats>,
     /// A map from function identifers to function bodies and parameter lists

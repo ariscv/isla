@@ -1,0 +1,37 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+warning: methods `with_transaction_condition` and `order_transaction_register_reads` are never used
+   --> isla-lib/src/smt/transaction.rs:211:19
+    |
+ 52 | impl<'ctx, B: BV> Solver<'ctx, B> {
+    | --------------------------------- methods in this implementation
+...
+211 |     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+355 |     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla-lib` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.10s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-28e6751cd897256a)
+
+running 1 test
+test ir::regions::tests::regions_premerge_review_default_preserves_slot_liveness ... FAILED
+
+failures:
+
+---- ir::regions::tests::regions_premerge_review_default_preserves_slot_liveness stdout ----
+
+thread 'ir::regions::tests::regions_premerge_review_default_preserves_slot_liveness' (2498) panicked at isla-lib/src/ir/regions.rs:738:9:
+默认构造必须保持旧的保守槽位活跃性
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ir::regions::tests::regions_premerge_review_default_preserves_slot_liveness
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 843 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p isla-lib --lib`

@@ -1266,7 +1266,7 @@ fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig
         None => ExecutionLimits::default(),
     };
     let global_state = limits.path_merging;
-    limits.with_region_global_state(global_state)
+    limits.with_region_global_state(global_state).with_region_loop_analysis(global_state)
 }
 
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
@@ -4018,10 +4018,13 @@ mod tests {
         let symtab = Symtab::new();
         assert!(!ExecutionLimits::default().with_path_merging(true).region_global_state);
         assert!(!solve_execution_limits(&symtab, None).region_global_state);
+        assert!(!ExecutionLimits::default().with_path_merging(true).region_loop_analysis);
+        assert!(!solve_execution_limits(&symtab, None).region_loop_analysis);
         for enabled in [false, true] {
             let config = ExecutionLimitsConfig { path_merging: Some(enabled), ..ExecutionLimitsConfig::default() };
             let limits = solve_execution_limits(&symtab, Some(&config));
             assert_eq!(limits.region_global_state, enabled);
+            assert_eq!(limits.region_loop_analysis, enabled);
             assert_eq!(limits.path_merging, enabled);
         }
     }

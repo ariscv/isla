@@ -50,9 +50,15 @@ impl<B: BV> AccessLog<B> {
     pub fn record_read(&mut self, reg: Name, accessor: Vec<Accessor>, value: Val<B>) -> Result<bool, ExecError> {
         if self.global_state {
             // 内部读取使用当前臂的值；前态足迹按寄存器和字段路径只记录一次。
-            if self.writes.modified_regs.contains(&reg)
-                || self.reads.iter().any(|(name, path, _)| *name == reg && *path == accessor)
-            {
+            if self.writes.modified_regs.contains(&reg) {
+                return Ok(false);
+            }
+            if let Some(index) = self.reads.iter().position(|(name, path, _)| *name == reg && *path == accessor) {
+                // 内层仅一臂读取后，汇合点之后的读取可以扩大原足迹的条件。
+                self.read_guards[index] = smtlib::Exp::Or(
+                    Box::new(self.read_guards[index].clone()),
+                    Box::new(self.guard.clone().expect("区域读取必须有臂条件")),
+                );
                 return Ok(false);
             }
         } else if !self.writes.register_write_order.is_empty() {
@@ -262,13 +268,15 @@ fn region<'ir, B: BV>(
     frame: &LocalFrame<'ir, B>,
     shared: &SharedState<'ir, B>,
     summaries: &HashMap<Name, FunctionEffect>,
+    loop_analysis: bool,
 ) -> Result<Arc<Region>, ExecError> {
     let mut cache = shared.function_regions.lock().unwrap();
-    let analysis = cache.entry(frame.function_name).or_insert_with(|| {
+    let analysis = cache.entry((frame.function_name, loop_analysis)).or_insert_with(|| {
         FunctionRegions::with_options(
             frame.instrs,
             RegionOptions {
-                filter_assertion_failures: true,
+                filter_assertion_failures: loop_analysis,
+                recreated_slot_liveness: loop_analysis,
                 have_exception: Some(shared.symtab.lookup(shared.symtab.to_str(HAVE_EXCEPTION))),
                 terminal_calls: &summaries
                     .iter()
@@ -348,6 +356,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 frame,
                 shared,
                 state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state)),
+                state.execution_limits.as_ref().is_some_and(|limits| limits.region_loop_analysis),
             )
             .and_then(|region| {
                 for pc in &region.nodes {
@@ -1046,13 +1055,14 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
             if let Instr::Jump(_, _, info) = instr {
                 if limits.merge_mode(*function, *info, None) == MergeMode::Force {
                     let mut cache = shared.function_regions.lock().unwrap();
-                    let regions = cache.entry(*function).or_insert_with(|| {
+                    let regions = cache.entry((*function, limits.region_loop_analysis)).or_insert_with(|| {
                         let summaries =
                             summaries.get_or_init(|| function_effect_summaries(shared, limits.region_global_state));
                         FunctionRegions::with_options(
                             body,
                             RegionOptions {
-                                filter_assertion_failures: true,
+                                filter_assertion_failures: limits.region_loop_analysis,
+                                recreated_slot_liveness: limits.region_loop_analysis,
                                 have_exception: Some(HAVE_EXCEPTION),
                                 terminal_calls: &summaries
                                     .iter()

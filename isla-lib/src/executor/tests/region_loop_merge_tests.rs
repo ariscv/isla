@@ -1,6 +1,31 @@
 //! 循环内分叉的差分、槽位和寄存器回归；沿用父模块的真实执行与 SMT 等价判据。
 use super::*;
 
+fn paths(instrs: Vec<Instr<Name, B64>>, shared: &SharedState<'static, B64>, inputs: usize, merge: bool) -> Vec<Path> {
+    paths_with_state(
+        instrs,
+        shared,
+        inputs,
+        ExecutionLimits::default().with_path_merging(merge).with_region_loop_analysis(true),
+        crate::memory::Memory::new(),
+        |_| (),
+    )
+}
+
+fn differential(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    complete: bool,
+) -> (usize, usize) {
+    let forked = paths(instrs.clone(), shared, inputs, false);
+    let merged = paths(instrs, shared, inputs, true);
+    if merged.len() == 1 {
+        assert!(!merged[0].records.is_empty());
+    }
+    equivalent_paths(&forked, &merged, inputs, complete)
+}
+
 fn loop_program(assertion: Exp<Name>, other: Exp<Name>, jumps: bool, pessimistic: bool) -> Vec<Instr<Name, B64>> {
     let counter = test_name(1100);
     let temporary = test_name(1101);
@@ -227,5 +252,34 @@ fn region_merge_assignment_keeps_local_slot_and_register_events() {
                 if local { None } else { Some(&Val::Bool(false)) }
             );
         }
+    }
+}
+
+#[test]
+fn region_premerge_review_loop_options_keep_shared_cache_separate() {
+    for order in [[false, true, false], [true, false, true]] {
+        let shared = empty_shared_state();
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Exit(crate::ir::ExitCause::AssertionFailure, info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        for enabled in order {
+            let result = paths_with_state(
+                program.clone(),
+                &shared,
+                1,
+                ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(enabled),
+                crate::memory::Memory::new(),
+                |_| (),
+            );
+            assert_eq!(result.len(), 1);
+            assert_eq!(!result[0].records.is_empty(), enabled, "默认旧模式与新模式不能复用对方的区域边界");
+        }
+        let cache = shared.function_regions.lock().unwrap();
+        assert!(cache.contains_key(&(TOP_LEVEL_LET, false)));
+        assert!(cache.contains_key(&(TOP_LEVEL_LET, true)));
     }
 }

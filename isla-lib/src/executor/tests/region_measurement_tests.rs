@@ -72,6 +72,7 @@ fn regions_loop_merge_real_ir_measurement() {
                         body,
                         RegionOptions {
                             filter_assertion_failures: filtered,
+                            recreated_slot_liveness: filtered,
                             have_exception: Some(HAVE_EXCEPTION),
                             terminal_calls: &terminals,
                         },

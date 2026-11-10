@@ -3100,7 +3100,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
             Instr::Exit(cause, info) => {
                 // 区域推演把断言失败交给臂事务处理；普通推演与其他终止仍须拒绝。
-                if !matches!(cause, ExitCause::AssertionFailure) || frame.region_execution.is_none() {
+                if !matches!(cause, ExitCause::AssertionFailure)
+                    || frame.region_execution.is_none()
+                    || !task_state.execution_limits.as_ref().is_some_and(|limits| limits.region_loop_analysis)
+                {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Exit)?;
                 }
                 return match cause {

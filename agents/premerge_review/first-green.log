@@ -1,0 +1,170 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.08s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-28e6751cd897256a)
+
+running 148 tests
+test config::tests::execution_limits_config_rejects_empty_region_override ... ok
+test config::tests::execution_limits_config_rejects_empty_region_fork_limits ... ok
+test config::tests::execution_limits_config_parses_region_fork_limits ... ok
+test config::tests::execution_limits_config_parses_region_scoped_branch_and_loop_limits ... ok
+test config::tests::execution_limits_config_parses_narrow_branch_region_limits ... ok
+test config::tests::execution_limits_config_parses_source_regions_and_overrides ... ok
+test config::tests::memory_regions_parse_excluded_type ... ok
+test config::tests::pma_regions_detailed_fields_and_override ... ok
+test config::tests::pma_regions_absent_returns_none ... ok
+test config::tests::pma_regions_symbolic_size_parsing ... ok
+test config::tests::pma_regions_alias_mapping ... ok
+test config::tests::pma_regions_symbolic_bounds_hard_fails ... ok
+test config::tests::pma_regions_validation_hard_fails ... ok
+test executor::execution_limits::tests::configured_regions_replace_preconfigured_branch_region_limits ... ok
+test executor::execution_limits::tests::branch_local_limit_only_applies_inside_selected_region ... ok
+test executor::execution_limits::tests::explicitly_empty_region_filter_matches_no_source_location ... ok
+test executor::execution_limits::tests::goto_without_source_location_does_not_match_source_region ... ok
+test executor::execution_limits::tests::limit_region_uses_source_range_selection ... ok
+test executor::execution_limits::tests::narrower_region_branch_budget_overrides_general_region_budget ... ok
+test executor::execution_limits::tests::region_does_not_gate_path_fork_accounting ... ok
+test config::tests::execution_limits_merge_policy_validates_ir_functions_and_strict_regions ... ok
+test executor::execution_limits::tests::region_fork_budget_keeps_the_first_fork_of_each_branch_point ... ok
+test executor::execution_limits::tests::path_merging_rule_indices_keep_toml_order_after_unmatched_region ... ok
+test executor::execution_limits::tests::region_fork_budgets_are_path_local ... ok
+test executor::tests::region_measurement_tests::regions_loop_merge_real_ir_measurement ... ignored, 需要 ISLA_REGIONS_IR、ISLA_M0_INPUT、ISLA_M0_OUTPUT 指定只读输入及输出
+test executor::execution_limits::tests::sample_bias_only_applies_inside_its_own_region ... ok
+test executor::tests::region_merge_tests::merge_enumeration_f5_单路径16384类且每类只消费一次模型 ... ignored, F5 万类压力验证，显式运行
+test executor::tests::region_merge_tests::merge_enumeration_real_ir_pte_is_invalid ... ignored, 需要 ISLA_REGIONS_IR 指向真实 rv64d.ir
+test executor::tests::region_merge_tests::region_merge_f4_real_get_xlpe_diagnosis ... ignored, 需要 ISLA_REGIONS_IR 指向真实 Sail IR
+test executor::tests::region_merge_tests::region_merge_real_ir_effects ... ignored, 需要外部 rv64d.ir；用 ISLA_REGIONS_IR 指定路径
+test executor::tests::region_merge_tests::samples_real_ir_pte_cross_mode ... ignored, 需要 ISLA_REGIONS_IR 指向真实 Sail IR
+test ir::regions::tests::regions_assertion_dead_end_shortens_loop_region_and_keeps_tail ... ok
+test ir::regions::tests::regions_boundary_validation_reports_exit ... ok
+test ir::regions::tests::regions_assertion_failure_edge_and_empty_trailing_ir ... ok
+test ir::regions::tests::regions_invalid_target_panics - should panic ... ok
+test ir::regions::tests::regions_keep_outer_handle_while_querying_inner ... ok
+test ir::regions::tests::regions_cycles_use_graph_not_pc_order ... ok
+test ir::regions::tests::regions_diamond_triangle_and_lazy_cache ... ok
+test ir::regions::tests::regions_four_term_or_chain_and_shared_join ... ok
+test ir::regions::tests::regions_init_only_locals_and_outside_same_name ... ok
+test ir::regions::tests::regions_non_returning_call_has_only_virtual_exit_and_keeps_full_liveness ... ok
+test ir::regions::tests::regions_exception_edges_follow_polarity_after_pure_call ... ok
+test ir::regions::tests::regions_real_ir ... ignored, 需要外部 rv64d.ir；用 ISLA_REGIONS_IR 指定路径
+test ir::regions::tests::regions_nonreturning_arm_and_irreducible_loop_are_rejected ... ok
+test ir::regions::tests::regions_premerge_review_default_preserves_assertion_exit_and_slot_liveness ... ok
+test ir::regions::tests::regions_parallel_polarity_edges_and_cached_rejections ... ok
+test ir::regions::tests::regions_premerge_review_default_preserves_slot_liveness ... ok
+test ir::regions::tests::regions_liveness_tracks_later_loops_exception_reads_and_addresses ... ok
+test ir::regions::tests::regions_slot_liveness_keeps_plain_assignment_destination ... ok
+test ir::regions::tests::regions_all_terminal_forms_and_return_goto ... ok
+test ir::regions::tests::regions_local_liveness_bypasses_redefinitions_and_sub_locations ... ok
+test source_loc::tests::source_region_overlaps_half_open_ranges_by_line_then_column ... ok
+test source_loc::tests::source_region_rejects_disjoint_or_enclosing_locations ... ok
+test ir::regions::tests::regions_assertion_filter_rejects_cycles_and_preserves_other_exits ... ok
+test source_loc::tests::source_region_rejects_reversed_range - should panic ... ok
+test source_loc::tests::source_region_selects_match_ir_and_excludes_enclosing_foreach_ir ... ok
+test source_loc::tests::source_region_spec_missing_file_resolves_to_no_matching_region ... ok
+test source_loc::tests::source_region_spec_rejects_duplicate_file - should panic ... ok
+test ir::regions::tests::regions_slot_liveness_stops_at_loop_redeclaration ... ok
+test ir::regions::tests::regions_direct_assertion_normal_paths_join_inside_loop ... ok
+test source_loc::tests::source_region_generated_ir_matches_fixture ... ok
+test source_loc::tests::source_region_spec_rejects_reversed_span - should panic ... ok
+test ir::regions::tests::regions_primop_assertions_and_reset_preserve_control_flow ... ok
+test source_loc::tests::source_region_spec_resolves_exact_file_name ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_callee_address_and_other_write_effects_stay_in_summary ... ok
+test executor::tests::region_merge_tests::region_merge_f4_special_calls_still_rejected_statically ... ok
+test executor::tests::region_merge_tests::region_merge_force_static_validation_before_execution ... ok
+test executor::tests::region_merge_tests::region_merge_recursive_effect_least_fixed_point ... ok
+test ir::regions::tests::regions_variable_enumeration_uses_values_not_field_or_type_names ... ok
+test executor::tests::region_merge_tests::region_merge_non_returning_fixed_point_is_conservative_for_recursion_and_exception_state ... ok
+test executor::tests::region_merge_tests::region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_invalid_index_retains_arguments ... ok
+test executor::tests::path_merging_discards_region_local_declaration ... ok
+test executor::tests::multi_thread_read_mem_symbolic_region_event ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_out_of_bounds_rollback ... ok
+test executor::tests::region_merge_tests::region_merge_effects_use_external_binding_and_reject_callee_vector_writes ... ok
+test executor::tests::region_merge_tests::region_merge_prior_fresh_definitions_remain_dependencies_after_next_merge ... ok
+test executor::tests::monomorphize_branch_local_limit_keeps_one_model_inside_selected_region ... ok
+test executor::tests::region_merge_tests::region_merge_callee_have_exception_write_rejects ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_base_slot_survives_even_when_statically_dead ... ok
+test executor::tests::monomorphize_branch_local_limit_does_not_apply_outside_selected_region ... ok
+test executor::tests::region_merge_tests::region_merge_non_returning_requires_all_paths_and_preserves_normal_writes ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_callee_register_and_global_let_writes ... ok
+test memory::tests::symbolic_ifetch_callbacks_preserve_regions_and_exclusions ... ok
+test executor::tests::region_merge_tests::region_merge_f2_records_disabled_skips_scan ... ok
+test executor::tests::region_merge_tests::region_merge_repeated_pure_calls_keep_distinct_local_initial_values ... ok
+test executor::tests::region_merge_tests::region_merge_force_toml_exits_with_rule_stats ... ok
+test executor::tests::region_merge_tests::region_merge_single_arm_register_read_union_and_guard ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_symbolic_length_rollback ... ok
+test executor::tests::region_merge_tests::region_merge_f2_invalid_savepoint_panics_before_arm_commit - should panic ... ok
+test executor::tests::region_merge_tests::region_merge_undeclared_call_rejected_only_when_reached ... ok
+test executor::tests::region_merge_tests::region_merge_f4_memory_constraints_are_guarded_and_reads_survive_checkpoint ... ok
+test executor::tests::region_merge_tests::region_merge_partial_register_write_reuses_original_unwritten_fields ... ok
+test executor::tests::region_merge_tests::region_merge_nested_single_read_keeps_complete_guard ... ok
+test executor::tests::region_merge_tests::region_merge_force_process_failure_and_off_conflict ... ok
+test executor::tests::region_merge_tests::merge_enumeration_budget_边枚举边回调并正常截断回滚 ... ok
+test executor::tests::region_merge_tests::region_merge_pow_int_fresh_equations_and_local_variable ... ok
+test executor::tests::region_merge_tests::region_merge_f2_pow_before_region_inputs ... ok
+test executor::tests::region_merge_tests::region_merge_nested_same_join_and_single_feasible_jump ... ok
+test executor::tests::region_merge_tests::region_merge_pure_call_and_short_circuit ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_preflight_and_merge ... ok
+test executor::tests::region_merge_tests::region_merge_f4_union_success_domain_unwrap ... ok
+test executor::tests::region_merge_tests::region_merge_dead_arm_and_guarded_assume ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_nested_conditional_write_then_outer_read ... ok
+test executor::tests::region_merge_tests::region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_read_write_read_and_repeated_pre_state_read ... ok
+test executor::tests::region_merge_tests::region_merge_policy_inheritance_and_global_off ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_unrelated_read_after_write_and_first_write_order ... ok
+test executor::tests::region_merge_tests::region_merge_f4_union_match_and_nested_tags ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_pre_state_read_after_nested_join_widens_footprint_guard ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_repeated_write_and_internal_read ... ok
+test executor::tests::region_merge_tests::region_merge_f4_unreachable_unknown_extern ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_opposite_register_order_with_distinct_accessors ... ok
+test executor::tests::region_merge_tests::region_merge_configured_const_primop_effects ... ok
+test executor::tests::region_merge_tests::region_merge_records_json_lines_and_parallel_writes ... ok
+test executor::tests::region_merge_tests::region_merge_four_item_or_chain_differential ... ok
+test executor::tests::region_merge_tests::merge_enumeration_结构字段分配与显示不依赖哈希迭代 ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_assignment_keeps_local_slot_and_register_events ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_pessimistic_symbolic_assertion_is_rejected ... ok
+test executor::tests::region_merge_tests::region_merge_unique_monomorphize_and_retry_in_real_arms ... ok
+test executor::tests::symbolic_pma_region_size_forks_matching_range ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_callee_vector_write_uses_register_merge ... ok
+test executor::tests::region_merge_tests::region_merge_f2_force_and_adaptive_errors ... ok
+test executor::tests::region_merge_tests::region_merge_f2_nested_pessimistic_assert_success_domain ... ok
+test executor::tests::region_merge_tests::region_merge_f2_concrete_pessimistic_assert ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_status_callback_with_conditional_and_repeated_struct_writes ... ok
+test executor::tests::region_merge_tests::region_merge_multiple_returns_common_virtual_exit ... ok
+test executor::tests::review17_tests::review17_ifetch_region_dispatch ... ok
+test executor::tests::region_merge_tests::region_merge_list_construction_and_pattern_matching ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_read_footprint_topology_and_write_cycle ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_base_slot_and_late_entry_preserve_state ... ok
+test executor::tests::region_merge_tests::region_merge_f4_memory_read_union ... ok
+test executor::tests::region_merge_tests::global_state_tests::region_m2_relaxed_and_address_writes_remain_rejected ... ok
+test executor::tests::region_merge_tests::region_merge_declared_union_constructors_are_pure ... ok
+test executor::tests::region_merge_tests::merge_enumeration_extract_of_derived_symbol ... ok
+test executor::tests::region_merge_tests::region_merge_inner_commit_then_outer_rollback_with_assertion ... FAILED
+test executor::tests::region_merge_tests::merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规范最小值 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_nested_context_and_fork_inheritance ... ok
+test executor::tests::region_merge_tests::merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_coupled_slices_caps_and_failure_result ... ok
+test executor::tests::region_merge_tests::region_merge_f2_union_initial_value_constraints ... ok
+test executor::tests::region_merge_tests::region_merge_seeded_random_pure_ir ... ok
+test executor::tests::region_merge_tests::loop_merge_tests::region_merge_loop_assertion_forms_and_dead_arms_differential ... ok
+test executor::tests::region_merge_tests::samples_two_arm_nested_cross_mode_and_roundtrip ... ok
+test executor::tests::region_merge_tests::merge_enumeration_budget_256组合及多线程守卫规范编号 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_多分区耦合守卫规范编号与计数 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截断 ... ok
+test executor::tests::region_merge_tests::merge_enumeration_stride_只消费dfs序号倍数且预算不变 ... ok
+
+failures:
+
+---- executor::tests::region_merge_tests::region_merge_inner_commit_then_outer_rollback_with_assertion stdout ----
+
+thread 'executor::tests::region_merge_tests::region_merge_inner_commit_then_outer_rollback_with_assertion' (510) panicked at isla-lib/src/executor/tests/region_merge_tests.rs:840:9:
+assertion `left == right` failed
+  left: (3, 3)
+ right: (3, 2)
+
+
+failures:
+    executor::tests::region_merge_tests::region_merge_inner_commit_then_outer_rollback_with_assertion
+
+test result: FAILED. 140 passed; 1 failed; 7 ignored; 0 measured; 696 filtered out; finished in 6.32s
+
+error: test failed, to rerun pass `-p isla-lib --lib`
