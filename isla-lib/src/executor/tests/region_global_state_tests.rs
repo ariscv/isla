@@ -56,6 +56,184 @@ fn finish() -> Vec<Instr<Name, B64>> {
 }
 
 #[test]
+fn region_m2_vector_update_preflight_and_merge() {
+    let shared = empty_shared_state();
+    let vector = test_name(990);
+    let updated = test_name(991);
+    let update = |index| {
+        vec![
+            // 沿用区域局部槽位规则：向量在臂内消费，汇合点保留布尔返回值。
+            Instr::Decl(updated, Ty::Vector(Box::new(Ty::Bool)), info()),
+            Instr::PrimopVariadic(
+                Loc::Id(updated),
+                primop::variadic_primops()["vector_update"],
+                vec![Exp::Id(vector), Exp::I128(index), Exp::Bool(true)],
+                info(),
+            ),
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_access"],
+                Exp::Id(updated),
+                Exp::I128(0),
+                info(),
+            ),
+        ]
+    };
+    let program = diamond(update(0), update(1), vec![Instr::End]);
+    let summaries = region_summary::function_effect_summaries(&shared, true);
+    for (pc, instruction) in program.iter().enumerate() {
+        assert!(region_summary::instruction_effect(TOP_LEVEL_LET, pc, instruction, &shared, &summaries).is_none());
+    }
+    let initial = Val::Vector(vec![Val::Bool(false), Val::Bool(false)]);
+    let configure = |frame: &mut LocalFrame<'static, B64>| {
+        frame.vars_mut().insert(vector, UVal::Init(initial.clone()));
+    };
+    let forked = run(program.clone(), &shared, 1, false, configure);
+    let merged = run(program, &shared, 1, true, configure);
+    assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 1));
+    assert_eq!(merged[0].records.len(), 1, "必须实际提交区域合并");
+    assert!(!merged[0].variables.contains_key(&updated));
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    let (_, actual) = import(&merged[0], &[condition], &mut solver);
+    assert!(
+        solver
+            .check_sat_with(&smtlib::Exp::Neq(Box::new(actual), Box::new(smtlib::Exp::Var(condition))), info())
+            .is_unsat()
+            .unwrap(),
+        "索引 0 的最终值必须等于分支条件"
+    );
+}
+
+fn check_vector_update_error_rollback(symbolic_index: bool) {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let reg = shared.symtab.intern("zstate");
+    shared.registers.insert(reg, Ty::Bool);
+    let vector = test_name(990);
+    let index_name = test_name(991);
+    let temporary = test_name(992);
+    let program = diamond(
+        vec![
+            Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+            Instr::Decl(temporary, Ty::Bool, info()),
+            Instr::PrimopUnary(Loc::Id(temporary), primop::unary_primops()["not"], input(0), info()),
+            Instr::PrimopVariadic(
+                Loc::Id(vector),
+                primop::variadic_primops()["vector_update"],
+                vec![Exp::Id(vector), Exp::Id(index_name), Exp::Bool(true)],
+                info(),
+            ),
+        ],
+        vec![],
+        finish(),
+    );
+    let mut frame = make_frame(program);
+    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    let index = solver.declare_const(smtlib::Ty::BitVec(128), info());
+    let initial = Val::Vector(vec![Val::Bool(false), Val::Bool(false)]);
+    let index_value = if symbolic_index { Val::Symbolic(index) } else { Val::I128(2) };
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    frame.vars_mut().insert(vector, UVal::Init(initial.clone()));
+    frame.vars_mut().insert(index_name, UVal::Init(index_value.clone()));
+    // 先证实输入确实触发目标错误，再检查完整区域事务的拒绝和回滚。
+    let error = primop::vector_update(
+        vec![initial.clone(), index_value.clone(), Val::Bool(true)],
+        &mut solver,
+        &mut frame,
+        info(),
+    )
+    .unwrap_err();
+    if symbolic_index {
+        assert!(matches!(error, ExecError::SymbolicLength("vector_update", _)));
+    } else {
+        assert!(matches!(error, ExecError::OutOfBounds("vector_update")));
+    }
+    let before = solver.trace().to_vec().len();
+    let state = TaskState::new()
+        .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_region_global_state(true));
+    let queue = Worker::new_lifo();
+    let mut fraction = Fraction::one();
+    let outcome = region_merge::try_region(
+        condition,
+        2,
+        0,
+        TaskId::fresh(),
+        &mut fraction,
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    )
+    .unwrap();
+    assert!(matches!(outcome, region_merge::RegionResult::Rejected));
+    let report = shared.execution_stats.merge_json();
+    assert_eq!(report["candidate_attempts"], 1, "必须通过静态预检并在运行时拒绝");
+    let reason = if symbolic_index { "retry_operand" } else { "incompatible_state" };
+    assert_eq!(report["failure_reasons"][reason], 1);
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(solver.trace().to_vec().len(), before, "回滚不得泄漏定义和寄存器事件");
+    assert_eq!(frame.pc, 0);
+    assert_eq!(frame.regs().get_last_if_initialized(reg), Some(&Val::Bool(false)));
+    let UVal::Init(actual_vector) = &frame.vars()[&vector] else { panic!("向量必须保持初始化") };
+    let UVal::Init(actual_index) = &frame.vars()[&index_name] else { panic!("索引必须保持初始化") };
+    assert_eq!(*actual_vector, initial);
+    assert_eq!(*actual_index, index_value);
+    assert!(!frame.vars().contains_key(&temporary));
+    assert!(frame.region_merge_records().is_empty());
+    assert!(frame.region_execution.is_none());
+    assert!(frame.local_state.speculative_access.is_none());
+    assert!(frame.pending_retry_operand.is_none());
+    assert!(queue.is_empty());
+    assert!(fraction.is_one());
+    // 两侧分支与合法、越界索引仍能任意组合，证明回滚没有缩小输入域。
+    for branch in [false, true] {
+        for concrete_index in [0, 2] {
+            let constraint = smtlib::Exp::And(
+                Box::new(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(condition)), Box::new(smtlib::Exp::Bool(branch)))),
+                Box::new(smtlib::Exp::Eq(
+                    Box::new(smtlib::Exp::Var(index)),
+                    Box::new(crate::primop_util::smt_i128(concrete_index)),
+                )),
+            );
+            assert!(solver.check_sat_with(&constraint, info()).is_sat().unwrap());
+        }
+    }
+}
+
+#[test]
+fn region_m2_vector_update_symbolic_length_rollback() {
+    check_vector_update_error_rollback(true);
+}
+
+#[test]
+fn region_m2_vector_update_out_of_bounds_rollback() {
+    check_vector_update_error_rollback(false);
+}
+
+#[test]
+fn region_m2_vector_update_invalid_index_retains_arguments() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let mut frame = make_frame(vec![Instr::End]);
+    let args = vec![Val::Vector(vec![Val::Bool(false)]), Val::Bool(true), Val::Bool(false)];
+    let error = primop::vector_update(args.clone(), &mut solver, &mut frame, info()).unwrap_err();
+    let ExecError::Type(message, location) = error else { panic!("非法索引类型必须返回类型错误") };
+    assert_eq!(location, info());
+    assert!(message.contains(&format!("{args:?}")), "类型错误必须保留全部实参：{message}");
+}
+
+#[test]
 fn region_m2_callee_register_and_global_let_writes() {
     let mut shared = empty_shared_state();
     let reg = shared.symtab.intern("zstate");

@@ -2810,10 +2810,7 @@ pub fn vector_update<B: BV>(
                 }
                 Ok(Val::Vector(vec))
             }
-            _ => {
-                eprintln!("{:?}", args);
-                Err(ExecError::Type(format!("vector_update (index) {:?}", &args[1]), info))
-            }
+            _ => Err(ExecError::Type(format!("vector_update (index) {:?}; args {:?}", &args[1], &args), info)),
         },
         Val::Bits(_) => {
             // If the argument is a bitvector then `vector_update` is a special case of `set_slice`

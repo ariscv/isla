@@ -148,6 +148,7 @@ pub fn effect(name: &str) -> Option<Effect> {
         | "slice"
         | "vector_subrange"
         | "vector_update_subrange"
+        | "vector_update"
         | "bitvector_update"
         | "set_slice"
         | "get_slice_int"
@@ -268,8 +269,6 @@ pub fn effect(name: &str) -> Option<Effect> {
         | "fp64_undefined" => Some(Effect::WritesState),
         // 这两个向量辅助原语会直接对既有实参加范围断言，可能删除路径。
         "isla_fixed_rounding_incr" | "isla_mask_from_low_bits" => Some(Effect::WritesState),
-        // 非法索引类型分支会 eprintln 输出；有效分支仅更新返回的向量，仍按 IO 保守分类。
-        "vector_update" => Some(Effect::WritesState),
         // RAM 读取在推演中按并集发布；设备区域在运行时预检拒绝，写和 IO 仍拒绝。
         "platform_read_mem"
         | "platform_read_mem_ifetch"

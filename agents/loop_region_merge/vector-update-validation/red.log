@@ -1,0 +1,55 @@
+   Compiling isla-lib v0.2.0 (/data1/baiyifan/workplace/isla-runner/.worktree/isla-loop-merge-20261110/isla-lib)
+warning: methods `with_transaction_condition` and `order_transaction_register_reads` are never used
+   --> isla-lib/src/smt/transaction.rs:211:19
+    |
+ 52 | impl<'ctx, B: BV> Solver<'ctx, B> {
+    | --------------------------------- methods in this implementation
+...
+211 |     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+355 |     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `isla-lib` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.71s
+     Running unittests src/lib.rs (target/debug/deps/isla_lib-36d87c5a4a773f4c)
+
+running 4 tests
+
+thread 'executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_preflight_and_merge' (2888) panicked at isla-lib/src/executor/tests/region_global_state_tests.rs:86:9:
+assertion failed: region_summary::instruction_effect(TOP_LEVEL_LET, pc, instruction, &shared,
+        &summaries).is_none()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_preflight_and_merge ... FAILED
+[Vector([Bool(false)]), Bool(true), Bool(false)]
+
+thread 'executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_invalid_index_retains_arguments' (2886) panicked at isla-lib/src/executor/tests/region_global_state_tests.rs:243:5:
+类型错误必须保留全部实参：vector_update (index) Bool(true)
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_invalid_index_retains_arguments ... FAILED
+
+thread 'executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_out_of_bounds_rollback' (2887) panicked at isla-lib/src/executor/tests/region_global_state_tests.rs:190:5:
+assertion `left == right` failed: 必须通过静态预检并在运行时拒绝
+  left: Number(0)
+ right: 1
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_out_of_bounds_rollback ... FAILED
+
+thread 'executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_symbolic_length_rollback' (2889) panicked at isla-lib/src/executor/tests/region_global_state_tests.rs:190:5:
+assertion `left == right` failed: 必须通过静态预检并在运行时拒绝
+  left: Number(0)
+ right: 1
+test executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_symbolic_length_rollback ... FAILED
+
+failures:
+
+failures:
+    executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_invalid_index_retains_arguments
+    executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_out_of_bounds_rollback
+    executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_preflight_and_merge
+    executor::tests::region_merge_tests::global_state_tests::region_m2_vector_update_symbolic_length_rollback
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 837 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p isla-lib --lib`

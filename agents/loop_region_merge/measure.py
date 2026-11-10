@@ -143,13 +143,45 @@ def report():
         lines += ["### 仍被拒的原因细分", ""]
         table(lines, ["clause", "原因", "证据函数", "pc", "原语", "权重"], [
             [*key, weight] for key, weight in sorted(evidence.items())])
-        lines += ["本次仍被拒的首个证据均为 `execute` 中的 `vector_update`。"
-                  "其现有效应分类为 `WritesState`，属于设计要求保持拒绝的其他写效应原语，本次不放宽。", ""]
+        lines += ["M2 测量时仍被拒的首个证据均为 `execute` 中的 `vector_update`。"
+                  "当时效应分类为 `WritesState`，该次测量未放宽。", ""]
         lines += ["M2 保留地址写、其他写效应原语和内存写的拒绝。"
                   "未实现的外部函数仍按原规则在实际到达时拒绝，不计入静态拒绝；"
                   "relaxed 寄存器、历史写入和访问顺序冲突也需运行时判定。", "",
                   "复现 M2：沿用上述测量命令，额外设置 `ISLA_M0_GLOBAL_STATE=1`，"
                   "并将 `ISLA_M0_OUTPUT` 改为 `$PWD/agents/loop_region_merge/m2.json`，随后运行 `measure.py report`。", ""]
+    vector_update_path = DIRECTORY / "vector-update.json"
+    if vector_update_path.exists():
+        updated = json.loads(vector_update_path.read_text())
+        m2 = json.loads(m2_path.read_text())
+        assert [c["clause"] for c in updated] == CLAUSES
+        rows = []
+        totals = collections.Counter()
+        for old, new in zip(m2, updated):
+            assert old["clause"] == new["clause"]
+            assert old["config"] == new["config"]
+            assert old["snapshots"] == new["snapshots"]
+            assert old["weights"] == new["weights"]
+            assert old["missing_weight"] == new["missing_weight"]
+            assert [(b["function"], b["branch_pc"], b["count"], b["category"]) for b in old["branches"]] == [
+                (b["function"], b["branch_pc"], b["count"], b["category"]) for b in new["branches"]]
+            before = old["preflight_weights"].get("可通过", 0)
+            after = new["preflight_weights"].get("可通过", 0)
+            rejected = sum(new["preflight_weights"].values()) - after
+            row = [before, after, after - before, rejected, new["weights"].get("HasBackEdge", 0)]
+            totals.update(dict(enumerate(row)))
+            rows.append([new["clause"], *row])
+        rows.append(["合计", *[totals[i] for i in range(5)]])
+        lines += ["## vector_update 改纯后预检", "",
+                  "与 M2 使用相同的 IR、加载期配置、最后快照、入口和权重，并保持 `region_global_state` 打开。"
+                  "测量入口仍为 `region_measurement_tests.rs`，报告逐项核对配置、快照、入口、权重和区域分类一致。"
+                  "只做静态预检，不初始化架构、不执行 IR、不跑 isarch 长时实测。", ""]
+        table(lines, ["clause", "M2 可通过", "改纯后可通过", "新增可通过", "仍被拒", "仍有环"], rows)
+        lines += ["结果保存于 `vector-update.json`，逐节点拒绝证据保留在 `preflight_rejections`。"
+                  "静态可通过权重不代表动态合并成功数或实际加速。", "",
+                  "复现：沿用 M0 测量命令，设置 `ISLA_M0_GLOBAL_STATE=1`，"
+                  "将 `ISLA_M0_OUTPUT` 改为 `$PWD/agents/loop_region_merge/vector-update.json`，"
+                  "随后运行 `python3 agents/loop_region_merge/measure.py report`。", ""]
     (DIRECTORY / "m0.md").write_text("\n".join(lines))
 
 
