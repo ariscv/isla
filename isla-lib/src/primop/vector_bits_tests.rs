@@ -46,7 +46,7 @@ fn vector_bits_lookup_symbolic_matches_linear_selection() -> Result<(), ExecErro
     let ctx = context();
     let info = SourceLoc::unknown();
     let lookup = binary_primops::<B64>()["lookup_bits"];
-    for (index_width, output_width) in [(1, 8), (3, 128), (5, 32), (8, 8)] {
+    for (index_width, output_width) in [(1, 8), (3, 128), (4, 32), (5, 32), (8, 8)] {
         let mut solver = Solver::<B64>::new(&ctx);
         let index = solver.declare_bitvector(index_width, info);
         let table: Vec<_> =
