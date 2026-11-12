@@ -60,6 +60,13 @@ use crate::source_loc::SourceLoc;
 
 pub mod float;
 pub mod memory;
+mod stable_pack;
+mod vector_bits;
+
+#[cfg(test)]
+mod primitive_operator_tests;
+#[cfg(test)]
+mod vector_bits_tests;
 
 pub type Unary<B> = fn(Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
 pub type Binary<B> = fn(Val<B>, Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError>;
@@ -5137,6 +5144,112 @@ fn isla_cpopw<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> R
     isla_cpop_width(bits, 32, solver, info)
 }
 
+/// 全位宽反转，区别于字节内反转和字节换序。支持任意正位宽。
+fn isla_reverse_bits<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    let bits = expect_bits_arg(bits, "isla_reverse_bits", solver, info)?;
+    let len = length_bits(&bits, solver, info)?;
+    if len == 0 {
+        return Err(ExecError::Type("isla_reverse_bits requires a positive width".to_string(), info));
+    }
+    match bits {
+        Val::Bits(bits) => {
+            let mut result = B::zeros(len);
+            for output in 0..len {
+                result = result.set_slice(output, bits.slice(len - 1 - output, 1).expect("已检查反转位宽"));
+            }
+            Ok(Val::Bits(result))
+        }
+        bits => {
+            let input = smt_value(&bits, info)?;
+            let result = (0..len)
+                .map(|bit| Exp::Extract(bit, bit, Box::new(input.clone())))
+                .reduce(|result, bit| Exp::Concat(Box::new(result), Box::new(bit)))
+                .expect("已检查反转位宽非零");
+            solver.define_bitvector(result, info).into()
+        }
+    }
+}
+
+/// GF(2)[X]/(X^W+r)中的乘法；三个同宽实参，1<=W<=128，r须为具体常量。
+/// 模数只要求单首，不要求不可约。每步只生成表达式，不分叉执行路径。
+fn gf2_poly_mul_mod<B: BV>(
+    args: Vec<Val<B>>,
+    solver: &mut Solver<B>,
+    _: &mut LocalFrame<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if args.len() != 3 {
+        return Err(ExecError::Type(format!("gf2_poly_mul_mod expected 3 arguments, got {}", args.len()), info));
+    }
+    let mut a = expect_bits_arg(args[0].clone(), "gf2_poly_mul_mod", solver, info)?;
+    let mut b = expect_bits_arg(args[1].clone(), "gf2_poly_mul_mod", solver, info)?;
+    let r = expect_bits_arg(args[2].clone(), "gf2_poly_mul_mod", solver, info)?;
+    let width = length_bits(&a, solver, info)?;
+    if !(1..=128).contains(&width) || length_bits(&b, solver, info)? != width || length_bits(&r, solver, info)? != width
+    {
+        return Err(ExecError::Type("gf2_poly_mul_mod requires equal widths in 1..=128".to_string(), info));
+    }
+    let Val::Bits(r) = r else {
+        return Err(ExecError::Type("gf2_poly_mul_mod requires a concrete modulus".to_string(), info));
+    };
+    if let (Val::Bits(a), Val::Bits(b)) = (&a, &b) {
+        let mut z = B::zeros(width);
+        let mut h = *b;
+        for bit in 0..width {
+            if a.slice(bit, 1).expect("已检查乘法位宽").lower_u64() != 0 {
+                z = z ^ h;
+            }
+            let reduce = h.slice(width - 1, 1).expect("已检查乘法位宽").lower_u64() != 0;
+            h = h.shiftl(1);
+            if reduce {
+                h = h ^ r;
+            }
+        }
+        return Ok(Val::Bits(z));
+    }
+    // 常系数作为选择位，省去已知为零的项；两输入的数学角色对称。
+    if matches!(b, Val::Bits(_)) {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let a_exp = smt_value(&a, info)?;
+    let mut h = solver.define_bitvector(smt_value(&b, info)?, info);
+    let mut z = solver.define_bitvector(smt_zeros(width.into()), info);
+    let rounds = match &a {
+        Val::Bits(a) => width - a.leading_zeros(),
+        _ => width,
+    };
+    for bit in 0..rounds {
+        let term = match &a {
+            Val::Bits(a) if a.slice(bit, 1).expect("已检查乘法位宽").is_zero() => None,
+            Val::Bits(_) => Some(Exp::Var(h)),
+            _ => Some(Exp::Bvand(
+                Box::new(Exp::SignExtend(width - 1, Box::new(Exp::Extract(bit, bit, Box::new(a_exp.clone()))))),
+                Box::new(Exp::Var(h)),
+            )),
+        };
+        if let Some(term) = term {
+            z = solver.define_bitvector(Exp::Bvxor(Box::new(Exp::Var(z)), Box::new(term)), info);
+        }
+        if bit + 1 < rounds {
+            let reduction = Exp::Bvand(
+                Box::new(Exp::SignExtend(
+                    width - 1,
+                    Box::new(Exp::Extract(width - 1, width - 1, Box::new(Exp::Var(h)))),
+                )),
+                Box::new(smt_sbits(r)),
+            );
+            h = solver.define_bitvector(
+                Exp::Bvxor(
+                    Box::new(Exp::Bvshl(Box::new(Exp::Var(h)), Box::new(smt_u64_width(1, width)))),
+                    Box::new(reduction),
+                ),
+                info,
+            );
+        }
+    }
+    Ok(Val::Symbolic(z))
+}
+
 fn isla_brev8<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     let bits = replace_mixed_bits(bits, solver, info)?;
     let len = length_bits(&bits, solver, info)?;
@@ -5352,6 +5465,7 @@ pub fn unary_primops<B: BV>() -> HashMap<String, Unary<B>> {
     primops.insert("isla_count_ones".to_string(), isla_count_ones as Unary<B>);
     primops.insert("isla_cpop".to_string(), isla_cpop as Unary<B>);
     primops.insert("isla_cpopw".to_string(), isla_cpopw as Unary<B>);
+    primops.insert("isla_reverse_bits".to_string(), isla_reverse_bits as Unary<B>);
     primops.insert("isla_brev8".to_string(), isla_brev8 as Unary<B>);
     primops.insert("isla_rev8".to_string(), isla_rev8 as Unary<B>);
     primops.insert("isla_vector_rev8".to_string(), isla_vector_rev8 as Unary<B>);
@@ -5438,6 +5552,8 @@ pub fn binary_primops<B: BV>() -> HashMap<String, Binary<B>> {
     primops.insert("append".to_string(), append as Binary<B>);
     primops.insert("append_64".to_string(), append as Binary<B>);
     primops.insert("vector_access".to_string(), vector_access as Binary<B>);
+    primops.insert("lookup_bits".to_string(), vector_bits::lookup_bits as Binary<B>);
+    primops.insert("prefix_popcount".to_string(), vector_bits::prefix_popcount as Binary<B>);
     primops.insert("eq_anything".to_string(), eq_anything as Binary<B>);
     primops.insert("eq_string".to_string(), eq_string as Binary<B>);
     primops.insert("concat_str".to_string(), concat_str as Binary<B>);
@@ -5509,6 +5625,8 @@ pub fn variadic_primops<B: BV>() -> HashMap<String, Variadic<B>> {
     primops.insert("isla_vector_access_or_default".to_string(), isla_vector_access_or_default as Variadic<B>);
     primops.insert("isla_vector_select".to_string(), isla_vector_select as Variadic<B>);
     primops.insert("isla_mux2".to_string(), isla_mux2 as Variadic<B>);
+    primops.insert("gf2_poly_mul_mod".to_string(), gf2_poly_mul_mod as Variadic<B>);
+    primops.insert("stable_pack".to_string(), stable_pack::stable_pack as Variadic<B>);
     primops.insert("isla_masktypei_result".to_string(), isla_masktypei_result as Variadic<B>);
     primops.insert("isla_masktypev_result".to_string(), isla_masktypev_result as Variadic<B>);
     primops.insert("isla_pack_vreg".to_string(), isla_pack_vreg as Variadic<B>);

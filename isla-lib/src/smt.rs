@@ -190,6 +190,7 @@ mod dump;
 mod transaction;
 use transaction::SolverSavepoint;
 pub use transaction::{SolverTransaction, MAX_TRANSACTION_DEPTH};
+mod dependencies;
 pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
@@ -2284,6 +2285,11 @@ unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr) -> Z3_solver {
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
+    /// 同线程辅助求解可共享AST管理器；各Solver的断言仍相互独立。
+    pub fn context(&self) -> &'ctx Context {
+        self.ctx
+    }
+
     pub fn new(ctx: &'ctx Context) -> Self {
         Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, fresh_random_seed())
     }
