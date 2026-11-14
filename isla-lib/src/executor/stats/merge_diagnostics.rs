@@ -36,6 +36,7 @@ pub fn configure(value: &str) -> Result<(), String> {
         Ordering::Relaxed,
     );
     if mode != Mode::Off {
+        super::merge_timing::reset();
         *COUNTS.get_or_init(|| Mutex::new(DiagnosticCounts::new(mode))).lock().unwrap() = DiagnosticCounts::new(mode);
     }
     Ok(())
@@ -468,21 +469,22 @@ struct Attempt {
     origin: Value,
     root: Option<usize>,
 }
-pub(crate) struct AttemptGuard;
+pub(crate) struct AttemptGuard {
+    timing: super::merge_timing::AttemptGuard,
+}
 impl AttemptGuard {
     pub fn start(task: usize, function: Name, pc: usize, symtab: &Symtab) -> Self {
+        let origin = json!({"function":name_string(function,symtab),"function_id":function.as_u32(),"pc":pc});
+        let timing = super::merge_timing::AttemptGuard::start(origin.clone());
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
             let parent = stack.last().map(|attempt| attempt.id);
-            stack.push(Attempt {
-                id: NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed),
-                parent,
-                task,
-                origin: json!({"function":name_string(function,symtab),"pc":pc}),
-                root: None,
-            });
+            stack.push(Attempt { id: NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed), parent, task, origin, root: None });
         });
-        Self
+        Self { timing }
+    }
+    pub fn finish(&mut self, reason: Option<super::SpeculativeRejectReason>) {
+        self.timing.finish(reason.map_or_else(|| "success".into(), |reason| reason.to_string()));
     }
 }
 impl Drop for AttemptGuard {
@@ -666,6 +668,7 @@ fn print_with_trigger(trigger: &str) {
         )
         .unwrap();
     }
+    super::merge_timing::write_snapshot(&mut out, snapshot, trigger);
     let mut totals = counts.totals();
     totals["snapshot"] = json!(snapshot);
     totals["trigger"] = json!(trigger);

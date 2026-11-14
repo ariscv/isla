@@ -130,6 +130,10 @@ fn merge_diagnostics_periodic_output_and_off() {
             assert!(text.is_empty(), "关闭时不得输出诊断：{text}");
         } else {
             assert!(!summaries.is_empty(), "周期快照未输出：{text}");
+            assert!(text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|row| row["kind"] == "merge_timing_summary" && row["trigger"] == "periodic"));
             assert!(summaries.iter().any(|s| s["total"] == 1 && s["trigger"] == "periodic"));
             // 多次快照是累计值，输出本身不能清空计数。
             assert!(summaries.iter().all(|s| s["total"] == 1));

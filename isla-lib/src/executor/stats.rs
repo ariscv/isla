@@ -1,5 +1,8 @@
 //! 可选执行统计；所有线程共享，拒绝统一使用推演原因标签。
 pub mod merge_diagnostics;
+pub(crate) mod merge_timing;
+#[cfg(test)]
+mod merge_timing_tests;
 use super::{ForkSink, SpeculativeRejectReason, Task};
 use crate::bitvector::BV;
 use crate::ir::{Instr, Name, Symtab};

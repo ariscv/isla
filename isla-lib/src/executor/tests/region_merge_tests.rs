@@ -4531,6 +4531,17 @@ fn merge_diagnostics_execution_is_observational() {
     assert_eq!(off_queries, on_queries, "诊断不得额外调用求解器");
     let on_stats = shared.execution_stats.merge_json();
     let measured = diag::summary_for_test();
+    let timing = stats::merge_timing::summary_for_test();
+    assert_eq!(timing["started"], timing["finished"]);
+    assert_eq!(timing["in_flight"], 0);
+    assert_eq!(timing["all_smt"]["queries"]["sum"], on_queries);
+    let outcomes = timing["outcomes"].as_array().unwrap();
+    assert!(!outcomes.iter().any(|row| row["outcome"] == "unfinished"));
+    let root_queries: u64 = outcomes.iter().map(|row| row["root"]["queries"]["sum"].as_u64().unwrap()).sum();
+    let exclusive_queries: u64 = outcomes.iter().map(|row| row["exclusive"]["queries"]["sum"].as_u64().unwrap()).sum();
+    assert_eq!(root_queries, exclusive_queries);
+    assert_eq!(root_queries + timing["outside_smt"]["queries"]["sum"].as_u64().unwrap(), on_queries as u64);
+    assert!(timing["outcomes"].as_array().unwrap().iter().any(|row| row["outcome"] == "incompatible_state"));
     assert_eq!(measured["differences"]["concrete_required"], 1);
     assert_eq!(measured["keys"][0]["key"]["slot"]["name"], "diagnostic_slot");
     diag::configure("off").unwrap();

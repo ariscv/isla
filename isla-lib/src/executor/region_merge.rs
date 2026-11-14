@@ -364,7 +364,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
         }
     }
-    let diagnostics_attempt = diagnostics::enabled()
+    let mut diagnostics_attempt = diagnostics::enabled()
         .then(|| diagnostics::AttemptGuard::start(task_id.as_usize(), frame.function_name, frame.pc, &shared.symtab));
     shared.execution_stats.merge_attempt();
     let diagnostics_active = diagnostics_attempt.is_some();
@@ -497,6 +497,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     };
     match result {
         Ok(result) => {
+            if let Some(attempt) = diagnostics_attempt.as_mut() {
+                attempt.finish(None);
+            }
             shared.execution_stats.merge_finished(true);
             shared.execution_stats.rule_finished(rule, None);
             Ok(result)
@@ -528,6 +531,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 &site
             };
             if diagnostics_active {
+                diagnostics_attempt.as_mut().unwrap().finish(Some(reason));
                 if matches!(reason, SpeculativeRejectReason::IncompatibleState | SpeculativeRejectReason::UnionPayload)
                 {
                     diagnostics::unattributed_error(frame.function_name, frame.pc, &error, &shared.symtab);

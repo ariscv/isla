@@ -81,6 +81,7 @@ thread_local! {
 
 fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
     PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out));
+    crate::executor::stats::merge_timing::record_smt_call(operation, wall);
     // 只持久记录慢查询，避免全量SMT样本随长任务占用额外内存。
     if wall >= Duration::from_secs(1) {
         crate::log!(
