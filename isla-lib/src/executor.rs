@@ -1211,11 +1211,13 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'collector: 'scope,
     {
         self.pending_tasks.fetch_add(1, Ordering::AcqRel);
+        self.shared_state.execution_stats.task_submitted();
         if self.try_reserve_thread() {
             self.spawn_reserved_task(scope, task);
         } else {
             let mut queued = self.queued_tasks.lock().unwrap();
             queued.push_back(task);
+            self.shared_state.execution_stats.task_queue_changed(queued.len());
         }
     }
 
@@ -1291,6 +1293,7 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
+        self.shared_state.execution_stats.task_completed();
         let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
         self.active_threads.fetch_sub(1, Ordering::AcqRel);
 
@@ -1339,8 +1342,10 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
                     .is_ok()
                 {
                     for _ in 0..batch {
-                        to_spawn.push(queued.pop_front().unwrap());
+                        // 优先继续最近分叉，避免宽前沿同时驻留；所有兄弟任务仍完整保留。
+                        to_spawn.push(queued.pop_back().unwrap());
                     }
+                    self.shared_state.execution_stats.task_queue_changed(queued.len());
                     break;
                 }
             }
@@ -3940,6 +3945,7 @@ mod tests {
     mod review33_tests;
     mod review35_tests;
     mod symbolic_ctor_unwrap_tests;
+    mod task_queue_tests;
     mod union_vector_tests;
 
     mod review26_tests {

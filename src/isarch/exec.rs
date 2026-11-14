@@ -2031,6 +2031,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     signature: frame.path_signature(),
                                     pure_definitions: frame.pure_definitions().to_vec(),
                                 });
+                                shared_state.execution_stats.terminal_path_retained(frame.region_merge_records().len());
                             }
                             if samples.path_cache.dag_only {
                                 // 不生成代表值，也不枚举守卫组合；恢复入口保留原公式及全部守卫。
@@ -2238,10 +2239,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             return;
                         }
                         for (symbolic_encoding, encoding_checkpoint) in encodings {
-                            let mut cfg = Config::new();
-                            cfg.set_param_value("model", "true");
-                            let ctx = Context::new(cfg);
-                            let mut solver = Solver::from_checkpoint(&ctx, encoding_checkpoint);
+                            // 复用当前执行的AST管理器，避免每个终态再次复制完整数学表达式。
+                            // 新Solver仍独立保存全部编码／执行约束，不沿用其他分支的断言。
+                            let mut solver = Solver::from_checkpoint(solver.context(), encoding_checkpoint);
                             if instruction_name.strip_prefix('z').is_some_and(|name| {
                                 include_str!("official_float77.txt").lines().any(|entry| entry == name)
                             }) {

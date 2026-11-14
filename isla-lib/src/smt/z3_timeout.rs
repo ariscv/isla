@@ -15,6 +15,7 @@ use z3_sys::{
 };
 
 use crate::error::SmtError;
+use crate::log;
 use crate::source_loc::SourceLoc;
 #[cfg(feature = "smt-thread-interrupt")]
 use crate::timeout::SmtTimeout;
@@ -79,7 +80,20 @@ thread_local! {
 }
 
 fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
-    PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out))
+    PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out));
+    // 只持久记录慢查询，避免全量SMT样本随长任务占用额外内存。
+    if wall >= Duration::from_secs(1) {
+        crate::log!(
+            log::VERBOSE,
+            format!(
+                "SLOW_SMT {}",
+                serde_json::json!({
+                    "operation": format!("{:?}", operation), "source_loc": source_loc,
+                    "wall_seconds": wall.as_secs_f64(), "timed_out": timed_out
+                })
+            )
+        );
+    }
 }
 
 /// 清空当前线程的路径级 SMT 统计。

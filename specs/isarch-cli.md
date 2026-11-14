@@ -376,8 +376,10 @@ isarch [原 J1 探索参数] \
 
 ## 合并拒绝诊断
 
-`--merge-diagnostics off|summary|detail` 默认关闭。`summary` 在执行结束时按位置、槽和差异类别汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
+`--merge-diagnostics off|summary|detail` 默认关闭。`summary` 每 15 秒及正常收尾时，按位置、槽和差异类别输出累计汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
 
 记录包含 `stage`、尝试编号、父尝试编号、函数／IR pc、槽名与声明类型、原始初始化状态、正常初始化后的值形态、失败字段／元素路径及原错误。执行臂内无法取得双臂槽的错误使用 `stage=execute_arm`，槽和值填 `null`；嵌套传播另记 `merge_value_propagated`。
 
 细节每个汇总键最多 3 条，全进程最多 1000 条，每行最多 4096 字节，路径最多 8 层。汇总最多保留 4096 个键，每键最多 1024 字节，超出计入 `other`。`details_suppressed` 和 `oversized` 明确记录未输出的细节，采样行数不代表拒绝总数。
+
+每组汇总带同一个 `snapshot`，末行 `merge_value_summary` 表示该组输出完整；`trigger` 区分 `periodic`、`final` 和 `signal`。计数不清空，比较时应选完整的一组，不能跨组累加。开启诊断后，收到 SIGINT／SIGTERM 会尽力补写汇总，再恢复原信号行为；SIGKILL 不会触发补写。关闭诊断时不注册这些信号处理器；诊断与 `ISLA_STATS` 均关闭时不创建统计线程。

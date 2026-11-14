@@ -199,4 +199,8 @@ initial = [
         (and (= (bvand vtype.bits #x000000000000003f) #x000000000000001a) (bvule vl #x0000000000000008))
         (and (= (bvand vtype.bits #x000000000000003f) #x000000000000001b) (bvule vl #x0000000000000010))))
       (and (= vtype.bits #x8000000000000000) (= vl #x0000000000000000))""",
+    # Sail：extensions/V/vext_regs.sail:410–413、422；sys/sys_control.sail:424。
+    # VLEN=128、vlen_exp=7，set_vstart 仅保留低7位；保留0..127全部可写值，允许vstart>=vl。
+    "bvule vstart #x000000000000007f",
+
 ]

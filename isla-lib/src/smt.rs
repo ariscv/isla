@@ -190,6 +190,7 @@ mod dump;
 mod transaction;
 use transaction::SolverSavepoint;
 pub use transaction::{SolverTransaction, MAX_TRANSACTION_DEPTH};
+mod dependencies;
 pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
@@ -1242,10 +1243,6 @@ impl<'ctx> Ast<'ctx> {
 
     fn mk_bvsub(&self, rhs: &Ast<'ctx>) -> Self {
         z3_binary_op!(Z3_mk_bvsub, self, rhs)
-    }
-
-    fn mk_bvmul(&self, rhs: &Ast<'ctx>) -> Self {
-        z3_binary_op!(Z3_mk_bvmul, self, rhs)
     }
 
     fn mk_bvudiv(&self, rhs: &Ast<'ctx>) -> Self {
@@ -2345,6 +2342,11 @@ unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr, seed: Option<(&CStr, u32
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
+    /// 同线程辅助求解可共享AST管理器；各Solver的断言仍相互独立。
+    pub fn context(&self) -> &'ctx Context {
+        self.ctx
+    }
+
     pub fn new(ctx: &'ctx Context) -> Self {
         Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, None)
     }
@@ -3264,6 +3266,8 @@ pub fn z3_version() -> String {
 mod arithmetic_tests;
 #[cfg(test)]
 mod division_tests;
+#[cfg(test)]
+mod multiplication_tests;
 #[cfg(test)]
 mod query_tests;
 

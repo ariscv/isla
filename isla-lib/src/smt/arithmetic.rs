@@ -65,7 +65,7 @@ impl<'ctx> Ast<'ctx> {
 }
 
 impl<'ctx> Ast<'ctx> {
-    fn signed_source_width(&self) -> Option<u32> {
+    fn extended_source_width(&self, signed: bool) -> Option<u32> {
         unsafe {
             let ctx = self.ctx.z3_ctx;
             if Z3_get_ast_kind(ctx, self.z3_ast) != AstKind::App {
@@ -89,7 +89,8 @@ impl<'ctx> Ast<'ctx> {
             }
             Z3_inc_ref(ctx, child);
             let child = Ast { z3_ast: child, ctx: self.ctx };
-            let mut rebuilt = child.sign_extend(width - source);
+            let mut rebuilt =
+                if signed { child.sign_extend(width - source) } else { child.zero_extend(width - source) };
             if Z3_is_eq_ast(ctx, self.z3_ast, rebuilt.z3_ast) {
                 return Some(source);
             }
@@ -100,12 +101,46 @@ impl<'ctx> Ast<'ctx> {
         }
     }
 
+    pub(super) fn mk_bvmul(&self, rhs: &Self) -> Self {
+        assert_eq!(self.ctx.z3_ctx, rhs.ctx.z3_ctx, "乘法操作数必须属于同一上下文");
+        let width = unsafe { Z3_get_bv_sort_size(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, self.z3_ast)) };
+        let rhs_width = unsafe { Z3_get_bv_sort_size(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, rhs.z3_ast)) };
+        assert_eq!(width, rhs_width, "乘法操作数位宽必须一致");
+        let left = self
+            .extended_source_width(true)
+            .map(|w| (w, true))
+            .or_else(|| self.extended_source_width(false).map(|w| (w, false)));
+        let right = rhs
+            .extended_source_width(true)
+            .map(|w| (w, true))
+            .or_else(|| rhs.extended_source_width(false).map(|w| (w, false)));
+        let (Some((left_source, left_signed)), Some((right_source, right_signed))) = (left, right) else {
+            return z3_binary_op!(Z3_mk_bvmul, self, rhs);
+        };
+        if left_source >= width - right_source {
+            return z3_binary_op!(Z3_mk_bvmul, self, rhs);
+        }
+        let product_width = left_source + right_source;
+        let left = self.extract(product_width - 1, 0);
+        let right = rhs.extract(product_width - 1, 0);
+        let product = z3_binary_op!(Z3_mk_bvmul, left, right);
+        // n位与m位的完整乘积在n+m位内表示；混合有/无符号时仍满足此界。
+        // 保留全部乘积位后再扩展，让后续范围证明直接化简，避免求解宽乘法的高位。
+        if left_signed || right_signed {
+            product.sign_extend(width - product_width)
+        } else {
+            product.zero_extend(width - product_width)
+        }
+    }
+
     pub(super) fn mk_bvsdiv(&self, rhs: &Self) -> Self {
         assert_eq!(self.ctx.z3_ctx, rhs.ctx.z3_ctx, "有符号除法操作数必须属于同一上下文");
         let width = unsafe { Z3_get_bv_sort_size(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, self.z3_ast)) };
         let rhs_width = unsafe { Z3_get_bv_sort_size(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, rhs.z3_ast)) };
         assert_eq!(width, rhs_width, "有符号除法操作数位宽必须一致");
-        let (Some(left_source), Some(right_source)) = (self.signed_source_width(), rhs.signed_source_width()) else {
+        let (Some(left_source), Some(right_source)) =
+            (self.extended_source_width(true), rhs.extended_source_width(true))
+        else {
             return z3_binary_op!(Z3_mk_bvsdiv, self, rhs);
         };
         let source = left_source.max(right_source);
