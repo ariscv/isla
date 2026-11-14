@@ -196,6 +196,150 @@ mod tests {
     }
 
     #[test]
+    fn nested_generated_mapping_rejects_only_its_partial_domain() {
+        isla_lib::smt::configure_tastic(Tactic::Qfaufbv);
+        let loc = SourceLoc::unknown();
+        for mode in 0..6 {
+            let mut symtab = Symtab::new();
+            let normal = symtab.intern("zencdec_forwards");
+            let compressed = symtab.intern("zencdec_compressed_forwards");
+            let helper = symtab.intern(if mode == 2 { "zordinary_helper" } else { "zfield_forwards" });
+            let companion =
+                symtab.intern(if mode == 2 { "zordinary_helper_infallible" } else { "zfield_forwards_infallible" });
+            let bridge = symtab.intern("zordinary_guard");
+            let arg = symtab.intern("zargument");
+            let condition = symtab.intern("zcondition");
+            let helper_body = vec![
+                Instr::Decl(condition, Ty::Bool, loc),
+                Instr::PrimopBinary(
+                    Loc::Id(condition),
+                    isla_lib::primop::binary_primops::<B64>()["neq_bits"],
+                    Exp::Id(arg),
+                    Exp::Bits(B64::new(0, 2)),
+                    loc,
+                ),
+                Instr::Jump(Exp::Id(condition), 5, loc),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), loc),
+                Instr::End,
+                Instr::PrimopBinary(
+                    Loc::Id(condition),
+                    isla_lib::primop::binary_primops::<B64>()["neq_bits"],
+                    Exp::Id(arg),
+                    Exp::Bits(B64::new(1, 2)),
+                    loc,
+                ),
+                Instr::Jump(Exp::Id(condition), 9, loc),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x93, 32)), loc),
+                Instr::End,
+                Instr::Exit(if mode == 3 { ExitCause::AssertionFailure } else { ExitCause::MatchFailure }, loc),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 32)), loc),
+                Instr::End,
+            ];
+            let mut defs: Vec<Def<Name, B64>> = vec![
+                Def::Val(helper, vec![Ty::Bits(2)], Ty::Bits(32)),
+                Def::Fn(helper, vec![arg], helper_body),
+                Def::Val(normal, vec![Ty::Bits(2)], Ty::Bits(32)),
+                Def::Fn(
+                    normal,
+                    vec![arg],
+                    vec![
+                        Instr::Call(
+                            Loc::Id(RETURN),
+                            false,
+                            if mode == 4 { bridge } else { helper },
+                            vec![Exp::Id(arg)],
+                            loc,
+                        ),
+                        Instr::End,
+                    ],
+                ),
+                Def::Val(compressed, vec![Ty::Bits(2)], Ty::Bits(16)),
+                Def::Fn(
+                    compressed,
+                    vec![arg],
+                    vec![
+                        Instr::Exit(ExitCause::MatchFailure, loc),
+                        Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0, 16)), loc),
+                        Instr::End,
+                    ],
+                ),
+            ];
+            if mode != 1 {
+                defs.extend([
+                    Def::Val(companion, vec![Ty::Bits(if mode == 5 { 3 } else { 2 })], Ty::Bits(32)),
+                    Def::Fn(
+                        companion,
+                        vec![arg],
+                        vec![Instr::Copy(Loc::Id(RETURN), Exp::Bits(B64::new(0x13, 32)), loc), Instr::End],
+                    ),
+                ]);
+            }
+            if mode == 4 {
+                defs.extend([
+                    Def::Val(bridge, vec![Ty::Bits(2)], Ty::Bits(32)),
+                    Def::Fn(
+                        bridge,
+                        vec![arg],
+                        vec![Instr::Call(Loc::Id(RETURN), false, helper, vec![Exp::Id(arg)], loc), Instr::End],
+                    ),
+                ]);
+            }
+            let shared = SharedState::new(
+                symtab,
+                &defs,
+                IRTypeInfo::new(&defs),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let input = solver.declare_bitvector(2, loc);
+            let result = encoding_paths(
+                &Val::Symbolic(input),
+                &shared,
+                &RegisterBindings::new(),
+                &Bindings::default(),
+                checkpoint(&mut solver),
+            );
+            if mode != 0 {
+                if mode == 3 {
+                    assert!(matches!(result, Err(ExecError::AssertionFailure(..))));
+                } else {
+                    assert!(
+                        matches!(result, Err(ExecError::MatchFailure(..))),
+                        "普通函数／缺少生成配对证据的错误必须传播"
+                    );
+                }
+                continue;
+            }
+            let paths = result.expect("嵌套Sail mapping的默认拒绝不得抹掉合法编码");
+            assert_eq!(paths.len(), 2);
+            let mut encoded = HashSet::new();
+            for (value, cp) in paths {
+                let Val::Bits(bits) = value else { panic!("编码必须为位串") };
+                encoded.insert(bits.lower_u64());
+                let expected = if bits.lower_u64() == 0x13 { 0 } else { 1 };
+                let mut checked = Solver::from_checkpoint(&ctx, cp);
+                assert_eq!(
+                    checked.check_sat_with(
+                        &SmtExp::Not(Box::new(SmtExp::Eq(
+                            Box::new(SmtExp::Var(input)),
+                            Box::new(smtlib::bits64(expected, 2))
+                        ))),
+                        loc
+                    ),
+                    SmtResult::Unsat
+                );
+            }
+            assert_eq!(encoded, HashSet::from([0x13, 0x93]));
+        }
+    }
+
+    #[test]
     fn isolated_candidates_keep_only_full_execution_feasible_encodings() {
         isla_lib::smt::configure_tastic(Tactic::Qfaufbv);
         let loc = SourceLoc::unknown();

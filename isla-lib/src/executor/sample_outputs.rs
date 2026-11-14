@@ -403,6 +403,7 @@ mod tests {
             for (signature, class) in order {
                 let path = outputs.start_path(*signature);
                 let sample = Sample {
+                    terminal: Default::default(),
                     schema_version: 1,
                     sample_id: 999,
                     mode: "merge".into(),
@@ -452,6 +453,7 @@ mod tests {
         for class in 0..2 {
             for solution in 0..3 {
                 let sample = Sample {
+                    terminal: Default::default(),
                     schema_version: 1,
                     sample_id: 999,
                     mode: "merge".into(),

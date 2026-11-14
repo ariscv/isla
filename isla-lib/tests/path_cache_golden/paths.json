@@ -7,6 +7,7 @@
       "leaf":1
     },
     "path":{
+      "terminal":"Normal",
       "pre":{
         "bits":{"Bits":{"len":8,"bits":7}},
         "bool":{"Bool":true},
@@ -93,7 +94,8 @@
       "guard_unique":true,
       "post_unique":false,
       "simple_pre":false
-    }
+    },
+    "pure_definitions":[]
   },
   {
     "signature":22,
@@ -103,6 +105,7 @@
       "leaf":2
     },
     "path":{
+      "terminal":"Normal",
       "pre":{
         "input":{"Symbolic":2}
       },
@@ -118,6 +121,7 @@
       "guard_unique":false,
       "post_unique":true,
       "simple_pre":true
-    }
+    },
+    "pure_definitions":[]
   }
 ]

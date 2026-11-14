@@ -19,6 +19,7 @@ pub struct ResidentPath<B: BV> {
     pub path: SamplePath<B>,
     pub records: Vec<RegionMergeRecord<B>>,
     pub signature: u64,
+    pub pure_definitions: Vec<(u32, u32)>,
 }
 
 fn thread_cpu_seconds() -> f64 {

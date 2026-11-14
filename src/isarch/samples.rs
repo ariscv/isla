@@ -25,14 +25,16 @@ pub struct SampleOptions {
 
 impl SampleOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.path_cache.dag_only
+            && (self.path_cache.write.is_none()
+                || self.fuzz.is_some()
+                || self.check.is_some()
+                || self.resident.is_some())
+        {
+            return Err("--path-cache-only 只支持独立缓存写出；请读回缓存后导出或认证".into());
+        }
         if self.path_cache.enabled() && self.resident.is_some() {
             return Err("缓存选项不能与旧常驻 judge 同时运行".into());
-        }
-        if self.path_cache.read.is_some() && self.fuzz.is_none() {
-            return Err("--path-cache-read 需要 fuzz 子命令".into());
-        }
-        if self.path_cache.read.is_some() && (self.check.is_some() || self.resident.is_some()) {
-            return Err("缓存读回只进入 fuzz 流程，不能同时运行样本检查或旧常驻 judge".into());
         }
         if self.resident_fast && self.resident.is_none() {
             return Err("--judge-resident-fast 需要 --judge-resident".into());
@@ -89,6 +91,9 @@ impl SampleSession {
                 return Err("ISLA_EXPORT_SAMPLES 不得与 TOML 输出路径或 v1_jsonl 后端重复".into());
             }
             configured.push(SampleOutputConfig { format: SampleOutputFormat::V1Jsonl, path });
+        }
+        if options.path_cache.dag_only && !configured.is_empty() {
+            return Err("--path-cache-only 不同时导出样本；请读回缓存后枚举".into());
         }
         if options.check.as_ref().is_some_and(|input| configured.iter().any(|output| &output.path == input)) {
             return Err("样本输出不得覆盖检查输入".into());
@@ -162,6 +167,80 @@ impl SampleSession {
     }
 }
 
+/// 从真实完成检查点导出，现场帧和缓存使用同一守卫枚举器。
+pub fn export_cached_path<B: BV>(
+    path: &super::resident::ResidentPath<B>,
+    solver: &mut isla_lib::smt::Solver<B>,
+    shared: &SharedState<B>,
+    target: &dyn Target<B>,
+    limits: &isla_lib::executor::ExecutionLimits,
+    writer: Option<&SampleOutputs>,
+    checker: Option<&SampleChecker>,
+) -> Result<Option<serde_json::Value>, isla_lib::error::ExecError> {
+    use isla_lib::error::ExecError;
+    use isla_lib::executor::{MergeEnumeration, TaskState};
+    if let Some(checker) = checker {
+        checker.check_path_with_judge(&path.path, solver, shared, path.signature, &path.records, |sample, model| {
+            sample.isa_state = isa_state(target, sample, model, shared)?;
+            Ok(())
+        })?;
+    }
+    let Some(writer) = writer else { return Ok(None) };
+    let output_path = writer.start_path(path.signature);
+    let complete = |class, metadata: &serde_json::Value| {
+        writer.finish_class(output_path, Some(class), metadata);
+        Ok(())
+    };
+    let state = TaskState::new().with_execution_limits(limits.clone());
+    let enumeration = MergeEnumeration {
+        records: &path.records,
+        pure_definitions: &path.pure_definitions,
+        signature: path.signature,
+    }
+    .enumerate_merges_output_with(
+        solver,
+        &state,
+        shared,
+        &path.path.result,
+        &|class, solution, slices, truncated, model| {
+            if let Some(reason) = writer.stop_reason() {
+                return Err(ExecError::SampleOutputStopped(reason));
+            }
+            let mut sample = path.path.materialize(model, shared, "merge", path.signature, Some(class))?;
+            sample.isa_state = isa_state(target, &sample, model, shared)?;
+            sample.truncated = truncated;
+            if !writer.append(output_path, solution, slices, sample) {
+                return Err(ExecError::SampleOutputStopped(writer.stop_reason().unwrap()));
+            }
+            Ok(())
+        },
+        if writer.grouped() { Some(&complete) } else { None },
+        false,
+    )?;
+    if enumeration.is_none() {
+        assert_eq!(
+            solver.check_sat(isla_lib::source_loc::SourceLoc::unknown()),
+            isla_lib::smt::SmtResult::Sat,
+            "缓存完成路径必须可满足"
+        );
+        let mut model = isla_lib::smt::Model::new(solver);
+        model.set_complete_model(true);
+        let mut sample = path.path.materialize(&mut model, shared, "merge", path.signature, None)?;
+        sample.isa_state = isa_state(target, &sample, &mut model, shared)?;
+        writer.append(output_path, 0, &[], sample);
+        if writer.grouped() {
+            writer.finish_class(
+                output_path,
+                None,
+                &serde_json::json!({"solution_count":1,"guard_assignment":{},"tested_slices":[],"truncated":false}),
+            );
+        }
+    }
+    writer
+        .finish_path(output_path, enumeration.as_ref().is_some_and(|value| value["path_truncated"].as_bool().unwrap()));
+    Ok(enumeration)
+}
+
 pub fn path<B: BV>(
     target: &dyn Target<B>,
     initial: &RegisterBindings<B>,
@@ -169,7 +248,7 @@ pub fn path<B: BV>(
     shared: &SharedState<B>,
     instruction: &Val<B>,
     result: &Val<B>,
-    memory: Vec<isla_lib::smt::Event<B>>,
+    trace: &isla_lib::smt::Trace<B>,
 ) -> SamplePath<B> {
     let mut pre: BTreeMap<_, _> = initial
         .iter()
@@ -182,6 +261,27 @@ pub fn path<B: BV>(
     for (name, value) in target.pre_state().iter() {
         pre.insert(isla_lib::zencode::decode(shared.symtab.to_str(*name)), value.clone());
     }
+    // 入口没有初始化的寄存器可能在执行途中首次读取。事件保存的是完整寄存器值，
+    // 即使访问了字段也能补齐前态；写入之后的读取不得倒灌成输入。
+    let events = trace.to_vec();
+    let mut written = std::collections::HashSet::new();
+    for event in events.iter().rev() {
+        match event {
+            isla_lib::smt::Event::WriteReg(name, ..) => {
+                written.insert(*name);
+            }
+            isla_lib::smt::Event::ReadReg(name, _, value) if !written.contains(name) => {
+                pre.entry(isla_lib::zencode::decode(shared.symtab.to_str(*name))).or_insert_with(|| value.clone());
+            }
+            isla_lib::smt::Event::AssumeReg(name, accessor, value)
+                if accessor.is_empty() && !written.contains(name) =>
+            {
+                pre.entry(isla_lib::zencode::decode(shared.symtab.to_str(*name))).or_insert_with(|| value.clone());
+            }
+            _ => (),
+        }
+    }
+    let memory = events.into_iter().rev().filter(|event| event.is_memory_read_or_write()).cloned().collect();
     let post = frame
         .regs()
         .iter()
@@ -200,7 +300,19 @@ pub fn path<B: BV>(
         .iter()
         .flat_map(|record| record.memory_reads.iter().map(|(index, guard, _)| (*index, guard.clone())))
         .collect();
-    SamplePath { pre, post, result: result.clone(), memory, memory_guards }
+    SamplePath {
+        terminal: match frame.get_exception() {
+            Some((_, location)) => {
+                isla_lib::executor::samples::Terminal::SailException { throw_location: location.into() }
+            }
+            None => isla_lib::executor::samples::Terminal::Normal,
+        },
+        pre,
+        post,
+        result: result.clone(),
+        memory,
+        memory_guards,
+    }
 }
 
 /// 样本已物化完整前态；复用其值格式化 ISA 状态，避免再抽取同一模型。
@@ -274,6 +386,61 @@ pub fn isa_state<B: BV>(
 mod tests {
     use super::*;
     #[test]
+    fn samples_preserve_lazy_register_input_without_treating_writes_as_input() {
+        use isla_lib::bitvector::b64::B64;
+        use isla_lib::ir::{Bindings, Symtab, Ty, UVal, TOP_LEVEL_LET};
+        use isla_lib::smt::{Config, Context, Event, Model, SmtResult, Solver};
+        use isla_lib::source_loc::SourceLoc;
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let encoded = isla_lib::zencode::encode("lazy_input");
+        let register = symtab.intern(&encoded);
+        let mut shared = SharedState::<B64>::empty(symtab);
+        shared.registers.insert(register, Ty::Bits(64));
+        for (read, assume, write) in
+            [(true, false, false), (true, false, true), (false, true, true), (false, false, true)]
+        {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::new(&context);
+            let mut initial = RegisterBindings::new();
+            initial.insert(register, false, UVal::Uninit(&Ty::Bits(64)));
+            let mut frame = LocalFrame::new(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
+            frame.add_regs(&initial);
+            frame.add_lets(&Bindings::default());
+            let before = if read || assume {
+                let value = frame
+                    .regs_mut()
+                    .get(register, &shared, &mut solver, SourceLoc::unknown())
+                    .unwrap()
+                    .unwrap()
+                    .clone();
+                solver.add_event(if assume {
+                    Event::AssumeReg(register, vec![], value.clone())
+                } else {
+                    Event::ReadReg(register, vec![], value.clone())
+                });
+                Some(value)
+            } else {
+                None
+            };
+            if write {
+                let value = Val::Bits(B64::new(7, 64));
+                frame.regs_mut().assign(register, value.clone(), &shared);
+                solver.add_event(Event::WriteReg(register, vec![], value));
+            }
+            let target = super::super::target::RV64::<B64>::default();
+            let sample = path(&target, &initial, &frame, &shared, &Val::Unit, &Val::Unit, solver.trace());
+            assert_eq!(sample.pre.get("lazy_input"), before.as_ref(), "懒初始化读取的原值必须进入样本前态");
+            if write {
+                assert_eq!(sample.post["lazy_input"], Val::Bits(B64::new(7, 64)));
+            }
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+            let concrete = sample.materialize(&mut Model::new(&solver), &shared, "regression", 0, None).unwrap();
+            assert_eq!(sample.check(&mut solver, &shared, &concrete).unwrap(), Some(true));
+        }
+    }
+
+    #[test]
     fn resident_fast_requires_resident_input() {
         assert!(SampleOptions { resident_fast: true, ..Default::default() }.validate().is_err());
         assert!(SampleOptions {
@@ -340,6 +507,7 @@ mod tests {
             .map(|(name, value)| (isla_lib::zencode::decode(shared.symtab.to_str(*name)), value.clone()))
             .collect();
         let path = SamplePath {
+            terminal: Default::default(),
             pre,
             post: BTreeMap::new(),
             result: Val::Unit,
@@ -500,5 +668,17 @@ mod tests {
             solver.rollback_transaction(tx);
         }
         assert_ne!(values[0], values[1], "两次读取必须使用不同的新鲜符号");
+    }
+}
+
+#[cfg(test)]
+mod cache_fuzz_tests {
+    use super::*;
+    #[test]
+    fn cache_fuzz_cached_solve_can_export_and_check() {
+        let mut options = SampleOptions::default();
+        options.path_cache.read = Some("cache".into());
+        options.check = Some("samples.jsonl".into());
+        assert!(options.validate().is_ok());
     }
 }

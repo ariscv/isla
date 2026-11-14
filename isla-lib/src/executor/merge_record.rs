@@ -4,6 +4,7 @@ use super::*;
 mod merge_enumeration;
 use crate::ir::regions::RegionPoint;
 use crate::primop::Effect;
+pub use merge_enumeration::MergeEnumeration;
 pub(crate) use merge_enumeration::{context, guard_order, model_guards};
 pub(crate) use merge_enumeration::{Atoms, Support};
 

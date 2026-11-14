@@ -42,7 +42,7 @@ pub(super) struct ClassPlan {
 }
 
 pub(super) fn enumerate<B: BV>(
-    frame: &LocalFrame<B>,
+    frame: &MergeEnumeration<B>,
     solver: &mut Solver<B>,
     state: &TaskState<B>,
     shared: &SharedState<B>,
@@ -95,7 +95,7 @@ pub(super) fn enumerate<B: BV>(
         }
     };
     let started = std::time::Instant::now();
-    let records = &frame.region_merge_records;
+    let records = frame.records;
     let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
     assert_eq!(records.len(), by_id.len(), "帧内记录编号必须唯一");
     let mut contexts = HashMap::new();
@@ -169,7 +169,7 @@ pub(super) fn enumerate<B: BV>(
         eprintln!(
             "[MERGE_ENUMERATION_MEASURE] {}",
             json!({"phase":"started",
-            "path_signature":frame.path_signature(), "partitions":partitions.len()})
+            "path_signature":frame.signature, "partitions":partitions.len()})
         );
     }
     // 路径内线程数为 1 时仍允许既有的跨路径并发，避免串行化 -T 的完成路径。
@@ -420,7 +420,7 @@ pub(super) fn enumerate<B: BV>(
                 eprintln!(
                     "[MERGE_ENUMERATION_MEASURE] {}",
                     json!({"phase":"complete",
-                    "path_signature":frame.path_signature(), "counted_classes":counted_classes,
+                    "path_signature":frame.signature, "counted_classes":counted_classes,
                     "counted_paths":total, "path_truncated":path_truncated, "truncated_classes":truncated_classes})
                 );
             }

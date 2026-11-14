@@ -61,6 +61,7 @@ use crate::source_loc::SourceLoc;
 use crate::tracetool::TraceHandler;
 use crate::zencode;
 
+mod dead_formatting;
 pub mod linearize;
 pub mod partial_linearize;
 pub mod regions;
@@ -134,7 +135,7 @@ impl fmt::Display for Name {
 
 pub type RegisterField = (Name, Vec<Accessor>);
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FPTy {
     ebits: u32,
     sbits: u32,
@@ -170,7 +171,7 @@ impl FPTy {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ty<A> {
     I64,
     I128,
@@ -1521,6 +1522,8 @@ pub fn assertions_to_jumps<B: BV>(defs: &mut [Def<Name, B>]) {
             instrs_assertions_to_jumps(body)
         }
     }
+    // 转换后消息不再有消费者，纯格式化不应继续触发输入枚举。
+    dead_formatting::remove_dead_formatting(defs);
 }
 
 fn instrs_assertions_to_jumps<B: BV>(instrs: &mut Vec<Instr<Name, B>>) {

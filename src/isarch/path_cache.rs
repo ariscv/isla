@@ -46,6 +46,110 @@ mod tests {
         check_envelope(&envelope, &entry, "new");
     }
     #[test]
+    fn dag_only_requires_write_and_parses_without_enumeration() {
+        let mut cli = getopts::Options::new();
+        Options::add_cli(&mut cli);
+        let matches = cli.parse(["--path-cache-only", "--path-cache-write", "unused"]).unwrap();
+        let parsed = Options::parse(&matches);
+        assert!(parsed.dag_only);
+        let matches = cli.parse(["--path-cache-only"]).unwrap();
+        assert!(std::panic::catch_unwind(|| Options::parse(&matches)).is_err());
+    }
+
+    #[test]
+    fn sail_exception_terminal_dual_encoding_and_old_schema_rejection() {
+        use super::super::target::RV64;
+        use isla_lib::{
+            executor::samples::SamplePath,
+            ir::Val,
+            smt::{self, checkpoint},
+        };
+        smt::configure_tastic(smt::Tactic::Qfaufbv);
+        let shared = SharedState::<B64>::empty(Symtab::new());
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let raw = json!({"pre":{},"post":{},"result":{"String":"reserved"},
+            "memory":[],"memory_guards":[],
+            "terminal":{"SailException":{"throw_location":"fixture.sail:42"}}});
+        let dto: dto::PathData<B64> = serde_json::from_value(raw).unwrap();
+        let path: SamplePath<B64> = dto.into();
+        assert_eq!(
+            serde_json::to_value(dto::PathData::from(path.clone())).unwrap()["terminal"],
+            json!({"SailException":{"throw_location":"fixture.sail:42"}}),
+            "异常终态字段不得丢失"
+        );
+        let paths = vec![ResidentPath {
+            signature: 42,
+            checkpoint: checkpoint(&mut solver),
+            path,
+            records: vec![],
+            pure_definitions: vec![],
+        }];
+        let directory =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("output/exception-cache-{}", std::process::id()));
+        assert!(!directory.exists());
+        let options = Options {
+            write: Some(directory.clone()),
+            format: vec![Encoding::Json, Encoding::Bin],
+            ..Default::default()
+        };
+        let mut summary = super::super::solve_summary::SolveSummary::default().json();
+        summary["model-exception-paths"] = json!(1);
+        save(
+            &options,
+            "generic",
+            &paths,
+            &[Facts { guard_unique: false, post_unique: false, simple_pre: false }.into()],
+            &shared,
+            &RV64::default(),
+            &summary,
+            &json!({"command":[],"inputs":{},"binary":{"path":"fixture","sha256":"fixture"}}),
+            &mut Timing::default(),
+            &Stages::new(None, Instant::now()),
+        );
+        for encoding in [Encoding::Json, Encoding::Bin] {
+            let loaded =
+                load::<B64>(&directory, encoding, true, &shared, "generic", &Stages::new(None, Instant::now()));
+            assert_eq!(loaded.manifest.schema_version, 3);
+            assert_eq!(loaded.manifest.normal_paths, 0);
+            assert_eq!(loaded.manifest.model_exception_paths, 1);
+            let restored = &loaded.paths[0].path;
+            assert_eq!(
+                serde_json::to_value(dto::PathData::from(restored.clone())).unwrap()["terminal"],
+                json!({"SailException":{"throw_location":"fixture.sail:42"}})
+            );
+            assert_eq!(solver.check_sat(isla_lib::source_loc::SourceLoc::unknown()), smt::SmtResult::Sat);
+            let sample = restored.materialize(&mut smt::Model::new(&solver), &shared, "fork", 42, None).unwrap();
+            assert_eq!(restored.check(&mut solver, &shared, &sample).unwrap(), Some(true));
+            let mut wrong = serde_json::to_value(&sample).unwrap();
+            wrong["terminal"] = json!("Normal");
+            let wrong = serde_json::from_value(wrong).unwrap();
+            assert_eq!(restored.check(&mut solver, &shared, &wrong).unwrap(), Some(false), "异常不能认证成正常终态");
+            let judged = restored.judge(&mut solver, &shared, &sample, &[], 42, |_, _| Ok(())).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(judged.sample).unwrap()["terminal"],
+                json!({"SailException":{"throw_location":"fixture.sail:42"}})
+            );
+        }
+        let mut manifest: Value =
+            serde_json::from_reader(File::open(directory.join("manifest.json")).unwrap()).unwrap();
+        for version in [1, 2] {
+            manifest["schema_version"] = json!(version);
+            fs::write(directory.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load::<B64>(
+                &directory,
+                Encoding::Bin,
+                false,
+                &shared,
+                "generic",
+                &Stages::new(None, Instant::now())
+            )))
+            .is_err());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn 双编码_完整快照_target_与文件损坏检查() {
         use super::super::target::RV64;
         use isla_lib::{
@@ -64,9 +168,11 @@ mod tests {
         target.pre_state_mut().insert(Name::from_u32(0), Val::Symbolic(symbol));
         target.symbolic_pma_sizes_mut().push(("generic".into(), symbol));
         let paths = vec![ResidentPath {
+            pure_definitions: vec![],
             signature: 42,
             checkpoint: checkpoint(&mut solver),
             path: SamplePath {
+                terminal: Default::default(),
                 pre: std::collections::BTreeMap::from([("value".into(), Val::Symbolic(symbol))]),
                 post: Default::default(),
                 result: Val::Bits(B64::new(7, 8)),
@@ -125,6 +231,10 @@ mod tests {
         };
         let manifest = fs::read(directory.join("manifest.json")).unwrap();
         let mut changed: Value = serde_json::from_slice(&manifest).unwrap();
+        changed["schema_version"] = json!(1);
+        fs::write(directory.join("manifest.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+        reject();
+        changed["schema_version"] = json!(3);
         changed["paths"][0]["entries"] = json!(2);
         fs::write(directory.join("manifest.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
         reject();
@@ -203,6 +313,8 @@ pub struct Options {
     pub crosscheck: bool,
     pub export_dag: bool,
     pub recompute_facts: bool,
+    /// 只保存完整符号路径；类枚举与可选快档证明留待读回后执行。
+    pub dag_only: bool,
 }
 impl Options {
     pub fn enabled(&self) -> bool {
@@ -210,6 +322,7 @@ impl Options {
     }
     pub fn add_cli(opts: &mut getopts::Options) {
         opts.optopt("", "path-cache-write", "探索完成后写出缓存（必须是新目录）", "<dir>");
+        opts.optflag("", "path-cache-only", "仅写符号路径，跳过类枚举和具体样例生成");
         opts.optopt("", "path-cache-read", "读回缓存并跳过探索", "<dir>");
         opts.optopt("", "path-cache-format", "写出格式 json、bin、both，默认 both", "<format>");
         opts.optopt("", "path-cache-encoding", "读入格式 json、bin，默认 json", "<encoding>");
@@ -241,7 +354,12 @@ impl Options {
             !matches.opt_present("path-cache-format") || write.is_some(),
             "--path-cache-format 需要 --path-cache-write"
         );
+        assert!(
+            !matches.opt_present("path-cache-only") || write.is_some(),
+            "--path-cache-only 需要 --path-cache-write"
+        );
         Self {
+            dag_only: matches.opt_present("path-cache-only"),
             read,
             write,
             format,
@@ -285,6 +403,7 @@ pub struct ExplorationSummary {
     pub execution_timeouts: u64,
     pub smt_timeouts: u64,
     pub unfinished_paths: u64,
+    pub model_exception_paths: u64,
     pub assertion_filtered_paths: u64,
     pub omitted_cases: u64,
     pub model_query_timeouts: u64,
@@ -306,6 +425,8 @@ pub struct Manifest<B> {
     pub segments: Vec<DataFile>,
     pub paths: Vec<DataFile>,
     pub path_signatures: Vec<u64>,
+    pub normal_paths: u64,
+    pub model_exception_paths: u64,
     pub pre_state: Vec<(Name, dto::value::Val<B>)>,
     pub pma_sizes: Vec<(String, u32)>,
     pub names: NameEnvironment,
@@ -441,10 +562,11 @@ pub fn load<B: BV>(
     stages: &Stages,
 ) -> Loaded<B> {
     let started = Instant::now();
-    let manifest: Manifest<B> =
+    let raw: Value =
         serde_json::from_reader(File::open(dir.join("manifest.json")).expect("缓存 manifest 缺失，目录尚未发布"))
             .expect("缓存 manifest 损坏");
-    assert_eq!(manifest.schema_version, 1, "缓存 schema 不兼容");
+    assert_eq!(raw["schema_version"], json!(3), "缓存 schema 不兼容");
+    let manifest: Manifest<B> = serde_json::from_value(raw).expect("缓存 manifest 字段损坏");
     assert_eq!(manifest.bit_width, B::MAX_WIDTH, "缓存位宽不兼容");
     assert_eq!(manifest.current_ir_review, "未做当前 IR 复核", "缓存 IR 复核标注无效");
     assert!(matches!(manifest.completeness.as_str(), "complete" | "partial"), "缓存完整性标注无效");
@@ -466,6 +588,13 @@ pub fn load<B: BV>(
     let parsing = Instant::now();
     let segments: Vec<Segment<B>> = read_data(dir, &manifest.segments, encoding, &manifest.batch_id);
     let paths: Vec<CachedPath<B>> = read_data(dir, &manifest.paths, encoding, &manifest.batch_id);
+    let exception_count = paths
+        .iter()
+        .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::SailException { .. }))
+        .count() as u64;
+    assert_eq!(manifest.model_exception_paths, exception_count, "缓存异常终态计数不一致");
+    assert_eq!(manifest.normal_paths, paths.len() as u64 - exception_count, "缓存正常终态计数不一致");
+    assert_eq!(manifest.errors.model_exception_paths, exception_count, "缓存摘要异常终态计数不一致");
     let parse_seconds = parsing.elapsed().as_secs_f64();
     stages.record(
         &format!("cache_read_{}", extension(encoding)),
@@ -524,6 +653,7 @@ pub fn load<B: BV>(
             facts.push(p.facts.clone());
             ResidentPath {
                 signature: p.signature,
+                pure_definitions: p.pure_definitions.clone(),
                 checkpoint: reader.restore(&p.checkpoint),
                 path: p.path.clone().into(),
                 records: p.records.iter().cloned().map(Into::into).collect(),
@@ -534,6 +664,7 @@ pub fn load<B: BV>(
     for ((expected, restored), fact) in paths.iter().zip(&restored_paths).zip(&facts) {
         let actual = CachedPath {
             signature: restored.signature,
+            pure_definitions: restored.pure_definitions.clone(),
             checkpoint: roundtrip.capture(&restored.checkpoint),
             path: restored.path.clone().into(),
             records: restored.records.iter().cloned().map(Into::into).collect(),
@@ -582,6 +713,7 @@ pub fn save<B: BV>(
         .zip(facts)
         .map(|(p, f)| CachedPath {
             signature: p.signature,
+            pure_definitions: p.pure_definitions.clone(),
             checkpoint: writer.capture(&p.checkpoint),
             path: p.path.clone().into(),
             records: p.records.iter().cloned().map(Into::into).collect(),
@@ -611,12 +743,18 @@ pub fn save<B: BV>(
     stages.record("cache_capture", timing.capture_seconds, json!({"paths":timing.paths,"segments":timing.segments,"unshared_segments":timing.unshared_segments,"deduplication_rate":deduplication_rate}));
     let segments = write_data(dir, "segments", writer.segments, &options.format, &batch_id, timing, stages);
     let path_signatures = cached.iter().map(|p| p.signature).collect();
+    let model_exception_paths = cached
+        .iter()
+        .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::SailException { .. }))
+        .count() as u64;
+    let normal_paths = cached.len() as u64 - model_exception_paths;
+    assert_eq!(summary["model-exception-paths"].as_u64(), Some(model_exception_paths), "缓存摘要异常终态计数不一致");
     let paths = write_data(dir, "paths", cached, &options.format, &batch_id, timing, stages);
     let complete = summary["status"] == "finished"
         && summary["errors"].as_u64() == Some(0)
         && summary["unfinished-paths"].as_u64() == Some(0);
     let manifest = Manifest {
-        schema_version: 1,
+        schema_version: 3,
         bit_width: B::MAX_WIDTH,
         batch_id,
         source: serde_json::from_value(source.clone()).expect("缓存来源记录字段无效"),
@@ -627,6 +765,8 @@ pub fn save<B: BV>(
         segments,
         paths,
         path_signatures,
+        normal_paths,
+        model_exception_paths,
         pre_state,
         pma_sizes,
         names,
@@ -709,6 +849,7 @@ pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_sum
         execution_timeouts: field(summary.execution_timeouts),
         smt_timeouts: field(summary.smt_timeouts),
         unfinished_paths: field(summary.unfinished_paths),
+        model_exception_paths: field(summary.model_exception_paths),
         assertion_filtered_paths: field(summary.assertion_filtered_paths),
         omitted_cases: field(summary.omitted_cases),
         model_query_timeouts: field(summary.model_query_timeouts),

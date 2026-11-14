@@ -2,9 +2,11 @@
 
 `isarch fuzz` 支持路径引导 campaign、corpus 认证、只判定与历史变异记录回放，支持确定性并行生成与 `--executor difftest` 三方闭环，并导出路径 DAG。默认用类内字段桶和不一致签名驱动 corpus 增长与调度，`--fuzz-feedback none` 切回轮转基线；公式与评估见 [第 5 步](agents/path_merge_call_support/fuzz-step5.md)。第 4 步的接口、验收与复现见 [闭环记录](agents/path_merge_call_support/fuzz-step4.md)。用法见 [命令说明](specs/isarch-cli.md#fuzz)，回放见 [第 2 步](agents/path_merge_call_support/fuzz-step2.md)，路径引导实验见 [第 3 步](agents/path_merge_call_support/fuzz-step3.md)。
 
-可选 `--fuzz-avoid-known-ppn-overflow`（默认关闭）使分页 A/B 优先清零活动叶 PTE[53:46]；目标类要求超宽时保留并计数，编码空间对照不受影响。设计和对比见 [第 8 步](agents/path_merge_call_support/fuzz-step8.md)。
+`--path-cache-read` 跳过探索。省略 `--fuzz-corpus` 时，从缓存按 `class_cap=1` 生成初始 corpus 并完整认证后进入 fuzz loop；提供它时直接复用并认证已有 corpus。用法与缓存版本见 [命令说明](specs/isarch-cli.md#fuzz)。
 
-E2 符号前态闭环使用 `tools/fuzz/run_campaign.py --e2-experiment <第6a步导出根目录>`：按场景选择完整 corpus、同组配置和 U/S、SUM、MXR profile，使用 `sv39-load-e2` 等新场景配置 id 重新认证；编码空间对照也从 E2 corpus 重新生成。四场景执行、指标和复现见 [第 7 步](agents/path_merge_call_support/fuzz-step7.md)。
+历史版本的可选 `--fuzz-avoid-known-ppn-overflow`（默认关闭）使分页 A/B 优先清零活动叶 PTE[53:46]；目标类要求超宽时保留并计数，编码空间对照不受影响。该选项现已废弃，当前 CLI 明确拒绝使用。旧版本的设计和对比保留在 [第 8 步](agents/path_merge_call_support/fuzz-step8.md)。
+
+历史 E2 符号前态闭环使用 `tools/fuzz/run_campaign.py --e2-experiment <第6a步导出根目录>`：按场景选择完整 corpus、同组配置和 U/S、SUM、MXR profile，使用 `sv39-load-e2` 等新场景配置 id 重新认证；编码空间对照也从 E2 corpus 重新生成。该 Python 入口仅作历史备份，当前 fuzz 全流程使用 Rust `isarch`。旧四场景执行、指标和复现见 [第 7 步](agents/path_merge_call_support/fuzz-step7.md)。
 
 ![Ubuntu-20.04](https://github.com/rems-project/isla/actions/workflows/ubuntu_22_04.yml/badge.svg)
 
@@ -735,3 +737,10 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 机器码能汇编并不代表它在模型中合法退休，仍须检查 `ret_val`。
 `ExecuteAs` 是中间执行结果；生成器继续执行其载荷后才输出最终返回值和寄存器后态，
 记录中的编码和助记符仍属于原请求指令。
+
+### 分开探索与类枚举（全符号实验入口）
+
+`--path-cache-write <新目录> --path-cache-only solve-state --clause=<clause>` 只保存完成路径的符号 DAG、merge 守卫及执行摘要，不生成具体样例或枚举类。可选快档事实全部记为未证明，完整 judge 仍使用原求解。用 `--path-cache-read` 配合样本输出或 fuzz 入口可在后续独立枚举，`class_cap` 仅控制每类代表数量。缓存仍受原错误摘要约束，partial 不能当完整探索。异常和未完成路径保留原摘要，不被改写为正常后态。
+
+
+路径缓存现使用 schema 3，旧 schema 1/2 明确拒绝读取。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。

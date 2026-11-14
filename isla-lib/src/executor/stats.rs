@@ -1,4 +1,5 @@
 //! 可选执行统计；所有线程共享，拒绝统一使用推演原因标签。
+pub mod merge_diagnostics;
 use super::{ForkSink, SpeculativeRejectReason, Task};
 use crate::bitvector::BV;
 use crate::ir::{Instr, Name, Symtab};
@@ -145,6 +146,7 @@ impl ExecutionStats {
     }
     /// 正常收尾与 Force 强退共用，确保强退不依赖析构或 worker panic。
     pub fn print<B>(&self, shared: &crate::ir::SharedState<B>) {
+        merge_diagnostics::print();
         if self.enabled {
             eprintln!("[MERGE_STATS] {}", self.merge_json());
             eprintln!("[FORK_STATS] {}", self.fork_json(&shared.symtab));
@@ -418,3 +420,7 @@ mod merge_rule_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stats/merge_diagnostics_tests.rs"]
+mod merge_diagnostics_tests;

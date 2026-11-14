@@ -47,10 +47,10 @@ pub struct SandboxedCommand {
 }
 
 impl SandboxedCommand {
-    pub fn from_tool(tool: &Tool) -> Self {
-        let mut cmd = Self::new(&tool.executable);
+    pub fn from_tool(tool: &Tool, required_by: &str) -> Result<Self, String> {
+        let mut cmd = Self::new(tool.resolve(required_by)?);
         cmd.args(&tool.options);
-        cmd
+        Ok(cmd)
     }
 
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
@@ -153,5 +153,23 @@ impl SandboxedCommand {
 
     pub fn status(&mut self) -> std::io::Result<ExitStatus> {
         self.sandbox().status()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn missing_tool_is_reported_at_the_actual_call_site() {
+        let tool = Tool { executable: Some(PathBuf::from("isla-test-missing-assembler")), options: vec![] };
+        match SandboxedCommand::from_tool(&tool, "测试汇编命令 assembler") {
+            Err(error) => {
+                assert!(error.contains("测试汇编命令 assembler"), "{error}");
+                assert!(error.contains("isla-test-missing-assembler"), "{error}");
+            }
+            Ok(_) => panic!("缺少实际需要的工具时必须报错"),
+        }
     }
 }

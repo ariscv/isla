@@ -56,6 +56,106 @@ fn finish() -> Vec<Instr<Name, B64>> {
 }
 
 #[test]
+fn region_m2_nested_unread_preservation_shares_one_initial() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zstate");
+    let function = shared.symtab.intern("zconditional_write");
+    let parameter = test_name(993);
+    shared.registers.insert(reg, Ty::Bool);
+    let body = vec![
+        Instr::Jump(Exp::Id(parameter), 2, info()),
+        Instr::Goto(3),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+        Instr::End,
+    ];
+    shared.functions.insert(function, (vec![(parameter, &Ty::Bool)], &Ty::Unit, Box::leak(body.into_boxed_slice())));
+    let arm = vec![Instr::Call(Loc::Id(RETURN), false, function, vec![input(1)], info())];
+    let merged = paths_with_state(
+        diamond(arm.clone(), arm, finish()),
+        &shared,
+        2,
+        ExecutionLimits::default().with_path_merging(true).with_region_global_state(true),
+        crate::memory::Memory::new(),
+        |_| (),
+    );
+    assert_eq!(merged.len(), 1);
+    let initials: Vec<_> = merged[0]
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AssumeReg(name, _, value) if *name == reg => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert!(!initials.is_empty());
+    assert!(
+        initials.iter().all(|value| *value == initials[0]),
+        "两外臂内的保留状态必须引用同一个入口初值：{initials:?}"
+    );
+}
+
+#[test]
+fn region_m2_retained_unread_initial_is_published_without_read_event() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zstate");
+    shared.registers.insert(reg, Ty::Bool);
+    let program = diamond(vec![Instr::Copy(Loc::Id(reg), Exp::Bool(false), info())], vec![], finish());
+    let merged = paths_with_state(
+        program,
+        &shared,
+        1,
+        ExecutionLimits::default().with_path_merging(true).with_region_global_state(true),
+        crate::memory::Memory::new(),
+        |_| (),
+    );
+    assert_eq!(merged.len(), 1);
+    assert!(!merged[0].events.iter().any(|event| matches!(event, Event::ReadReg(..))));
+    assert!(
+        merged[0].events.iter().any(
+            |event| matches!(event, Event::AssumeReg(name, path, Val::Symbolic(_)) if *name == reg && path.is_empty())
+        ),
+        "未活动臂保留的初值必须成为显式输入，不能伪造架构读取"
+    );
+}
+
+#[test]
+fn region_m2_long_finite_callee_preserves_masked_state_in_one_path() {
+    for (steps, expected_paths) in [(4200, 1), (9000, 2)] {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let reg = shared.symtab.intern("zstate");
+        let function = shared.symtab.intern("zlong_finite_body");
+        let temporary = test_name(992);
+        shared.registers.insert(reg, Ty::Bool);
+        // 真实长臂可跨多层算术与回调；有限直线调用不能在尾部反复退回掩码分叉。
+        let mut body = vec![Instr::Decl(temporary, Ty::Bool, info())];
+        body.extend((0..steps).map(|_| Instr::Copy(Loc::Id(temporary), Exp::Bool(true), info())));
+        body.extend([
+            Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+            Instr::End,
+        ]);
+        shared.functions.insert(function, (vec![], &Ty::Unit, Box::leak(body.into_boxed_slice())));
+        let program = diamond(
+            vec![Instr::Call(Loc::Id(RETURN), false, function, vec![], info())],
+            vec![Instr::Copy(Loc::Id(RETURN), Exp::Unit, info())],
+            vec![Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()), Instr::End],
+        );
+        let forked = run(program.clone(), &shared, 1, false, |_| ());
+        let merged = run(program, &shared, 1, true, |_| ());
+        assert_eq!(
+            equivalent_paths(&forked, &merged, 1, true),
+            (2, expected_paths),
+            "{}",
+            shared.execution_stats.merge_json()
+        );
+        equivalent_register_paths(&forked, &merged, 1);
+        assert_eq!(merged[0].records.len(), usize::from(expected_paths == 1));
+    }
+}
+
+#[test]
 fn region_m2_vector_update_preflight_and_merge() {
     let shared = empty_shared_state();
     let vector = test_name(990);
@@ -104,6 +204,41 @@ fn region_m2_vector_update_preflight_and_merge() {
             .unwrap(),
         "索引 0 的最终值必须等于分支条件"
     );
+}
+
+#[test]
+fn region_m2_vector_update_live_after_join() {
+    let shared = empty_shared_state();
+    let vector = test_name(990);
+    let update = |index| {
+        vec![Instr::PrimopVariadic(
+            Loc::Id(vector),
+            primop::variadic_primops()["vector_update"],
+            vec![Exp::Id(vector), Exp::I128(index), Exp::Bool(true)],
+            info(),
+        )]
+    };
+    let program = diamond(
+        update(0),
+        update(1),
+        vec![
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_access"],
+                Exp::Id(vector),
+                Exp::I128(0),
+                info(),
+            ),
+            Instr::End,
+        ],
+    );
+    let configure = |frame: &mut LocalFrame<'static, B64>| {
+        frame.vars_mut().insert(vector, UVal::Init(Val::Vector(vec![Val::Bool(false), Val::Bool(false)])));
+    };
+    let forked = run(program.clone(), &shared, 1, false, configure);
+    let merged = run(program, &shared, 1, true, configure);
+    assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 1));
+    assert_eq!(merged[0].records.len(), 1, "汇合后读取的向量必须逐元素保留分支选择");
 }
 
 fn check_vector_update_error_rollback(symbolic_index: bool) {
@@ -443,6 +578,7 @@ fn region_m2_nested_conditional_write_then_outer_read() {
     let context = Context::new(Config::new());
     let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
     let sample_path = SamplePath {
+        terminal: Default::default(),
         pre: (0..2)
             .map(|i| {
                 let UVal::Init(value) = &path.variables[&test_name(900 + i)] else { panic!("输入必须初始化") };
@@ -475,6 +611,7 @@ fn region_m2_nested_conditional_write_then_outer_read() {
     assert!(dag["definitions"].as_array().unwrap().iter().any(|row| row["smtlib"].as_str().unwrap().contains("ite")));
     let mut writer = TraceWriter::default();
     let cached = CachedPath {
+        pure_definitions: vec![],
         signature: 7,
         checkpoint: writer.capture(&path.checkpoint),
         path: sample_path.into(),
@@ -744,4 +881,90 @@ fn region_m2_second_arm_pre_state_read_after_first_arm_internal_read() {
     let reads = &paths[0].records.last().unwrap().single_arm_reads;
     assert_eq!(reads.len(), 1);
     assert_eq!(reads[0].value, Val::Bool(false));
+}
+
+#[test]
+fn region_m2_scalar_integer_counter_drives_symbolic_vector_update() {
+    let shared = empty_shared_state();
+    let index = test_name(994);
+    let vector = test_name(995);
+    let program = diamond(
+        vec![Instr::Copy(Loc::Id(index), Exp::I128(1), info())],
+        vec![Instr::Copy(Loc::Id(index), Exp::I128(0), info())],
+        vec![
+            Instr::PrimopVariadic(
+                Loc::Id(vector),
+                primop::variadic_primops()["vector_update"],
+                vec![Exp::Id(vector), Exp::Id(index), Exp::Bool(true)],
+                info(),
+            ),
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_access"],
+                Exp::Id(vector),
+                Exp::I128(0),
+                info(),
+            ),
+            Instr::End,
+        ],
+    );
+    let configure = |frame: &mut LocalFrame<'static, B64>| {
+        frame.vars_mut().insert(index, UVal::Init(Val::I128(0)));
+        frame.vars_mut().insert(vector, UVal::Init(Val::Vector(vec![Val::Bool(false); 2])));
+    };
+    let forked = run(program.clone(), &shared, 1, false, configure);
+    let merged = run(program, &shared, 1, true, configure);
+    assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 1));
+    assert_eq!(merged[0].records.len(), 1, "普通整数计数必须实际合并，后续动态向量索引保持原语义");
+}
+
+#[test]
+fn region_m2_sequential_joins_keep_read_footprint_linear() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zstate");
+    let function = shared.symtab.intern("zsequential_joins");
+    let parameter = test_name(993);
+    shared.registers.insert(reg, Ty::Bool);
+    let mut body = vec![Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info())];
+    // 一个外层推演内有连续的小菱形；没有新增读取，也没有新增输入。
+    // 原实现每次汇合都把继承的同一读取条件复制两遍。
+    for _ in 0..8 {
+        let pc = body.len();
+        body.extend([
+            Instr::Jump(Exp::Id(parameter), pc + 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(pc + 4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        ]);
+    }
+    body.push(Instr::End);
+    shared.functions.insert(function, (vec![(parameter, &Ty::Bool)], &Ty::Bool, Box::leak(body.into_boxed_slice())));
+    let program = diamond(
+        vec![Instr::Call(Loc::Id(RETURN), false, function, vec![input(1)], info())],
+        vec![Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info())],
+        vec![Instr::End],
+    );
+    let forked = run(program.clone(), &shared, 2, false, |_| ());
+    let merged = run(program, &shared, 2, true, |_| ());
+    assert_eq!(equivalent_paths(&forked, &merged, 2, true), (3, 1));
+    let root = merged[0].records.iter().find(|record| record.parent_record.is_none()).unwrap();
+    let read = root.single_arm_reads.iter().find(|read| read.register == reg).unwrap();
+    let mut guard = read.guard.clone();
+    let mut nodes = 0;
+    guard.modify(&mut |_| nodes += 1);
+    assert!(nodes <= 32, "8次汇合没有新读取，条件却膨胀为{nodes}个节点");
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let inputs: Vec<_> = (0..2).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
+    let (_, guards) = import_values(&merged[0], &inputs, &mut solver, &[read.guard.clone()]);
+    assert!(
+        solver
+            .check_sat_with(
+                &smtlib::Exp::Neq(Box::new(guards[0].clone()), Box::new(smtlib::Exp::Var(inputs[0]))),
+                info()
+            )
+            .is_unsat()
+            .unwrap(),
+        "共享条件必须精确保留外层读取守卫"
+    );
 }

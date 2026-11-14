@@ -33,9 +33,16 @@ impl Directory {
             assert_eq!(row["guard_unique"], true);
             assert_eq!(row["post_unique"], true);
             let expected = serde_json::to_value(input).unwrap();
-            for field in
-                ["result", "pre_registers", "post_registers", "pre_memory", "post_memory", "ret_val", "isa_state"]
-            {
+            for field in [
+                "terminal",
+                "result",
+                "pre_registers",
+                "post_registers",
+                "pre_memory",
+                "post_memory",
+                "ret_val",
+                "isa_state",
+            ] {
                 let mut row_val = row["sample"][field].clone();
                 let mut exp_val = expected[field].clone();
                 if field.ends_with("_registers") {

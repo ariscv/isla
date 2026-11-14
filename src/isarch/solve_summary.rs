@@ -10,6 +10,7 @@ pub(super) struct SolveSummary {
     pub execution_timeouts: usize,
     pub smt_timeouts: usize,
     pub unfinished_paths: usize,
+    pub model_exception_paths: usize,
     pub assertion_filtered_paths: usize,
     pub omitted_cases: usize,
     pub model_query_timeouts: usize,
@@ -56,6 +57,7 @@ impl SolveSummary {
         self.execution_timeouts += other.execution_timeouts;
         self.smt_timeouts += other.smt_timeouts;
         self.unfinished_paths += other.unfinished_paths;
+        self.model_exception_paths += other.model_exception_paths;
         self.assertion_filtered_paths += other.assertion_filtered_paths;
         self.omitted_cases += other.omitted_cases;
         self.model_query_timeouts += other.model_query_timeouts;

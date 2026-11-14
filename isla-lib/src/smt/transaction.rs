@@ -40,6 +40,7 @@ pub(super) struct SolverSavepoint<'ctx> {
     def_attrs: DefAttrs,
     cycles: i128,
     asserts_since_check: usize,
+    floating_point_seen: bool,
     last_check_sat: bool,
     model: SavedModel<'ctx>,
     performance_info: PerformanceInfo,
@@ -54,12 +55,39 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.savepoints.len()
     }
 
+    /// 标记当前逻辑臂的事件起点；不创建求解器保存点或臂条件。
+    pub(crate) fn transaction_effect_mark(&self) -> usize {
+        assert!(!self.savepoints.is_empty(), "逻辑臂标记必须位于事务中");
+        self.transaction_events.len()
+    }
+
+    /// 整条逻辑臂已证明死亡后撤去其事件足迹。定义与死亡约束仍保留，
+    /// 因为外层求解和其他已保留约束可能引用这些符号；最外层回滚仍会全部撤销。
+    pub(crate) fn discard_transaction_effects_since(&mut self, start: usize) {
+        assert!(!self.savepoints.is_empty(), "丢弃死臂足迹必须位于事务中");
+        assert!(self.savepoints.iter().all(|point| start >= point.events_len), "死臂后缀不能越过活动保存点");
+        assert!(start <= self.transaction_events.len(), "死臂事件起点越界");
+        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len(), "事件条件必须对齐");
+        let retained: Vec<_> = self
+            .transaction_events
+            .drain(start..)
+            .zip(self.transaction_event_guards.drain(start..))
+            .filter(|(event, _)| matches!(event, Event::Smt(..)))
+            .collect();
+        for (event, guard) in retained {
+            self.transaction_events.push(event);
+            self.transaction_event_guards.push(guard);
+        }
+    }
+
     /// 在保存点内用同一 Context、同一断言集做只读增量查询。
     /// tactic solver 每次查询可能重新执行预处理；计数 DFS 需要复用查询间的学习结果。
     /// 现有构造接口不能临时切换后端，因此在此资源边界配对替换、恢复 solver。
     pub(crate) fn with_incremental_checks<T>(&mut self, query: impl FnOnce(&mut Self) -> T) -> T {
         assert!(self.transaction_depth() > 0, "增量查询必须位于保存点内");
         let original = self.z3_solver;
+        let was_incremental = self.incremental_checks;
+        self.incremental_checks = true;
         let model = self.stashed_model.take();
         let last_check_sat = self.last_check_sat;
         let asserts_since_check = self.asserts_since_check;
@@ -81,6 +109,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.clear_stashed_model();
         unsafe { Z3_solver_dec_ref(self.ctx.z3_ctx, self.z3_solver) };
         self.z3_solver = original;
+        self.incremental_checks = was_incremental;
         self.stashed_model = model;
         self.last_check_sat = last_check_sat;
         self.asserts_since_check = asserts_since_check;
@@ -140,6 +169,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             def_attrs: self.def_attrs,
             cycles: self.cycles,
             asserts_since_check: self.asserts_since_check,
+            floating_point_seen: self.floating_point_seen.get(),
             last_check_sat: self.last_check_sat,
             model: SavedModel { model: self.stashed_model, ctx: self.ctx },
             performance_info: self.performance_info.clone(),
@@ -181,6 +211,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.def_attrs = savepoint.def_attrs;
         self.cycles = savepoint.cycles;
         self.asserts_since_check = savepoint.asserts_since_check;
+        self.floating_point_seen.set(savepoint.floating_point_seen);
         self.last_check_sat = savepoint.last_check_sat;
         self.stashed_model = savepoint.model.model.take();
         self.performance_info = savepoint.performance_info;

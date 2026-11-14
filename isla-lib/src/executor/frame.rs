@@ -396,6 +396,21 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         self.execution_limit_state.path_signature()
     }
 
+    /// 为同次探索的多个入口添加等长前缀，防止不同入口的相同分叉序列重用签名。
+    /// 单入口保留原签名；入口编号必须来自确定顺序，不能使用 worker 或 TaskId。
+    pub fn with_path_root(mut self, index: usize, roots: usize) -> Self {
+        assert!(roots > 0 && index < roots, "路径入口编号越界");
+        let state = Arc::make_mut(&mut self.execution_limit_state);
+        assert_eq!(state.total_forks(), 0, "只能给尚未分叉的初始帧设置入口");
+        assert_eq!(state.control_flow_steps(), 0, "只能在执行开始前设置路径入口");
+        assert_eq!(state.path_signature(), 0, "路径入口只能设置一次");
+        let width = usize::BITS - (roots - 1).leading_zeros();
+        for bit in (0..width).rev() {
+            state.advance_path_signature(index & (1 << bit) != 0);
+        }
+        self
+    }
+
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
         &mut Arc::make_mut(&mut self.local_state).regs
     }
@@ -533,6 +548,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     /// ExecuteAs 等以检查点重建帧的入口必须同时携带本路径合并历史。
+    pub fn pure_definitions(&self) -> &[(u32, u32)] {
+        &self.local_state.pure_definitions
+    }
+
     pub fn merge_history(&self) -> (Vec<super::RegionMergeRecord<B>>, Vec<(u32, u32)>) {
         (self.region_merge_records.clone(), self.local_state.pure_definitions.clone())
     }
@@ -581,8 +600,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         checkpoint: Checkpoint<B>,
     ) -> Task<'ir, 'task, B> {
         let mut frame = freeze_frame(self);
-        Arc::make_mut(&mut frame.local_state).enumerate_merges =
-            state.execution_limits.as_ref().is_some_and(|limits| limits.merge_enumeration.enabled);
+        Arc::make_mut(&mut frame.local_state).enumerate_merges = state
+            .execution_limits
+            .as_ref()
+            .is_some_and(|limits| limits.merge_enumeration.enabled || limits.collect_merge_definitions);
         Task {
             id: task_id,
             fraction: Fraction::one(),

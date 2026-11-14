@@ -283,3 +283,376 @@ fn region_premerge_review_loop_options_keep_shared_cache_separate() {
         assert!(cache.contains_key(&(TOP_LEVEL_LET, true)));
     }
 }
+
+/// 出口可在不同轮次到达，循环头再次分叉，循环体内还有独立分叉。
+fn crossing_loop_program(dead: bool) -> Vec<Instr<Name, B64>> {
+    let counter = test_name(1150);
+    let eq = |n| Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::I128(n)]);
+    vec![
+        Instr::Init(counter, Ty::I128, Exp::I128(0), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Jump(
+            Exp::Call(
+                Op::Or,
+                vec![
+                    eq(3),
+                    Exp::Call(
+                        Op::Or,
+                        vec![Exp::Call(Op::And, vec![input(0), eq(0)]), Exp::Call(Op::And, vec![input(1), eq(1)])],
+                    ),
+                ],
+            ),
+            10,
+            info(),
+        ),
+        Instr::Jump(input(2), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(7),
+        if dead {
+            Instr::Exit(crate::ir::ExitCause::AssertionFailure, info())
+        } else {
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info())
+        },
+        Instr::PrimopBinary(
+            Loc::Id(counter),
+            primop::binary_primops()["add_int"],
+            Exp::Id(counter),
+            Exp::I128(1),
+            info(),
+        ),
+        Instr::Goto(2),
+        Instr::Arbitrary,
+        Instr::End,
+    ]
+}
+
+#[test]
+fn region_crossing_loop_finite_nested_head_and_dead_arm() {
+    for dead in [false, true] {
+        let shared = empty_shared_state();
+        let program = crossing_loop_program(dead);
+        let forked = paths(program.clone(), &shared, 3, false);
+        let merged = paths(program, &shared, 3, true);
+        equivalent_paths(&forked, &merged, 3, !dead);
+        assert_eq!(merged.len(), 1, "不同轮次的出口必须实际合并");
+        assert!(merged[0].records.iter().filter(|r| r.branch_pc == 2).count() >= 2, "循环头再次分叉必须产生嵌套记录");
+    }
+}
+
+#[test]
+fn region_crossing_loop_nontermination_rolls_back_inner_commits() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let reg = shared.symtab.intern("zbounded_loop_register");
+    shared.registers.insert(reg, Ty::Bool);
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(10),
+        Instr::Jump(input(1), 6, info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+        Instr::Goto(7),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+        Instr::Jump(input(2), 10, info()),
+        Instr::Goto(3),
+        Instr::End,
+    ];
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let mut frame = make_frame(program);
+    for index in 0..3 {
+        let sym = solver.declare_const(smtlib::Ty::Bool, info());
+        frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(sym)));
+    }
+    solver.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(Sym { id: 2 }))));
+    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+    let before_vars = format!("{:?}", frame.vars());
+    let before_events = solver.trace().to_vec().len();
+    let state = TaskState::new().with_region_step_budget(80).with_execution_limits(
+        ExecutionLimits::default()
+            .with_path_merging(true)
+            .with_region_loop_analysis(true)
+            .with_region_global_state(true),
+    );
+    let queue = Worker::new_lifo();
+    let mut fraction = Fraction::one();
+    let result = region_merge::try_region(
+        Sym { id: 0 },
+        3,
+        0,
+        TaskId::fresh(),
+        &mut fraction,
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    )
+    .unwrap();
+    assert!(matches!(result, region_merge::RegionResult::Rejected));
+    assert!(shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap() > 0);
+    assert!(shared.execution_stats.merge_json()["successes"].as_u64().unwrap() > 0);
+    assert_eq!(frame.pc, 0);
+    assert_eq!(format!("{:?}", frame.vars()), before_vars);
+    assert_eq!(frame.regs().get_last_if_initialized(reg), Some(&Val::Bool(false)));
+    assert!(frame.region_merge_records().is_empty());
+    assert!(frame.region_execution.is_none());
+    assert!(frame.local_state.speculative_access.is_none());
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(solver.trace().to_vec().len(), before_events);
+    assert!(queue.is_empty());
+    assert!(fraction.is_one());
+    assert!(solver.check_sat_with(&smtlib::Exp::Var(Sym { id: 0 }), info()).is_sat().unwrap());
+    assert!(solver
+        .check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(Sym { id: 0 }))), info())
+        .is_sat()
+        .unwrap());
+}
+
+#[test]
+fn region_crossing_loop_budget_rejection_preserves_complete_execution() {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let program = crossing_loop_program(false);
+    let forked = paths(program.clone(), &shared, 3, false);
+    for budget in [0, 12] {
+        let rejected_before =
+            shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap_or(0);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let mut frame = make_frame(program.clone());
+        frame.function_name = TOP_LEVEL_LET;
+        for index in 0..3 {
+            let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+            frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(symbol)));
+        }
+        let state = TaskState::new()
+            .with_region_step_budget(budget)
+            .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true));
+        let output = Mutex::new(Vec::new());
+        start_single(
+            frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
+            &shared,
+            &output,
+            &|_, _, result, _, mut solver, output| {
+                let Ok((Run::Finished(value), frame)) = result else {
+                    panic!("合并预算耗尽后普通执行必须完整完成");
+                };
+                assert_eq!(solver.transaction_depth(), 0);
+                assert!(frame.region_execution.is_none());
+                if solver.check_sat(info()).is_sat().unwrap() {
+                    output.lock().unwrap().push(Path {
+                        records: frame.region_merge_records().to_vec(),
+                        value,
+                        events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
+                        variables: frame.vars().clone(),
+                        registers: frame.regs().clone(),
+                        lets: frame.lets().clone(),
+                        checkpoint: checkpoint(&mut solver),
+                    });
+                }
+            },
+        );
+        equivalent_paths(&forked, &output.into_inner().unwrap(), 3, true);
+        assert!(
+            shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap() > rejected_before
+        );
+    }
+}
+
+#[test]
+fn region_crossing_loop_no_join_and_mode_cache_isolation() {
+    use crate::ir::regions::{FunctionRegions, RegionOptions, RegionRejection};
+    for body in [
+        vec![Instr::Jump(input(0), 0, info()), Instr::Goto(0)],
+        vec![Instr::Jump(input(0), 2, info()), Instr::Goto(1), Instr::End],
+        vec![
+            Instr::Jump(input(0), 2, info()),
+            Instr::Exit(crate::ir::ExitCause::AssertionFailure, info()),
+            Instr::Exit(crate::ir::ExitCause::AssertionFailure, info()),
+        ],
+    ] {
+        let options = RegionOptions { bounded_loops: true, filter_assertion_failures: true, ..Default::default() };
+        assert_eq!(FunctionRegions::<B64>::with_options(&body, options).region(0), Err(RegionRejection::NoJoin));
+    }
+    for order in [[false, true, false], [true, false, true]] {
+        let shared = empty_shared_state();
+        let program = crossing_loop_program(false);
+        assert_eq!(FunctionRegions::new(&program, HAVE_EXCEPTION).region(2), Err(RegionRejection::HasBackEdge));
+        for enabled in order {
+            let result = paths_with_state(
+                program.clone(),
+                &shared,
+                3,
+                ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(enabled),
+                crate::memory::Memory::new(),
+                |_| (),
+            );
+            assert_eq!(result.iter().any(|path| path.records.iter().any(|record| record.branch_pc == 2)), enabled);
+        }
+        let mut cache = shared.function_regions.lock().unwrap();
+        assert_eq!(cache.get_mut(&(TOP_LEVEL_LET, false)).unwrap().region(2), Err(RegionRejection::HasBackEdge));
+        assert!(cache.get_mut(&(TOP_LEVEL_LET, true)).unwrap().region(2).unwrap().has_back_edge);
+    }
+}
+
+/// 布尔输入定义有限但符号的循环上界，差分时仍共享完全相同的外部输入。
+fn bounded_iteration_paths(program: Vec<Instr<Name, B64>>, groups: &[usize], expected_value: usize) -> Vec<Path> {
+    use smtlib::Exp::{And, Bits, Bool, Bvadd, Ite, Neq, Not, Var};
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let mut frame = make_frame(program);
+    frame.function_name = TOP_LEVEL_LET;
+    let mut index = 0;
+    let constant = |n: u128| Bits((0..128).map(|bit| n & (1u128 << bit) != 0).collect());
+    for (group, bits) in groups.iter().enumerate() {
+        let mut bound = constant(0);
+        for bit in 0..*bits {
+            let input = solver.declare_const(smtlib::Ty::Bool, info());
+            frame.vars_mut().insert(test_name(900 + index), UVal::Init(Val::Symbolic(input)));
+            index += 1;
+            bound = Bvadd(
+                Box::new(bound),
+                Box::new(Ite(Box::new(Var(input)), Box::new(constant(1 << bit)), Box::new(constant(0)))),
+            );
+        }
+        let bound = solver.define_const(bound, info());
+        frame.vars_mut().insert(test_name(1200 + group as u32), UVal::Init(Val::Symbolic(bound)));
+    }
+    let state = TaskState::new()
+        .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true));
+    frame.pc = 1;
+    frame.vars_mut().insert(test_name(1210), UVal::Init(Val::I128(0)));
+    frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+    let UVal::Init(Val::Symbolic(bound)) = frame.vars()[&test_name(1200)].clone() else { unreachable!() };
+    let condition = solver.define_const(smtlib::Exp::Eq(Box::new(Var(bound)), Box::new(constant(0))), info());
+    let Instr::Jump(_, target, _) = frame.instrs[1] else { unreachable!() };
+    let shared = empty_shared_state();
+    let queue = Worker::new_lifo();
+    let sink = SingleForkSink { queue: &queue };
+    let mut fraction = Fraction::one();
+    let result = region_merge::try_region(
+        condition,
+        target,
+        0,
+        TaskId::fresh(),
+        &mut fraction,
+        PathTimeout::unlimited(),
+        None,
+        &sink,
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    )
+    .unwrap();
+    assert!(matches!(result, region_merge::RegionResult::Merged), "整个有限循环必须一次合并，不能靠普通执行掩盖拒绝");
+    let Run::Finished(value) = run_loop(
+        0,
+        TaskId::fresh(),
+        &mut fraction,
+        PathTimeout::unlimited(),
+        None,
+        &sink,
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+    )
+    .unwrap() else {
+        panic!("合并之后必须返回")
+    };
+    assert!(queue.is_empty());
+    // 直接使用原求解器保留共享表达式；不把深层定义DAG递归展开成树。
+    let inputs: Vec<_> = (0..index)
+        .map(|index| {
+            let UVal::Init(Val::Symbolic(symbol)) = frame.vars()[&test_name(900 + index)] else { unreachable!() };
+            symbol
+        })
+        .collect();
+    let ideal = inputs[..groups[0]].iter().enumerate().fold(Bool(true), |formula, (bit, symbol)| {
+        And(
+            Box::new(formula),
+            Box::new(if expected_value & (1 << bit) != 0 { Var(*symbol) } else { Not(Box::new(Var(*symbol))) }),
+        )
+    });
+    assert!(solver
+        .check_sat_with(&Neq(Box::new(smt_value(&value, info()).unwrap()), Box::new(ideal)), info())
+        .is_unsat()
+        .unwrap());
+    // 输入域仅由这些布尔量组成；逐个组合可满足即证明没有丢弃任意输入。
+    for assignment in 0..(1usize << inputs.len()) {
+        let guard = inputs.iter().enumerate().fold(Bool(true), |formula, (bit, symbol)| {
+            And(
+                Box::new(formula),
+                Box::new(if assignment & (1 << bit) != 0 { Var(*symbol) } else { Not(Box::new(Var(*symbol))) }),
+            )
+        });
+        assert!(solver.check_sat_with(&guard, info()).is_sat().unwrap(), "有限输入组合不得被合并过滤");
+    }
+
+    vec![Path {
+        records: frame.region_merge_records().to_vec(),
+        value,
+        events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
+        variables: frame.vars().clone(),
+        registers: frame.regs().clone(),
+        lets: frame.lets().clone(),
+        checkpoint: checkpoint(&mut solver),
+    }]
+}
+
+#[test]
+fn region_loop_rounds_many_iterations_use_one_level() {
+    let counter = test_name(1210);
+    let bound = test_name(1200);
+    let program = vec![
+        Instr::Init(counter, Ty::I128, Exp::I128(0), info()),
+        Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::Id(bound)]), 4, info()),
+        Instr::PrimopBinary(
+            Loc::Id(counter),
+            primop::binary_primops()["add_int"],
+            Exp::Id(counter),
+            Exp::I128(1),
+            info(),
+        ),
+        Instr::Goto(1),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::I128(42)]), info()),
+        Instr::End,
+    ];
+    let merged = bounded_iteration_paths(program, &[6], 42);
+    assert!(merged[0].records.iter().filter(|record| record.branch_pc == 1).count() > 32);
+    assert!(merged[0].records.iter().all(|record| record.depth == 1), "后续轮次复用本循环层数");
+}
+
+#[test]
+fn region_loop_rounds_nested_loops_keep_distinct_levels() {
+    let outer = test_name(1210);
+    let inner = test_name(1211);
+    let program = vec![
+        Instr::Init(outer, Ty::I128, Exp::I128(0), info()),
+        Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(outer), Exp::Id(test_name(1200))]), 9, info()),
+        Instr::Init(inner, Ty::I128, Exp::I128(0), info()),
+        Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(inner), Exp::Id(test_name(1201))]), 6, info()),
+        Instr::PrimopBinary(Loc::Id(inner), primop::binary_primops()["add_int"], Exp::Id(inner), Exp::I128(1), info()),
+        Instr::Goto(3),
+        Instr::PrimopBinary(Loc::Id(outer), primop::binary_primops()["add_int"], Exp::Id(outer), Exp::I128(1), info()),
+        Instr::Goto(1),
+        Instr::Arbitrary,
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(outer), Exp::I128(2)]), info()),
+        Instr::End,
+    ];
+    let merged = bounded_iteration_paths(program, &[2, 5], 2);
+    assert_eq!(merged.len(), 1);
+    assert!(merged[0].records.iter().filter(|record| record.branch_pc == 1).all(|record| record.depth == 1));
+    assert!(merged[0].records.iter().filter(|record| record.branch_pc == 3).all(|record| record.depth == 2));
+    assert!(merged[0].records.iter().any(|record| record.branch_pc == 3));
+}

@@ -11,6 +11,7 @@ fn fast_facts_skip_only_proven_queries() {
     let input = solver.declare_const(Ty::Bool, SourceLoc::unknown());
     let free = solver.declare_const(Ty::Bool, SourceLoc::unknown());
     let mut path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
         post: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
         result: Val::Symbolic(input),
@@ -59,6 +60,7 @@ fn fast_facts_guarded_reads_and_free_symbols() {
         region: "test",
     };
     let mut path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
         post: BTreeMap::new(),
         result: Val::Symbolic(result),
@@ -80,6 +82,7 @@ fn fast_binding_matches_byte_binding_including_wrap_and_missing_bytes() {
     let address = solver.declare_bitvector(64, SourceLoc::unknown());
     let data = solver.declare_bitvector(16, SourceLoc::unknown());
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("address".into(), Val::Symbolic(address))]),
         post: BTreeMap::new(),
         result: Val::Symbolic(data),
@@ -117,6 +120,7 @@ fn fast_facts_normalize_inactive_free_guard_and_keep_active_one_slow() {
     let input = solver.declare_const(Ty::Bool, SourceLoc::unknown());
     let free = solver.declare_const(Ty::Bool, SourceLoc::unknown());
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
         post: BTreeMap::new(),
         result: Val::Unit,

@@ -575,6 +575,9 @@ pub fn validate_paths<B: BV>(
     let mut signatures = HashSet::new();
     for path in paths {
         assert!(signatures.insert(path.signature), "缓存路径签名重复");
+        for (start, end) in &path.pure_definitions {
+            assert!(start < end && *end < path.checkpoint.next_var, "缓存纯计算定义区间无效");
+        }
         let checkpoint = reader.restore(&path.checkpoint);
         drop(checkpoint);
         let mut chain = Vec::new();

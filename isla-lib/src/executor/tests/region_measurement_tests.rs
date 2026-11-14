@@ -71,6 +71,7 @@ fn regions_loop_merge_real_ir_measurement() {
                     FunctionRegions::with_options(
                         body,
                         RegionOptions {
+                            bounded_loops: false,
                             filter_assertion_failures: filtered,
                             recreated_slot_liveness: filtered,
                             have_exception: Some(HAVE_EXCEPTION),

@@ -41,10 +41,18 @@ impl Session {
         &self.options.output
     }
     pub fn new(options: &Options) -> Result<Self, String> {
-        let corpus = SampleChecker::load(&options.corpus, None)?.samples;
-        if corpus.is_empty() {
-            return Err("corpus 不得为空".into());
-        }
+        let corpus = options
+            .corpus
+            .as_ref()
+            .map(|path| -> Result<Vec<Sample>, String> {
+                let corpus = SampleChecker::load(path, None)?.samples;
+                if corpus.is_empty() {
+                    return Err("corpus 不得为空".into());
+                }
+                Ok(corpus)
+            })
+            .transpose()?
+            .unwrap_or_default();
         if !options.output.is_absolute() {
             return Err("--fuzz-output 必须是绝对路径，避免探索阶段改变输出位置".into());
         }
@@ -52,7 +60,8 @@ impl Session {
         std::fs::create_dir(&options.output).map_err(|e| format!("fuzz 输出必须是新目录：{e}"))?;
         let mut source_records = serde_json::Map::new();
         for name in ["done.json", "samples.manifest.json"] {
-            let path = options.corpus.parent().unwrap().join(name);
+            let Some(corpus) = &options.corpus else { continue };
+            let path = corpus.parent().unwrap().join(name);
             if path.exists() {
                 let value: serde_json::Value =
                     serde_json::from_reader(std::fs::File::open(path).unwrap()).expect("来源记录损坏");

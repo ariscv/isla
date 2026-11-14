@@ -127,9 +127,23 @@ fn decode<B: BV>(value: &Value, shared: &SharedState<B>) -> Val<B> {
     }
 }
 
+/// result 在正常终态中是返回值，在 SailException 中是异常值；两者不得互相认证。
+/// 使用普通枚举编码，使 JSON 和 bincode 共用同一类型，无 deserialize_any。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Terminal {
+    #[default]
+    Normal,
+    SailException {
+        throw_location: String,
+    },
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sample {
+    // 旧样本只表示正常终态；异常输入必须显式携带类型，仍由当前路径重新认证。
+    #[serde(default)]
+    pub terminal: Terminal,
     pub schema_version: u32,
     pub sample_id: u64,
     pub mode: String,
@@ -157,6 +171,7 @@ pub struct MemoryCell {
 /// 每条访问拆成小端字节；前后内存与 isarch 既有重放规则一致。
 #[derive(Clone)]
 pub struct SamplePath<B: BV> {
+    pub terminal: Terminal,
     pub pre: BTreeMap<String, Val<B>>,
     pub post: BTreeMap<String, Val<B>>,
     pub result: Val<B>,
@@ -356,6 +371,7 @@ impl<B: BV> SamplePath<B> {
         };
         let result = materialized(&self.result, model, shared)?;
         Ok(Sample {
+            terminal: self.terminal.clone(),
             schema_version: 1,
             sample_id: 0,
             mode: mode.into(),
@@ -527,6 +543,7 @@ impl<B: BV> SamplePath<B> {
             let timing = profile::Span::new("post_prepare");
             let accesses = self.accesses();
             let mut checks = Vec::new();
+            checks.push(Exp::Bool(self.terminal == sample.terminal));
             checks.push(equal(&self.result, &sample.result, shared, solver)?);
             for (name, value) in &sample.post_registers {
                 if self.pre.get(name) == self.post.get(name) && sample.pre_registers.get(name) == Some(value) {
@@ -625,6 +642,7 @@ impl<B: BV> SamplePath<B> {
         };
         let result = materialized(&self.result, model, shared)?;
         Ok(Sample {
+            terminal: self.terminal.clone(),
             schema_version: 1,
             sample_id: 0,
             mode: mode.into(),
@@ -913,6 +931,7 @@ mod tests {
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Unit,
@@ -969,6 +988,7 @@ mod tests {
         let mut solver = Solver::<B64>::new(&context);
         let shared = SharedState::empty(crate::ir::Symtab::new());
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Bool(true),
@@ -998,6 +1018,7 @@ mod tests {
         let mut solver = Solver::<B64>::new(&context);
         let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
             post: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
             result: Val::Symbolic(input),
@@ -1047,6 +1068,7 @@ mod tests {
         let root = solver.define_const(Exp::Bool(false), SourceLoc::unknown());
         let free = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Unit,
@@ -1079,6 +1101,7 @@ mod tests {
         let mut solver = Solver::<B64>::new(&context);
         let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
         let mut path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
             post: BTreeMap::new(),
             result: Val::Symbolic(input),
@@ -1105,6 +1128,7 @@ mod tests {
         let mut solver = Solver::<B64>::new(&context);
         let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
             post: BTreeMap::new(),
             result: Val::Symbolic(input),
@@ -1146,6 +1170,7 @@ mod tests {
         let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
         solver.assert(Exp::Var(input));
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
             post: BTreeMap::new(),
             result: Val::Symbolic(input),
@@ -1201,6 +1226,7 @@ mod tests {
         let value = solver.declare_const(crate::smt::smtlib::Ty::BitVec(16), SourceLoc::unknown());
         let write = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Unit,
@@ -1283,6 +1309,7 @@ mod tests {
             region: "mem",
         };
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::Unit,
@@ -1323,6 +1350,7 @@ mod tests {
             .assert(Exp::Eq(Box::new(Exp::Var(data)), Box::new(Exp::Bits((0..128).map(|bit| bit % 3 == 0).collect()))));
         let shared = SharedState::empty(crate::ir::Symtab::new());
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("wide".into(), Val::Symbolic(data))]),
             post: BTreeMap::from([("wide".into(), Val::Symbolic(data))]),
             result: Val::Symbolic(data),
@@ -1361,6 +1389,7 @@ mod tests {
             region: "mem",
         };
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("g".into(), Val::Symbolic(guard))]),
             post: BTreeMap::new(),
             result: Val::Bool(true),

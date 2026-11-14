@@ -11,7 +11,7 @@ pub enum Mode {
 pub struct Options {
     pub mode: Mode,
     pub scenario: String,
-    pub corpus: PathBuf,
+    pub corpus: Option<PathBuf>,
     pub inputs: Option<PathBuf>,
     pub mutations: Option<PathBuf>,
     pub output: PathBuf,
@@ -36,7 +36,7 @@ impl Options {
         let options = Self {
             mode,
             scenario: required("fuzz-scenario")?,
-            corpus: required("fuzz-corpus")?.into(),
+            corpus: matches.opt_str("fuzz-corpus").map(Into::into),
             inputs: matches.opt_str("fuzz-inputs").map(Into::into),
             mutations: matches.opt_str("fuzz-mutations").map(Into::into),
             output: required("fuzz-output")?.into(),
@@ -118,6 +118,9 @@ impl Options {
                 Some(_) => return Err("--executor 必须为 model 或 difftest".into()),
             },
         };
+        if options.corpus.is_none() && !matches.opt_present("path-cache-read") {
+            return Err("没有 --fuzz-corpus 时需要 --path-cache-read 生成初始 corpus".into());
+        }
         if options.difftest.is_some() && !matches!(options.mode, Mode::Campaign) {
             return Err("--executor difftest 仅用于 campaign".into());
         }
@@ -147,5 +150,57 @@ impl Options {
             }
         }
         Ok(options)
+    }
+}
+
+#[cfg(test)]
+mod cache_fuzz_tests {
+    use super::*;
+    #[test]
+    fn cache_fuzz_only_cache_can_omit_corpus() {
+        let mut parser = getopts::Options::new();
+        for name in [
+            "fuzz-mode",
+            "fuzz-scenario",
+            "fuzz-corpus",
+            "fuzz-output",
+            "fuzz-control-percent",
+            "path-cache-read",
+            "fuzz-inputs",
+            "fuzz-mutations",
+            "fuzz-seed",
+            "fuzz-batch-size",
+            "fuzz-budget",
+            "fuzz-feedback",
+            "executor",
+        ] {
+            parser.optopt("", name, "", "VALUE");
+        }
+        for name in [
+            "fuzz-certify-all",
+            "fuzz-avoid-known-ppn-overflow",
+            "check-samples",
+            "check-samples-judge",
+            "judge-resident",
+            "judge-resident-out",
+            "judge-resident-fast",
+        ] {
+            parser.optflag("", name, "");
+        }
+        let args = [
+            "--fuzz-mode",
+            "campaign",
+            "--fuzz-scenario",
+            "example",
+            "--fuzz-output",
+            "/tmp/unused",
+            "--fuzz-control-percent",
+            "0",
+        ];
+        let without = parser.parse(args).unwrap();
+        assert!(Options::parse(&without).is_err());
+        let mut args = args.to_vec();
+        args.extend(["--path-cache-read", "cache"]);
+        assert!(Options::parse(&parser.parse(args).unwrap()).is_ok());
     }
 }

@@ -2,7 +2,7 @@ use std::ffi::CStr;
 use std::str::FromStr;
 
 /// Isla 支持的 Z3 求解策略。
-/// 默认使用 Z3 自身的 Default 策略，仍须通过运行时随机种子能力校验。
+/// Default 使用 Z3 原生求解器与默认参数；显式种子仍须通过运行时能力校验。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tactic {
     #[default]

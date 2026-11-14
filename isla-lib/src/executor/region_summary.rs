@@ -3,6 +3,9 @@ use super::*;
 use crate::ir::regions::{RegionCfg, RegionOptions};
 use crate::primop::{self as effects, Effect};
 
+#[cfg(test)]
+mod tests;
+
 fn constraint_unary<B: BV>(f: primop::Unary<B>) -> bool {
     std::ptr::fn_addr_eq(f, primop::assume::<B> as primop::Unary<B>)
 }
@@ -19,6 +22,7 @@ pub(super) struct FunctionEffect {
     pub effect: Effect,
     pub non_returning: bool,
     pub(super) rejection: Option<CachedReject>,
+    pub(super) constant_return: Option<bool>,
 }
 impl FunctionEffect {
     fn join(&mut self, other: Self) -> bool {
@@ -64,6 +68,20 @@ pub(super) fn function_effect_summaries<B: BV>(
     shared: &SharedState<B>,
     global_state: bool,
 ) -> HashMap<Name, FunctionEffect> {
+    // 函数假设可以跳过实际函数体，原字面量返回不能代表这些调用的结果。
+    let assumed: HashSet<_> =
+        shared.function_assumptions.iter().map(|(function, _, _)| shared.symtab.lookup(function)).collect();
+    let constant_returns: HashMap<_, _> = shared
+        .functions
+        .iter()
+        .filter(|(function, _)| !assumed.contains(function))
+        .filter_map(|(function, (_, ret_ty, body))| match (*ret_ty, *body) {
+            (Ty::Bool, [Instr::Copy(Loc::Id(name), Exp::Bool(value), _), Instr::End]) if *name == RETURN => {
+                Some((*function, *value))
+            }
+            _ => None,
+        })
+        .collect();
     let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
     let nodes: HashMap<_, _> = shared.functions.keys().map(|function| (*function, graph.add_node(*function))).collect();
     for (function, (_, _, body)) in &shared.functions {
@@ -88,6 +106,7 @@ pub(super) fn function_effect_summaries<B: BV>(
                     RegionCfg::new(
                         shared.functions[&function].2,
                         RegionOptions {
+                            bounded_loops: false,
                             filter_assertion_failures: false,
                             recreated_slot_liveness: false,
                             have_exception: None,
@@ -143,17 +162,24 @@ pub(super) fn function_effect_summaries<B: BV>(
                 _ => None,
             }))
             .collect();
-        let mut summary =
-            FunctionEffect { effect: Effect::Pure, non_returning: non_returning.contains(function), rejection: None };
-        let cfg = RegionCfg::new(
+        let mut summary = FunctionEffect {
+            effect: Effect::Pure,
+            non_returning: non_returning.contains(function),
+            rejection: None,
+            constant_return: constant_returns.get(function).copied(),
+        };
+        let mut cfg = RegionCfg::new(
             body,
             RegionOptions {
+                bounded_loops: false,
                 filter_assertion_failures: false,
                 recreated_slot_liveness: false,
                 have_exception: None,
                 terminal_calls: &terminal_calls,
             },
         );
+        let branches = cfg.constant_branches(body, &constant_returns);
+        cfg.retain_constant_branches(&branches);
         for pc in cfg.reachable_instructions() {
             let instr = &body[pc];
             if matches!(instr, Instr::Call(_, _, callee, _, _) if non_returning.contains(callee)) {
@@ -216,7 +242,7 @@ pub(super) fn function_effect_summaries<B: BV>(
                     });
                 }
             }
-            summary.join(FunctionEffect { effect, non_returning: false, rejection });
+            summary.join(FunctionEffect { effect, non_returning: false, rejection, constant_return: None });
             if let Instr::Call(_, _, callee, _, _) = instr {
                 if let Some(callee) = nodes.get(callee) {
                     graph.update_edge(nodes[function], *callee, ());

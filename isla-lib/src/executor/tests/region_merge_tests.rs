@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 #[path = "region_loop_merge_tests.rs"]
 mod loop_merge_tests;
 
+#[path = "region_loop_round_review_tests.rs"]
+mod loop_round_review_tests;
+
 #[path = "region_global_state_tests.rs"]
 mod global_state_tests;
 
@@ -1368,6 +1371,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
     frame.region_execution = Some(region_merge::RegionExecution {
         region: Arc::new(crate::ir::regions::Region {
             branch_pc: 0,
+            has_back_edge: false,
             join: crate::ir::regions::RegionPoint::Instruction(1),
             nodes: Default::default(),
             kind: crate::ir::regions::RegionKind::Reconvergent,
@@ -1379,6 +1383,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         remaining: Arc::new(AtomicUsize::new(10)),
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
+        pending_branch: None,
     });
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -3316,6 +3321,7 @@ fn sample_run<'ir>(
                 panic!("样本测试必须完成");
             };
             let path = SamplePath {
+                terminal: Default::default(),
                 pre: pre.clone(),
                 post: BTreeMap::new(),
                 result: value.clone(),
@@ -3760,7 +3766,7 @@ fn region_merge_f4_memory_constraints_are_guarded_and_reads_survive_checkpoint()
     let g = solver.declare_const(smtlib::Ty::Bool, info());
     let value = test_name(960);
     let mut frame = make_frame(vec![
-        Instr::Jump(Exp::Bool(true), 3, info()),
+        Instr::Jump(input(0), 3, info()),
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::Goto(6),
         Instr::PrimopVariadic(
@@ -3778,6 +3784,8 @@ fn region_merge_f4_memory_constraints_are_guarded_and_reads_survive_checkpoint()
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
         Instr::End,
     ]);
+    // 静态 CFG 与下方手工传给推演器的条件必须相同，不能被常量剪边提前删除另一臂。
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(g)));
     frame.vars_mut().insert(value, UVal::Uninit(&Ty::Bits(8)));
     frame.memory_mut().add_symbolic_region(0x1000..0x1010);
     frame.memory_mut().set_client_info(Box::new(F4ReadConstraint { input: g }));
@@ -3796,6 +3804,7 @@ fn region_merge_f4_memory_constraints_are_guarded_and_reads_survive_checkpoint()
     let memory =
         solver.trace().to_vec().into_iter().rev().filter(|event| event.is_memory_read_or_write()).cloned().collect();
     let sample_path = crate::executor::samples::SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("g".into(), Val::Symbolic(g))]),
         post: BTreeMap::new(),
         result: Val::Symbolic(g),
@@ -3857,6 +3866,7 @@ fn region_merge_f4_real_get_xlpe_diagnosis() {
     let mut regions = crate::ir::regions::FunctionRegions::with_options(
         body,
         crate::ir::regions::RegionOptions {
+            bounded_loops: false,
             filter_assertion_failures: false,
             recreated_slot_liveness: false,
             have_exception: Some(HAVE_EXCEPTION),
@@ -4028,6 +4038,7 @@ fn merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规�
             });
         }
         let path = SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([
                 ("input".into(), Val::Symbolic(input)),
                 ("extra".into(), Val::Symbolic(extra)),
@@ -4149,6 +4160,7 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
         };
         let state = TaskState::new().with_execution_limits(limits);
         let path = crate::executor::samples::SamplePath {
+            terminal: Default::default(),
             pre: BTreeMap::from([("input".into(), Val::Symbolic(input)), ("extra".into(), Val::Symbolic(extra))]),
             post: BTreeMap::from([("input".into(), Val::Symbolic(input))]),
             result: Val::Symbolic(input),
@@ -4420,4 +4432,220 @@ fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截�
         .unwrap();
     assert_eq!(output["counted_paths"], 256);
     assert_eq!(output["path_truncated"], true);
+}
+
+#[test]
+fn default_complex_feasibility_keeps_three_results_and_rollback() {
+    const CHILD: &str = "ISLA_FEASIBILITY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_merge_tests::default_complex_feasibility_keeps_three_results_and_rollback",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    crate::smt::configure_tastic(crate::smt::Tactic::Default);
+    let frame = make_frame(vec![]);
+    for limited in [false, true] {
+        let mut config = Config::new();
+        if limited {
+            config.set_param_value("rlimit", "1");
+        }
+        let context = Context::new(config);
+        let mut solver = Solver::<B64>::new(&context);
+        let mut value = crate::primop_util::smt_i128(0);
+        for i in 1..=128 {
+            let bit = solver.declare_const(smtlib::Ty::Bool, info());
+            value =
+                Formula::Ite(Box::new(Formula::Var(bit)), Box::new(crate::primop_util::smt_i128(i)), Box::new(value));
+        }
+        let value = solver.define_const(value, info());
+        let condition = Formula::Eq(Box::new(Formula::Var(value)), Box::new(crate::primop_util::smt_i128(17)));
+        let tx = solver.start_transaction_with_guard(Some(condition.clone()));
+        if limited {
+            assert!(matches!(
+                region_merge::feasible(&frame, &mut solver, &condition, info()),
+                Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. })
+            ));
+        } else {
+            assert!(region_merge::feasible(&frame, &mut solver, &condition, info()).unwrap());
+            assert!(!region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition.clone())), info())
+                .unwrap());
+        }
+        solver.rollback_transaction(tx);
+        if !limited {
+            assert!(region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition)), info()).unwrap());
+        }
+    }
+}
+
+/// 同一合成程序比较诊断开关、结果域、原拒绝理由及完整 SMT／事件轨迹。
+#[test]
+fn merge_diagnostics_execution_is_observational() {
+    use crate::executor::stats::merge_diagnostics as diag;
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let slot = shared.symtab.intern("zdiagnostic_slot");
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(slot), Exp::I64(0), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(slot), Exp::I64(1), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::End,
+    ];
+    let run = || {
+        paths_with_state(
+            program.clone(),
+            &shared,
+            1,
+            ExecutionLimits::default().with_path_merging(true),
+            crate::memory::Memory::new(),
+            |frame| {
+                frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+                frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+            },
+        )
+    };
+    diag::configure("off").unwrap();
+    let query_start = crate::smt::test_query_count();
+    let off = run();
+    let off_queries = crate::smt::test_query_count() - query_start;
+    let before_stats = shared.execution_stats.merge_json();
+    shared.execution_stats.reset();
+    diag::configure("detail").unwrap();
+    let query_start = crate::smt::test_query_count();
+    let on = run();
+    let on_queries = crate::smt::test_query_count() - query_start;
+    assert_eq!(off_queries, on_queries, "诊断不得额外调用求解器");
+    let on_stats = shared.execution_stats.merge_json();
+    let measured = diag::summary_for_test();
+    assert_eq!(measured["differences"]["concrete_required"], 1);
+    assert_eq!(measured["keys"][0]["key"]["slot"]["name"], "diagnostic_slot");
+    diag::configure("off").unwrap();
+    assert_eq!(off.len(), 2);
+    assert_eq!(on.len(), off.len());
+    assert_eq!(before_stats, on_stats, "诊断不能改变拒绝理由或次数");
+    for (left, right) in off.iter().zip(&on) {
+        assert_eq!(left.value, right.value);
+        assert_eq!(left.variables.len(), right.variables.len());
+        for (name, value) in &left.variables {
+            assert_eq!(format!("{value:?}"), format!("{:?}", right.variables.get(name).unwrap()));
+        }
+        assert_eq!(
+            format!("{:?}", left.events),
+            format!("{:?}", right.events),
+            "全部 SMT 定义、断言和可观察事件必须逐项一致"
+        );
+    }
+    shared.function_regions.lock().unwrap().clear();
+    // 一臂仍为原始 Uninit，正常初始化成为 Poison 后不能和字符串合流。
+    diag::configure("detail").unwrap();
+    let uninit = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(slot), Exp::String("value".into()), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::End,
+    ];
+    let result = paths_with_state(
+        uninit,
+        &shared,
+        1,
+        ExecutionLimits::default().with_path_merging(true),
+        crate::memory::Memory::new(),
+        |frame| {
+            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::String));
+            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+        },
+    );
+    assert_eq!(result.len(), 2);
+    assert_eq!(diag::summary_for_test()["differences"]["init_mismatch"], 1);
+    diag::configure("detail").unwrap();
+    shared.function_regions.lock().unwrap().clear();
+    let nested = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(9),
+        Instr::Jump(input(1), 6, info()),
+        Instr::Copy(Loc::Id(slot), Exp::I64(0), info()),
+        Instr::Goto(7),
+        Instr::Copy(Loc::Id(slot), Exp::I64(1), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(9),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::End,
+    ];
+    let result = paths_with_state(
+        nested,
+        &shared,
+        2,
+        ExecutionLimits::default().with_path_merging(true),
+        crate::memory::Memory::new(),
+        |frame| {
+            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+        },
+    );
+    assert_eq!(result.len(), 3);
+    assert!(diag::summary_for_test()["propagated"].as_u64().unwrap() > 0, "嵌套失败必须区分根因和向外传播");
+    diag::configure("detail").unwrap();
+    shared.function_regions.lock().unwrap().clear();
+    shared.registers.insert(slot, Ty::I64);
+    let result = paths_with_state(
+        program,
+        &shared,
+        1,
+        ExecutionLimits::default().with_path_merging(true).with_region_global_state(true),
+        crate::memory::Memory::new(),
+        |_| (),
+    );
+    assert_eq!(result.len(), 2);
+    let measured = diag::summary_for_test();
+    assert!(measured["keys"].as_array().unwrap().iter().any(|entry| entry["key"]["slot"]["space"] == "registers"));
+    diag::configure("off").unwrap();
+}
+
+#[test]
+fn region_merge_constant_liveness_dead_read_allows_missing_slot_merge() {
+    let shared = empty_shared_state();
+    let local = test_name(1100);
+    let program = vec![
+        Instr::Jump(input(0), 5, info()),
+        Instr::Decl(local, Ty::Bool, info()),
+        Instr::Jump(Exp::Bool(false), 7, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(6),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::End,
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(local), info()),
+        Instr::End,
+    ];
+    let execute = |merge| {
+        paths_with_state(
+            program.clone(),
+            &shared,
+            1,
+            ExecutionLimits::default().with_path_merging(merge).with_region_loop_analysis(true),
+            crate::memory::Memory::new(),
+            |_| (),
+        )
+    };
+    let forked = execute(false);
+    let merged = execute(true);
+    assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 1));
+    assert!(!merged[0].records.is_empty(), "必须实际提交区域合并");
+    assert!(!merged[0].variables.contains_key(&local));
 }

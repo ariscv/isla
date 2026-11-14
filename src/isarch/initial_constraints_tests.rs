@@ -283,14 +283,19 @@ stride = "16"
         .into_iter()
         .filter(|exp| {
             let mut has_vector = false;
+            let mut has_vstart = false;
             exp.map_var(&mut |loc| {
                 if loc.id() == zencode::encode("vtype") {
                     has_vector = true;
                 }
+                if loc.id() == zencode::encode("vstart") {
+                    has_vstart = true;
+                }
                 Ok::<_, String>(smtlib::Exp::<Sym>::Bool(true))
             })
             .unwrap();
-            has_vector == vector
+            // 历史规则没有 vstart 域；这里只证明原有域的等价，新增域由配置全值测试覆盖。
+            !has_vstart && has_vector == vector
         })
         .collect();
     regs.apply_constraints(&selected, &shared, &mut configured, SourceLoc::unknown()).unwrap();

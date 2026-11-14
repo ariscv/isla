@@ -17,6 +17,7 @@ pub struct Facts {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PathData<B> {
+    pub terminal: crate::executor::samples::Terminal,
     pub pre: BTreeMap<String, Val<B>>,
     pub post: BTreeMap<String, Val<B>>,
     pub result: Val<B>,
@@ -26,6 +27,7 @@ pub struct PathData<B> {
 impl<B: BV> From<crate::executor::samples::SamplePath<B>> for PathData<B> {
     fn from(value: crate::executor::samples::SamplePath<B>) -> Self {
         Self {
+            terminal: value.terminal,
             pre: value.pre.into_iter().map(|(n, v)| (n, v.into())).collect(),
             post: value.post.into_iter().map(|(n, v)| (n, v.into())).collect(),
             result: value.result.into(),
@@ -37,6 +39,7 @@ impl<B: BV> From<crate::executor::samples::SamplePath<B>> for PathData<B> {
 impl<B: BV> From<PathData<B>> for crate::executor::samples::SamplePath<B> {
     fn from(value: PathData<B>) -> Self {
         Self {
+            terminal: value.terminal,
             pre: value.pre.into_iter().map(|(n, v)| (n, v.into())).collect(),
             post: value.post.into_iter().map(|(n, v)| (n, v.into())).collect(),
             result: value.result.into(),
@@ -165,4 +168,5 @@ pub struct CachedPath<B> {
     pub path: PathData<B>,
     pub records: Vec<Record<B>>,
     pub facts: Facts,
+    pub pure_definitions: Vec<(u32, u32)>,
 }

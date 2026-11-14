@@ -8,7 +8,6 @@ pub mod fuzz;
 pub mod memory_builder;
 pub mod memory_model;
 pub mod path_cache;
-pub mod platform;
 mod representation;
 pub mod samples;
 mod solve_summary;
@@ -33,11 +32,7 @@ use std::sync::{Arc, Mutex};
 
 /// arbitrary 的 Poison 保留 Sail 异常值、源码调用位置及路径身份。
 fn poison_diagnostic<B: BV>(frame: &LocalFrame<B>, shared_state: &SharedState<B>) -> String {
-    let exception = shared_state
-        .symtab
-        .get("zcurrent_exception")
-        .and_then(|name| frame.regs().get_last_if_initialized(name))
-        .map(|value| value.to_str(shared_state));
+    let exception = frame.get_exception().map(|(value, location)| (value.to_str(shared_state), location));
     let sources: Vec<_> = frame
         .backtrace()
         .iter()
@@ -89,10 +84,28 @@ fn is_mapping_rejection<B: BV>(
     frame: &LocalFrame<B>,
     shared_state: &SharedState<B>,
 ) -> bool {
-    if !matches!(error, ExecError::MatchFailure(_))
-        || frame.function_name() != shared_state.symtab.lookup(function_name)
-    {
+    if !matches!(error, ExecError::MatchFailure(_)) {
         return false;
+    }
+    let root = shared_state.symtab.lookup(function_name);
+    if frame.function_name() != root {
+        // Sail为方向mapping生成同签名的_infallible配对；普通helper不得借此隐藏错误。
+        let generated_mapping = |name: Name| {
+            let text = shared_state.symtab.to_str(name);
+            if !text.ends_with("_forwards") && !text.ends_with("_backwards") {
+                return false;
+            }
+            let Some(companion) = shared_state.symtab.get(&format!("{text}_infallible")) else { return false };
+            let Some((args, result, _)) = shared_state.functions.get(&name) else { return false };
+            let Some((other_args, other_result, _)) = shared_state.functions.get(&companion) else { return false };
+            args.iter().map(|(_, ty)| ty).eq(other_args.iter().map(|(_, ty)| ty)) && result == other_result
+        };
+        let Some(root_index) = frame.backtrace().iter().rposition(|(name, _)| *name == root) else { return false };
+        if !generated_mapping(frame.function_name())
+            || frame.backtrace()[root_index + 1..].iter().any(|(name, _)| !generated_mapping(*name))
+        {
+            return false;
+        }
     }
     let (_, _, body) = shared_state.functions.get(&frame.function_name()).expect("mapping 函数必须存在");
     let exits: Vec<_> =
@@ -1138,6 +1151,21 @@ mod tests {
     use isla_lib::bitvector::b64::B64;
     use isla_lib::timeout::{SmtDumpNames, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
     use std::time::Duration;
+
+    #[test]
+    fn poison_diagnostic_reads_sail_exception_from_frame_lets() {
+        use isla_lib::executor::LocalFrame;
+        use isla_lib::ir::{Symtab, Ty, UVal, CURRENT_EXCEPTION, HAVE_EXCEPTION, THROW_LOCATION, TOP_LEVEL_LET};
+        let mut shared = SharedState::<B64>::empty(Symtab::new());
+        shared.functions.insert(TOP_LEVEL_LET, (vec![], &Ty::Unit, &[]));
+        let mut frame = LocalFrame::new(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
+        frame.lets_mut().insert(HAVE_EXCEPTION, UVal::Init(Val::Bool(true)));
+        frame.lets_mut().insert(CURRENT_EXCEPTION, UVal::Init(Val::String("reserved-state".into())));
+        frame.lets_mut().insert(THROW_LOCATION, UVal::Init(Val::String("generic.sail:42".into())));
+        let text = poison_diagnostic(&frame, &shared);
+        assert!(text.contains("reserved-state"), "{text}");
+        assert!(text.contains("generic.sail:42"), "{text}");
+    }
 
     struct NamesTimeoutDump;
 

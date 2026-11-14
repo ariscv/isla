@@ -168,6 +168,6 @@ impl<B: BV> SamplePath<B> {
         }
         let mut declarations=declared.into_iter().map(|s|json!({"symbol":format!("v{s}"),"type":type_json(&types[&s],shared),"input_reference":input_symbols.contains(&s),"meaning":"声明保持自由；约束见 definitions，活动读取由具体前态内存绑定"})).collect::<Vec<_>>();
         declarations.sort_by(|a, b| a["symbol"].as_str().cmp(&b["symbol"].as_str()));
-        json!({"schema_version":1,"path_signature":signature,"definitions":definitions,"guards":guards,"declarations":declarations,"state":{"pre":self.pre.iter().map(|(n,v)|(n,value(v,shared,&expression))).collect::<BTreeMap<_,_>>(),"post":self.post.iter().map(|(n,v)|(n,value(v,shared,&expression))).collect::<BTreeMap<_,_>>(),"result":value(&self.result,shared,&expression),"ret_val":self.result.to_string(shared),"memory":memory}})
+        json!({"schema_version":3,"terminal":self.terminal,"path_signature":signature,"definitions":definitions,"guards":guards,"declarations":declarations,"state":{"pre":self.pre.iter().map(|(n,v)|(n,value(v,shared,&expression))).collect::<BTreeMap<_,_>>(),"post":self.post.iter().map(|(n,v)|(n,value(v,shared,&expression))).collect::<BTreeMap<_,_>>(),"result":value(&self.result,shared,&expression),"ret_val":self.result.to_string(shared),"memory":memory}})
     }
 }

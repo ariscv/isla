@@ -262,6 +262,34 @@ impl<B: BV> LocalFrame<'_, B> {
         )
     }
 
+    /// 执行帧和缓存路径共用相同的枚举输入，禁止以临时帧代替历史信息。
+    pub fn enumerate_merges_output_with(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
+        consume: &SampleConsumer<'_, B>,
+        complete: Option<&ClassConsumer<'_>>,
+        retain_solutions: bool,
+    ) -> Result<Option<Value>, ExecError> {
+        MergeEnumeration {
+            records: &self.region_merge_records,
+            pure_definitions: &self.local_state.pure_definitions,
+            signature: self.path_signature(),
+        }
+        .enumerate_merges_output_with(solver, state, shared, result, consume, complete, retain_solutions)
+    }
+}
+
+/// 完成路径枚举所需的完整元数据；不依赖执行中的局部帧。
+pub struct MergeEnumeration<'a, B> {
+    pub records: &'a [RegionMergeRecord<B>],
+    pub pure_definitions: &'a [(u32, u32)],
+    pub signature: u64,
+}
+
+impl<B: BV> MergeEnumeration<'_, B> {
     /// 输出端收到同一个模型、被测片段与最终截断标志；显式外置解可避免在 gen JSON 中积攒全部组合。
     pub fn enumerate_merges_output_with(
         &self,
@@ -324,14 +352,14 @@ impl<B: BV> LocalFrame<'_, B> {
             "枚举上限和采样步长必须大于零"
         );
         assert_eq!(solver.transaction_depth(), 0, "仅在路径结束后枚举");
-        let records = &self.region_merge_records;
+        let records = self.records;
         let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
         assert_eq!(by_id.len(), records.len(), "帧内记录编号必须唯一");
         let mut contexts = HashMap::new();
         for record in records {
             context(record, &by_id, &mut HashSet::new(), &mut contexts);
         }
-        let events = super::definition_events(solver, &self.local_state.pure_definitions).0;
+        let events = super::definition_events(solver, self.pure_definitions).0;
         let definitions: HashMap<_, _> = events
             .iter()
             .filter_map(|event| match event {
@@ -383,7 +411,7 @@ impl<B: BV> LocalFrame<'_, B> {
             let path_started = std::time::Instant::now();
             eprintln!(
                 "[MERGE_PREDICT_START] {}",
-                json!({"path_signature":self.path_signature(),"probes":config.predict_probes,
+                json!({"path_signature":self.signature,"probes":config.predict_probes,
                 "guard_depth":order.len(),"bit_depth":bits.len()})
             );
             let guards: Vec<_> = order
@@ -420,7 +448,7 @@ impl<B: BV> LocalFrame<'_, B> {
                 assert_eq!(catalog["path_truncated"], false, "粘合诊断不得截断守卫类目录");
                 components::PredictionGraph::diagnose(
                     &directory,
-                    self.path_signature(),
+                    self.signature,
                     &events,
                     &guards,
                     &record_ids,
@@ -435,7 +463,7 @@ impl<B: BV> LocalFrame<'_, B> {
             drop(catalog);
             let catalog_seconds = path_started.elapsed().as_secs_f64();
             let mut prediction =
-                predict::run(self.path_signature(), &events, &guards, &record_ids, &bit_predicates, classes, config)?;
+                predict::run(self.signature, &events, &guards, &record_ids, &bit_predicates, classes, config)?;
             prediction["domain_and_probe_seconds"] = prediction["seconds"].clone();
             prediction["guard_catalog_seconds"] = json!(catalog_seconds);
             prediction["seconds"] = json!(path_started.elapsed().as_secs_f64());
@@ -471,7 +499,7 @@ impl<B: BV> LocalFrame<'_, B> {
                 eprintln!(
                     "[MERGE_ENUMERATION_MEASURE] {}",
                     json!({"phase":phase,
-                    "path_signature":self.path_signature(), "partition_id":partition.unwrap().id,
+                    "path_signature":self.signature, "partition_id":partition.unwrap().id,
                     "counted_classes":classes, "counted_paths":paths})
                 );
             }

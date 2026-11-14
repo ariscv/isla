@@ -259,7 +259,96 @@ pub fn build_ite<B: BV>(
     build_ite_with(b, lhs, rhs, solver, info, build_ite)
 }
 
-// 向量读写需要保留错误标签解包的路径；嵌套元素也沿用同一限制。
+// 只检查结构与已有 sort，不声明符号、不查询模型。先检查整组候选，
+// 避免更新到一半才发现共享标签的载荷不能用现有表示承载。
+pub(crate) fn vector_ite_compatible<B: BV>(values: &[&Val<B>], solver: &Solver<B>) -> bool {
+    fn scalar_sort<B: BV>(value: &Val<B>, solver: &Solver<B>) -> Option<smtlib::Ty> {
+        match value {
+            Val::Symbolic(sym) => solver.scalar_sort(*sym),
+            Val::Bool(_) => Some(smtlib::Ty::Bool),
+            Val::I64(_) => Some(smtlib::Ty::BitVec(64)),
+            Val::I128(_) => Some(smtlib::Ty::BitVec(128)),
+            Val::Bits(bits) if bits.len() > 0 => Some(smtlib::Ty::BitVec(bits.len())),
+            Val::Enum(member) => Some(smtlib::Ty::Enum(member.enum_id)),
+            Val::MixedBits(segments) => {
+                let width = segments.iter().try_fold(0u32, |width, segment| {
+                    let length = match segment {
+                        BitsSegment::Concrete(bits) => bits.len(),
+                        BitsSegment::Symbolic(sym) => match solver.scalar_sort(*sym) {
+                            Some(smtlib::Ty::BitVec(width)) => width,
+                            _ => return None,
+                        },
+                    };
+                    width.checked_add(length)
+                })?;
+                (width > 0).then_some(smtlib::Ty::BitVec(width))
+            }
+            _ => None,
+        }
+    }
+
+    let Some(first) = values.first() else { return true };
+    if values.iter().all(|value| *value == *first) {
+        return true;
+    }
+    match first {
+        Val::Struct(fields) => {
+            let Some(structs) = values
+                .iter()
+                .map(|value| match value {
+                    Val::Struct(other)
+                        if fields.len() == other.len() && fields.keys().all(|key| other.contains_key(key)) =>
+                    {
+                        Some(other)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return false;
+            };
+            fields.keys().all(|key| {
+                vector_ite_compatible(&structs.iter().map(|fields| &fields[key]).collect::<Vec<_>>(), solver)
+            })
+        }
+        Val::Vector(elements) => {
+            let Some(vectors) = values
+                .iter()
+                .map(|value| match value {
+                    Val::Vector(other) if elements.len() == other.len() => Some(other),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return false;
+            };
+            (0..elements.len()).all(|index| {
+                vector_ite_compatible(&vectors.iter().map(|elements| &elements[index]).collect::<Vec<_>>(), solver)
+            })
+        }
+        Val::Ctor(..) | Val::SymbolicCtor(..) => {
+            let mut payloads = std::collections::BTreeMap::<Name, Vec<&Val<B>>>::new();
+            for value in values {
+                match value {
+                    Val::Ctor(tag, payload) => payloads.entry(*tag).or_default().push(payload),
+                    Val::SymbolicCtor(tag, cases) if solver.scalar_sort(*tag) == Some(Name::smt_ty()) => {
+                        for (tag, payload) in cases {
+                            payloads.entry(*tag).or_default().push(payload);
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            // 不同标签的载荷独立保存；只有共享标签才需要同形状 ITE。
+            payloads.values().all(|values| vector_ite_compatible(values, solver))
+        }
+        _ => {
+            let sort = scalar_sort(first, solver);
+            sort.is_some() && values.iter().all(|value| scalar_sort(value, solver) == sort)
+        }
+    }
+}
+
 pub(crate) fn build_vector_ite<B: BV>(
     b: Sym,
     lhs: &Val<B>,
@@ -267,14 +356,29 @@ pub(crate) fn build_vector_ite<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    match (lhs, rhs) {
-        (Val::Ctor(l_id, _), Val::Ctor(r_id, _)) if l_id != r_id => Err(ExecError::IncompatibleMerge),
-        (Val::SymbolicCtor(..), _) | (_, Val::SymbolicCtor(..)) => Err(ExecError::IncompatibleMerge),
-        _ => build_ite_with(b, lhs, rhs, solver, info, build_vector_ite),
+    if !vector_ite_compatible(&[lhs, rhs], solver) {
+        return Err(ExecError::IncompatibleMerge);
     }
+    // 标签仍走既有 Kind / Unwrap 检查；不在此处假定任何标签已匹配。
+    build_ite_with(b, lhs, rhs, solver, info, build_ite)
 }
 
 fn build_ite_with<B: BV>(
+    b: Sym,
+    lhs: &Val<B>,
+    rhs: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut Solver<B>, SourceLoc) -> Result<Val<B>, ExecError>,
+) -> Result<Val<B>, ExecError> {
+    let result = build_ite_with_inner(b, lhs, rhs, solver, info, merge_payload);
+    if let Err(error) = &result {
+        crate::executor::stats::merge_diagnostics::failed(lhs, rhs, solver, error);
+    }
+    result
+}
+
+fn build_ite_with_inner<B: BV>(
     b: Sym,
     lhs: &Val<B>,
     rhs: &Val<B>,
@@ -293,7 +397,13 @@ fn build_ite_with<B: BV>(
         (Val::Vector(lhs), Val::Vector(rhs)) if lhs.len() == rhs.len() => lhs
             .iter()
             .zip(rhs)
-            .map(|(l, r)| merge_payload(b, l, r, solver, info))
+            .enumerate()
+            .map(|(index, (l, r))| {
+                crate::executor::stats::merge_diagnostics::with_path(
+                    crate::executor::stats::merge_diagnostics::PathPart::Index(index),
+                    || merge_payload(b, l, r, solver, info),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(Val::Vector),
         (Val::Vector(_), Val::Vector(_))
@@ -307,7 +417,13 @@ fn build_ite_with<B: BV>(
                 .into_iter()
                 .map(|(k, l_val)| match r_fields.get(k) {
                     None => Err(ExecError::Type(format!("build_ite {:?}", &k), info)),
-                    Some(r_val) => Ok((*k, merge_payload(b, l_val, r_val, solver, info)?)),
+                    Some(r_val) => Ok((
+                        *k,
+                        crate::executor::stats::merge_diagnostics::with_path(
+                            crate::executor::stats::merge_diagnostics::PathPart::Field(*k),
+                            || merge_payload(b, l_val, r_val, solver, info),
+                        )?,
+                    )),
                 })
                 .collect();
             Ok(Val::Struct(fields?))
@@ -315,7 +431,13 @@ fn build_ite_with<B: BV>(
 
         (Val::Ctor(l_id, lhs), Val::Ctor(r_id, rhs)) => {
             if l_id == r_id {
-                Ok(Val::Ctor(*l_id, Box::new(merge_payload(b, lhs, rhs, solver, info)?)))
+                Ok(Val::Ctor(
+                    *l_id,
+                    Box::new(crate::executor::stats::merge_diagnostics::with_path(
+                        crate::executor::stats::merge_diagnostics::PathPart::Ctor(*l_id),
+                        || merge_payload(b, lhs, rhs, solver, info),
+                    )?),
+                ))
             } else {
                 use smtlib::Exp::*;
                 let sym_id =
@@ -335,7 +457,12 @@ fn build_ite_with<B: BV>(
 
             let mut possibilities = rhs.clone();
             match possibilities.entry(*l_id) {
-                Entry::Occupied(o) => *o.into_mut() = merge_payload(b, lhs, o.get(), solver, info)?,
+                Entry::Occupied(o) => {
+                    *o.into_mut() = crate::executor::stats::merge_diagnostics::with_path(
+                        crate::executor::stats::merge_diagnostics::PathPart::Ctor(*l_id),
+                        || merge_payload(b, lhs, o.get(), solver, info),
+                    )?
+                }
                 Entry::Vacant(v) => {
                     v.insert(lhs.as_ref().clone());
                 }
@@ -347,7 +474,9 @@ fn build_ite_with<B: BV>(
         (Val::SymbolicCtor(_, _), Val::Ctor(_, _)) => {
             use smtlib::Exp::*;
             let not_b = solver.define_const(Not(Box::new(Var(b))), info);
-            build_ite_with(not_b, rhs, lhs, solver, info, merge_payload)
+            crate::executor::stats::merge_diagnostics::with_swapped(|| {
+                build_ite_with(not_b, rhs, lhs, solver, info, merge_payload)
+            })
         }
 
         (Val::SymbolicCtor(l_id, lhs), Val::SymbolicCtor(r_id, rhs)) => {
@@ -357,7 +486,12 @@ fn build_ite_with<B: BV>(
             let mut possibilities = lhs.clone();
             for (ctor, rhs_val) in rhs.iter().collect::<std::collections::BTreeMap<_, _>>() {
                 match possibilities.entry(*ctor) {
-                    Entry::Occupied(o) => *o.into_mut() = merge_payload(b, o.get(), rhs_val, solver, info)?,
+                    Entry::Occupied(o) => {
+                        *o.into_mut() = crate::executor::stats::merge_diagnostics::with_path(
+                            crate::executor::stats::merge_diagnostics::PathPart::Ctor(*ctor),
+                            || merge_payload(b, o.get(), rhs_val, solver, info),
+                        )?
+                    }
                     Entry::Vacant(v) => {
                         v.insert(rhs_val.clone());
                     }
@@ -419,6 +553,24 @@ mod build_ite_tests {
                 build_ite(condition, &value, &values[2], &mut solver, info),
                 Err(ExecError::IncompatibleMerge)
             ));
+        }
+    }
+
+    #[test]
+    fn vector_merge_keeps_element_compatibility() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let condition = solver.declare_const(smtlib::Ty::Bool, info);
+        for (left, right) in [
+            (Val::Vector(vec![]), Val::Vector(vec![Val::Bool(false)])),
+            (Val::Vector(vec![Val::I128(0)]), Val::Vector(vec![Val::I128(1)])),
+            (Val::Vector(vec![Val::Bits(B64::new(0, 8))]), Val::Vector(vec![Val::Bits(B64::new(0, 16))])),
+            (Val::Vector(vec![Val::Unit]), Val::Vector(vec![Val::Bool(false)])),
+            (Val::Vector(vec![Val::Vector(vec![Val::I64(0)])]), Val::Vector(vec![Val::Vector(vec![Val::I64(1)])])),
+        ] {
+            assert!(merge_val(condition, &left, &right, &mut solver, info).is_err(), "不得把不兼容向量元素强行符号化");
         }
     }
 
@@ -664,6 +816,20 @@ pub fn merge_val<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    let result = merge_val_inner(cond, val_a, val_b, solver, info);
+    if let Err(error) = &result {
+        crate::executor::stats::merge_diagnostics::failed(val_a, val_b, solver, error);
+    }
+    result
+}
+
+fn merge_val_inner<B: BV>(
+    cond: Sym,
+    val_a: &Val<B>,
+    val_b: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     if merge_bit_width(val_a, solver, info)? != merge_bit_width(val_b, solver, info)? {
         return Err(ExecError::IncompatibleMerge);
     }
@@ -688,7 +854,13 @@ pub fn merge_val<B: BV>(
                 .collect::<std::collections::BTreeMap<_, _>>()
                 .into_iter()
                 .map(|(field, a_val)| match b_fields.get(field) {
-                    Some(b_val) => Ok((*field, merge_val(cond, a_val, b_val, solver, info)?)),
+                    Some(b_val) => Ok((
+                        *field,
+                        crate::executor::stats::merge_diagnostics::with_path(
+                            crate::executor::stats::merge_diagnostics::PathPart::Field(*field),
+                            || merge_val(cond, a_val, b_val, solver, info),
+                        )?,
+                    )),
                     None => Err(ExecError::Type(format!("merge_val missing struct field {:?}", field), info)),
                 })
                 .collect();
@@ -706,6 +878,9 @@ pub fn merge_val<B: BV>(
                 _ => ExecError::IncompatibleUnionPayload,
             })
         }
+
+        // 向量长度保持具体，元素递归沿用路径合流的严格类型与整数限制。
+        (Val::Vector(_), Val::Vector(_)) => build_ite_with(cond, val_a, val_b, solver, info, merge_val),
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
 

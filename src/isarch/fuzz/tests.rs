@@ -189,7 +189,7 @@ fn p1b_path_aliases_start_at_one() {
     let options = Options {
         mode: Mode::ReplayLog,
         scenario: "场景".into(),
-        corpus: "unused".into(),
+        corpus: Some("unused".into()),
         inputs: None,
         mutations: None,
         output: output.clone(),
@@ -218,13 +218,14 @@ fn reconfirm_rejects_changed_path_state_and_rank() {
     std::fs::create_dir_all(&output).unwrap();
     let row = json!({"path_signature":123,"guard_vector":"0","guard_unique":true,"post_unique":true,"sample":sample});
     super::corpus::Directory::reconfirm("场景", &[sample.clone()], &[Some(row.clone())], &output);
-    for field in ["path_signature", "result", "class_id"] {
+    for field in ["path_signature", "result", "class_id", "terminal"] {
         let mut changed = row.clone();
         let mut parent = sample.clone();
         match field {
             "path_signature" => changed["path_signature"] = json!(124),
             "result" => changed["sample"]["result"] = json!({"bool":false}),
             "class_id" => parent.class_id = Some(1),
+            "terminal" => changed["sample"]["terminal"] = json!({"SailException":{"throw_location":"fixture:42"}}),
             _ => unreachable!(),
         }
         assert!(std::panic::catch_unwind(|| super::corpus::Directory::reconfirm(
@@ -273,7 +274,7 @@ fn mutation_metadata_identifies_current_corpus_entry() {
     let options = Options {
         mode: Mode::ReplayLog,
         scenario: "场景".into(),
-        corpus: "unused".into(),
+        corpus: Some("unused".into()),
         inputs: None,
         mutations: None,
         output: output.clone(),
@@ -315,7 +316,7 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
     let options = Options {
         mode: Mode::JudgeOnly,
         scenario: "场景".into(),
-        corpus: "unused".into(),
+        corpus: Some("unused".into()),
         inputs: None,
         mutations: None,
         output: output.clone(),

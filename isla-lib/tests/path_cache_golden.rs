@@ -84,6 +84,7 @@ fn fixture() -> (SharedState<'static, B64>, Vec<Path>) {
     branch.assert(Exp::Var(condition));
     let branch = checkpoint(&mut branch); // 段 2：父段 0，仅 Assert(v3)。
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([
             ("bits".into(), Val::Bits(B64::new(7, 8))),
             ("bool".into(), Val::Bool(true)),
@@ -137,6 +138,7 @@ fn fixture() -> (SharedState<'static, B64>, Vec<Path>) {
         })
         .collect();
     let small = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("input".into(), Val::Symbolic(input))]),
         post: BTreeMap::new(),
         result: Val::Bool(false),
@@ -169,6 +171,7 @@ fn capture(paths: &[Path]) -> (Vec<Segment<B64>>, Vec<CachedPath<B64>>) {
     let paths = paths
         .iter()
         .map(|p| CachedPath {
+            pure_definitions: vec![],
             signature: p.signature,
             checkpoint: writer.capture(&p.checkpoint),
             path: p.path.clone().into(),

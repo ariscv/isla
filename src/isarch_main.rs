@@ -429,6 +429,7 @@ fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     isarch::path_cache::Options::add_cli(&mut opts);
+    opts.optopt("", "merge-diagnostics", "合并拒绝诊断，默认 off", "off|summary|detail");
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
     opts.optopt("", "timeout", "超时时间，默认秒；支持 s/m/h 后缀", "<n[s|m|h]>");
@@ -504,6 +505,12 @@ fn isla_main() -> i32 {
     }
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
+    if let Err(error) = isla_lib::executor::stats::merge_diagnostics::configure(
+        matches.opt_str("merge-diagnostics").as_deref().unwrap_or("off"),
+    ) {
+        eprintln!("{error}");
+        return 1;
+    }
     let trace_options = match parse_trace_options(&matches) {
         Ok(options) => options,
         Err(error) => {
@@ -584,8 +591,6 @@ fn isla_main() -> i32 {
 
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
-
-    isarch::platform::configure(&mut arch, &symtab, &mut isa_config);
 
     if matches!(subcommand, Subcommand::SolveState { .. } | Subcommand::Fuzz { .. }) {
         // solve-state 必须同时保留符号 assert 的 true/false 两臂。

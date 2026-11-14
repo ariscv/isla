@@ -121,9 +121,11 @@ fn 完整路径与非连续记录编号往返并重新导出() {
     use isla_lib::executor::path_cache::{CachedPath, Facts, PathData, Record};
     use std::collections::BTreeMap;
     let cached = CachedPath::<B64> {
+        pure_definitions: vec![],
         signature: 999,
         checkpoint: CheckpointData { num: 0, next_var: 1, leaf: None },
         path: PathData {
+            terminal: Default::default(),
             pre: BTreeMap::new(),
             post: BTreeMap::new(),
             result: Val::MixedBits(vec![]),
@@ -183,9 +185,11 @@ fn 定义中的悬空引用必须拒绝() {
         )],
     }];
     let paths = vec![CachedPath {
+        pure_definitions: vec![],
         signature: 1,
         checkpoint: CheckpointData { num: 1, next_var: 9, leaf: Some(0) },
         path: PathData {
+            terminal: Default::default(),
             pre: Default::default(),
             post: Default::default(),
             result: Val::Unit,

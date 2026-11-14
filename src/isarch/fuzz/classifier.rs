@@ -70,12 +70,61 @@ pub fn run<B: BV>(
     threads: usize,
     exploration_seconds: f64,
     mut cache: crate::isarch::path_cache::Run<B>,
+    execution_limits: &isla_lib::executor::ExecutionLimits,
 ) {
     assert!(!paths.is_empty(), "fuzz 没有完成路径");
     assert!(threads > 0);
     paths.sort_by_key(|p| p.signature);
     let options = &session.options;
     let output = &options.output;
+    let generated;
+    let corpus = if options.corpus.is_some() {
+        &session.corpus
+    } else {
+        assert!(cache.loaded.is_some(), "初始 corpus 只从缓存生成");
+        let started = Instant::now();
+        let path = output.join("initial-corpus.jsonl");
+        let writer =
+            isla_lib::executor::samples::outputs::SampleOutputs::open(&[isla_lib::config::SampleOutputConfig {
+                format: isla_lib::config::SampleOutputFormat::V1Jsonl,
+                path: path.clone(),
+            }]);
+        let mut limits = execution_limits.clone();
+        limits.merge_enumeration.enabled = true;
+        limits.merge_enumeration.mode = isla_lib::config::MergeEnumerationMode::Samples;
+        limits.merge_enumeration.class_cap = 1;
+        limits.merge_enumeration.sample_stride = 1;
+        limits.merge_enumeration.enumeration_threads = limits.merge_enumeration.enumeration_threads.min(threads);
+        limits.merge_enumeration.max_output_bytes = None;
+        let context = Context::new(Config::new());
+        let mut enumerations = Vec::new();
+        for resident in &paths {
+            let mut solver = Solver::from_checkpoint(&context, resident.checkpoint.clone());
+            let enumeration = crate::isarch::samples::export_cached_path(
+                resident,
+                &mut solver,
+                shared,
+                target,
+                &limits,
+                Some(&writer),
+                None,
+            )
+            .expect("缓存初始 corpus 枚举失败")
+            .expect("初始 corpus 必须开启枚举");
+            enumerations.push(json!({"path_signature":resident.signature,"enumeration":enumeration}));
+        }
+        writer.finish();
+        generated =
+            isla_lib::executor::samples::SampleChecker::load(&path, None).expect("读取生成的初始 corpus 失败").samples;
+        assert!(!generated.is_empty(), "缓存未生成任何 corpus entry");
+        write_json(&output.join("initial-corpus-enumeration.json"), &enumerations);
+        cache.stages.record(
+            "initial_corpus_enumeration",
+            started.elapsed().as_secs_f64(),
+            json!({"entries":generated.len(),"class_cap":1,"sample_stride":1}),
+        );
+        &generated
+    };
     let index_start = Instant::now();
     let mut cache_timing = cache.loaded.as_mut().map(|loaded| std::mem::take(&mut loaded.timing)).unwrap_or_default();
     cache_timing.paths = paths.len();
@@ -95,13 +144,19 @@ pub fn run<B: BV>(
         );
         if cache.options.recompute_facts {
             let recomputed = crate::isarch::path_cache::analyze(&paths, &mut cache_timing);
-            assert_eq!(
-                loaded.facts,
-                recomputed.iter().cloned().map(Into::into).collect::<Vec<isla_lib::executor::path_cache::Facts>>(),
-                "缓存静态事实重新分析不一致"
-            );
+            let verified =
+                recomputed.iter().cloned().map(Into::into).collect::<Vec<isla_lib::executor::path_cache::Facts>>();
+            // false 表示未证明，允许读回后取得更强证明；缓存声称已证明的条件仍须逐项核对。
+            assert_eq!(loaded.facts.len(), verified.len(), "缓存静态事实条目数变化");
+            for (saved, current) in loaded.facts.iter().zip(&verified) {
+                assert!(!saved.guard_unique || current.guard_unique, "缓存守卫唯一性证明重新分析不一致");
+                assert!(!saved.post_unique || current.post_unique, "缓存后态唯一性证明重新分析不一致");
+                assert!(!saved.simple_pre || current.simple_pre, "缓存前态形状证明重新分析不一致");
+            }
+            recomputed
+        } else {
+            loaded.facts.iter().cloned().map(Into::into).collect::<Vec<FastFacts>>()
         }
-        loaded.facts.iter().cloned().map(Into::into).collect::<Vec<FastFacts>>()
     } else {
         crate::isarch::path_cache::analyze(&paths, &mut cache_timing)
     };
@@ -187,9 +242,9 @@ pub fn run<B: BV>(
         cache.stages.record("checkpoint_restore", restore_seconds, json!({"threads":threads,"paths":paths.len()}));
         let mut executor = ModelExecutor { input: input_tx, output: output_rx, pending: 0 };
         let started = Instant::now();
-        let mut corpus_rows = classify(&mut executor, &session.corpus, true, options.batch_size);
+        let mut corpus_rows = classify(&mut executor, corpus, true, options.batch_size);
         let reconfirm_seconds = started.elapsed().as_secs_f64();
-        let directory = Directory::reconfirm(&options.scenario, &session.corpus, &corpus_rows, output);
+        let directory = Directory::reconfirm(&options.scenario, corpus, &corpus_rows, output);
         for row in corpus_rows.iter_mut().flatten() {
             let identity = directory.identity(&options.scenario, row);
             row["sample"]["class_id"] = json!(directory.classes[&identity].0);
@@ -201,7 +256,7 @@ pub fn run<B: BV>(
         cache.stages.record(
             "corpus_certification",
             started.elapsed().as_secs_f64(),
-            json!({"entries":session.corpus.len(),"certified":true}),
+            json!({"entries":corpus.len(),"certified":true}),
         );
         let mut feedback = LogFeedback::default();
         cache_timing.to_campaign_seconds = cache.started.elapsed().as_secs_f64();
@@ -212,7 +267,7 @@ pub fn run<B: BV>(
         let (samples, records, mut judged, campaign_timing) = if matches!(options.mode, Mode::Campaign) {
             super::campaign::run(
                 options,
-                &session.corpus,
+                corpus,
                 &directory,
                 &paths,
                 shared,
@@ -222,7 +277,7 @@ pub fn run<B: BV>(
                 threads,
             )
         } else {
-            let (samples, records, audit) = super::replay::prepare(options, &session.corpus);
+            let (samples, records, audit) = super::replay::prepare(options, corpus);
             write_json(&output.join("input-audit.json"), &audit);
             let judged = classify(&mut executor, &samples, options.certify_all, options.batch_size);
             (samples, records, judged, Value::Null)
@@ -247,11 +302,11 @@ pub fn run<B: BV>(
         cache.stages.record(
             "campaign_end",
             started.elapsed().as_secs_f64(),
-            json!({"mutants":samples.len(),"corpus":session.corpus.len()}),
+            json!({"mutants":samples.len(),"corpus":corpus.len()}),
         );
         eprintln!(
             "[FUZZ_COMPLETE] {}",
-            json!({"corpus":session.corpus.len(),"mutants":samples.len(),"judge_seconds":judge_seconds})
+            json!({"corpus":corpus.len(),"mutants":samples.len(),"judge_seconds":judge_seconds})
         );
     });
 }

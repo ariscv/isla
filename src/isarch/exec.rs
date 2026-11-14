@@ -1378,18 +1378,19 @@ pub fn solve_state_main<'ir, B: BV>(
     }
 
     shared_state.execution_stats.reset();
-    if shared_state.execution_stats.enabled() {
-        // 限时场景下进程可能被外层强杀，收尾打印不会执行；ISLA_STATS=1 时周期性输出快照。
-        let stats = shared_state.execution_stats.clone();
-        stats.prepare_snapshot(&shared_state.symtab);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(15));
-            let (merge, forks, arms) = stats.snapshot_json();
-            eprintln!("[MERGE_STATS_SNAPSHOT] {}", merge);
-            eprintln!("[FORK_STATS_SNAPSHOT] {}", forks);
-            eprintln!("[ARM_UNSUPPORTED_SNAPSHOT] {}", arms);
-        });
-    }
+    let stats_reporter =
+        if shared_state.execution_stats.enabled() || isla_lib::executor::stats::merge_diagnostics::enabled() {
+            let stats = shared_state.execution_stats.clone();
+            if stats.enabled() {
+                stats.prepare_snapshot(&shared_state.symtab);
+            }
+            Some(isla_lib::executor::stats::merge_diagnostics::SnapshotReporter::start(
+                stats,
+                std::time::Duration::from_secs(15),
+            ))
+        } else {
+            None
+        };
     let num_clauses = clause_set.len();
     assert!(!samples.path_cache.enabled() || num_clauses == 1, "缓存一次只能保存或恢复一个 clause");
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
@@ -1628,6 +1629,7 @@ pub fn solve_state_main<'ir, B: BV>(
         }
     }
 
+    drop(stats_reporter);
     super::solve_summary::print_execution_stats(shared_state);
     samples.finish(sample_options, success && sample_paths_complete);
     success
@@ -1711,15 +1713,23 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         let paths = std::mem::take(&mut loaded.paths);
         cache.summary = serde_json::to_value(&loaded.manifest.errors).unwrap();
         cache.loaded = Some(loaded);
-        super::fuzz::run(
-            samples.fuzz.as_ref().expect("缓存读入需要 fuzz 会话"),
-            paths,
-            shared_state,
-            target,
-            num_threads,
-            0.0,
-            cache,
-        );
+        if let Some(session) = &samples.fuzz {
+            super::fuzz::run(session, paths, shared_state, target, num_threads, 0.0, cache, execution_limits);
+        } else {
+            let context = Context::new(Config::new());
+            for path in paths {
+                let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
+                super::samples::export_cached_path(
+                    &path,
+                    &mut solver,
+                    shared_state,
+                    target,
+                    execution_limits,
+                    samples.writer.as_ref(),
+                    samples.checker.as_ref(),
+                )?;
+            }
+        }
         return Ok(BatchOutcome {
             items: Vec::new(),
             summary,
@@ -1865,18 +1875,62 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         Arc::new(Mutex::new(SolveCollectorState::with_case_quota(case_quota)));
     result.lock().unwrap().summary.applicable_batches = 1;
 
-    let task_state = TaskState::new().with_execution_limits(execution_limits.clone());
+    let mut path_limits = execution_limits.clone();
+    path_limits.collect_merge_definitions |= samples.path_cache.write.is_some();
+    let task_state = TaskState::new().with_execution_limits(path_limits);
 
     // ExecuteAs 是同一机器指令的中间返回。new_call 保留该路径的寄存器、内存、
     // 路径身份、累计执行时间及分支预算；checkpoint 保留前段约束。
+    let profile_paths = std::env::var("ISLA_PROFILE_PATHS").as_deref() == Ok("1");
     let resident_paths = Mutex::new(Vec::new());
     let continuations = Arc::new(Mutex::new(Vec::new()));
     let queued_continuations = continuations.clone();
     let target = &*target;
     let collector: &ScopedCollector<'ir, '_, B, Mutex<SolveCollectorState>> =
-        &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+        &|thread, task_id, mut exec_result, shared_state, mut solver, collected| {
+            let path_profile = profile_paths.then(|| {
+                let frame = match &exec_result {
+                    Ok((_, frame)) | Err((_, frame)) => frame,
+                };
+                let timing = frame.path_time_snapshot();
+                let smt = isla_lib::smt::path_smt_stats();
+                let mut sites = smt.hottest_sites(usize::MAX);
+                sites.sort_by(|a, b| b.wall.cmp(&a.wall));
+                // 路径累计包含共享前缀，不可跨路径相加当作整项墙钟。
+                eprintln!(
+                    "[PATH_COST] {}",
+                    serde_json::json!({
+                        "signature":frame.path_signature(), "scope":"logical-path-with-shared-prefix",
+                        "active_seconds":timing.active_wall.as_secs_f64(),
+                        "executor_cpu_seconds":timing.executor_cpu.as_secs_f64(),
+                        "smt_seconds":smt.wall.as_secs_f64(), "smt_calls":smt.calls,
+                        "smt_timeouts":smt.timeouts,
+                        "top_sites":sites.iter().take(12).map(|site| serde_json::json!({
+                            "location":site.source_loc.location_string(shared_state.symtab.files()),
+                            "calls":site.calls, "seconds":site.wall.as_secs_f64(),
+                        })).collect::<Vec<_>>(),
+                    })
+                );
+                (std::time::Instant::now(), smt.wall)
+            });
+            // 仅将带有明确 Sail 异常状态的完成终态独立保存；未知 Poison 与执行错误仍失败。
+            // 用异常值替换无意义返回槽，终态类型与抛出位置由 samples::path 单独记录。
+            let sail_exception = if samples.enabled() {
+                if let Ok((Run::Finished(result), frame)) = &mut exec_result {
+                    if let Some((exception, _)) = frame.get_exception() {
+                        *result = exception.clone();
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             if let Ok((Run::Finished(Val::Ctor(ctor, payload)), frame)) = &exec_result {
-                if zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "ExecuteAs" {
+                if !sail_exception && zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "ExecuteAs" {
                     assert!(matches!(payload.as_ref(), Val::Ctor(_, _)), "ExecuteAs 载荷必须是指令构造子");
                     let function = shared_state.symtab.lookup("zexecute");
                     let (args, ret_ty, instrs) = shared_state.functions.get(&function).unwrap();
@@ -1956,6 +2010,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     result => panic!("样本终态查询失败：{result:?}"),
                                 }
                             }
+                            collected.lock().unwrap().summary.model_exception_paths += usize::from(sail_exception);
                             let sample_path = super::samples::path(
                                 target,
                                 &symbolic_regs,
@@ -1963,7 +2018,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 shared_state,
                                 &fun_args[0],
                                 ret_val,
-                                memory_events_chronological(solver.trace()).into_iter().cloned().collect(),
+                                solver.trace(),
                             );
                             if samples.resident.is_some()
                                 || samples.fuzz.is_some()
@@ -1974,7 +2029,29 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     path: sample_path.clone(),
                                     records: frame.region_merge_records().to_vec(),
                                     signature: frame.path_signature(),
+                                    pure_definitions: frame.pure_definitions().to_vec(),
                                 });
+                            }
+                            if samples.path_cache.dag_only {
+                                // 不生成代表值，也不枚举守卫组合；恢复入口保留原公式及全部守卫。
+                                // 终态 SAT 已在上方验证，错误路径仍由原 ErrorRecorder 计入摘要。
+                                eprintln!(
+                                    "[PATH_CACHE_TERMINAL] paths={} terminal={}",
+                                    resident_paths.lock().unwrap().len(),
+                                    if sail_exception { "sail_exception" } else { "normal" }
+                                );
+                                if let Some((started, smt_before)) = path_profile {
+                                    eprintln!(
+                                        "[PATH_COLLECTOR_COST] {}",
+                                        serde_json::json!({
+                                            "signature":frame.path_signature(),
+                                            "seconds":started.elapsed().as_secs_f64(),
+                                            "smt_seconds":isla_lib::smt::path_smt_stats().wall.saturating_sub(smt_before).as_secs_f64(),
+                                        })
+                                    );
+                                }
+                                submit_trace(frame, &mut trace_diagnostics);
+                                return;
                             }
                             if let Some(checker) = &samples.checker {
                                 checker
@@ -2079,6 +2156,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 .enumerate_merges(&mut solver, &task_state, shared_state, ret_val)
                                 .expect("完成路径的合并枚举失败")
                         };
+                        if sail_exception {
+                            // 异常只走带类型的样本／缓存通道，不生成正常指令的旧 JSON 后态。
+                            submit_trace(frame, &mut trace_diagnostics);
+                            return;
+                        }
                         let ret_val_str = ret_val.to_str(shared_state).to_string();
                         log!(
                             log::PATH_RESULT,
@@ -2708,10 +2790,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         initial_frame.set_memory(memory);
     }
     let exploration_started = std::time::Instant::now();
+    let roots = entry_encodings.len();
     let mut tasks = entry_encodings
         .into_iter()
-        .map(|(_, encoding_checkpoint)| {
-            initial_frame.task_with_checkpoint(TaskId::fresh(), &task_state, encoding_checkpoint)
+        .enumerate()
+        .map(|(index, (_, encoding_checkpoint))| {
+            initial_frame.clone().with_path_root(index, roots).task_with_checkpoint(
+                TaskId::fresh(),
+                &task_state,
+                encoding_checkpoint,
+            )
         })
         .collect();
     loop {
@@ -2791,13 +2879,26 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             num_threads,
             exploration_seconds,
             cache,
+            execution_limits,
         );
     } else if samples.path_cache.write.is_some() {
         let mut paths = resident_paths.into_inner().unwrap();
         paths.sort_by_key(|p| p.signature);
         let mut timing = super::path_cache::Timing::default();
         let facts_started = std::time::Instant::now();
-        let facts = super::path_cache::analyze(&paths, &mut timing);
+        let facts = if samples.path_cache.dag_only {
+            // 三个 false 都只表示没有充分证明，恢复后的完整 judge 仍走原求解。
+            // 这避免 DAG 写出之前为可选快档重放每条路径，不改变可接受输入集合。
+            paths
+                .iter()
+                .map(|_| {
+                    isla_lib::executor::path_cache::Facts { guard_unique: false, post_unique: false, simple_pre: false }
+                        .into()
+                })
+                .collect()
+        } else {
+            super::path_cache::analyze(&paths, &mut timing)
+        };
         cache.stages.record("fast_facts", facts_started.elapsed().as_secs_f64(), serde_json::json!({"z3_replay_seconds":timing.facts_replay_seconds,"analysis_seconds":timing.facts_seconds}));
         super::path_cache::save(
             &samples.path_cache,
@@ -2843,6 +2944,312 @@ mod tests {
     use isla_lib::source_loc::SourceRegionSpec;
     use isla_lib::timeout::{SmtDumpNames, SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
     use std::time::Duration;
+
+    #[test]
+    fn cache_fuzz_restore_enumerates_same_classes_and_judges_without_execute_ir() {
+        cache_fuzz_restore_fixture(false, false);
+    }
+
+    #[test]
+    fn sail_exception_corpus_restores_enumerates_and_certifies() {
+        cache_fuzz_restore_fixture(true, false);
+    }
+
+    #[test]
+    fn ladder_store_cache_restores_write_and_certifies_corpus() {
+        cache_fuzz_restore_fixture(false, true);
+    }
+
+    #[test]
+    fn ladder_store_exception_cache_preserves_prior_write_and_certifies_corpus() {
+        cache_fuzz_restore_fixture(true, true);
+    }
+
+    fn cache_fuzz_restore_fixture(sail_exception: bool, store: bool) {
+        use crate::isarch::timeout_report::{TimeoutReportConfig, TimeoutSmtOutput};
+        use crate::isarch::{
+            fuzz, path_cache,
+            resident::ResidentPath,
+            samples::{SampleOptions, SampleSession},
+            target::RV64,
+        };
+        use isla_lib::config::{SampleOutputConfig, SampleOutputFormat};
+        use isla_lib::executor::{
+            samples::{SampleChecker, SamplePath},
+            RegionMergeRecord,
+        };
+        use isla_lib::ir::regions::RegionPoint;
+        use isla_lib::smt::{
+            checkpoint,
+            smtlib::{Exp, Ty as SmtTy},
+        };
+        use std::collections::{BTreeMap, HashSet};
+        use std::time::Instant;
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("output/cache-fuzz-{}-{sail_exception}-{store}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let clause = if store { "STORE" } else { "generic" };
+        let shared = SharedState::<B64>::empty(Symtab::new());
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let loc = SourceLoc::unknown();
+        let input = solver.declare_const(SmtTy::BitVec(2), loc);
+        let start = solver.fresh();
+        let derived = solver.declare_const(SmtTy::BitVec(2), loc);
+        solver.assert(Exp::Eq(Box::new(Exp::Var(derived)), Box::new(Exp::Var(input))));
+        let end = solver.fresh();
+        let guard = solver.define_const(
+            Exp::Eq(Box::new(Exp::Extract(0, 0, Box::new(Exp::Var(derived)))), Box::new(smtlib::bits64(1, 1))),
+            loc,
+        );
+        let records = vec![RegionMergeRecord {
+            record_id: 7,
+            parent_record: None,
+            arm: "root",
+            function: TOP_LEVEL_LET,
+            branch_pc: 0,
+            join: RegionPoint::FunctionExit,
+            condition: guard,
+            source_loc: loc,
+            depth: 0,
+            dead: false,
+            value_symbols: HashSet::new(),
+            input_symbols: HashSet::new(),
+            single_arm_reads: vec![],
+            memory_reads: vec![],
+        }];
+        let ranges = vec![(start.as_u32(), end.as_u32())];
+        let memory = if store {
+            // 写数据依赖自由输入；异常终态也必须保留抛出前已发生的写入。
+            let written = solver.declare_const(SmtTy::Bool, loc);
+            solver.assert(Exp::Var(written));
+            let data = solver.define_const(Exp::ZeroExtend(6, Box::new(Exp::Var(input))), loc);
+            vec![
+                isla_lib::smt::Event::ReadMem {
+                    value: Val::Bits(B64::new(0, 8)),
+                    read_kind: Val::Unit,
+                    address: Val::Bits(B64::new(0x80000000, 64)),
+                    bytes: 1,
+                    tag_value: None,
+                    opts: Default::default(),
+                    region: "store-fixture",
+                },
+                isla_lib::smt::Event::WriteMem {
+                    value: written,
+                    write_kind: Val::Unit,
+                    address: Val::Bits(B64::new(0x80000000, 64)),
+                    data: Val::Symbolic(data),
+                    bytes: 1,
+                    tag_value: None,
+                    opts: Default::default(),
+                    region: "store-fixture",
+                },
+            ]
+        } else {
+            vec![]
+        };
+        let path = SamplePath {
+            terminal: Default::default(),
+            pre: BTreeMap::from([("input".into(), Val::Symbolic(input))]),
+            post: BTreeMap::new(),
+            result: Val::Symbolic(guard),
+            memory,
+            memory_guards: BTreeMap::new(),
+        };
+        let path = if sail_exception {
+            let mut encoded = serde_json::to_value(isla_lib::executor::path_cache::PathData::from(path)).unwrap();
+            encoded["terminal"] = serde_json::json!({"SailException":{"throw_location":"fixture.sail:42"}});
+            let decoded: isla_lib::executor::path_cache::PathData<B64> = serde_json::from_value(encoded).unwrap();
+            decoded.into()
+        } else {
+            path
+        };
+        let mut limits = ExecutionLimits::default();
+        limits.merge_enumeration.enabled = true;
+        limits.merge_enumeration.class_cap = 1;
+        limits.merge_enumeration.enumeration_threads = 1;
+        let state = TaskState::new().with_execution_limits(limits.clone());
+        let mut frame = LocalFrame::new(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
+        frame.restore_merge_history((records.clone(), ranges.clone()));
+        let expected = Mutex::new(Vec::new());
+        let enumeration = frame
+            .enumerate_merges_output_with(
+                &mut solver,
+                &state,
+                &shared,
+                &path.result,
+                &|class, _, _, _, model| {
+                    expected.lock().unwrap().push(path.materialize(model, &shared, "merge", 42, Some(class))?);
+                    Ok(())
+                },
+                None,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        if sail_exception {
+            let first = serde_json::to_value(&expected.lock().unwrap()[0]).unwrap();
+            assert_eq!(
+                first["terminal"],
+                serde_json::json!({"SailException":{"throw_location":"fixture.sail:42"}}),
+                "异常corpus导出不得丢失终态类型"
+            );
+        }
+        assert_eq!(enumeration["counted_classes"], 2);
+        assert_eq!(enumeration["tested_slices"][0]["symbol"], format!("v{}", input.as_u32()));
+        let mut expected = expected.into_inner().unwrap();
+        expected.sort_by_key(|sample| sample.class_id);
+        for (id, sample) in expected.iter_mut().enumerate() {
+            sample.sample_id = id as u64;
+        }
+        if store {
+            for sample in &expected {
+                assert_eq!(sample.pre_memory.len(), 1);
+                assert_eq!(sample.pre_memory[0].value, Some(0));
+                assert_eq!(sample.post_memory.len(), 1);
+                let input = &sample.pre_registers["input"]["bits"].as_str().unwrap();
+                assert_eq!(sample.post_memory[0].value, Some(u8::from_str_radix(input, 2).unwrap()));
+                let mut wrong = sample.clone();
+                wrong.post_memory[0].value = Some(sample.post_memory[0].value.unwrap() ^ 1);
+                assert_eq!(path.check(&mut solver, &shared, &wrong).unwrap(), Some(false));
+            }
+        }
+        let mut target = RV64::default();
+        let paths = vec![ResidentPath {
+            signature: 42,
+            checkpoint: checkpoint(&mut solver),
+            path,
+            records,
+            pure_definitions: ranges.clone(),
+        }];
+        let cache_dir = root.join("cache");
+        path_cache::save(
+            &path_cache::Options {
+                write: Some(cache_dir.clone()),
+                format: vec![path_cache::Encoding::Json, path_cache::Encoding::Bin],
+                ..Default::default()
+            },
+            clause,
+            &paths,
+            &[isla_lib::executor::path_cache::Facts { guard_unique: false, post_unique: false, simple_pre: false }
+                .into()],
+            &shared,
+            &target,
+            &SolveSummary { model_exception_paths: usize::from(sail_exception), ..Default::default() }.json(),
+            &serde_json::json!({"command":[],"inputs":{},"binary":{"path":"synthetic","sha256":"synthetic"}}),
+            &mut path_cache::Timing::default(),
+            &path_cache::Stages::new(None, Instant::now()),
+        );
+        let loaded = path_cache::load::<B64>(
+            &cache_dir,
+            path_cache::Encoding::Bin,
+            true,
+            &shared,
+            clause,
+            &path_cache::Stages::new(None, Instant::now()),
+        );
+        assert_eq!(loaded.paths[0].pure_definitions, ranges);
+        let inputs = root.join("inputs.jsonl");
+        std::fs::write(&inputs, "").unwrap();
+        let output = root.join("bootstrap");
+        let options = SampleOptions {
+            path_cache: path_cache::Options {
+                read: Some(cache_dir.clone()),
+                encoding: Some(path_cache::Encoding::Bin),
+                crosscheck: true,
+                recompute_facts: true,
+                ..Default::default()
+            },
+            fuzz: Some(fuzz::Options {
+                mode: fuzz::Mode::JudgeOnly,
+                scenario: "fixture".into(),
+                corpus: None,
+                inputs: Some(inputs),
+                mutations: None,
+                output: output.clone(),
+                random_seed: 0,
+                batch_size: 2,
+                budget: 2,
+                control_percent: 0,
+                certify_all: true,
+                avoid_known_ppn_overflow: false,
+                feedback: true,
+                difftest: None,
+            }),
+            ..Default::default()
+        };
+        let samples = SampleSession::new(&options, Some(&limits.merge_enumeration)).unwrap();
+        let reporter = TimeoutReporter::new(TimeoutReportConfig {
+            output: TimeoutSmtOutput::new(false, true, false),
+            directory: root.clone(),
+        });
+        // SharedState 没有 execute 函数；若误入探索，此处必然失败。
+        let result = run_symbolic_execute_with_target(
+            &mut target,
+            clause,
+            &shared,
+            &RegisterBindings::new(),
+            &Bindings::default(),
+            None,
+            1,
+            None,
+            &limits,
+            &reporter,
+            None,
+            &FixedSolveInputs::default(),
+            None,
+            None,
+            None,
+            &samples,
+        )
+        .unwrap();
+        assert!(result.items.is_empty());
+        let actual = SampleChecker::load(&output.join("initial-corpus.jsonl"), None).unwrap().samples;
+        assert_eq!(serde_json::to_value(&actual).unwrap(), serde_json::to_value(&expected).unwrap());
+        let certified: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(output.join("reconfirm.json")).unwrap()).unwrap();
+        assert_eq!(certified["certified"], true);
+        assert_eq!(certified["corpus_entries"], 2);
+        // 同一缓存也支持普通 solve-state 导出与完整样本检查。
+        let mut target = RV64::default();
+        let mut normal_limits = limits.clone();
+        let normal = root.join("normal.jsonl");
+        normal_limits.merge_enumeration.outputs =
+            vec![SampleOutputConfig { format: SampleOutputFormat::V1Jsonl, path: normal.clone() }];
+        let options = SampleOptions {
+            path_cache: options.path_cache.clone(),
+            check: Some(output.join("initial-corpus.jsonl")),
+            ..Default::default()
+        };
+        let samples = SampleSession::new(&options, Some(&normal_limits.merge_enumeration)).unwrap();
+        run_symbolic_execute_with_target(
+            &mut target,
+            clause,
+            &shared,
+            &RegisterBindings::new(),
+            &Bindings::default(),
+            None,
+            1,
+            None,
+            &normal_limits,
+            &reporter,
+            None,
+            &FixedSolveInputs::default(),
+            None,
+            None,
+            None,
+            &samples,
+        )
+        .unwrap();
+        samples.finish(&options, true);
+        assert!(samples.checker.as_ref().unwrap().report()["inconsistent"].as_array().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(SampleChecker::load(&normal, None).unwrap().samples).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn batch_json(outcome: &BatchOutcome) -> serde_json::Value {
         serde_json::json!({
@@ -3092,6 +3499,8 @@ mod tests {
         MergeExecuteAs,
         EntryGuard,
         ContradictoryPrestate,
+        SailException,
+        UnexplainedPoison,
     }
 
     /// 内联 collector 夹具的译码器：原夹具只检查编码路径，这里补回环所需的
@@ -3118,6 +3527,10 @@ mod tests {
     }
 
     fn check_encoding_fixture(mode: EncodingFixture) {
+        check_encoding_fixture_for_clause(mode, false);
+    }
+
+    fn check_encoding_fixture_for_clause(mode: EncodingFixture, store: bool) {
         use super::super::target::PreStateCtx;
         struct EncodingTarget {
             pre_state: PreStateCtx<B64>,
@@ -3151,7 +3564,8 @@ mod tests {
         let mut symtab = Symtab::new();
         let instruction = symtab.intern("zinstruction");
         let result_type = symtab.intern("zExecutionResult");
-        let clause = format!("zENCODING_GUARD_{}_{}", std::process::id(), mode as u8);
+        let clause =
+            if store { "zSTORE".to_string() } else { format!("zENCODING_GUARD_{}_{}", std::process::id(), mode as u8) };
         let requested = symtab.intern(&clause);
         let retire = symtab.intern("zRetire_Success");
         let execute_as = symtab.intern("zExecuteAs");
@@ -3322,6 +3736,26 @@ mod tests {
             prefix.extend(execute_body);
             execute_body = prefix;
         }
+        if matches!(mode, EncodingFixture::SailException | EncodingFixture::UnexplainedPoison) {
+            execute_body = if matches!(mode, EncodingFixture::SailException) {
+                vec![
+                    Instr::Copy(Loc::Id(isla_lib::ir::HAVE_EXCEPTION), isla_lib::ir::Exp::Bool(true), source),
+                    Instr::Copy(
+                        Loc::Id(isla_lib::ir::CURRENT_EXCEPTION),
+                        isla_lib::ir::Exp::String("reserved".into()),
+                        source,
+                    ),
+                    Instr::Copy(
+                        Loc::Id(isla_lib::ir::THROW_LOCATION),
+                        isla_lib::ir::Exp::String("fixture.sail:42".into()),
+                        source,
+                    ),
+                    Instr::Arbitrary,
+                ]
+            } else {
+                vec![Instr::Arbitrary]
+            };
+        }
         let mut defs = vec![
             Def::Register(mstatus, Ty::Bits(64), vec![]),
             Def::Union(instruction, vec![(requested, Ty::Unit), (payload, Ty::Unit)]),
@@ -3369,12 +3803,29 @@ mod tests {
             limits.merge_enumeration.enabled = true;
             limits.merge_enumeration.class_cap = 1;
         }
+        let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "output/terminal-collector-{}-{}-{store}",
+            std::process::id(),
+            mode as u8
+        ));
+        let mut options = super::super::samples::SampleOptions::default();
+        let mut initial_lets = Bindings::default();
+        if matches!(mode, EncodingFixture::SailException | EncodingFixture::UnexplainedPoison) {
+            options.path_cache.write = Some(cache_dir.clone());
+            options.path_cache.format =
+                vec![super::super::path_cache::Encoding::Json, super::super::path_cache::Encoding::Bin];
+            options.path_cache.dag_only = true;
+            initial_lets.insert(isla_lib::ir::HAVE_EXCEPTION, UVal::Init(Val::Bool(false)));
+            initial_lets.insert(isla_lib::ir::CURRENT_EXCEPTION, UVal::Init(Val::String(String::new())));
+            initial_lets.insert(isla_lib::ir::THROW_LOCATION, UVal::Init(Val::String(String::new())));
+        }
+        let sample_session = super::super::samples::SampleSession::new(&options, None).unwrap();
         let execution = run_symbolic_execute_with_target(
             &mut target,
             &clause,
             &shared,
             &regs,
-            &Bindings::default(),
+            &initial_lets,
             None,
             1,
             None,
@@ -3385,7 +3836,7 @@ mod tests {
             None,
             None,
             None,
-            &super::super::samples::SampleSession::new(&Default::default(), None).unwrap(),
+            &sample_session,
         );
         if matches!(mode, EncodingFixture::ContradictoryPrestate) {
             assert!(matches!(execution, Err(ExecError::Unreachable(_))), "矛盾前态不得伪装成编码域不适用");
@@ -3397,6 +3848,35 @@ mod tests {
         }
         let execution = execution.unwrap();
         let data = batch_json(&execution);
+        if matches!(mode, EncodingFixture::SailException | EncodingFixture::UnexplainedPoison) {
+            use isla_lib::executor::samples::Terminal;
+            let exception = matches!(mode, EncodingFixture::SailException);
+            assert_eq!(execution.summary.model_exception_paths, usize::from(exception));
+            assert_eq!(execution.summary.unfinished_paths, usize::from(!exception));
+            assert_eq!(execution.summary.status(), if exception { "finished" } else { "partial" });
+            let loaded = super::super::path_cache::load::<B64>(
+                &cache_dir,
+                super::super::path_cache::Encoding::Bin,
+                true,
+                &shared,
+                &clause,
+                &super::super::path_cache::Stages::new(None, std::time::Instant::now()),
+            );
+            assert_eq!(loaded.paths.len(), usize::from(exception));
+            if exception {
+                assert_eq!(
+                    loaded.paths[0].path.terminal,
+                    Terminal::SailException { throw_location: "fixture.sail:42".into() }
+                );
+                assert_eq!(loaded.paths[0].path.result, Val::String("reserved".into()));
+                assert_eq!(loaded.manifest.completeness, "complete");
+            } else {
+                assert_eq!(loaded.manifest.completeness, "partial");
+            }
+            std::fs::remove_dir_all(cache_dir).unwrap();
+            return;
+        }
+
         if matches!(mode, EncodingFixture::EntryGuard) {
             assert_eq!(data["summary"]["assertion-filtered-paths"], 0, "编码守卫必须在执行前排除非法载荷");
         }
@@ -3458,6 +3938,10 @@ mod tests {
             encodings.insert(encoding.to_string());
         }
         assert_eq!(encodings.len(), cases.len());
+        if matches!(mode, EncodingFixture::Split | EncodingFixture::Compressed) {
+            let signatures = cases.iter().map(|case| case["path-signature"].as_u64().unwrap()).collect::<HashSet<_>>();
+            assert_eq!(signatures.len(), cases.len(), "独立编码入口必须拥有不同路径签名");
+        }
     }
 
     #[test]
@@ -3468,6 +3952,31 @@ mod tests {
     #[test]
     fn collector_applies_encoding_guard_before_execute() {
         check_encoding_fixture(EncodingFixture::EntryGuard);
+    }
+
+    #[test]
+    fn collector_saves_sail_exception_as_complete_typed_terminal() {
+        check_encoding_fixture(EncodingFixture::SailException);
+    }
+
+    #[test]
+    fn ladder_store_collector_preserves_normal_poststate() {
+        check_encoding_fixture_for_clause(EncodingFixture::Guard, true);
+    }
+
+    #[test]
+    fn ladder_store_collector_saves_typed_exception() {
+        check_encoding_fixture_for_clause(EncodingFixture::SailException, true);
+    }
+
+    #[test]
+    fn ladder_store_collector_keeps_unexplained_poison_incomplete() {
+        check_encoding_fixture_for_clause(EncodingFixture::UnexplainedPoison, true);
+    }
+
+    #[test]
+    fn collector_keeps_unexplained_poison_as_incomplete_error() {
+        check_encoding_fixture(EncodingFixture::UnexplainedPoison);
     }
 
     #[test]

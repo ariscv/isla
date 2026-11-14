@@ -31,6 +31,7 @@ fn mutation_enum_keeps_allowed_domain_and_selects_deterministically() {
             let guard = solver.define_const(guard, SourceLoc::unknown());
             let records = vec![super::tests::judge_record(4, guard)];
             let path = SamplePath {
+                terminal: Default::default(),
                 pre: BTreeMap::from([("cur_privilege".into(), Val::Symbolic(privilege))]),
                 post: BTreeMap::new(),
                 result: Val::Unit,
@@ -72,6 +73,7 @@ fn mutation_a_blocks_previous_values_and_keeps_the_class() {
         SourceLoc::unknown(),
     );
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("x".into(), Val::Symbolic(x)), ("unused".into(), Val::Symbolic(unused))]),
         post: BTreeMap::new(),
         result: Val::Unit,
@@ -117,6 +119,7 @@ fn mutation_b_opens_only_bits_related_to_different_guards() {
         SourceLoc::unknown(),
     );
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("x".into(), Val::Symbolic(x))]),
         post: BTreeMap::new(),
         result: Val::Unit,
@@ -152,6 +155,7 @@ fn mutation_b_preserves_a_coupled_unchanged_guard() {
     );
     let second = solver.define_const(Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), SourceLoc::unknown());
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("x".into(), Val::Symbolic(x)), ("y".into(), Val::Symbolic(y))]),
         post: BTreeMap::new(),
         result: Val::Unit,
@@ -186,6 +190,7 @@ fn dag_export_keeps_definition_order_guards_and_state_references() {
     let y = solver.define_const(Exp::Not(Box::new(Exp::Var(x))), SourceLoc::unknown());
     solver.assert(Exp::Var(y));
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("flag".into(), Val::Symbolic(x))]),
         post: BTreeMap::from([("flag".into(), Val::Symbolic(y))]),
         result: Val::Bool(true),
@@ -255,6 +260,7 @@ fn mutation_ppn_preference_is_soft_and_only_changes_active_leaves() {
                         region: "mem",
                     };
                     let path = SamplePath {
+                        terminal: Default::default(),
                         pre: BTreeMap::new(),
                         post: BTreeMap::new(),
                         result: Val::Unit,

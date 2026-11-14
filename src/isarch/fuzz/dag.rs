@@ -21,7 +21,7 @@ pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &Shar
         replay_seconds += started.elapsed().as_secs_f64();
         let mut value = path.path.export_dag(&solver, shared, &path.records, path.signature);
         // 与 judged 的守卫坐标一致；进程内编号不进入确定性数据接口。
-        value["schema_version"] = json!(2);
+        value["schema_version"] = json!(3);
         for guard in value["guards"].as_array_mut().unwrap() {
             guard["record_id"] = guard["coordinate"].clone();
         }
@@ -38,7 +38,7 @@ pub fn export<B: BV>(paths: &[ResidentPath<B>], context: &Context, shared: &Shar
     assert_eq!(manifest.len(), paths.len());
     write_json(
         &output.join("dag-manifest.json"),
-        &json!({"schema_version":2,"paths":paths.len(),"guards":guards,"reread_consistent":true,"entries":manifest}),
+        &json!({"schema_version":3,"paths":paths.len(),"guards":guards,"reread_consistent":true,"entries":manifest}),
     );
     replay_seconds
 }

@@ -300,7 +300,7 @@ fn assemble<B>(
 
     let objfile = tmpfile::TmpFile::new();
 
-    let mut assembler = SandboxedCommand::from_tool(&isa.assembler)
+    let mut assembler = SandboxedCommand::from_tool(&isa.assembler, "汇编线程或指令（assembler）")?
         .arg("-o")
         .arg(objfile.path())
         .arg("-") // gas is agnostic about this, but clang requires a - to indicate stdin
@@ -309,7 +309,11 @@ fn assemble<B>(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| {
-            format!("Failed to spawn assembler {}. Got error: {}", &isa.assembler.executable.display(), err)
+            format!(
+                "Failed to spawn assembler {}. Got error: {}",
+                &isa.assembler.executable.as_ref().expect("已解析工具必须有程序名").display(),
+                err
+            )
         })?;
 
     // Write each thread to the assembler's standard input, in a section called `THREAD_PREFIXN` for each thread `N`
@@ -352,7 +356,7 @@ fn assemble<B>(
                 .map_err(|_| "Failed to write linker script".to_string())?;
         }
 
-        let linker_status = SandboxedCommand::from_tool(&isa.linker)
+        let linker_status = SandboxedCommand::from_tool(&isa.linker, "链接 litmus（linker）")?
             .arg("-T")
             .arg(linker_script.path())
             .arg("-o")
@@ -360,30 +364,36 @@ fn assemble<B>(
             .arg(objfile.path())
             .status()
             .map_err(|err| {
-                format!("Failed to invoke linker {}. Got error: {}", &isa.linker.executable.display(), err)
+                format!(
+                    "Failed to invoke linker {}. Got error: {}",
+                    &isa.linker.executable.as_ref().expect("已解析工具必须有程序名").display(),
+                    err
+                )
             })?;
 
-        // Invoke objdump to get the assembled output in human readable
-        // form. If objdump fails for whatever reason, we don't want to
-        // consider it a hard error however.
+        // 只有重定位后的文本输出需要 objdump，缺工具时在此报告调用上下文。
         let objdump = {
-            let output = SandboxedCommand::from_tool(&isa.objdump).arg("-D").arg(objfile_reloc.path()).output();
-
-            if let Ok(output) = output {
-                String::from_utf8_lossy(if output.status.success() { &output.stdout } else { &output.stderr })
-                    .to_string()
-            } else {
-                format!("Failed to invoke {}", &isa.objdump.executable.display())
-            }
+            let output = SandboxedCommand::from_tool(&isa.objdump, "反汇编 litmus（objdump）")?
+                .arg("-D")
+                .arg(objfile_reloc.path())
+                .output()
+                .map_err(|error| format!("调用 objdump 失败：{error}"))?;
+            String::from_utf8_lossy(if output.status.success() { &output.stdout } else { &output.stderr }).to_string()
         };
 
         // Invoke nm to get the list of locations in human readable form.
         // This failing is a hard error, as we need the location information.
-        let names = SandboxedCommand::from_tool(&isa.nm)
+        let names = SandboxedCommand::from_tool(&isa.nm, "读取 litmus 符号（nm）")?
             .arg(objfile_reloc.path())
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .map_err(|err| format!("Failed to invoke nm {}. Got error: {}", &isa.nm.executable.display(), err))?;
+            .map_err(|err| {
+                format!(
+                    "Failed to invoke nm {}. Got error: {}",
+                    &isa.nm.executable.as_ref().expect("已解析工具必须有程序名").display(),
+                    err
+                )
+            })?;
 
         if linker_status.success() {
             (objfile_reloc, objdump, names)

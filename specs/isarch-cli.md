@@ -339,6 +339,18 @@ isarch list-instructions 实际输出
 
 与 `solve-state` 共用全部探索参数、指令与前态设置。每个进程针对一个场景，先用当前模型完整认证 corpus，再用常驻快档判定 mutant。
 
+`--path-cache-read <目录> --path-cache-encoding bin` 直接恢复完成路径，跳过符号探索。省略 `--fuzz-corpus` 时，沿用现场枚举器，以 `class_cap=1`、`sample_stride=1` 生成每个守卫类的一个代表，写入 `initial-corpus.jsonl`；完整枚举元数据写入 `initial-corpus-enumeration.json`。生成的 corpus 经完整 judge 认证后才进入 loop。提供 `--fuzz-corpus` 时跳过生成，认证并复用指定的 corpus。缓存读取也支持普通 `solve-state` 的样本导出和 `--check-samples`。
+
+新缓存 schema 为 2，同时保存纯原语定义的符号区间 `pure_definitions`，以保持现场和恢复后的被测片段一致；schema 1 缺少该信息，必须重新生成。JSON 和二进制均保存该元数据，`--path-cache-crosscheck` 可交叉核对。初始 corpus 通过恢复路径的完整 judge 认证，检查其输入与后态，不重新执行当前 IR 的 clause。本轮保持 IR／配置不变；跨 IR／配置的语义兼容仍需独立复验。manifest 的来源哈希只作记录，不是准入门槛。partial 缓存只代表已完成路径，完整性和错误数量以 manifest 为准。
+
+```sh
+isarch [原探索参数] \
+  --path-cache-read <缓存目录> --path-cache-encoding bin --path-cache-crosscheck \
+  --fuzz-mode campaign --fuzz-scenario <场景配置id> \
+  --fuzz-budget 50 --fuzz-control-percent 0 \
+  --fuzz-output <绝对路径的新目录> fuzz --clause <指令>
+```
+
 ```sh
 isarch [原 J1 探索参数] \
   --fuzz-mode judge-only --fuzz-scenario <场景配置id> \
@@ -361,3 +373,11 @@ isarch [原 J1 探索参数] \
 所有 fuzz 模式都将路径 DAG 写到 `dag/`，重读检查结果写到 `dag-manifest.json`。格式见 [DAG 导出](../agents/path_merge_call_support/fuzz-dag-export.md)，本轮实验与限制见 [第 3 步记录](../agents/path_merge_call_support/fuzz-step3.md)。
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。
+
+## 合并拒绝诊断
+
+`--merge-diagnostics off|summary|detail` 默认关闭。`summary` 在执行结束时按位置、槽和差异类别汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
+
+记录包含 `stage`、尝试编号、父尝试编号、函数／IR pc、槽名与声明类型、原始初始化状态、正常初始化后的值形态、失败字段／元素路径及原错误。执行臂内无法取得双臂槽的错误使用 `stage=execute_arm`，槽和值填 `null`；嵌套传播另记 `merge_value_propagated`。
+
+细节每个汇总键最多 3 条，全进程最多 1000 条，每行最多 4096 字节，路径最多 8 层。汇总最多保留 4096 个键，每键最多 1024 字节，超出计入 `other`。`details_suppressed` 和 `oversized` 明确记录未输出的细节，采样行数不代表拒绝总数。

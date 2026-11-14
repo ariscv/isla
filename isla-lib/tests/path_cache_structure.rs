@@ -88,6 +88,7 @@ fn fixture() -> (Vec<Segment<B64>>, Vec<CachedPath<B64>>, SharedState<'static, B
     let mut writer = TraceWriter::default();
     let checkpoint = writer.capture(&checkpoint);
     let path = SamplePath {
+        terminal: Default::default(),
         pre: BTreeMap::from([("input".into(), Val::Symbolic(input))]),
         post: BTreeMap::from([("result".into(), Val::Symbolic(result))]),
         result: value,
@@ -118,6 +119,7 @@ fn fixture() -> (Vec<Segment<B64>>, Vec<CachedPath<B64>>, SharedState<'static, B
     (
         writer.segments,
         vec![CachedPath {
+            pure_definitions: vec![],
             signature: 109,
             checkpoint,
             path: path.into(),
