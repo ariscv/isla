@@ -88,6 +88,7 @@ pub(super) fn function_effect_summaries<B: BV>(
                     RegionCfg::new(
                         shared.functions[&function].2,
                         RegionOptions {
+                            bounded_loops: false,
                             filter_assertion_failures: false,
                             recreated_slot_liveness: false,
                             have_exception: None,
@@ -148,6 +149,7 @@ pub(super) fn function_effect_summaries<B: BV>(
         let cfg = RegionCfg::new(
             body,
             RegionOptions {
+                bounded_loops: false,
                 filter_assertion_failures: false,
                 recreated_slot_liveness: false,
                 have_exception: None,

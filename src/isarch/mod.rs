@@ -8,7 +8,6 @@ pub mod fuzz;
 pub mod memory_builder;
 pub mod memory_model;
 pub mod path_cache;
-pub mod platform;
 mod representation;
 pub mod samples;
 mod solve_summary;
@@ -89,10 +88,28 @@ fn is_mapping_rejection<B: BV>(
     frame: &LocalFrame<B>,
     shared_state: &SharedState<B>,
 ) -> bool {
-    if !matches!(error, ExecError::MatchFailure(_))
-        || frame.function_name() != shared_state.symtab.lookup(function_name)
-    {
+    if !matches!(error, ExecError::MatchFailure(_)) {
         return false;
+    }
+    let root = shared_state.symtab.lookup(function_name);
+    if frame.function_name() != root {
+        // Sail为方向mapping生成同签名的_infallible配对；普通helper不得借此隐藏错误。
+        let generated_mapping = |name: Name| {
+            let text = shared_state.symtab.to_str(name);
+            if !text.ends_with("_forwards") && !text.ends_with("_backwards") {
+                return false;
+            }
+            let Some(companion) = shared_state.symtab.get(&format!("{text}_infallible")) else { return false };
+            let Some((args, result, _)) = shared_state.functions.get(&name) else { return false };
+            let Some((other_args, other_result, _)) = shared_state.functions.get(&companion) else { return false };
+            args.iter().map(|(_, ty)| ty).eq(other_args.iter().map(|(_, ty)| ty)) && result == other_result
+        };
+        let Some(root_index) = frame.backtrace().iter().rposition(|(name, _)| *name == root) else { return false };
+        if !generated_mapping(frame.function_name())
+            || frame.backtrace()[root_index + 1..].iter().any(|(name, _)| !generated_mapping(*name))
+        {
+            return false;
+        }
     }
     let (_, _, body) = shared_state.functions.get(&frame.function_name()).expect("mapping 函数必须存在");
     let exits: Vec<_> =

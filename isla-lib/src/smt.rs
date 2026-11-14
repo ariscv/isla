@@ -54,7 +54,7 @@ use z3_sys::*;
 
 use std::time::{Duration, Instant};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::error::Error as StdError;
@@ -194,6 +194,7 @@ mod dependencies;
 pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
+mod query;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
@@ -1008,6 +1009,8 @@ macro_rules! z3_float_binary_op {
     };
 }
 
+mod arithmetic;
+
 static PUSH_ITE_BV: &[u8] = b"push_ite_bv\0";
 static BV_LE_EXTRA: &[u8] = b"bv_le_extra\0";
 static BV_SORT_AC: &[u8] = b"bv_sort_ac\0";
@@ -1015,6 +1018,13 @@ static BV_SORT_AC: &[u8] = b"bv_sort_ac\0";
 impl<'ctx> Ast<'ctx> {
     fn simplify(&mut self) {
         unsafe {
+            if SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default) {
+                let z3_ast = Z3_simplify(self.ctx.z3_ctx, self.z3_ast);
+                Z3_inc_ref(self.ctx.z3_ctx, z3_ast);
+                Z3_dec_ref(self.ctx.z3_ctx, self.z3_ast);
+                self.z3_ast = z3_ast;
+                return;
+            }
             let z3_params = Z3_mk_params(self.ctx.z3_ctx);
             let push_ite_bv =
                 Z3_mk_string_symbol(self.ctx.z3_ctx, CStr::from_bytes_with_nul_unchecked(PUSH_ITE_BV).as_ptr());
@@ -1235,24 +1245,12 @@ impl<'ctx> Ast<'ctx> {
         z3_binary_op!(Z3_mk_bvsub, self, rhs)
     }
 
-    fn mk_bvmul(&self, rhs: &Ast<'ctx>) -> Self {
-        z3_binary_op!(Z3_mk_bvmul, self, rhs)
-    }
-
     fn mk_bvudiv(&self, rhs: &Ast<'ctx>) -> Self {
         z3_binary_op!(Z3_mk_bvudiv, self, rhs)
     }
 
-    fn mk_bvsdiv(&self, rhs: &Ast<'ctx>) -> Self {
-        z3_binary_op!(Z3_mk_bvsdiv, self, rhs)
-    }
-
     fn mk_bvurem(&self, rhs: &Ast<'ctx>) -> Self {
         z3_binary_op!(Z3_mk_bvurem, self, rhs)
-    }
-
-    fn mk_bvsrem(&self, rhs: &Ast<'ctx>) -> Self {
-        z3_binary_op!(Z3_mk_bvsrem, self, rhs)
     }
 
     fn mk_bvsmod(&self, rhs: &Ast<'ctx>) -> Self {
@@ -1396,6 +1394,47 @@ impl<'ctx> Ast<'ctx> {
     }
 
     fn mk_fpa_is_nan(&self) -> Self {
+        unsafe {
+            let ctx = self.ctx.z3_ctx;
+            if Z3_get_ast_kind(ctx, self.z3_ast) == AstKind::App {
+                let app = Z3_to_app(ctx, self.z3_ast);
+                let declaration = Z3_get_app_decl(ctx, app);
+                let name = Z3_get_decl_name(ctx, declaration);
+                if Z3_get_symbol_kind(ctx, name) == SymbolKind::String
+                    && CStr::from_ptr(Z3_get_symbol_string(ctx, name)).to_bytes() == b"fp.div"
+                    && Z3_get_app_num_args(ctx, app) == 3
+                {
+                    let args = [Z3_get_app_arg(ctx, app, 0), Z3_get_app_arg(ctx, app, 1), Z3_get_app_arg(ctx, app, 2)];
+                    if Z3_get_sort_kind(ctx, Z3_get_sort(ctx, args[0])) == SortKind::RoundingMode
+                        && Z3_get_sort_kind(ctx, Z3_get_sort(ctx, args[1])) == SortKind::FloatingPoint
+                        && Z3_is_eq_sort(ctx, Z3_get_sort(ctx, args[1]), Z3_get_sort(ctx, args[2]))
+                    {
+                        let [rounding, left, right] = args.map(|z3_ast| {
+                            Z3_inc_ref(ctx, z3_ast);
+                            Ast { z3_ast, ctx: self.ctx }
+                        });
+                        let builtin = rounding.mk_fpa_div(&left, &right);
+                        // 用实际内建声明核对，不能把同名未解释函数当作浮点除法。
+                        // z3-sys 0.5 的 DeclKind 数值与现用 Z3 不兼容，不能读取该 Rust 枚举。
+                        if Z3_get_ast_kind(ctx, builtin.z3_ast) == AstKind::App
+                            && Z3_is_eq_func_decl(
+                                ctx,
+                                declaration,
+                                Z3_get_app_decl(ctx, Z3_to_app(ctx, builtin.z3_ast)),
+                            )
+                        {
+                            // 对所有精度和舍入模式，NaN仅来自NaN输入、0/0或无穷/无穷。
+                            // 数值结果仍使用原除法；分类查询无需构造其数值除法器。
+                            let left_nan = z3_unary_op!(Z3_mk_fpa_is_nan, left);
+                            let right_nan = z3_unary_op!(Z3_mk_fpa_is_nan, right);
+                            let both_zero = left.mk_fpa_is_zero().mk_and(&right.mk_fpa_is_zero());
+                            let both_infinite = left.mk_fpa_is_infinite().mk_and(&right.mk_fpa_is_infinite());
+                            return left_nan.mk_or(&right_nan).mk_or(&both_zero).mk_or(&both_infinite);
+                        }
+                    }
+                }
+            }
+        }
         z3_unary_op!(Z3_mk_fpa_is_nan, self)
     }
 
@@ -1696,6 +1735,9 @@ pub struct Solver<'ctx, B> {
     func_decls: HashMap<Sym, FuncDecl<'ctx>>,
     enums: Enums<'ctx>,
     z3_solver: Z3_solver,
+    seed: Option<u32>,
+    incremental_checks: bool,
+    floating_point_seen: Cell<bool>,
     ctx: &'ctx Context,
     symbol_namer: Z3SymbolNamer,
     performance_info: PerformanceInfo,
@@ -2246,7 +2288,7 @@ pub fn configure_tastic(tactic: Tactic) {
                     .any(|i| CStr::from_ptr(Z3_get_tactic_name(ctx.z3_ctx, i)) == tactic.as_c_str()),
                 "Z3 {version} 不存在 tactic {tactic:?}",
             );
-            let solver = new_z3_solver(ctx.z3_ctx, tactic.as_c_str());
+            let solver = new_z3_solver(ctx.z3_ctx, tactic.as_c_str(), None);
             let descrs = Z3_solver_get_param_descrs(ctx.z3_ctx, solver);
             Z3_param_descrs_inc_ref(ctx.z3_ctx, descrs);
             let seed_param = [b"seed\0".as_slice(), b"random_seed\0".as_slice()]
@@ -2275,12 +2317,26 @@ pub fn configure_tastic(tactic: Tactic) {
 }
 
 // 初始化能力探测与实际求解必须使用相同的 tactic 创建方式。
-unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr) -> Z3_solver {
-    let solver_tactic = Z3_mk_tactic(ctx, tactic.as_ptr());
-    Z3_tactic_inc_ref(ctx, solver_tactic);
-    let solver = Z3_mk_solver_from_tactic(ctx, solver_tactic);
-    Z3_solver_inc_ref(ctx, solver);
-    Z3_tactic_dec_ref(ctx, solver_tactic);
+unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr, seed: Option<(&CStr, u32)>) -> Z3_solver {
+    let solver = if tactic == Tactic::Default.as_c_str() {
+        let solver = Z3_mk_solver(ctx);
+        Z3_solver_inc_ref(ctx, solver);
+        solver
+    } else {
+        let solver_tactic = Z3_mk_tactic(ctx, tactic.as_ptr());
+        Z3_tactic_inc_ref(ctx, solver_tactic);
+        let solver = Z3_mk_solver_from_tactic(ctx, solver_tactic);
+        Z3_solver_inc_ref(ctx, solver);
+        Z3_tactic_dec_ref(ctx, solver_tactic);
+        solver
+    };
+    if let Some((parameter, value)) = seed {
+        let params = Z3_mk_params(ctx);
+        Z3_params_inc_ref(ctx, params);
+        Z3_params_set_uint(ctx, params, Z3_mk_string_symbol(ctx, parameter.as_ptr()), value);
+        Z3_solver_set_params(ctx, solver, params);
+        Z3_params_dec_ref(ctx, params);
+    }
     solver
 }
 
@@ -2291,32 +2347,28 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn new(ctx: &'ctx Context) -> Self {
-        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, fresh_random_seed())
+        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, None)
     }
 
-    /// 为可复现的投影枚举创建求解器；不改变普通执行的随机种子策略。
+    /// 为可复现的投影枚举显式设置种子；普通 Default 执行保留 Z3 默认参数。
     pub(crate) fn new_seeded(ctx: &'ctx Context, seed: u32) -> Self {
-        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, seed)
+        Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, Some(seed))
     }
 
-    fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: u32) -> Self {
+    fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: Option<u32>) -> Self {
         let config = SMT_CONFIG.get().expect("SMT 尚未初始化，请在程序启动时调用 smt::configure_tastic");
         unsafe {
-            // 始终通过 tactic 创建 solver，避免按 logic 创建时枚举支持不完整。
-            let z3_solver = new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str());
-
-            let z3_params = Z3_mk_params(ctx.z3_ctx);
-            Z3_params_inc_ref(ctx.z3_ctx, z3_params);
-
-            let seed_symbol = Z3_mk_string_symbol(ctx.z3_ctx, config.seed_param.as_ptr());
-            Z3_params_set_uint(ctx.z3_ctx, z3_params, seed_symbol, seed);
-            Z3_solver_set_params(ctx.z3_ctx, z3_solver, z3_params);
-
-            Z3_params_dec_ref(ctx.z3_ctx, z3_params);
+            // Default 使用原生 solver，其余策略仍显式指定 tactic；均不按 logic 限制枚举支持。
+            let seed = seed.or_else(|| (config.tactic != Tactic::Default).then(fresh_random_seed));
+            let z3_solver =
+                new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str(), seed.map(|value| (config.seed_param, value)));
 
             Solver {
                 ctx,
                 z3_solver,
+                seed,
+                incremental_checks: false,
+                floating_point_seen: Cell::new(false),
                 next_var: 0,
                 def_attrs: DefAttrs::default(),
                 cycles: 0,
@@ -2352,6 +2404,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     fn translate_exp(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
         use Exp::*;
+        if matches!(
+            exp,
+            FPConstant(..)
+                | FPRoundingMode(..)
+                | FPUnary(..)
+                | FPRoundingUnary(..)
+                | FPBinary(..)
+                | FPRoundingBinary(..)
+                | FPfma(..)
+        ) {
+            self.floating_point_seen.set(true);
+        }
         match exp {
             Var(v) => match self.decls.get(v) {
                 None => panic!("Could not get Z3 func_decl {}", *v),
@@ -2535,6 +2599,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
             }
             Def::DeclareConst(v, ty) => {
+                if query::floating_type(ty) {
+                    self.floating_point_seen.set(true);
+                }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
                 self.decls.insert(*v, Ast::mk_constant(&fd));
@@ -2543,6 +2610,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
             }
             Def::DeclareFun(v, arg_tys, result_ty) => {
+                if arg_tys.iter().any(query::floating_type) || query::floating_type(result_ty) {
+                    self.floating_point_seen.set(true);
+                }
                 if cfg!(feature = "smtperf") {
                     self.performance_info.add_var_node(*v, info);
                 }
@@ -2872,6 +2942,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn check_sat_with(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        self.check_sat_with_strategy(exp, info, query::QueryPurpose::General)
+    }
+
+    /// 整数转换及向量边界证明复用完整查询与超时机制；default使用同Config/种子的新solver。
+    /// 活动臂条件、已发布断言和缓冲断言全部保留，Sat也仍是原上下文的反例。
+    pub(crate) fn check_sat_with_for_range(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        self.check_sat_with_strategy(exp, info, query::QueryPurpose::RangeProof)
+    }
+
+    /// 布尔恒值及推演可行性证明：复杂目标按成本选择完整快照，其余复用原查询。
+    pub(crate) fn check_sat_with_for_bool(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        self.check_sat_with_strategy(exp, info, query::QueryPurpose::BooleanProof)
+    }
+
+    fn check_sat_with_strategy(&mut self, exp: &Exp<Sym>, info: SourceLoc, purpose: query::QueryPurpose) -> SmtResult {
         let started = Instant::now();
         self.performance_info.start();
 
@@ -2879,7 +2964,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let pending = self.transaction_assertions();
         let mut assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
         assumptions.push(ast.z3_ast);
-        let z3_result = match timeout_Z3_solver_check_assumptions(self.ctx.z3_ctx, self.z3_solver, &assumptions, info) {
+        let query = self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast));
+        let z3_result = match timeout_Z3_solver_check_assumptions(
+            self.ctx.z3_ctx,
+            query.z3_solver,
+            query.assumptions(&assumptions),
+            info,
+        ) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
                 // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
@@ -2898,7 +2989,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Unknown
         };
 
-        self.record_check_result(&result);
+        self.record_check_result(&result, query.z3_solver);
         self.performance_info.assign_cost(exp);
         result
     }
@@ -2911,16 +3002,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
-        let z3_result = match timeout_Z3_solver_check(self.ctx.z3_ctx, self.z3_solver, &assumptions, info) {
-            Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
-                // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
-                self.last_check_sat = false;
-                self.asserts_since_check = 0;
-                let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
-            }
-        };
+        let query = self.query_solver(&assumptions, false);
+        let z3_result =
+            match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
+                Ok(result) => result,
+                Err(Z3TimeoutError::Interrupted) => {
+                    // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
+                    self.last_check_sat = false;
+                    self.asserts_since_check = 0;
+                    let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
+                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                }
+            };
         let result = if z3_result == Z3_L_TRUE {
             Sat
         } else if z3_result == Z3_L_FALSE {
@@ -2928,7 +3021,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else {
             Unknown
         };
-        self.record_check_result(&result);
+        self.record_check_result(&result, query.z3_solver);
         result
     }
 
@@ -2936,12 +3029,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// `take_stashed_model`）；同时重置断言计数。Unsat/Unknown 不会让既有
     /// 缓存失效——缓存模型满足的是当前断言集（自缓存以来没有新增
     /// `Def::Assert`），与这次探测的假设和结果无关。
-    fn record_check_result(&mut self, result: &SmtResult) {
+    fn record_check_result(&mut self, result: &SmtResult, queried_solver: Z3_solver) {
         self.last_check_sat = matches!(result, Sat);
         self.asserts_since_check = 0;
         if self.last_check_sat {
             unsafe {
-                let model = Z3_solver_get_model(self.ctx.z3_ctx, self.z3_solver);
+                let model = Z3_solver_get_model(self.ctx.z3_ctx, queried_solver);
                 if !model.is_null() {
                     Z3_model_inc_ref(self.ctx.z3_ctx, model);
                     self.clear_stashed_model();
@@ -3002,17 +3095,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
-        let z3_result =
-            match timeout_Z3_solver_check_deadline(self.ctx.z3_ctx, self.z3_solver, &assumptions, info, deadline) {
-                Ok(result) => result,
-                Err(Z3TimeoutError::Interrupted) => {
-                    // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
-                    self.last_check_sat = false;
-                    self.asserts_since_check = 0;
-                    let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
-                }
-            };
+        let query = self.query_solver(&assumptions, false);
+        let z3_result = match timeout_Z3_solver_check_deadline(
+            self.ctx.z3_ctx,
+            query.z3_solver,
+            query.assumptions(&assumptions),
+            info,
+            deadline,
+        ) {
+            Ok(result) => result,
+            Err(Z3TimeoutError::Interrupted) => {
+                // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
+                self.last_check_sat = false;
+                self.asserts_since_check = 0;
+                let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
+                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+            }
+        };
         let result = if z3_result == Z3_L_TRUE {
             Sat
         } else if z3_result == Z3_L_FALSE {
@@ -3020,7 +3119,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else {
             Unknown
         };
-        self.record_check_result(&result);
+        self.record_check_result(&result, query.z3_solver);
         result
     }
 
@@ -3111,7 +3210,241 @@ pub fn z3_version() -> String {
 }
 
 #[cfg(test)]
+mod arithmetic_tests;
+#[cfg(test)]
+mod division_tests;
+#[cfg(test)]
+mod multiplication_tests;
+#[cfg(test)]
+mod query_tests;
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn native_default_uses_plain_solver_and_models() {
+        const CHILD: &str = "ISLA_NATIVE_DEFAULT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "smt::tests::native_default_uses_plain_solver_and_models", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let found = unsafe {
+            let descriptors = Z3_solver_get_param_descrs(context.z3_ctx, solver.z3_solver);
+            Z3_param_descrs_inc_ref(context.z3_ctx, descriptors);
+            let native = (0..Z3_param_descrs_size(context.z3_ctx, descriptors)).any(|i| {
+                let name = Z3_param_descrs_get_name(context.z3_ctx, descriptors, i);
+                Z3_get_symbol_kind(context.z3_ctx, name) == SymbolKind::String
+                    && CStr::from_ptr(Z3_get_symbol_string(context.z3_ctx, name)).to_bytes() == b"solver2_timeout"
+            });
+            Z3_param_descrs_dec_ref(context.z3_ctx, descriptors);
+            native
+        };
+        assert!(found, "Default必须是Z3原生solver，而不是同名tactic包装器");
+        let info = SourceLoc::unknown();
+        let enum_id = solver.get_enum(Name::from_u32(40000), 2);
+        let tag = solver.declare_const(smtlib::Ty::Enum(enum_id), info);
+        let byte = solver.declare_bitvector(8, info);
+        let member = EnumMember { enum_id, member: 1 };
+        solver.assert(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(smtlib::Exp::Enum(member))));
+        solver.assert(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(byte)), Box::new(smtlib::bits64(0x5a, 8))));
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        let mut model = Model::new(&solver);
+        assert_eq!(model.get_var(tag).unwrap().unwrap_exp(), smtlib::Exp::Enum(member));
+        assert_eq!(model.get_var(byte).unwrap().unwrap_exp(), smtlib::bits64(0x5a, 8));
+    }
+
+    #[test]
+    fn fp_div_nan_classification_avoids_arithmetic_and_matches_ieee() {
+        configure_tastic(Tactic::Qfaufbv);
+        for (exponent, significand) in [(3, 3), (5, 11), (8, 24), (11, 53)] {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let info = SourceLoc::unknown();
+            let left = solver.declare_const(smtlib::Ty::Float(exponent, significand), info);
+            let right = solver.declare_const(smtlib::Ty::Float(exponent, significand), info);
+            let rounding = solver.declare_const(smtlib::Ty::RoundingMode, info);
+            let quotient = solver.define_const(
+                smtlib::Exp::FPRoundingBinary(
+                    smtlib::FPRoundingBinary::Div,
+                    Box::new(smtlib::Exp::Var(rounding)),
+                    Box::new(smtlib::Exp::Var(left)),
+                    Box::new(smtlib::Exp::Var(right)),
+                ),
+                info,
+            );
+            // 穿过DefineConst引用，覆盖真实原语调用产生的表达式形式。
+            let value = solver.translate_exp(&smtlib::Exp::Var(quotient));
+            let classified = solver
+                .translate_exp(&smtlib::Exp::FPUnary(smtlib::FPUnary::IsNaN, Box::new(smtlib::Exp::Var(quotient))));
+            let mut pending = vec![classified.z3_ast];
+            let mut visited = HashSet::new();
+            while let Some(ast) = pending.pop() {
+                if !visited.insert(ast) {
+                    continue;
+                }
+                unsafe {
+                    if Z3_get_ast_kind(context.z3_ctx, ast) != AstKind::App {
+                        continue;
+                    }
+                    let app = Z3_to_app(context.z3_ctx, ast);
+                    let symbol = Z3_get_decl_name(context.z3_ctx, Z3_get_app_decl(context.z3_ctx, app));
+                    if Z3_get_symbol_kind(context.z3_ctx, symbol) == SymbolKind::String {
+                        assert_ne!(
+                            CStr::from_ptr(Z3_get_symbol_string(context.z3_ctx, symbol)).to_bytes(),
+                            b"fp.div",
+                            "仅分类NaN的查询不应构造数值除法器"
+                        );
+                    }
+                    pending.extend(
+                        (0..Z3_get_app_num_args(context.z3_ctx, app)).map(|i| Z3_get_app_arg(context.z3_ctx, app, i)),
+                    );
+                }
+            }
+            // 小格式用原始Z3 API证明全部位型／RM；f64全域证明另存实测证据，单测覆盖IEEE边界。
+            use smtlib::FPRoundingMode::*;
+            if exponent == 11 {
+                let bits = [
+                    0,
+                    0x8000000000000000,
+                    1,
+                    0x8000000000000001,
+                    0x0010000000000000,
+                    0x3ff0000000000000,
+                    0xbff0000000000000,
+                    0x7fefffffffffffff,
+                    0x7ff0000000000000,
+                    0xfff0000000000000,
+                    0x7ff8000000000000,
+                    0x7ff0000000000001,
+                ];
+                for mode in [
+                    RoundNearestTiesToEven,
+                    RoundNearestTiesToAway,
+                    RoundTowardPositive,
+                    RoundTowardNegative,
+                    RoundTowardZero,
+                ] {
+                    for a in bits {
+                        for b in bits {
+                            let operand = |bits| {
+                                smtlib::Exp::FPUnary(
+                                    smtlib::FPUnary::FromIEEE(11, 53),
+                                    Box::new(smtlib::bits64(bits, 64)),
+                                )
+                            };
+                            let value = solver.translate_exp(&smtlib::Exp::FPRoundingBinary(
+                                smtlib::FPRoundingBinary::Div,
+                                Box::new(smtlib::Exp::FPRoundingMode(mode)),
+                                Box::new(operand(a)),
+                                Box::new(operand(b)),
+                            ));
+                            let reference = z3_unary_op!(Z3_mk_fpa_is_nan, value);
+                            let mut agreement = value.mk_fpa_is_nan().mk_eq(&reference);
+                            agreement.simplify();
+                            assert!(unsafe {
+                                Z3_is_eq_ast(context.z3_ctx, agreement.z3_ast, Ast::mk_bool(&context, true).z3_ast)
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            let modes = [None];
+            for mode in modes {
+                let value = match mode {
+                    None => value.clone(),
+                    Some(mode) => solver.translate_exp(&smtlib::Exp::FPRoundingBinary(
+                        smtlib::FPRoundingBinary::Div,
+                        Box::new(smtlib::Exp::FPRoundingMode(mode)),
+                        Box::new(smtlib::Exp::Var(left)),
+                        Box::new(smtlib::Exp::Var(right)),
+                    )),
+                };
+                let reference = z3_unary_op!(Z3_mk_fpa_is_nan, value);
+                let different = value.mk_fpa_is_nan().mk_eq(&reference).mk_not();
+                unsafe {
+                    let proof = new_z3_solver(context.z3_ctx, Tactic::Qffp.as_c_str(), None);
+                    // 仅独立证明使用保护预算，不参与生产求解器配置。
+                    let parameters = Z3_mk_params(context.z3_ctx);
+                    Z3_params_inc_ref(context.z3_ctx, parameters);
+                    let timeout = CString::new("timeout").unwrap();
+                    Z3_params_set_uint(
+                        context.z3_ctx,
+                        parameters,
+                        Z3_mk_string_symbol(context.z3_ctx, timeout.as_ptr()),
+                        15000,
+                    );
+                    Z3_solver_set_params(context.z3_ctx, proof, parameters);
+                    Z3_params_dec_ref(context.z3_ctx, parameters);
+                    Z3_solver_assert(context.z3_ctx, proof, different.z3_ast);
+                    assert_eq!(
+                        Z3_solver_check(context.z3_ctx, proof),
+                        Z3_L_FALSE,
+                        "全部浮点位型必须等价：{exponent}/{significand}，{mode:?}"
+                    );
+                    Z3_solver_dec_ref(context.z3_ctx, proof);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fp_nan_does_not_rewrite_same_named_uninterpreted_function() {
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        for concrete in [false, true] {
+            let mut solver = Solver::<B64>::new(&context);
+            let info = SourceLoc::unknown();
+            let left = solver.declare_const(smtlib::Ty::Float(11, 53), info);
+            let right = solver.declare_const(smtlib::Ty::Float(11, 53), info);
+            let rounding = solver.declare_const(smtlib::Ty::RoundingMode, info);
+            let args = if concrete {
+                [
+                    Ast::mk_fpa_round_toward_zero(&context),
+                    Ast::mk_fpa_zero(&context, 11, 53, false),
+                    Ast::mk_fpa_zero(&context, 11, 53, false),
+                ]
+            } else {
+                [
+                    solver.translate_exp(&smtlib::Exp::Var(rounding)),
+                    solver.translate_exp(&smtlib::Exp::Var(left)),
+                    solver.translate_exp(&smtlib::Exp::Var(right)),
+                ]
+            };
+            unsafe {
+                let ctx = context.z3_ctx;
+                let name = CString::new("fp.div").unwrap();
+                let domain = args.each_ref().map(|arg| Z3_get_sort(ctx, arg.z3_ast));
+                let declaration =
+                    Z3_mk_func_decl(ctx, Z3_mk_string_symbol(ctx, name.as_ptr()), 3, domain.as_ptr(), domain[1]);
+                let declaration_ast = Z3_func_decl_to_ast(ctx, declaration);
+                Z3_inc_ref(ctx, declaration_ast);
+                let arguments = args.each_ref().map(|arg| arg.z3_ast);
+                let application = Z3_mk_app(ctx, declaration, 3, arguments.as_ptr());
+                Z3_inc_ref(ctx, application);
+                let value = Ast { z3_ast: application, ctx: &context };
+                Z3_dec_ref(ctx, declaration_ast);
+                let expected = z3_unary_op!(Z3_mk_fpa_is_nan, value);
+                assert!(
+                    Z3_is_eq_ast(ctx, value.mk_fpa_is_nan().z3_ast, expected.z3_ast),
+                    "同名同签名的未解释函数必须保持原有NaN判定"
+                );
+            }
+        }
+    }
+
     #[test]
     fn z3_version_comparison_covers_lower_equal_and_higher() {
         for version in [(4, 99, 99, 99), (5, 3, 9, 9), (5, 4, 0, 0), (5, 4, 0, 1), (6, 0, 0, 0)] {

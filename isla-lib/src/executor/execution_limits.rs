@@ -120,7 +120,7 @@ pub struct ExecutionLimits {
     pub path_merging: bool,
     /// 区域内按前态足迹合并全局状态；需要精确寄存器事件顺序的调用方保持关闭。
     pub region_global_state: bool,
-    /// 启用循环区域的断言死端过滤与重新声明槽位活跃性。
+    /// 启用断言死端过滤、重新声明槽位活跃性和预算内含回边区域推演。
     pub region_loop_analysis: bool,
     pub merge_enumeration: crate::config::MergeEnumerationConfig,
     merge_policy: Vec<MergePolicy>,

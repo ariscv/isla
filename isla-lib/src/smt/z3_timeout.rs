@@ -23,6 +23,16 @@ use crate::timeout::{SmtCallStats, SmtOperation, TimeoutSmtDump};
 #[cfg(feature = "smt-thread-interrupt")]
 use z3_sys::Z3_interrupt;
 
+#[cfg(test)]
+thread_local! {
+    static LAST_SOLVER_QUERY: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn last_solver_query() -> (usize, usize) {
+    LAST_SOLVER_QUERY.with(|last| last.get().expect("尚未执行求解查询"))
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum Z3TimeoutError {
     #[cfg_attr(not(feature = "smt-thread-interrupt"), allow(dead_code))]
@@ -293,6 +303,8 @@ pub(super) fn timeout_Z3_solver_check(
     assumptions: &[Z3_ast],
     source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
+    #[cfg(test)]
+    LAST_SOLVER_QUERY.with(|last| last.set(Some((solver as usize, assumptions.len()))));
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe {
         if assumptions.is_empty() {
@@ -314,6 +326,8 @@ pub(super) fn timeout_Z3_solver_check_deadline(
     source_loc: SourceLoc,
     deadline: Duration,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
+    #[cfg(test)]
+    LAST_SOLVER_QUERY.with(|last| last.set(Some((solver as usize, assumptions.len()))));
     let started = Instant::now();
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     let check = || unsafe {
@@ -347,9 +361,15 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
     assumptions: &[Z3_ast],
     source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
+    #[cfg(test)]
+    LAST_SOLVER_QUERY.with(|last| last.set(Some((solver as usize, assumptions.len()))));
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     interruptible_z3_call!(SmtOperation::CheckSatAssuming, source_loc, context, unsafe {
-        Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+        if assumptions.is_empty() {
+            Z3_solver_check(context, solver)
+        } else {
+            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+        }
     })
 }
 

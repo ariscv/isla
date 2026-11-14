@@ -326,3 +326,32 @@ impl From<crate::executor::path_cache::Facts> for FastFacts {
         Self { guard_unique: value.guard_unique, post_unique: value.post_unique, simple_pre: value.simple_pre }
     }
 }
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn pure_shared_dag_dependency_proof_stays_constant() {
+        let value = Sym::from_u32(0);
+        let guard = Sym::from_u32(1);
+        let mut dependencies = Dependencies {
+            definitions: HashMap::new(),
+            inputs: [value, guard].into_iter().collect(),
+            reads: HashMap::new(),
+            cache: HashMap::new(),
+            visiting: HashSet::new(),
+        };
+        let mut previous = value;
+        // 每层引用同一前驱两次，原始数据仍是线性 DAG；确定性证明也必须保持常量。
+        for index in 2..10 {
+            let next = Sym::from_u32(index);
+            dependencies.definitions.insert(
+                next,
+                Exp::Ite(Box::new(Exp::Var(guard)), Box::new(Exp::Var(previous)), Box::new(Exp::Var(previous))),
+            );
+            previous = next;
+        }
+        assert_eq!(dependencies.symbol(previous), Exp::Bool(true), "完整输入已确定的纯计算不应展开成指数证明树");
+    }
+}

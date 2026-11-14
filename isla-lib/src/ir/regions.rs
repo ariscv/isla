@@ -47,6 +47,8 @@ pub enum RegionKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
     pub branch_pc: usize,
+    /// 已完成边界校验的含回边区域；执行层必须使用共享推演预算。
+    pub has_back_edge: bool,
     pub join: RegionPoint,
     /// 入口 Jump 与 join 均不包含在内，按原始 pc 排序。
     pub nodes: BTreeSet<usize>,
@@ -67,6 +69,8 @@ pub enum RegionRejection {
 /// `None` 保留异常边，供诊断和对比使用。`Some(name)` 按边的极性剔除。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RegionOptions<'a> {
+    /// 仅供有预算和完整回滚的执行器使用；默认仍拒绝回边。
+    pub bounded_loops: bool,
     /// 仅区域查询启用：计算正常完成路径的汇合点，断言失败作为死端。
     pub filter_assertion_failures: bool,
     /// 在 Decl/Init 处截断槽位活跃性；默认保留旧的保守分析。
@@ -470,6 +474,7 @@ pub struct FunctionRegions<B> {
     have_exception: Option<Name>,
     filter_assertion_failures: bool,
     recreated_slot_liveness: bool,
+    bounded_loops: bool,
     terminal_calls: Vec<Name>,
     analysis: OnceLock<FunctionAnalysis>,
     regions: HashMap<usize, Result<Arc<Region>, RegionRejection>>,
@@ -480,6 +485,7 @@ impl<B: BV> FunctionRegions<B> {
         Self::with_options(
             instrs,
             RegionOptions {
+                bounded_loops: false,
                 filter_assertion_failures: false,
                 recreated_slot_liveness: false,
                 have_exception: Some(have_exception),
@@ -494,6 +500,7 @@ impl<B: BV> FunctionRegions<B> {
             have_exception: options.have_exception,
             filter_assertion_failures: options.filter_assertion_failures,
             recreated_slot_liveness: options.recreated_slot_liveness,
+            bounded_loops: options.bounded_loops,
             terminal_calls: options.terminal_calls.to_vec(),
             analysis: OnceLock::new(),
             regions: HashMap::new(),
@@ -515,6 +522,7 @@ impl<B: BV> FunctionRegions<B> {
             let cfg = RegionCfg::new(
                 &self.instrs,
                 RegionOptions {
+                    bounded_loops: false,
                     filter_assertion_failures: self.filter_assertion_failures,
                     recreated_slot_liveness: self.recreated_slot_liveness,
                     have_exception: self.have_exception,
@@ -525,6 +533,7 @@ impl<B: BV> FunctionRegions<B> {
             let full_cfg = RegionCfg::new(
                 &self.instrs,
                 RegionOptions {
+                    bounded_loops: false,
                     filter_assertion_failures: false,
                     recreated_slot_liveness: false,
                     have_exception: None,
@@ -665,7 +674,13 @@ impl<B: BV> FunctionRegions<B> {
         }
         // 返回入口的路径由边界校验连同入口一起做 DFS 检查。
         nodes.remove(&branch_pc);
-        cfg.validate_region(branch_pc, join, &nodes)?;
+        // validate_region 先完整校验所有出边，再检查环；只接纳单独报告的回边。
+        // 是否在预算内抵达出口由真实推演决定，不能在静态层假定循环终止。
+        let has_back_edge = match cfg.validate_region(branch_pc, join, &nodes) {
+            Ok(()) => false,
+            Err(RegionRejection::HasBackEdge) if self.bounded_loops => true,
+            Err(reason) => return Err(reason),
+        };
         let mut live_after = HashSet::new();
         let mut boundary = vec![match join {
             RegionPoint::Instruction(pc) => analysis.full_cfg.pcs[pc],
@@ -700,6 +715,7 @@ impl<B: BV> FunctionRegions<B> {
             .collect();
         Ok(Region {
             branch_pc,
+            has_back_edge,
             join,
             nodes,
             kind: if join == RegionPoint::FunctionExit { RegionKind::FunctionReturn } else { RegionKind::Reconvergent },
@@ -729,6 +745,7 @@ mod tests {
     }
     fn options() -> RegionOptions<'static> {
         RegionOptions {
+            bounded_loops: false,
             filter_assertion_failures: false,
             recreated_slot_liveness: false,
             have_exception: Some(HAVE_EXCEPTION),
@@ -773,6 +790,7 @@ mod tests {
         FunctionRegions::with_options(
             body,
             RegionOptions {
+                bounded_loops: false,
                 filter_assertion_failures: true,
                 recreated_slot_liveness: true,
                 have_exception: Some(have_exception),
@@ -1059,6 +1077,7 @@ mod tests {
             let mut unfiltered = FunctionRegions::with_options(
                 &body,
                 RegionOptions {
+                    bounded_loops: false,
                     filter_assertion_failures: false,
                     recreated_slot_liveness: false,
                     have_exception: None,
@@ -1084,6 +1103,7 @@ mod tests {
             let mut regions = FunctionRegions::with_options(
                 &body,
                 RegionOptions {
+                    bounded_loops: false,
                     filter_assertion_failures: false,
                     recreated_slot_liveness: false,
                     have_exception: Some(HAVE_EXCEPTION),
@@ -1124,6 +1144,7 @@ mod tests {
         let mut regions = FunctionRegions::with_options(
             &body,
             RegionOptions {
+                bounded_loops: false,
                 filter_assertion_failures: false,
                 recreated_slot_liveness: false,
                 have_exception: Some(HAVE_EXCEPTION),
@@ -1397,6 +1418,7 @@ mod tests {
             let mut original = FunctionRegions::with_options(
                 &body,
                 RegionOptions {
+                    bounded_loops: false,
                     filter_assertion_failures: false,
                     recreated_slot_liveness: false,
                     have_exception: None,

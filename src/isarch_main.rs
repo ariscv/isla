@@ -585,8 +585,6 @@ fn isla_main() -> i32 {
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
-    isarch::platform::configure(&mut arch, &symtab, &mut isa_config);
-
     if matches!(subcommand, Subcommand::SolveState { .. } | Subcommand::Fuzz { .. }) {
         // solve-state 必须同时保留符号 assert 的 true/false 两臂。
         if !matches.opt_present("fork-assertions") {

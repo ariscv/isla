@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 #[path = "region_loop_merge_tests.rs"]
 mod loop_merge_tests;
 
+#[path = "region_loop_round_review_tests.rs"]
+mod loop_round_review_tests;
+
 #[path = "region_global_state_tests.rs"]
 mod global_state_tests;
 
@@ -1368,6 +1371,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
     frame.region_execution = Some(region_merge::RegionExecution {
         region: Arc::new(crate::ir::regions::Region {
             branch_pc: 0,
+            has_back_edge: false,
             join: crate::ir::regions::RegionPoint::Instruction(1),
             nodes: Default::default(),
             kind: crate::ir::regions::RegionKind::Reconvergent,
@@ -1379,6 +1383,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         remaining: Arc::new(AtomicUsize::new(10)),
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
+        pending_branch: None,
     });
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -3857,6 +3862,7 @@ fn region_merge_f4_real_get_xlpe_diagnosis() {
     let mut regions = crate::ir::regions::FunctionRegions::with_options(
         body,
         crate::ir::regions::RegionOptions {
+            bounded_loops: false,
             filter_assertion_failures: false,
             recreated_slot_liveness: false,
             have_exception: Some(HAVE_EXCEPTION),
@@ -4420,4 +4426,60 @@ fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截�
         .unwrap();
     assert_eq!(output["counted_paths"], 256);
     assert_eq!(output["path_truncated"], true);
+}
+
+#[test]
+fn default_complex_feasibility_keeps_three_results_and_rollback() {
+    const CHILD: &str = "ISLA_FEASIBILITY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_merge_tests::default_complex_feasibility_keeps_three_results_and_rollback",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    crate::smt::configure_tastic(crate::smt::Tactic::Default);
+    let frame = make_frame(vec![]);
+    for limited in [false, true] {
+        let mut config = Config::new();
+        if limited {
+            config.set_param_value("rlimit", "1");
+        }
+        let context = Context::new(config);
+        let mut solver = Solver::<B64>::new(&context);
+        let mut value = crate::primop_util::smt_i128(0);
+        for i in 1..=128 {
+            let bit = solver.declare_const(smtlib::Ty::Bool, info());
+            value =
+                Formula::Ite(Box::new(Formula::Var(bit)), Box::new(crate::primop_util::smt_i128(i)), Box::new(value));
+        }
+        let value = solver.define_const(value, info());
+        let condition = Formula::Eq(Box::new(Formula::Var(value)), Box::new(crate::primop_util::smt_i128(17)));
+        let tx = solver.start_transaction_with_guard(Some(condition.clone()));
+        if limited {
+            assert!(matches!(
+                region_merge::feasible(&frame, &mut solver, &condition, info()),
+                Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. })
+            ));
+        } else {
+            assert!(region_merge::feasible(&frame, &mut solver, &condition, info()).unwrap());
+            assert!(!region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition.clone())), info())
+                .unwrap());
+        }
+        solver.rollback_transaction(tx);
+        if !limited {
+            assert!(region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition)), info()).unwrap());
+        }
+    }
 }

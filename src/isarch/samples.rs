@@ -169,7 +169,7 @@ pub fn path<B: BV>(
     shared: &SharedState<B>,
     instruction: &Val<B>,
     result: &Val<B>,
-    memory: Vec<isla_lib::smt::Event<B>>,
+    trace: &isla_lib::smt::Trace<B>,
 ) -> SamplePath<B> {
     let mut pre: BTreeMap<_, _> = initial
         .iter()
@@ -182,6 +182,27 @@ pub fn path<B: BV>(
     for (name, value) in target.pre_state().iter() {
         pre.insert(isla_lib::zencode::decode(shared.symtab.to_str(*name)), value.clone());
     }
+    // 入口没有初始化的寄存器可能在执行途中首次读取。事件保存的是完整寄存器值，
+    // 即使访问了字段也能补齐前态；写入之后的读取不得倒灌成输入。
+    let events = trace.to_vec();
+    let mut written = std::collections::HashSet::new();
+    for event in events.iter().rev() {
+        match event {
+            isla_lib::smt::Event::WriteReg(name, ..) => {
+                written.insert(*name);
+            }
+            isla_lib::smt::Event::ReadReg(name, _, value) if !written.contains(name) => {
+                pre.entry(isla_lib::zencode::decode(shared.symtab.to_str(*name))).or_insert_with(|| value.clone());
+            }
+            isla_lib::smt::Event::AssumeReg(name, accessor, value)
+                if accessor.is_empty() && !written.contains(name) =>
+            {
+                pre.entry(isla_lib::zencode::decode(shared.symtab.to_str(*name))).or_insert_with(|| value.clone());
+            }
+            _ => (),
+        }
+    }
+    let memory = events.into_iter().rev().filter(|event| event.is_memory_read_or_write()).cloned().collect();
     let post = frame
         .regs()
         .iter()
@@ -273,6 +294,61 @@ pub fn isa_state<B: BV>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn samples_preserve_lazy_register_input_without_treating_writes_as_input() {
+        use isla_lib::bitvector::b64::B64;
+        use isla_lib::ir::{Bindings, Symtab, Ty, UVal, TOP_LEVEL_LET};
+        use isla_lib::smt::{Config, Context, Event, Model, SmtResult, Solver};
+        use isla_lib::source_loc::SourceLoc;
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let mut symtab = Symtab::new();
+        let encoded = isla_lib::zencode::encode("lazy_input");
+        let register = symtab.intern(&encoded);
+        let mut shared = SharedState::<B64>::empty(symtab);
+        shared.registers.insert(register, Ty::Bits(64));
+        for (read, assume, write) in
+            [(true, false, false), (true, false, true), (false, true, true), (false, false, true)]
+        {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::new(&context);
+            let mut initial = RegisterBindings::new();
+            initial.insert(register, false, UVal::Uninit(&Ty::Bits(64)));
+            let mut frame = LocalFrame::new(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
+            frame.add_regs(&initial);
+            frame.add_lets(&Bindings::default());
+            let before = if read || assume {
+                let value = frame
+                    .regs_mut()
+                    .get(register, &shared, &mut solver, SourceLoc::unknown())
+                    .unwrap()
+                    .unwrap()
+                    .clone();
+                solver.add_event(if assume {
+                    Event::AssumeReg(register, vec![], value.clone())
+                } else {
+                    Event::ReadReg(register, vec![], value.clone())
+                });
+                Some(value)
+            } else {
+                None
+            };
+            if write {
+                let value = Val::Bits(B64::new(7, 64));
+                frame.regs_mut().assign(register, value.clone(), &shared);
+                solver.add_event(Event::WriteReg(register, vec![], value));
+            }
+            let target = super::super::target::RV64::<B64>::default();
+            let sample = path(&target, &initial, &frame, &shared, &Val::Unit, &Val::Unit, solver.trace());
+            assert_eq!(sample.pre.get("lazy_input"), before.as_ref(), "懒初始化读取的原值必须进入样本前态");
+            if write {
+                assert_eq!(sample.post["lazy_input"], Val::Bits(B64::new(7, 64)));
+            }
+            assert_eq!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat);
+            let concrete = sample.materialize(&mut Model::new(&solver), &shared, "regression", 0, None).unwrap();
+            assert_eq!(sample.check(&mut solver, &shared, &concrete).unwrap(), Some(true));
+        }
+    }
+
     #[test]
     fn resident_fast_requires_resident_input() {
         assert!(SampleOptions { resident_fast: true, ..Default::default() }.validate().is_err());

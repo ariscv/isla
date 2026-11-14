@@ -542,6 +542,7 @@ impl<V: PartialEq> Exp<V> {
                 match extract_bool(&guard) {
                     Some(true) => *true_exp,
                     Some(false) => *false_exp,
+                    None if true_exp == false_exp => *true_exp,
                     None => Ite(guard, true_exp, false_exp),
                 }
             }
@@ -1169,6 +1170,18 @@ mod tests {
 
     fn exp_eval_unchanged(exp: Exp<Sym>) {
         assert_eq!(exp, exp.clone().eval());
+    }
+
+    #[test]
+    fn exp_eval_equal_ite_arms_preserves_solver_semantics() {
+        let guard = Sym::from_u32(0);
+        let value = Sym::from_u32(1);
+        exp_eval(&[(guard, Ty::Bool)], Ite(Box::new(Var(guard)), Box::new(Bool(true)), Box::new(Bool(true))));
+        exp_eval(
+            &[(guard, Ty::Bool), (value, Ty::BitVec(64))],
+            Ite(Box::new(Var(guard)), Box::new(Var(value)), Box::new(Var(value))),
+        );
+        exp_eval_unchanged(Ite(Box::new(Var(guard)), Box::new(Bool(true)), Box::new(Bool(false))));
     }
 
     #[test]

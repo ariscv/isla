@@ -24,9 +24,11 @@ def main():
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--sail', default='sail')
     parser.add_argument('--name', default='rv64d')
+    parser.add_argument('--allow-dirty', action='store_true', help='允许未提交模型，保存完整源码快照与差异作为来源记录')
     args = parser.parse_args()
     repo = args.model.resolve()
-    if subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain']):
+    model_status = subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain'], text=True)
+    if model_status and not args.allow_dirty:
         parser.error('模型仓有未提交改动，请先固定来源提交')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -35,6 +37,10 @@ def main():
     sail = Path(shutil.which(args.sail) or args.sail).resolve()
     config, plugin = args.config.resolve(), args.plugin.resolve()
     sources = {str(p.relative_to(repo/'model')):digest(p) for p in (repo/'model').rglob('*') if p.is_file()}
+    if model_status:
+        shutil.copytree(repo/'model', output/'model-source')
+        (output/'model.patch').write_bytes(subprocess.check_output(['git', '-C', str(repo), 'diff', 'HEAD', '--', 'model']))
+
     command = [str(sail), '-plugin', str(plugin), '-isla', '-D', 'SYMBOLIC',
                '--strict-var', '--strict-bitvector', '--strict-exponentials',
                '--require-version', '0.20.1', '--memo-z3-path', str(output/'sail_smt_cache'), '--all-modules']
@@ -42,6 +48,7 @@ def main():
         command += ['--isla-preserve', name]
     command += ['--isla-output-dir', str(output), '--config', str(config), '-o', args.name, 'riscv.sail_project']
     record = {'model_commit':subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip(),
+              'model_dirty':bool(model_status), 'model_status':model_status,
               'model_files':sources, 'config_sha256':digest(config), 'plugin_sha256':digest(plugin),
               'sail_launcher_sha256':digest(sail), 'sail_version':subprocess.check_output([str(sail), '--version'], text=True).strip(),
               'command':command}

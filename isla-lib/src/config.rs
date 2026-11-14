@@ -79,14 +79,17 @@ fn allowed_table_keys(config: &toml::value::Table, root: &str, allowed_keys: &[&
     Ok(())
 }
 
-/// We make use of various external tools like an assembler/objdump utility. We want to make sure
-/// they are available.
+/// 仅在真正调用工具时查找程序，不让求解等无工具路径依赖宿主机工具链。
 fn find_tool_path<P>(program: P) -> Result<PathBuf, String>
 where
     P: AsRef<Path>,
 {
     if program.as_ref().is_absolute() {
-        Ok(program.as_ref().to_path_buf())
+        if program.as_ref().is_file() {
+            Ok(program.as_ref().to_path_buf())
+        } else {
+            Err(format!("工具路径不存在：{}", program.as_ref().display()))
+        }
     } else {
         env::var_os("PATH")
             .and_then(|paths| {
@@ -105,15 +108,23 @@ where
 
 #[derive(Debug)]
 pub struct Tool {
-    pub executable: PathBuf,
+    pub executable: Option<PathBuf>,
     pub options: Vec<String>,
 }
 
 impl Tool {
-    pub fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.executable);
+    pub fn resolve(&self, required_by: &str) -> Result<PathBuf, String> {
+        let caller = env::args().next().expect("进程参数必须包含程序名");
+        let program = self.executable.as_ref().ok_or_else(|| format!("{caller}：{required_by} 需要的工具未配置"))?;
+        find_tool_path(program).map_err(|error| {
+            format!("{caller}：{required_by} 需要工具命令 {} {}：{error}", program.display(), self.options.join(" "))
+        })
+    }
+
+    pub fn command(&self, required_by: &str) -> Result<Command, String> {
+        let mut cmd = Command::new(self.resolve(required_by)?);
         cmd.args(&self.options);
-        cmd
+        Ok(cmd)
     }
 }
 
@@ -753,12 +764,13 @@ pub fn get_encoding_slices(config: &Value) -> Result<Option<Vec<EncodingSliceCon
 
 fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
     match config.get(tool) {
-        Some(Value::String(tool)) => {
-            let mut words = tool.split_whitespace();
+        Some(Value::String(command)) => {
+            let mut words = command.split_whitespace();
             let program = words.next().ok_or_else(|| format!("Toolchain option {} cannot be an empty string", tool))?;
-            Ok(Tool { executable: find_tool_path(program)?, options: words.map(|w| w.to_string()).collect() })
+            Ok(Tool { executable: Some(PathBuf::from(program)), options: words.map(|w| w.to_string()).collect() })
         }
-        _ => Err(format!("Toolchain option {} must be specified", tool)),
+        None => Ok(Tool { executable: None, options: Vec::new() }),
+        _ => Err(format!("Toolchain option {} must be a string", tool)),
     }
 }
 
@@ -2575,13 +2587,13 @@ pub struct ISAConfig<B> {
     pub pc: Name,
     /// Map from cat sets to register event kinds
     pub register_event_sets: HashMap<String, Vec<RegisterKind>>,
-    /// A path to an assembler for the architecture
+    /// 配置中的汇编器命令；调用时才解析路径。
     pub assembler: Tool,
-    /// A path to an objdump for the architecture
+    /// 配置中的 objdump 命令；调用时才解析路径。
     pub objdump: Tool,
-    /// A path to an nm for the architecture
+    /// 配置中的 nm 命令；调用时才解析路径。
     pub nm: Tool,
-    /// A path to a linker for the architecture
+    /// 配置中的链接器命令；调用时才解析路径。
     pub linker: Tool,
     /// The base address for the page tables
     pub page_table_base: u64,
@@ -4333,6 +4345,67 @@ fcsr = "0b010_?????"
 #[cfg(test)]
 mod initial_constraints_tests {
     use super::*;
+
+    #[test]
+    fn rv64_initial_domain_preserves_all_writable_vstart_values() {
+        use crate::bitvector::{b64::B64, BV};
+        use crate::ir::Val;
+        use crate::smt::{smtlib, Config, Context, SmtResult, Solver};
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let configs = [
+            include_str!("../../configs/riscv64_difftest.toml"),
+            include_str!("../../configs/riscv64_difftest_fd.toml"),
+            include_str!("../../configs/riscv64_difftest_vabs_v.toml"),
+        ];
+        for text in configs {
+            let config = text.parse::<Value>().unwrap();
+            let constraints: Vec<_> = config["constraints"]["initial"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .filter(|expression| expression.contains("vstart"))
+                .map(|expression| crate::smt_parser::ExpParser::new().parse(expression).unwrap())
+                .collect();
+            assert!(!constraints.is_empty(), "RV64 初态必须声明模型可写的 vstart 完整范围");
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let info = crate::source_loc::SourceLoc::unknown();
+            let vstart = solver.declare_bitvector(64, info);
+            for constraint in constraints {
+                let expression = constraint
+                    .map_var(&mut |location| -> Result<_, ()> {
+                        assert_eq!(location, &Loc::Id("zvstart".to_string()));
+                        Ok(smtlib::Exp::Var(vstart))
+                    })
+                    .unwrap();
+                solver.assert(expression);
+            }
+            // 当前模型 VLEN=128，set_vstart 将低7位零扩展；128个可写值全部保留。
+            for value in 0..128 {
+                assert_eq!(
+                    solver.check_sat_with(
+                        &smtlib::Exp::Eq(
+                            Box::new(smtlib::Exp::Var(vstart)),
+                            Box::new(smtlib::Exp::Bits64(B64::new(value, 64))),
+                        ),
+                        info,
+                    ),
+                    SmtResult::Sat,
+                    "合法起点 {value}，包括大于 vl 的起点，不得固定或删去"
+                );
+            }
+            let outside = smtlib::Exp::Bvuge(
+                Box::new(smtlib::Exp::Var(vstart)),
+                Box::new(smtlib::Exp::Bits64(B64::new(128, 64))),
+            );
+            assert_eq!(solver.check_sat_with(&outside, info), SmtResult::Unsat, "不可写的高位必须为零");
+            // 沿真实原语链验证循环入口窄化；不放宽真实整数溢出检查。
+            let integer =
+                crate::primop::unary_primops()["sail_unsigned"](Val::Symbolic(vstart), &mut solver, info).unwrap();
+            assert!(crate::primop::unary_primops()["%i->%i64"](integer, &mut solver, info).is_ok());
+        }
+    }
     #[test]
     fn initial_constraints_share_reset_parser_and_validate_input() {
         let value: Value = r#"[constraints]
@@ -4346,5 +4419,96 @@ reset = ["= ((_ extract 35 34) status.bits) #b10"]
         for text in ["initial = true", "initial = [1]", r#"initial = ["(broken"]"#] {
             assert!(get_constraints(&format!("[constraints]\n{text}").parse().unwrap(), "initial").is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_path_tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+
+    #[test]
+    fn invoking_a_missing_tool_names_the_command_and_role() {
+        for role in ["assembler", "objdump", "nm", "linker"] {
+            let program = format!("isla-test-missing-{role}");
+            let config: Value = format!("{role} = '{program} --configured-option'").parse().unwrap();
+            let tool = get_tool_path(&config, role).expect("配置加载不查找工具");
+            let context = format!("测试调用入口 {role}");
+            let error = tool.command(&context).unwrap_err();
+            assert!(error.contains(&context) && error.contains(&program), "{error}");
+            assert!(error.contains("--configured-option"), "错误应保留配置命令：{error}");
+            let missing = get_tool_path(&"".parse::<Value>().unwrap(), role).unwrap();
+            let error = missing.command(&context).unwrap_err();
+            assert!(error.contains(&context) && error.contains("未配置"), "{error}");
+        }
+    }
+
+    #[test]
+    fn missing_absolute_tool_path_reports_the_calling_command() {
+        let tool = Tool { executable: Some(PathBuf::from("/isla-test-no-toolchain/assembler")), options: vec![] };
+        let error = tool.command("测试绝对路径 assembler").unwrap_err();
+        assert!(error.contains("测试绝对路径 assembler") && error.contains("/isla-test-no-toolchain/assembler"));
+    }
+
+    #[test]
+    fn configured_options_are_preserved_when_the_tool_is_invoked() {
+        let config: Value = "assembler = '/bin/echo 配置参数'".parse().unwrap();
+        let tool = get_tool_path(&config, "assembler").unwrap();
+        let output = tool.command("测试实际调用 assembler").unwrap().arg("调用参数").output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "配置参数 调用参数");
+        assert!(get_tool_path(&"assembler = 7".parse::<Value>().unwrap(), "assembler").is_err());
+        assert!(get_tool_path(&"assembler = ''".parse::<Value>().unwrap(), "assembler").is_err());
+    }
+
+    #[test]
+    fn config_loading_does_not_require_tools_in_path() {
+        // 子进程隔离 PATH，不修改并行测试共享的环境。
+        if env::var_os("ISLA_LAZY_TOOL_TEST_CHILD").is_none() {
+            let result = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tool_path_tests::config_loading_does_not_require_tools_in_path",
+                    "--nocapture",
+                ])
+                .env("ISLA_LAZY_TOOL_TEST_CHILD", "1")
+                .env("PATH", "/isla-test-no-toolchain")
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+            return;
+        }
+        let mut symtab = Symtab::new();
+        symtab.intern("zPC");
+        let types = IRTypeInfo::new::<B64>(&[]);
+        let config = r#"pc = "PC"
+[[toolchain]]
+name = "default"
+assembler = "isla-test-missing-as -march=rv64imac"
+objdump = "isla-test-missing-objdump"
+nm = "isla-test-missing-nm"
+linker = "isla-test-missing-ld"
+[mmu]
+page_table_base = "0"
+page_size = "4096"
+s2_page_table_base = "0"
+s2_page_size = "4096"
+[threads]
+base = "0"
+top = "4096"
+stride = "4096"
+[symbolic_addrs]
+base = "4096"
+top = "8192"
+stride = "16"
+"#;
+        let isa = ISAConfig::<B64>::parse(config, None, &symtab, &types).expect("加载配置不得查找工具");
+        assert_eq!(isa.assembler.options, ["-march=rv64imac"]);
+    }
+
+    #[test]
+    fn unused_tools_can_be_omitted_from_toolchain() {
+        let config: Value = "[[toolchain]]\nname = 'default'".parse().unwrap();
+        get_toolchain(&config, None).expect("不使用工具时不要求配置四个工具");
     }
 }

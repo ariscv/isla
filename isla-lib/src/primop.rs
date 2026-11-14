@@ -141,14 +141,14 @@ fn smt_u64_width<V>(value: u64, width: u32) -> Exp<V> {
 // 例：若已有 assert(num_elem == 1 | num_elem == 2 | num_elem == 4)，
 // `0 < num_elem` 会返回 true，而 `num_elem == 2` 仍返回 symbolic。
 fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match solver.check_sat_with(&Exp::Not(Box::new(exp.clone())), info) {
+    match solver.check_sat_with_for_bool(&Exp::Not(Box::new(exp.clone())), info) {
         SmtResult::Unsat => return Ok(Val::Bool(true)),
         SmtResult::Sat => (),
         SmtResult::Unknown => return solver.define_const(exp, info).into(),
         SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
 
-    match solver.check_sat_with(&exp, info) {
+    match solver.check_sat_with_for_bool(&exp, info) {
         SmtResult::Unsat => Ok(Val::Bool(false)),
         SmtResult::Sat | SmtResult::Unknown => solver.define_const(exp, info).into(),
         SmtResult::Error(error) => Err(ExecError::Smt(error)),
@@ -397,8 +397,8 @@ fn check_integer_conversion<B: BV>(
     info: SourceLoc,
 ) -> Result<(), ExecError> {
     if let Some(in_range) = integer_conversion_in_range(f, value, solver, info)? {
-        if solver.check_sat_with(&Exp::Not(Box::new(in_range.clone())), info).is_sat()? {
-            if !solver.check_sat_with(&in_range, info).is_sat()? {
+        if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_range.clone())), info).is_sat()? {
+            if !solver.check_sat_with_for_range(&in_range, info).is_sat()? {
                 return Err(ExecError::Overflow);
             }
             return Err(ExecError::IntegerConversion(in_range, info));
@@ -2292,8 +2292,8 @@ pub(crate) fn vector_access<B: BV>(
                 } else {
                     Exp::Bvult(Box::new(Exp::Var(*index)), Box::new(smt_u64_width(u64::from(length), width)))
                 };
-                if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
-                    if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+                if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                    if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
                         return Err(ExecError::OutOfBounds("vector_access"));
                     }
                     return Err(ExecError::SymbolicLength("vector_access", info));
@@ -2380,8 +2380,8 @@ pub(crate) fn vector_access<B: BV>(
             } else {
                 Exp::Bvult(Box::new(Exp::Var(n)), Box::new(smt_u64_width(len, width)))
             };
-            if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
-                if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+            if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
                     return Err(ExecError::OutOfBounds("vector_access"));
                 }
                 return Err(ExecError::SymbolicLength("vector_access", info));
@@ -2441,8 +2441,8 @@ fn check_slice_update_bounds<B: BV>(
     };
     assert!(matches!(width, 64 | 128), "更新索引必须是机器整数或整数");
     let in_bounds = Exp::Bvule(Box::new(index), Box::new(smt_u64_width(u64::from(max_index), width)));
-    if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
-        if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+    if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+        if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
             return Err(ExecError::OutOfBounds("vector_update"));
         }
         return Err(ExecError::RetryCondition(in_bounds, info));
@@ -2783,8 +2783,8 @@ pub fn vector_update<B: BV>(
                     Box::new(Exp::Var(n)),
                     Box::new(smt_u64_width(u64::try_from(vec.len()).unwrap(), width)),
                 );
-                if solver.check_sat_with(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
-                    if !solver.check_sat_with(&in_bounds, info).is_sat()? {
+                if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                    if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
                         return Err(ExecError::OutOfBounds("vector_update"));
                     }
                     return Err(ExecError::SymbolicLength("vector_update", info));
@@ -3024,6 +3024,13 @@ pub fn eq_anything<B: BV>(
         (Val::Bool(lhs), Val::Bool(rhs)) => Ok(Val::Bool(lhs == rhs)),
         (Val::I128(lhs), Val::I128(rhs)) => Ok(Val::Bool(lhs == rhs)),
         (Val::I64(lhs), Val::I64(rhs)) => Ok(Val::Bool(lhs == rhs)),
+        // 整数具体化可能保留同宽 BV 表示，须与上面的符号等式保持一致。
+        (Val::Bits(bits), Val::I64(integer)) | (Val::I64(integer), Val::Bits(bits)) if bits.len() == 64 => {
+            Ok(Val::Bool(bits.signed() == i128::from(integer)))
+        }
+        (Val::Bits(bits), Val::I128(integer)) | (Val::I128(integer), Val::Bits(bits)) if bits.len() == 128 => {
+            Ok(Val::Bool(bits.signed() == integer))
+        }
         (Val::Struct(lhs), Val::Struct(rhs)) => {
             let mut vars = vec![];
             for (k, lhs_v) in lhs {
@@ -5092,12 +5099,16 @@ fn isla_count_ones<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
         Val::Bits(bits) => Ok(Val::I128(bits.to_vec().iter().filter(|bit| **bit).count() as i128)),
         bits @ (Val::Symbolic(_) | Val::MixedBits(_)) => {
             let bits_exp = smt_value(&bits, info)?;
-            let mut count = smt_i128(0);
+            // 计数和任意前缀和均在 0..=len 内，按此范围累加不会溢出。
+            // 先扩成 128 位再相加会让含枚举状态的求解器证明大量不可达进位。
+            let count_width = (u32::BITS - len.leading_zeros()).max(1);
+            let mut count = smt_zeros(i128::from(count_width));
             for bit in 0..len {
-                let bit_value = Exp::ZeroExtend(127, Box::new(Exp::Extract(bit, bit, Box::new(bits_exp.clone()))));
+                let bit_value =
+                    Exp::ZeroExtend(count_width - 1, Box::new(Exp::Extract(bit, bit, Box::new(bits_exp.clone()))));
                 count = Exp::Bvadd(Box::new(count), Box::new(bit_value));
             }
-            solver.define_const(count, info).into()
+            solver.define_const(Exp::ZeroExtend(128 - count_width, Box::new(count)), info).into()
         }
         value => Err(ExecError::Type(format!("isla_count_ones {:?}", value), info)),
     }
@@ -6383,6 +6394,37 @@ mod tests {
     }
 
     #[test]
+    fn integer_equality_matches_concretized_bitvector_representation() -> Result<(), ExecError> {
+        use crate::bitvector::b129::B129;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B129>::new(&context);
+        for (width, values) in [
+            (64, vec![i128::from(i64::MIN), -1, 0, 1, 2, 4, 8, i128::from(i64::MAX)]),
+            (128, vec![i128::MIN, -1, 0, 1, i128::MAX]),
+        ] {
+            for value in values {
+                let bits = Val::Bits(B129::get_slice_int(width, value, 0));
+                let integer = if width == 64 { Val::I64(value as i64) } else { Val::I128(value) };
+                assert_eq!(op_eq(bits.clone(), integer.clone(), &mut solver, SourceLoc::unknown())?, Val::Bool(true));
+                assert_eq!(op_eq(integer.clone(), bits.clone(), &mut solver, SourceLoc::unknown())?, Val::Bool(true));
+                assert_eq!(op_neq(bits.clone(), integer, &mut solver, SourceLoc::unknown())?, Val::Bool(false));
+                let other = if width == 64 {
+                    Val::I64((value as i64).wrapping_add(1))
+                } else {
+                    Val::I128(value.wrapping_add(1))
+                };
+                assert_eq!(op_eq(bits, other, &mut solver, SourceLoc::unknown())?, Val::Bool(false));
+            }
+        }
+        assert_eq!(
+            op_eq(Val::Bits(B129::new(1, 32)), Val::I64(1), &mut solver, SourceLoc::unknown())?,
+            Val::Bool(false)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn i64_to_i128_accepts_bits_as_signed_i64() -> Result<(), ExecError> {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
@@ -6576,6 +6618,100 @@ mod tests {
             value => panic!("expected vector rev8 result, got {:?}", value),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn count_ones_symbolic_narrowing_proves_bounds_without_wide_carries() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut cfg = Config::new();
+        // 窄化只需确认计数范围；不应为不可达的高位进位消耗长时求解。
+        cfg.set_param_value("timeout", "1000");
+        let ctx = Context::new(cfg);
+        for width in [32, 64] {
+            let mut solver = Solver::<B129>::new_seeded(&ctx, 0);
+            let enum_id = solver.get_enum(crate::ir::Name::from_u32(2000 + width), 5);
+            let mode = solver.declare_const(Ty::Enum(enum_id), SourceLoc::unknown());
+            solver.assert(
+                [0, 2, 4]
+                    .into_iter()
+                    .map(|member| {
+                        Exp::Eq(
+                            Box::new(Exp::Var(mode)),
+                            Box::new(Exp::Enum(crate::smt::EnumMember { enum_id, member })),
+                        )
+                    })
+                    .reduce(|left, right| Exp::Or(Box::new(left), Box::new(right)))
+                    .unwrap(),
+            );
+            let index = solver.declare_bitvector(5, SourceLoc::unknown());
+            let mut selected = smt_zeros(i128::from(width));
+            for register in 1..32 {
+                let value = solver.declare_bitvector(width, SourceLoc::unknown());
+                selected = Exp::Ite(
+                    Box::new(Exp::Eq(Box::new(Exp::Var(index)), Box::new(smtlib::bits64(register, 5)))),
+                    Box::new(Exp::Var(value)),
+                    Box::new(selected),
+                );
+            }
+            let input = solver.define_const(selected, SourceLoc::unknown());
+            // 真实执行在计数前已有可满足性查询，须覆盖增量求解状态。
+            assert!(solver
+                .check_sat_with(
+                    &Exp::Not(Box::new(Exp::Eq(Box::new(Exp::Var(index)), Box::new(smtlib::bits64(0, 5))))),
+                    SourceLoc::unknown()
+                )
+                .is_sat()?);
+            let count = isla_count_ones(Val::Symbolic(input), &mut solver, SourceLoc::unknown())?;
+            i128_to_i64(count, &mut solver, SourceLoc::unknown())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn count_ones_preserves_values_and_power_of_two_boundaries() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let info = SourceLoc::unknown();
+        for width in [1, 2, 3, 7, 8, 31, 32, 63, 64, 127, 128, 129, 256] {
+            let mut solver = Solver::<B129>::new(&ctx);
+            let input = solver.declare_bitvector(width, info);
+            let count = isla_count_ones(Val::Symbolic(input), &mut solver, info)?;
+            let Val::Symbolic(result) = count else { panic!("符号位计数必须返回符号整数") };
+            assert_eq!(solver.length(result), Some(128));
+            i128_to_i64(Val::Symbolic(result), &mut solver, info)?;
+            for period in [0, 1, 2, width + 1] {
+                let bits: Vec<bool> = (0..width).map(|bit| period != 0 && bit % period == 0).collect();
+                let expected = bits.iter().filter(|bit| **bit).count() as i128;
+                let input_matches = Exp::Eq(Box::new(Exp::Var(input)), Box::new(Exp::Bits(bits)));
+                let wrong_count = Exp::Neq(Box::new(Exp::Var(result)), Box::new(smt_i128(expected)));
+                assert_eq!(
+                    solver.check_sat_with(&Exp::And(Box::new(input_matches), Box::new(wrong_count)), info),
+                    SmtResult::Unsat
+                );
+            }
+            if width <= 8 {
+                // 独立的逐位整数求和，对小位宽证明全部输入等价。
+                let mut reference = smt_i128(0);
+                for bit in 0..width {
+                    reference = Exp::Bvadd(
+                        Box::new(reference),
+                        Box::new(Exp::Ite(
+                            Box::new(Exp::Eq(
+                                Box::new(Exp::Extract(bit, bit, Box::new(Exp::Var(input)))),
+                                Box::new(smtlib::bits64(1, 1)),
+                            )),
+                            Box::new(smt_i128(1)),
+                            Box::new(smt_i128(0)),
+                        )),
+                    );
+                }
+                assert_eq!(
+                    solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(result)), Box::new(reference)), info),
+                    SmtResult::Unsat
+                );
+            }
+        }
         Ok(())
     }
 

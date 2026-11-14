@@ -1211,11 +1211,13 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'collector: 'scope,
     {
         self.pending_tasks.fetch_add(1, Ordering::AcqRel);
+        self.shared_state.execution_stats.task_submitted();
         if self.try_reserve_thread() {
             self.spawn_reserved_task(scope, task);
         } else {
             let mut queued = self.queued_tasks.lock().unwrap();
             queued.push_back(task);
+            self.shared_state.execution_stats.task_queue_changed(queued.len());
         }
     }
 
@@ -1263,9 +1265,7 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
-        let mut cfg = Config::new();
-        cfg.set_param_value("model", "true");
-        let ctx = Context::new(cfg);
+        let ctx = Context::new(Config::new());
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
             solver.add_event(event);
@@ -1293,6 +1293,7 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
+        self.shared_state.execution_stats.task_completed();
         let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
         self.active_threads.fetch_sub(1, Ordering::AcqRel);
 
@@ -1341,8 +1342,10 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
                     .is_ok()
                 {
                     for _ in 0..batch {
-                        to_spawn.push(queued.pop_front().unwrap());
+                        // 优先继续最近分叉，避免宽前沿同时驻留；所有兄弟任务仍完整保留。
+                        to_spawn.push(queued.pop_back().unwrap());
                     }
+                    self.shared_state.execution_stats.task_queue_changed(queued.len());
                     break;
                 }
             }
@@ -2170,6 +2173,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 )? {
                                     region_merge::RegionResult::Merged => continue 'main_loop,
                                     region_merge::RegionResult::Dead => return Ok(Run::Dead),
+                                    region_merge::RegionResult::Suspended => return Ok(Run::Suspended),
                                     region_merge::RegionResult::Rejected => (),
                                 }
                             }
@@ -3213,9 +3217,7 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
-        let mut cfg = Config::new();
-        cfg.set_param_value("model", "true");
-        let ctx = Context::new(cfg);
+        let ctx = Context::new(Config::new());
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
             solver.add_event(event);
@@ -3943,6 +3945,7 @@ mod tests {
     mod review33_tests;
     mod review35_tests;
     mod symbolic_ctor_unwrap_tests;
+    mod task_queue_tests;
 
     mod review26_tests {
         use super::*;
@@ -11442,7 +11445,6 @@ mod tests {
     use super::*;
     use crate::config::{ISAConfig, Tool};
     use crate::source_loc::SourceRegion;
-    use std::path::PathBuf;
 
     const REAL_RV64D_ZRX_IR: &str = r#"
 val zz5i64zDzKz5i = "%i64->%i" : (%i64) ->  %i
@@ -12154,7 +12156,7 @@ fn zcaller(za, zb) {
     }
 
     fn empty_tool() -> Tool {
-        Tool { executable: PathBuf::new(), options: Vec::new() }
+        Tool { executable: None, options: Vec::new() }
     }
 
     fn empty_isa_config() -> ISAConfig<B64> {
@@ -12714,6 +12716,7 @@ fn zcaller(za, zb) {
         Ok(match result {
             region_merge::RegionResult::Merged => Some(frame.pc),
             region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
+            region_merge::RegionResult::Suspended => panic!("最外层不能挂起循环分叉"),
         })
     }
 
@@ -13497,6 +13500,107 @@ fn zcaller(za, zb) {
             &shared_state,
             &mut solver,
         )
+    }
+
+    #[test]
+    fn assertion_message_formatting_does_not_enumerate_unused_inputs() {
+        let decimal = test_name(19000);
+        let concat = test_name(19001);
+        let bits = test_name(19002);
+        let integer = test_name(19003);
+        let message = test_name(19004);
+        let tagged = test_name(19005);
+        let unit = test_name(19006);
+        for (condition, observed) in [(true, false), (false, false), (true, true), (false, true)] {
+            let mut defs = vec![
+                crate::ir::Def::Extern(decimal, false, "dec_str".into(), vec![Ty::I128], Ty::String),
+                crate::ir::Def::Extern(concat, false, "concat_str".into(), vec![Ty::String, Ty::String], Ty::String),
+                crate::ir::Def::Fn(
+                    TOP_LEVEL_LET,
+                    vec![],
+                    vec![
+                        Instr::Decl(bits, Ty::Bits(2), info()),
+                        Instr::Decl(integer, Ty::I128, info()),
+                        Instr::PrimopUnary(
+                            Loc::Id(integer),
+                            primop::unary_primops()["sail_unsigned"],
+                            Exp::Id(bits),
+                            info(),
+                        ),
+                        Instr::Decl(message, Ty::String, info()),
+                        Instr::Call(Loc::Id(message), false, decimal, vec![Exp::Id(integer)], info()),
+                        Instr::Decl(tagged, Ty::String, info()),
+                        Instr::Call(
+                            Loc::Id(tagged),
+                            false,
+                            concat,
+                            vec![Exp::String("value=".into()), Exp::Id(message)],
+                            info(),
+                        ),
+                        Instr::Decl(unit, Ty::Unit, info()),
+                        Instr::Call(
+                            Loc::Id(unit),
+                            false,
+                            SAIL_ASSERT,
+                            vec![Exp::Bool(condition), Exp::Id(tagged)],
+                            info(),
+                        ),
+                        if observed {
+                            Instr::PrimopBinary(
+                                Loc::Id(RETURN),
+                                primop::binary_primops()["eq_string"],
+                                Exp::Id(tagged),
+                                Exp::String("value=1".into()),
+                                info(),
+                            )
+                        } else {
+                            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info())
+                        },
+                        Instr::End,
+                    ],
+                ),
+            ];
+            crate::ir::assertions_to_jumps(&mut defs);
+            let crate::ir::Def::Fn(_, _, mut program) = defs.pop().unwrap() else { panic!("必须保留测试函数") };
+            // 沿用加载期原语绑定；保留未消除的调用，以真实复现旧实现的四值枚举。
+            for instr in &mut program {
+                if let Instr::Call(loc, false, function, args, source) = instr {
+                    if *function == decimal {
+                        *instr = Instr::PrimopUnary(
+                            loc.clone(),
+                            primop::unary_primops()["dec_str"],
+                            args[0].clone(),
+                            *source,
+                        );
+                    } else if *function == concat {
+                        *instr = Instr::PrimopBinary(
+                            loc.clone(),
+                            primop::binary_primops()["concat_str"],
+                            args[0].clone(),
+                            args[1].clone(),
+                            *source,
+                        );
+                    }
+                }
+            }
+            let results = run_all_with_shared_state(
+                program,
+                ExecutionLimits::default().with_path_merging(true),
+                empty_shared_state(),
+            );
+            assert_eq!(results.len(), if observed { 4 } else { 1 }, "只有实际读取字符串的消费者才能触发四值枚举");
+            if condition {
+                assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bool(true))))));
+                if observed {
+                    assert!(results.iter().any(|result| matches!(result, Ok(Run::Finished(Val::Bool(false))))));
+                }
+            } else {
+                assert!(
+                    results.iter().all(|result| matches!(result, Err(ExecError::AssertionFailure(..)))),
+                    "断言失败路径必须保留"
+                );
+            }
+        }
     }
 
     fn run_all_with_shared_state<'ir>(
@@ -14698,6 +14802,25 @@ fn zmemreadfork(zu) {
             &collector,
         );
         assert_eq!(queued.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn independent_roots_keep_distinct_signatures_after_forks_and_continuations() {
+        let frame = make_frame(Vec::new());
+        assert_eq!(frame.clone().with_path_root(0, 1).path_signature(), frame.path_signature());
+        let mut signatures = HashSet::new();
+        for root in 0..3 {
+            for suffix in 0..4 {
+                let mut branch = frame.clone().with_path_root(root, 3);
+                for bit in (0..2).rev() {
+                    Arc::make_mut(&mut branch.execution_limit_state).advance_path_signature(suffix & (1 << bit) != 0);
+                }
+                assert!(signatures.insert(branch.path_signature()), "不同入口和分叉序列不能共用签名");
+                assert_eq!(branch.forks(), 0, "入口身份不得消耗分叉预算");
+                let continuation = branch.new_call(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
+                assert_eq!(continuation.path_signature(), branch.path_signature());
+            }
+        }
     }
 
     #[test]

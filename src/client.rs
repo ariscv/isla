@@ -194,20 +194,20 @@ fn interact(
 
             ["execute_asm", instruction] => {
                 // Protocol : Send StartTraces then any number of Trace then StopTraces
-                if let Ok(bytes) = assemble_instruction(instruction, isa_config) {
-                    let mut opcode: [u8; 4] = Default::default();
-                    opcode.copy_from_slice(&bytes);
-                    let opcode = B64::from_u32(u32::from_le_bytes(opcode));
-                    match execute_opcode(stream, opcode, num_threads, shared_state, register_state, letbindings)? {
-                        Ok(()) => continue,
-                        Err(msg) => {
-                            eprintln!("{}", msg);
-                            write_answer(stream, Answer::Error)?;
-                            continue;
-                        }
+                let bytes = match assemble_instruction(instruction, isa_config) {
+                    Ok(bytes) => bytes,
+                    Err(message) => break Err(message),
+                };
+                let mut opcode: [u8; 4] = Default::default();
+                opcode.copy_from_slice(&bytes);
+                let opcode = B64::from_u32(u32::from_le_bytes(opcode));
+                match execute_opcode(stream, opcode, num_threads, shared_state, register_state, letbindings)? {
+                    Ok(()) => continue,
+                    Err(msg) => {
+                        eprintln!("{}", msg);
+                        write_answer(stream, Answer::Error)?;
+                        continue;
                     }
-                } else {
-                    break Err(format!("Could not parse opcode {}", &instruction));
                 }
             }
 

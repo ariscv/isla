@@ -14,12 +14,11 @@ use isla_lib::smt::EnumMember;
 use isla_lib::smt::{configure_tastic, Model, SmtResult, Tactic};
 use isla_lib::source_loc::SourceLoc;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use std::sync::Mutex;
 
 fn empty_tool() -> Tool {
-    Tool { executable: PathBuf::new(), options: Vec::new() }
+    Tool { executable: None, options: Vec::new() }
 }
 
 fn empty_config() -> ISAConfig<B64> {
@@ -44,6 +43,7 @@ fn empty_config() -> ISAConfig<B64> {
         default_registers: HashMap::new(),
         reset_registers: Vec::new(),
         reset_constraints: Vec::new(),
+        initial_constraints: Vec::new(),
         const_primops: HashMap::new(),
         function_assumptions: Vec::new(),
         register_renames: HashMap::new(),
@@ -66,7 +66,6 @@ fn empty_config() -> ISAConfig<B64> {
         clint_enabled: None,
         execution_limits: None,
         initial_state: Vec::new(),
-        initial_state_rv64_domain: false,
     }
 }
 

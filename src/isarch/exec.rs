@@ -1963,7 +1963,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 shared_state,
                                 &fun_args[0],
                                 ret_val,
-                                memory_events_chronological(solver.trace()).into_iter().cloned().collect(),
+                                solver.trace(),
                             );
                             if samples.resident.is_some()
                                 || samples.fuzz.is_some()
@@ -1975,6 +1975,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     records: frame.region_merge_records().to_vec(),
                                     signature: frame.path_signature(),
                                 });
+                                shared_state.execution_stats.terminal_path_retained(frame.region_merge_records().len());
                             }
                             if let Some(checker) = &samples.checker {
                                 checker
@@ -2707,10 +2708,16 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         initial_frame.set_memory(memory);
     }
     let exploration_started = std::time::Instant::now();
+    let roots = entry_encodings.len();
     let mut tasks = entry_encodings
         .into_iter()
-        .map(|(_, encoding_checkpoint)| {
-            initial_frame.task_with_checkpoint(TaskId::fresh(), &task_state, encoding_checkpoint)
+        .enumerate()
+        .map(|(index, (_, encoding_checkpoint))| {
+            initial_frame.clone().with_path_root(index, roots).task_with_checkpoint(
+                TaskId::fresh(),
+                &task_state,
+                encoding_checkpoint,
+            )
         })
         .collect();
     loop {
@@ -3457,6 +3464,10 @@ mod tests {
             encodings.insert(encoding.to_string());
         }
         assert_eq!(encodings.len(), cases.len());
+        if matches!(mode, EncodingFixture::Split | EncodingFixture::Compressed) {
+            let signatures = cases.iter().map(|case| case["path-signature"].as_u64().unwrap()).collect::<HashSet<_>>();
+            assert_eq!(signatures.len(), cases.len(), "独立编码入口必须拥有不同路径签名");
+        }
     }
 
     #[test]

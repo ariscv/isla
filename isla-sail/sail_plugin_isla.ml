@@ -205,7 +205,52 @@ module Ir_config : Jib_compile.CONFIG = struct
 
     | _ -> Reporting.unreachable l  __POS__ ("No C type for type " ^ string_of_typ typ)
 
-  let optimize_anf _ aexp = aexp
+  let optimize_anf ctx aexp =
+    let open Anf in
+    (* 有限整数类型在 Jib 中退化为普通整数。首次使用时保留集合约束，
+       避免从符号联合体参数引入 Sail 类型不允许的值。 *)
+    let constrain (AE_aux (aux, annot) as exp) =
+      let values = match aux with
+        | AE_val v | AE_return (v, _) | AE_exit (v, _) | AE_throw (v, _)
+        | AE_field (v, _, _) | AE_match (v, _, _) | AE_if (v, _, _, _)
+        | AE_short_circuit (_, v, _) -> [v]
+        | AE_app (_, values, _) -> values
+        | AE_struct_update (v, fields, _) -> v :: List.map snd (Bindings.bindings fields)
+        | _ -> []
+      in
+      let seen = ref NameSet.empty in
+      let rec assumptions = function
+        | AV_id (id, lvar) when not (NameSet.mem id !seen) ->
+            seen := NameSet.add id !seen;
+            let typ = Env.expand_synonyms annot.env (lvar_typ lvar) in
+            let rec finite_sets value (NC_aux (nc, _)) = match nc with
+              | NC_set (set_value, ints) when nexp_identical value set_value -> [ints]
+              | NC_and (lhs, rhs) -> finite_sets value lhs @ finite_sets value rhs
+              | _ -> []
+            in
+            let sets = match destruct_numeric typ with
+              | Some (_, nc, value) ->
+                  List.concat_map (finite_sets value) (nc :: Env.get_constraints annot.env)
+              | None -> []
+            in
+            List.map (fun ints ->
+                let ctyp = convert_typ { ctx with local_env = annot.env } typ in
+                let tests = List.map (fun n ->
+                    V_call (Eq, [V_id (id, ctyp); V_lit (VL_int n, ctyp)])) ints in
+                let condition = List.fold_left (fun acc test -> V_call (Bor, [acc; test]))
+                    (V_lit (VL_bool false, CT_bool)) tests in
+                AE_aux (AE_app (Extern (mk_id "isla_type_assume", Some unit_typ),
+                    [AV_cval (condition, bool_typ)], unit_typ), annot)
+              ) sets
+        | AV_tuple vs | AV_list (vs, _) | AV_vector (vs, _) -> List.concat_map assumptions vs
+        | AV_record (fields, _) -> List.concat_map (fun (_, v) -> assumptions v) (Bindings.bindings fields)
+        | _ -> []
+      in
+      match List.concat_map assumptions values with
+      | [] -> exp
+      | checks -> AE_aux (AE_block (checks, exp, aexp_typ exp), annot)
+    in
+    fold_aexp constrain aexp
 
   let unroll_loops = None
   let make_call_precise _ _ _ _ = true
@@ -336,6 +381,9 @@ let isla_target out_file { ast; effect_info; env; _ } =
 
   (* let ast, env = Specialize.(specialize typ_ord_specialization env ast) in *)
   let cdefs, ctx = jib_of_ast env ast effect_info in
+  let assume = CDEF_aux (CDEF_val (mk_id "isla_type_assume", [], [CT_bool], CT_unit, Some "assume"),
+      mk_def_annot Parse_ast.Unknown ()) in
+  let cdefs = assume :: cdefs in
   let cdefs, _ = Jib_optimize.remove_tuples cdefs ctx in
   let cdefs = remove_casts cdefs |> remove_extern_impls |> fix_cons in
   let buf = Buffer.create 256 in

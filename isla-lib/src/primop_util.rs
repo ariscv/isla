@@ -423,6 +423,24 @@ mod build_ite_tests {
     }
 
     #[test]
+    fn vector_merge_keeps_element_compatibility() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let condition = solver.declare_const(smtlib::Ty::Bool, info);
+        for (left, right) in [
+            (Val::Vector(vec![]), Val::Vector(vec![Val::Bool(false)])),
+            (Val::Vector(vec![Val::I128(0)]), Val::Vector(vec![Val::I128(1)])),
+            (Val::Vector(vec![Val::Bits(B64::new(0, 8))]), Val::Vector(vec![Val::Bits(B64::new(0, 16))])),
+            (Val::Vector(vec![Val::Unit]), Val::Vector(vec![Val::Bool(false)])),
+            (Val::Vector(vec![Val::Vector(vec![Val::I64(0)])]), Val::Vector(vec![Val::Vector(vec![Val::I64(1)])])),
+        ] {
+            assert!(merge_val(condition, &left, &right, &mut solver, info).is_err(), "不得把不兼容向量元素强行符号化");
+        }
+    }
+
+    #[test]
     fn matching_ctor_merges_nested_payload() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -706,6 +724,9 @@ pub fn merge_val<B: BV>(
                 _ => ExecError::IncompatibleUnionPayload,
             })
         }
+
+        // 向量长度保持具体，元素递归沿用路径合流的严格类型与整数限制。
+        (Val::Vector(_), Val::Vector(_)) => build_ite_with(cond, val_a, val_b, solver, info, merge_val),
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
 

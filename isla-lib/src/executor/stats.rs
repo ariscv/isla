@@ -47,6 +47,18 @@ struct MergeStats {
     failure_reasons: BTreeMap<SpeculativeRejectReason, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     merge_enumeration: Option<EnumerationCountStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<RuntimeStats>,
+}
+
+#[derive(Default, Serialize)]
+struct RuntimeStats {
+    submitted_tasks: usize,
+    completed_tasks: usize,
+    queued_tasks: usize,
+    queued_tasks_peak: usize,
+    retained_terminal_paths: usize,
+    retained_merge_records: usize,
 }
 
 #[derive(Default, Serialize)]
@@ -94,6 +106,33 @@ impl ExecutionStats {
     }
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+    pub(super) fn task_submitted(&self) {
+        if self.enabled {
+            self.merge.lock().unwrap().runtime.get_or_insert_with(RuntimeStats::default).submitted_tasks += 1;
+        }
+    }
+    pub(super) fn task_completed(&self) {
+        if self.enabled {
+            self.merge.lock().unwrap().runtime.get_or_insert_with(RuntimeStats::default).completed_tasks += 1;
+        }
+    }
+    pub(super) fn task_queue_changed(&self, queued: usize) {
+        if self.enabled {
+            let mut merge = self.merge.lock().unwrap();
+            let runtime = merge.runtime.get_or_insert_with(RuntimeStats::default);
+            runtime.queued_tasks = queued;
+            runtime.queued_tasks_peak = runtime.queued_tasks_peak.max(queued);
+        }
+    }
+    /// 完成路径在探索阶段为后续缓存输出保留；计数不改变路径或取值。
+    pub fn terminal_path_retained(&self, records: usize) {
+        if self.enabled {
+            let mut merge = self.merge.lock().unwrap();
+            let runtime = merge.runtime.get_or_insert_with(RuntimeStats::default);
+            runtime.retained_terminal_paths += 1;
+            runtime.retained_merge_records += records;
+        }
     }
     pub(super) fn enumeration_counted(
         &self,
