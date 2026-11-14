@@ -1208,8 +1208,8 @@ fn get_clint_enabled(config: &Value) -> Result<Option<bool>, String> {
 /// cur_privilege = { allowed = ["User", "Supervisor"] }  # 枚举取值域
 ///
 /// [symbolic_registers.mstatus]            # 表形式：位级钉死 + 位组域 + 派生位
-/// pin_mask  = "0x0000183C00000000"        # MBE(37)|SBE(36)|UXL(44:43)|SXL(35:34)
-/// pin_value = "0x0000100800000000"        # 小端 + XLEN=64
+/// pin_mask  = "0x0000003F00000000"        # MBE(37)|SBE(36)|SXL(35:34)|UXL(33:32)
+/// pin_value = "0x0000000A00000000"        # 小端 + XLEN=64
 /// nonzero_groups = [[13, 14]]             # FS != Off
 /// derive_bit = { bit = 63, groups = [[14, 13], [10, 9], [16, 15]] }  # SD 派生
 /// ```
@@ -2682,6 +2682,9 @@ impl<B: BV> ISAConfig<B> {
             Ok(config) => config,
             Err(e) => return Err(format!("Error when parsing configuration: {}", e)),
         };
+        if config.get("includes").is_some() {
+            return Err("includes 需要通过 ISAConfig::from_file 加载，以确定相对路径".to_string());
+        }
 
         // Insert the translation_function into the set of functions
         // to trace, if it is provided by the config
@@ -2782,14 +2785,7 @@ impl<B: BV> ISAConfig<B> {
     where
         P: AsRef<Path>,
     {
-        let mut contents = String::new();
-        match File::open(&path) {
-            Ok(mut handle) => match handle.read_to_string(&mut contents) {
-                Ok(_) => (),
-                Err(e) => return Err(format!("Unexpected failure while reading config: {}", e)),
-            },
-            Err(e) => return Err(format!("Error when loading config '{}': {}", path.as_ref().display(), e)),
-        };
+        let contents = read_config_contents(path.as_ref(), &mut Vec::new())?;
         hasher.input(&contents);
         hasher.input(toolchain_name.unwrap_or("default"));
 
@@ -2800,10 +2796,157 @@ impl<B: BV> ISAConfig<B> {
     }
 }
 
+/// 按 includes 数组顺序加载，再覆盖本文件；相对路径以声明文件的目录为基准。
+/// 表递归合并，其余值（含数组）整体替换，不为具体架构设置特殊合并规则。
+fn read_config_contents(path: &Path, stack: &mut Vec<PathBuf>) -> Result<String, String> {
+    let canonical = path.canonicalize().map_err(|error| format!("读取配置 {} 失败：{}", path.display(), error))?;
+    if stack.contains(&canonical) {
+        return Err(format!("配置 includes 循环：{:?} -> {}", stack, path.display()));
+    }
+    let contents =
+        std::fs::read_to_string(path).map_err(|error| format!("读取配置 {} 失败：{}", path.display(), error))?;
+    let mut config = contents.parse::<Value>().map_err(|error| format!("{}：{}", path.display(), error))?;
+    let Some(includes) = config.as_table_mut().expect("TOML 顶层必须是表").remove("includes") else {
+        return Ok(contents);
+    };
+    let includes = includes.as_array().ok_or_else(|| format!("{}：includes 必须是文件名数组", path.display()))?;
+    // 规范路径只用于判环；相对 include 必须保留任务目录中的符号链接布局。
+    stack.push(canonical);
+    let mut merged = Value::Table(toml::value::Table::new());
+    for include in includes {
+        let include = include.as_str().ok_or_else(|| format!("{}：includes 只接受文件名字符串", path.display()))?;
+        let included = read_config_contents(&path.parent().expect("配置文件路径必须有父目录").join(include), stack)?;
+        merge_config_values(&mut merged, included.parse::<Value>().expect("已加载配置必须是有效 TOML"));
+    }
+    stack.pop();
+    merge_config_values(&mut merged, config);
+    Ok(merged.to_string())
+}
+
+fn merge_config_values(base: &mut Value, overrides: Value) {
+    match (base, overrides) {
+        (Value::Table(base), Value::Table(overrides)) => {
+            for (key, value) in overrides {
+                match base.get_mut(&key) {
+                    Some(previous) => merge_config_values(previous, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overrides) => *base = overrides,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
+
+    #[test]
+    fn config_includes_merge_relative_files_in_order() {
+        let dir = std::env::temp_dir().join(format!("isla-config-includes-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("overrides")).unwrap();
+        std::fs::write(
+            dir.join("base.toml"),
+            "pc='PC'\n[constraints]\ninitial=['base']\n[symbolic_registers.mstatus]\npin_mask='0xf'\npin_value='0x8'\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("extra.toml"), "[symbolic_registers.mstatus]\npin_value='0x4'\n").unwrap();
+        let top = dir.join("overrides/clause.toml");
+        std::fs::write(&top, "includes=['../base.toml','../extra.toml']\n[constraints]\ninitial=['clause']\n[symbolic_registers.mstatus]\nnonzero_groups=[[13,14]]\n").unwrap();
+        let value = read_config_contents(&top, &mut Vec::new()).unwrap().parse::<Value>().unwrap();
+        assert_eq!(value["pc"].as_str(), Some("PC"));
+        assert_eq!(value["symbolic_registers"]["mstatus"]["pin_mask"].as_str(), Some("0xf"));
+        assert_eq!(value["symbolic_registers"]["mstatus"]["pin_value"].as_str(), Some("0x4"));
+        assert_eq!(value["symbolic_registers"]["mstatus"]["nonzero_groups"][0][1].as_integer(), Some(14));
+        assert_eq!(value["constraints"]["initial"].as_array().unwrap().len(), 1);
+        assert_eq!(value["constraints"]["initial"][0].as_str(), Some("clause"));
+        assert!(value.get("includes").is_none());
+        // 同一基础文件可被不同分支共享，不应误判成递归环。
+        std::fs::write(dir.join("extra.toml"), "includes=['base.toml']\n").unwrap();
+        assert!(read_config_contents(&top, &mut Vec::new()).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn config_includes_reject_cycles_missing_files_and_invalid_entries() {
+        let dir = std::env::temp_dir().join(format!("isla-config-includes-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let top = dir.join("top.toml");
+        for invalid in ["includes='base.toml'", "includes=[42]"] {
+            std::fs::write(&top, invalid).unwrap();
+            assert!(read_config_contents(&top, &mut Vec::new()).unwrap_err().contains("includes"));
+        }
+        std::fs::write(&top, "includes=['missing.toml']").unwrap();
+        assert!(read_config_contents(&top, &mut Vec::new()).unwrap_err().contains("missing.toml"));
+        std::fs::write(&top, "includes=['./top.toml']").unwrap();
+        assert!(read_config_contents(&top, &mut Vec::new()).unwrap_err().contains("循环"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_includes_resolve_relative_to_staged_symlink() {
+        let dir = std::env::temp_dir().join(format!("isla-config-includes-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("objects")).unwrap();
+        std::fs::create_dir_all(dir.join("staged")).unwrap();
+        std::fs::write(dir.join("objects/base"), "pc='PC'").unwrap();
+        std::fs::write(dir.join("objects/override"), "includes=['base.toml']\nzero_announce_exit=true").unwrap();
+        std::os::unix::fs::symlink(dir.join("objects/base"), dir.join("staged/base.toml")).unwrap();
+        std::os::unix::fs::symlink(dir.join("objects/override"), dir.join("staged/config.toml")).unwrap();
+        let text = read_config_contents(&dir.join("staged/config.toml"), &mut Vec::new()).unwrap();
+        let value = text.parse::<Value>().unwrap();
+        assert_eq!(value["pc"].as_str(), Some("PC"));
+        assert_eq!(value["zero_announce_exit"].as_bool(), Some(true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn config_includes_load_through_isa_config_and_keep_conflict_checks() {
+        let dir = std::env::temp_dir().join(format!("isla-config-includes-api-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = r#"pc = "PC"
+[[toolchain]]
+name = "default"
+assembler = "as"
+objdump = "objdump"
+nm = "nm"
+linker = "ld"
+[mmu]
+page_table_base = "0"
+page_size = "4096"
+s2_page_table_base = "0"
+s2_page_size = "4096"
+[threads]
+base = "0"
+top = "4096"
+stride = "4096"
+[symbolic_addrs]
+base = "4096"
+top = "8192"
+stride = "16"
+[registers.defaults]
+r0 = "0x0000000000000000"
+"#;
+        std::fs::write(dir.join("base.toml"), base).unwrap();
+        let path = dir.join("clause.toml");
+        std::fs::write(&path, "includes=['base.toml']\nzero_announce_exit=true").unwrap();
+        let mut symtab = Symtab::new();
+        symtab.intern("zPC");
+        symtab.intern("zr0");
+        let types = IRTypeInfo::new::<B64>(&[]);
+        let config = ISAConfig::<B64>::from_file(&mut Sha256::new(), &path, None, &symtab, &types).unwrap();
+        assert!(config.zero_announce_exit);
+        assert_eq!(config.default_registers.len(), 1);
+        std::fs::write(&path, "includes=['base.toml']\n[symbolic_registers]\nr0='symbolic'").unwrap();
+        let result = ISAConfig::<B64>::from_file(&mut Sha256::new(), &path, None, &symtab, &types);
+        assert!(result.err().unwrap().contains("同名冲突"));
+        let result = ISAConfig::<B64>::parse("includes=['base.toml']", None, &symtab, &types);
+        assert!(result.err().unwrap().contains("from_file"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn merge_config(text: &str) -> Result<ExecutionLimitsConfig, String> {
         get_execution_limits_config(&text.parse::<Value>().unwrap()).map(Option::unwrap)
