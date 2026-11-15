@@ -956,6 +956,27 @@ struct ErrorRecorder<'a> {
 }
 
 impl ErrorRecorder<'_> {
+    fn terminal_path_is_sat<'ir, B: BV>(
+        &self,
+        result: isla_lib::smt::SmtResult,
+        frame: &LocalFrame<'ir, B>,
+        shared_state: &SharedState<'ir, B>,
+    ) -> bool {
+        match result.is_sat() {
+            Ok(sat) => sat,
+            Err(error) => {
+                // 超时或 Unknown 只拒绝当前路径；沿用错误摘要与迹诊断，不能签成完整结果。
+                let diagnostics = self.record_error_diagnostic(&error, frame, shared_state);
+                eprintln!(
+                    "[TERMINAL_QUERY_REJECT] {}",
+                    serde_json::json!({"path-signature": frame.path_signature(), "error": error.to_string()}),
+                );
+                isla_lib::executor::submit_trace_for_local_frame_with_diagnostics(frame, shared_state, diagnostics);
+                false
+            }
+        }
+    }
+
     fn record_error_diagnostic<'ir, B: BV>(
         &self,
         error: &ExecError,
@@ -1990,10 +2011,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 .expect("完成路径的合并计数失败")
                         } else if samples.enabled() {
                             if !solver.has_stashed_model() {
-                                match solver.check_sat(SourceLoc::unknown()) {
-                                    isla_lib::smt::SmtResult::Sat => (),
-                                    isla_lib::smt::SmtResult::Unsat => return,
-                                    result => panic!("样本终态查询失败：{result:?}"),
+                                if !error_recorder.terminal_path_is_sat(
+                                    solver.check_sat(SourceLoc::unknown()),
+                                    frame,
+                                    shared_state,
+                                ) {
+                                    return;
                                 }
                             }
                             collected.lock().unwrap().summary.model_exception_paths += usize::from(sail_exception);
@@ -3461,6 +3484,63 @@ mod tests {
         assert!(Arc::ptr_eq(&recorded, &timeout));
         assert_eq!(diagnostics.len(), 1);
         assert!(timeout.dump.materialize().unwrap().contains("isla_test_argument__s17"));
+    }
+
+    #[test]
+    fn terminal_query_failure_discards_path_and_records_partial() {
+        let function_text = zencode::encode("test_function");
+        let mut symtab = Symtab::new();
+        let function_name = symtab.intern(&function_text);
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let frame = LocalFrame::new(function_name, &[], &Ty::Unit, None, &instrs);
+        let timeout = Arc::new(SmtTimeout {
+            source_loc: SourceLoc::unknown(),
+            operation: SmtOperation::CheckSat,
+            limit: Duration::from_secs(1),
+            operation_wall: Duration::from_secs(1),
+            dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
+        });
+        for (result, expected_timeouts) in
+            [(isla_lib::smt::SmtResult::Unknown, 0), (isla_lib::smt::SmtResult::Error(SmtError::Timeout(timeout)), 1)]
+        {
+            let collected = Mutex::new(SolveCollectorState::new());
+            let reporter = TimeoutReporter::new(TimeoutReportConfig {
+                output: TimeoutSmtOutput::new(false, true, false),
+                directory: PathBuf::new(),
+            });
+            let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
+            assert!(!recorder.terminal_path_is_sat(result, &frame, &shared_state));
+            // 拒绝发生在样本与常驻路径入库之前，不能伪装成完整结果。
+            let state = collected.into_inner().unwrap();
+            assert!(state.cases.is_empty());
+            assert_eq!(state.summary.errors, 1);
+            assert_eq!(state.summary.smt_timeouts, expected_timeouts);
+            assert_eq!(state.summary.status(), "partial");
+            assert_eq!(state.diagnostics.len(), 1);
+            assert_eq!(state.diagnostics[0]["path-signature"], frame.path_signature());
+        }
+    }
+
+    #[test]
+    fn terminal_query_sat_and_unsat_do_not_record_errors() {
+        let mut symtab = Symtab::new();
+        let function_name = symtab.intern("ztest_function");
+        let shared_state: SharedState<B64> = SharedState::empty(symtab);
+        let instrs: Vec<Instr<Name, B64>> = Vec::new();
+        let frame = LocalFrame::new(function_name, &[], &Ty::Unit, None, &instrs);
+        let collected = Mutex::new(SolveCollectorState::new());
+        let reporter = TimeoutReporter::new(TimeoutReportConfig {
+            output: TimeoutSmtOutput::new(false, true, false),
+            directory: PathBuf::new(),
+        });
+        let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
+        assert!(recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Sat, &frame, &shared_state));
+        assert!(!recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Unsat, &frame, &shared_state));
+        let state = collected.into_inner().unwrap();
+        assert_eq!(state.summary.errors, 0);
+        assert_eq!(state.summary.status(), "finished");
+        assert!(state.diagnostics.is_empty());
     }
 
     #[test]

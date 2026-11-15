@@ -1868,7 +1868,7 @@ struct ModelEvalTimeoutContext {
 
 impl<'ctx, B: BV> Model<'ctx, B> {
     /// 借用当前断言集的缓存模型并持有独立引用，支持 Unsat 探测及保存点回滚后的取值。
-    /// 调用前须有 Sat 查询，且此后未新增断言、未通过 take_stashed_model 取走缓存。
+    /// 调用前须有满足当前完整断言集的 Sat 见证，且尚未通过 take_stashed_model 取走缓存。
     /// 缺少模型是调用顺序错误，直接 panic，绝不向 Z3 索取可能已失效的最后模型。
     pub fn new(solver: &'ctx Solver<'ctx, B>) -> Self {
         unsafe {
@@ -2606,7 +2606,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
-                self.decls.insert(*v, Ast::mk_constant(&fd));
+                if self.decls.insert(*v, Ast::mk_constant(&fd)).is_some() {
+                    self.clear_stashed_model();
+                }
                 if self.def_attrs.attrs & 2 != 0 {
                     self.sail_bitvectors.insert(*v);
                 }
@@ -2619,7 +2621,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.performance_info.add_var_node(*v, info);
                 }
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, arg_tys, result_ty, &self.symbol_namer);
-                self.func_decls.insert(*v, fd);
+                if self.func_decls.insert(*v, fd).is_some() {
+                    self.clear_stashed_model();
+                }
             }
             Def::DefineConst(v, exp) => {
                 // DefineConst 降级为化简后的表达式 AST，既不是 DeclareConst + Assert，
@@ -2634,7 +2638,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 let mut ast = self.translate_exp(exp);
                 ast.simplify();
-                self.decls.insert(*v, ast);
+                // 改绑已有符号可能改变缓冲断言的含义，不能沿用改绑前的见证。
+                if self.decls.insert(*v, ast).is_some() {
+                    self.clear_stashed_model();
+                }
                 if self.def_attrs.attrs & 2 != 0 {
                     self.sail_bitvectors.insert(*v);
                 }
@@ -3097,7 +3104,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.asserts_since_check
     }
 
-    /// 是否持有可复用的"最近一次 Sat check"模型缓存（断言未变）。
+    /// 是否持有满足当前完整断言集的 Sat 见证；提交弱化约束时也可以保留。
     pub fn has_stashed_model(&self) -> bool {
         self.stashed_model.is_some()
     }

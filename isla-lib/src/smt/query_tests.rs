@@ -43,8 +43,9 @@ fn default_bitvector_queries_keep_original_backend() {
         assert_eq!(solver.check_sat(info), Sat);
         assert_ne!(z3_timeout::last_solver_query().0, original);
         solver.rollback_transaction(tx);
+        let calls = z3_timeout::test_query_count();
         assert_eq!(solver.check_sat(info), Sat);
-        assert_eq!(z3_timeout::last_solver_query().0, original);
+        assert_eq!(z3_timeout::test_query_count(), calls, "回滚恢复的有效模型不应重新求解");
         floating_prefix(&mut solver);
         assert_eq!(solver.check_sat(info), Sat);
         assert_ne!(z3_timeout::last_solver_query().0, original);
@@ -199,7 +200,9 @@ fn default_integer_range_proof_uses_fresh_complete_snapshot() {
         let mut solver = Solver::<B64>::new(&context);
         let info = SourceLoc::unknown();
         let byte = solver.declare_bitvector(8, info);
-        let wide = solver.define_const(ZeroExtend(120, Box::new(Var(byte))), info);
+        let wide = solver.declare_bitvector(128, info);
+        // 通过断言给出范围，避免ZeroExtend本身已被化简、无需调用求解器。
+        solver.assert(Eq(Box::new(Var(wide)), Box::new(ZeroExtend(120, Box::new(Var(byte))))));
         let original = solver.z3_solver as usize;
         let narrow = crate::primop::unary_primops::<B64>()["%i->%i64"];
         narrow(Val::Symbolic(wide), &mut solver, info).unwrap();
@@ -714,5 +717,114 @@ fn default_region_queries_reuse_complete_prefix_without_leaking_assumptions() {
         solver.assert(Not(Box::new(Var(fixed))));
         assert_eq!(solver.check_sat(info), Unsat);
         assert_eq!(solver.seed, Some(117));
+    });
+}
+
+#[test]
+fn smt_witness_commit_keeps_witness_for_weaker_guarded_formula() {
+    in_default_process("smt_witness_commit_keeps_witness_for_weaker_guarded_formula", || {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let guard = solver.declare_const(Ty::Bool, info);
+        let value = solver.declare_const(Ty::Bool, info);
+        solver.start_transaction_with_guard(Some(Var(guard)));
+        solver.assert(Var(value));
+        assert_eq!(solver.check_sat(info), Sat);
+        let witness = solver.stashed_model;
+        let calls = path_smt_stats().calls;
+        solver.commit_transaction();
+        // g ∧ c 的同一个见证满足 g→c；提交不应丢弃已经证明有效的模型。
+        assert_eq!(solver.stashed_model, witness);
+        assert_eq!(solver.check_sat(info), Sat);
+        assert_eq!(path_smt_stats().calls, calls, "提交后的完整查询应复用见证");
+        // 原臂条件已经撤掉，另一臂仍可取相反值，不能把模型取值当成恒真条件。
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(value))), info), Sat);
+        assert_eq!(solver.cached_bool_value(&Var(guard)).unwrap(), Some(false));
+        solver.assert(Var(guard));
+        assert!(!solver.has_stashed_model(), "新增断言必须使旧见证失效");
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(value))), info), Unsat);
+    });
+}
+
+#[test]
+fn smt_witness_commit_two_arms_preserves_both_values_and_rollback() {
+    in_default_process("smt_witness_commit_two_arms_preserves_both_values_and_rollback", || {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let guard = solver.declare_const(Ty::Bool, info);
+        let value = solver.declare_const(Ty::Bool, info);
+        assert_eq!(solver.check_sat_with(&Var(guard), info), Sat);
+        let prefix_witness = solver.stashed_model;
+        let outer = solver.start_transaction();
+        for (condition, result) in [(Var(guard), Var(value)), (Not(Box::new(Var(guard))), Not(Box::new(Var(value))))] {
+            solver.start_transaction_with_guard(Some(condition));
+            solver.assert(result);
+            assert_eq!(solver.check_sat(info), Sat);
+            let witness = solver.stashed_model;
+            solver.commit_transaction();
+            assert_eq!(solver.stashed_model, witness);
+            assert_eq!(solver.check_sat(info), Sat);
+        }
+        assert_eq!(solver.check_sat_with(&Var(value), info), Sat);
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(value))), info), Sat);
+        assert_eq!(solver.check_sat_with(&And(Box::new(Var(guard)), Box::new(Not(Box::new(Var(value))))), info), Unsat);
+        solver.rollback_transaction(outer);
+        assert_eq!(solver.stashed_model, prefix_witness);
+        // 回滚移除了两臂约束，交叉赋值重新可行。
+        assert_eq!(solver.check_sat_with(&And(Box::new(Var(guard)), Box::new(Not(Box::new(Var(value))))), info), Sat);
+    });
+}
+
+#[test]
+fn smt_witness_commit_unconditional_assertions_keeps_current_witness() {
+    in_default_process("smt_witness_commit_unconditional_assertions_keeps_current_witness", || {
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let value = solver.declare_const(Ty::Bool, info);
+        solver.start_transaction();
+        solver.assert(Var(value));
+        assert_eq!(solver.check_sat(info), Sat);
+        let witness = solver.stashed_model;
+        solver.commit_transaction();
+        assert_eq!(solver.stashed_model, witness);
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(value))), info), Unsat);
+        // 未查询的新断言不能在提交时重新获得一个旧模型。
+        solver.start_transaction();
+        solver.assert(Not(Box::new(Var(value))));
+        solver.commit_transaction();
+        assert!(!solver.has_stashed_model());
+        assert_eq!(solver.check_sat(info), Unsat);
+    });
+}
+
+#[test]
+fn default_rebinding_invalidates_witness_for_buffered_assertions() {
+    in_default_process("default_rebinding_invalidates_witness_for_buffered_assertions", || {
+        for redeclare in [false, true] {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let info = SourceLoc::unknown();
+            let guard = solver.declare_const(smtlib::Ty::Bool, info);
+            solver.start_transaction_with_guard(Some(Var(guard)));
+            let value = solver.define_const(Bool(true), info);
+            solver.assert(Var(value));
+            assert_eq!(solver.check_sat(info), Sat);
+            solver.define_const(Not(Box::new(Var(guard))), info);
+            assert!(solver.has_stashed_model(), "新符号的纯定义不改变既有约束");
+            if redeclare {
+                solver.add(smtlib::Def::DeclareConst(value, smtlib::Ty::Bool));
+            } else {
+                solver.add(smtlib::Def::DefineConst(value, Bool(false)));
+            }
+            assert!(!solver.has_stashed_model(), "已有符号改绑后，缓冲断言的含义可能改变");
+            solver.commit_transaction();
+            let impossible =
+                if redeclare { And(Box::new(Var(guard)), Box::new(Not(Box::new(Var(value))))) } else { Var(guard) };
+            assert_eq!(solver.check_sat_with(&impossible, info), Unsat);
+            assert_eq!(solver.check_sat_with(&Not(Box::new(Var(guard))), info), Sat);
+        }
     });
 }

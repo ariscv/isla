@@ -288,9 +288,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
             self.transaction_conditions.pop().unwrap();
             self.guard_transaction_events(savepoint.events_len, guard);
-            // pop 或把 c 换成 g→c 都会改变查询上下文，臂内模型不能继续使用。
-            self.clear_stashed_model();
-            self.last_check_sat = false;
+            // 已缓存的模型满足全部前提、活动臂条件与缓冲断言。
+            // 撤去 g 并把 c 改为 g→c 只会弱化约束，同一见证仍然有效。
         }
         if self.savepoints.is_empty() {
             if savepoint.order_register_reads {
@@ -307,10 +306,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     _ => None,
                 })
                 .collect();
-            if !assertions.is_empty() {
-                self.clear_stashed_model();
-                self.last_check_sat = false;
-            }
+            // 这些断言已经参与模型查询；新增 assert 本身会清除旧模型。
+            // 提交只发布缓冲内容，不凭空恢复没有验证过的见证。
             for exp in assertions {
                 self.z3_assert(&exp);
             }
