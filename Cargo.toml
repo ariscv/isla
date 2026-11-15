@@ -26,6 +26,10 @@ Isla is a symbolic execution engine for Sail instruction set
 architecture specifications.
 """
 
+[[example]]
+name = "misaligned-access"
+path = "test/isarch/misaligned_access/runner.rs"
+
 [[bin]]
 name = "isla-property"
 path = "src/property.rs"

@@ -147,7 +147,7 @@ initial = [
 # 香山 PMA 九段地图，全部为左闭右开。Sail 无独立 atomic 属性。
 # misaligned：香山可缓存 DRAM 的普通非对齐访问由硬件完成（no_fault）；PMA 不可缓存的设备区非对齐报
 # access fault（5/7），故这些段用 access_fault；空洞靠 R/W/X=false 报权限错误，保持 no_fault 以免 4/6 抢先。
-# 依据与限制（Sail 先拆分后检查 PMA，单改配置不保证生效）见 agents/fuzz_strategy_20261112/exp/pma-target/semantics.md。
+# 需要具有拆分前区域检查与 PBMT 传播的新 Sail IR；旧 IR 先拆分再检查，不能保证此策略生效。
 
 [[pma_regions]]
 name = "xiangshan_0"
