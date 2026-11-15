@@ -18,6 +18,10 @@ misaligned-access MODEL.ir CONFIG.toml nc LOAD 8 judge
 
 实际程序为构建目录下的 `release/examples/misaligned-access`。
 场景支持 `dram`、`device`、`nc`、`io`、`pma-page`、`nc-hit`、`io-hit`。
+`reverse-boundary` 配合 `sys_misaligned_order_decreasing = true` 检查逆序边界：
+2 字节访问从 `0x7fffffff` 开始，先访问高地址 DRAM，再在低地址设备区报错。
+须核对高地址的读取或部分写入记录，不能仅检查最终异常。
+
 访问选择 `LOAD`／`STORE`，宽度选择 2／4／8 字节，地址均为区域起点加 1。
 `pma-page` 是分页且 PBMT=00 的成功对照；`-hit` 使用预置 TLB，其余分页场景走页表遍历。
 

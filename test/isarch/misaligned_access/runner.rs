@@ -83,6 +83,10 @@ fn main() {
     };
     let address: u64 = if paged {
         0x40000001
+    } else if scenario == "reverse-boundary" {
+        // 逆序先访问 DRAM，再在低地址设备区报错；检查部分访存没有被提前翻译吞掉。
+        assert_eq!(width, 2);
+        0x7fffffff
     } else if scenario == "device" {
         0x10000001
     } else {
