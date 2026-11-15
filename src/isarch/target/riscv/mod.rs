@@ -218,7 +218,12 @@ impl<B: BV> Target<B> for RV32<B> {
         regs.push("vstart".to_string());
         regs.push("vtype".to_string());
         regs.push("vcsr".to_string());
+        regs.push("reservation_valid".to_string());
+        regs.push("reservation_addr".to_string());
         regs
+    }
+    fn must_output_register(&self, reg_name: &str) -> bool {
+        matches!(reg_name, "reservation_valid" | "reservation_addr")
     }
     fn pre_state(&self) -> &PreStateCtx<B> {
         &self.pre_state
@@ -318,12 +323,14 @@ impl<B: BV> Target<B> for RV64<B> {
         regs.push("vstart".to_string());
         regs.push("vtype".to_string());
         regs.push("vcsr".to_string());
+        regs.push("reservation_valid".to_string());
+        regs.push("reservation_addr".to_string());
         regs
     }
     fn must_output_register(&self, reg_name: &str) -> bool {
         // V 上下文寄存器沿用原必输出集合；f0-f31/vr0-vr31 为 F4 扩展（见 trait
         // 默认实现的注释），复用 is_vector_register_name 的 vr 判定形态。
-        if matches!(reg_name, "vl" | "vstart" | "vtype" | "vcsr") {
+        if matches!(reg_name, "vl" | "vstart" | "vtype" | "vcsr" | "reservation_valid" | "reservation_addr") {
             return true;
         }
         let digits = reg_name.strip_prefix("vr").or_else(|| reg_name.strip_prefix('f')).unwrap_or("");
@@ -355,3 +362,6 @@ impl<B: BV> RV64<B> {
         [(va >> 12) & 0x1FF, (va >> 21) & 0x1FF, (va >> 30) & 0x1FF, (va >> 39) & 0x1FF]
     }
 }
+
+#[cfg(test)]
+mod reservation_tests;

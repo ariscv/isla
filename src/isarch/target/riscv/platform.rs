@@ -13,6 +13,16 @@ pub struct RiscvPlatformConfig {
 
 impl RiscvPlatformConfig {
     pub fn from_merged_toml(merged: &toml::Value) -> Result<Self, String> {
+        // 常量替代可绕过 Sail 的静态 range 约束，平台入口先拒绝无效集合大小。
+        if let Some(value) = merged.get("const_primops").and_then(|primops| primops.get("sys_reservation_set_size")) {
+            let size = value
+                .as_str()
+                .and_then(|text| text.trim().strip_suffix(": %i64"))
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .filter(|size| size.is_power_of_two() && *size <= 4096)
+                .ok_or("sys_reservation_set_size 须为 1..4096 的二次幂，写作 '<大小> : %i64'")?;
+            assert!(size > 0, "二次幂集合大小必须非零");
+        }
         Ok(Self { pma_regions: pma::get_pma_regions(merged)? })
     }
 

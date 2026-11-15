@@ -70,6 +70,7 @@
     }
   },
   "memory": {
+    "reservation_set_size": 1,
     "pmp": {
       "grain": 0,
       // This specifies the number of PMP entries present.

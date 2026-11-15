@@ -244,6 +244,15 @@ backing = "memory"
 `backing` 可省略或取 `memory`、`device_bus`、`denied`，只作接线记录。
 cacheable／coherent 的实际执行效果、普通非对齐拆分和 PBMT 仍有独立模型边界。
 
+Isla 的顺序 reservation 模型需用严格 IR 入口加
+`--variable ISLA_RESERVATION=true` 生成。两个寄存器 `reservation_valid`（bool）和
+`reservation_addr`（模型物理地址位宽）由 target 主动符号化并随样本导出／重放，
+无需放入不支持 bool 的 `[symbolic_registers]`。默认按精确地址匹配；平台可在
+`[const_primops]` 写 `sys_reservation_set_size = "64 : %i64"`，将匹配粒度设为
+64 字节 block（香山配置采用此值）。大小必须为 1..4096 的二次幂，否则启动报错。
+该模型不模拟其他 hart 的干扰或任意 SC 失败；其他后端默认仍使用外部 reservation
+接口。旧 extern IR 的配置继续适用于对应旧 IR；新香山配置要求上述新模型 IR。
+
 以下 W10／W17 示例可直接使用。符号 size 输出仍为
 `pma_regions.<name>.size`，路径缓存的 `pma_sizes` 和 schema 保持原格式。
 

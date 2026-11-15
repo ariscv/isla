@@ -24,6 +24,7 @@ def main():
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--sail', default='sail')
     parser.add_argument('--name', default='rv64d')
+    parser.add_argument('--variable', action='append', default=[], help='传给 Sail 的项目变量，可重复指定')
     parser.add_argument('--allow-dirty', action='store_true', help='允许未提交模型，保存完整源码快照与差异作为来源记录')
     args = parser.parse_args()
     repo = args.model.resolve()
@@ -46,6 +47,8 @@ def main():
                '--require-version', '0.20.1', '--memo-z3-path', str(output/'sail_smt_cache'), '--all-modules']
     for name in PRESERVE:
         command += ['--isla-preserve', name]
+    for assignment in args.variable:
+        command += ['--variable', assignment]
     command += ['--isla-output-dir', str(output), '--config', str(config), '-o', args.name, 'riscv.sail_project']
     record = {'model_commit':subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip(),
               'model_dirty':bool(model_status), 'model_status':model_status,
