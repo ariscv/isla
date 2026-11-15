@@ -1393,6 +1393,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         arm_start: None,
     }];
     loop {
+        super::stats::memory_stats::poll(frame, solver);
         if pending.last().unwrap().arms.len() == 2 {
             let mut work = pending.pop().unwrap();
             // 子循环段已提交为完整条件保护的约束；汇合时也保留所属臂条件。

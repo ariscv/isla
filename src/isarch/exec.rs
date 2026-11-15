@@ -1399,19 +1399,21 @@ pub fn solve_state_main<'ir, B: BV>(
     }
 
     shared_state.execution_stats.reset();
-    let stats_reporter =
-        if shared_state.execution_stats.enabled() || isla_lib::executor::stats::merge_diagnostics::enabled() {
-            let stats = shared_state.execution_stats.clone();
-            if stats.enabled() {
-                stats.prepare_snapshot(&shared_state.symtab);
-            }
-            Some(isla_lib::executor::stats::merge_diagnostics::SnapshotReporter::start(
-                stats,
-                std::time::Duration::from_secs(15),
-            ))
-        } else {
-            None
-        };
+    let stats_reporter = if shared_state.execution_stats.enabled()
+        || isla_lib::executor::stats::merge_diagnostics::enabled()
+        || isla_lib::executor::stats::memory_stats::enabled()
+    {
+        let stats = shared_state.execution_stats.clone();
+        if stats.enabled() {
+            stats.prepare_snapshot(&shared_state.symtab);
+        }
+        Some(isla_lib::executor::stats::merge_diagnostics::SnapshotReporter::start(
+            stats,
+            std::time::Duration::from_secs(15),
+        ))
+    } else {
+        None
+    };
     let num_clauses = clause_set.len();
     assert!(!samples.path_cache.enabled() || num_clauses == 1, "缓存一次只能保存或恢复一个 clause");
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
@@ -1889,6 +1891,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // ExecuteAs 是同一机器指令的中间返回。new_call 保留该路径的寄存器、内存、
     // 路径身份、累计执行时间及分支预算；checkpoint 保留前段约束。
     let profile_paths = std::env::var("ISLA_PROFILE_PATHS").as_deref() == Ok("1");
+    isla_lib::executor::stats::memory_stats::reset_resident();
     let resident_paths = Mutex::new(Vec::new());
     let continuations = Arc::new(Mutex::new(Vec::new()));
     let queued_continuations = continuations.clone();
@@ -2033,13 +2036,23 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 || samples.fuzz.is_some()
                                 || samples.path_cache.write.is_some()
                             {
-                                resident_paths.lock().unwrap().push(super::resident::ResidentPath {
+                                let resident = super::resident::ResidentPath {
                                     checkpoint: checkpoint(&mut solver),
                                     path: sample_path.clone(),
                                     records: frame.region_merge_records().to_vec(),
                                     signature: frame.path_signature(),
                                     pure_definitions: frame.pure_definitions().to_vec(),
-                                });
+                                };
+                                isla_lib::executor::stats::memory_stats::retain(
+                                    &resident.checkpoint,
+                                    &resident.path,
+                                    &resident.records,
+                                    resident.pure_definitions.capacity() * std::mem::size_of::<(u32, u32)>()
+                                        + std::mem::size_of_val(&resident)
+                                        - std::mem::size_of_val(&resident.checkpoint)
+                                        - std::mem::size_of_val(&resident.path),
+                                );
+                                resident_paths.lock().unwrap().push(resident);
                                 shared_state.execution_stats.terminal_path_retained(frame.region_merge_records().len());
                             }
                             if samples.path_cache.dag_only {
@@ -2822,6 +2835,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .map(|(task_id, frame, checkpoint)| frame.task_with_checkpoint(task_id, &task_state, checkpoint))
             .collect();
     }
+    isla_lib::executor::stats::memory_stats::print();
     let exploration_seconds = exploration_started.elapsed().as_secs_f64();
     cache.stages.record(
         "exploration",
@@ -2932,6 +2946,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             samples.resident_fast,
         );
     }
+    isla_lib::executor::stats::memory_stats::reset_resident();
     Ok(BatchOutcome {
         items,
         summary: state.summary,

@@ -1,4 +1,5 @@
 //! 可选执行统计；所有线程共享，拒绝统一使用推演原因标签。
+pub mod memory_stats;
 pub mod merge_diagnostics;
 pub(crate) mod merge_timing;
 #[cfg(test)]

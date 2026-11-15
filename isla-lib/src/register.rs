@@ -437,3 +437,23 @@ impl<'a, 'ir, B: BV> IntoIterator for &'a RegisterBindings<'ir, B> {
         Iter { iterator: self.map.iter() }
     }
 }
+
+impl<B: BV> RegisterBindings<'_, B> {
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        use crate::executor::stats::memory_stats::{map_bytes, value_heap_bytes};
+        map_bytes::<Name, Register<B>>(self.map.capacity())
+            + self
+                .map
+                .values()
+                .map(|reg| match &reg.value {
+                    RelaxedVal::Uninit(_) => 0,
+                    RelaxedVal::Init { last_write, last_read, old_writes } => {
+                        value_heap_bytes(last_write)
+                            + last_read.as_ref().map_or(0, value_heap_bytes)
+                            + old_writes.capacity() * std::mem::size_of::<Val<B>>()
+                            + old_writes.iter().map(value_heap_bytes).sum::<usize>()
+                    }
+                })
+                .sum::<usize>()
+    }
+}

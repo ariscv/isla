@@ -4556,3 +4556,35 @@ impl<B> Trace<B> {
 pub(crate) fn test_query_count() -> usize {
     z3_timeout::test_query_count()
 }
+
+// 只在显式内存采样时遍历；不创建 checkpoint、不翻译表达式、不查询 Z3。
+impl<B: BV> Checkpoint<B> {
+    pub fn estimated_bytes(&self, seen: &mut HashSet<usize>) -> usize {
+        std::mem::size_of_val(self) + estimated_tail_bytes(&self.trace, seen)
+    }
+}
+fn estimated_tail_bytes<B: BV>(tail: &Arc<Option<Trace<B>>>, seen: &mut HashSet<usize>) -> usize {
+    let mut bytes = 0;
+    let mut tail = tail;
+    loop {
+        if !seen.insert(Arc::as_ptr(tail) as usize) {
+            break;
+        }
+        bytes += std::mem::size_of::<Option<Trace<B>>>();
+        let Some(trace) = tail.as_ref() else {
+            break;
+        };
+        bytes += trace.head.capacity() * std::mem::size_of::<Event<B>>()
+            + trace.head.iter().map(crate::executor::stats::memory_stats::event_heap_bytes).sum::<usize>();
+        tail = &trace.tail;
+    }
+    bytes
+}
+impl<B: BV> Solver<'_, B> {
+    pub fn estimated_trace_bytes(&self, seen: &mut HashSet<usize>) -> usize {
+        std::mem::size_of_val(&self.trace)
+            + self.trace.head.capacity() * std::mem::size_of::<Event<B>>()
+            + self.trace.head.iter().map(crate::executor::stats::memory_stats::event_heap_bytes).sum::<usize>()
+            + estimated_tail_bytes(&self.trace.tail, seen)
+    }
+}

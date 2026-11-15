@@ -437,3 +437,41 @@ fn order_register_reads<B: BV>(events: &mut Vec<Event<B>>, guards: &mut Vec<Opti
         }
     }
 }
+
+impl<B: BV> Solver<'_, B> {
+    /// 各层真实 capacity 的 payload 估算；模型只数引用，不访问 Z3 opaque 对象。
+    pub fn memory_stats(&self) -> crate::executor::stats::memory_stats::SolverMemory {
+        use crate::executor::stats::memory_stats::{event_heap_bytes, exp_heap_bytes, map_bytes, SolverMemory};
+        use std::mem::{size_of, size_of_val};
+        let mut layers = vec![
+            serde_json::json!({"layer":0,"decls_capacity":self.decls.capacity(),"sail_bitvectors_capacity":self.sail_bitvectors.capacity(),"func_decls_capacity":self.func_decls.capacity()}),
+        ];
+        let mut bytes = size_of_val(self)
+            + map_bytes::<Sym, Ast>(self.decls.capacity())
+            + self.sail_bitvectors.capacity() * size_of::<Sym>()
+            + map_bytes::<Sym, FuncDecl>(self.func_decls.capacity());
+        let mut models = usize::from(self.stashed_model.is_some());
+        bytes += self.savepoints.capacity() * size_of::<SolverSavepoint>();
+        for (index, point) in self.savepoints.iter().enumerate() {
+            layers.push(serde_json::json!({"layer":index+1,"decls_capacity":point.decls.capacity(),"sail_bitvectors_capacity":point.sail_bitvectors.capacity(),"func_decls_capacity":point.func_decls.capacity()}));
+            bytes += map_bytes::<Sym, Ast>(point.decls.capacity())
+                + point.sail_bitvectors.capacity() * size_of::<Sym>()
+                + map_bytes::<Sym, FuncDecl>(point.func_decls.capacity())
+                + point.guard.as_ref().map_or(0, exp_heap_bytes);
+            models += usize::from(point.model.model.is_some());
+        }
+        bytes += self.transaction_events.capacity() * size_of::<Event<B>>()
+            + self.transaction_events.iter().map(event_heap_bytes).sum::<usize>()
+            + self.transaction_event_guards.capacity() * size_of::<Option<Exp<Sym>>>()
+            + self.transaction_event_guards.iter().flatten().map(exp_heap_bytes).sum::<usize>()
+            + self.committed_transaction_events.capacity() * size_of::<(Option<Exp<Sym>>, Event<B>)>()
+            + self
+                .committed_transaction_events
+                .iter()
+                .map(|(g, e)| g.as_ref().map_or(0, exp_heap_bytes) + event_heap_bytes(e))
+                .sum::<usize>()
+            + self.transaction_conditions.capacity() * size_of::<Exp<Sym>>()
+            + self.transaction_conditions.iter().map(exp_heap_bytes).sum::<usize>();
+        SolverMemory { bytes, layers, model_caches: models }
+    }
+}

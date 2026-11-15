@@ -429,6 +429,7 @@ fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     isarch::path_cache::Options::add_cli(&mut opts);
+    opts.optflag("", "memory-stats", "周期输出 Rust 内存估算、采样年龄及 RSS；默认关闭");
     opts.optopt("", "merge-diagnostics", "合并拒绝诊断，默认 off", "off|summary|detail");
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
@@ -511,6 +512,7 @@ fn isla_main() -> i32 {
         eprintln!("{error}");
         return 1;
     }
+    isla_lib::executor::stats::memory_stats::configure(matches.opt_present("memory-stats"));
     let trace_options = match parse_trace_options(&matches) {
         Ok(options) => options,
         Err(error) => {

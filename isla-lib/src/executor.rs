@@ -1265,6 +1265,7 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
+        let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
         let ctx = Context::new(Config::new());
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
@@ -1285,6 +1286,7 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
             &mut solver,
         );
         (self.collector)(tid, task.id, result, self.shared_state, solver, self.collected.as_ref());
+        drop(memory_task);
     }
 
     fn on_task_finished<'scope, 'env>(self: &Arc<Self>, scope: &'scope thread::Scope<'scope, 'env>)
@@ -1366,7 +1368,18 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
     fn wait_until_finished(&self) {
         let mut finished = self.finished_mu.lock().unwrap();
         while self.pending_tasks.load(Ordering::Acquire) != 0 {
-            finished = self.finished_cv.wait(finished).unwrap();
+            if stats::memory_stats::enabled() {
+                let queued = self.queued_tasks.lock().unwrap();
+                stats::memory_stats::queue_sample(queued.iter(), self.active_threads.load(Ordering::Acquire));
+                drop(queued);
+                finished = self.finished_cv.wait_timeout(finished, Duration::from_secs(15)).unwrap().0;
+            } else {
+                finished = self.finished_cv.wait(finished).unwrap();
+            }
+        }
+        if stats::memory_stats::enabled() {
+            let queued = self.queued_tasks.lock().unwrap();
+            stats::memory_stats::queue_sample(queued.iter(), self.active_threads.load(Ordering::Acquire));
         }
     }
 }
@@ -1976,6 +1989,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        stats::memory_stats::poll(frame, solver);
         if region_merge::step(frame)? {
             return Ok(Run::Suspended);
         }
@@ -3217,6 +3231,7 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
+        let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
         let ctx = Context::new(Config::new());
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
@@ -3237,6 +3252,7 @@ fn start_single_with_timeout<'ir, B: BV, R>(
             &mut solver,
         );
         collector(0, task.id, result, shared_state, solver, collected);
+        drop(memory_task);
     }
 }
 
@@ -3261,6 +3277,7 @@ fn do_work<'ir, 'task, B: BV, R>(
     collected: &R,
     collector: &Collector<'ir, B, R>,
 ) -> Fraction {
+    let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
     let cfg = Config::new();
     let ctx = Context::new(cfg);
     let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
@@ -3282,6 +3299,7 @@ fn do_work<'ir, 'task, B: BV, R>(
         &mut solver,
     );
     collector(tid, task.id, result, shared_state, solver, collected);
+    drop(memory_task);
     task.fraction
 }
 

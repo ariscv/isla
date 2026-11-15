@@ -1708,3 +1708,17 @@ mod tests {
         }
     }
 }
+
+impl<B> Memory<B> {
+    pub(crate) fn estimated_bytes(&self, seen: &mut std::collections::HashSet<usize>) -> usize {
+        let mut bytes = std::mem::size_of_val(self) + self.regions.capacity() * std::mem::size_of::<Region<B>>();
+        for region in &self.regions {
+            if let Region::Concrete(_, table) = region {
+                if seen.insert(Arc::as_ptr(table) as usize) {
+                    bytes += crate::executor::stats::memory_stats::map_bytes::<Address, u8>(table.capacity());
+                }
+            }
+        }
+        bytes
+    }
+}
