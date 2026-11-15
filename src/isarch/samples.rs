@@ -370,12 +370,12 @@ pub fn isa_state<B: BV>(
             state.insert(name, value.to_str(shared));
         }
     }
-    // PMA 大小不在 pre_registers 中，仍按现有接口查询。
-    for (name, symbol) in target.symbolic_pma_sizes() {
+    // target 的额外标量不在 pre_registers 中，按通用模型绑定查询。
+    for (name, symbol) in target.model_bindings() {
         let value = model.get_var(*symbol)?;
         if let Some(value) = FmtVal::from_model_val(&value) {
             if !value.is_arbitrary() {
-                state.insert(format!("pma_regions.{name}.size"), value.to_str(shared));
+                state.insert(name.clone(), value.to_str(shared));
             }
         }
     }
@@ -499,7 +499,7 @@ mod tests {
             solver.declare_const(smtlib::Ty::Enum(isla_lib::smt::EnumId::from_name(enum_name)), SourceLoc::unknown());
         target.pre_state_mut().insert(enum_register, Val::Symbolic(enum_value));
         let pma_size = solver.declare_bitvector(64, SourceLoc::unknown());
-        target.symbolic_pma_sizes_mut().push(("test".into(), pma_size));
+        target.model_bindings.push(("pma_regions.test.size".into(), pma_size));
 
         let pre = target
             .pre_state()

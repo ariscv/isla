@@ -121,7 +121,7 @@ fn isla_main() -> i32 {
     };
 
     // Load the architecture
-    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path: _ } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path: _, .. } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &orig_arch);
 
     let iarch = initialize_architecture(&mut arch, symtab, type_info, &isa_config, AssertionMode::Optimistic, true);
@@ -138,6 +138,7 @@ fn isla_main() -> i32 {
         type_info: ftype_info,
         isa_config: _,
         source_path: _,
+        ..
     } = opts::parse_with_arch(&mut hasher, &opts, &matches, &orig_arch);
 
     let footprint_config = if let Some(file) = matches.opt_str("footprint-config") {

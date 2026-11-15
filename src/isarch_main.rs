@@ -48,7 +48,7 @@ use isla_lib::ir::{set_global_shared_state, AssertionMode, Bindings, SharedState
 use isla_lib::log;
 mod opts;
 use isla::isarch;
-use isla::isarch::target::{RISCV, RV32, RV64};
+use isla::isarch::target::{Target, RISCV, RV32, RV64};
 use opts::CommonOpts;
 
 /// isarch 支持的子命令
@@ -589,7 +589,7 @@ fn isla_main() -> i32 {
 
     isla_lib::smt::configure_z3_timeout(smt_timeout);
 
-    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, merged_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     if matches!(subcommand, Subcommand::SolveState { .. } | Subcommand::Fuzz { .. }) {
@@ -639,27 +639,15 @@ fn isla_main() -> i32 {
         }
     }
 
-    // W10（S1）：[[pma_regions]] 配置化 PMA 地图。构造 list-of-records 值写入
-    // zpma_regions 寄存器默认值，替代 IR 固化地图；未配置时不注入，沿用 IR 默认。
-    // S2（W17）：含符号边界（size = "symbolic"）时符号常量必须活在本次求解的
-    // solver 里（config 期没有 solver 上下文），跳过配置期注入，改由 solve-state
-    // 启动时 apply_symbolic_pma_regions_to_registers 执行期注入。
-    let pma_size_symbolic = isa_config.pma_regions.as_ref().is_some_and(|regions| {
-        regions.iter().any(|region| matches!(region.size, isla_lib::config::PmaSize::Symbolic { .. }))
-    });
-    if let Some(pma_regions) = &isa_config.pma_regions {
-        if !pma_size_symbolic {
-            if let Err(error) = isarch::target::apply_pma_regions_to_config(
-                pma_regions,
-                &symtab,
-                &type_info,
-                &mut isa_config.default_registers,
-            ) {
-                eprintln!("{}", error);
-                return 1;
-            }
-        }
+    // RISC-V target 解释平台配置并准备具体默认值，CLI 不解释 PMA 字段。
+    let mut model_target = RV64::default();
+    if let Err(error) =
+        model_target.configure_model(&merged_config, &symtab, &type_info, &mut isa_config.default_registers)
+    {
+        eprintln!("{}", error);
+        return 1;
     }
+    let pma_regions = model_target.platform.pma_regions.clone();
 
     // W21：符号化 CSR 与具体默认值的冲突兜底。[registers.defaults] 的同名
     // 冲突在配置解析期已硬失败；PMP 规则在上面才注入 default_registers，
@@ -792,7 +780,7 @@ fn isla_main() -> i32 {
             // [[pma_regions]]/[[memory_regions]] 推导）
             let value_hints = isa_config.value_hints.clone();
             let region_configs = isla::isarch::value_hints::RegionConfigInput {
-                pma_regions: isa_config.pma_regions.as_deref(),
+                pma_regions: pma_regions.as_deref(),
                 memory_regions: isa_config.memory_regions.as_deref(),
             };
             let timeout_report_config =
@@ -803,10 +791,6 @@ fn isla_main() -> i32 {
                     panic!("RV32 solve-state 暂不支持");
                     let mut target = RV32::default();
                     target.pmp_symbolic = pmp_symbolic;
-                    if pma_size_symbolic {
-                        target.symbolic_pma_regions =
-                            isa_config.pma_regions.clone().expect("pma_size_symbolic 为真时 pma_regions 必已配置");
-                    }
                     target.symbolic_csrs = isa_config.symbolic_registers.clone();
                     let initial_memory = Some(
                         isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)
@@ -837,13 +821,9 @@ fn isla_main() -> i32 {
                     )
                 }
                 64 => {
-                    let mut target = RV64::default();
+                    let mut target = model_target;
                     target.initial_state = isa_config.initial_state.clone();
                     target.pmp_symbolic = pmp_symbolic;
-                    if pma_size_symbolic {
-                        target.symbolic_pma_regions =
-                            isa_config.pma_regions.clone().expect("pma_size_symbolic 为真时 pma_regions 必已配置");
-                    }
                     target.symbolic_csrs = isa_config.symbolic_registers.clone();
                     let initial_memory = Some(
                         isla::isarch::memory_builder::MemoryBuilder::from_config(&target, &isa_config)

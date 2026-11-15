@@ -1,0 +1,191 @@
+[
+  {
+    "base": 8796093022208,
+    "attributes": {
+      "cacheable": false,
+      "reservability": {
+        "enum": 0
+      },
+      "readable": false,
+      "supports_cbo_zero": false,
+      "writable": false,
+      "coherent": false,
+      "read_idempotent": false,
+      "write_idempotent": false,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "executable": false
+    },
+    "include_in_device_tree": false,
+    "size": 272678883688448
+  },
+  {
+    "attributes": {
+      "read_idempotent": true,
+      "reservability": {
+        "enum": 2
+      },
+      "readable": true,
+      "writable": true,
+      "write_idempotent": true,
+      "executable": true,
+      "cacheable": true,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "supports_cbo_zero": true,
+      "coherent": true
+    },
+    "include_in_device_tree": true,
+    "size": 8793945538560,
+    "base": 2147483648
+  },
+  {
+    "base": 973078528,
+    "include_in_device_tree": false,
+    "attributes": {
+      "cacheable": false,
+      "reservability": {
+        "enum": 0
+      },
+      "read_idempotent": false,
+      "readable": true,
+      "supports_cbo_zero": false,
+      "executable": false,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "writable": true,
+      "write_idempotent": false,
+      "coherent": true
+    },
+    "size": 1174405120
+  },
+  {
+    "base": 956309504,
+    "size": 16769024,
+    "include_in_device_tree": false,
+    "attributes": {
+      "executable": false,
+      "writable": false,
+      "readable": false,
+      "reservability": {
+        "enum": 0
+      },
+      "cacheable": false,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "write_idempotent": false,
+      "coherent": false,
+      "read_idempotent": false,
+      "supports_cbo_zero": false
+    }
+  },
+  {
+    "include_in_device_tree": false,
+    "base": 939659264,
+    "size": 16650240,
+    "attributes": {
+      "executable": false,
+      "cacheable": false,
+      "coherent": true,
+      "readable": true,
+      "write_idempotent": false,
+      "reservability": {
+        "enum": 0
+      },
+      "supports_cbo_zero": false,
+      "read_idempotent": false,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "writable": true
+    }
+  },
+  {
+    "attributes": {
+      "coherent": true,
+      "readable": true,
+      "cacheable": false,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "supports_cbo_zero": false,
+      "writable": true,
+      "executable": true,
+      "reservability": {
+        "enum": 0
+      },
+      "write_idempotent": false,
+      "read_idempotent": false
+    },
+    "base": 939655168,
+    "size": 4096,
+    "include_in_device_tree": false
+  },
+  {
+    "size": 402784256,
+    "base": 536870912,
+    "attributes": {
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "coherent": true,
+      "executable": false,
+      "cacheable": false,
+      "readable": true,
+      "reservability": {
+        "enum": 0
+      },
+      "read_idempotent": false,
+      "supports_cbo_zero": false,
+      "write_idempotent": false,
+      "writable": true
+    },
+    "include_in_device_tree": false
+  },
+  {
+    "attributes": {
+      "write_idempotent": false,
+      "coherent": true,
+      "supports_cbo_zero": false,
+      "cacheable": false,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "read_idempotent": false,
+      "readable": true,
+      "executable": true,
+      "writable": true,
+      "reservability": {
+        "enum": 0
+      }
+    },
+    "base": 268435456,
+    "size": 268435456,
+    "include_in_device_tree": false
+  },
+  {
+    "base": 0,
+    "include_in_device_tree": false,
+    "size": 268435456,
+    "attributes": {
+      "reservability": {
+        "enum": 0
+      },
+      "executable": false,
+      "read_idempotent": false,
+      "readable": true,
+      "misaligned_fault": {
+        "enum": 0
+      },
+      "coherent": true,
+      "cacheable": false,
+      "supports_cbo_zero": false,
+      "writable": true,
+      "write_idempotent": false
+    }
+  }
+]

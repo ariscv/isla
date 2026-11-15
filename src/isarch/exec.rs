@@ -1790,22 +1790,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         target.apply_symbolic_csrs_to_registers(&mut symbolic_regs, shared_state, &mut solver)?;
     }
 
-    // S2（W17）：[[pma_regions]] 含符号边界时的执行期注入（镜像符号 PMP 的
-    // 装配时机）。符号 zsizze 必须声明在本次求解的 solver 里，且必须在下方
-    // checkpoint 之前完成——所有路径共享同一组符号声明与取值域约束，
-    // zpmaCheck/zmatching_pma 的符号比较在各路径上独立分叉。
-    if !target.symbolic_pma_regions().is_empty() {
-        let records = super::target::apply_symbolic_pma_regions_to_registers(
-            target.symbolic_pma_regions(),
-            &shared_state.symtab,
-            &shared_state.type_info,
-            &mut symbolic_regs,
-            shared_state,
-            &mut solver,
-        )
-        .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?;
-        target.symbolic_pma_sizes_mut().extend(records);
-    }
+    // target 的执行期初始化须先于首次 SAT 与 checkpoint，声明由后续所有路径共享。
+    target.initialize_execution(&mut symbolic_regs, shared_state, &mut solver)?;
 
     // 所有初态注入共用执行寄存器中的符号；先施加配置约束，再做首次可满足性检查和编码预检。
     symbolic_regs.apply_constraints(

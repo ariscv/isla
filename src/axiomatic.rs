@@ -247,7 +247,7 @@ fn isla_main() -> i32 {
         exit(1);
     }
 
-    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path, .. } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &orig_arch);
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");
 
@@ -259,6 +259,7 @@ fn isla_main() -> i32 {
         type_info: ftype_info,
         isa_config: _,
         source_path: _,
+        ..
     } = opts::parse_with_arch(&mut hasher, &opts, &matches, &orig_arch);
 
     let iarch = initialize_architecture(

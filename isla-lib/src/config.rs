@@ -66,7 +66,7 @@ fn allowed_keys(config: &Value, root: &str, allowed_keys: &[&str]) -> Result<(),
     Ok(())
 }
 
-fn allowed_table_keys(config: &toml::value::Table, root: &str, allowed_keys: &[&str]) -> Result<(), String> {
+pub fn allowed_table_keys(config: &toml::value::Table, root: &str, allowed_keys: &[&str]) -> Result<(), String> {
     'outer: for key in config.keys() {
         for allowed_key in allowed_keys {
             if key == allowed_key {
@@ -158,183 +158,6 @@ pub struct MemoryRegionConfig {
     pub size: u64,
     pub region_type: MemoryRegionType,
 }
-
-/// `zmisaligned_fault` 枚举（IR rv64d.ir:671）的配置镜像。模型字段语义见
-/// zpmaCheck：NoFault 不因未对齐 trap；AccessFault/AlignmentFault 在地址
-/// 未对齐时分别转 access/alignment fault。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmaMisalignedFault {
-    NoFault,
-    AccessFault,
-    AlignmentFault,
-}
-
-impl FromStr for PmaMisalignedFault {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "no_fault" => Ok(PmaMisalignedFault::NoFault),
-            "access_fault" => Ok(PmaMisalignedFault::AccessFault),
-            "alignment_fault" => Ok(PmaMisalignedFault::AlignmentFault),
-            _ => Err(format!("Unknown PMA misaligned policy {}", s)),
-        }
-    }
-}
-
-/// `zReservability` 枚举（IR rv64d.ir:3161）的配置镜像。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmaReservability {
-    None,
-    NonEventual,
-    Eventual,
-}
-
-impl FromStr for PmaReservability {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "none" => Ok(PmaReservability::None),
-            "non_eventual" => Ok(PmaReservability::NonEventual),
-            "eventual" => Ok(PmaReservability::Eventual),
-            _ => Err(format!("Unknown PMA reservability {}", s)),
-        }
-    }
-}
-
-/// `zPMA` record（IR rv64d.ir:3295）的配置镜像：别名（ram/rom/mmio/hole）
-/// 与明细字段都解析到这个结构。字段语义由模型 zpmaCheck 消费。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PmaAttributes {
-    pub readable: bool,
-    pub writable: bool,
-    pub executable: bool,
-    pub cacheable: bool,
-    pub coherent: bool,
-    pub read_idempotent: bool,
-    pub write_idempotent: bool,
-    pub supports_cbo_zzero: bool,
-    pub misaligned_fault: PmaMisalignedFault,
-    pub reservability: PmaReservability,
-    pub include_in_device_tree: bool,
-}
-
-impl PmaAttributes {
-    /// attr 别名底座。ram/mmio 镜像 IR 固化 zpma_regions 默认 region 的属性，
-    /// rom/hole 取最保守值（rom 只读；hole 全 false）。
-    fn from_alias(alias: &str) -> Option<PmaAttributes> {
-        let attributes = match alias {
-            "ram" => PmaAttributes {
-                readable: true,
-                writable: true,
-                executable: true,
-                cacheable: true,
-                coherent: true,
-                read_idempotent: true,
-                write_idempotent: true,
-                supports_cbo_zzero: true,
-                misaligned_fault: PmaMisalignedFault::NoFault,
-                reservability: PmaReservability::Eventual,
-                include_in_device_tree: true,
-            },
-            "rom" => PmaAttributes {
-                readable: true,
-                writable: false,
-                executable: false,
-                cacheable: true,
-                coherent: true,
-                read_idempotent: true,
-                write_idempotent: true,
-                supports_cbo_zzero: false,
-                misaligned_fault: PmaMisalignedFault::NoFault,
-                reservability: PmaReservability::None,
-                include_in_device_tree: false,
-            },
-            "mmio" => PmaAttributes {
-                readable: true,
-                writable: true,
-                executable: false,
-                cacheable: false,
-                coherent: true,
-                read_idempotent: false,
-                write_idempotent: false,
-                supports_cbo_zzero: false,
-                misaligned_fault: PmaMisalignedFault::AlignmentFault,
-                reservability: PmaReservability::None,
-                include_in_device_tree: false,
-            },
-            "hole" => PmaAttributes {
-                readable: false,
-                writable: false,
-                executable: false,
-                cacheable: false,
-                coherent: false,
-                read_idempotent: false,
-                write_idempotent: false,
-                supports_cbo_zzero: false,
-                misaligned_fault: PmaMisalignedFault::NoFault,
-                reservability: PmaReservability::None,
-                include_in_device_tree: false,
-            },
-            _ => return None,
-        };
-        Some(attributes)
-    }
-
-    /// 无 attr 明细字段模式的基线：除 include_in_device_tree=true 外全 false。
-    fn detailed_default() -> PmaAttributes {
-        PmaAttributes {
-            readable: false,
-            writable: false,
-            executable: false,
-            cacheable: false,
-            coherent: false,
-            read_idempotent: false,
-            write_idempotent: false,
-            supports_cbo_zzero: false,
-            misaligned_fault: PmaMisalignedFault::NoFault,
-            reservability: PmaReservability::None,
-            include_in_device_tree: true,
-        }
-    }
-}
-
-/// `zPMA_Region` record（IR rv64d.ir:3309）的配置镜像：base+size 布局
-/// （非 base+end），属性见 [PmaAttributes]。
-#[derive(Debug, Clone)]
-pub struct PmaRegionConfig {
-    pub name: String,
-    pub base: u64,
-    pub size: PmaSize,
-    pub attributes: PmaAttributes,
-}
-
-/// S2（W17）：[[pma_regions]] 的 size 字段。`Concrete` 为固定值（W10 行为）；
-/// `Symbolic` 把 IR 字段 zsizze 声明为 64 位符号常量，并在注入时附加闭区间
-/// 取值域约束 [min, max]（bvule）——默认域防全 64 位空间稀释求解。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmaSize {
-    Concrete(u64),
-    Symbolic { min: u64, max: u64 },
-}
-
-impl PmaSize {
-    /// 取值域上界（具体 size 即自身）：重叠自校验用符号域上界做保守检查，
-    /// 保证任意模型取值下相邻 region 都不重叠。
-    fn upper_bound(&self) -> u64 {
-        match self {
-            PmaSize::Concrete(size) => *size,
-            PmaSize::Symbolic { max, .. } => *max,
-        }
-    }
-}
-
-/// 符号 size 未声明 size_bounds 时的默认取值域：[4KiB, 2^43)。
-/// 上界 2^43 锚定 W13 实测的 emu RAM 顶界（SimMemSize 8190GiB），下界 4KiB
-/// 是最小页粒度（size=0 的 region 无意义，与具体路径的 size>0 校验一致）。
-const SYMBOLIC_SIZE_DEFAULT_MIN: u64 = 0x1000;
-const SYMBOLIC_SIZE_DEFAULT_MAX: u64 = 0x80000000000;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -774,7 +597,7 @@ fn get_tool_path(config: &Value, tool: &str) -> Result<Tool, String> {
     }
 }
 
-fn parse_u64_value(value: &Value, context: &str) -> Result<u64, String> {
+pub fn parse_u64_value(value: &Value, context: &str) -> Result<u64, String> {
     match value {
         Value::Integer(i) => u64::try_from(*i).map_err(|e| format!("failed to parse integer in {}: {}", context, e)),
         Value::String(s) => {
@@ -837,173 +660,6 @@ fn get_memory_regions(config: &Value) -> Result<Option<Vec<MemoryRegionConfig>>,
             Ok(MemoryRegionConfig { name, base, size, region_type })
         })
         .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(Some(regions))
-}
-
-/// 解析 `[[pma_regions]]`（W10/S1 配置化 PMA 地图）。返回的列表按 base 降序
-/// （与 IR 固化 zpma_regions 列表次序一致），并完成 size/溢出/重叠自校验——
-/// isarch 不经过模型的 zcheck_mem_layout，排序与重叠检查必须在配置解析做。
-fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, String> {
-    let Some(pma_regions) = config.get("pma_regions") else { return Ok(None) };
-    let Some(pma_regions) = pma_regions.as_array() else {
-        return Err("pma_regions should be an array of tables".to_string());
-    };
-
-    let mut regions = Vec::with_capacity(pma_regions.len());
-    for (index, region) in pma_regions.iter().enumerate() {
-        let Some(region) = region.as_table() else {
-            return Err("pma_regions should be an array of tables".to_string());
-        };
-
-        allowed_table_keys(
-            region,
-            "[[pma_regions]]",
-            &[
-                "name",
-                "base",
-                "size",
-                "size_bounds",
-                "attr",
-                "readable",
-                "writable",
-                "executable",
-                "cacheable",
-                "coherent",
-                "read_idempotent",
-                "write_idempotent",
-                "supports_cbo_zero",
-                "misaligned",
-                "reservability",
-                "include_in_device_tree",
-            ],
-        )?;
-
-        let name =
-            region.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("pma{}", index));
-        let context = format!("pma_regions.{}", name);
-        let base = region
-            .get("base")
-            .ok_or_else(|| format!("No {}.base found", context))
-            .and_then(|value| parse_u64_value(value, &format!("{}.base", context)))?;
-        // S2（W17）：size = "symbolic" 声明符号边界（可选 size_bounds = [下界, 上界]
-        // 闭区间），其余写法仍是 W10 的具体十六进制。
-        let size = match region.get("size") {
-            Some(Value::String(text)) if text == "symbolic" => {
-                let (min, max) = match region.get("size_bounds") {
-                    None => (SYMBOLIC_SIZE_DEFAULT_MIN, SYMBOLIC_SIZE_DEFAULT_MAX),
-                    Some(Value::Array(bounds)) if bounds.len() == 2 => {
-                        let min = parse_u64_value(&bounds[0], &format!("{}.size_bounds[0]", context))?;
-                        let max = parse_u64_value(&bounds[1], &format!("{}.size_bounds[1]", context))?;
-                        (min, max)
-                    }
-                    Some(_) => {
-                        return Err(format!("{}.size_bounds should be an array of two integers", context));
-                    }
-                };
-                if min == 0 {
-                    return Err(format!("{}.size_bounds lower bound must be greater than 0", context));
-                }
-                if min > max {
-                    return Err(format!(
-                        "{}.size_bounds lower bound 0x{:x} exceeds upper bound 0x{:x}",
-                        context, min, max
-                    ));
-                }
-                if base.checked_add(max).is_none() {
-                    return Err(format!("{}.base + size_bounds upper bound overflows 64-bit address space", context));
-                }
-                PmaSize::Symbolic { min, max }
-            }
-            Some(value) => {
-                if region.contains_key("size_bounds") {
-                    return Err(format!("{}.size_bounds 只能与 size = \"symbolic\" 搭配", context));
-                }
-                let size = parse_u64_value(value, &format!("{}.size", context))?;
-                if size == 0 {
-                    return Err(format!("{}.size must be greater than 0", context));
-                }
-                if base.checked_add(size).is_none() {
-                    return Err(format!("{}.base + size overflows 64-bit address space", context));
-                }
-                PmaSize::Concrete(size)
-            }
-            None => return Err(format!("No {}.size found", context)),
-        };
-
-        // attr 别名给底座（无 attr 用明细模式基线），明细字段逐项覆盖
-        let mut attributes = match region.get("attr") {
-            Some(Value::String(alias)) => PmaAttributes::from_alias(alias)
-                .ok_or_else(|| format!("Unknown PMA attr alias {} in {}", alias, context))?,
-            Some(_) => return Err(format!("{}.attr should be a string", context)),
-            None => PmaAttributes::detailed_default(),
-        };
-        let mut has_detail = false;
-        let bool_field = |region: &toml::value::Table, key: &str| -> Result<Option<bool>, String> {
-            match region.get(key) {
-                Some(Value::Boolean(b)) => Ok(Some(*b)),
-                Some(_) => Err(format!("{}.{} should be a boolean", context, key)),
-                None => Ok(None),
-            }
-        };
-        for (key, target) in [
-            ("readable", &mut attributes.readable),
-            ("writable", &mut attributes.writable),
-            ("executable", &mut attributes.executable),
-            ("cacheable", &mut attributes.cacheable),
-            ("coherent", &mut attributes.coherent),
-            ("read_idempotent", &mut attributes.read_idempotent),
-            ("write_idempotent", &mut attributes.write_idempotent),
-            ("supports_cbo_zero", &mut attributes.supports_cbo_zzero),
-            ("include_in_device_tree", &mut attributes.include_in_device_tree),
-        ] {
-            if let Some(value) = bool_field(region, key)? {
-                *target = value;
-                has_detail = true;
-            }
-        }
-        match region.get("misaligned") {
-            Some(Value::String(s)) => {
-                attributes.misaligned_fault = s.parse::<PmaMisalignedFault>()?;
-                has_detail = true;
-            }
-            Some(_) => return Err(format!("{}.misaligned should be a string", context)),
-            None => (),
-        }
-        match region.get("reservability") {
-            Some(Value::String(s)) => {
-                attributes.reservability = s.parse::<PmaReservability>()?;
-                has_detail = true;
-            }
-            Some(_) => return Err(format!("{}.reservability should be a string", context)),
-            None => (),
-        }
-        if !region.contains_key("attr") && !has_detail {
-            return Err(format!("{} 需要 attr 别名或至少一个明细属性字段", context));
-        }
-
-        regions.push(PmaRegionConfig { name, base, size, attributes });
-    }
-
-    // 按 base 降序（IR 固化 zpma_regions 的列表次序），再做相邻重叠检查。
-    // 区间按起点排序后，任意重叠必然产生一对相邻重叠。符号 size 用取值域上界
-    // 参与检查（保守：任意模型取值下都不重叠）。
-    regions.sort_by(|a, b| b.base.cmp(&a.base));
-    for pair in regions.windows(2) {
-        let (upper, lower) = (&pair[0], &pair[1]);
-        let lower_end = lower.base.checked_add(lower.size.upper_bound()).expect("已校验 base+size 上界不溢出");
-        if lower_end > upper.base {
-            return Err(format!(
-                "pma_regions.{} [0x{:x},0x{:x}) 与 pma_regions.{} [0x{:x},0x{:x}) 重叠",
-                upper.name,
-                upper.base,
-                upper.base + upper.size.upper_bound(),
-                lower.name,
-                lower.base,
-                lower_end
-            ));
-        }
-    }
 
     Ok(Some(regions))
 }
@@ -2652,8 +2308,6 @@ pub struct ISAConfig<B> {
     pub zero_announce_exit: bool,
     /// Optional memory regions for symbolic/concrete setup
     pub memory_regions: Option<Vec<MemoryRegionConfig>>,
-    /// Optional PMA map regions written into the zpma_regions register (W10/S1)
-    pub pma_regions: Option<Vec<PmaRegionConfig>>,
     /// Optional page table configuration
     pub page_table_config: Option<PageTableConfig>,
     /// Optional PMP configuration
@@ -2669,6 +2323,12 @@ pub struct ISAConfig<B> {
     /// solve-state 的 execution-limit TOML 覆盖；未配置时由调用方使用代码默认值。
     pub execution_limits: Option<ExecutionLimitsConfig>,
     pub initial_state: Vec<InitialRegisterConfig>,
+}
+
+/// 通用配置及 includes 合并后的原始表，供调用方解析 target 专属配置。
+pub struct LoadedConfig<B: BV> {
+    pub isa: ISAConfig<B>,
+    pub merged: Value,
 }
 
 impl<B: BV> ISAConfig<B> {
@@ -2738,7 +2398,6 @@ impl<B: BV> ISAConfig<B> {
             default_sizeof: get_default_sizeof(&config)?,
             zero_announce_exit: get_zero_announce_exit(&config)?,
             memory_regions: get_memory_regions(&config)?,
-            pma_regions: get_pma_regions(&config)?,
             page_table_config: get_page_table_config(&config)?,
             pmp,
             symbolic_registers,
@@ -2785,14 +2444,24 @@ impl<B: BV> ISAConfig<B> {
     where
         P: AsRef<Path>,
     {
+        Self::from_file_with_merged(hasher, path, toolchain_name, symtab, type_info).map(|loaded| loaded.isa)
+    }
+
+    /// 同时返回合并后的 TOML；不解释调用方的 target 字段。
+    pub fn from_file_with_merged<P: AsRef<Path>>(
+        hasher: &mut Sha256,
+        path: P,
+        toolchain_name: Option<&str>,
+        symtab: &Symtab,
+        type_info: &IRTypeInfo,
+    ) -> Result<LoadedConfig<B>, String> {
         let contents = read_config_contents(path.as_ref(), &mut Vec::new())?;
         hasher.input(&contents);
         hasher.input(toolchain_name.unwrap_or("default"));
-
-        match Self::parse(&contents, toolchain_name, symtab, type_info) {
-            Ok(config) => Ok(config),
-            Err(msg) => Err(format!("{}: {}", path.as_ref().display(), msg)),
-        }
+        let merged = contents.parse::<Value>().expect("已加载配置必须是有效 TOML");
+        let isa = Self::parse(&contents, toolchain_name, symtab, type_info)
+            .map_err(|msg| format!("{}: {}", path.as_ref().display(), msg))?;
+        Ok(LoadedConfig { isa, merged })
     }
 }
 
@@ -3537,351 +3206,6 @@ r0 = "0x0000000000000000"
         .parse::<Value>()
         .unwrap();
         assert!(get_memory_regions(&bad).is_err(), "未知 region_type 仍应报错");
-    }
-
-    /// W10（S1）[[pma_regions]] 未配置时必须返回 Ok(None)：不注入任何地图，
-    /// 行为与现状（IR 固化 zpma_regions 默认值）逐项一致。
-    #[test]
-    fn pma_regions_absent_returns_none() {
-        let value = r#"
-            [[memory_regions]]
-            name = "sym_ram"
-            base = "0x80000000"
-            size = "0x10000000"
-            region_type = "symbolic"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        assert!(matches!(get_pma_regions(&value), Ok(None)));
-    }
-
-    /// 别名 ram/rom/mmio/hole 的关键字段映射（S1 别名映射完整性）：
-    /// ram=RWX+cacheable+no_fault+eventual，rom=R 只，mmio=RW 不 cacheable+
-    /// alignment_fault，hole=全 false。别名取值镜像 IR 固化 zpma_regions 的
-    /// 默认 region 属性（ram/mmio）与最保守取值（rom/hole）。
-    #[test]
-    fn pma_regions_alias_mapping() {
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "0x10000000"
-            attr = "ram"
-
-            [[pma_regions]]
-            base = "0x1000"
-            size = "0x1000"
-            attr = "rom"
-
-            [[pma_regions]]
-            base = "0x02000000"
-            size = "0x02000000"
-            attr = "mmio"
-
-            [[pma_regions]]
-            base = "0x40000000"
-            size = "0x10000000"
-            attr = "hole"
-        "#
-        .parse::<Value>()
-        .unwrap();
-
-        // 输出按 base 降序：ram(0x80000000) > hole(0x40000000) > mmio(0x02000000) > rom(0x1000)
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        assert_eq!(regions.len(), 4);
-
-        let ram = &regions[0];
-        assert_eq!(ram.base, 0x8000_0000);
-        assert_eq!(ram.size, PmaSize::Concrete(0x1000_0000));
-        let a = &ram.attributes;
-        assert!(a.readable && a.writable && a.executable && a.cacheable && a.coherent);
-        assert!(a.read_idempotent && a.write_idempotent && a.supports_cbo_zzero);
-        assert_eq!(a.misaligned_fault, PmaMisalignedFault::NoFault);
-        assert_eq!(a.reservability, PmaReservability::Eventual);
-        assert!(a.include_in_device_tree);
-
-        let hole = &regions[1];
-        let a = &hole.attributes;
-        assert!(!a.readable && !a.writable && !a.executable && !a.cacheable && !a.coherent);
-        assert!(!a.read_idempotent && !a.write_idempotent && !a.supports_cbo_zzero);
-        assert_eq!(a.misaligned_fault, PmaMisalignedFault::NoFault);
-        assert_eq!(a.reservability, PmaReservability::None);
-        assert!(!a.include_in_device_tree);
-
-        let mmio = &regions[2];
-        let a = &mmio.attributes;
-        assert!(a.readable && a.writable && !a.executable && !a.cacheable);
-        assert!(!a.read_idempotent && !a.write_idempotent && !a.supports_cbo_zzero);
-        assert_eq!(a.misaligned_fault, PmaMisalignedFault::AlignmentFault);
-        assert_eq!(a.reservability, PmaReservability::None);
-
-        let rom = &regions[3];
-        let a = &rom.attributes;
-        assert!(a.readable && !a.writable && !a.executable && a.cacheable);
-        assert_eq!(a.misaligned_fault, PmaMisalignedFault::NoFault);
-        assert_eq!(a.reservability, PmaReservability::None);
-        assert!(!a.include_in_device_tree);
-
-        // 未知别名必须报错
-        let bad = r#"
-            [[pma_regions]]
-            base = "0x0"
-            size = "0x1000"
-            attr = "sram"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        assert!(get_pma_regions(&bad).is_err(), "未知 attr 别名仍应报错");
-    }
-
-    /// 明细字段模式：无 attr 时以 include_in_device_tree=true、其余全 false 为
-    /// 基线，明细字段逐项覆盖；attr 与明细字段可同时出现（attr 给底、明细覆盖）。
-    #[test]
-    fn pma_regions_detailed_fields_and_override() {
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "0x1000"
-            readable = true
-            misaligned = "alignment_fault"
-            reservability = "eventual"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        let a = &regions[0].attributes;
-        assert!(a.readable && !a.writable && !a.executable);
-        assert!(a.include_in_device_tree, "明细模式 include_in_device_tree 默认 true");
-        assert_eq!(a.misaligned_fault, PmaMisalignedFault::AlignmentFault);
-        assert_eq!(a.reservability, PmaReservability::Eventual);
-
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "0x1000"
-            attr = "mmio"
-            executable = true
-            include_in_device_tree = true
-        "#
-        .parse::<Value>()
-        .unwrap();
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        let a = &regions[0].attributes;
-        assert!(a.executable, "明细字段应覆盖 attr 底座");
-        assert!(!a.cacheable, "未被覆盖的 attr 字段保持 mmio 取值");
-        assert_eq!(a.misaligned_fault, PmaMisalignedFault::AlignmentFault);
-        assert!(a.include_in_device_tree);
-
-        // 既无 attr 也无任何明细属性字段的 region 是配置疑点，直接报错
-        let bare = r#"
-            [[pma_regions]]
-            base = "0x0"
-            size = "0x1000"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        assert!(get_pma_regions(&bare).is_err(), "无 attr 且无明细字段应报错");
-    }
-
-    /// 配置解析自校验（对齐 MemoryBuilder 硬失败风格）：size=0、base+size 溢出、
-    /// 区域重叠都必须报错；重叠检测与 TOML 书写顺序无关（解析内部按 base 降序
-    /// 排序后再做相邻重叠检查，注入的 zpma_regions 列表即该降序）。
-    #[test]
-    fn pma_regions_validation_hard_fails() {
-        let cases = [
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "0x0"
-                attr = "ram"
-                "#,
-                "size 为 0",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0xffffffffffffffff"
-                size = "0x2"
-                attr = "ram"
-                "#,
-                "base+size 溢出",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "0x10000000"
-                attr = "ram"
-
-                [[pma_regions]]
-                base = "0x8ffff000"
-                size = "0x1000"
-                attr = "ram"
-                "#,
-                "相邻区域重叠",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x0"
-                size = "0x2000"
-                attr = "rom"
-
-                [[pma_regions]]
-                base = "0x1000"
-                size = "0x2000"
-                attr = "ram"
-                "#,
-                "乱序书写仍检出重叠",
-            ),
-        ];
-        for (toml, why) in cases {
-            let value = toml.parse::<Value>().unwrap();
-            let err = get_pma_regions(&value).unwrap_err();
-            assert!(!err.is_empty(), "{} 应报错", why);
-        }
-
-        // 合法乱序配置：输出按 base 降序（与 IR 固化 zpma_regions 的列表次序一致）
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "0x10000000"
-            attr = "ram"
-
-            [[pma_regions]]
-            base = "0x1000"
-            size = "0x1000"
-            attr = "rom"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        assert!(regions[0].base > regions[1].base, "输出应按 base 降序");
-    }
-
-    /// S2（W17）：size = "symbolic" 声明符号边界。显式 size_bounds 取闭区间
-    /// [下界, 上界]；未声明时用默认域 [4KiB, 2^43)（emu RAM 顶界锚点）。
-    /// 具体与符号 region 可混排（重叠检查按符号域上界保守处理）。
-    #[test]
-    fn pma_regions_symbolic_size_parsing() {
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "symbolic"
-            size_bounds = ["0x800", "0x1000000000"]
-            attr = "ram"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].size, PmaSize::Symbolic { min: 0x800, max: 0x10_0000_0000 });
-
-        // 未声明 size_bounds：默认域
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "symbolic"
-            attr = "ram"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        assert_eq!(regions[0].size, PmaSize::Symbolic { min: 0x1000, max: 0x80000000000 });
-
-        // 具体与符号混排合法：重叠检查用符号域上界（0x80000000+0x2000 <= 0x90000000 不重叠）
-        let value = r#"
-            [[pma_regions]]
-            base = "0x80000000"
-            size = "symbolic"
-            size_bounds = ["0x1000", "0x2000"]
-            attr = "ram"
-
-            [[pma_regions]]
-            base = "0x90000000"
-            size = "0x1000"
-            attr = "ram"
-        "#
-        .parse::<Value>()
-        .unwrap();
-        let regions = get_pma_regions(&value).unwrap().unwrap();
-        assert_eq!(regions.len(), 2, "符号域上界不与具体 region 重叠时应放行");
-    }
-
-    /// S2（W17）：符号边界自校验硬失败——size_bounds 元数错误/下界为 0/下界超
-    /// 上界/base+上界溢出/具体 size 搭配 size_bounds/符号域上界与邻居重叠。
-    #[test]
-    fn pma_regions_symbolic_bounds_hard_fails() {
-        let cases = [
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "symbolic"
-                size_bounds = ["0x1000"]
-                attr = "ram"
-                "#,
-                "size_bounds 元数不是 2",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "symbolic"
-                size_bounds = ["0x0", "0x1000"]
-                attr = "ram"
-                "#,
-                "下界为 0",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "symbolic"
-                size_bounds = ["0x2000", "0x1000"]
-                attr = "ram"
-                "#,
-                "下界超上界",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0xffffffffffffffff"
-                size = "symbolic"
-                attr = "ram"
-                "#,
-                "base + 默认域上界溢出",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "0x1000"
-                size_bounds = ["0x1000", "0x2000"]
-                attr = "ram"
-                "#,
-                "具体 size 搭配 size_bounds",
-            ),
-            (
-                r#"
-                [[pma_regions]]
-                base = "0x80000000"
-                size = "symbolic"
-                size_bounds = ["0x1000", "0x20000000"]
-                attr = "ram"
-
-                [[pma_regions]]
-                base = "0x90000000"
-                size = "0x1000"
-                attr = "ram"
-                "#,
-                "符号域上界与相邻 region 重叠",
-            ),
-        ];
-        for (toml, why) in cases {
-            let value = toml.parse::<Value>().unwrap();
-            assert!(get_pma_regions(&value).is_err(), "{} 应报错", why);
-        }
     }
 
     /// W21：[symbolic_registers] 最小夹具——只 intern zmstatus/zsatp 的 symtab

@@ -8,13 +8,14 @@
 //! E 线已证定向钉值有效），批调度见 exec.rs 的 solve_state_main。
 
 use isla_lib::bitvector::BV;
-use isla_lib::config::{MemoryRegionConfig, PmaRegionConfig, PmaSize, ValueHintConfig, ValueHintTarget, ValuePattern};
+use isla_lib::config::{MemoryRegionConfig, ValueHintConfig, ValueHintTarget, ValuePattern};
 use isla_lib::ir::*;
 use isla_lib::register::RegisterBindings;
 use isla_lib::zencode;
 use std::collections::HashMap;
 
 use super::clause::normalize_clause_name;
+use super::target::riscv::pma::{PmaRegionConfig, PmaSize};
 
 /// 候选值的宽度语义：`Exact` 不允许超出寄存器宽度（显式数值，超宽即配置
 /// 错误）；`RepeatToFill` 按低 64 位模式重复填充寄存器宽度（nonzero_pattern
@@ -430,8 +431,8 @@ mod tests {
     }
 
     /// 属性字段内容对锚点展开无关，构造一个合法的基线即可。
-    fn baseline_pma_attributes() -> isla_lib::config::PmaAttributes {
-        use isla_lib::config::{PmaAttributes, PmaMisalignedFault, PmaReservability};
+    fn baseline_pma_attributes() -> super::super::target::riscv::pma::PmaAttributes {
+        use super::super::target::riscv::pma::{PmaAttributes, PmaMisalignedFault, PmaReservability};
         PmaAttributes {
             readable: true,
             writable: true,
@@ -456,12 +457,16 @@ mod tests {
                 base: 0x8000_0000,
                 size: PmaSize::Concrete(0x1000_0000),
                 attributes: ram_attrs.clone(),
+                atomic: None,
+                backing: None,
             },
             PmaRegionConfig {
                 name: "sym".to_string(),
                 base: 0x9000_0000,
                 size: PmaSize::Symbolic { min: 0x1000, max: 0x2000 },
                 attributes: ram_attrs,
+                atomic: None,
+                backing: None,
             },
         ];
         let anchors = region_anchors(Some(&pma), None).unwrap();
@@ -653,6 +658,8 @@ mod tests {
                 base: 0x8000_0000,
                 size: PmaSize::Concrete(0x1000_0000),
                 attributes: baseline_pma_attributes(),
+                atomic: None,
+                backing: None,
             }]),
             memory_regions: None,
         };

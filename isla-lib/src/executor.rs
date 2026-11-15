@@ -3933,7 +3933,7 @@ mod tests {
     // 源位宽由操作数决定；宽输入、负数与溢出测试不能将源位宽传作该参数。
     mod boundary_regression_tests;
     mod cow_tests;
-    mod pma_enum_tests;
+    mod nested_enum_tests;
     mod region_measurement_tests;
     mod region_merge_tests;
     mod review27_tests;
@@ -12199,7 +12199,6 @@ fn zcaller(za, zb) {
             default_sizeof: 0,
             zero_announce_exit: false,
             memory_regions: None,
-            pma_regions: None,
             page_table_config: None,
             pmp: None,
             clint_enabled: None,

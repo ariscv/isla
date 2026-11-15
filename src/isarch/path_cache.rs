@@ -166,7 +166,11 @@ mod tests {
         let mut solver = Solver::<B64>::new(&context);
         let symbol = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
         target.pre_state_mut().insert(Name::from_u32(0), Val::Symbolic(symbol));
-        target.symbolic_pma_sizes_mut().push(("generic".into(), symbol));
+        target.platform = super::super::target::riscv::RiscvPlatformConfig::from_merged_toml(
+            &"[[pma_regions]]\nname='generic'\nbase=0\nsize='symbolic'\nattr='ram'".parse().unwrap(),
+        )
+        .unwrap();
+        target.model_bindings.push(("pma_regions.generic.size".into(), symbol));
         let paths = vec![ResidentPath {
             pure_definitions: vec![],
             signature: 42,
@@ -215,9 +219,11 @@ mod tests {
         assert_eq!(a.segments, b.segments);
         assert_eq!(json.facts, bin.facts);
         let mut restored = RV64::default();
+        restored.platform = target.platform.clone();
+        assert_eq!(json.manifest.pma_sizes, vec![("generic".to_string(), symbol.as_u32())]);
         restore_target(&json.manifest, &mut restored);
         assert_eq!(target.pre_state().get(&Name::from_u32(0)), restored.pre_state().get(&Name::from_u32(0)));
-        assert_eq!(target.symbolic_pma_sizes(), restored.symbolic_pma_sizes());
+        assert_eq!(target.model_bindings(), restored.model_bindings());
         let reject = || {
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load::<B64>(
                 &directory,
@@ -684,13 +690,17 @@ pub fn load<B: BV>(
 
 pub fn restore_target<B: BV>(manifest: &Manifest<B>, target: &mut dyn Target<B>) {
     assert_eq!(target.pre_state().len(), 0, "缓存读入前 Target 前态必须为空");
-    assert!(target.symbolic_pma_sizes().is_empty(), "缓存读入前 PMA 绑定必须为空");
+    assert!(target.model_bindings().is_empty(), "缓存读入前 PMA 绑定必须为空");
     for (name, value) in &manifest.pre_state {
         assert!(target.pre_state_mut().insert(*name, value.clone().into()).is_none(), "缓存前态重复");
     }
-    if !manifest.pma_sizes.is_empty() {
-        target.symbolic_pma_sizes_mut().extend(manifest.pma_sizes.iter().map(|(n, s)| (n.clone(), Sym::from_u32(*s))));
-    }
+    // 兼容旧 schema：pma_sizes 保存 region 名，Target 使用完整输出键。
+    let bindings = manifest
+        .pma_sizes
+        .iter()
+        .map(|(name, sym)| (format!("pma_regions.{name}.size"), Sym::from_u32(*sym)))
+        .collect::<Vec<_>>();
+    target.restore_model_bindings(&bindings).expect("缓存模型绑定与当前 target 配置不匹配");
 }
 
 pub fn save<B: BV>(
@@ -723,7 +733,18 @@ pub fn save<B: BV>(
     let names = NameEnvironment::capture(&shared.symtab, &shared.type_info);
     let mut pre_state = target.pre_state().iter().map(|(n, v)| (*n, v.clone().into())).collect::<Vec<_>>();
     pre_state.sort_by_key(|(n, _)| *n);
-    let pma_sizes = target.symbolic_pma_sizes().iter().map(|(n, s)| (n.clone(), s.as_u32())).collect::<Vec<_>>();
+    let pma_sizes = target
+        .model_bindings()
+        .iter()
+        .map(|(name, sym)| {
+            // 仅兼容历史 PMA 槽；新增种类的绑定必须明确设计缓存表达。
+            let region = name
+                .strip_prefix("pma_regions.")
+                .and_then(|name| name.strip_suffix(".size"))
+                .expect("当前缓存格式只能保存 PMA size 模型绑定");
+            (region.to_string(), sym.as_u32())
+        })
+        .collect::<Vec<_>>();
     dto::validate_paths(&writer.segments, &cached, &names, &pre_state, &pma_sizes);
     timing.capture_seconds = started.elapsed().as_secs_f64();
     timing.paths = paths.len();

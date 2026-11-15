@@ -55,7 +55,6 @@ fn empty_config() -> ISAConfig<B64> {
         default_sizeof: 0,
         zero_announce_exit: false,
         memory_regions: None,
-        pma_regions: None,
         page_table_config: None,
         pmp: None,
         symbolic_registers: Vec::new(),

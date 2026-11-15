@@ -336,7 +336,7 @@ fn isla_main() -> i32 {
         eprintln!("Unexpected arguments: {}", matches.free.join(" "));
         exit(1)
     }
-    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path, .. } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
     // Note this is the opposite default to other tools

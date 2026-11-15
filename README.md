@@ -216,7 +216,33 @@ region_type = "excluded"
 clint_enabled = false
 ```
 
-### 配置化 PMA 地图：`[[pma_regions]]`（W10）
+### 配置化 PMA 地图：`[[pma_regions]]`
+
+PMA 的配置类型、别名、解析、校验、Sail IR 编码与符号 size 注入位于
+`src/isarch/target/riscv/`，通用配置库不解释 PMA。
+配置只使用顶层 `[[pma_regions]]`，既有配置无需修改。
+includes 中的 PMA 数组由后加载文件整体替换，不按 region 名合并。
+
+同一张表内可选填 `atomic`、`backing`：
+
+```toml
+[[pma_regions]]
+name = "ram"
+base = "0x80000000"
+size = "0x7ff80000000"
+attr = "ram"
+atomic = true
+backing = "memory"
+```
+
+`atomic` 可省略，省略表示未声明；`backing` 可省略或取 `memory`、
+`device_bus`、`denied`。二者仅记录硬件能力和接线，不注入 Sail 字段，
+本阶段也不据此过滤 testcase。旧别名的属性和“别名底座→明细覆盖”顺序保持不变。
+Sail 的 AMO 支持级别、cacheable／coherent 执行效果仍有模型能力缺口；模型侧建议
+是后续独立补齐相应语义，本次不改 Sail。
+
+以下 W10／W17 示例可直接使用。符号 size 输出仍为
+`pma_regions.<name>.size`，路径缓存的 `pma_sizes` 和 schema 保持原格式。
 
 把模型 PMA 地图写入 IR 顶层寄存器 `zpma_regions`（`%list(%struct zPMA_Region)`，
 模型的 `zpmaCheck`/`zmatching_pma` 逐项遍历）——启动时按配置构造
@@ -239,6 +265,8 @@ region 布局与 IR record 对齐：**base+size（非 base+end）**；配置列�
 | `readable`/`writable`/`executable`/`cacheable`/`coherent`/`read_idempotent`/`write_idempotent`/`supports_cbo_zero`/`include_in_device_tree` | bool | 全 false，唯 `include_in_device_tree=true` |
 | `misaligned` | `"no_fault"` / `"access_fault"` / `"alignment_fault"` | `no_fault` |
 | `reservability` | `"eventual"` / `"non_eventual"` / `"none"` | `none` |
+| `atomic`（可选元数据） | bool | 未声明，不由别名推导 |
+| `backing`（可选元数据） | `"memory"` / `"device_bus"` / `"denied"` | 未声明 |
 
 注意 `supports_cbo_zero` 是单个 z（IR 里 `zsupports_cbo_zzero` 的双 z 是
 Sail zencode）。别名映射（ram/mmio 镜像 IR 固化默认 region 属性）：
@@ -304,7 +332,7 @@ size_bounds = ["0x1000", "0x80000000000"]   # 可选：闭区间取值域
 attr = "ram"
 ```
 
-- `size_bounds` 可省略，默认闭区间 `[0x1000, 0x80000000000)`（4KiB..
+- `size_bounds` 可省略，默认闭区间 `[0x1000, 0x80000000000]`（4KiB..
   2^43，上界锚定 W13 实测的 emu RAM 顶界），防全 64 位空间稀释求解。
 - 自校验：`size_bounds` 必须二元/下界>0/下界≤上界/base+上界不溢出；
   具体尺寸搭配 `size_bounds` 报错。属性字段（attr 等）本期不做符号化。

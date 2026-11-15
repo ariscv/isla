@@ -162,6 +162,7 @@ pub struct CommonOpts<'ir, B> {
     pub symtab: Symtab<'ir>,
     pub type_info: IRTypeInfo,
     pub isa_config: ISAConfig<B>,
+    pub merged_config: toml::Value,
     pub source_path: Option<PathBuf>,
 }
 
@@ -293,8 +294,14 @@ pub fn parse_with_arch<'ir, B: BV>(
         }
     });
 
-    let mut isa_config = if let Some(file) = matches.opt_str("config") {
-        match ISAConfig::from_file(hasher, file, matches.opt_str("toolchain").as_deref(), &symtab, &type_info) {
+    let loaded = if let Some(file) = matches.opt_str("config") {
+        match ISAConfig::from_file_with_merged(
+            hasher,
+            file,
+            matches.opt_str("toolchain").as_deref(),
+            &symtab,
+            &type_info,
+        ) {
             Ok(isa_config) => isa_config,
             Err(e) => {
                 eprintln!("{}", e);
@@ -305,6 +312,9 @@ pub fn parse_with_arch<'ir, B: BV>(
         eprintln!("A configuration must be supplied with the -C/--config flag");
         exit(1)
     };
+
+    let mut isa_config = loaded.isa;
+    let merged_config = loaded.merged;
 
     matches.opt_strs("probe").iter().for_each(|arg| {
         if let Some(id) = symtab.get(&zencode::encode(arg)) {
@@ -543,5 +553,5 @@ pub fn parse_with_arch<'ir, B: BV>(
     let source_path = matches.opt_str("source").map(PathBuf::from);
     symtab.set_directory(source_path.clone());
 
-    CommonOpts { num_threads, arch, symtab, type_info, isa_config, source_path }
+    CommonOpts { num_threads, arch, symtab, type_info, isa_config, merged_config, source_path }
 }
