@@ -223,7 +223,7 @@ PMA 的配置类型、别名、解析、校验、Sail IR 编码与符号 size �
 配置只使用顶层 `[[pma_regions]]`，既有配置无需修改。
 includes 中的 PMA 数组由后加载文件整体替换，不按 region 名合并。
 
-同一张表内可选填 `atomic`、`backing`：
+同一张表内可选填 `atomic`、`atomic_support`、`backing`：
 
 ```toml
 [[pma_regions]]
@@ -235,18 +235,21 @@ atomic = true
 backing = "memory"
 ```
 
-`atomic` 可省略，省略表示未声明；`backing` 可省略或取 `memory`、
-`device_bus`、`denied`。二者仅记录硬件能力和接线，不注入 Sail 字段，
-本阶段也不据此过滤 testcase。旧别名的属性和“别名底座→明细覆盖”顺序保持不变。
-Sail 的 AMO 支持级别、cacheable／coherent 执行效果仍有模型能力缺口；模型侧建议
-是后续独立补齐相应语义，本次不改 Sail。
+`atomic=false` 编码为 `AMONone`＋`RsrvNone`；`atomic=true` 未写明细时采用
+`AMOArithmetic`，CAS 宽度必须另写。`atomic_support` 可取 `none`、`swap`、
+`logical`、`arithmetic`、`cas_w`、`cas_d`、`cas_q`。各 CAS 等级包含经典 AMO，
+并限制 CAS 最大宽度。`atomic=false` 与允许 AMO／reservation 的显式明细冲突时拒绝配置。
+未写 `atomic` 和 `atomic_support` 的旧平台默认 `AMOCASQ`，保留其已启用 AMO 的
+原接纳范围；指令译码仍负责检查扩展启用。新编码需要含 `PMA.atomic_support` 的新 IR。
+`backing` 可省略或取 `memory`、`device_bus`、`denied`，只作接线记录。
+cacheable／coherent 的实际执行效果、普通非对齐拆分和 PBMT 仍有独立模型边界。
 
 以下 W10／W17 示例可直接使用。符号 size 输出仍为
 `pma_regions.<name>.size`，路径缓存的 `pma_sizes` 和 schema 保持原格式。
 
 把模型 PMA 地图写入 IR 顶层寄存器 `zpma_regions`（`%list(%struct zPMA_Region)`，
 模型的 `zpmaCheck`/`zmatching_pma` 逐项遍历）——启动时按配置构造
-list-of-records 值注入 `default_registers`，模型逻辑与 IR **零改动**。
+list-of-records 值注入 `default_registers`，权限语义由同版模型 IR 执行。
 region 布局与 IR record 对齐：**base+size（非 base+end）**；配置列表按 base
 降序注入（与 IR 固化列表次序一致）。与 `[[memory_regions]]` 的关系是**正交
 两层**：
@@ -265,7 +268,8 @@ region 布局与 IR record 对齐：**base+size（非 base+end）**；配置列�
 | `readable`/`writable`/`executable`/`cacheable`/`coherent`/`read_idempotent`/`write_idempotent`/`supports_cbo_zero`/`include_in_device_tree` | bool | 全 false，唯 `include_in_device_tree=true` |
 | `misaligned` | `"no_fault"` / `"access_fault"` / `"alignment_fault"` | `no_fault` |
 | `reservability` | `"eventual"` / `"non_eventual"` / `"none"` | `none` |
-| `atomic`（可选元数据） | bool | 未声明，不由别名推导 |
+| `atomic` | bool | 未声明 |
+| `atomic_support` | `none` / `swap` / `logical` / `arithmetic` / `cas_w` / `cas_d` / `cas_q` | 旧平台 `cas_q`；显式 atomic=true 时 `arithmetic`，false 时 `none` |
 | `backing`（可选元数据） | `"memory"` / `"device_bus"` / `"denied"` | 未声明 |
 
 注意 `supports_cbo_zero` 是单个 z（IR 里 `zsupports_cbo_zzero` 的双 z 是

@@ -360,8 +360,10 @@ fn pma_type_fixture() -> (Symtab<'static>, IRTypeInfo) {
     let pma_name = symtab.intern("zPMA");
     let misaligned_enum = symtab.intern("zmisaligned_fault");
     let reservability_enum = symtab.intern("zReservability");
+    let atomic_enum = symtab.intern("zAtomicSupport");
 
     let mut pma_fields = BTreeMap::new();
+    pma_fields.insert(symtab.intern("zatomic_support"), Ty::Enum(atomic_enum));
     pma_fields.insert(symtab.intern("zcacheable"), Ty::Bool);
     pma_fields.insert(symtab.intern("zcoherent"), Ty::Bool);
     pma_fields.insert(symtab.intern("zexecutable"), Ty::Bool);
@@ -391,7 +393,16 @@ fn pma_type_fixture() -> (Symtab<'static>, IRTypeInfo) {
     enums.insert(misaligned_enum, misaligned_members.clone());
     enums.insert(reservability_enum, reservability_members.clone());
 
+    let atomic_members: Vec<_> =
+        ["zAMONone", "zAMOSwap", "zAMOLogical", "zAMOArithmetic", "zAMOCASW", "zAMOCASD", "zAMOCASQ"]
+            .iter()
+            .map(|name| symtab.intern(name))
+            .collect();
+    enums.insert(atomic_enum, atomic_members.clone());
     let mut enum_members = HashMap::new();
+    for (pos, member) in atomic_members.iter().enumerate() {
+        enum_members.insert(*member, (pos, atomic_members.len(), atomic_enum));
+    }
     for (pos, member) in misaligned_members.iter().enumerate() {
         enum_members.insert(*member, (pos, misaligned_members.len(), misaligned_enum));
     }
@@ -419,6 +430,7 @@ fn pma_region(base: u64, size: u64, attr: &str) -> super::PmaRegionConfig {
             supports_cbo_zzero: true,
             misaligned_fault: PmaMisalignedFault::NoFault,
             reservability: PmaReservability::Eventual,
+            atomic_support: PmaAtomicSupport::CasQ,
             include_in_device_tree: true,
         },
         "mmio" => PmaAttributes {
@@ -432,6 +444,7 @@ fn pma_region(base: u64, size: u64, attr: &str) -> super::PmaRegionConfig {
             supports_cbo_zzero: false,
             misaligned_fault: PmaMisalignedFault::AlignmentFault,
             reservability: PmaReservability::None,
+            atomic_support: PmaAtomicSupport::CasQ,
             include_in_device_tree: false,
         },
         other => panic!("测试不支持别名 {}", other),
@@ -693,7 +706,15 @@ fn pma_regions_real_nine_regions_match_original_encoding() {
     assert_eq!(legacy.len(), 9);
     let (mut symtab, types) = pma_type_fixture();
     let register = symtab.intern("zpma_regions");
-    let expected: serde_json::Value = serde_json::from_str(include_str!("original-nine-regions.json")).unwrap();
+    let mut expected: serde_json::Value = serde_json::from_str(include_str!("original-nine-regions.json")).unwrap();
+    for region in expected.as_array_mut().unwrap() {
+        let base = region["base"].as_u64().unwrap();
+        region["attributes"]["atomic_support"] = serde_json::json!({"enum": if base == 0x80000000 {3} else {0}});
+        // 基线 56bae3f2 已将六段设备区改为 AccessFault；冻结快照仍是迁移前值。
+        if region["attributes"]["readable"] == true && region["attributes"]["cacheable"] == false {
+            region["attributes"]["misaligned_fault"] = serde_json::json!({"enum":1});
+        }
+    }
     let value = encoded(&legacy, &symtab, &types);
     assert_eq!(normalized(&value, &symtab), expected);
     use crate::isarch::target::{Target, RV64};
@@ -704,7 +725,7 @@ fn pma_regions_real_nine_regions_match_original_encoding() {
 }
 
 #[test]
-fn pma_regions_optional_metadata_does_not_change_encoding() {
+fn pma_regions_atomic_metadata_maps_permissions() {
     let legacy = "[[pma_regions]]\nname='ram'\nbase=4096\nsize=4096\nattr='ram'\n";
     let (symtab, types) = pma_type_fixture();
     let old = get_pma_regions(&legacy.parse().unwrap()).unwrap().unwrap();
@@ -719,9 +740,15 @@ fn pma_regions_optional_metadata_does_not_change_encoding() {
             assert_eq!(new[0].atomic, Some(atomic));
             assert_eq!(new[0].backing, Some(backing));
             assert_eq!(
-                normalized(&encoded(&old, &symtab, &types), &symtab),
-                normalized(&encoded(&new, &symtab, &types), &symtab)
+                new[0].attributes.atomic_support,
+                if atomic { PmaAtomicSupport::Arithmetic } else { PmaAtomicSupport::None }
             );
+            assert_eq!(
+                new[0].attributes.reservability,
+                if atomic { PmaReservability::Eventual } else { PmaReservability::None }
+            );
+            let value = normalized(&encoded(&new, &symtab, &types), &symtab);
+            assert_eq!(value[0]["attributes"]["atomic_support"], serde_json::json!({"enum":if atomic {3} else {0}}));
         }
     }
     for bad in ["atomic='true'", "backing=true", "backing='ram'", "typo=true"] {
@@ -931,4 +958,39 @@ fn pma_regions_ir_missing_fields_and_wrong_enum_types_are_rejected() {
     let mut wrong = types.clone();
     wrong.structs.get_mut(&region).unwrap().insert(symtab.get("zsizze").unwrap(), Ty::Bits(32));
     assert!(apply_pma_regions_to_config::<B64>(&regions, &symtab, &wrong, &mut HashMap::new()).is_err());
+}
+
+#[test]
+fn pma_regions_atomic_false_disables_reservation() {
+    let text = "[[pma_regions]]\nbase=4096\nsize=4096\nattr='ram'\natomic=false";
+    let regions = get_pma_regions(&text.parse().unwrap()).unwrap().unwrap();
+    assert_eq!(regions[0].attributes.reservability, PmaReservability::None);
+}
+
+#[test]
+fn pma_regions_atomic_support_accepts_explicit_cas_width() {
+    let text = "[[pma_regions]]\nbase=4096\nsize=4096\nattr='ram'\natomic_support='cas_d'";
+    assert!(get_pma_regions(&text.parse().unwrap()).is_ok());
+}
+
+#[test]
+fn pma_regions_atomic_levels_and_conflicts() {
+    let base = "[[pma_regions]]\nbase=4096\nsize=4096\nattr='ram'\n";
+    let (symtab, types) = pma_type_fixture();
+    for (index, level) in ["none", "swap", "logical", "arithmetic", "cas_w", "cas_d", "cas_q"].iter().enumerate() {
+        let config: Value = format!("{base}atomic_support='{level}'").parse().unwrap();
+        let regions = get_pma_regions(&config).unwrap().unwrap();
+        let value = normalized(&encoded(&regions, &symtab, &types), &symtab);
+        assert_eq!(value[0]["attributes"]["atomic_support"], serde_json::json!({"enum":index}));
+    }
+    for bad in [
+        "atomic_support='invalid'",
+        "atomic_support=true",
+        "atomic=false\natomic_support='swap'",
+        "atomic=false\nreservability='eventual'",
+    ] {
+        assert!(get_pma_regions(&format!("{base}{bad}").parse().unwrap()).is_err());
+    }
+    let regions = get_pma_regions(&base.parse().unwrap()).unwrap().unwrap();
+    assert_eq!(regions[0].attributes.atomic_support, PmaAtomicSupport::CasQ);
 }

@@ -444,6 +444,7 @@ mod tests {
             supports_cbo_zzero: true,
             misaligned_fault: PmaMisalignedFault::NoFault,
             reservability: PmaReservability::Eventual,
+            atomic_support: super::super::target::riscv::pma::PmaAtomicSupport::CasQ,
             include_in_device_tree: true,
         }
     }

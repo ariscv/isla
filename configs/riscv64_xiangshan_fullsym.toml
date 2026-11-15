@@ -144,7 +144,7 @@ initial = [
 
 ]
 
-# 香山 PMA 九段地图，全部为左闭右开。Sail 无独立 atomic 属性。
+# 香山 PMA 九段地图，全部为左闭右开。atomic 位映射为 AMO 等级和 LR/SC 权限，DRAM 不由 atomic=true 推断 CAS 宽度。
 # misaligned：香山可缓存 DRAM 的普通非对齐访问由硬件完成（no_fault）；PMA 不可缓存的设备区非对齐报
 # access fault（5/7），故这些段用 access_fault；空洞靠 R/W/X=false 报权限错误，保持 no_fault 以免 4/6 抢先。
 # 依据与限制（Sail 先拆分后检查 PMA，单改配置不保证生效）见 agents/fuzz_strategy_20261112/exp/pma-target/semantics.md。
@@ -154,6 +154,8 @@ name = "xiangshan_0"
 base = "0x0000000000000000"
 size = "0x0000000010000000"
 attr = "mmio"
+atomic = false
+atomic_support = "none"
 executable = false
 misaligned = "access_fault"
 
@@ -162,6 +164,8 @@ name = "xiangshan_1"
 base = "0x0000000010000000"
 size = "0x0000000010000000"
 attr = "mmio"
+atomic = false
+atomic_support = "none"
 executable = true
 misaligned = "access_fault"
 
@@ -170,6 +174,8 @@ name = "xiangshan_2"
 base = "0x0000000020000000"
 size = "0x0000000018020000"
 attr = "mmio"
+atomic = false
+atomic_support = "none"
 executable = false
 misaligned = "access_fault"
 
@@ -178,6 +184,8 @@ name = "xiangshan_3"
 base = "0x0000000038020000"
 size = "0x0000000000001000"
 attr = "mmio"
+atomic = false
+atomic_support = "none"
 executable = true
 misaligned = "access_fault"
 
@@ -186,6 +194,8 @@ name = "xiangshan_4"
 base = "0x0000000038021000"
 size = "0x0000000000fe1000"
 attr = "mmio"
+atomic = false
+atomic_support = "none"
 executable = false
 misaligned = "access_fault"
 
@@ -194,12 +204,16 @@ name = "xiangshan_5"
 base = "0x0000000039002000"
 size = "0x0000000000ffe000"
 attr = "hole"
+atomic = false
+atomic_support = "none"
 
 [[pma_regions]]
 name = "xiangshan_6"
 base = "0x000000003a000000"
 size = "0x0000000046000000"
 attr = "mmio"
+atomic = false
+atomic_support = "none"
 executable = false
 misaligned = "access_fault"
 
@@ -208,6 +222,8 @@ name = "xiangshan_7"
 base = "0x0000000080000000"
 size = "0x000007ff80000000"
 attr = "ram"
+atomic = true
+atomic_support = "arithmetic"
 misaligned = "no_fault"
 
 [[pma_regions]]
@@ -215,3 +231,5 @@ name = "xiangshan_8"
 base = "0x0000080000000000"
 size = "0x0000f80000000000"
 attr = "hole"
+atomic = false
+atomic_support = "none"

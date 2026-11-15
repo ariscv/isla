@@ -53,6 +53,34 @@ impl FromStr for PmaReservability {
     }
 }
 
+/// PMA 支持的 AMO 等级；CAS 等级包含经典 AMO，并分别限定 CAS 最大宽度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmaAtomicSupport {
+    None,
+    Swap,
+    Logical,
+    Arithmetic,
+    CasW,
+    CasD,
+    CasQ,
+}
+
+impl FromStr for PmaAtomicSupport {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "swap" => Ok(Self::Swap),
+            "logical" => Ok(Self::Logical),
+            "arithmetic" => Ok(Self::Arithmetic),
+            "cas_w" => Ok(Self::CasW),
+            "cas_d" => Ok(Self::CasD),
+            "cas_q" => Ok(Self::CasQ),
+            _ => Err(format!("未知 PMA atomic_support {}", s)),
+        }
+    }
+}
+
 /// `zPMA` record（IR rv64d.ir:3295）的配置镜像：别名（ram/rom/mmio/hole）
 /// 与明细字段都解析到这个结构。字段语义由模型 zpmaCheck 消费。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +95,7 @@ pub struct PmaAttributes {
     pub supports_cbo_zzero: bool,
     pub misaligned_fault: PmaMisalignedFault,
     pub reservability: PmaReservability,
+    pub atomic_support: PmaAtomicSupport,
     pub include_in_device_tree: bool,
 }
 
@@ -86,6 +115,7 @@ impl PmaAttributes {
                 supports_cbo_zzero: true,
                 misaligned_fault: PmaMisalignedFault::NoFault,
                 reservability: PmaReservability::Eventual,
+                atomic_support: PmaAtomicSupport::CasQ,
                 include_in_device_tree: true,
             },
             "rom" => PmaAttributes {
@@ -99,6 +129,7 @@ impl PmaAttributes {
                 supports_cbo_zzero: false,
                 misaligned_fault: PmaMisalignedFault::NoFault,
                 reservability: PmaReservability::None,
+                atomic_support: PmaAtomicSupport::CasQ,
                 include_in_device_tree: false,
             },
             "mmio" => PmaAttributes {
@@ -112,6 +143,7 @@ impl PmaAttributes {
                 supports_cbo_zzero: false,
                 misaligned_fault: PmaMisalignedFault::AlignmentFault,
                 reservability: PmaReservability::None,
+                atomic_support: PmaAtomicSupport::CasQ,
                 include_in_device_tree: false,
             },
             "hole" => PmaAttributes {
@@ -125,6 +157,7 @@ impl PmaAttributes {
                 supports_cbo_zzero: false,
                 misaligned_fault: PmaMisalignedFault::NoFault,
                 reservability: PmaReservability::None,
+                atomic_support: PmaAtomicSupport::CasQ,
                 include_in_device_tree: false,
             },
             _ => return None,
@@ -132,7 +165,7 @@ impl PmaAttributes {
         Some(attributes)
     }
 
-    /// 无 attr 明细字段模式的基线：除 include_in_device_tree=true 外全 false。
+    /// 无 attr 明细模式的基线：布尔位除 include_in_device_tree=true 外全 false，AMO 等级保持旧平台范围。
     fn detailed_default() -> PmaAttributes {
         PmaAttributes {
             readable: false,
@@ -145,6 +178,7 @@ impl PmaAttributes {
             supports_cbo_zzero: false,
             misaligned_fault: PmaMisalignedFault::NoFault,
             reservability: PmaReservability::None,
+            atomic_support: PmaAtomicSupport::CasQ,
             include_in_device_tree: true,
         }
     }
@@ -158,7 +192,7 @@ pub struct PmaRegionConfig {
     pub base: u64,
     pub size: PmaSize,
     pub attributes: PmaAttributes,
-    /// 硬件能力元数据，未声明时不由别名推导，不编码成 Sail 字段。
+    /// 平台 atomic 位；声明后映射到 AMO 权限和 LR/SC 权限。
     pub atomic: Option<bool>,
     pub backing: Option<PmaBacking>,
 }
@@ -217,6 +251,7 @@ pub fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, S
             "[[pma_regions]]",
             &[
                 "atomic",
+                "atomic_support",
                 "backing",
                 "name",
                 "base",
@@ -336,11 +371,32 @@ pub fn get_pma_regions(config: &Value) -> Result<Option<Vec<PmaRegionConfig>>, S
             Some(_) => return Err(format!("{}.reservability should be a string", context)),
             None => (),
         }
+        let atomic = bool_field(region, "atomic")?;
+        // 未配置的新字段保持旧平台的 AMO 接纳范围；显式 atomic=true 只保证经典 AMO。
+        attributes.atomic_support = match region.get("atomic_support") {
+            Some(Value::String(s)) => {
+                has_detail = true;
+                s.parse::<PmaAtomicSupport>()?
+            }
+            Some(_) => return Err(format!("{}.atomic_support 应为字符串", context)),
+            None => match atomic {
+                Some(false) => PmaAtomicSupport::None,
+                Some(true) => PmaAtomicSupport::Arithmetic,
+                None => PmaAtomicSupport::CasQ,
+            },
+        };
+        if atomic == Some(false) {
+            if attributes.atomic_support != PmaAtomicSupport::None
+                || (region.contains_key("reservability") && attributes.reservability != PmaReservability::None)
+            {
+                return Err(format!("{}.atomic=false 与原子权限明细冲突", context));
+            }
+            attributes.reservability = PmaReservability::None;
+        }
         if !region.contains_key("attr") && !has_detail {
             return Err(format!("{} 需要 attr 别名或至少一个明细属性字段", context));
         }
 
-        let atomic = bool_field(region, "atomic")?;
         let backing = match region.get("backing") {
             None => None,
             Some(Value::String(value)) => Some(match value.as_str() {
@@ -413,7 +469,7 @@ fn pma_attributes_value<B: BV>(
         .get(&pma_struct_name)
         .ok_or_else(|| format!("type_info 缺少 struct {}（PMA 属性 record）", symtab.to_str(pma_struct_name)))?;
 
-    if struct_def.len() != 10 {
+    if struct_def.len() != 11 {
         return Err("IR PMA 属性 record 缺少字段或包含未知字段".to_string());
     }
     let mut fields: ahash::HashMap<Name, Val<B>> =
@@ -440,6 +496,18 @@ fn pma_attributes_value<B: BV>(
                     pma_enum_member(symtab, type_info, "AlignmentFault", *enum_name, "misaligned_fault")?
                 }
             },
+            ("atomic_support", Ty::Enum(enum_name)) => {
+                let member = match attributes.atomic_support {
+                    PmaAtomicSupport::None => "AMONone",
+                    PmaAtomicSupport::Swap => "AMOSwap",
+                    PmaAtomicSupport::Logical => "AMOLogical",
+                    PmaAtomicSupport::Arithmetic => "AMOArithmetic",
+                    PmaAtomicSupport::CasW => "AMOCASW",
+                    PmaAtomicSupport::CasD => "AMOCASD",
+                    PmaAtomicSupport::CasQ => "AMOCASQ",
+                };
+                pma_enum_member(symtab, type_info, member, *enum_name, "atomic_support")?
+            }
             ("reservability", Ty::Enum(enum_name)) => match attributes.reservability {
                 PmaReservability::None => pma_enum_member(symtab, type_info, "RsrvNone", *enum_name, "reservability")?,
                 PmaReservability::NonEventual => {
