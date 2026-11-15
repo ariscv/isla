@@ -150,7 +150,9 @@ initial = [
 name = "xiangshan_0"
 base = "0x0000000000000000"
 size = "0x0000000010000000"
-attr = "hole"
+attr = "mmio"
+executable = false
+misaligned = "no_fault"
 
 [[pma_regions]]
 name = "xiangshan_1"
