@@ -1813,6 +1813,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             )
                         })?;
                         assert!(matches!(result, RegionResult::Merged));
+                        solver.compact_region_query_prefix();
                         Arc::make_mut(&mut next.local_state).speculative_access.as_mut().unwrap().guard = Some(guard);
                         let id = NEXT_RECORD
                             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))

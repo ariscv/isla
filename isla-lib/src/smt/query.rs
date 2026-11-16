@@ -56,12 +56,14 @@ pub(super) fn floating_type(ty: &smtlib::Ty) -> bool {
     }
 }
 
-/// 完整约束的可重用查询上下文；每条断言占一层，按共同前缀撤销变化后缀。
+/// 完整约束的可重用查询上下文；固化基础为单个合取断言，可撤销后缀按共同前缀逐项pop。
 /// 不修改执行solver的scope／缓冲／迹，模型仍通过既有record_check_result管理。
 pub(super) struct RegionQuery<'ctx> {
     ctx: &'ctx Context,
     z3_solver: Z3_solver,
     prefix: Vec<Ast<'ctx>>,
+    /// 逻辑前缀的前base_len项已合取为基础层，不能逐项pop。
+    base_len: usize,
 }
 
 impl Drop for RegionQuery<'_> {
@@ -114,6 +116,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             // 只复用原来会新建快照的查询；主solver全部断言（含活动臂）＋全部缓冲断言及本次条件。
             // 不做切片、不删约束；目标条件也是可撤销的最后一层，不能泄漏到下次查询。
             unsafe {
+                let (complete, _) = self.region_query_complete(assumptions, prefix_compaction_enabled());
                 let reusable = self.region_query.get_or_insert_with(|| RegionQuery {
                     ctx: self.ctx,
                     z3_solver: new_z3_solver(
@@ -122,15 +125,24 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         self.seed.map(|seed| (config.seed_param, seed)),
                     ),
                     prefix: Vec::new(),
+                    base_len: 0,
                 });
-                let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
-                Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
-                let mut complete = (0..Z3_ast_vector_size(self.ctx.z3_ctx, assertions))
-                    .map(|index| Z3_ast_vector_get(self.ctx.z3_ctx, assertions, index))
-                    .collect::<Vec<_>>();
-                complete.extend_from_slice(assumptions);
                 // 同一Context中AST已驻留，旧前缀持有引用，指针相等就是同一公式。
-                let common = reusable.prefix.iter().zip(&complete).take_while(|(old, new)| old.z3_ast == **new).count();
+                let mut common =
+                    reusable.prefix.iter().zip(&complete).take_while(|(old, new)| old.z3_ast == **new).count();
+                if common < reusable.base_len {
+                    // 已固化前提因回滚或符号改绑而变化；旧基础不能局部pop，完整重建当前查询。
+                    let fresh = new_z3_solver(
+                        self.ctx.z3_ctx,
+                        config.tactic.as_c_str(),
+                        self.seed.map(|seed| (config.seed_param, seed)),
+                    );
+                    Z3_solver_dec_ref(self.ctx.z3_ctx, reusable.z3_solver);
+                    reusable.z3_solver = fresh;
+                    reusable.prefix.clear();
+                    reusable.base_len = 0;
+                    common = 0;
+                }
                 let remove = reusable.prefix.len() - common;
                 if remove > 0 {
                     Z3_solver_pop(
@@ -147,7 +159,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     Z3_inc_ref(self.ctx.z3_ctx, *z3_ast);
                     reusable.prefix.push(Ast { ctx: self.ctx, z3_ast: *z3_ast });
                 }
-                Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
                 Z3_solver_inc_ref(self.ctx.z3_ctx, reusable.z3_solver);
                 // 全部假设已逐项断言；外层不再以assumptions重复提交。
                 drop(setup);
@@ -334,6 +345,87 @@ mod tests {
     }
 
     #[test]
+    fn region_prefix_compaction_keeps_full_model_and_bounds_scopes() {
+        if !default_tactic_child("smt::query::tests::region_prefix_compaction_keeps_full_model_and_bounds_scopes") {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_PREFIX_COMPACT", "1");
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let parent = solver.declare_const(Ty::Bool, info);
+        let target = solver.declare_const(Ty::Bool, info);
+        let symbols = (0..24).map(|_| solver.declare_const(Ty::Bool, info)).collect::<Vec<_>>();
+        solver.assert(Exp::Var(parent));
+        let tx = solver.start_transaction();
+        for x in &symbols {
+            solver.assert(Exp::Var(*x));
+        }
+        assert!(solver.check_sat_with_for_range(&Exp::Var(target), info).is_sat().unwrap());
+        solver.compact_region_query_prefix();
+        let pending = solver.transaction_assertions();
+        let goal = solver.translate_exp(&Exp::Var(target));
+        let mut assumptions = pending.iter().map(|a| a.z3_ast).collect::<Vec<_>>();
+        assumptions.push(goal.z3_ast);
+        let query = solver.query_solver(&assumptions, true);
+        assert!(
+            unsafe { Z3_solver_get_num_scopes(context.z3_ctx, query.z3_solver) } <= 1,
+            "25条已提交前提应固化为一个基础断言，只给当前目标保留scope"
+        );
+        drop(query);
+        for x in std::iter::once(&parent).chain(symbols.iter()) {
+            assert!(solver.check_sat_with_for_range(&Exp::Not(Box::new(Exp::Var(*x))), info).is_unsat().unwrap());
+        }
+        assert!(solver.check_sat_with_for_range(&Exp::Var(target), info).is_sat().unwrap());
+        for x in std::iter::once(&parent).chain(symbols.iter()).chain(std::iter::once(&target)) {
+            assert_eq!(solver.cached_bool_value(&Exp::Var(*x)).unwrap(), Some(true));
+        }
+        let nested = solver.start_transaction();
+        solver.assert(Exp::Not(Box::new(Exp::Var(symbols[0]))));
+        assert!(solver.check_sat_for_arm(info).is_unsat().unwrap());
+        solver.rollback_transaction(nested);
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        solver.rollback_transaction(tx);
+        assert!(solver.region_query.is_none());
+    }
+
+    #[test]
+    fn region_prefix_compaction_preserves_guard_polarity_and_invalidates_changed_base() {
+        if !default_tactic_child(
+            "smt::query::tests::region_prefix_compaction_preserves_guard_polarity_and_invalidates_changed_base",
+        ) {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_PREFIX_COMPACT", "1");
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let guard = solver.declare_const(Ty::Bool, info);
+        let x = solver.declare_const(Ty::Bool, info);
+        let tx = solver.start_transaction();
+        solver.start_transaction_with_guard(Some(Exp::Var(guard)));
+        solver.assert(Exp::Var(x));
+        solver.commit_transaction();
+        assert!(solver.check_sat_with_for_range(&Exp::Var(guard), info).is_sat().unwrap());
+        solver.compact_region_query_prefix();
+        assert!(
+            solver.check_sat_with_for_range(&Exp::Not(Box::new(Exp::Var(guard))), info).is_sat().unwrap(),
+            "临时臂条件不能固化成跨臂前提"
+        );
+        let contradiction = Exp::And(Box::new(Exp::Var(guard)), Box::new(Exp::Not(Box::new(Exp::Var(x)))));
+        assert!(solver.check_sat_with_for_range(&contradiction, info).is_unsat().unwrap());
+        solver.add(Def::DefineConst(x, Exp::Bool(false)));
+        assert!(
+            solver.check_sat_with_for_range(&Exp::Var(guard), info).is_unsat().unwrap(),
+            "改绑导致已固化前缀变化时必须丢弃旧基础并完整重建"
+        );
+        assert!(solver.check_sat_with_for_range(&Exp::Not(Box::new(Exp::Var(guard))), info).is_sat().unwrap());
+        solver.rollback_transaction(tx);
+    }
+
+    #[test]
     fn same_context_diagnostic_replay_keeps_buffer_and_leaves_original_untouched() {
         configure_tastic(Tactic::Qfaufbv);
         let context = Context::new(Config::new());
@@ -431,5 +523,92 @@ mod tests {
         }
         solver.rollback_transaction(tx);
         assert!(solver.check_sat_with(&Exp::Not(Box::new(Exp::Var(guard))), info).is_sat().unwrap());
+    }
+}
+
+fn prefix_compaction_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_PREFIX_COMPACT").as_deref() == Ok("1"))
+}
+
+impl<'ctx, B: BV> Solver<'ctx, B> {
+    /// 辅助查询的完整前提；实验开启时先放稳定断言，再放当前臂和目标。
+    /// 活动guard必须留在可撤销后缀，不能被固化成跨臂事实。
+    fn region_query_complete(&self, assumptions: &[Z3_ast], stable_order: bool) -> (Vec<Z3_ast>, usize) {
+        unsafe {
+            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
+            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
+            let published = (0..Z3_ast_vector_size(self.ctx.z3_ctx, assertions))
+                .map(|i| Z3_ast_vector_get(self.ctx.z3_ctx, assertions, i))
+                .collect::<Vec<_>>();
+            let mut complete = Vec::with_capacity(published.len() + assumptions.len());
+            let stable_len;
+            if stable_order {
+                let guards = self.transaction_conditions.len();
+                assert!(published.len() >= guards, "每个活动guard必须对应一个主solver断言");
+                let buffered = self
+                    .transaction_events
+                    .iter()
+                    .filter(|event| matches!(event, Event::Smt(Def::Assert(_), ..)))
+                    .count();
+                assert!(assumptions.len() >= buffered, "区域查询不能缺缓冲断言");
+                let parent = published.len() - guards;
+                complete.extend_from_slice(&published[..parent]);
+                complete.extend_from_slice(&assumptions[..buffered]);
+                stable_len = complete.len();
+                complete.extend_from_slice(&published[parent..]);
+                complete.extend_from_slice(&assumptions[buffered..]);
+            } else {
+                complete.extend_from_slice(&published);
+                complete.extend_from_slice(assumptions);
+                stable_len = complete.len();
+            }
+            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
+            (complete, stable_len)
+        }
+    }
+
+    /// 只在成功提交的迭代合并边界调用；辅助solver的逻辑前提不变，执行solver/trace不变。
+    pub(crate) fn compact_region_query_prefix(&mut self) {
+        if !prefix_compaction_enabled() || self.region_query.is_none() {
+            return;
+        }
+        assert!(self.transaction_depth() > 0, "前缀固化只用于活动区域");
+        let pending = self.transaction_assertions();
+        let assumptions = pending.iter().map(|a| a.z3_ast).collect::<Vec<_>>();
+        let (complete, stable_len) = self.region_query_complete(&assumptions, true);
+        let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
+        unsafe {
+            let before_scopes =
+                Z3_solver_get_num_scopes(self.ctx.z3_ctx, self.region_query.as_ref().unwrap().z3_solver);
+            let fresh = new_z3_solver(
+                self.ctx.z3_ctx,
+                config.tactic.as_c_str(),
+                self.seed.map(|seed| (config.seed_param, seed)),
+            );
+            if stable_len > 0 {
+                let base =
+                    Z3_mk_and(self.ctx.z3_ctx, stable_len.try_into().expect("基础断言数超出Z3接口"), complete.as_ptr());
+                Z3_solver_assert(self.ctx.z3_ctx, fresh, base);
+            }
+            let prefix = complete[..stable_len]
+                .iter()
+                .map(|a| {
+                    Z3_inc_ref(self.ctx.z3_ctx, *a);
+                    Ast { ctx: self.ctx, z3_ast: *a }
+                })
+                .collect();
+            self.region_query = Some(RegionQuery { ctx: self.ctx, z3_solver: fresh, prefix, base_len: stable_len });
+            if crate::executor::stats::region_progress::enabled() {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static ROWS: AtomicUsize = AtomicUsize::new(0);
+                if ROWS.fetch_add(1, Ordering::Relaxed) < 2048 {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"kind":"region_prefix_compact","base_assertions":stable_len,"before_scopes":before_scopes,"after_scopes":Z3_solver_get_num_scopes(self.ctx.z3_ctx,fresh)})
+                    );
+                }
+            }
+        }
     }
 }
