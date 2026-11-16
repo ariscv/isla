@@ -95,7 +95,13 @@ impl Drop for QuerySolver<'_> {
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(super) fn query_solver(&mut self, assumptions: &[Z3_ast], snapshot_requested: bool) -> QuerySolver<'ctx> {
         let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
+        // 实验性的原生快照边界：同一完整公式在首次check前批量装入，不预先push。
+        // 只改变求解调用形态；结果及模型仍须满足全部已发布/缓冲/活动臂前提。
+        static NATIVE_SNAPSHOT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let native_snapshot = snapshot_requested
+            && *NATIVE_SNAPSHOT.get_or_init(|| std::env::var("ISLA_REGION_NATIVE_SNAPSHOT").as_deref() == Ok("1"));
         if config.tactic == Tactic::Default
+            && !native_snapshot
             && (snapshot_requested || self.floating_point_seen.get())
             && !self.incremental_checks
             && self.transaction_depth() > 0
@@ -285,5 +291,53 @@ mod tests {
         });
         assert_eq!(solver.cached_bool_value(&Exp::Var(x)).unwrap(), None, "符号改绑即使不新增逻辑断言也必须清见证");
         solver.rollback_transaction(tx);
+    }
+
+    #[test]
+    fn native_region_snapshot_has_no_scopes_and_preserves_complete_model() {
+        if !default_tactic_child("smt::query::tests::native_region_snapshot_has_no_scopes_and_preserves_complete_model")
+        {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_NATIVE_SNAPSHOT", "1");
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let parent = solver.declare_const(Ty::Bool, info);
+        let guard = solver.declare_const(Ty::Bool, info);
+        let buffered = solver.declare_const(Ty::Bool, info);
+        let target = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(parent));
+        let tx = solver.start_transaction_with_guard(Some(Exp::Var(guard)));
+        solver.assert(Exp::Var(buffered));
+        let pending = solver.transaction_assertions();
+        let goal = solver.translate_exp(&Exp::Var(target));
+        let mut assumptions = pending.iter().map(|a| a.z3_ast).collect::<Vec<_>>();
+        assumptions.push(goal.z3_ast);
+        let query = solver.query_solver(&assumptions, true);
+        assert_eq!(
+            unsafe { Z3_solver_get_num_scopes(context.z3_ctx, query.z3_solver) },
+            0,
+            "原生快照必须在第一条check前批量装入全部断言，不能预先进入push路径"
+        );
+        drop(query);
+        assert!(solver.region_query.is_none());
+        for symbol in [parent, guard, buffered] {
+            assert!(
+                solver.check_sat_with_for_range(&Exp::Not(Box::new(Exp::Var(symbol))), info).is_unsat().unwrap(),
+                "快照不得丢父前提、缓冲断言或当前臂条件"
+            );
+        }
+        assert!(solver.check_sat_with_for_range(&Exp::Var(target), info).is_sat().unwrap());
+        for symbol in [parent, guard, buffered, target] {
+            assert_eq!(
+                solver.cached_bool_value(&Exp::Var(symbol)).unwrap(),
+                Some(true),
+                "查询返回的模型必须满足完整前提和目标"
+            );
+        }
+        solver.rollback_transaction(tx);
+        assert!(solver.check_sat_with(&Exp::Not(Box::new(Exp::Var(guard))), info).is_sat().unwrap());
     }
 }
