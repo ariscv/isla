@@ -1043,6 +1043,16 @@ fn merge_states<'ir, B: BV>(
         let original = if lets { base.lets() } else { base.vars() };
         let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
         for name in names {
+            // 两臂均已退出函数：End只读取RETURN，调用者从stack_vars恢复自己的局部槽。
+            // 继续前沿尚未到End，必须保留计数和其他局部值；lets与架构状态也不能丢弃。
+            if !lets
+                && name != RETURN
+                && matches!(left.instrs.get(left.pc), Some(Instr::End))
+                && matches!(right.instrs.get(right.pc), Some(Instr::End))
+            {
+                merged.vars_mut().remove(&name);
+                continue;
+            }
             if !lets && region.local_variables.contains(&name) && !original.contains_key(&name) {
                 merged.vars_mut().remove(&name);
                 continue;

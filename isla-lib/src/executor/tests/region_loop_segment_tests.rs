@@ -359,3 +359,62 @@ fn loop_segment_failed_exit_merge_does_not_submit_a_continuation() {
         }
     }
 }
+
+#[test]
+fn loop_segment_discards_dead_preexisting_locals_at_function_exit() {
+    let shared = empty_shared_state();
+    let n = 64;
+    let counter = test_name(1800);
+    let choices = test_name(1801);
+    let choice = test_name(1802);
+    let scratch = test_name(1803);
+    let labels = test_name(1804);
+    let mut program = scan_program(counter, choices, choice, n, None);
+    // 返回前留下各轮不同的具体临时值；它在函数退出后不再可读。
+    program.insert(
+        7,
+        Instr::PrimopBinary(
+            Loc::Id(scratch),
+            primop::binary_primops()["vector_access"],
+            Exp::Id(labels),
+            Exp::Id(counter),
+            info(),
+        ),
+    );
+    for instr in &mut program {
+        match instr {
+            Instr::Jump(_, target, _) | Instr::Goto(target) if *target >= 7 => *target += 1,
+            _ => (),
+        }
+    }
+    program[3] = Instr::Jump(Exp::Id(choice), 7, info());
+    let run = |merge| {
+        segment_paths(
+            program.clone(),
+            &shared,
+            n,
+            ExecutionLimits::default()
+                .with_path_merging(merge)
+                .with_region_loop_analysis(true)
+                .with_region_global_state(true),
+            128,
+            crate::memory::Memory::new(),
+            |frame| {
+                let values = (0..n)
+                    .map(|i| match frame.vars()[&test_name(900 + i as u32)].clone() {
+                        UVal::Init(v) => v,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                frame.vars_mut().insert(choices, UVal::Init(Val::Vector(values)));
+                frame.vars_mut().insert(choice, UVal::Uninit(&Ty::Bool));
+                frame.vars_mut().insert(scratch, UVal::Init(Val::I64(-1)));
+                frame.vars_mut().insert(labels, UVal::Init(Val::Vector((0..n).map(|i| Val::I64(i as i64)).collect())));
+            },
+        )
+    };
+    let off = run(false);
+    let on = run(true);
+    equivalent_scalar_paths(&off, &on, n);
+    assert!(on.len() <= 16, "死局部槽位不能阻碍返回前沿合并：{}", on.len());
+}
