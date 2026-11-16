@@ -345,6 +345,35 @@ mod tests {
     }
 
     #[test]
+    fn witness_native_sat_refreshes_pool_after_fast_miss() {
+        if !default_tactic_child("smt::query::tests::witness_native_sat_refreshes_pool_after_fast_miss") {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
+        configure_tastic(Tactic::Default);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::BitVec(8), info);
+        let old = Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(0, 8))));
+        assert!(solver.check_sat_with(&old, info).is_sat().unwrap());
+        let tx = solver.start_transaction();
+        let goal = Exp::Eq(
+            Box::new(Exp::Bvmul(Box::new(Exp::Var(x)), Box::new(Exp::Var(x)))),
+            Box::new(Exp::Bits64(B64::new(9, 8))),
+        );
+        let before = test_query_count();
+        assert!(solver.check_sat_with(&goal, info).is_sat().unwrap());
+        assert_eq!(test_query_count(), before + 1, "快路未证明时确实交回原搜索");
+        assert_eq!(solver.cached_bool_value(&goal).unwrap(), Some(true), "真实SAT更新当前见证");
+        let ast = solver.translate_exp(&goal);
+        assert_eq!(solver.shadow_witnesses.evaluate(&[ast.z3_ast])["method"], "retained", "新模型确实回写见证池");
+        solver.clear_stashed_model();
+        assert!(solver.check_sat_with(&goal, info).is_sat().unwrap());
+        assert_eq!(test_query_count(), before + 1, "清除当前缓存后也能从池取回刚才的新模型");
+        solver.rollback_transaction(tx);
+    }
+    #[test]
     fn witness_eval_fast_sat_keeps_symbolic_both_arms_and_never_skips_unsat() {
         if !default_tactic_child(
             "smt::query::tests::witness_eval_fast_sat_keeps_symbolic_both_arms_and_never_skips_unsat",

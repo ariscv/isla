@@ -24,6 +24,98 @@ impl<'ctx> Bank<'ctx> {
             }
         }
     }
+    /// 固定见证已有的全部常量解释，只有未解释的变量可由独立solver补全。
+    /// 局部UNSAT仅表示旧赋值冲突，绝不作为执行查询的UNSAT答案。
+    fn local_completion(
+        &self,
+        terms: &[Z3_ast],
+        timeout_ms: u32,
+        current_model: Option<Z3_model>,
+    ) -> (serde_json::Value, Option<ModelCopy<'ctx>>) {
+        let started = Instant::now();
+        let Some(source) = current_model.or_else(|| self.models.last().copied()) else {
+            return (serde_json::json!({"class":"no_model"}), None);
+        };
+        unsafe {
+            if Z3_model_get_num_funcs(self.ctx.z3_ctx, source) != 0 {
+                return (serde_json::json!({"class":"unsupported_functions"}), None);
+            }
+            let root = owned_ast(
+                self.ctx,
+                Z3_mk_and(self.ctx.z3_ctx, terms.len().try_into().expect("局部补全前提过多"), terms.as_ptr()),
+            );
+            let prefix = owned_ast(
+                self.ctx,
+                Z3_mk_and(self.ctx.z3_ctx, terms.len().saturating_sub(1).try_into().unwrap(), terms.as_ptr()),
+            );
+            let current = evaluate_bool(self.ctx, source, root.z3_ast, false);
+            let target = terms.last().and_then(|goal| evaluate_bool(self.ctx, source, *goal, false));
+            let mut data = serde_json::json!({"class":"unclassified","source_constants":Z3_model_get_num_consts(self.ctx.z3_ctx,source),"target_current":target,"prefix_current":evaluate_bool(self.ctx,source,prefix.z3_ast,false),"whole_current":current,"solver_check":false,"timeout_ms":timeout_ms});
+            if current == Some(false) {
+                data["class"] = serde_json::json!("B_old_assignment_conflict");
+                data["proof"] = serde_json::json!("fixed_assignment_evaluates_false");
+                data["milliseconds"] = serde_json::json!(started.elapsed().as_secs_f64() * 1000.0);
+                return (data, None);
+            }
+            if current == Some(true) {
+                data["class"] = serde_json::json!("already_satisfied");
+                Z3_model_inc_ref(self.ctx.z3_ctx, source);
+                return (data, Some(ModelCopy { ctx: self.ctx, model: source }));
+            }
+            let Some(missing) = missing_scalars(self.ctx, source, root.z3_ast) else {
+                data["class"] = serde_json::json!("unsupported_traversal");
+                return (data, None);
+            };
+            data["new_scalars"] = serde_json::json!(missing.len());
+            let local =
+                LocalSolver { ctx: self.ctx, solver: new_z3_solver(self.ctx.z3_ctx, Tactic::Default.as_c_str(), None) };
+            let params = Z3_mk_params(self.ctx.z3_ctx);
+            Z3_params_inc_ref(self.ctx.z3_ctx, params);
+            Z3_params_set_uint(
+                self.ctx.z3_ctx,
+                params,
+                Z3_mk_string_symbol(self.ctx.z3_ctx, b"timeout\0".as_ptr().cast()),
+                timeout_ms,
+            );
+            Z3_solver_set_params(self.ctx.z3_ctx, local.solver, params);
+            Z3_params_dec_ref(self.ctx.z3_ctx, params);
+            for i in 0..Z3_model_get_num_consts(self.ctx.z3_ctx, source) {
+                let decl = Z3_model_get_const_decl(self.ctx.z3_ctx, source, i);
+                let value = Z3_model_get_const_interp(self.ctx.z3_ctx, source, decl);
+                assert!(!value.is_null(), "已枚举的旧常量必须有解释");
+                let variable = owned_ast(self.ctx, Z3_mk_app(self.ctx.z3_ctx, decl, 0, std::ptr::null()));
+                let fixed = owned_ast(self.ctx, Z3_mk_eq(self.ctx.z3_ctx, variable.z3_ast, value));
+                Z3_solver_assert(self.ctx.z3_ctx, local.solver, fixed.z3_ast);
+            }
+            Z3_solver_assert(self.ctx.z3_ctx, local.solver, root.z3_ast);
+            let check_started = Instant::now();
+            let result = Z3_solver_check(self.ctx.z3_ctx, local.solver);
+            data["solver_check"] = serde_json::json!(true);
+            data["check_milliseconds"] = serde_json::json!(check_started.elapsed().as_secs_f64() * 1000.0);
+            data["milliseconds"] = serde_json::json!(started.elapsed().as_secs_f64() * 1000.0);
+            if result == Z3_L_TRUE {
+                let model = Z3_solver_get_model(self.ctx.z3_ctx, local.solver);
+                assert!(!model.is_null(), "局部SAT必须提供模型");
+                Z3_model_inc_ref(self.ctx.z3_ctx, model);
+                let model = ModelCopy { ctx: self.ctx, model };
+                let verified = evaluate_bool(self.ctx, model.model, root.z3_ast, true);
+                assert_ne!(verified, Some(false), "局部SAT模型不得违反完整前提");
+                if verified != Some(true) {
+                    data["class"] = serde_json::json!("unverified_model");
+                    return (data, None);
+                }
+                data["class"] = serde_json::json!("A_new_variables");
+                (data, Some(model))
+            } else if result == Z3_L_FALSE {
+                data["class"] = serde_json::json!("B_old_assignment_conflict");
+                data["proof"] = serde_json::json!("pinned_solver_unsat");
+                (data, None)
+            } else {
+                data["class"] = serde_json::json!("unknown");
+                (data, None)
+            }
+        }
+    }
     pub fn evaluate(&self, terms: &[Z3_ast]) -> serde_json::Value {
         self.prove(terms).0
     }
@@ -130,6 +222,66 @@ mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
     #[test]
+    fn witness_local_completion_solves_only_new_variables_and_preserves_source() {
+        configure_tastic(Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::BitVec(8), info);
+        let old = Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(3, 8))));
+        assert!(solver.check_sat_with(&old, info).is_sat().unwrap());
+        let mut bank = Bank::new(&ctx);
+        bank.remember(solver.stashed_model.unwrap());
+        let y = solver.declare_const(Ty::BitVec(8), info);
+        let goal = Exp::And(
+            Box::new(Exp::Bvult(Box::new(Exp::Var(x)), Box::new(Exp::Var(y)))),
+            Box::new(Exp::Bvult(Box::new(Exp::Var(y)), Box::new(Exp::Bits64(B64::new(5, 8))))),
+        );
+        let old = solver.translate_exp(&old);
+        let goal = solver.translate_exp(&goal);
+        let before = test_query_count();
+        assert_eq!(
+            bank.evaluate(&[old.z3_ast, goal.z3_ast])["sat_claim"],
+            false,
+            "零／全1／简单等式修补覆盖不了内部区间值4"
+        );
+        let (data, model) = bank.local_completion(&[old.z3_ast, goal.z3_ast], 1000, None);
+        assert_eq!(data["class"], "A_new_variables", "固定旧值后可只补出y=4");
+        let model = model.expect("局部SAT必须提供完整见证");
+        unsafe {
+            assert_eq!(evaluate_bool(&ctx, model.model, old.z3_ast, false), Some(true));
+            assert_eq!(evaluate_bool(&ctx, model.model, goal.z3_ast, false), Some(true));
+        }
+        assert_eq!(test_query_count(), before, "诊断搜索不能写入执行侧查询统计");
+        assert_eq!(
+            solver.cached_bool_value(&Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(3, 8))))).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            solver.cached_bool_value(&Exp::Eq(Box::new(Exp::Var(y)), Box::new(Exp::Bits64(B64::new(4, 8))))).unwrap(),
+            None,
+            "不能改动原模型"
+        );
+    }
+    #[test]
+    fn witness_local_completion_conflict_is_not_full_query_unsat() {
+        configure_tastic(Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::BitVec(8), info);
+        let old = Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(3, 8))));
+        assert!(solver.check_sat_with(&old, info).is_sat().unwrap());
+        let mut bank = Bank::new(&ctx);
+        bank.remember(solver.stashed_model.unwrap());
+        let changed = Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(4, 8))));
+        let goal = solver.translate_exp(&changed);
+        let (data, model) = bank.local_completion(&[goal.z3_ast], 1000, None);
+        assert_eq!(data["class"], "B_old_assignment_conflict");
+        assert!(model.is_none());
+        assert!(solver.check_sat_with(&changed, info).is_sat().unwrap(), "局部UNSAT不能代替完整查询");
+    }
+    #[test]
     fn shadow_witness_extends_bv128_in_copy_without_search_or_model_mutation() {
         configure_tastic(Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -228,7 +380,7 @@ mod tests {
 }
 
 pub(super) fn enabled() -> bool {
-    shadow_enabled() || fast_enabled()
+    shadow_enabled() || fast_enabled() || local_shadow_enabled()
 }
 fn fast_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -237,6 +389,21 @@ fn fast_enabled() -> bool {
 fn shadow_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_SHADOW").as_deref() == Ok("1"))
+}
+fn local_shadow_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_LOCAL_SHADOW").as_deref() == Ok("1"))
+}
+struct LocalSolver<'ctx> {
+    ctx: &'ctx Context,
+    solver: Z3_solver,
+}
+impl Drop for LocalSolver<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            Z3_solver_dec_ref(self.ctx.z3_ctx, self.solver);
+        }
+    }
 }
 struct ModelCopy<'ctx> {
     ctx: &'ctx Context,
@@ -310,14 +477,19 @@ unsafe fn missing_scalars(ctx: &Context, model: Z3_model, root: Z3_ast) -> Optio
 pub(super) struct Token {
     metadata: serde_json::Value,
     evaluation: serde_json::Value,
+    local_completion: Option<serde_json::Value>,
     started: Instant,
 }
 impl Token {
     pub fn finish(self, result: Z3_lbool) {
         let claim = self.evaluation["sat_claim"].as_bool().unwrap();
-        let row = serde_json::json!({"kind":"region_witness_shadow","query":self.metadata,"evaluation":self.evaluation,"native_result":if result==Z3_L_TRUE{"sat"}else if result==Z3_L_FALSE{"unsat"}else{"unknown"},"native_milliseconds":self.started.elapsed().as_secs_f64()*1000.0,"false_sat":claim && result==Z3_L_FALSE});
+        let local_claim = self
+            .local_completion
+            .as_ref()
+            .is_some_and(|d| d["class"] == "A_new_variables" || d["class"] == "already_satisfied");
+        let row = serde_json::json!({"local_completion":self.local_completion,"local_false_sat":local_claim && result==Z3_L_FALSE,"kind":"region_witness_shadow","query":self.metadata,"evaluation":self.evaluation,"native_result":if result==Z3_L_TRUE{"sat"}else if result==Z3_L_FALSE{"unsat"}else{"unknown"},"native_milliseconds":self.started.elapsed().as_secs_f64()*1000.0,"false_sat":claim && result==Z3_L_FALSE});
         eprintln!("{row}");
-        assert!(!(claim && result == Z3_L_FALSE), "影子见证判SAT而原Z3判UNSAT，必须停止实验");
+        assert!(!((claim || local_claim) && result == Z3_L_FALSE), "影子见证判SAT而原Z3判UNSAT，必须停止实验");
     }
 }
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -356,7 +528,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
     pub(super) fn shadow_probe(&self, solver: Z3_solver, assumptions: &[Z3_ast]) -> Option<Token> {
-        if !shadow_enabled() {
+        if !shadow_enabled() && !local_shadow_enabled() {
             return None;
         }
         let metadata = crate::executor::stats::region_progress::query_metadata()?;
@@ -368,8 +540,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 .collect::<Vec<_>>();
             terms.extend_from_slice(assumptions);
             let evaluation = self.shadow_witnesses.evaluate(&terms);
+            let local_completion = local_shadow_enabled()
+                .then(|| self.shadow_witnesses.local_completion(&terms, 10, self.stashed_model).0);
             Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
-            Some(Token { metadata, evaluation, started: Instant::now() })
+            Some(Token { metadata, evaluation, local_completion, started: Instant::now() })
         }
     }
 }
