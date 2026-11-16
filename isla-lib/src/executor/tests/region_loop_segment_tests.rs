@@ -418,3 +418,70 @@ fn loop_segment_discards_dead_preexisting_locals_at_function_exit() {
     equivalent_scalar_paths(&off, &on, n);
     assert!(on.len() <= 16, "死局部槽位不能阻碍返回前沿合并：{}", on.len());
 }
+
+#[test]
+fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region() {
+    let shared = empty_shared_state();
+    let off = scan_paths(&shared, 64, 128, false, None);
+    let on = scan_paths(&shared, 64, 128, true, None);
+    equivalent_scalar_paths(&off, &on, 64);
+    assert_eq!(on.len(), 1, "累计返回与继续前沿应逐轮收敛，完整函数只有一个合并状态");
+    let records = &on[0].records;
+    let ids: std::collections::HashSet<_> = records.iter().map(|r| r.record_id).collect();
+    assert_eq!(ids.len(), records.len(), "共享前缀在不同条件下出现时必须保持记录ID唯一");
+    assert!(records.iter().all(|r| r.parent_record.is_none_or(|id| ids.contains(&id))), "任何父记录都必须存在");
+}
+
+#[test]
+fn loop_iteration_frontiers_nested_call_preserves_complete_relation() {
+    let mut shared = empty_shared_state();
+    let function = shared.symtab.intern("zfinite_scan");
+    let counter = test_name(1800);
+    let choices = test_name(1801);
+    let choice = test_name(1802);
+    let n = 64;
+    let mut body = scan_program(counter, choices, choice, n, None);
+    // 参数只传输入向量，局部判断槽仍属于被调用帧。
+    body.insert(0, Instr::Decl(choice, Ty::Bool, info()));
+    for instr in &mut body {
+        match instr {
+            Instr::Jump(_, target, _) | Instr::Goto(target) => *target += 1,
+            _ => (),
+        }
+    }
+    let ty = Box::leak(Box::new(Ty::Vector(Box::new(Ty::Bool))));
+    shared.functions.insert(function, (vec![(choices, &*ty)], &Ty::I128, Box::leak(body.into_boxed_slice())));
+    let program = vec![
+        Instr::Jump(input(n as u32), 3, info()),
+        Instr::Call(Loc::Id(RETURN), false, function, vec![Exp::Id(choices)], info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::I128(-1), info()),
+        Instr::End,
+    ];
+    let run = |merge| {
+        segment_paths(
+            program.clone(),
+            &shared,
+            n + 1,
+            ExecutionLimits::default()
+                .with_path_merging(merge)
+                .with_region_loop_analysis(true)
+                .with_region_global_state(true),
+            128,
+            crate::memory::Memory::new(),
+            |frame| {
+                let values = (0..n)
+                    .map(|i| match frame.vars()[&test_name(900 + i as u32)].clone() {
+                        UVal::Init(v) => v,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                frame.vars_mut().insert(choices, UVal::Init(Val::Vector(values)));
+            },
+        )
+    };
+    let off = run(false);
+    let on = run(true);
+    equivalent_scalar_paths(&off, &on, n + 1);
+    assert_eq!(on.len(), 1, "子循环必须收敛后交还调用者，不能耗尽父区域总预算");
+}
