@@ -2152,14 +2152,15 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let can_be_true = if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_true, *info)?
                         } else {
-                            solver.check_sat_with(&test_true, *info).is_sat()?
+                            solver.check_sat_with_for_branch(&test_true, *info, false).is_sat()?
                         };
                         let can_be_false = if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_false, *info)?
                         } else {
-                            solver.check_sat_with(&test_false, *info).is_sat()?
+                            solver.check_sat_with_for_branch(&test_false, *info, false).is_sat()?
                         };
 
+                        solver.note_jump_results(v, can_be_true, can_be_false);
                         if can_be_true && can_be_false {
                             let mode = region_merge::policy(frame, task_state, *info);
                             if mode == crate::config::MergeMode::Off && frame.region_execution.is_some() {

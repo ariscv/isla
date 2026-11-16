@@ -194,6 +194,7 @@ mod dependencies;
 pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
+mod dedup;
 mod query;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
@@ -1747,6 +1748,7 @@ pub struct Solver<'ctx, B> {
     asserts_since_check: usize,
     /// 最后一次 check（含 `check_sat_with` 的 assumption 查询）是否返回 Sat。
     last_check_sat: bool,
+    knowledge: dedup::Knowledge,
     /// 最近一次返回 Sat 的 check 所产生的模型（已 inc_ref）。断言集此后未变时
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
@@ -2383,6 +2385,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 performance_info: PerformanceInfo::new(),
                 asserts_since_check: 0,
                 last_check_sat: false,
+                knowledge: dedup::Knowledge::default(),
                 stashed_model: None,
                 savepoints: Vec::new(),
                 transaction_events: Vec::new(),
@@ -2582,6 +2585,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
         match &def {
             Def::Assert(exp) => {
+                self.knowledge.constrain();
                 self.asserts_since_check += 1;
                 self.clear_stashed_model();
                 let vars = exp.variables();
@@ -2607,6 +2611,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
                 if self.decls.insert(*v, Ast::mk_constant(&fd)).is_some() {
+                    self.knowledge.constrain();
                     self.clear_stashed_model();
                 }
                 if self.def_attrs.attrs & 2 != 0 {
@@ -2622,6 +2627,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, arg_tys, result_ty, &self.symbol_namer);
                 if self.func_decls.insert(*v, fd).is_some() {
+                    self.knowledge.constrain();
                     self.clear_stashed_model();
                 }
             }
@@ -2640,6 +2646,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 ast.simplify();
                 // 改绑已有符号可能改变缓冲断言的含义，不能沿用改绑前的见证。
                 if self.decls.insert(*v, ast).is_some() {
+                    self.knowledge.constrain();
                     self.clear_stashed_model();
                 }
                 if self.def_attrs.attrs & 2 != 0 {
@@ -3033,6 +3040,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         };
 
         self.record_check_result(&result, query.z3_solver);
+        if matches!(result, Sat) {
+            self.knowledge.literal = dedup::literal(exp);
+        }
         self.performance_info.assign_cost(exp);
         result
     }
@@ -3082,6 +3092,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.last_check_sat = matches!(result, Sat);
         self.asserts_since_check = 0;
         if self.last_check_sat {
+            self.knowledge.sat = true;
             unsafe {
                 let model = Z3_solver_get_model(self.ctx.z3_ctx, queried_solver);
                 if !model.is_null() {
