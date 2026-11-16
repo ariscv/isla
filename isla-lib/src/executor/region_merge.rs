@@ -435,6 +435,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
         }
         Ok(region) => {
+            if region.has_back_edge && super::stats::region_progress::enabled() {
+                Arc::make_mut(&mut frame.local_state).loop_attempt_seen = true;
+            }
             shared.execution_stats.merge_candidate();
             let depth = frame.region_execution.as_ref().map_or(1, |execution| execution.depth + 1);
             if depth > MAX_REGION_MERGE_DEPTH {
@@ -643,7 +646,10 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver);
         match result {
             Ok(Run::Suspended) => {
-                match solver.check_sat(info) {
+                let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
+                let close_result = solver.check_sat(info);
+                drop(close_scope);
+                match close_result {
                     SmtResult::Unsat => {
                         solver.commit_dead_transaction();
                         arms.push(None);
@@ -1452,7 +1458,10 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver);
         match result {
             Ok(Run::Suspended) => {
-                match solver.check_sat(work.info) {
+                let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
+                let close_result = solver.check_sat(work.info);
+                drop(close_scope);
+                match close_result {
                     SmtResult::Sat => (),
                     SmtResult::Unsat => {
                         solver.commit_dead_transaction();

@@ -2969,6 +2969,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn check_sat_with_strategy(&mut self, exp: &Exp<Sym>, info: SourceLoc, purpose: query::QueryPurpose) -> SmtResult {
+        let label = match purpose {
+            query::QueryPurpose::General => "general",
+            query::QueryPurpose::RangeProof => "range_proof",
+            query::QueryPurpose::BooleanProof => "boolean_proof",
+        };
+        let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
         let started = Instant::now();
         self.performance_info.start();
 
@@ -3034,6 +3040,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
         self.record_check_result(&result, query.z3_solver);
         self.performance_info.assign_cost(exp);
+        drop(query_scope);
         result
     }
 
@@ -3042,6 +3049,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn check_sat(&mut self, info: SourceLoc) -> SmtResult {
+        let query_scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_close_or_general");
         // 模型缓存由新增断言、臂条件及提交/回滚统一维护，仍有效即有 Sat 见证。
         if self.has_stashed_model() {
             self.last_check_sat = true;
@@ -3071,6 +3079,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Unknown
         };
         self.record_check_result(&result, query.z3_solver);
+        drop(query_scope);
         result
     }
 

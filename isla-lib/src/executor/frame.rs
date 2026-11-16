@@ -57,6 +57,8 @@ pub struct LocalDebugProbes {
 
 #[derive(Clone)]
 pub struct LocalState<'ir, B> {
+    pub(super) call_instance: usize,
+    pub(super) loop_attempt_seen: bool,
     pub(super) vars: Bindings<'ir, B>,
     pub(super) regs: RegisterBindings<'ir, B>,
     pub(super) lets: Bindings<'ir, B>,
@@ -516,6 +518,12 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pending_retry_operand: None,
             execution_limit_state: Arc::new(ExecutionLimitPathState::default()),
             local_state: Arc::new(LocalState {
+                call_instance: if super::stats::region_progress::enabled() {
+                    super::stats::region_progress::fresh_invocation()
+                } else {
+                    0
+                },
+                loop_attempt_seen: false,
                 vars,
                 regs,
                 lets,

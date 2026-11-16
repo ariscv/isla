@@ -1,0 +1,269 @@
+//! 可关闭的区域步数与真实查询诊断；不参与执行决策。
+use crate::bitvector::BV;
+use crate::executor::LocalFrame;
+use crate::ir::{Instr, Symtab, UVal, Val};
+use crate::timeout::SmtOperation;
+use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+
+#[cfg(test)]
+thread_local! {static TEST_ENABLED:Cell<Option<bool>>=const{Cell::new(None)};}
+pub(crate) fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) = TEST_ENABLED.with(Cell::get) {
+        return value;
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    cfg!(test) || *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_PROGRESS").as_deref() == Ok("1"))
+}
+// 诊断身份独立于执行侧访问作用域，开关诊断不改变执行编号。
+static NEXT_INVOCATION: AtomicUsize = AtomicUsize::new(1);
+pub(crate) fn fresh_invocation() -> usize {
+    NEXT_INVOCATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("诊断调用编号溢出")
+}
+static EMITTED: AtomicUsize = AtomicUsize::new(0);
+static LIVE_ROWS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static DEPTH: Cell<usize> = const { Cell::new(0) };
+    static LABEL: Cell<&'static str> = const { Cell::new("unclassified") };
+    static ROOT: RefCell<Option<Progress>> = const { RefCell::new(None) };
+}
+#[derive(Default, serde::Serialize)]
+struct Counts {
+    steps: u64,
+    queries: u64,
+    smt_seconds: f64,
+}
+struct Progress {
+    origin: Value,
+    outcome: String,
+    counts: Counts,
+    sites: BTreeMap<String, Counts>,
+    phases: BTreeMap<String, Counts>,
+    branches: BTreeMap<String, u64>,
+    current: String,
+    back_edges: Vec<Value>,
+    initial: Option<Value>,
+    call_instance: Option<usize>,
+    exhausted: Option<Value>,
+}
+pub(crate) struct AttemptGuard {
+    active: bool,
+    root: bool,
+}
+impl AttemptGuard {
+    pub(crate) fn start(origin: Value) -> Self {
+        if !enabled() {
+            return Self { active: false, root: false };
+        }
+        let root = DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n == 0
+        });
+        if root && EMITTED.load(Ordering::Relaxed) < 256 {
+            ROOT.with(|r| {
+                *r.borrow_mut() = Some(Progress {
+                    origin,
+                    outcome: "unfinished".into(),
+                    counts: Counts::default(),
+                    sites: BTreeMap::new(),
+                    phases: BTreeMap::new(),
+                    branches: BTreeMap::new(),
+                    current: "entry".into(),
+                    back_edges: Vec::new(),
+                    initial: None,
+                    call_instance: None,
+                    exhausted: None,
+                })
+            });
+        }
+        Self { active: true, root }
+    }
+    pub(crate) fn finish(&mut self, outcome: &str) {
+        if self.root {
+            ROOT.with(|r| {
+                if let Some(p) = r.borrow_mut().as_mut() {
+                    p.outcome = outcome.into()
+                }
+            });
+        }
+    }
+}
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        DEPTH.with(|d| d.set(d.get().checked_sub(1).expect("诊断尝试栈失衡")));
+        if self.root {
+            let p = ROOT.with(|r| r.borrow_mut().take());
+            if let Some(p) = p.filter(|p| p.counts.steps >= 256 && !p.back_edges.is_empty()) {
+                if EMITTED.fetch_add(1, Ordering::Relaxed) < 256 {
+                    eprintln!(
+                        "{}",
+                        json!({"kind":"region_progress","origin":p.origin,"outcome":p.outcome,"counts":p.counts,"sites":p.sites,"query_phases":p.phases,"branch_results":p.branches,"back_edges":p.back_edges,"initial":p.initial,"call_instance":p.call_instance,"exhausted":p.exhausted,"note":"每个根尝试；真实Z3查询不含模型求值；步数含共享预算下嵌套；回边仅记录实际执行前的无条件后跳"})
+                    );
+                }
+            }
+        }
+    }
+}
+fn integers<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) -> Value {
+    let mut values = frame
+        .local_state
+        .vars
+        .iter()
+        .filter_map(|(n, v)| match v {
+            UVal::Init(Val::I64(i)) => Some((crate::zencode::decode(symtab.to_str(*n)), *i)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    values.truncate(64);
+    json!(values.into_iter().collect::<BTreeMap<_, _>>())
+}
+pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
+    if !enabled() || frame.region_execution.is_none() {
+        return;
+    }
+    ROOT.with(|r| {
+        let mut r=r.borrow_mut();let Some(p)=r.as_mut() else{return};
+        let function=crate::zencode::decode(symtab.to_str(frame.function_name));
+        let mut key=format!("{}@{}",function,frame.pc);
+        if p.sites.len()>=512 && !p.sites.contains_key(&key) {key="other".into();}
+        p.current=key.clone();if p.call_instance.is_none(){p.call_instance=Some(frame.local_state.call_instance);}p.counts.steps+=1;p.sites.entry(key).or_default().steps+=1;
+        if p.initial.is_none() {p.initial=Some(json!({"function":function,"pc":frame.pc,"integers":integers(frame,symtab)}));}
+        if let Some(Instr::Goto(target))=frame.instrs.get(frame.pc) {
+            if *target<frame.pc && p.back_edges.len()<512 {
+                let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"query_phases":p.phases,"integers":integers(frame,symtab)});
+                if p.origin["function"].as_str()==Some(function.as_str()) && LIVE_ROWS.fetch_add(1,Ordering::Relaxed)<2048 {
+                    eprintln!("{}",json!({"kind":"region_iteration","origin":p.origin,"call_instance":p.call_instance,"edge":edge}));
+                }
+                p.back_edges.push(edge);
+            }
+        }
+    });
+}
+pub(crate) fn exhausted<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
+    if !enabled() {
+        return;
+    }
+    ROOT.with(|r|if let Some(p)=r.borrow_mut().as_mut(){p.exhausted=Some(json!({"function":crate::zencode::decode(symtab.to_str(frame.function_name)),"pc":frame.pc,"integers":integers(frame,symtab)}));});
+}
+pub(crate) fn smt(operation: SmtOperation, wall: Duration) {
+    if !enabled() || matches!(operation, SmtOperation::ModelEval) {
+        return;
+    }
+    ROOT.with(|r| {
+        let mut r = r.borrow_mut();
+        if let Some(p) = r.as_mut() {
+            p.counts.queries += 1;
+            p.counts.smt_seconds += wall.as_secs_f64();
+            let site = p.sites.entry(p.current.clone()).or_default();
+            site.queries += 1;
+            site.smt_seconds += wall.as_secs_f64();
+            let phase = p.phases.entry(query_label().into()).or_default();
+            phase.queries += 1;
+            phase.smt_seconds += wall.as_secs_f64();
+        }
+    });
+}
+pub(crate) fn branch_result(a: bool, b: bool) {
+    if enabled() {
+        ROOT.with(|r| {
+            if let Some(p) = r.borrow_mut().as_mut() {
+                *p.branches.entry(format!("{a}/{b}")).or_default() += 1;
+            }
+        });
+    }
+}
+fn query_label() -> &'static str {
+    LABEL.with(Cell::get)
+}
+pub(crate) struct QueryScope(Option<&'static str>);
+impl QueryScope {
+    pub(crate) fn enter(label: &'static str) -> Self {
+        if enabled() {
+            Self(Some(LABEL.with(|l| l.replace(label))))
+        } else {
+            Self(None)
+        }
+    }
+    pub(crate) fn fallback(label: &'static str) -> Self {
+        if !enabled() {
+            return Self(None);
+        }
+        if query_label() == "unclassified" {
+            Self::enter(label)
+        } else {
+            Self(None)
+        }
+    }
+}
+impl Drop for QueryScope {
+    fn drop(&mut self) {
+        if let Some(old) = self.0 {
+            LABEL.with(|l| l.set(old));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn region_progress_query_scope_restores_outer_classification() {
+        assert_eq!(query_label(), "unclassified");
+        {
+            let branch = QueryScope::enter("branch_feasibility");
+            {
+                let proof = QueryScope::fallback("boolean_proof");
+                assert_eq!(query_label(), "branch_feasibility");
+                drop(proof);
+            }
+            drop(branch);
+        }
+        assert_eq!(query_label(), "unclassified");
+    }
+}
+
+pub(crate) fn loop_return<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
+    if enabled() && frame.region_execution.is_none() && frame.local_state.loop_attempt_seen {
+        eprintln!(
+            "{}",
+            json!({"kind":"loop_call_return","call_instance":frame.local_state.call_instance,"function":crate::zencode::decode(symtab.to_str(frame.function_name)),"integers":integers(frame,symtab)})
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn region_progress_disabled_has_no_collection_or_call_id_allocation() {
+    let old = TEST_ENABLED.with(|flag| flag.replace(Some(false)));
+    let frame = crate::executor::LocalFrame::<crate::bitvector::b64::B64>::new(
+        crate::ir::TOP_LEVEL_LET,
+        &[],
+        &crate::ir::Ty::Unit,
+        None,
+        &[],
+    );
+    let state = frame.local_state.clone();
+    let before = EMITTED.load(Ordering::Relaxed);
+    let scope = QueryScope::enter("disabled");
+    assert_eq!(query_label(), "unclassified");
+    assert_eq!(frame.local_state.call_instance, 0);
+    step(&frame, &Symtab::new());
+    smt(SmtOperation::CheckSat, Duration::from_millis(1));
+    assert!(std::sync::Arc::ptr_eq(&state, &frame.local_state));
+    assert!(ROOT.with(|root| root.borrow().is_none()));
+    assert_eq!(EMITTED.load(Ordering::Relaxed), before);
+    drop(scope);
+    TEST_ENABLED.with(|flag| flag.set(old));
+}

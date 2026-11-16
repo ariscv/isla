@@ -1990,10 +1990,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 
     'main_loop: loop {
         stats::memory_stats::poll(frame, solver);
-        if region_merge::step(frame)? {
+        let region_step = region_merge::step(frame);
+        if matches!(&region_step, Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::StepBudget, .. }))
+        {
+            stats::region_progress::exhausted(frame, &shared_state.symtab);
+        }
+        if region_step? {
             return Ok(Run::Suspended);
         }
         if frame.pc < frame.instrs.len() {
+            stats::region_progress::step(frame, &shared_state.symtab);
             region_merge::preflight(frame, task_state, shared_state)?;
         }
         if matches!(&frame.pending_retry_operand, Some((pc, Val::Unit)) if *pc != frame.pc) {
@@ -2149,6 +2155,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let test_true = Var(v);
                         let test_false = Not(Box::new(Var(v)));
 
+                        let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
                         let can_be_true = if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_true, *info)?
                         } else {
@@ -2160,6 +2167,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             solver.check_sat_with(&test_false, *info).is_sat()?
                         };
 
+                        stats::region_progress::branch_result(can_be_true, can_be_false);
+                        drop(branch_queries);
                         if can_be_true && can_be_false {
                             let mode = region_merge::policy(frame, task_state, *info);
                             if mode == crate::config::MergeMode::Off && frame.region_execution.is_some() {
@@ -2803,6 +2812,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 access.call_scope = region_merge::fresh_call_scope();
                                 caller
                             });
+                        let caller_instance = frame.local_state.call_instance;
+                        let caller_loop_seen = frame.local_state.loop_attempt_seen;
+                        if stats::region_progress::enabled() {
+                            Arc::make_mut(&mut frame.local_state).call_instance =
+                                stats::region_progress::fresh_invocation();
+                            Arc::make_mut(&mut frame.local_state).loop_attempt_seen = false;
+                        }
                         let caller_pc = frame.pc;
                         let caller_instrs = frame.instrs;
                         let caller_stack_call = frame.stack_call.clone();
@@ -2815,6 +2831,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         // the function we call returns
                         frame.stack_call = Some(Arc::new(move |ret, frame, shared_state, solver| {
                             pop_call_stack(frame);
+                            if stats::region_progress::enabled() {
+                                Arc::make_mut(&mut frame.local_state).call_instance = caller_instance;
+                                Arc::make_mut(&mut frame.local_state).loop_attempt_seen = caller_loop_seen;
+                            }
                             frame.set_probes(shared_state);
                             // could avoid putting caller_pc into the stack?
                             if let Some((name, _)) = Arc::make_mut(&mut frame.backtrace).pop() {
@@ -2851,35 +2871,38 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 }
             }
 
-            Instr::End => match frame.vars().get(&RETURN) {
-                None => panic!("Return variable missing at end of function"),
-                Some(value) => {
-                    let value = match value {
-                        UVal::Uninit(ty) => symbolic(ty, shared_state, solver, SourceLoc::unknown())?,
-                        UVal::Init(value) => value.clone(),
-                    };
+            Instr::End => {
+                stats::region_progress::loop_return(frame, &shared_state.symtab);
+                match frame.vars().get(&RETURN) {
+                    None => panic!("Return variable missing at end of function"),
+                    Some(value) => {
+                        let value = match value {
+                            UVal::Uninit(ty) => symbolic(ty, shared_state, solver, SourceLoc::unknown())?,
+                            UVal::Init(value) => value.clone(),
+                        };
 
-                    if frame.local_state.should_probe(shared_state, &frame.function_name) {
-                        let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
-                        log_from!(
-                            tid,
-                            log::PROBE,
-                            &format!("Returning {} = {}", symbol, value.to_string(shared_state))
-                        );
-                        probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
+                        if frame.local_state.should_probe(shared_state, &frame.function_name) {
+                            let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
+                            log_from!(
+                                tid,
+                                log::PROBE,
+                                &format!("Returning {} = {}", symbol, value.to_string(shared_state))
+                            );
+                            probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
+                        }
+
+                        if shared_state.trace_functions.contains(&frame.function_name) {
+                            solver.trace_return(frame.function_name)
+                        }
+
+                        let caller = match &frame.stack_call {
+                            None => return Ok(Run::Finished(value)),
+                            Some(caller) => Arc::clone(caller),
+                        };
+                        (*caller)(value, frame, shared_state, solver)?
                     }
-
-                    if shared_state.trace_functions.contains(&frame.function_name) {
-                        solver.trace_return(frame.function_name)
-                    }
-
-                    let caller = match &frame.stack_call {
-                        None => return Ok(Run::Finished(value)),
-                        Some(caller) => Arc::clone(caller),
-                    };
-                    (*caller)(value, frame, shared_state, solver)?
                 }
-            },
+            }
 
             // The idea beind the Monomorphize operation is it takes a
             // bitvector identifier, and if that identifer has a

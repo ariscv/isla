@@ -142,9 +142,12 @@ thread_local! {
 pub(super) fn reset() {
     *COUNTS.get_or_init(|| Mutex::new(Counts::default())).lock().unwrap() = Counts::default();
 }
-pub(super) struct AttemptGuard;
+pub(super) struct AttemptGuard {
+    progress: super::region_progress::AttemptGuard,
+}
 impl AttemptGuard {
     pub(super) fn start(origin: Value) -> Self {
+        let progress = super::region_progress::AttemptGuard::start(origin.clone());
         let started = Instant::now();
         COUNTS.get().unwrap().lock().unwrap().begin();
         ATTEMPTS.with(|stack| {
@@ -156,9 +159,10 @@ impl AttemptGuard {
                 children: Measure::default(),
             })
         });
-        Self
+        Self { progress }
     }
     pub(super) fn finish(&mut self, outcome: String) {
+        self.progress.finish(&outcome);
         ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().outcome = outcome);
     }
 }
@@ -186,6 +190,7 @@ pub(crate) fn record_smt_call(operation: SmtOperation, wall: Duration) {
     if !merge_diagnostics::enabled() {
         return;
     }
+    super::region_progress::smt(operation, wall);
     let measure = match operation {
         SmtOperation::ModelEval => Measure { wall, model: wall, model_calls: 1, ..Measure::default() },
         SmtOperation::CheckSat | SmtOperation::CheckSatAssuming => {
