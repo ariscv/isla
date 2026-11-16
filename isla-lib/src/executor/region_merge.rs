@@ -26,6 +26,7 @@ pub(super) struct RegionExecution {
     pub write_depth: usize,
     pub depth: usize,
     pub remaining: Arc<AtomicUsize>,
+    pub iteration_budget: Option<usize>,
     pub mode: MergeMode,
     pub origin: (Name, usize, SourceLoc),
     pub pending_branch: Option<(Sym, usize, Arc<Region>, SourceLoc)>,
@@ -235,6 +236,16 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
     log.pc = frame.pc;
     log.location = location;
     log.writes_allowed = depth == execution.write_depth;
+    // 回边这一步仍须先成功扣费；只有当前轮确已完成，才授予下一轮预算。
+    // 即使后续条件已具体化、不再产生pending_branch，也不能丢掉轮次边界。
+    if let Some(budget) = execution.iteration_budget {
+        if depth == execution.entry_depth
+            && log.writes.modified_regs.is_empty()
+            && matches!(frame.instrs.get(frame.pc), Some(Instr::Goto(target)) if *target < frame.pc)
+        {
+            execution.remaining.store(budget, Ordering::Relaxed);
+        }
+    }
     Ok(false)
 }
 
@@ -691,6 +702,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             )
         },
         depth,
+        iteration_budget: iterative.then_some(state.region_step_budget),
         mode,
         origin: if mode == MergeMode::Force {
             parent
@@ -1813,7 +1825,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 serde_json::json!({"kind":"loop_iteration_fold",
                                 "function":diagnostics::name_string(original_frame.function_name,&shared.symtab),
                                 "pc":root_branch,"call_instance":original_frame.local_state.call_instance,
-                                "iteration_steps":used,"logical_frontiers":2,
+                                "steps_since_budget_renewal":used,"logical_frontiers":2,
                                 "returned_records":exit_prefix.as_ref().unwrap().region_merge_records.len(),
                                 "continuation_records":next.region_merge_records.len(),
                                 "savepoint_depth":solver.transaction_depth()})
@@ -1830,8 +1842,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             arms: Vec::new(),
                             arm_start: None,
                         };
-                        // 只有完整一轮与退出前沿已经收尾后才发下一轮预算。
-                        remaining.store(state.region_step_budget, Ordering::Relaxed);
+                        // 预算由实际回边更新；此处只收敛前沿，避免半轮重复授予预算。
                         last_boundary = 0;
                         largest_round = 0;
                         continue;

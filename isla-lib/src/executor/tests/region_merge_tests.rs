@@ -1384,6 +1384,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         write_depth: 0,
         depth: 1,
         remaining: Arc::new(AtomicUsize::new(10)),
+        iteration_budget: None,
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
         pending_branch: None,

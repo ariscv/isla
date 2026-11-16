@@ -485,3 +485,35 @@ fn loop_iteration_frontiers_nested_call_preserves_complete_relation() {
     equivalent_scalar_paths(&off, &on, n + 1);
     assert_eq!(on.len(), 1, "子循环必须收敛后交还调用者，不能耗尽父区域总预算");
 }
+
+#[test]
+fn loop_iteration_frontiers_concrete_tail_keeps_iteration_budget() {
+    let shared = empty_shared_state();
+    let n = 64;
+    let counter = test_name(1800);
+    let choices = test_name(1801);
+    let choice = test_name(1802);
+    let run = |merge| {
+        segment_paths(
+            scan_program(counter, choices, choice, n, None),
+            &shared,
+            1,
+            ExecutionLimits::default()
+                .with_path_merging(merge)
+                .with_region_loop_analysis(true)
+                .with_region_global_state(true),
+            128,
+            crate::memory::Memory::new(),
+            |frame| {
+                let UVal::Init(value) = frame.vars()[&test_name(900)].clone() else { unreachable!() };
+                // 首轮未命中后，其余轮的同一条件全部已知为false，不再产生pending_branch。
+                frame.vars_mut().insert(choices, UVal::Init(Val::Vector(vec![value; n])));
+                frame.vars_mut().insert(choice, UVal::Uninit(&Ty::Bool));
+            },
+        )
+    };
+    let off = run(false);
+    let on = run(true);
+    equivalent_scalar_paths(&off, &on, 1);
+    assert_eq!(on.len(), 1, "没有新符号分叉的后续轮次仍应按迭代预算收敛");
+}
