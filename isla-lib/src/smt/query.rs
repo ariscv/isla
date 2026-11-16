@@ -345,6 +345,68 @@ mod tests {
     }
 
     #[test]
+    fn witness_eval_fast_sat_keeps_symbolic_both_arms_and_never_skips_unsat() {
+        if !default_tactic_child(
+            "smt::query::tests::witness_eval_fast_sat_keeps_symbolic_both_arms_and_never_skips_unsat",
+        ) {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::BitVec(8), info);
+        let zero = Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(0, 8))));
+        assert!(solver.check_sat_with(&zero, info).is_sat().unwrap());
+        let tx = solver.start_transaction();
+        solver.assert(Exp::Bool(true));
+        // 不建立诊断上下文，快路也必须生效。
+        let goal = Exp::Eq(Box::new(Exp::Extract(4, 3, Box::new(Exp::Var(x)))), Box::new(Exp::Bits64(B64::new(1, 2))));
+        let before = test_query_count();
+        assert!(solver.check_sat_with_for_bool(&goal, info).is_sat().unwrap());
+        assert_eq!(test_query_count(), before, "满足完整前提的见证应避免SAT搜索");
+        assert_eq!(solver.cached_bool_value(&goal).unwrap(), Some(true), "快路必须交付满足目标的真实模型");
+        assert!(solver.check_sat_with_for_bool(&Exp::Not(Box::new(goal.clone())), info).is_sat().unwrap());
+        assert_eq!(test_query_count(), before, "另一臂也必须保留，前态不能被第一次见证钉死");
+        solver.assert(goal.clone());
+        assert!(solver.check_sat_with_for_bool(&Exp::Not(Box::new(goal)), info).is_unsat().unwrap());
+        assert_eq!(test_query_count(), before + 1, "见证未证明时仍必须由原Z3判UNSAT");
+        solver.rollback_transaction(tx);
+    }
+
+    #[test]
+    fn witness_eval_rechecks_current_assertions_after_symbol_rebinding() {
+        if !default_tactic_child("smt::query::tests::witness_eval_rechecks_current_assertions_after_symbol_rebinding") {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let parent = solver.declare_const(Ty::Bool, info);
+        let x = solver.declare_const(Ty::Bool, info);
+        let g = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(parent));
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        let tx = solver.start_transaction();
+        solver.assert(Exp::Var(x));
+        let mut progress = crate::executor::stats::region_progress::AttemptGuard::start(
+            serde_json::json!({"function":"unit_witness","pc":0}),
+        );
+        assert!(solver.check_sat_with_for_bool(&Exp::Var(g), info).is_sat().unwrap());
+        solver.add(Def::DefineConst(x, Exp::Bool(false)));
+        let before = test_query_count();
+        assert!(solver.check_sat_with_for_bool(&Exp::Var(g), info).is_unsat().unwrap());
+        assert_eq!(test_query_count(), before + 1, "旧见证不能忽略改绑后的假前提");
+        solver.rollback_transaction(tx);
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        assert_eq!(solver.cached_bool_value(&Exp::Var(parent)).unwrap(), Some(true));
+        progress.finish("test_complete");
+    }
+
+    #[test]
     fn region_prefix_compaction_keeps_full_model_and_bounds_scopes() {
         if !default_tactic_child("smt::query::tests::region_prefix_compaction_keeps_full_model_and_bounds_scopes") {
             return;

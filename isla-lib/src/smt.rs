@@ -189,6 +189,7 @@ impl fmt::Debug for EnumMember {
 }
 mod dump;
 mod transaction;
+mod witness_shadow;
 use transaction::SolverSavepoint;
 pub use transaction::{SolverTransaction, MAX_TRANSACTION_DEPTH};
 mod dependencies;
@@ -1754,6 +1755,7 @@ pub struct Solver<'ctx, B> {
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
     stashed_model: Option<Z3_model>,
+    shadow_witnesses: witness_shadow::Bank<'ctx>,
     savepoints: Vec<SolverSavepoint<'ctx>>,
     transaction_events: Vec<Event<B>>,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
@@ -2388,6 +2390,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 last_check_sat: false,
                 knowledge: dedup::Knowledge::default(),
                 stashed_model: None,
+                shadow_witnesses: witness_shadow::Bank::new(ctx),
                 savepoints: Vec::new(),
                 transaction_events: Vec::new(),
                 transaction_event_guards: Vec::new(),
@@ -3023,10 +3026,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let pending = self.transaction_assertions();
         let mut assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
         assumptions.push(ast.z3_ast);
+        if self.witness_fast_sat(&assumptions) {
+            self.knowledge.literal = dedup::literal(exp);
+            self.performance_info.assign_cost(exp);
+            return Sat;
+        }
         let query = self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast));
         let diagnostic_dump = self.diagnostic_query_dump(exp);
         let diagnostic_pair = diagnostic_dump.as_ref().is_some_and(dump::wants_same_context_pair);
         let diagnostic_before = diagnostic_pair.then(|| self.diagnostic_solver_stats(query.z3_solver));
+        let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
@@ -3036,6 +3045,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         ) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
+                if let Some(shadow) = shadow {
+                    shadow.finish(Z3_L_UNDEF);
+                }
                 // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
                 self.last_check_sat = false;
                 self.asserts_since_check = 0;
@@ -3044,6 +3056,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
             }
         };
+        if let Some(shadow) = shadow {
+            shadow.finish(z3_result);
+        }
         if let Some(mut point) = diagnostic_dump {
             point["kind"] = serde_json::json!("query_replay_result");
             point["check_milliseconds"] =
@@ -3096,11 +3111,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
+        if self.witness_fast_sat(&assumptions) {
+            return Sat;
+        }
         let query = self.query_solver(&assumptions, false);
+        let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
                 Ok(result) => result,
                 Err(Z3TimeoutError::Interrupted) => {
+                    if let Some(shadow) = shadow {
+                        shadow.finish(Z3_L_UNDEF);
+                    }
                     // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
                     self.last_check_sat = false;
                     self.asserts_since_check = 0;
@@ -3108,6 +3130,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
                 }
             };
+        if let Some(shadow) = shadow {
+            shadow.finish(z3_result);
+        }
         let result = if z3_result == Z3_L_TRUE {
             Sat
         } else if z3_result == Z3_L_FALSE {
@@ -3135,6 +3160,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     Z3_model_inc_ref(self.ctx.z3_ctx, model);
                     self.clear_stashed_model();
                     self.stashed_model = Some(model);
+                    if witness_shadow::enabled() {
+                        self.shadow_witnesses.remember(model);
+                    }
                 }
             }
         }
@@ -3202,7 +3230,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
+        if self.witness_fast_sat(&assumptions) {
+            return Sat;
+        }
         let query = self.query_solver(&assumptions, false);
+        let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let z3_result = match timeout_Z3_solver_check_deadline(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3212,6 +3244,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         ) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
+                if let Some(shadow) = shadow {
+                    shadow.finish(Z3_L_UNDEF);
+                }
                 // 超时中断不改断言集：既有缓存模型（若有）仍满足当前断言，保持有效。
                 self.last_check_sat = false;
                 self.asserts_since_check = 0;
@@ -3219,6 +3254,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
             }
         };
+        if let Some(shadow) = shadow {
+            shadow.finish(z3_result);
+        }
         let result = if z3_result == Z3_L_TRUE {
             Sat
         } else if z3_result == Z3_L_FALSE {

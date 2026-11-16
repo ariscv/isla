@@ -368,3 +368,11 @@ pub(crate) fn query_dump_point() -> Option<Value> {
         Some(json!({"round":round,"call_instance":id,"site":p.current,"phase":query_label(),"query_ordinal":p.counts.queries+1,"origin":p.origin}))
     })
 }
+
+/// 当前真实查询的只读位置；影子诊断不推进计数或修改分类。
+pub(crate) fn query_metadata() -> Option<Value> {
+    if !enabled() {
+        return None;
+    }
+    ROOT.with(|root|root.borrow().as_ref().map(|p|json!({"origin":p.origin,"call_instance":p.call_instance,"round":p.back_edges.len()+1,"site":p.current,"phase":query_label(),"ordinal":p.counts.queries+1})))
+}
