@@ -175,3 +175,65 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+
+    // SMT配置在进程内固定；沿用隔离子进程测试，避免其他回归先选Qfaufbv。
+    fn default_tactic_child(name: &str) -> bool {
+        if std::env::var("ISLA_REGION_QUERY_LIFETIME_TEST").as_deref() == Ok(name) {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("ISLA_REGION_QUERY_LIFETIME_TEST", name)
+            .status()
+            .unwrap();
+        assert!(status.success(), "默认策略的资源生命周期子测试失败");
+        false
+    }
+
+    #[test]
+    fn region_query_released_after_outer_commit() {
+        if !default_tactic_child("smt::query::tests::region_query_released_after_outer_commit") {
+            return;
+        }
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let value = solver.declare_const(Ty::Bool, info);
+        solver.start_transaction();
+        solver.assert(Exp::Var(value));
+        assert!(solver.check_sat_with_for_range(&Exp::Var(value), info).is_sat().unwrap());
+        assert!(solver.region_query.is_some());
+        solver.commit_transaction();
+        assert!(solver.region_query.is_none(), "区域已结束，临时查询不能继续持有前缀");
+        assert!(solver.check_sat_with(&Exp::Not(Box::new(Exp::Var(value))), info).is_unsat().unwrap());
+    }
+
+    #[test]
+    fn region_query_released_after_outer_rollback_but_not_inner_rollback() {
+        if !default_tactic_child("smt::query::tests::region_query_released_after_outer_rollback_but_not_inner_rollback")
+        {
+            return;
+        }
+        configure_tastic(Tactic::Default);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let value = solver.declare_const(Ty::Bool, info);
+        let outer = solver.start_transaction();
+        let inner = solver.start_transaction();
+        solver.assert(Exp::Var(value));
+        assert!(solver.check_sat_with_for_range(&Exp::Var(value), info).is_sat().unwrap());
+        assert!(solver.region_query.is_some());
+        solver.rollback_transaction(inner);
+        assert!(solver.region_query.is_some(), "活动外层仍可复用查询资源");
+        solver.rollback_transaction(outer);
+        assert!(solver.region_query.is_none(), "回滚必须释放已废弃的查询前缀");
+        assert!(solver.check_sat_with(&Exp::Not(Box::new(Exp::Var(value))), info).is_sat().unwrap());
+    }
+}

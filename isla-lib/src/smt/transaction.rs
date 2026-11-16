@@ -235,6 +235,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.transaction_event_guards.push(None);
         }
         if self.savepoints.is_empty() {
+            // 查询前缀只供活动区域复用；回滚后不能让辅助solver继续持有废弃AST。
+            self.region_query = None;
             self.trace.head.append(&mut self.transaction_events);
             self.transaction_event_guards.clear();
         }
@@ -308,6 +310,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             // 撤去 g 并把 c 改为 g→c 只会弱化约束，同一见证仍然有效。
         }
         if self.savepoints.is_empty() {
+            // 最外层已提交，辅助solver的旧scope与学习状态不再属于活动区域。
+            // 主solver和其模型各自持有引用；释放辅助资源不改变已提交约束。
+            self.region_query = None;
             if savepoint.order_register_reads {
                 order_register_reads(&mut self.transaction_events, &mut self.transaction_event_guards, 0);
             }
