@@ -142,6 +142,12 @@ and a guide to its support for virtual memory and address translation
 不设置时不打印统计。计数覆盖本次求解的全部 clause、批次及续执行；合并关闭时尝试次数为零。
 字段及限定验证见 [执行统计记录](agents/execution_stats/status.md)。
 
+`--memory-stats` 独立开启内存估算，每 15 秒向 stderr 输出 `[MEMORY_STATS] {json}`，并在探索结束输出一次。默认关闭时不分配统计状态、不遍历容器、不计时、不加统计锁。
+快照包含活动任务数、已采样任务数、各任务采样年龄、执行帧／检查点估算字节、求解器保存点深度与逐层表容量、缓存模型引用数、排队任务及已保留终态估算，以及 `/proc/self/status` 的 VmRSS／VmHWM。
+活动任务按执行实例计数，包含 collector 内嵌套调用时尚未释放的父实例；逻辑 TaskId 可重复。活动任务在执行循环协作采样，长 SMT 调用期间沿用旧样本；队列仅覆盖 `MultiRuntime`，使用最近一次持队列锁的快照并输出年龄。未采样任务不按零字节计算，需结合覆盖数理解。
+估算使用 Rust 容器 capacity 与嵌套值／表达式 payload；队列和终态集合各自按 Arc 地址去重共享检查点。活动任务之间、各类别之间可能重叠，不能相加当作 RSS。
+Z3 内部 AST／solver／model、分配器及哈希表控制区、闭包捕获的调用帧、区域工作栈、部分共享缓存和自定义内存回调不在估算内；完整缺口随每行快照的 `excluded` 输出。模型字段统计引用数，不估算 Z3 模型大小。
+
 ## solve-state 内存符号化模型（isarch）
 
 `solve-state` 对符号内存的建模由环境变量 `ISLA_RISCV_MEMORY_MODEL` 控制：

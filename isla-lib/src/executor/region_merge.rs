@@ -131,7 +131,7 @@ pub(super) fn feasible<B: BV>(
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
-    match solver.check_sat_with_for_bool(exp, info) {
+    match solver.check_sat_with_for_branch(exp, info, true) {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
         SmtResult::Unknown => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
@@ -643,7 +643,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver);
         match result {
             Ok(Run::Suspended) => {
-                match solver.check_sat(info) {
+                match solver.check_sat_for_arm(info) {
                     SmtResult::Unsat => {
                         solver.commit_dead_transaction();
                         arms.push(None);
@@ -1393,6 +1393,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         arm_start: None,
     }];
     loop {
+        super::stats::memory_stats::poll(frame, solver);
         if pending.last().unwrap().arms.len() == 2 {
             let mut work = pending.pop().unwrap();
             // 子循环段已提交为完整条件保护的约束；汇合时也保留所属臂条件。
@@ -1451,7 +1452,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver);
         match result {
             Ok(Run::Suspended) => {
-                match solver.check_sat(work.info) {
+                match solver.check_sat_for_arm(work.info) {
                     SmtResult::Sat => (),
                     SmtResult::Unsat => {
                         solver.commit_dead_transaction();

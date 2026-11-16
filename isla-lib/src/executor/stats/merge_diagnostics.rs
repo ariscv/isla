@@ -695,7 +695,7 @@ impl SnapshotReporter {
     pub fn start(stats: Arc<super::ExecutionStats>, interval: Duration) -> Self {
         let diagnostic = enabled();
         let mut reporter = Self { stop: None, worker: None, handlers: Vec::new() };
-        if !diagnostic && !stats.enabled() {
+        if !diagnostic && !stats.enabled() && !super::memory_stats::enabled() {
             return reporter;
         }
         assert!(!interval.is_zero());
@@ -728,6 +728,7 @@ impl SnapshotReporter {
                     let signal = TERMINATION.swap(0, Ordering::Relaxed);
                     if signal != 0 {
                         print_with_trigger("signal");
+                        super::memory_stats::print();
                         // 恢复原动作后重新投递，保留默认的信号退出状态或原处理器行为。
                         let previous = &handlers.iter().find(|(number, _)| *number == signal).unwrap().1;
                         unsafe {
@@ -739,6 +740,7 @@ impl SnapshotReporter {
                 }
                 if Instant::now() >= deadline {
                     print_with_trigger("periodic");
+                    super::memory_stats::print();
                     if stats.enabled() {
                         let (merge, forks, arms) = stats.snapshot_json();
                         eprintln!("[MERGE_STATS_SNAPSHOT] {}", merge);
@@ -763,6 +765,7 @@ impl Drop for SnapshotReporter {
         if let Some(worker) = self.worker.take() {
             worker.join().unwrap();
         }
+        super::memory_stats::print();
         unsafe {
             for (signal, previous) in &self.handlers {
                 assert_eq!(libc::sigaction(*signal, previous, std::ptr::null_mut()), 0);

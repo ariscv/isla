@@ -462,3 +462,24 @@ fn primitive_clmul_original_steps_and_actual_slices() -> Result<(), ExecError> {
     );
     Ok(())
 }
+
+#[test]
+fn dedup_actual_bool_comparison_reuses_both_sat_and_keeps_dead_arm_pruned() {
+    let ctx = context();
+    let info = SourceLoc::unknown();
+    let mut solver = Solver::<B64>::new(&ctx);
+    let x = solver.declare_const(smtlib::Ty::BitVec(8), info);
+    let result =
+        try_concretize_bool_exp(Exp::Eq(Box::new(Exp::Var(x)), Box::new(bits64(7, 8))), &mut solver, info).unwrap();
+    let Val::Symbolic(condition) = result else {
+        panic!("自由比较必须保留两种取值");
+    };
+    crate::smt::reset_path_smt_stats();
+    assert_eq!(solver.check_sat_with_for_branch(&Exp::Var(condition), info, true), SmtResult::Sat);
+    assert_eq!(solver.check_sat_with_for_branch(&Exp::Not(Box::new(Exp::Var(condition))), info, true), SmtResult::Sat);
+    assert_eq!(crate::smt::path_smt_stats().calls, 0);
+    solver.assert(Exp::Var(condition));
+    if solver.check_sat_with_for_branch(&Exp::Not(Box::new(Exp::Var(condition))), info, true).is_sat().unwrap() {
+        panic!("新增约束之后的死臂不能执行原语不变量检查");
+    }
+}

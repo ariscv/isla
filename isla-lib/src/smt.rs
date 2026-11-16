@@ -194,6 +194,7 @@ mod dependencies;
 pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
+mod dedup;
 mod query;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
@@ -1747,6 +1748,7 @@ pub struct Solver<'ctx, B> {
     asserts_since_check: usize,
     /// 最后一次 check（含 `check_sat_with` 的 assumption 查询）是否返回 Sat。
     last_check_sat: bool,
+    knowledge: dedup::Knowledge,
     /// 最近一次返回 Sat 的 check 所产生的模型（已 inc_ref）。断言集此后未变时
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
@@ -1868,7 +1870,7 @@ struct ModelEvalTimeoutContext {
 
 impl<'ctx, B: BV> Model<'ctx, B> {
     /// 借用当前断言集的缓存模型并持有独立引用，支持 Unsat 探测及保存点回滚后的取值。
-    /// 调用前须有 Sat 查询，且此后未新增断言、未通过 take_stashed_model 取走缓存。
+    /// 调用前须有满足当前完整断言集的 Sat 见证，且尚未通过 take_stashed_model 取走缓存。
     /// 缺少模型是调用顺序错误，直接 panic，绝不向 Z3 索取可能已失效的最后模型。
     pub fn new(solver: &'ctx Solver<'ctx, B>) -> Self {
         unsafe {
@@ -2383,6 +2385,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 performance_info: PerformanceInfo::new(),
                 asserts_since_check: 0,
                 last_check_sat: false,
+                knowledge: dedup::Knowledge::default(),
                 stashed_model: None,
                 savepoints: Vec::new(),
                 transaction_events: Vec::new(),
@@ -2582,6 +2585,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
         match &def {
             Def::Assert(exp) => {
+                self.knowledge.constrain();
                 self.asserts_since_check += 1;
                 self.clear_stashed_model();
                 let vars = exp.variables();
@@ -2606,7 +2610,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
-                self.decls.insert(*v, Ast::mk_constant(&fd));
+                if self.decls.insert(*v, Ast::mk_constant(&fd)).is_some() {
+                    self.knowledge.constrain();
+                    self.clear_stashed_model();
+                }
                 if self.def_attrs.attrs & 2 != 0 {
                     self.sail_bitvectors.insert(*v);
                 }
@@ -2619,7 +2626,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.performance_info.add_var_node(*v, info);
                 }
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, arg_tys, result_ty, &self.symbol_namer);
-                self.func_decls.insert(*v, fd);
+                if self.func_decls.insert(*v, fd).is_some() {
+                    self.knowledge.constrain();
+                    self.clear_stashed_model();
+                }
             }
             Def::DefineConst(v, exp) => {
                 // DefineConst 降级为化简后的表达式 AST，既不是 DeclareConst + Assert，
@@ -2634,7 +2644,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 let mut ast = self.translate_exp(exp);
                 ast.simplify();
-                self.decls.insert(*v, ast);
+                // 改绑已有符号可能改变缓冲断言的含义，不能沿用改绑前的见证。
+                if self.decls.insert(*v, ast).is_some() {
+                    self.knowledge.constrain();
+                    self.clear_stashed_model();
+                }
                 if self.def_attrs.attrs & 2 != 0 {
                     self.sail_bitvectors.insert(*v);
                 }
@@ -3026,6 +3040,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         };
 
         self.record_check_result(&result, query.z3_solver);
+        if matches!(result, Sat) {
+            self.knowledge.literal = dedup::literal(exp);
+        }
         self.performance_info.assign_cost(exp);
         result
     }
@@ -3075,6 +3092,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.last_check_sat = matches!(result, Sat);
         self.asserts_since_check = 0;
         if self.last_check_sat {
+            self.knowledge.sat = true;
             unsafe {
                 let model = Z3_solver_get_model(self.ctx.z3_ctx, queried_solver);
                 if !model.is_null() {
@@ -3097,7 +3115,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.asserts_since_check
     }
 
-    /// 是否持有可复用的"最近一次 Sat check"模型缓存（断言未变）。
+    /// 是否持有满足当前完整断言集的 Sat 见证；提交弱化约束时也可以保留。
     pub fn has_stashed_model(&self) -> bool {
         self.stashed_model.is_some()
     }
@@ -4548,4 +4566,36 @@ impl<B> Trace<B> {
 #[cfg(test)]
 pub(crate) fn test_query_count() -> usize {
     z3_timeout::test_query_count()
+}
+
+// 只在显式内存采样时遍历；不创建 checkpoint、不翻译表达式、不查询 Z3。
+impl<B: BV> Checkpoint<B> {
+    pub fn estimated_bytes(&self, seen: &mut HashSet<usize>) -> usize {
+        std::mem::size_of_val(self) + estimated_tail_bytes(&self.trace, seen)
+    }
+}
+fn estimated_tail_bytes<B: BV>(tail: &Arc<Option<Trace<B>>>, seen: &mut HashSet<usize>) -> usize {
+    let mut bytes = 0;
+    let mut tail = tail;
+    loop {
+        if !seen.insert(Arc::as_ptr(tail) as usize) {
+            break;
+        }
+        bytes += std::mem::size_of::<Option<Trace<B>>>();
+        let Some(trace) = tail.as_ref() else {
+            break;
+        };
+        bytes += trace.head.capacity() * std::mem::size_of::<Event<B>>()
+            + trace.head.iter().map(crate::executor::stats::memory_stats::event_heap_bytes).sum::<usize>();
+        tail = &trace.tail;
+    }
+    bytes
+}
+impl<B: BV> Solver<'_, B> {
+    pub fn estimated_trace_bytes(&self, seen: &mut HashSet<usize>) -> usize {
+        std::mem::size_of_val(&self.trace)
+            + self.trace.head.capacity() * std::mem::size_of::<Event<B>>()
+            + self.trace.head.iter().map(crate::executor::stats::memory_stats::event_heap_bytes).sum::<usize>()
+            + estimated_tail_bytes(&self.trace.tail, seen)
+    }
 }

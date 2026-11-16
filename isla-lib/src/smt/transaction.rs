@@ -42,6 +42,7 @@ pub(super) struct SolverSavepoint<'ctx> {
     asserts_since_check: usize,
     floating_point_seen: bool,
     last_check_sat: bool,
+    pub(super) knowledge: dedup::Knowledge,
     model: SavedModel<'ctx>,
     performance_info: PerformanceInfo,
     smt_stats: crate::timeout::SmtCallStats,
@@ -171,6 +172,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             asserts_since_check: self.asserts_since_check,
             floating_point_seen: self.floating_point_seen.get(),
             last_check_sat: self.last_check_sat,
+            knowledge: self.knowledge,
             model: SavedModel { model: self.stashed_model, ctx: self.ctx },
             performance_info: self.performance_info.clone(),
             smt_stats: path_smt_stats(),
@@ -179,6 +181,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             order_register_reads: false,
         });
         if let Some(condition) = condition {
+            let sat = self.guard_known_sat(self.savepoints.last().unwrap().guard.as_ref().unwrap());
+            self.knowledge.change();
+            self.knowledge.sat = sat;
             self.clear_stashed_model();
             self.last_check_sat = false;
             unsafe {
@@ -213,6 +218,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.asserts_since_check = savepoint.asserts_since_check;
         self.floating_point_seen.set(savepoint.floating_point_seen);
         self.last_check_sat = savepoint.last_check_sat;
+        self.knowledge = savepoint.knowledge;
         self.stashed_model = savepoint.model.model.take();
         self.performance_info = savepoint.performance_info;
         restore_path_smt_stats(savepoint.smt_stats);
@@ -241,6 +247,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 臂条件只在推演期间生效；正常返回、Err 返回及 panic 展开均配对 pop。
     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
         assert!(!self.savepoints.is_empty(), "推测臂条件必须位于事务中");
+        let saved = self.knowledge;
+        let sat = self.guard_known_sat(condition);
+        self.knowledge.change();
+        self.knowledge.sat = sat;
         self.clear_stashed_model();
         self.last_check_sat = false;
         unsafe { Z3_solver_push(self.ctx.z3_ctx, self.z3_solver) };
@@ -260,6 +270,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         // 兼容旧执行器在同一个事务中依次推演两个臂：仅包装本次臂新增的事件，
         // 另一臂的查询因而只看到带条件的约束，定义则像以前一样跨 pop 保留。
+        let unchanged = self.knowledge.constraints == saved.constraints;
+        self.knowledge.sat = unchanged && (self.knowledge.sat || saved.sat);
+        self.knowledge.change();
         self.guard_transaction_events(events_len, condition);
         unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
         self.transaction_conditions.pop().unwrap();
@@ -284,13 +297,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         );
         assert_eq!(self.trace.head.len(), savepoint.token.head_len, "保存点期间不能改写已发布的迹");
         let savepoint = self.savepoints.pop().unwrap();
+        let unchanged = self.knowledge.constraints == savepoint.knowledge.constraints;
+        self.knowledge.sat = unchanged && (self.knowledge.sat || savepoint.knowledge.sat);
+        self.knowledge.change();
         if let Some(guard) = &savepoint.guard {
             unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
             self.transaction_conditions.pop().unwrap();
             self.guard_transaction_events(savepoint.events_len, guard);
-            // pop 或把 c 换成 g→c 都会改变查询上下文，臂内模型不能继续使用。
-            self.clear_stashed_model();
-            self.last_check_sat = false;
+            // 已缓存的模型满足全部前提、活动臂条件与缓冲断言。
+            // 撤去 g 并把 c 改为 g→c 只会弱化约束，同一见证仍然有效。
         }
         if self.savepoints.is_empty() {
             if savepoint.order_register_reads {
@@ -307,10 +322,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     _ => None,
                 })
                 .collect();
-            if !assertions.is_empty() {
-                self.clear_stashed_model();
-                self.last_check_sat = false;
-            }
+            // 这些断言已经参与模型查询；新增 assert 本身会清除旧模型。
+            // 提交只发布缓冲内容，不凭空恢复没有验证过的见证。
             for exp in assertions {
                 self.z3_assert(&exp);
             }
@@ -438,5 +451,43 @@ fn order_register_reads<B: BV>(events: &mut Vec<Event<B>>, guards: &mut Vec<Opti
         } else if !matches!(&events[index], Event::Smt(..)) {
             position = index + 1;
         }
+    }
+}
+
+impl<B: BV> Solver<'_, B> {
+    /// 各层真实 capacity 的 payload 估算；模型只数引用，不访问 Z3 opaque 对象。
+    pub fn memory_stats(&self) -> crate::executor::stats::memory_stats::SolverMemory {
+        use crate::executor::stats::memory_stats::{event_heap_bytes, exp_heap_bytes, map_bytes, SolverMemory};
+        use std::mem::{size_of, size_of_val};
+        let mut layers = vec![
+            serde_json::json!({"layer":0,"decls_capacity":self.decls.capacity(),"sail_bitvectors_capacity":self.sail_bitvectors.capacity(),"func_decls_capacity":self.func_decls.capacity()}),
+        ];
+        let mut bytes = size_of_val(self)
+            + map_bytes::<Sym, Ast>(self.decls.capacity())
+            + self.sail_bitvectors.capacity() * size_of::<Sym>()
+            + map_bytes::<Sym, FuncDecl>(self.func_decls.capacity());
+        let mut models = usize::from(self.stashed_model.is_some());
+        bytes += self.savepoints.capacity() * size_of::<SolverSavepoint>();
+        for (index, point) in self.savepoints.iter().enumerate() {
+            layers.push(serde_json::json!({"layer":index+1,"decls_capacity":point.decls.capacity(),"sail_bitvectors_capacity":point.sail_bitvectors.capacity(),"func_decls_capacity":point.func_decls.capacity()}));
+            bytes += map_bytes::<Sym, Ast>(point.decls.capacity())
+                + point.sail_bitvectors.capacity() * size_of::<Sym>()
+                + map_bytes::<Sym, FuncDecl>(point.func_decls.capacity())
+                + point.guard.as_ref().map_or(0, exp_heap_bytes);
+            models += usize::from(point.model.model.is_some());
+        }
+        bytes += self.transaction_events.capacity() * size_of::<Event<B>>()
+            + self.transaction_events.iter().map(event_heap_bytes).sum::<usize>()
+            + self.transaction_event_guards.capacity() * size_of::<Option<Exp<Sym>>>()
+            + self.transaction_event_guards.iter().flatten().map(exp_heap_bytes).sum::<usize>()
+            + self.committed_transaction_events.capacity() * size_of::<(Option<Exp<Sym>>, Event<B>)>()
+            + self
+                .committed_transaction_events
+                .iter()
+                .map(|(g, e)| g.as_ref().map_or(0, exp_heap_bytes) + event_heap_bytes(e))
+                .sum::<usize>()
+            + self.transaction_conditions.capacity() * size_of::<Exp<Sym>>()
+            + self.transaction_conditions.iter().map(exp_heap_bytes).sum::<usize>();
+        SolverMemory { bytes, layers, model_caches: models }
     }
 }
