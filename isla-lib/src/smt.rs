@@ -188,6 +188,7 @@ impl fmt::Debug for EnumMember {
     }
 }
 mod dump;
+mod proof_budget;
 mod transaction;
 mod witness_shadow;
 use transaction::SolverSavepoint;
@@ -2984,8 +2985,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             query::QueryPurpose::General => "general",
             query::QueryPurpose::RangeProof => "range_proof",
             query::QueryPurpose::BooleanProof => "boolean_proof",
+            query::QueryPurpose::BranchFeasibility => "branch_feasibility",
         };
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
+        let proof_limit = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
+            proof_budget::limit()
+        } else {
+            None
+        };
         let started = Instant::now();
         self.performance_info.start();
 
@@ -2995,7 +3002,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut ast = self.translate_exp(exp);
         ast.simplify();
         drop(translation);
-        if let Some(value) = ast.get_bool_value() {
+        if let Some(value) = ast.get_bool_value().filter(|value| !*value || proof_limit.is_none()) {
             let result = if value {
                 self.check_sat(info)
             } else {
@@ -3031,11 +3038,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.performance_info.assign_cost(exp);
             return Sat;
         }
-        let query = self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast));
+        let query = if let Some(limit) = proof_limit {
+            let setup = WorkTimer::start(WorkKind::QuerySetup);
+            let query = self.independent_query(&assumptions, Some(limit));
+            drop(setup);
+            query
+        } else {
+            self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast))
+        };
         let diagnostic_dump = self.diagnostic_query_dump(exp);
         let diagnostic_pair = diagnostic_dump.as_ref().is_some_and(dump::wants_same_context_pair);
         let diagnostic_before = diagnostic_pair.then(|| self.diagnostic_solver_stats(query.z3_solver));
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
+        let budget_profile = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
+            proof_budget::Token::begin(self.ctx, query.z3_solver, proof_limit)
+        } else {
+            None
+        };
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
@@ -3045,6 +3064,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         ) {
             Ok(result) => result,
             Err(Z3TimeoutError::Interrupted) => {
+                if let Some(profile) = budget_profile {
+                    profile.finish(Z3_L_UNDEF);
+                }
                 if let Some(shadow) = shadow {
                     shadow.finish(Z3_L_UNDEF);
                 }
@@ -3056,6 +3078,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
             }
         };
+        if let Some(profile) = budget_profile {
+            profile.finish(z3_result);
+        }
         if let Some(shadow) = shadow {
             shadow.finish(z3_result);
         }

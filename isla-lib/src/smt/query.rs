@@ -5,6 +5,7 @@ pub(super) enum QueryPurpose {
     General,
     RangeProof,
     BooleanProof,
+    BranchFeasibility,
 }
 
 impl QueryPurpose {
@@ -12,7 +13,7 @@ impl QueryPurpose {
         match self {
             Self::General => false,
             Self::RangeProof => true,
-            Self::BooleanProof => {
+            Self::BooleanProof | Self::BranchFeasibility => {
                 if SMT_CONFIG.get().unwrap().tactic != Tactic::Default || solver.incremental_checks {
                     return false;
                 }
@@ -177,13 +178,22 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 drop(setup);
                 return QuerySolver { ctx: self.ctx, z3_solver: self.z3_solver, independent };
             }
-            // 同一Context沿用Config；同一有效种子沿用调用者设置，不重新随机化。
+            let query = self.independent_query(assumptions, None);
+            drop(setup);
+            query
+        }
+    }
+
+    /// 同Context、同配置／种子，复制完整逻辑式。资源上限只存在此独立查询中。
+    pub(super) fn independent_query(&self, assumptions: &[Z3_ast], limit: Option<u32>) -> QuerySolver<'ctx> {
+        let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
+        unsafe {
             let z3_solver = new_z3_solver(
                 self.ctx.z3_ctx,
                 config.tactic.as_c_str(),
                 self.seed.map(|seed| (config.seed_param, seed)),
             );
-            let query = QuerySolver { ctx: self.ctx, z3_solver, independent };
+            let query = QuerySolver { ctx: self.ctx, z3_solver, independent: true };
             // 当前solver包括活动臂条件；缓冲断言与本次条件由调用方补齐。
             let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
             Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
@@ -194,7 +204,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             for assumption in assumptions {
                 Z3_solver_assert(self.ctx.z3_ctx, z3_solver, *assumption);
             }
-            drop(setup);
+            if let Some(limit) = limit {
+                let params = Z3_mk_params(self.ctx.z3_ctx);
+                Z3_params_inc_ref(self.ctx.z3_ctx, params);
+                Z3_params_set_uint(
+                    self.ctx.z3_ctx,
+                    params,
+                    Z3_mk_string_symbol(self.ctx.z3_ctx, b"rlimit\0".as_ptr().cast()),
+                    limit,
+                );
+                Z3_solver_set_params(self.ctx.z3_ctx, z3_solver, params);
+                Z3_params_dec_ref(self.ctx.z3_ctx, params);
+            }
             query
         }
     }
@@ -344,6 +365,69 @@ mod tests {
         solver.rollback_transaction(tx);
     }
 
+    #[test]
+    fn boolean_proof_rlimit_unknown_does_not_limit_range_branch_or_terminal() {
+        if !default_tactic_child(
+            "smt::query::tests::boolean_proof_rlimit_unknown_does_not_limit_range_branch_or_terminal",
+        ) {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_BOOL_PROOF_RLIMIT", "1");
+        configure_tastic(Tactic::Default);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::BitVec(64), info);
+        let goal = Exp::Eq(
+            Box::new(Exp::Bvmul(Box::new(Exp::Var(x)), Box::new(Exp::Var(x)))),
+            Box::new(Exp::Bits64(B64::new(9, 64))),
+        );
+        let tx = solver.start_transaction();
+        assert_eq!(solver.check_sat_with_for_bool(&goal, info), Unknown, "只限制可选的布尔证明");
+        assert!(
+            solver.check_sat_with_for_branch(&goal, info, true).is_sat().unwrap(),
+            "区域分支不是可选布尔化简，不能继承预算"
+        );
+        solver.clear_stashed_model();
+        assert!(solver.check_sat_with_for_range(&goal, info).is_sat().unwrap(), "范围证明不受限");
+        solver.clear_stashed_model();
+        assert!(solver.check_sat_with(&goal, info).is_sat().unwrap(), "普通分支查询不受限");
+        solver.assert(goal.clone());
+        assert!(solver.check_sat_deadline(info, Duration::from_secs(5)).is_sat().unwrap(), "终态求解不继承rlimit");
+        solver.rollback_transaction(tx);
+        solver.clear_stashed_model();
+        assert!(solver.check_sat_with_for_bool(&goal, info).is_sat().unwrap(), "事务外不受此区域上限影响");
+    }
+    #[test]
+    fn boolean_proof_rlimit_unknown_keeps_exact_symbolic_relation() {
+        if !default_tactic_child("smt::query::tests::boolean_proof_rlimit_unknown_keeps_exact_symbolic_relation") {
+            return;
+        }
+        std::env::set_var("ISLA_REGION_BOOL_PROOF_RLIMIT", "1");
+        configure_tastic(Tactic::Default);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::BitVec(64), info);
+        solver.assert(Exp::Eq(Box::new(Exp::Var(x)), Box::new(Exp::Bits64(B64::new(0, 64)))));
+        let tx = solver.start_transaction();
+        let result = crate::primop::lt_bits_u(
+            crate::ir::Val::Symbolic(x),
+            crate::ir::Val::Bits(B64::new(8, 64)),
+            &mut solver,
+            info,
+        )
+        .unwrap();
+        let crate::ir::Val::Symbolic(value) = result else {
+            panic!("资源耗尽必须保留布尔符号，不冒充已证明常量");
+        };
+        assert!(solver.check_sat_with(&Exp::Var(value), info).is_sat().unwrap());
+        assert!(
+            solver.check_sat_with(&Exp::Not(Box::new(Exp::Var(value))), info).is_unsat().unwrap(),
+            "定义必须保留原表达式的精确关系"
+        );
+        solver.rollback_transaction(tx);
+    }
     #[test]
     fn witness_native_sat_refreshes_pool_after_fast_miss() {
         if !default_tactic_child("smt::query::tests::witness_native_sat_refreshes_pool_after_fast_miss") {
