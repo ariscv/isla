@@ -269,7 +269,7 @@ impl SmtDumpNames {
         self.ir_names
             .get(&enum_id)
             .map(|name| format!("isla_{}__n{}", name, enum_id))
-            .unwrap_or_else(|| format!("isla_s{}", enum_id))
+            .unwrap_or_else(|| format!("isla_enum_n{}", enum_id))
     }
 
     pub(crate) fn enum_member_name(&self, enum_id: u32, member: usize, generated_symbol_id: u32) -> String {
@@ -277,7 +277,7 @@ impl SmtDumpNames {
             .get(&enum_id)
             .and_then(|members| members.get(member))
             .map(|name| format!("isla_{}__e{}_m{}", name, enum_id, member))
-            .unwrap_or_else(|| format!("isla_s{}", generated_symbol_id))
+            .unwrap_or_else(|| format!("isla_enum_e{}_m{}__s{}", enum_id, member, generated_symbol_id))
     }
 
     fn merge(&mut self, other: Self) {

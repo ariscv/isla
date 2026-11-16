@@ -117,6 +117,56 @@ mod tests {
     }
 
     #[test]
+    fn query_replay_dump_keeps_buffered_assertions_and_active_guard() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::Bool, info);
+        let tx = solver.start_transaction_with_guard(Some(Var(x)));
+        solver.assert(Not(Box::new(Var(x))));
+        let dump = timeout_dump_from_checkpoint(solver.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(Bool(true)));
+        let text = dump.materialize().unwrap();
+        let parsed = CString::new(text.as_bytes()).unwrap();
+        let replay = Solver::<B64>::new(&ctx);
+        unsafe {
+            Z3_solver_from_string(ctx.z3_ctx, replay.z3_solver, parsed.as_ptr());
+            assert_eq!(
+                Z3_solver_check(ctx.z3_ctx, replay.z3_solver),
+                Z3_L_FALSE,
+                "回放必须同时保留互相矛盾的活动守卫和缓冲断言"
+            );
+        }
+        solver.rollback_transaction(tx);
+        assert!(solver.check_sat(info).is_sat().unwrap());
+    }
+
+    #[test]
+    fn checkpoint_dump_default_names_separate_enum_members_from_symbols() {
+        let names = SmtDumpNames::default();
+        for i in 0..5 {
+            assert_ne!(names.symbol_name(i), names.enum_member_name(2097, i as usize, i));
+            assert_ne!(names.symbol_name(i), names.enum_sort_name(i));
+        }
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::BitVec(64), SourceLoc::unknown());
+        let enumeration = solver.get_enum(Name::from_u32(2097), 5);
+        let e = solver.declare_const(Ty::Enum(enumeration), SourceLoc::unknown());
+        solver.assert(Eq(Box::new(Var(e)), Box::new(Enum(EnumMember { enum_id: enumeration, member: 0 }))));
+        solver.assert(Eq(Box::new(Var(x)), Box::new(Bits64(B64::new(7, 64)))));
+        let dump = timeout_dump_from_checkpoint(solver.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
+        let text = dump.materialize().unwrap();
+        let parsed = CString::new(text.as_bytes()).unwrap();
+        let replay = Solver::<B64>::new(&ctx);
+        unsafe {
+            Z3_solver_from_string(ctx.z3_ctx, replay.z3_solver, parsed.as_ptr());
+            assert_eq!(Z3_solver_check(ctx.z3_ctx, replay.z3_solver), Z3_L_TRUE);
+        }
+    }
+
+    #[test]
     fn checkpoint_dump_without_worker_uses_replayable_datatype_symbols() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -128,8 +178,12 @@ mod tests {
 
         let text = dump.materialize().unwrap();
 
-        assert!(text.contains("(declare-datatypes ((isla_s2097 0))"), "unexpected datatype declaration:\n{}", text);
-        assert!(text.contains("() isla_s2097)"), "datatype reference does not match declaration:\n{}", text);
+        assert!(
+            text.contains("(declare-datatypes ((isla_enum_n2097 0))"),
+            "unexpected datatype declaration:\n{}",
+            text
+        );
+        assert!(text.contains("() isla_enum_n2097)"), "datatype reference does not match declaration:\n{}", text);
     }
 
     #[test]
@@ -277,5 +331,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
         }
         smt2
+    }
+}
+
+impl<'ctx, B: BV> Solver<'ctx, B> {
+    pub(super) fn diagnostic_query_dump(&self, exp: &Exp<Sym>) -> Option<serde_json::Value> {
+        let mut point = crate::executor::stats::region_progress::query_dump_point()?;
+        let directory = std::env::var_os("ISLA_QUERY_DUMP_DIR").expect("指定导出位置时必须指定数据目录");
+        std::fs::create_dir_all(&directory).expect("创建查询导出目录失败");
+        let filename = format!(
+            "round-{}-{}-query-{}.smt2",
+            point["round"],
+            point["site"].as_str().unwrap().replace('@', "-"),
+            point["query_ordinal"]
+        );
+        let path = std::path::Path::new(&directory).join(filename);
+        let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(exp.clone()));
+        let text = dump.materialize().expect("生成完整查询回放失败");
+        std::fs::write(&path, text.as_bytes()).expect("写出查询回放失败");
+        point["path"] = serde_json::json!(path);
+        Some(point)
     }
 }

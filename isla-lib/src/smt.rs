@@ -3024,6 +3024,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
         assumptions.push(ast.z3_ast);
         let query = self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast));
+        let diagnostic_dump = self.diagnostic_query_dump(exp);
+        let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3040,6 +3042,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
             }
         };
+        if let Some(mut point) = diagnostic_dump {
+            point["kind"] = serde_json::json!("query_replay_result");
+            point["check_milliseconds"] =
+                serde_json::json!(diagnostic_started.unwrap().elapsed().as_secs_f64() * 1000.0);
+            point["result"] = serde_json::json!(if z3_result == Z3_L_TRUE {
+                "sat"
+            } else if z3_result == Z3_L_FALSE {
+                "unsat"
+            } else {
+                "unknown"
+            });
+            eprintln!("{point}");
+        }
         let result = if z3_result == Z3_L_TRUE {
             Sat
         } else if z3_result == Z3_L_FALSE {

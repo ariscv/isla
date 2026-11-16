@@ -348,3 +348,23 @@ fn region_progress_disabled_has_no_collection_or_call_id_allocation() {
     drop(scope);
     TEST_ENABLED.with(|flag| flag.set(old));
 }
+
+/// 由外部指定位置及轮次的单调用有界导出；不改变执行或查询策略。
+pub(crate) fn query_dump_point() -> Option<Value> {
+    static SITES: OnceLock<Option<Vec<String>>> = OnceLock::new();
+    let sites = SITES
+        .get_or_init(|| std::env::var("ISLA_QUERY_DUMP_SITES").ok().map(|s| s.split(',').map(str::to_owned).collect()));
+    let sites = sites.as_ref()?;
+    ROOT.with(|root| {
+        let root = root.borrow();
+        let p = root.as_ref()?;
+        if !sites.contains(&p.current) { return None; }
+        let round = p.back_edges.len() + 1;
+        if ![2,4,6,8].contains(&round) { return None; }
+        static CALL: AtomicUsize = AtomicUsize::new(0);
+        let id = p.call_instance?;
+        let selected = CALL.compare_exchange(0, id, Ordering::Relaxed, Ordering::Relaxed).unwrap_or_else(|x| x);
+        if selected != 0 && selected != id { return None; }
+        Some(json!({"round":round,"call_instance":id,"site":p.current,"phase":query_label(),"query_ordinal":p.counts.queries+1,"origin":p.origin}))
+    })
+}
