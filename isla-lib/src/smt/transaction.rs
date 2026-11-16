@@ -250,6 +250,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
         assert!(!self.savepoints.is_empty(), "推测臂条件必须位于事务中");
         let saved = self.knowledge;
+        // 暂时加入的臂条件不能使用调用者见证；纯定义范围退出后可归还它。
+        // SavedModel接管同一引用，不复制模型；断言或改绑均会改变constraints版本。
+        let mut caller_model = SavedModel { model: self.stashed_model.take(), ctx: self.ctx };
+        let caller_last_check_sat = self.last_check_sat;
         let sat = self.guard_known_sat(condition);
         self.knowledge.change();
         self.knowledge.sat = sat;
@@ -280,6 +284,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.transaction_conditions.pop().unwrap();
         self.clear_stashed_model();
         self.last_check_sat = false;
+        if unchanged && balanced && result.is_ok() {
+            self.stashed_model = caller_model.model.take();
+            self.last_check_sat = caller_last_check_sat && self.has_stashed_model();
+        }
         match result {
             Ok(value) => {
                 assert!(balanced, "退出臂条件前必须结束其内层保存点");

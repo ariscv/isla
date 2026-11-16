@@ -236,4 +236,54 @@ mod tests {
         assert!(solver.region_query.is_none(), "回滚必须释放已废弃的查询前缀");
         assert!(solver.check_sat_with(&Exp::Not(Box::new(Exp::Var(value))), info).is_sat().unwrap());
     }
+
+    #[test]
+    fn temporary_guard_restores_unchanged_caller_witness() {
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let value = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(value));
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        let tx = solver.start_transaction();
+        let before = test_query_count();
+        solver.with_transaction_condition(&Exp::Not(Box::new(Exp::Var(value))), |solver| {
+            assert_eq!(solver.cached_bool_value(&Exp::Var(value)).unwrap(), None, "调用者见证不能用于临时的相反条件");
+            solver.define_const(Exp::Var(value), info);
+        });
+        assert_eq!(
+            solver.cached_bool_value(&Exp::Var(value)).unwrap(),
+            Some(true),
+            "仅新增定义并退出临时条件后，调用者的完整见证仍然有效"
+        );
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        assert_eq!(test_query_count(), before, "只读范围结束不应重查同一前提");
+        solver.rollback_transaction(tx);
+    }
+
+    #[test]
+    fn temporary_guard_changed_constraints_never_restore_caller_witness() {
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::Bool, info);
+        let y = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(x));
+        solver.assert(Exp::Not(Box::new(Exp::Var(y))));
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        let tx = solver.start_transaction();
+        solver.with_transaction_condition(&Exp::Var(x), |solver| solver.assert(Exp::Var(y)));
+        assert_eq!(solver.cached_bool_value(&Exp::Var(x)).unwrap(), None);
+        assert!(solver.check_sat(info).is_unsat().unwrap(), "新断言必须生效，不能沿用旧SAT");
+        solver.rollback_transaction(tx);
+        assert!(solver.check_sat(info).is_sat().unwrap());
+        let tx = solver.start_transaction();
+        solver.with_transaction_condition(&Exp::Var(x), |solver| {
+            solver.add(Def::DefineConst(x, Exp::Bool(false)));
+        });
+        assert_eq!(solver.cached_bool_value(&Exp::Var(x)).unwrap(), None, "符号改绑即使不新增逻辑断言也必须清见证");
+        solver.rollback_transaction(tx);
+    }
 }
