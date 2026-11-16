@@ -42,6 +42,7 @@ pub(super) struct SolverSavepoint<'ctx> {
     asserts_since_check: usize,
     floating_point_seen: bool,
     last_check_sat: bool,
+    pub(super) knowledge: dedup::Knowledge,
     model: SavedModel<'ctx>,
     performance_info: PerformanceInfo,
     smt_stats: crate::timeout::SmtCallStats,
@@ -171,6 +172,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             asserts_since_check: self.asserts_since_check,
             floating_point_seen: self.floating_point_seen.get(),
             last_check_sat: self.last_check_sat,
+            knowledge: self.knowledge,
             model: SavedModel { model: self.stashed_model, ctx: self.ctx },
             performance_info: self.performance_info.clone(),
             smt_stats: path_smt_stats(),
@@ -179,6 +181,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             order_register_reads: false,
         });
         if let Some(condition) = condition {
+            let sat = self.guard_known_sat(self.savepoints.last().unwrap().guard.as_ref().unwrap());
+            self.knowledge.change();
+            self.knowledge.sat = sat;
             self.clear_stashed_model();
             self.last_check_sat = false;
             unsafe {
@@ -213,6 +218,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.asserts_since_check = savepoint.asserts_since_check;
         self.floating_point_seen.set(savepoint.floating_point_seen);
         self.last_check_sat = savepoint.last_check_sat;
+        self.knowledge = savepoint.knowledge;
         self.stashed_model = savepoint.model.model.take();
         self.performance_info = savepoint.performance_info;
         restore_path_smt_stats(savepoint.smt_stats);
@@ -241,6 +247,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 臂条件只在推演期间生效；正常返回、Err 返回及 panic 展开均配对 pop。
     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
         assert!(!self.savepoints.is_empty(), "推测臂条件必须位于事务中");
+        let saved = self.knowledge;
+        let sat = self.guard_known_sat(condition);
+        self.knowledge.change();
+        self.knowledge.sat = sat;
         self.clear_stashed_model();
         self.last_check_sat = false;
         unsafe { Z3_solver_push(self.ctx.z3_ctx, self.z3_solver) };
@@ -260,6 +270,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         // 兼容旧执行器在同一个事务中依次推演两个臂：仅包装本次臂新增的事件，
         // 另一臂的查询因而只看到带条件的约束，定义则像以前一样跨 pop 保留。
+        let unchanged = self.knowledge.constraints == saved.constraints;
+        self.knowledge.sat = unchanged && (self.knowledge.sat || saved.sat);
+        self.knowledge.change();
         self.guard_transaction_events(events_len, condition);
         unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
         self.transaction_conditions.pop().unwrap();
@@ -284,6 +297,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         );
         assert_eq!(self.trace.head.len(), savepoint.token.head_len, "保存点期间不能改写已发布的迹");
         let savepoint = self.savepoints.pop().unwrap();
+        let unchanged = self.knowledge.constraints == savepoint.knowledge.constraints;
+        self.knowledge.sat = unchanged && (self.knowledge.sat || savepoint.knowledge.sat);
+        self.knowledge.change();
         if let Some(guard) = &savepoint.guard {
             unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
             self.transaction_conditions.pop().unwrap();

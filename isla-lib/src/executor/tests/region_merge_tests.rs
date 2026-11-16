@@ -4663,3 +4663,24 @@ fn region_merge_constant_liveness_dead_read_allows_missing_slot_merge() {
     assert!(!merged[0].records.is_empty(), "必须实际提交区域合并");
     assert!(!merged[0].variables.contains_key(&local));
 }
+
+#[test]
+fn dedup_executor_guard_change_prunes_poison_before_execution() {
+    let shared = empty_shared_state();
+    let poison = Instr::PrimopReset(
+        Loc::Id(RETURN),
+        Arc::new(|_, _, _| panic!("死臂触发了原语不变量")),
+        primop::Effect::Pure,
+        info(),
+    );
+    let program = vec![
+        Instr::Jump(input(0), 5, info()),
+        Instr::Jump(input(0), 4, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(6),
+        poison,
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 1, true), (2, 1));
+}

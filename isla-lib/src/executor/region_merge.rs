@@ -131,7 +131,7 @@ pub(super) fn feasible<B: BV>(
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
-    match solver.check_sat_with_for_bool(exp, info) {
+    match solver.check_sat_with_for_branch(exp, info, true) {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
         SmtResult::Unknown => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
@@ -725,7 +725,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = solver.check_sat(info);
+                let close_result = solver.check_sat_for_arm(info);
                 drop(close_scope);
                 match close_result {
                     SmtResult::Unsat => {
@@ -1568,7 +1568,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = solver.check_sat(work.info);
+                let close_result = solver.check_sat_for_arm(work.info);
                 drop(close_scope);
                 match close_result {
                     SmtResult::Sat => (),

@@ -141,27 +141,41 @@ fn smt_u64_width<V>(value: u64, width: u32) -> Exp<V> {
 // 例：若已有 assert(num_elem == 1 | num_elem == 2 | num_elem == 4)，
 // `0 < num_elem` 会返回 true，而 `num_elem == 2` 仍返回 symbolic。
 fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    // 已有完整前态见证证明一侧可满足；只求另一侧，不能由一个解断言条件恒定。
-    if let Some(value) = solver.cached_bool_value(&exp)? {
+    let mut both = false;
+    let value = if let Some(value) = solver.cached_bool_value(&exp)? {
         let opposite = if value { Exp::Not(Box::new(exp.clone())) } else { exp.clone() };
-        return match solver.check_sat_with_for_bool(&opposite, info) {
-            SmtResult::Unsat => Ok(Val::Bool(value)),
-            SmtResult::Sat | SmtResult::Unknown => solver.define_const(exp, info).into(),
-            SmtResult::Error(error) => Err(ExecError::Smt(error)),
-        };
-    }
-    match solver.check_sat_with_for_bool(&Exp::Not(Box::new(exp.clone())), info) {
-        SmtResult::Unsat => return Ok(Val::Bool(true)),
-        SmtResult::Sat => (),
-        SmtResult::Unknown => return solver.define_const(exp, info).into(),
-        SmtResult::Error(error) => return Err(ExecError::Smt(error)),
-    }
-
-    match solver.check_sat_with_for_bool(&exp, info) {
-        SmtResult::Unsat => Ok(Val::Bool(false)),
-        SmtResult::Sat | SmtResult::Unknown => solver.define_const(exp, info).into(),
-        SmtResult::Error(error) => Err(ExecError::Smt(error)),
-    }
+        match solver.check_sat_with_for_bool(&opposite, info) {
+            SmtResult::Unsat => return Ok(Val::Bool(value)),
+            SmtResult::Sat => {
+                both = true;
+                solver.define_const(exp, info)
+            }
+            SmtResult::Unknown => solver.define_const(exp, info),
+            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+        }
+    } else {
+        match solver.check_sat_with_for_bool(&Exp::Not(Box::new(exp.clone())), info) {
+            SmtResult::Unsat => return Ok(Val::Bool(true)),
+            SmtResult::Sat => (),
+            SmtResult::Unknown => {
+                let sym = solver.define_const(exp, info);
+                solver.note_bool_proof(sym, false);
+                return Ok(Val::Symbolic(sym));
+            }
+            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+        }
+        match solver.check_sat_with_for_bool(&exp, info) {
+            SmtResult::Unsat => return Ok(Val::Bool(false)),
+            SmtResult::Sat => {
+                both = true;
+                solver.define_const(exp, info)
+            }
+            SmtResult::Unknown => solver.define_const(exp, info),
+            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+        }
+    };
+    solver.note_bool_proof(value, both);
+    Ok(Val::Symbolic(value))
 }
 
 fn concretize_proven_i128<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
