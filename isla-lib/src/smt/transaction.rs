@@ -346,6 +346,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 主迹仍按访问足迹并集发布；快照不受旧执行器提交后替换寄存器事件的影响。
     /// 开始下一个最外层事务或发布检查点时清空；嵌套条件以合取表示。
     /// SMT 声明与定义仍无条件生效，其事件 guard 只记录分支来源。
+    /// 只读检查待提交前缀，不改变查询、见证或事务状态。
+    pub(crate) fn transaction_has_memory_writes(&self) -> bool {
+        self.transaction_events.iter().any(Event::is_memory_write)
+    }
+
     pub fn committed_transaction_events(&self) -> &[(Option<Exp<Sym>>, Event<B>)] {
         &self.committed_transaction_events
     }

@@ -314,6 +314,76 @@ fn region<'ir, B: BV>(
     })
 }
 
+/// 只有最外层、无架构写出、无控制流采样限制的有环函数出口区域才能分段。
+/// 分段本身不猜测循环是否终止；它只将同一有限展开的前缀变成两个普通前沿。
+fn can_segment<B: BV>(frame: &LocalFrame<B>, state: &TaskState<B>, mode: MergeMode) -> bool {
+    if frame.region_execution.is_some() || mode != MergeMode::Adaptive || state.pc_limit.is_some() {
+        return false;
+    }
+    state.execution_limits.as_ref().is_some_and(|limits| {
+        limits.max_forks_per_branch.is_none()
+            && limits.max_forks_per_path.is_none()
+            && limits.max_backjumps_per_loop.is_none()
+            && limits.max_path_depth.is_none()
+            && limits.max_fork_pct_per_branch.is_none()
+            && limits.branch_region_limits.is_empty()
+            && limits.region_fork_limits.is_empty()
+    })
+}
+
+/// 提交后的返回前沿与继续前沿共用相同的条件事件后缀，分别保留自己的根记录。
+fn publish_committed_records<B: BV>(
+    frame: &mut LocalFrame<B>,
+    start: usize,
+    task: TaskId,
+    shared: &SharedState<B>,
+    solver: &mut Solver<B>,
+) {
+    let events = solver.committed_transaction_events();
+    let count = events.iter().filter(|(_, event)| event.is_memory_read_or_write()).count();
+    if count != 0 {
+        let offset = solver
+            .trace()
+            .to_vec()
+            .iter()
+            .filter(|event| event.is_memory_read_or_write())
+            .count()
+            .checked_sub(count)
+            .expect("提交事件必须属于主迹后缀");
+        let root = frame.region_merge_records.last_mut().expect("提交必须有根记录");
+        assert!(root.parent_record.is_none());
+        root.memory_reads = events
+            .iter()
+            .filter(|(_, event)| event.is_memory_read_or_write())
+            .enumerate()
+            .filter_map(|(i, (guard, event))| {
+                if event.is_memory_read() {
+                    guard.as_ref().map(|guard| (offset + i, guard.clone(), event.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+    super::merge_record::publish(
+        &mut frame.region_merge_records[start..],
+        &frame.local_state.pure_definitions,
+        task,
+        shared,
+        solver,
+    );
+}
+
+struct RegionOutput<'ir, B> {
+    result: RegionResult,
+    continuation: Option<(Sym, LocalFrame<'ir, B>)>,
+}
+impl<'ir, B> RegionOutput<'ir, B> {
+    fn complete(result: RegionResult) -> Self {
+        Self { result, continuation: None }
+    }
+}
+
 pub(super) enum RegionResult {
     Merged,
     Dead,
@@ -416,6 +486,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
     };
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
+    let mut segmented = false;
     let result = match candidate {
         Err(error) => {
             if let ExecError::SpeculativeReject { reason, function, pc, location } = error {
@@ -449,47 +520,51 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame, state,
                     shared, solver, info,
                 );
+                let mut continuation = None;
+                let result = result.map(|output| {
+                    continuation = output.continuation;
+                    output.result
+                });
                 match &result {
                     Ok(_) => {
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         solver.commit_transaction();
                         if !nested {
-                            // 注意（ATTENTION）：主迹保留两臂 ReadMem 的并集，不能作为精确读序列。
-                            // 保存完整 guard 与主迹访存序号，供样本检查过滤另一臂的读取。
-                            let events = solver.committed_transaction_events();
-                            let memory_count =
-                                events.iter().filter(|(_, event)| event.is_memory_read_or_write()).count();
-                            if memory_count != 0 {
-                                let offset = solver
-                                    .trace()
-                                    .to_vec()
-                                    .iter()
-                                    .filter(|event| event.is_memory_read_or_write())
-                                    .count()
-                                    .checked_sub(memory_count)
-                                    .expect("提交事件必须属于主迹后缀");
-                                let root = frame.region_merge_records.last_mut().expect("提交必须有根记录");
-                                assert!(root.parent_record.is_none());
-                                root.memory_reads = events
-                                    .iter()
-                                    .filter(|(_, event)| event.is_memory_read_or_write())
-                                    .enumerate()
-                                    .filter_map(|(index, (guard, event))| {
-                                        if event.is_memory_read() {
-                                            guard.as_ref().map(|guard| (offset + index, guard.clone(), event.clone()))
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect();
+                            publish_committed_records(frame, record_start, task_id, shared, solver);
+                            if let Some((returned, mut continued)) = continuation.take() {
+                                segmented = true;
+                                publish_committed_records(&mut continued, record_start, task_id, shared, solver);
+                                let fork_id = Arc::make_mut(&mut frame.execution_limit_state).record_fork();
+                                let other = Arc::make_mut(&mut continued.execution_limit_state).record_fork();
+                                assert_eq!(fork_id, other, "同一分段的两前沿必须继承相同fork计数");
+                                Arc::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
+                                Arc::make_mut(&mut continued.execution_limit_state).advance_path_signature(false);
+                                frame.capture_path_smt_stats();
+                                continued.capture_path_smt_stats();
+                                let point = checkpoint(solver);
+                                let condition = smtlib::Exp::Not(Box::new(smtlib::Exp::Var(returned)));
+                                let frozen = super::trace_fork_frame_with_branch_condition!(
+                                    &continued,
+                                    continued.pc,
+                                    condition.clone()
+                                );
+                                fraction.halve();
+                                sink.submit(Task {
+                                    id: task_id,
+                                    fraction: fraction.clone(),
+                                    frame: frozen,
+                                    checkpoint: point,
+                                    fork_cond: Some((
+                                        smtlib::Def::Assert(condition),
+                                        Event::Fork(fork_id, returned, 1, info),
+                                    )),
+                                    state,
+                                    stop_conditions: stop,
+                                });
+                                solver.add_event(Event::Fork(fork_id, returned, 0, info));
+                                solver.assert(smtlib::Exp::Var(returned));
+                                super::btrace_push_branch_condition!(frame, smtlib::Exp::Var(returned));
                             }
-                            super::merge_record::publish(
-                                &mut frame.region_merge_records[record_start..],
-                                &frame.local_state.pure_definitions,
-                                task_id,
-                                shared,
-                                solver,
-                            );
                         }
                     }
                     Err(_) => solver.rollback_transaction(tx),
@@ -502,6 +577,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         Ok(result) => {
             if let Some(attempt) = diagnostics_attempt.as_mut() {
                 attempt.finish(None);
+                if segmented {
+                    attempt.finish_segmented();
+                }
             }
             shared.execution_stats.merge_finished(true);
             shared.execution_stats.rule_finished(rule, None);
@@ -580,7 +658,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-) -> Result<RegionResult, ExecError> {
+) -> Result<RegionOutput<'ir, B>, ExecError> {
     use smtlib::Exp::{Not, Var};
     let record_id = NEXT_RECORD
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -703,6 +781,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         }
     }
     finish_region(record_id, condition, &region, &base, arms, frame, state, shared, solver, info)
+        .map(RegionOutput::complete)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1385,8 +1464,22 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-) -> Result<RegionResult, ExecError> {
+) -> Result<RegionOutput<'ir, B>, ExecError> {
     use smtlib::Exp::{And, Not, Var};
+    let eligible = can_segment(frame, state, base.region_execution.as_ref().unwrap().mode)
+        && match region.join {
+            RegionPoint::FunctionExit => true,
+            RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
+        };
+    let root_branch = region.branch_pc;
+    let root_region = region.clone();
+    let remaining = base.region_execution.as_ref().unwrap().remaining.clone();
+    let original_base = base.clone();
+    let original_frame = frame.clone();
+    let mut last_boundary = 0;
+    let mut largest_round = 0;
+    let mut continuation = None;
+    let mut return_guard = None;
     let mut pending = vec![LoopWork {
         original: frame.clone(),
         base,
@@ -1417,7 +1510,13 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     work.info,
                 )
             };
-            let guard = work.base.local_state.speculative_access.as_ref().unwrap().guard.clone();
+            let mut guard = work.base.local_state.speculative_access.as_ref().unwrap().guard.clone();
+            if let Some(returned) = return_guard {
+                guard = Some(match guard {
+                    Some(parent) => And(Box::new(parent), Box::new(Var(returned))),
+                    None => Var(returned),
+                });
+            }
             let result = match guard {
                 Some(guard) => solver.with_transaction_condition(&guard, finish),
                 None => finish(solver),
@@ -1437,10 +1536,20 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 parent.arm_start = None;
             } else {
                 *frame = work.original;
-                return Ok(result);
+                return Ok(RegionOutput { result, continuation });
             }
             continue;
         }
+        let exit_spine = eligible
+            && continuation.is_none()
+            && pending.iter().all(|work| {
+                work.arms.len() == 1
+                    && work.arms[0].as_ref().is_some_and(|arm| {
+                        matches!(arm.instrs.get(arm.pc), Some(Instr::End))
+                            && arm.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty()
+                    })
+            });
+        let completed_exits = pending.len();
         let work = pending.last_mut().unwrap();
         assert!(work.arm_start.is_none(), "前一逻辑臂必须先收尾");
         work.arm_start = Some(solver.transaction_effect_mark());
@@ -1482,6 +1591,71 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 solver.commit_transaction();
                 let branch = arm.region_execution.as_mut().unwrap().pending_branch.take();
                 if let Some((condition, target, region, info)) = branch {
+                    let used = state.region_step_budget.saturating_sub(remaining.load(Ordering::Relaxed));
+                    if region.branch_pc == root_branch {
+                        largest_round = largest_round.max(used.saturating_sub(last_boundary));
+                        last_boundary = used;
+                    }
+                    let no_writes =
+                        arm.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty();
+                    if eligible
+                        && exit_spine
+                        && region.branch_pc == root_branch
+                        && no_writes
+                        && !solver.transaction_has_memory_writes()
+                        && largest_round > 0
+                        && remaining.load(Ordering::Relaxed) <= largest_round.saturating_mul(2)
+                    {
+                        let continued_guard = arm
+                            .local_state
+                            .speculative_access
+                            .as_ref()
+                            .unwrap()
+                            .guard
+                            .clone()
+                            .expect("继续臂必须有完整条件");
+                        let returned = solver.define_const(Not(Box::new(continued_guard.clone())), info);
+                        let continuation_region = Region {
+                            branch_pc: root_branch,
+                            has_back_edge: false,
+                            join: RegionPoint::Instruction(arm.pc),
+                            nodes: root_region.nodes.clone(),
+                            kind: crate::ir::regions::RegionKind::Reconvergent,
+                            local_variables: Default::default(),
+                        };
+                        let prefix_record = NEXT_RECORD
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                            .expect("合并记录编号溢出");
+                        let mut continued = original_frame.clone();
+                        let result = solver.with_transaction_condition(&continued_guard, |solver| {
+                            finish_region(
+                                prefix_record,
+                                returned,
+                                &continuation_region,
+                                &original_base,
+                                vec![None, Some(arm)],
+                                &mut continued,
+                                state,
+                                shared,
+                                solver,
+                                info,
+                            )
+                        })?;
+                        assert!(matches!(result, RegionResult::Merged), "已证可行的继续臂必须保留");
+                        if diagnostics::enabled() {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({"kind":"loop_segment","function":diagnostics::name_string(original_frame.function_name,&shared.symtab),"pc":root_branch,"call_instance":original_frame.local_state.call_instance,"steps":used,"remaining":remaining.load(Ordering::Relaxed),"completed_exits":completed_exits,"continuation_pc":continued.pc})
+                            );
+                        }
+                        continuation = Some((returned, continued));
+                        return_guard = Some(returned);
+                        // 继续臂已单独保存；这里只折叠已完成出口，补集将在最外层提交后成为普通任务。
+                        work.arms.push(None);
+                        work.arm_start = None;
+                        continue;
+                    }
+
                     let record_id = NEXT_RECORD
                         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                         .expect("合并记录编号溢出");

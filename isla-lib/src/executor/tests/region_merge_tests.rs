@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 #[path = "region_loop_merge_tests.rs"]
 mod loop_merge_tests;
 
+#[path = "region_loop_segment_tests.rs"]
+mod loop_segment_tests;
+
 #[path = "region_loop_round_review_tests.rs"]
 mod loop_round_review_tests;
 

@@ -483,6 +483,9 @@ impl AttemptGuard {
         });
         Self { timing }
     }
+    pub fn finish_segmented(&mut self) {
+        self.timing.finish("segmented".into());
+    }
     pub fn finish(&mut self, reason: Option<super::SpeculativeRejectReason>) {
         self.timing.finish(reason.map_or_else(|| "success".into(), |reason| reason.to_string()));
     }
