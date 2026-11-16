@@ -3025,6 +3025,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         assumptions.push(ast.z3_ast);
         let query = self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast));
         let diagnostic_dump = self.diagnostic_query_dump(exp);
+        let diagnostic_pair = diagnostic_dump.as_ref().is_some_and(dump::wants_same_context_pair);
+        let diagnostic_before = diagnostic_pair.then(|| self.diagnostic_solver_stats(query.z3_solver));
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
@@ -3053,6 +3055,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             } else {
                 "unknown"
             });
+            if diagnostic_pair {
+                point["original_statistics_before"] = diagnostic_before.unwrap();
+                point["original_statistics_after"] = self.diagnostic_solver_stats(query.z3_solver);
+                point["original_uses_main_solver"] = serde_json::json!(query.z3_solver == self.z3_solver);
+                point["fresh_same_context"] =
+                    self.diagnostic_fresh_query(query.z3_solver, query.assumptions(&assumptions), 1000);
+            }
             eprintln!("{point}");
         }
         let result = if z3_result == Z3_L_TRUE {

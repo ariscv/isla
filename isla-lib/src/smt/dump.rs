@@ -353,3 +353,95 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         Some(point)
     }
 }
+
+/// 默认关闭；只在已经选中的导出点做一次同Context对照，不参与执行决策。
+pub(super) fn wants_same_context_pair(point: &serde_json::Value) -> bool {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        OnceLock,
+    };
+    static SITES: OnceLock<Option<Vec<String>>> = OnceLock::new();
+    let sites = SITES.get_or_init(|| {
+        std::env::var("ISLA_SAME_CONTEXT_SITES").ok().map(|s| s.split(',').map(str::to_owned).collect())
+    });
+    let Some(sites) = sites.as_ref() else {
+        return false;
+    };
+    let Some(index) = sites.iter().position(|s| Some(s.as_str()) == point["site"].as_str()) else {
+        return false;
+    };
+    assert!(sites.len() <= 2, "有界配对最多选择两个位置");
+    let round = point["round"].as_u64().expect("导出点必须包含轮号") as usize;
+    assert!(round <= 8, "有界配对轮号超限");
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+    let bit = 1usize << (round * 2 + index);
+    DONE.fetch_or(bit, Ordering::Relaxed) & bit == 0
+}
+
+impl<'ctx, B: BV> Solver<'ctx, B> {
+    pub(super) fn diagnostic_solver_stats(&self, solver: Z3_solver) -> serde_json::Value {
+        unsafe {
+            let stats = Z3_solver_get_statistics(self.ctx.z3_ctx, solver);
+            Z3_stats_inc_ref(self.ctx.z3_ctx, stats);
+            let text = CStr::from_ptr(Z3_stats_to_string(self.ctx.z3_ctx, stats)).to_string_lossy().into_owned();
+            Z3_stats_dec_ref(self.ctx.z3_ctx, stats);
+            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, solver);
+            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
+            let count = Z3_ast_vector_size(self.ctx.z3_ctx, assertions);
+            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
+            serde_json::json!({"text":text,"assertions":count,"scopes":Z3_solver_get_num_scopes(self.ctx.z3_ctx,solver)})
+        }
+    }
+
+    /// 用原查询solver的全部断言与真实assumptions装配新solver；不重新翻译/命名/建Context。
+    pub(super) fn diagnostic_fresh_query(
+        &self,
+        original: Z3_solver,
+        assumptions: &[Z3_ast],
+        timeout_ms: u32,
+    ) -> serde_json::Value {
+        let setup = std::time::Instant::now();
+        let config = super::SMT_CONFIG.get().expect("诊断前必须初始化SMT");
+        unsafe {
+            let fresh = super::new_z3_solver(
+                self.ctx.z3_ctx,
+                config.tactic.as_c_str(),
+                self.seed.map(|seed| (config.seed_param, seed)),
+            );
+            let params = Z3_mk_params(self.ctx.z3_ctx);
+            Z3_params_inc_ref(self.ctx.z3_ctx, params);
+            Z3_params_set_uint(
+                self.ctx.z3_ctx,
+                params,
+                Z3_mk_string_symbol(self.ctx.z3_ctx, b"timeout\0".as_ptr().cast()),
+                timeout_ms,
+            );
+            Z3_solver_set_params(self.ctx.z3_ctx, fresh, params);
+            Z3_params_dec_ref(self.ctx.z3_ctx, params);
+            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, original);
+            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
+            let count = Z3_ast_vector_size(self.ctx.z3_ctx, assertions);
+            for i in 0..count {
+                Z3_solver_assert(self.ctx.z3_ctx, fresh, Z3_ast_vector_get(self.ctx.z3_ctx, assertions, i));
+            }
+            for assumption in assumptions {
+                Z3_solver_assert(self.ctx.z3_ctx, fresh, *assumption);
+            }
+            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
+            let before = self.diagnostic_solver_stats(fresh);
+            let setup_ms = setup.elapsed().as_secs_f64() * 1000.0;
+            let started = std::time::Instant::now();
+            // 诊断单独有原生timeout；不用执行侧包装器，避免把诊断计入路径查询/SMT计数。
+            let result = Z3_solver_check(self.ctx.z3_ctx, fresh);
+            let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let after = self.diagnostic_solver_stats(fresh);
+            let reason = if result == Z3_L_UNDEF {
+                CStr::from_ptr(Z3_solver_get_reason_unknown(self.ctx.z3_ctx, fresh)).to_string_lossy().into_owned()
+            } else {
+                String::new()
+            };
+            Z3_solver_dec_ref(self.ctx.z3_ctx, fresh);
+            serde_json::json!({"result":if result==Z3_L_TRUE {"sat"} else if result==Z3_L_FALSE {"unsat"} else {"unknown"},"check_milliseconds":wall_ms,"setup_milliseconds":setup_ms,"statistics_before":before,"statistics_after":after,"reason_unknown":reason,"timeout_ms":timeout_ms,"seed":self.seed,"assertions":count as usize + assumptions.len(),"scopes":0,"same_context":true,"same_ast":true})
+        }
+    }
+}

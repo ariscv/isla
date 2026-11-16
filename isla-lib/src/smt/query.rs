@@ -334,6 +334,33 @@ mod tests {
     }
 
     #[test]
+    fn same_context_diagnostic_replay_keeps_buffer_and_leaves_original_untouched() {
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let x = solver.declare_const(Ty::Bool, info);
+        let guard = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(x));
+        let tx = solver.start_transaction_with_guard(Some(Exp::Var(guard)));
+        solver.assert(Exp::Not(Box::new(Exp::Var(x))));
+        let pending = solver.transaction_assertions();
+        let assumptions = pending.iter().map(|ast| ast.z3_ast).collect::<Vec<_>>();
+        let query = solver.query_solver(&assumptions, false);
+        let before = solver.diagnostic_solver_stats(query.z3_solver);
+        let replay = solver.diagnostic_fresh_query(query.z3_solver, query.assumptions(&assumptions), 1000);
+        assert_eq!(replay["result"], "unsat", "缓冲断言不得漏掉");
+        assert_eq!(replay["assertions"], 3, "父断言、活动臂、缓冲断言都必须复制");
+        assert_eq!(replay["scopes"], 0, "新solver应在首次check前完整装配且不push");
+        let after = solver.diagnostic_solver_stats(query.z3_solver);
+        assert_eq!(before["assertions"], after["assertions"]);
+        assert_eq!(before["scopes"], after["scopes"]);
+        drop(query);
+        solver.rollback_transaction(tx);
+        assert!(solver.check_sat(info).is_sat().unwrap(), "诊断不得污染原solver");
+    }
+
+    #[test]
     fn temporary_guard_changed_constraints_never_restore_caller_witness() {
         configure_tastic(Tactic::Qfaufbv);
         let context = Context::new(Config::new());
