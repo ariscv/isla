@@ -284,7 +284,18 @@ fn thread_interrupt_call_with_timeout<T>(
 macro_rules! interruptible_z3_call {
     ($operation:expr, $source_loc:expr, $context:expr, $call:expr) => {{
         let started = Instant::now();
-        let result = interruptible_z3_call!($context, $call);
+        let result = interruptible_z3_call!($context, {
+            let timer = crate::executor::stats::region_progress::WorkTimer::start(
+                if matches!($operation, SmtOperation::ModelEval) {
+                    crate::executor::stats::region_progress::WorkKind::ModelEval
+                } else {
+                    crate::executor::stats::region_progress::WorkKind::Z3Check
+                },
+            );
+            let value = $call;
+            drop(timer);
+            value
+        });
         let elapsed = started.elapsed();
         record_path_smt_call($operation, $source_loc, elapsed, result.is_err());
         #[cfg(feature = "smtperf")]
@@ -344,11 +355,16 @@ pub(super) fn timeout_Z3_solver_check_deadline(
     let started = Instant::now();
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     let check = || unsafe {
-        if assumptions.is_empty() {
+        let timer = crate::executor::stats::region_progress::WorkTimer::start(
+            crate::executor::stats::region_progress::WorkKind::Z3Check,
+        );
+        let result = if assumptions.is_empty() {
             Z3_solver_check(context, solver)
         } else {
             Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
-        }
+        };
+        drop(timer);
+        result
     };
     let result = {
         #[cfg(feature = "smt-thread-interrupt")]

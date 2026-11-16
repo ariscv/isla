@@ -186,11 +186,18 @@ pub fn value_heap_bytes<B: BV>(value: &Val<B>) -> usize {
     }
 }
 pub fn exp_heap_bytes<V>(exp: &Exp<V>) -> usize {
+    exp_stats(exp).1
+}
+
+/// 只读统计原始表达式树节点数与堆载荷；不克隆表达式、不翻译SMT。
+pub fn exp_stats<V>(exp: &Exp<V>) -> (usize, usize) {
     use Exp::*;
     // SMT 表达式可呈长链；诊断遍历不用宿主调用栈。
     let mut pending = vec![exp];
     let mut bytes = 0;
+    let mut nodes = 0;
     while let Some(exp) = pending.pop() {
+        nodes += 1;
         bytes += size_of::<Exp<V>>();
         match exp {
             Bits(v) => bytes += v.capacity(),
@@ -251,7 +258,7 @@ pub fn exp_heap_bytes<V>(exp: &Exp<V>) -> usize {
             Var(_) | Bits64(_) | Enum(_) | Bool(_) | FPConstant(..) | FPRoundingMode(_) => (),
         }
     }
-    bytes - size_of::<Exp<V>>()
+    (nodes, bytes - size_of::<Exp<V>>())
 }
 pub fn event_heap_bytes<B: BV>(event: &Event<B>) -> usize {
     use Event::*;

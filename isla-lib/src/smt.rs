@@ -68,6 +68,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::bitvector::BV;
 use crate::error::{ExecError, SmtError};
+use crate::executor::stats::region_progress::{WorkKind, WorkTimer};
 use crate::ir::{Loc, Name, Symtab, Val};
 use crate::source_loc::SourceLoc;
 use crate::timeout::SmtOperation;
@@ -2987,8 +2988,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
         // 先做无上下文的等价化简，恒假目标不必反复求解整个路径。
         // 恒真目标仍检查当前断言集，不能把不可满足的路径当作 Sat。
+        let translation = WorkTimer::start(WorkKind::TargetTranslate);
         let mut ast = self.translate_exp(exp);
         ast.simplify();
+        drop(translation);
         if let Some(value) = ast.get_bool_value() {
             let result = if value {
                 self.check_sat(info)

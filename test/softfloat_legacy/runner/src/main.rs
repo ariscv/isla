@@ -46,6 +46,7 @@ fn empty_config() -> ISAConfig<B64> {
         function_assumptions: Vec::new(),
         register_renames: HashMap::new(),
         ignored_registers: HashSet::new(),
+        untraced_registers: HashSet::new(),
         relaxed_registers: HashSet::new(),
         probes: HashSet::new(),
         probe_functions: HashSet::new(),

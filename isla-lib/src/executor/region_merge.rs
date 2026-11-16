@@ -924,7 +924,7 @@ fn finish_region<'ir, B: BV>(
         // 读取在真实读取处缓冲，提交时按并集发布；此处补发以 ITE 保留原值的条件写入。
         let access = Arc::make_mut(&mut merged.local_state).speculative_access.take().unwrap();
         for reg in access.writes.register_write_order {
-            if zencode::decode(shared.symtab.to_str(reg)) != "_TLB" {
+            if !shared.untraced_registers.contains(&reg) {
                 solver.add_event(Event::WriteReg(
                     reg,
                     Vec::new(),

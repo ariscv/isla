@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 thread_local! {static TEST_ENABLED:Cell<Option<bool>>=const{Cell::new(None)};}
@@ -40,9 +40,83 @@ struct Counts {
     queries: u64,
     smt_seconds: f64,
 }
+#[derive(Default, serde::Serialize)]
+struct WorkSeconds {
+    target_translate: f64,
+    buffer_translate: f64,
+    query_setup: f64,
+    z3_check: f64,
+    model_eval: f64,
+    profiling: f64,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum WorkKind {
+    TargetTranslate,
+    BufferTranslate,
+    QuerySetup,
+    Z3Check,
+    ModelEval,
+    Profiling,
+}
+/// 与真实求解阶段配对的只读计时；关闭诊断不读取时钟。
+pub(crate) struct WorkTimer {
+    started: Option<Instant>,
+    kind: WorkKind,
+}
+impl WorkTimer {
+    pub(crate) fn start(kind: WorkKind) -> Self {
+        Self { started: enabled().then(Instant::now), kind }
+    }
+}
+impl Drop for WorkTimer {
+    fn drop(&mut self) {
+        let Some(started) = self.started else { return };
+        let seconds = started.elapsed().as_secs_f64();
+        ROOT.with(|root| {
+            if let Some(p) = root.borrow_mut().as_mut() {
+                match self.kind {
+                    WorkKind::TargetTranslate => p.work.target_translate += seconds,
+                    WorkKind::BufferTranslate => p.work.buffer_translate += seconds,
+                    WorkKind::QuerySetup => p.work.query_setup += seconds,
+                    WorkKind::Z3Check => p.work.z3_check += seconds,
+                    WorkKind::ModelEval => p.work.model_eval += seconds,
+                    WorkKind::Profiling => p.work.profiling += seconds,
+                }
+            }
+        });
+    }
+}
+static FOOTPRINT_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+pub(crate) fn needs_footprint() -> bool {
+    if !enabled() || FOOTPRINT_SAMPLES.load(Ordering::Relaxed) >= 4096 {
+        return false;
+    }
+    // 普通回归不做昂贵的AST普查；生产仍只由同一个ISLA_REGION_PROGRESS开关启用。
+    #[cfg(test)]
+    if !TEST_ENABLED.with(|flag| flag.get() == Some(true)) {
+        return false;
+    }
+    ROOT.with(|root| root.borrow().as_ref().is_some_and(|p| p.footprint_epoch != Some(p.back_edges.len())))
+}
+pub(crate) fn footprint(mut value: Value) {
+    ROOT.with(|root| {
+        if let Some(p) = root.borrow_mut().as_mut() {
+            FOOTPRINT_SAMPLES.fetch_add(1, Ordering::Relaxed);
+            value["query_site"] = json!(p.current);
+            value["query_phase"] = json!(query_label());
+            value["query_ordinal"] = json!(p.counts.queries + 1);
+            value["boundary_ordinal"] = json!(p.back_edges.len());
+            p.footprint = Some(value);
+            p.footprint_epoch = Some(p.back_edges.len());
+        }
+    });
+}
 struct Progress {
     origin: Value,
     outcome: String,
+    work: WorkSeconds,
+    footprint: Option<Value>,
+    footprint_epoch: Option<usize>,
     counts: Counts,
     sites: BTreeMap<String, Counts>,
     phases: BTreeMap<String, Counts>,
@@ -72,6 +146,9 @@ impl AttemptGuard {
                 *r.borrow_mut() = Some(Progress {
                     origin,
                     outcome: "unfinished".into(),
+                    work: WorkSeconds::default(),
+                    footprint: None,
+                    footprint_epoch: None,
                     counts: Counts::default(),
                     sites: BTreeMap::new(),
                     phases: BTreeMap::new(),
@@ -108,7 +185,7 @@ impl Drop for AttemptGuard {
                 if EMITTED.fetch_add(1, Ordering::Relaxed) < 256 {
                     eprintln!(
                         "{}",
-                        json!({"kind":"region_progress","origin":p.origin,"outcome":p.outcome,"counts":p.counts,"sites":p.sites,"query_phases":p.phases,"branch_results":p.branches,"back_edges":p.back_edges,"initial":p.initial,"call_instance":p.call_instance,"exhausted":p.exhausted,"note":"每个根尝试；真实Z3查询不含模型求值；步数含共享预算下嵌套；回边仅记录实际执行前的无条件后跳"})
+                        json!({"kind":"region_progress","origin":p.origin,"outcome":p.outcome,"counts":p.counts,"work_seconds":p.work,"query_footprint":p.footprint,"sites":p.sites,"query_phases":p.phases,"branch_results":p.branches,"back_edges":p.back_edges,"initial":p.initial,"call_instance":p.call_instance,"exhausted":p.exhausted,"note":"每个根尝试；真实Z3查询不含模型求值；步数含共享预算下嵌套；回边仅记录实际执行前的无条件后跳"})
                     );
                 }
             }
@@ -142,7 +219,7 @@ pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
         if p.initial.is_none() {p.initial=Some(json!({"function":function,"pc":frame.pc,"integers":integers(frame,symtab)}));}
         if let Some(Instr::Goto(target))=frame.instrs.get(frame.pc) {
             if *target<frame.pc && p.back_edges.len()<512 {
-                let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"query_phases":p.phases,"integers":integers(frame,symtab)});
+                let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"work_seconds":p.work,"query_footprint":p.footprint,"query_phases":p.phases,"integers":integers(frame,symtab)});
                 if p.origin["function"].as_str()==Some(function.as_str()) && LIVE_ROWS.fetch_add(1,Ordering::Relaxed)<2048 {
                     eprintln!("{}",json!({"kind":"region_iteration","origin":p.origin,"call_instance":p.call_instance,"edge":edge}));
                 }
@@ -257,6 +334,10 @@ fn region_progress_disabled_has_no_collection_or_call_id_allocation() {
     let state = frame.local_state.clone();
     let before = EMITTED.load(Ordering::Relaxed);
     let scope = QueryScope::enter("disabled");
+    let timer = WorkTimer::start(WorkKind::TargetTranslate);
+    assert!(timer.started.is_none());
+    assert!(!needs_footprint());
+    drop(timer);
     assert_eq!(query_label(), "unclassified");
     assert_eq!(frame.local_state.call_instance, 0);
     step(&frame, &Symtab::new());

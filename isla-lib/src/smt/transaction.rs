@@ -402,13 +402,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 查询所有尚未发布的断言。AST 必须存活到 Z3 check 返回，不能只收集裸指针。
     pub(super) fn transaction_assertions(&self) -> Vec<Ast<'ctx>> {
-        self.transaction_events
+        let timer = WorkTimer::start(WorkKind::BufferTranslate);
+        let assertions = self
+            .transaction_events
             .iter()
             .filter_map(|event| match event {
                 Event::Smt(Def::Assert(exp), ..) => Some(self.translate_exp(exp)),
                 _ => None,
             })
-            .collect()
+            .collect();
+        drop(timer);
+        assertions
     }
 
     /// 内层整理请求无副作用：只追加事件，不修改父层偏移，也不提前跨臂移动读取。

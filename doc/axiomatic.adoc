@@ -532,6 +532,10 @@ added to `registers.ignore` in the architecture configuration. Usually
 in ASL and therefore the ARMv8 Sail, these are prefixed by two
 underscores.
 
+寄存器读写事件也可以单独通过 `[registers] ignore_events = ["name"]` 过滤。
+该列表缺省为空；只控制轨迹发布，不改变寄存器状态、类型约束或区域读写集。
+它与用于依赖分析的 `registers.ignore` 是独立选项；需要旧有轨迹过滤政策的配置应显式列出寄存器。
+
 Unfortunately it is sometimes possible that this process doesn't give
 us exactly the dependencies we need. There are two special builtins
 

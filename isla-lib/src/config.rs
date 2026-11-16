@@ -2290,6 +2290,8 @@ pub struct ISAConfig<B> {
     pub register_renames: HashMap<String, Name>,
     /// Registers to ignore during footprint analysis
     pub ignored_registers: HashSet<Name>,
+    /// 不发布读写轨迹事件的寄存器；不影响状态更新或区域读写集。
+    pub untraced_registers: HashSet<Name>,
     /// Relaxed registers
     pub relaxed_registers: HashSet<Name>,
     /// Print debug information for any function calls in this set during symbolic execution
@@ -2389,6 +2391,7 @@ impl<B: BV> ISAConfig<B> {
             function_assumptions: Vec::new(),
             register_renames: get_register_renames(&config, symtab)?,
             ignored_registers: get_registers_set(&config, "ignore", symtab)?,
+            untraced_registers: get_registers_set(&config, "ignore_events", symtab)?,
             relaxed_registers: get_registers_set(&config, "relaxed", symtab)?,
             probes: HashSet::new(),
             probe_functions: HashSet::new(),
@@ -2512,6 +2515,23 @@ fn merge_config_values(base: &mut Value, overrides: Value) {
 mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
+
+    #[test]
+    fn register_event_filter_is_explicit_and_validated() {
+        let mut symtab = Symtab::new();
+        let encoded = zencode::encode("large_state");
+        let reg = symtab.intern(&encoded);
+        let empty: HashSet<Name> = get_registers_set(&"".parse::<Value>().unwrap(), "ignore_events", &symtab).unwrap();
+        assert!(empty.is_empty());
+        let config = "[registers]\nignore_events=['large_state']".parse::<Value>().unwrap();
+        let set: HashSet<Name> = get_registers_set(&config, "ignore_events", &symtab).unwrap();
+        assert_eq!(set, HashSet::from([reg]));
+        for text in ["[registers]\nignore_events=42", "[registers]\nignore_events=['missing']"] {
+            assert!(
+                get_registers_set::<HashSet<Name>>(&text.parse::<Value>().unwrap(), "ignore_events", &symtab).is_err()
+            );
+        }
+    }
 
     #[test]
     fn config_includes_merge_relative_files_in_order() {

@@ -238,6 +238,7 @@ pub fn initialize_architecture<'ir, B: BV>(
     );
 
     shared_state.initial_constraints = isa_config.initial_constraints.clone();
+    shared_state.untraced_registers = isa_config.untraced_registers.clone();
 
     let lets = Mutex::new(HashMap::default());
     let regs = Mutex::new(RegisterBindings::new());

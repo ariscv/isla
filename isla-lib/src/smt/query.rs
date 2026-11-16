@@ -94,6 +94,10 @@ impl Drop for QuerySolver<'_> {
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(super) fn query_solver(&mut self, assumptions: &[Z3_ast], snapshot_requested: bool) -> QuerySolver<'ctx> {
+        if crate::executor::stats::region_progress::needs_footprint() {
+            self.profile_query_footprint(assumptions);
+        }
+        let setup = WorkTimer::start(WorkKind::QuerySetup);
         let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
         // 实验性的原生快照边界：同一完整公式在首次check前批量装入，不预先push。
         // 只改变求解调用形态；结果及模型仍须满足全部已发布/缓冲/活动臂前提。
@@ -146,6 +150,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
                 Z3_solver_inc_ref(self.ctx.z3_ctx, reusable.z3_solver);
                 // 全部假设已逐项断言；外层不再以assumptions重复提交。
+                drop(setup);
                 return QuerySolver { ctx: self.ctx, z3_solver: reusable.z3_solver, independent: true };
             }
         }
@@ -158,6 +163,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         unsafe {
             if !independent {
                 Z3_solver_inc_ref(self.ctx.z3_ctx, self.z3_solver);
+                drop(setup);
                 return QuerySolver { ctx: self.ctx, z3_solver: self.z3_solver, independent };
             }
             // 同一Context沿用Config；同一有效种子沿用调用者设置，不重新随机化。
@@ -177,8 +183,67 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             for assumption in assumptions {
                 Z3_solver_assert(self.ctx.z3_ctx, z3_solver, *assumption);
             }
+            drop(setup);
             query
         }
+    }
+
+    /// 每条回边之间只采第一条真实查询；复用已经翻译的断言，不额外translate或check。
+    fn profile_query_footprint(&self, assumptions: &[Z3_ast]) {
+        let timer = WorkTimer::start(WorkKind::Profiling);
+        let mut buffered = 0;
+        let mut expression_nodes = 0;
+        let mut expression_bytes = 0;
+        for event in &self.transaction_events {
+            if let Event::Smt(Def::Assert(exp), ..) = event {
+                let (nodes, heap) = crate::executor::stats::memory_stats::exp_stats(exp);
+                buffered += 1;
+                expression_nodes += nodes;
+                expression_bytes += std::mem::size_of_val(exp) + heap;
+            }
+        }
+        assert!(assumptions.len() >= buffered, "查询必须包含全部缓冲断言");
+        unsafe {
+            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
+            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
+            let active = Z3_ast_vector_size(self.ctx.z3_ctx, assertions);
+            let mut context =
+                (0..active).map(|i| Z3_ast_vector_get(self.ctx.z3_ctx, assertions, i)).collect::<Vec<_>>();
+            context.extend_from_slice(&assumptions[..buffered]);
+            let (context_nodes, context_truncated) = self.profile_ast_nodes(context);
+            let (goal_nodes, goal_truncated) = self.profile_ast_nodes(assumptions[buffered..].to_vec());
+            crate::executor::stats::region_progress::footprint(serde_json::json!({
+                "active_assertions":active,"buffered_assertions":buffered,
+                "buffered_expression_nodes":expression_nodes,"buffered_expression_bytes":expression_bytes,
+                "context_ast_dag_nodes":context_nodes,"context_ast_truncated":context_truncated,
+                "goal_ast_dag_nodes":goal_nodes,"goal_ast_truncated":goal_truncated,
+                "note":"每轮第一条真实查询之前；bytes为Rust表达式载荷，nodes分别为原始树/展开DAG；不等于Z3/RSS字节"}));
+            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
+        }
+        drop(timer);
+    }
+
+    unsafe fn profile_ast_nodes(&self, mut pending: Vec<Z3_ast>) -> (usize, bool) {
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node as usize) {
+                continue;
+            }
+            if seen.len() >= 100_000 {
+                return (seen.len(), true);
+            }
+            match Z3_get_ast_kind(self.ctx.z3_ctx, node) {
+                AstKind::App => {
+                    let app = Z3_to_app(self.ctx.z3_ctx, node);
+                    for i in 0..Z3_get_app_num_args(self.ctx.z3_ctx, app) {
+                        pending.push(Z3_get_app_arg(self.ctx.z3_ctx, app, i));
+                    }
+                }
+                AstKind::Quantifier => pending.push(Z3_get_quantifier_body(self.ctx.z3_ctx, node)),
+                _ => (),
+            }
+        }
+        (seen.len(), false)
     }
 }
 

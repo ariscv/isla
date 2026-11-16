@@ -161,6 +161,9 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
                             access.initial_registers.entry(id).or_insert_with(|| value.clone());
                         }
                     }
+                    if !for_write {
+                        stats::call_census::read(local_state.call_instance, id, value, &shared_state.symtab);
+                    }
                     let publish_read = if !for_write {
                         match &mut local_state.speculative_access {
                             Some(access) => access.record_read(id, accessor.to_vec(), value.clone())?,
@@ -169,9 +172,7 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
                     } else {
                         false
                     };
-                    let symbol = zencode::decode(shared_state.symtab.to_str(id));
-                    // HACK: Don't store the entire TLB in the trace
-                    if publish_read && symbol != "_TLB" {
+                    if publish_read && !shared_state.untraced_registers.contains(&id) {
                         solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
                     }
                     Borrowed(value)
@@ -355,6 +356,7 @@ fn read_register_from_vector<'ir, B: BV>(
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
             let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap().clone();
+            stats::call_census::read(local_state.call_instance, regs[i], &value, &shared_state.symtab);
             let publish = region_merge::record_read(local_state, regs[i], Vec::new(), value.clone())?;
             if publish {
                 solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
@@ -364,6 +366,7 @@ fn read_register_from_vector<'ir, B: BV>(
         SymbolicIndex(i) => {
             // See above case for unwrap safety
             let mut chain = local_state.regs.get(regs[0], shared_state, solver, info)?.unwrap().clone();
+            stats::call_census::read(local_state.call_instance, regs[0], &chain, &shared_state.symtab);
             if local_state.speculative_access.is_some()
                 && region_merge::record_read(local_state, regs[0], Vec::new(), chain.clone())?
             {
@@ -375,6 +378,7 @@ fn read_register_from_vector<'ir, B: BV>(
                     solver.define_const(Eq(Box::new(Var(i)), Box::new(Bits64(B64::new((j + 1) as u64, rib)))), info)
                 });
                 let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone();
+                stats::call_census::read(local_state.call_instance, *reg, &value, &shared_state.symtab);
                 if local_state.speculative_access.is_some()
                     && region_merge::record_read(local_state, *reg, Vec::new(), value.clone())?
                 {
@@ -811,9 +815,7 @@ fn assign_with_accessor<'ir, B: BV>(
             } else if local_state.lets.contains_key(id) {
                 local_state.lets.insert(*id, UVal::Init(v));
             } else {
-                let symbol = zencode::decode(shared_state.symtab.to_str(*id));
-                // HACK: Don't store the entire TLB in the trace
-                if symbol != "_TLB" && local_state.speculative_access.is_none() {
+                if !shared_state.untraced_registers.contains(id) && local_state.speculative_access.is_none() {
                     solver.add_event(Event::WriteReg(*id, accessor.to_vec(), v.clone()))
                 }
                 local_state.regs.assign(*id, v, shared_state);
@@ -1484,6 +1486,7 @@ fn run_special_primop<'ir, B: BV>(
                 .get(reg, shared_state, solver, info)?
                 .cloned()
                 .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
+            stats::call_census::read(frame.local_state.call_instance, reg, &value, &shared_state.symtab);
             let publish =
                 region_merge::record_read(Arc::make_mut(&mut frame.local_state), reg, Vec::new(), value.clone())?;
             if publish {
@@ -2815,11 +2818,19 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             });
                         let caller_instance = frame.local_state.call_instance;
                         let caller_loop_seen = frame.local_state.loop_attempt_seen;
-                        if stats::region_progress::enabled() {
+                        if stats::region_progress::enabled() || stats::call_census::enabled() {
                             Arc::make_mut(&mut frame.local_state).call_instance =
                                 stats::region_progress::fresh_invocation();
                             Arc::make_mut(&mut frame.local_state).loop_attempt_seen = false;
                         }
+                        stats::call_census::enter(
+                            frame.local_state.call_instance,
+                            caller_instance,
+                            task_id.as_usize(),
+                            *f,
+                            &args,
+                            &shared_state.symtab,
+                        );
                         let caller_pc = frame.pc;
                         let caller_instrs = frame.instrs;
                         let caller_stack_call = frame.stack_call.clone();
@@ -2832,7 +2843,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         // the function we call returns
                         frame.stack_call = Some(Arc::new(move |ret, frame, shared_state, solver| {
                             pop_call_stack(frame);
-                            if stats::region_progress::enabled() {
+                            if stats::region_progress::enabled() || stats::call_census::enabled() {
                                 Arc::make_mut(&mut frame.local_state).call_instance = caller_instance;
                                 Arc::make_mut(&mut frame.local_state).loop_attempt_seen = caller_loop_seen;
                             }
@@ -2873,6 +2884,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
 
             Instr::End => {
+                stats::call_census::returned(frame.local_state.call_instance);
                 stats::region_progress::loop_return(frame, &shared_state.symtab);
                 match frame.vars().get(&RETURN) {
                     None => panic!("Return variable missing at end of function"),
@@ -3994,12 +4006,15 @@ mod tests {
         use super::*;
 
         #[test]
-        fn 合并写入必须保留特殊寄存器事件过滤() {
+        fn 未配置过滤时合并写入必须保留所有寄存器事件() {
             let mut observed = Vec::new();
-            for enabled in [false, true] {
+            for (enabled, filtered) in [(false, false), (true, false), (false, true), (true, true)] {
                 let mut shared = empty_shared_state();
                 let encoded = zencode::encode("_TLB");
                 let reg = shared.symtab.intern(&encoded);
+                if filtered {
+                    shared.untraced_registers.insert(reg);
+                }
                 let cond = test_name(620);
                 let mut frame = make_frame(vec![
                     Instr::Decl(cond, Ty::Bool, info()),
@@ -4021,10 +4036,12 @@ mod tests {
                     let merges = events.iter().filter(|event| matches!(event, Event::Merge(..))).count();
                     out.lock().unwrap().push((writes, merges));
                 });
-                observed.push((enabled, out.into_inner().unwrap()));
+                observed.push((enabled, filtered, out.into_inner().unwrap()));
             }
             eprintln!("特殊寄存器写轨迹：{observed:?}");
-            assert!(observed.iter().all(|(_, paths)| paths.iter().all(|(writes, _)| *writes == 0)));
+            assert!(observed
+                .iter()
+                .all(|(_, filtered, paths)| paths.iter().all(|(writes, _)| *writes == usize::from(!filtered))));
         }
 
         #[test]
@@ -4703,11 +4720,14 @@ mod tests {
         #[test]
         fn 合并必须沿用特殊寄存器轨迹过滤() {
             let mut observations = Vec::new();
-            for enabled in [false, true] {
+            for (enabled, filtered) in [(false, false), (true, false), (false, true), (true, true)] {
                 for name in ["_TLB", "core_TLB", "_TLB_cache", "ordinary_reg"] {
                     let mut shared = empty_shared_state();
                     let encoded = zencode::encode(name);
                     let reg = shared.symtab.intern(&encoded);
+                    if filtered {
+                        shared.untraced_registers.insert(reg);
+                    }
                     let cond = test_name(580);
                     let value = test_name(581);
                     let mut frame = make_frame(vec![
@@ -4741,7 +4761,7 @@ mod tests {
                     );
                     let counts = out.into_inner().unwrap();
                     assert_eq!(counts.len(), if enabled { 1 } else { 2 }, "开启合并时必须确实合流");
-                    let expected = usize::from(name != "_TLB");
+                    let expected = usize::from(!filtered);
                     assert!(
                         counts.iter().all(|count| *count == expected),
                         "{name}，合并={enabled}，读取次数={counts:?}"
@@ -12232,6 +12252,7 @@ fn zcaller(za, zb) {
             function_assumptions: Vec::new(),
             register_renames: HashMap::new(),
             ignored_registers: HashSet::new(),
+            untraced_registers: HashSet::new(),
             relaxed_registers: HashSet::new(),
             probes: HashSet::new(),
             probe_functions: HashSet::new(),
