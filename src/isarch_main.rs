@@ -430,6 +430,7 @@ fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     isarch::path_cache::Options::add_cli(&mut opts);
     isarch::region_options::add_cli(&mut opts);
+    opts.optopt("", "region-step-budget", "区域合并步数预算，默认8192；-1关闭，覆盖TOML", "<正整数|-1>");
     opts.optmulti(
         "",
         "filter-model-exception",
@@ -596,6 +597,22 @@ fn isla_main() -> i32 {
         None
     };
 
+    let region_step_budget = match matches
+        .opt_str("region-step-budget")
+        .map(|text| {
+            let value = text.parse::<i64>().map_err(|_| "--region-step-budget 必须为整数".to_string())?;
+            isla_lib::config::parse_region_step_budget(value)?;
+            Ok::<_, String>(value)
+        })
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+
     isla_lib::smt::configure_z3_timeout(smt_timeout);
 
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, merged_config, source_path } =
@@ -631,6 +648,15 @@ fn isla_main() -> i32 {
     }
     if had_limits || limits != ExecutionLimitsConfig::default() {
         isa_config.execution_limits = Some(limits);
+    }
+
+    if let Some(value) = region_step_budget {
+        let limits = isa_config.execution_limits.get_or_insert_with(Default::default);
+        if limits.enabled == Some(false) {
+            eprintln!("execution_limits.enabled=false 时不能指定 --region-step-budget");
+            return 1;
+        }
+        limits.region_step_budget = Some(value);
     }
 
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");

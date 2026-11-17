@@ -96,6 +96,18 @@ strict = false
 path_merging = true
 ```
 
+区域合并默认共享 8192 步；两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
+步数用尽只拒绝本次合并尝试，不截断普通执行路径。设置 `-1` 时，以上区域一律不扣步、不会因步数耗尽拒绝；路径限时仍有效。
+
+```toml
+[execution_limits]
+path_merging = true
+region_step_budget = -1
+```
+
+也可使用 `--region-step-budget=-1`，它覆盖 TOML 中的同名字段。合法值为正整数或 `-1`；`0`、其他负数、非整数均报错。
+关闭预算时，`region_progress` 继续统计实际步数，预算耗尽位置 `exhausted` 为 `null`；循环日志中 `steps_since_budget_renewal` 为 `null`，`step_budget_unlimited=true`。
+
 ## 子命令
 
 ### `list-instructions`

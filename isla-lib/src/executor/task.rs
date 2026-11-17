@@ -88,7 +88,7 @@ impl<B> TaskInterrupt<B> {
 pub struct TaskState<B> {
     pub(super) force_regions_validated: std::sync::OnceLock<()>,
     pub(super) region_effect_summaries: std::sync::OnceLock<HashMap<Name, super::region_summary::FunctionEffect>>,
-    pub(super) region_step_budget: usize,
+    region_step_budget: Option<usize>,
     pub(super) region_negative_cache: std::sync::Mutex<HashMap<(Name, usize), super::region_summary::CachedReject>>,
     pub(super) speculation_stats: SpeculationStats,
     pub(super) reset_registers: HashMap<Loc<Name>, Reset<B>>,
@@ -106,7 +106,16 @@ pub struct TaskState<B> {
 impl<B> TaskState<B> {
     /// 全部嵌套区域与调用共享该步数预算；零预算明确表示立即拒绝推演。
     pub fn with_region_step_budget(self, region_step_budget: usize) -> Self {
-        Self { region_step_budget, ..self }
+        Self { region_step_budget: Some(region_step_budget), ..self }
+    }
+
+    pub(super) fn region_step_budget(&self) -> Option<usize> {
+        // 显式内部预算覆盖运行时配置，保留零预算拒绝等测试接口的调用顺序。
+        self.region_step_budget.map(Some).unwrap_or_else(|| {
+            self.execution_limits
+                .as_ref()
+                .map_or(Some(super::region_merge::DEFAULT_REGION_STEP_BUDGET), |limits| limits.region_step_budget)
+        })
     }
 
     pub fn speculation_stats(&self) -> &SpeculationStats {
@@ -118,7 +127,7 @@ impl<B> TaskState<B> {
         TaskState {
             force_regions_validated: std::sync::OnceLock::new(),
             region_effect_summaries: std::sync::OnceLock::new(),
-            region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
+            region_step_budget: None,
             region_negative_cache: std::sync::Mutex::new(HashMap::new()),
             speculation_stats: SpeculationStats::default(),
             reset_registers: HashMap::new(),

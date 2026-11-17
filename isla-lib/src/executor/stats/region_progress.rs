@@ -214,7 +214,7 @@ impl Drop for AttemptGuard {
                 if EMITTED.fetch_add(1, Ordering::Relaxed) < 256 {
                     eprintln!(
                         "{}",
-                        json!({"kind":"region_progress","origin":p.origin,"outcome":p.outcome,"counts":p.counts,"work_seconds":p.work,"query_footprint":p.footprint,"sites":p.sites,"query_phases":p.phases,"branch_results":p.branches,"back_edges":p.back_edges,"initial":p.initial,"call_instance":p.call_instance,"exhausted":p.exhausted,"note":"每个根尝试；真实Z3查询不含模型求值；步数含共享预算下嵌套；回边仅记录实际执行前的无条件后跳"})
+                        json!({"kind":"region_progress","origin":p.origin,"outcome":p.outcome,"counts":p.counts,"work_seconds":p.work,"query_footprint":p.footprint,"sites":p.sites,"query_phases":p.phases,"branch_results":p.branches,"back_edges":p.back_edges,"initial":p.initial,"call_instance":p.call_instance,"exhausted":p.exhausted,"note":"每个根尝试；真实Z3查询不含模型求值；步数含嵌套区域；回边仅记录实际执行前的无条件后跳"})
                     );
                 }
             }

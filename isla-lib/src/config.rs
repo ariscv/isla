@@ -1571,6 +1571,8 @@ pub struct ExecutionLimitsConfig {
     pub call_context_depth: Option<usize>,
     pub branch_sampling_seed: Option<u64>,
     pub path_merging: Option<bool>,
+    /// -1 关闭区域步数预算；其他合法值必须为正数。
+    pub region_step_budget: Option<i64>,
     pub on_limit_reached: Option<LimitBehaviorConfig>,
     pub regions: Option<Vec<SourceRegionSpec>>,
     pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
@@ -1850,6 +1852,15 @@ fn validate_merge_policy_conflicts(rules: &[MergePolicyConfig]) -> Result<(), St
     Ok(())
 }
 
+/// TOML 与 CLI 共用的校验；None 表示不设步数上限。
+pub fn parse_region_step_budget(value: i64) -> Result<Option<usize>, String> {
+    match value {
+        -1 => Ok(None),
+        1.. => usize::try_from(value).map(Some).map_err(|_| "region_step_budget 超出 usize 范围".to_string()),
+        _ => Err("region_step_budget 必须为正整数或 -1（关闭预算）".to_string()),
+    }
+}
+
 fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsConfig>, String> {
     let Some(value) = config.get("execution_limits") else { return Ok(None) };
     let Some(table) = value.as_table() else { return Err("[execution_limits] 必须是 TOML table".to_string()) };
@@ -1869,6 +1880,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "call_context_depth",
             "branch_sampling_seed",
             "path_merging",
+            "region_step_budget",
             "on_limit_reached",
             "regions",
             "branch_region_limits",
@@ -2201,6 +2213,15 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             .map(|value| usize::try_from(value).expect("usize 无法表示 execution_limits.call_context_depth")),
         branch_sampling_seed: optional_u64(table, "branch_sampling_seed", "execution_limits")?,
         path_merging: optional_bool(table, "path_merging", "execution_limits")?,
+        region_step_budget: table
+            .get("region_step_budget")
+            .map(|value| {
+                let value =
+                    value.as_integer().ok_or_else(|| "execution_limits.region_step_budget 必须为整数".to_string())?;
+                parse_region_step_budget(value)?;
+                Ok::<_, String>(value)
+            })
+            .transpose()?,
         on_limit_reached,
         regions,
         branch_region_limits,
@@ -2720,6 +2741,16 @@ r0 = "0x0000000000000000"
         );
         for value in ["true", "'Error_internal_error'", "[1]", "['']"] {
             assert!(merge_config(&format!("[execution_limits]\nfilter_model_exceptions={value}")).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_limits_region_step_budget_values() {
+        for value in ["8192", "1", "32768", "-1"] {
+            assert!(merge_config(&format!("[execution_limits]\nregion_step_budget = {value}")).is_ok(), "{value}");
+        }
+        for value in ["0", "-2", "-9223372036854775808", "true", "1.5", "\"8192\""] {
+            assert!(merge_config(&format!("[execution_limits]\nregion_step_budget = {value}")).is_err(), "{value}");
         }
     }
 

@@ -667,3 +667,40 @@ fn region_loop_rounds_nested_loops_keep_distinct_levels() {
     assert!(merged[0].records.iter().filter(|record| record.branch_pc == 3).all(|record| record.depth == 2));
     assert!(merged[0].records.iter().any(|record| record.branch_pc == 3));
 }
+
+#[test]
+fn region_merge_unlimited_budget_applies_to_independent_loop_rounds() {
+    let mut code = crossing_loop_program(false);
+    let extra = 10_000;
+    for instr in &mut code {
+        match instr {
+            Instr::Jump(_, target, _) | Instr::Goto(target) if *target >= 8 => *target += extra,
+            _ => (),
+        }
+    }
+    code.splice(8..8, (0..extra).map(|_| Instr::Copy(Loc::Id(RETURN), input(0), info())));
+    let forked = paths(code.clone(), &empty_shared_state(), 3, false);
+    for budget in [None, Some(-1)] {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let config = crate::config::ExecutionLimitsConfig {
+            path_merging: Some(true),
+            region_step_budget: budget,
+            ..Default::default()
+        };
+        let limits = ExecutionLimits::default()
+            .with_config(&config, &shared.symtab)
+            .with_region_loop_analysis(true)
+            .with_region_global_state(true);
+        let merged = paths_with_state(code.clone(), &shared, 3, limits, crate::memory::Memory::new(), |_| ());
+        equivalent_paths(&forked, &merged, 3, true);
+        let failures = shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap_or(0);
+        if budget.is_none() {
+            assert!(failures > 0, "{:?}", shared.execution_stats.merge_json());
+        } else {
+            assert_eq!(failures, 0);
+            assert_eq!(merged.len(), 1);
+            assert!(!merged[0].records.is_empty());
+        }
+    }
+}

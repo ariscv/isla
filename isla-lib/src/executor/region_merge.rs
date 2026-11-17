@@ -7,7 +7,7 @@ use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
 /// 普通区域的两臂与调用共享预算；可收敛的只读循环按完整轮核算，单轮仍受限。
-/// 这只限制一次合并尝试，不截断普通符号执行的路径。
+/// 这只限制一次合并尝试，不截断普通符号执行的路径；配置 -1 时不创建或续配计数器。
 pub const DEFAULT_REGION_STEP_BUDGET: usize = 8192;
 /// 每层持有回滚层与当前臂两层保存点；16 层至多占 32 层，给 64 层上限留出一倍余量。
 pub const MAX_REGION_MERGE_DEPTH: usize = 16;
@@ -26,7 +26,7 @@ pub(super) struct RegionExecution {
     pub entry_depth: usize,
     pub write_depth: usize,
     pub depth: usize,
-    pub remaining: Arc<AtomicUsize>,
+    pub remaining: Option<Arc<AtomicUsize>>,
     pub iteration_budget: Option<usize>,
     pub mode: MergeMode,
     pub origin: (Name, usize, SourceLoc),
@@ -234,12 +234,10 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
             return Err(reject(frame, SpeculativeRejectReason::RegionEscaped));
         }
     }
-    if execution
-        .remaining
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(1))
-        .is_err()
-    {
-        return Err(reject(frame, SpeculativeRejectReason::StepBudget));
+    if let Some(remaining) = &execution.remaining {
+        if remaining.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(1)).is_err() {
+            return Err(reject(frame, SpeculativeRejectReason::StepBudget));
+        }
     }
     let location = frame.instrs.get(frame.pc).and_then(stats::instr_source_loc).unwrap_or(SourceLoc::unknown());
     let log = cost::make_mut(&mut frame.local_state).speculative_access.as_mut().expect("区域推演必须启用访问记录");
@@ -254,7 +252,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
             && log.writes.modified_regs.is_empty()
             && matches!(frame.instrs.get(frame.pc), Some(Instr::Goto(target)) if *target < frame.pc)
         {
-            execution.remaining.store(budget, Ordering::Relaxed);
+            execution.remaining.as_ref().expect("逐轮续配必须有有限预算").store(budget, Ordering::Relaxed);
         }
     }
     Ok(false)
@@ -759,15 +757,15 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         // 可按轮收敛的子循环独立核算单轮预算；非循环仍共享调用者预算。
         // 总路径限时仍生效，未完成的一轮仍会正常拒绝，不据此猜测循环会终止。
         remaining: if iterative {
-            Arc::new(AtomicUsize::new(state.region_step_budget))
+            state.region_step_budget().map(|budget| Arc::new(AtomicUsize::new(budget)))
         } else {
             parent.as_ref().map_or_else(
-                || Arc::new(AtomicUsize::new(state.region_step_budget)),
+                || state.region_step_budget().map(|budget| Arc::new(AtomicUsize::new(budget))),
                 |execution| execution.remaining.clone(),
             )
         },
         depth,
-        iteration_budget: iterative.then_some(state.region_step_budget),
+        iteration_budget: iterative.then(|| state.region_step_budget()).flatten(),
         mode,
         origin: if mode == MergeMode::Force {
             parent
@@ -1830,10 +1828,14 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 solver.commit_transaction();
                 let branch = arm.region_execution.as_mut().unwrap().pending_branch.take();
                 if let Some((condition, target, region, info)) = branch {
-                    let used = state.region_step_budget.saturating_sub(remaining.load(Ordering::Relaxed));
-                    if region.branch_pc == root_branch {
-                        largest_round = largest_round.max(used.saturating_sub(last_boundary));
-                        last_boundary = used;
+                    let used = state.region_step_budget().map(|budget| {
+                        budget.saturating_sub(remaining.as_ref().expect("有限预算必须有计数器").load(Ordering::Relaxed))
+                    });
+                    if let Some(used) = used {
+                        if region.branch_pc == root_branch {
+                            largest_round = largest_round.max(used.saturating_sub(last_boundary));
+                            last_boundary = used;
+                        }
                     }
                     let no_writes =
                         arm.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty();
@@ -1907,7 +1909,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 serde_json::json!({"kind":"loop_iteration_fold",
                                 "function":diagnostics::name_string(original_frame.function_name,&shared.symtab),
                                 "pc":root_branch,"call_instance":original_frame.local_state.call_instance,
-                                "steps_since_budget_renewal":used,"logical_frontiers":2,
+                                "steps_since_budget_renewal":used,"step_budget_unlimited":remaining.is_none(),"logical_frontiers":2,
                                 "returned_records":exit_prefix.as_ref().unwrap().region_merge_records.len(),
                                 "continuation_records":next.region_merge_records.len(),
                                 "savepoint_depth":solver.transaction_depth()})
@@ -1938,7 +1940,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         && no_writes
                         && !solver.transaction_has_memory_writes()
                         && largest_round > 0
-                        && remaining.load(Ordering::Relaxed) <= largest_round.saturating_mul(2)
+                        && remaining.as_ref().is_some_and(|remaining| {
+                            remaining.load(Ordering::Relaxed) <= largest_round.saturating_mul(2)
+                        })
                     {
                         let continued_guard = arm
                             .local_state
@@ -1979,7 +1983,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if diagnostics::enabled() {
                             eprintln!(
                                 "{}",
-                                serde_json::json!({"kind":"loop_segment","function":diagnostics::name_string(original_frame.function_name,&shared.symtab),"pc":root_branch,"call_instance":original_frame.local_state.call_instance,"steps":used,"remaining":remaining.load(Ordering::Relaxed),"completed_exits":completed_exits,"continuation_pc":continued.pc})
+                                serde_json::json!({"kind":"loop_segment","function":diagnostics::name_string(original_frame.function_name,&shared.symtab),"pc":root_branch,"call_instance":original_frame.local_state.call_instance,"steps":used,"remaining":remaining.as_ref().map(|remaining| remaining.load(Ordering::Relaxed)),"completed_exits":completed_exits,"continuation_pc":continued.pc})
                             );
                         }
                         continuation = Some((returned, continued));

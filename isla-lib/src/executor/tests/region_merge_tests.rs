@@ -1383,7 +1383,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         entry_depth: 0,
         write_depth: 0,
         depth: 1,
-        remaining: Arc::new(AtomicUsize::new(10)),
+        remaining: Some(Arc::new(AtomicUsize::new(10))),
         iteration_budget: None,
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
@@ -4990,4 +4990,36 @@ fn deferred_dead_arm_symbolic_obligation_unchanged() {
     }
     std::env::set_var("ISLA_ASSERT_OBLIGATION_CHILD", "1");
     deferred_assert_obligation_keeps_safe_and_rejects_failing_arms();
+}
+
+/// 每臂一万步；默认预算无法完成，关闭后必须保留全部输入和返回关系。
+#[test]
+fn region_merge_configurable_budget_long_region_equivalence() {
+    let length = 10_000;
+    let mut code = vec![Instr::Jump(input(0), length + 2, info())];
+    code.extend((0..length).map(|_| Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info())));
+    code.push(Instr::Goto(2 * length + 2));
+    code.extend((0..length).map(|_| Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info())));
+    code.push(Instr::End);
+    let forked = paths(code.clone(), &empty_shared_state(), 1, false);
+    for budget in [None, Some(8192), Some(32768), Some(-1)] {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let config = crate::config::ExecutionLimitsConfig {
+            path_merging: Some(true),
+            region_step_budget: budget,
+            ..Default::default()
+        };
+        let limits = ExecutionLimits::default().with_config(&config, &shared.symtab);
+        let merged = paths_with_state(code.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
+        let enough = matches!(budget, Some(-1 | 32768));
+        assert_eq!(merged.len(), if enough { 1 } else { 2 }, "budget={budget:?}");
+        let report = shared.execution_stats.merge_json();
+        assert_eq!(report["failure_reasons"]["step_budget"].as_u64().unwrap_or(0), if enough { 0 } else { 1 });
+        assert_eq!(report["successes"].as_u64().unwrap(), if enough { 1 } else { 0 });
+        if enough {
+            assert!(!merged[0].records.is_empty());
+        }
+        equivalent_paths(&forked, &merged, 1, true);
+    }
 }
