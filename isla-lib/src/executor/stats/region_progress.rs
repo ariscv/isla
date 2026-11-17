@@ -206,7 +206,7 @@ fn integers<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) -> Value {
     values.truncate(64);
     json!(values.into_iter().collect::<BTreeMap<_, _>>())
 }
-pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
+pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab, solver: &crate::smt::Solver<B>) {
     if !enabled() || frame.region_execution.is_none() {
         return;
     }
@@ -219,7 +219,7 @@ pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
         if p.initial.is_none() {p.initial=Some(json!({"function":function,"pc":frame.pc,"integers":integers(frame,symtab)}));}
         if let Some(Instr::Goto(target))=frame.instrs.get(frame.pc) {
             if *target<frame.pc && p.back_edges.len()<512 {
-                let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"work_seconds":p.work,"query_footprint":p.footprint,"query_phases":p.phases,"integers":integers(frame,symtab)});
+                let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"work_seconds":p.work,"query_footprint":p.footprint,"query_phases":p.phases,"definition_footprint":solver.region_definition_footprint(),"integers":integers(frame,symtab)});
                 if p.origin["function"].as_str()==Some(function.as_str()) && LIVE_ROWS.fetch_add(1,Ordering::Relaxed)<2048 {
                     eprintln!("{}",json!({"kind":"region_iteration","origin":p.origin,"call_instance":p.call_instance,"edge":edge}));
                 }
@@ -340,7 +340,10 @@ fn region_progress_disabled_has_no_collection_or_call_id_allocation() {
     drop(timer);
     assert_eq!(query_label(), "unclassified");
     assert_eq!(frame.local_state.call_instance, 0);
-    step(&frame, &Symtab::new());
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = crate::smt::Context::new(crate::smt::Config::new());
+    let solver = crate::smt::Solver::<crate::bitvector::b64::B64>::new(&context);
+    step(&frame, &Symtab::new(), &solver);
     smt(SmtOperation::CheckSat, Duration::from_millis(1));
     assert!(std::sync::Arc::ptr_eq(&state, &frame.local_state));
     assert!(ROOT.with(|root| root.borrow().is_none()));

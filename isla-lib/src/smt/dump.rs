@@ -445,3 +445,39 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 }
+
+/// 可重放的反例诊断：额外断言先作为自由别名定义，不施加真假限制，离线再逐条加回。
+pub(super) fn write_obligation_diagnostic<B: BV>(
+    point: Checkpoint<B>,
+    goal: &Exp<Sym>,
+    extras: &[(Exp<Sym>, crate::source_loc::SourceLoc)],
+    values: &[(Sym, crate::source_loc::SourceLoc)],
+    directory: &std::path::Path,
+    ordinal: usize,
+    replay_seconds: f64,
+    check_seconds: f64,
+) {
+    use super::{
+        smtlib::{Def, Ty},
+        SourceLoc,
+    };
+    let ctx = Context::new_smtlib2_dump(Config::new());
+    let mut solver = Solver::from_checkpoint_for_smtlib2_dump(&ctx, point, SmtDumpNames::default());
+    let mut metadata = Vec::new();
+    for (exp, loc) in extras {
+        let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.assert(Exp::Eq(Box::new(Exp::Var(sym)), Box::new(exp.clone())));
+        metadata.push(serde_json::json!({"symbol":solver.exp_to_str(&Exp::Var(sym)),"expression":solver.exp_to_str(exp),"source_loc":loc}));
+    }
+    let mut fields = Vec::new();
+    for (sym, loc) in values {
+        let alias = solver.declare_const(Ty::BitVec(2), SourceLoc::unknown());
+        solver.add(Def::Assert(Exp::Eq(Box::new(Exp::Var(alias)), Box::new(Exp::Var(*sym)))));
+        fields.push(serde_json::json!({"symbol":solver.exp_to_str(&Exp::Var(alias)),"expression":solver.exp_to_str(&Exp::Var(*sym)),"source_loc":loc}));
+    }
+    let smt = solver.benchmark_to_smt2(Some(goal));
+    std::fs::create_dir_all(directory).unwrap();
+    let prefix = directory.join(format!("obligation-{ordinal}"));
+    std::fs::write(prefix.with_extension("smt2"), smt).unwrap();
+    std::fs::write(prefix.with_extension("json"),serde_json::to_vec_pretty(&serde_json::json!({"excluded_assertions":metadata,"two_bit_values":fields,"replay_seconds":replay_seconds,"check_seconds":check_seconds})).unwrap()).unwrap();
+}

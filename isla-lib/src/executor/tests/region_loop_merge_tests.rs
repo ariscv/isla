@@ -421,6 +421,7 @@ fn region_crossing_loop_budget_rejection_preserves_complete_execution() {
     let program = crossing_loop_program(false);
     let forked = paths(program.clone(), &shared, 3, false);
     for budget in [0, 12] {
+        let successes_before = shared.execution_stats.merge_json()["successes"].as_u64().unwrap();
         let rejected_before =
             shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap_or(0);
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
@@ -460,9 +461,19 @@ fn region_crossing_loop_budget_rejection_preserves_complete_execution() {
             },
         );
         equivalent_paths(&forked, &output.into_inner().unwrap(), 3, true);
-        assert!(
-            shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap() > rejected_before
-        );
+        if budget == 0 {
+            assert!(
+                shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap()
+                    > rejected_before
+            );
+        } else {
+            // 预算按完整轮续配；12足以容纳本夹具一轮，不能再要求累计预算失败。
+            assert_eq!(
+                shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap(),
+                rejected_before
+            );
+            assert!(shared.execution_stats.merge_json()["successes"].as_u64().unwrap() > successes_before);
+        }
     }
 }
 

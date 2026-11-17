@@ -4685,3 +4685,308 @@ fn dedup_executor_guard_change_prunes_poison_before_execution() {
     ];
     assert_eq!(differential(program, &shared, 1, true), (2, 1));
 }
+
+#[test]
+fn deferred_exit_merge_preserves_relation_and_dead_guard() {
+    const CHILD: &str = "ISLA_EXIT_CHECK_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        for enabled in ["0", "1"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "executor::tests::region_merge_tests::deferred_exit_merge_preserves_relation_and_dead_guard",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ISLA_REGION_DEFER_EXIT_CHECK", enabled)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    let shared = empty_shared_state();
+    // 内层否定条件与入口条件矛盾，其返回值必须永远不能被观察到。
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(8),
+        Instr::Jump(Exp::Call(Op::Not, vec![input(0)]), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), input(1), info()),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(8),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, true), (2, 1));
+}
+
+#[test]
+fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
+    const CHILD: &str = "ISLA_ASSERT_OBLIGATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_merge_tests::deferred_assert_obligation_keeps_safe_and_rejects_failing_arms",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ISLA_REGION_DEFER_EXIT_CHECK", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let tmp = test_name(1900);
+    let safe = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(9),
+        Instr::Jump(Exp::Call(Op::Not, vec![input(0)]), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), input(1), info()),
+        Instr::Goto(9),
+        Instr::PrimopBinary(
+            Loc::Id(tmp),
+            primop::pessimistic_assert::<B64>,
+            Exp::Bool(false),
+            Exp::String("死臂断言".into()),
+            info(),
+        ),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(9),
+        Instr::End,
+    ];
+    assert_eq!(differential(safe, &shared, 2, true), (2, 1));
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let failing = vec![
+        Instr::Decl(tmp, Ty::Unit, info()),
+        Instr::Jump(input(0), 4, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(6),
+        Instr::PrimopBinary(
+            Loc::Id(tmp),
+            primop::pessimistic_assert::<B64>,
+            input(1),
+            Exp::String("可失败断言".into()),
+            info(),
+        ),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ];
+    let forked = paths(failing.clone(), &shared, 2, false);
+    let merged = paths(failing, &shared, 2, true);
+    equivalent_paths(&forked, &merged, 2, false);
+    assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
+}
+
+// 环境开关按进程冻结；每项回归独立子进程，不污染并行区域套件。
+fn dead_arm_candidate_child(test: &str) -> bool {
+    const CHILD: &str = "ISLA_DEAD_ARM_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("executor::tests::region_merge_tests::{test}"), "--nocapture"])
+        .env(CHILD, "1")
+        .env("ISLA_REGION_DEFER_EXIT_CHECK", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+// 每轮先检查死臂，再检查匹配/提前返回。后续轮的死臂只能限制继续前沿。
+fn dead_arm_three_round_program() -> Vec<Instr<Name, B64>> {
+    let counter = test_name(1910);
+    let unit = test_name(1911);
+    let at = |n| Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::I128(n)]);
+    let select = |offset| {
+        let term = |n| Exp::Call(Op::And, vec![at(n), input(offset + n as u32)]);
+        Exp::Call(Op::Or, vec![term(0), Exp::Call(Op::Or, vec![term(1), term(2)])])
+    };
+    vec![
+        Instr::Init(counter, Ty::I128, Exp::I128(0), info()),
+        Instr::Decl(unit, Ty::Unit, info()),
+        Instr::Jump(at(3), 14, info()),
+        Instr::Jump(select(0), 11, info()),
+        Instr::Jump(select(3), 16, info()),
+        Instr::PrimopBinary(
+            Loc::Id(counter),
+            primop::binary_primops()["add_int"],
+            Exp::Id(counter),
+            Exp::I128(1),
+            info(),
+        ),
+        Instr::Goto(2),
+        Instr::Arbitrary,
+        Instr::Arbitrary,
+        Instr::Arbitrary,
+        Instr::Arbitrary,
+        Instr::PrimopBinary(
+            Loc::Id(unit),
+            primop::optimistic_assert::<B64>,
+            Exp::Bool(false),
+            Exp::String("常量假死臂".into()),
+            info(),
+        ),
+        Instr::Goto(18),
+        Instr::Arbitrary,
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(18),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(18),
+        Instr::End,
+    ]
+}
+
+#[test]
+fn deferred_dead_arm_three_rounds_equivalent() {
+    if !dead_arm_candidate_child("deferred_dead_arm_three_rounds_equivalent") {
+        return;
+    }
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let program = dead_arm_three_round_program();
+    let run = |merge| {
+        paths_with_state(
+            program.clone(),
+            &shared,
+            6,
+            ExecutionLimits::default().with_path_merging(merge).with_region_loop_analysis(true),
+            crate::memory::Memory::new(),
+            |_| (),
+        )
+    };
+    let forked = run(false);
+    let merged = run(true);
+    assert!(forked.iter().all(|p| matches!(p.value, Val::Bool(_) | Val::Symbolic(_))), "枚举返回必须为布尔");
+    assert!(merged.iter().all(|p| matches!(p.value, Val::Bool(_) | Val::Symbolic(_))), "候选回退不得留下Unit返回");
+    equivalent_paths(&forked, &merged, 6, false);
+    assert_eq!(merged.len(), 1, "三轮必须实际合并，不能靠普通枚举掩盖回退");
+    assert!(!merged[0].records.is_empty(), "三轮的返回前沿必须包含已提交合并记录");
+    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap_or(0), 0);
+}
+
+#[test]
+fn deferred_dead_arm_write_after_assertion_still_rejected() {
+    if !dead_arm_candidate_child("deferred_dead_arm_write_after_assertion_still_rejected") {
+        return;
+    }
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let unit = test_name(1920);
+    for condition in [input(1)] {
+        let mut frame = make_frame(vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(6),
+            Instr::PrimopBinary(
+                Loc::Id(unit),
+                primop::optimistic_assert::<B64>,
+                condition,
+                Exp::String("写出前断言".into()),
+                info(),
+            ),
+            Instr::PrimopVariadic(Loc::Id(unit), primop::variadic_primops()["platform_write_mem"], Vec::new(), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]);
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::new(&ctx);
+        let guard = solver.declare_const(smtlib::Ty::Bool, info());
+        let before = solver.trace().to_vec().len();
+        let state = TaskState::new()
+            .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true));
+        let queue = Worker::new_lifo();
+        let sink = SingleForkSink { queue: &queue };
+        let outcome = region_merge::try_region(
+            guard,
+            3,
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &sink,
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver,
+            info(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, region_merge::RegionResult::Rejected));
+        assert!(frame.region_merge_records().is_empty());
+        assert_eq!(solver.transaction_depth(), 0);
+        assert_eq!(solver.trace().to_vec().len(), before, "拒绝必须回滚，不能发布写出");
+    }
+    assert!(shared.execution_stats.merge_json()["failure_reasons"]["state_effect"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn deferred_dead_arm_early_return_keeps_later_false_arm_input() {
+    if !dead_arm_candidate_child("deferred_dead_arm_early_return_keeps_later_false_arm_input") {
+        return;
+    }
+    let shared = empty_shared_state();
+    let program = dead_arm_three_round_program();
+    let run = |merge| {
+        paths_with_state(
+            program.clone(),
+            &shared,
+            6,
+            ExecutionLimits::default().with_path_merging(merge).with_region_loop_analysis(true),
+            crate::memory::Memory::new(),
+            |_| (),
+        )
+    };
+    let forked = run(false);
+    let merged = run(true);
+    assert!(forked.iter().all(|p| matches!(p.value, Val::Bool(_) | Val::Symbolic(_))), "枚举返回必须为布尔");
+    assert!(merged.iter().all(|p| matches!(p.value, Val::Bool(_) | Val::Symbolic(_))), "候选回退不得留下Unit返回");
+    equivalent_paths(&forked, &merged, 6, false);
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let inputs: Vec<_> = (0..6).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
+    // 第0轮匹配并返回；第1轮的死臂不可误删这个输入。
+    for (sym, value) in inputs.iter().zip([false, true, false, true, false, false]) {
+        solver.assert(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(*sym)), Box::new(smtlib::Exp::Bool(value))));
+    }
+    for paths in [&forked, &merged] {
+        let conditions = paths.iter().map(|path| import(path, &inputs, &mut solver).0).collect::<Vec<_>>();
+        let domain =
+            conditions.into_iter().fold(smtlib::Exp::Bool(false), |a, b| smtlib::Exp::Or(Box::new(a), Box::new(b)));
+        assert!(solver.check_sat_with(&domain, info()).is_sat().unwrap(), "前轮提前返回必须保留");
+    }
+    assert_eq!(merged.len(), 1, "必须实际合并后验证完整到达守卫");
+}
+
+#[test]
+fn deferred_dead_arm_symbolic_obligation_unchanged() {
+    if !dead_arm_candidate_child("deferred_dead_arm_symbolic_obligation_unchanged") {
+        return;
+    }
+    std::env::set_var("ISLA_ASSERT_OBLIGATION_CHILD", "1");
+    deferred_assert_obligation_keeps_safe_and_rejects_failing_arms();
+}

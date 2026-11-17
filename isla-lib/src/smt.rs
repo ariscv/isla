@@ -198,6 +198,7 @@ pub mod smtlib;
 mod tactic;
 pub use tactic::Tactic;
 mod dedup;
+mod deferred_assertions;
 mod query;
 mod z3_timeout;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
@@ -1752,6 +1753,9 @@ pub struct Solver<'ctx, B> {
     /// 最后一次 check（含 `check_sat_with` 的 assumption 查询）是否返回 Sat。
     last_check_sat: bool,
     knowledge: dedup::Knowledge,
+    /// 活动区域尚未在出口验证；内部查询只允许返回 Unknown。
+    deferred_region_queries: bool,
+    deferred_assertions: Option<deferred_assertions::DeferredAssertions<B>>,
     /// 最近一次返回 Sat 的 check 所产生的模型（已 inc_ref）。断言集此后未变时
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
@@ -2390,6 +2394,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 asserts_since_check: 0,
                 last_check_sat: false,
                 knowledge: dedup::Knowledge::default(),
+                deferred_region_queries: false,
+                deferred_assertions: None,
                 stashed_model: None,
                 shadow_witnesses: witness_shadow::Bank::new(ctx),
                 savepoints: Vec::new(),
@@ -2981,6 +2987,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn check_sat_with_strategy(&mut self, exp: &Exp<Sym>, info: SourceLoc, purpose: query::QueryPurpose) -> SmtResult {
+        if self.deferred_region_queries {
+            if !matches!(purpose, query::QueryPurpose::BooleanProof) {
+                self.note_deferred_mandatory_query(
+                    match purpose {
+                        query::QueryPurpose::RangeProof => "range_proof",
+                        _ => "general",
+                    },
+                    info,
+                );
+            }
+            return Unknown;
+        }
         let label = match purpose {
             query::QueryPurpose::General => "general",
             query::QueryPurpose::RangeProof => "range_proof",
@@ -3126,6 +3144,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn check_sat(&mut self, info: SourceLoc) -> SmtResult {
+        if self.deferred_region_queries {
+            self.note_deferred_mandatory_query("model_or_general", info);
+            return Unknown;
+        }
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_close_or_general");
         // 模型缓存由新增断言、臂条件及提交/回滚统一维护，仍有效即有 Sat 见证。
         if self.has_stashed_model() {
@@ -3252,6 +3274,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// feature 时无法中断 Z3，退化为普通 `check_sat`（deadline 不生效，
     /// 与 `--smt-timeout` 在该构建下的既有行为一致）。
     pub fn check_sat_deadline(&mut self, info: SourceLoc, deadline: Duration) -> SmtResult {
+        if self.deferred_region_queries {
+            self.note_deferred_mandatory_query("model_or_general", info);
+            return Unknown;
+        }
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
@@ -4698,3 +4724,6 @@ impl<B: BV> Solver<'_, B> {
             + estimated_tail_bytes(&self.trace.tail, seen)
     }
 }
+
+// 有界短探针的只读逐查询诊断。
+pub(crate) use z3_timeout::probe_query_event;

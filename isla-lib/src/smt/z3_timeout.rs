@@ -79,7 +79,26 @@ thread_local! {
     static PATH_SMT_STATS: RefCell<SmtCallStats> = const { RefCell::new(SmtCallStats::empty()) };
 }
 
+/// 有界短探针逐查询记录；线程边界用于将提交后的查询与下一次任务恢复分开。
+pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static EMITTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_QUERY_TIMINGS").as_deref() == Ok("1"))
+        && EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 100_000
+    {
+        eprintln!(
+            "{}",
+            serde_json::json!({"kind":"probe_query_event", "thread":format!("{:?}",std::thread::current().id()), "event":event()})
+        );
+    }
+}
+
 fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
+    if matches!(operation, SmtOperation::CheckSat | SmtOperation::CheckSatAssuming) {
+        probe_query_event(
+            || serde_json::json!({"type":"check", "operation":format!("{operation:?}"), "seconds":wall.as_secs_f64(), "source":source_loc, "timed_out":timed_out}),
+        );
+    }
     PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out));
     crate::executor::stats::merge_timing::record_smt_call(operation, wall);
     // 只持久记录慢查询，避免全量SMT样本随长任务占用额外内存。
@@ -109,6 +128,7 @@ pub fn path_smt_stats() -> SmtCallStats {
 
 /// 用调度快照恢复当前线程正在推进的路径级 SMT 统计。
 pub fn restore_path_smt_stats(stats: SmtCallStats) {
+    probe_query_event(|| serde_json::json!({"type":"task_restore"}));
     PATH_SMT_STATS.with(|current| *current.borrow_mut() = stats)
 }
 

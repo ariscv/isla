@@ -296,6 +296,19 @@ pub(crate) fn optimistic_assert<B: BV>(
         Val::String(message) => Some(message),
         _ => None,
     };
+    if solver.region_queries_deferred() {
+        match &x {
+            Val::Symbolic(v) => {
+                solver.defer_assertion(Exp::Var(*v), info);
+                return Ok(Val::Unit);
+            }
+            Val::Bool(true) => return Ok(Val::Unit),
+            // 立即停止此臂；区域收尾复用死臂事务，撤销本臂并保留完整到达守卫。
+            Val::Bool(false) => return Err(ExecError::AssertionFailure(message, info)),
+            _ => (),
+        }
+    }
+
     match x {
         Val::Symbolic(v) => {
             let test_true = Box::new(Exp::Var(v));
@@ -329,6 +342,19 @@ pub(crate) fn pessimistic_assert<B: BV>(
         Val::String(message) => Some(message),
         _ => None,
     };
+    if solver.region_queries_deferred() {
+        match &x {
+            Val::Symbolic(v) => {
+                solver.defer_assertion(Exp::Var(*v), info);
+                return Ok(Val::Unit);
+            }
+            Val::Bool(true) => return Ok(Val::Unit),
+            // 立即停止此臂；区域收尾复用死臂事务，撤销本臂并保留完整到达守卫。
+            Val::Bool(false) => return Err(ExecError::AssertionFailure(message, info)),
+            _ => (),
+        }
+    }
+
     match x {
         Val::Symbolic(v) => {
             let test_false = Exp::Not(Box::new(Exp::Var(v)));

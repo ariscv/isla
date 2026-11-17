@@ -2002,7 +2002,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             return Ok(Run::Suspended);
         }
         if frame.pc < frame.instrs.len() {
-            stats::region_progress::step(frame, &shared_state.symtab);
+            stats::region_progress::step(frame, &shared_state.symtab, solver);
             region_merge::preflight(frame, task_state, shared_state)?;
         }
         if matches!(&frame.pending_retry_operand, Some((pc, Val::Unit)) if *pc != frame.pc) {
@@ -3156,7 +3156,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 // 区域推演把断言失败交给臂事务处理；普通推演与其他终止仍须拒绝。
                 if !matches!(cause, ExitCause::AssertionFailure)
                     || frame.region_execution.is_none()
-                    || !task_state.execution_limits.as_ref().is_some_and(|limits| limits.region_loop_analysis)
+                    || (!solver.region_queries_deferred()
+                        && !task_state.execution_limits.as_ref().is_some_and(|limits| limits.region_loop_analysis))
                 {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Exit)?;
                 }

@@ -49,6 +49,8 @@ pub(super) struct SolverSavepoint<'ctx> {
     condition_depth: usize,
     guard: Option<Exp<Sym>>,
     order_register_reads: bool,
+    deferred_obligations_len: usize,
+    deferred_input_facts_len: usize,
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -179,6 +181,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             condition_depth: self.transaction_conditions.len(),
             guard,
             order_register_reads: false,
+            deferred_input_facts_len: self.deferred_assertions.as_ref().map_or(0, |state| state.input_facts.len()),
+            deferred_obligations_len: self.deferred_assertions.as_ref().map_or(0, |state| state.obligations.len()),
         });
         if let Some(condition) = condition {
             let sat = self.guard_known_sat(self.savepoints.last().unwrap().guard.as_ref().unwrap());
@@ -221,6 +225,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge = savepoint.knowledge;
         self.stashed_model = savepoint.model.model.take();
         self.performance_info = savepoint.performance_info;
+        if let Some(state) = &mut self.deferred_assertions {
+            state.obligations.truncate(savepoint.deferred_obligations_len);
+            state.input_facts.truncate(savepoint.deferred_input_facts_len);
+        }
         restore_path_smt_stats(savepoint.smt_stats);
         // 只保留本层的全局枚举定义；内层回滚也不能提前发布到迹。
         let enums: Vec<_> = self

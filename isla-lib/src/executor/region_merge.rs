@@ -97,7 +97,7 @@ fn assert_initial_type<B: BV>(value: &Val<B>, solver: &mut Solver<B>) {
             let valid = possibilities.keys().fold(Bool(false), |valid, ctor| {
                 Or(Box::new(valid), Box::new(Eq(Box::new(Var(*tag)), Box::new(ctor.to_smt()))))
             });
-            solver.assert(valid);
+            solver.assert_region_input_fact(valid);
             for value in possibilities.values() {
                 assert_initial_type(value, solver);
             }
@@ -133,6 +133,10 @@ pub(super) fn feasible<B: BV>(
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
+    if solver.region_queries_deferred() {
+        // 两臂只是候选；调用处不得把此结果登记为可满足性证明。
+        return Ok(true);
+    }
     match solver.check_sat_with_for_branch(exp, info, true) {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
@@ -532,10 +536,39 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             } else {
                 let record_start = frame.region_merge_records.len();
                 let tx = solver.start_transaction();
-                let result = execute_region(
-                    condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame, state,
-                    shared, solver, info,
-                );
+                static DEFER_EXIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let defer = solver.region_queries_deferred()
+                    || *DEFER_EXIT
+                        .get_or_init(|| std::env::var("ISLA_REGION_DEFER_EXIT_CHECK").is_ok_and(|value| value == "1"));
+                let execute = |solver: &mut Solver<B>| {
+                    let output = execute_region(
+                        condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame,
+                        state, shared, solver, info,
+                    );
+                    if defer && !nested && output.is_ok() {
+                        match solver.check_deferred_assertions(info) {
+                            SmtResult::Unsat => (),
+                            SmtResult::Sat => return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion)),
+                            SmtResult::Unknown => return Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+                        }
+                    }
+                    output
+                };
+                let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
+                // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
+                let result = if defer && !nested && result.is_ok() {
+                    match solver.check_sat(info) {
+                        SmtResult::Sat => result,
+                        // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
+                        // 保守回滚，让普通执行分别判断两个前沿。
+                        SmtResult::Unsat => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        SmtResult::Unknown => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        SmtResult::Error(error) => Err(ExecError::Smt(error)),
+                    }
+                } else {
+                    result
+                };
                 let mut continuation = None;
                 let result = result.map(|output| {
                     continuation = output.continuation;
@@ -546,6 +579,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         solver.commit_transaction();
                         if !nested {
+                            crate::smt::probe_query_event(
+                                || serde_json::json!({"type":"region_commit", "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1, "call_instance":frame.local_state.call_instance}),
+                            );
                             publish_committed_records(frame, record_start, task_id, shared, solver);
                             if let Some((returned, mut continued)) = continuation.take() {
                                 segmented = true;
@@ -754,7 +790,8 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = solver.check_sat_for_arm(info);
+                let close_result =
+                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(info) };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Unsat => {
@@ -791,6 +828,8 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
             }
             Ok(Run::Dead) | Err(ExecError::AssertionFailure(..)) => {
+                // 具体失败与普通执行同义：仅删除完整到达守卫覆盖的臂。
+                // 符号断言已在原语处记录义务，不会从这里静默丢弃。
                 solver.commit_dead_transaction();
                 arms.push(None);
             }
@@ -1072,10 +1111,14 @@ fn merge_states<'ir, B: BV>(
         let original = if lets { base.lets() } else { base.vars() };
         let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
         for name in names {
-            // 两臂均已退出函数：End只读取RETURN，调用者从stack_vars恢复自己的局部槽。
-            // 继续前沿尚未到End，必须保留计数和其他局部值；lets与架构状态也不能丢弃。
+            // End之后不再读取局部机器整数；不同具体值不能合成符号长度。
+            // 可合并的基态槽位和输入仍供导出使用，不能一并删除。
             if !lets
                 && name != RETURN
+                && matches!(
+                    (a.get(&name), b.get(&name)),
+                    (Some(UVal::Init(Val::I64(_))), _) | (_, Some(UVal::Init(Val::I64(_))))
+                )
                 && matches!(left.instrs.get(left.pc), Some(Instr::End))
                 && matches!(right.instrs.get(right.pc), Some(Instr::End))
             {
@@ -1675,7 +1718,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         .expect("完整退出前沿必须有条件");
                     let condition = solver.define_const(guard.clone(), info);
                     // 完整循环的存活域就是已累计的退出并集；死亡域保持原来的条件约束。
-                    solver.assert(guard);
+                    solver.assert_region_exit(guard);
                     let mut restored = original_frame.clone();
                     let result = finish_region(
                         record_id,
@@ -1726,7 +1769,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = solver.check_sat_for_arm(work.info);
+                let close_result =
+                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(work.info) };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Sat => (),
@@ -1949,6 +1993,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
             }
             Ok(Run::Dead) | Err(ExecError::AssertionFailure(..)) => {
+                // 具体失败与普通执行同义：仅删除完整到达守卫覆盖的臂。
+                // 符号断言已在原语处记录义务，不会从这里静默丢弃。
                 solver.commit_dead_transaction();
                 work.arms.push(None);
                 work.arm_start = None;

@@ -771,7 +771,7 @@ pub fn symbolic_from_typedefs<B: BV>(
                     possibilities.insert(*ctor, value);
                 }
 
-                solver.assert(name_exp);
+                solver.assert_region_input_fact(name_exp);
                 return Ok(Val::SymbolicCtor(sym, possibilities));
             } else {
                 return Err(ExecError::Unreachable(format!("Union {:?} does not appear to exist!", name)));
