@@ -1101,10 +1101,11 @@ fn merge_states<'ir, B: BV>(
         let original = if lets { base.lets() } else { base.vars() };
         let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
         for name in names {
-            // 两臂均已退出函数：End只读取RETURN，调用者从stack_vars恢复自己的局部槽。
-            // 继续前沿尚未到End，必须保留计数和其他局部值；lets与架构状态也不能丢弃。
+            // End之后不再读取局部机器整数；不同具体值不能合成符号长度。
+            // 可合并的基态槽位和输入仍供导出使用，不能一并删除。
             if !lets
                 && name != RETURN
+                && matches!((a.get(&name), b.get(&name)), (Some(UVal::Init(Val::I64(a))), Some(UVal::Init(Val::I64(b)))) if a != b)
                 && matches!(left.instrs.get(left.pc), Some(Instr::End))
                 && matches!(right.instrs.get(right.pc), Some(Instr::End))
             {
