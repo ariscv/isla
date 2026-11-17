@@ -390,13 +390,11 @@ fn publish_committed_records<B: BV>(
             })
             .collect();
     }
-    super::merge_record::publish(
-        &mut frame.region_merge_records[start..],
-        &frame.local_state.pure_definitions,
-        task,
-        shared,
-        solver,
-    );
+    if super::merge_record::enabled() {
+        frame.region_merge_records.edit_suffix(start, |records| {
+            super::merge_record::publish(records, &frame.local_state.pure_definitions, task, shared, solver)
+        });
+    }
 }
 
 struct RegionOutput<'ir, B> {
@@ -902,12 +900,14 @@ fn finish_region<'ir, B: BV>(
     // 只修改本次推演产生的根记录。历史前缀和已连接的后代保持原上下文。
     for (index, arm) in arms.iter_mut().enumerate() {
         if let Some(arm) = arm {
-            for record in &mut arm.region_merge_records[frame.region_merge_records.len()..] {
-                if record.parent_record.is_none() {
-                    record.parent_record = Some(record_id);
-                    record.arm = if index == 0 { "then" } else { "else" };
+            arm.region_merge_records.edit_suffix(frame.region_merge_records.len(), |records| {
+                for record in records {
+                    if record.parent_record.is_none() {
+                        record.parent_record = Some(record_id);
+                        record.arm = if index == 0 { "then" } else { "else" };
+                    }
                 }
-            }
+            });
         }
     }
     let right = arms.pop().unwrap();
@@ -925,16 +925,16 @@ fn finish_region<'ir, B: BV>(
                 source_loc: info,
                 depth,
                 dead: true,
-                value_symbols: HashSet::from([condition]),
-                input_symbols: HashSet::new(),
-                single_arm_reads: Vec::new(),
-                memory_reads: Vec::new(),
+                value_symbols: HashSet::from([condition]).into(),
+                input_symbols: HashSet::new().into(),
+                single_arm_reads: Vec::new().into(),
+                memory_reads: Vec::new().into(),
             });
             return Ok(RegionResult::Dead);
         }
         (Some(mut arm), None) | (None, Some(mut arm)) => {
             let access = arm.local_state.speculative_access.as_ref().unwrap();
-            let single_arm_reads = access
+            let single_arm_reads: Vec<_> = access
                 .reads
                 .iter()
                 .zip(&access.read_guards)
@@ -957,10 +957,10 @@ fn finish_region<'ir, B: BV>(
                 source_loc: info,
                 depth,
                 dead: false,
-                value_symbols: HashSet::new(),
-                input_symbols: HashSet::new(),
-                single_arm_reads,
-                memory_reads: Vec::new(),
+                value_symbols: HashSet::new().into(),
+                input_symbols: HashSet::new().into(),
+                single_arm_reads: single_arm_reads.into(),
+                memory_reads: Vec::new().into(),
             });
             arm
         }
@@ -969,14 +969,14 @@ fn finish_region<'ir, B: BV>(
         }
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
-    record.value_symbols.insert(condition);
+    Arc::make_mut(&mut record.value_symbols).insert(condition);
     for (bindings, original) in
         [(&merged.local_state.vars, &frame.local_state.vars), (&merged.local_state.lets, &frame.local_state.lets)]
     {
         for (name, value) in bindings {
             if let UVal::Init(value) = value {
                 if !matches!(original.get(name), Some(UVal::Init(old)) if value == old) {
-                    record.value_symbols.extend(value.symbolic_variables());
+                    Arc::make_mut(&mut record.value_symbols).extend(value.symbolic_variables());
                 }
             }
         }
@@ -984,7 +984,7 @@ fn finish_region<'ir, B: BV>(
     let access = merged.local_state.speculative_access.as_ref().unwrap();
     for reg in &access.writes.modified_regs {
         if let Some(value) = merged.local_state.regs.get_last_if_initialized(*reg) {
-            record.value_symbols.extend(value.symbolic_variables());
+            Arc::make_mut(&mut record.value_symbols).extend(value.symbolic_variables());
         }
     }
     cost::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard =
@@ -1438,8 +1438,8 @@ fn merge_states<'ir, B: BV>(
     cost::make_mut(&mut merged.local_state).speculative_access = Some(access);
     merged.pc = left.pc;
     let prefix = base.region_merge_records.len();
-    merged.region_merge_records.extend(left.region_merge_records[prefix..].iter().cloned());
-    merged.region_merge_records.extend(right.region_merge_records[prefix..].iter().cloned());
+    merged.region_merge_records.append_suffix(&left.region_merge_records, prefix);
+    merged.region_merge_records.append_suffix(&right.region_merge_records, prefix);
     merged.region_merge_records.push(RegionMergeRecord {
         record_id,
         parent_record: None,
@@ -1451,10 +1451,10 @@ fn merge_states<'ir, B: BV>(
         source_loc: info,
         depth: base.region_execution.as_ref().unwrap().depth,
         dead: false,
-        value_symbols: HashSet::new(),
-        input_symbols: HashSet::new(),
-        single_arm_reads,
-        memory_reads: Vec::new(),
+        value_symbols: HashSet::new().into(),
+        input_symbols: HashSet::new().into(),
+        single_arm_reads: single_arm_reads.into(),
+        memory_reads: Vec::new().into(),
     });
     Ok(merged)
 }
@@ -1592,9 +1592,9 @@ fn fold_loop_exit<'ir, B: BV>(
     // 两前沿可能共享先前轮次的记录，但在本次不同臂条件下各有一份出现。
     // 只给尚未发布的重复后缀换新ID，保留符号与父子关系；已发布前缀不动。
     let prefix = base.region_merge_records.len();
-    let previous_ids: HashSet<_> = previous.region_merge_records[prefix..].iter().map(|r| r.record_id).collect();
+    let previous_ids: HashSet<_> = previous.region_merge_records.suffix(prefix).map(|r| r.record_id).collect();
     let mut renamed = HashMap::new();
-    for record in &next.region_merge_records[prefix..] {
+    for record in next.region_merge_records.suffix(prefix) {
         if previous_ids.contains(&record.record_id) {
             renamed.entry(record.record_id).or_insert_with(|| {
                 NEXT_RECORD
@@ -1603,14 +1603,16 @@ fn fold_loop_exit<'ir, B: BV>(
             });
         }
     }
-    for record in &mut next.region_merge_records[prefix..] {
-        if let Some(id) = renamed.get(&record.record_id) {
-            record.record_id = *id;
+    next.region_merge_records.edit_suffix(prefix, |records| {
+        for record in records {
+            if let Some(id) = renamed.get(&record.record_id) {
+                record.record_id = *id;
+            }
+            if let Some(id) = record.parent_record.and_then(|id| renamed.get(&id)) {
+                record.parent_record = Some(*id);
+            }
         }
-        if let Some(id) = record.parent_record.and_then(|id| renamed.get(&id)) {
-            record.parent_record = Some(*id);
-        }
-    }
+    });
     let a = previous.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
     let b = next.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
     let condition = solver.define_const(a.clone(), info);

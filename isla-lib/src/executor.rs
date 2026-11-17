@@ -61,12 +61,14 @@ use crate::zencode;
 
 mod execution_limits;
 mod frame;
+mod merge_history;
 mod merge_record;
 pub mod path_cache;
 mod path_timing;
 mod region_merge;
 mod region_summary;
 pub mod samples;
+pub use merge_history::MergeHistory;
 pub use merge_record::{GuardedRegisterRead, MergeEnumeration, RegionMergeRecord};
 pub use region_merge::validate_force_regions;
 mod speculation;
@@ -4021,6 +4023,7 @@ mod tests {
     // 源位宽由操作数决定；宽输入、负数与溢出测试不能将源位宽传作该参数。
     mod boundary_regression_tests;
     mod cow_tests;
+    mod merge_history_tests;
     mod nested_enum_tests;
     mod region_measurement_tests;
     mod region_merge_tests;

@@ -295,29 +295,30 @@ pub fn event_heap_bytes<B: BV>(event: &Event<B>) -> usize {
         _ => 0,
     }
 }
-pub fn records_bytes<B: BV>(records: &[RegionMergeRecord<B>]) -> usize {
-    records.len() * size_of::<RegionMergeRecord<B>>()
-        + records
-            .iter()
-            .map(|r| {
-                r.value_symbols.capacity() * size_of::<Sym>()
-                    + r.input_symbols.capacity() * size_of::<Sym>()
-                    + r.single_arm_reads.capacity() * size_of::<crate::executor::GuardedRegisterRead<B>>()
-                    + r.single_arm_reads
-                        .iter()
-                        .map(|read| {
-                            read.accessor.capacity() * size_of::<crate::smt::Accessor>()
-                                + value_heap_bytes(&read.value)
-                                + exp_heap_bytes(&read.guard)
-                        })
-                        .sum::<usize>()
-                    + r.memory_reads.capacity() * size_of::<(usize, Exp<Sym>, Event<B>)>()
-                    + r.memory_reads
-                        .iter()
-                        .map(|(_, guard, event)| exp_heap_bytes(guard) + event_heap_bytes(event))
-                        .sum::<usize>()
-            })
-            .sum::<usize>()
+/// 逻辑载荷字节：共享载荷仍按每个逻辑出现计算，不能当作物理堆或 RSS。
+pub fn records_bytes<'a, B: BV + 'a>(records: impl IntoIterator<Item = &'a RegionMergeRecord<B>>) -> usize {
+    records
+        .into_iter()
+        .map(|r| {
+            size_of::<RegionMergeRecord<B>>()
+                + r.value_symbols.capacity() * size_of::<Sym>()
+                + r.input_symbols.capacity() * size_of::<Sym>()
+                + r.single_arm_reads.len() * size_of::<crate::executor::GuardedRegisterRead<B>>()
+                + r.single_arm_reads
+                    .iter()
+                    .map(|read| {
+                        read.accessor.capacity() * size_of::<crate::smt::Accessor>()
+                            + value_heap_bytes(&read.value)
+                            + exp_heap_bytes(&read.guard)
+                    })
+                    .sum::<usize>()
+                + r.memory_reads.len() * size_of::<(usize, Exp<Sym>, Event<B>)>()
+                + r.memory_reads
+                    .iter()
+                    .map(|(_, guard, event)| exp_heap_bytes(guard) + event_heap_bytes(event))
+                    .sum::<usize>()
+        })
+        .sum::<usize>()
 }
 fn sample_path_bytes<B: BV>(path: &SamplePath<B>) -> usize {
     size_of_val(path)
@@ -372,7 +373,6 @@ fn frame_bytes<B: BV>(frame: &Frame<B>, seen: &mut HashSet<usize>) -> usize {
     size_of_val(frame)
         + shared_bytes(&frame.local_state, &frame.stack_vars, seen)
         + records_bytes(&frame.region_merge_records)
-        + (frame.region_merge_records.capacity() - frame.region_merge_records.len()) * size_of::<RegionMergeRecord<B>>()
         + if seen.insert(std::sync::Arc::as_ptr(&frame.memory) as usize) {
             frame.memory.estimated_bytes(seen)
         } else {
@@ -388,7 +388,6 @@ fn local_frame_bytes<B: BV>(frame: &LocalFrame<B>, seen: &mut HashSet<usize>) ->
     size_of_val(frame)
         + shared_bytes(&frame.local_state, &frame.stack_vars, seen)
         + records_bytes(&frame.region_merge_records)
-        + (frame.region_merge_records.capacity() - frame.region_merge_records.len()) * size_of::<RegionMergeRecord<B>>()
         + if seen.insert(std::sync::Arc::as_ptr(&frame.memory) as usize) {
             frame.memory.estimated_bytes(seen)
         } else {
