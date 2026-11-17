@@ -2962,6 +2962,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             num_threads,
             exploration_seconds,
             samples.resident_fast,
+            samples.resident_batch_size,
         );
     }
     isla_lib::executor::stats::memory_stats::reset_resident();

@@ -142,9 +142,14 @@ impl Options {
         if matches!(options.mode, Mode::ReplayLog) && options.mutations.is_none() {
             return Err("replay-log 需要 --fuzz-mutations mutations.json".into());
         }
-        for flag in
-            ["check-samples", "check-samples-judge", "judge-resident", "judge-resident-out", "judge-resident-fast"]
-        {
+        for flag in [
+            "check-samples",
+            "check-samples-judge",
+            "judge-resident",
+            "judge-resident-out",
+            "judge-resident-fast",
+            "judge-resident-batch-size",
+        ] {
             if matches.opt_present(flag) {
                 return Err(format!("fuzz 不得与 --{flag} 同时使用"));
             }
@@ -184,6 +189,7 @@ mod cache_fuzz_tests {
             "judge-resident",
             "judge-resident-out",
             "judge-resident-fast",
+            "judge-resident-batch-size",
         ] {
             parser.optflag("", name, "");
         }

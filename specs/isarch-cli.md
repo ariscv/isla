@@ -483,3 +483,10 @@ isarch -A model.ir -C scenario.toml -T 32 --path-merging \
 配置在架构初始化前确定，执行期间按进程冻结；同一进程再次初始化架构时只能传入相同选项。诊断仍遵循已有条数／轮次限制。延迟 Z3 作用域也默认关闭，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。仅设置 `lazy_z3_scope=true` 而未开启 `defer_exit_check` 时静默无效；只有在 defer 推演内省去临时 push/pop，离开 defer 后的实际查询仍包含完整活动条件。
 
 开启可能增加内存占用。历史 STORE 两分钟探针峰值约 10.4 GiB，关闭侧约 8.9 GiB；PMP=2 的有限两输入 judge 峰值约 68.8 GiB，62 GiB 上限不足，须为该类验证选择更高的内存上限。这些测量仅针对特定输入与探索窗口，不代表任意规模的内存保证，也不签全域等价或完整 DAG。
+
+
+## resident judge 分批恢复
+
+普通 `--judge-resident INPUT --judge-resident-out OUTPUT` 默认每批恢复 `-T` 条完成路径，每批对全部输入执行原 judge，再释放该批求解器和 Context。所有保存路径仍参与判定，跨批重复接纳仍报错，守卫和后态唯一性证明保持原行为。保存路径及其事件记录仍占内存，因此批大小只约束恢复出的 native solver 数，不保证整个进程的固定内存上限。
+
+`--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。

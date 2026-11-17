@@ -1559,6 +1559,8 @@ pub use region_options::RegionOptions;
 pub struct ExecutionLimitsConfig {
     /// 区域候选与诊断选项；未配置时保持原默认行为。
     pub region_options: Option<RegionOptions>,
+    /// resident judge 同时恢复的路径上限，默认使用线程数。
+    pub judge_resident_batch_size: Option<usize>,
     pub strict: bool,
     pub ir_sha256: Option<String>,
     pub enabled: Option<bool>,
@@ -1889,6 +1891,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "merge_enumeration",
             "case_quota",
             "region_options",
+            "judge_resident_batch_size",
             "filter_model_exceptions",
         ],
     )?;
@@ -2198,8 +2201,18 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         })
         .transpose()?;
 
+    let judge_resident_batch_size = optional_u64(table, "judge_resident_batch_size", "execution_limits")?
+        .map(|value| {
+            let size = usize::try_from(value).map_err(|_| "judge_resident_batch_size 超出 usize 范围")?;
+            if size == 0 {
+                return Err("judge_resident_batch_size 必须大于零");
+            }
+            Ok(size)
+        })
+        .transpose()?;
     Ok(Some(ExecutionLimitsConfig {
         region_options,
+        judge_resident_batch_size,
         strict,
         ir_sha256,
         enabled,
@@ -2696,6 +2709,22 @@ r0 = "0x0000000000000000"
 
     fn merge_config(text: &str) -> Result<ExecutionLimitsConfig, String> {
         get_execution_limits_config(&text.parse::<Value>().unwrap()).map(Option::unwrap)
+    }
+
+    #[test]
+    fn resident_batch_size_toml_requires_positive_integer() {
+        assert_eq!(merge_config("[execution_limits]").unwrap().judge_resident_batch_size, None);
+        for size in [1, 2, 32] {
+            assert_eq!(
+                merge_config(&format!("[execution_limits]\njudge_resident_batch_size={size}"))
+                    .unwrap()
+                    .judge_resident_batch_size,
+                Some(size)
+            );
+        }
+        for value in ["0", "-1", "true", "'32'", "1.5"] {
+            assert!(merge_config(&format!("[execution_limits]\njudge_resident_batch_size={value}")).is_err());
+        }
     }
 
     #[test]

@@ -499,6 +499,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
     opts.optflag("", "judge-resident-fast", "");
+    opts.optopt("", "judge-resident-batch-size", "resident judge 每批恢复的路径数，默认等于 -T", "<number>");
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
@@ -851,6 +852,16 @@ fn isla_main() -> i32 {
                 resident: matches.opt_str("judge-resident").map(std::path::PathBuf::from),
                 resident_out: matches.opt_str("judge-resident-out").map(std::path::PathBuf::from),
                 resident_fast: matches.opt_present("judge-resident-fast"),
+                resident_batch_size: match matches.opt_str("judge-resident-batch-size") {
+                    Some(text) => match text.parse::<usize>() {
+                        Ok(size) if size > 0 => Some(size),
+                        _ => {
+                            eprintln!("--judge-resident-batch-size 必须为正整数");
+                            return 1;
+                        }
+                    },
+                    None => isa_config.execution_limits.as_ref().and_then(|config| config.judge_resident_batch_size),
+                },
             };
             if let Err(error) = sample_options.validate() {
                 eprintln!("{error}");

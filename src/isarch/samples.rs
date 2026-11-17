@@ -22,10 +22,17 @@ pub struct SampleOptions {
     pub resident: Option<PathBuf>,
     pub resident_out: Option<PathBuf>,
     pub resident_fast: bool,
+    pub resident_batch_size: Option<usize>,
 }
 
 impl SampleOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.resident_batch_size == Some(0) {
+            return Err("judge resident 批大小必须大于零".into());
+        }
+        if self.resident_batch_size.is_some() && (self.resident.is_none() || self.resident_fast) {
+            return Err("judge resident 批大小仅适用于普通 --judge-resident".into());
+        }
         if self.filter_model_exceptions.iter().any(|name| name.trim().is_empty() || name != name.trim()) {
             return Err("异常过滤必须使用非空构造子名称，且不得有首尾空格".into());
         }
@@ -83,6 +90,7 @@ pub struct SampleSession {
     pub resident: Option<SampleChecker>,
     pub retain_solutions: bool,
     pub resident_fast: bool,
+    pub resident_batch_size: Option<usize>,
 }
 impl SampleSession {
     pub fn new(options: &SampleOptions, enumeration: Option<&MergeEnumerationConfig>) -> Result<Self, String> {
@@ -148,6 +156,7 @@ impl SampleSession {
             resident,
             retain_solutions: outputs.is_empty(),
             resident_fast: options.resident_fast,
+            resident_batch_size: options.resident_batch_size,
         })
     }
     pub fn enabled(&self) -> bool {
