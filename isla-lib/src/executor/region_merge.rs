@@ -1105,7 +1105,10 @@ fn merge_states<'ir, B: BV>(
             // 可合并的基态槽位和输入仍供导出使用，不能一并删除。
             if !lets
                 && name != RETURN
-                && matches!((a.get(&name), b.get(&name)), (Some(UVal::Init(Val::I64(a))), Some(UVal::Init(Val::I64(b)))) if a != b)
+                && matches!(
+                    (a.get(&name), b.get(&name)),
+                    (Some(UVal::Init(Val::I64(_))), _) | (_, Some(UVal::Init(Val::I64(_))))
+                )
                 && matches!(left.instrs.get(left.pc), Some(Instr::End))
                 && matches!(right.instrs.get(right.pc), Some(Instr::End))
             {
