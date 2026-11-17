@@ -3,6 +3,7 @@ use super::region_summary::{function_effect_summaries, instruction_effect, Cache
 use super::stats::merge_diagnostics as diagnostics;
 use super::*;
 use crate::config::MergeMode;
+use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
 /// 普通区域的两臂与调用共享预算；可收敛的只读循环按完整轮核算，单轮仍受限。
@@ -54,6 +55,8 @@ impl<B: BV> AccessLog<B> {
     /// 发布发生在真实读取处，保证读取先于使用它的 SMT 定义；第二臂复用已发布的同序号读取。
     /// 计数属于帧快照，死臂/拒绝回滚后不会抑制存活臂的事件。
     pub fn record_read(&mut self, reg: Name, accessor: Vec<Accessor>, value: Val<B>) -> Result<bool, ExecError> {
+        let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+        let _ = &cost_scope;
         if self.global_state {
             // 内部读取使用当前臂的值；前态足迹按寄存器和字段路径只记录一次。
             if self.writes.modified_regs.contains(&reg) {
@@ -151,6 +154,8 @@ pub(super) fn record_read<B: BV>(
     accessor: Vec<Accessor>,
     value: Val<B>,
 ) -> Result<bool, ExecError> {
+    let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+    let _ = &cost_scope;
     match &mut state.speculative_access {
         Some(log) => log.record_read(reg, accessor, value),
         None => Ok(true),
@@ -158,6 +163,8 @@ pub(super) fn record_read<B: BV>(
 }
 
 pub(super) fn record_write<B: BV>(state: &mut LocalState<B>, id: Name, register: bool) -> Result<(), ExecError> {
+    let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+    let _ = &cost_scope;
     if let Some(log) = &mut state.speculative_access {
         if register || state.lets.contains_key(&id) {
             if !log.global_state && !log.writes_allowed {
@@ -235,7 +242,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
         return Err(reject(frame, SpeculativeRejectReason::StepBudget));
     }
     let location = frame.instrs.get(frame.pc).and_then(stats::instr_source_loc).unwrap_or(SourceLoc::unknown());
-    let log = Arc::make_mut(&mut frame.local_state).speculative_access.as_mut().expect("区域推演必须启用访问记录");
+    let log = cost::make_mut(&mut frame.local_state).speculative_access.as_mut().expect("区域推演必须启用访问记录");
     log.function = frame.function_name;
     log.pc = frame.pc;
     log.location = location;
@@ -527,7 +534,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
         Ok(region) => {
             if region.has_back_edge && super::stats::region_progress::enabled() {
-                Arc::make_mut(&mut frame.local_state).loop_attempt_seen = true;
+                cost::make_mut(&mut frame.local_state).loop_attempt_seen = true;
             }
             shared.execution_stats.merge_candidate();
             let depth = frame.region_execution.as_ref().map_or(1, |execution| execution.depth + 1);
@@ -610,11 +617,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             if let Some((returned, mut continued)) = continuation.take() {
                                 segmented = true;
                                 publish_committed_records(&mut continued, record_start, task_id, shared, solver);
-                                let fork_id = Arc::make_mut(&mut frame.execution_limit_state).record_fork();
-                                let other = Arc::make_mut(&mut continued.execution_limit_state).record_fork();
+                                let fork_id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
+                                let other = cost::make_mut(&mut continued.execution_limit_state).record_fork();
                                 assert_eq!(fork_id, other, "同一分段的两前沿必须继承相同fork计数");
-                                Arc::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
-                                Arc::make_mut(&mut continued.execution_limit_state).advance_path_signature(false);
+                                cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
+                                cost::make_mut(&mut continued.execution_limit_state).advance_path_signature(false);
                                 frame.capture_path_smt_stats();
                                 continued.capture_path_smt_stats();
                                 let point = checkpoint(solver);
@@ -777,7 +784,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     base.region_execution = Some(execution);
     base.speculation_mode = SpeculationMode::On;
     if base.local_state.speculative_access.is_none() {
-        Arc::make_mut(&mut base.local_state).speculative_access = Some(AccessLog {
+        cost::make_mut(&mut base.local_state).speculative_access = Some(AccessLog {
             writes: WriteSet::default(),
             reads: Vec::new(),
             published_reads: Vec::new(),
@@ -805,7 +812,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
         let mut arm = base.clone();
         arm.pc = pc;
-        let access = Arc::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
+        let access = cost::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
         access.guard = Some(match access.guard.take() {
             Some(parent) => smtlib::Exp::And(Box::new(parent), Box::new(guard.clone())),
             None => guard.clone(),
@@ -889,6 +896,8 @@ fn finish_region<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
+    let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+    let _ = &cost_scope;
     let depth = base.region_execution.as_ref().unwrap().depth;
     // 只修改本次推演产生的根记录。历史前缀和已连接的后代保持原上下文。
     for (index, arm) in arms.iter_mut().enumerate() {
@@ -978,14 +987,14 @@ fn finish_region<'ir, B: BV>(
             record.value_symbols.extend(value.symbolic_variables());
         }
     }
-    Arc::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard =
+    cost::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard =
         frame.local_state.speculative_access.as_ref().and_then(|access| access.guard.clone());
     merged.region_execution = frame.region_execution.clone();
     merged.speculation_mode = frame.speculation_mode;
     if merged.region_execution.is_none() {
         // 仅前置状态/访问足迹可信，需要逐条精确读写顺序时不可信。
         // 读取在真实读取处缓冲，提交时按并集发布；此处补发以 ITE 保留原值的条件写入。
-        let access = Arc::make_mut(&mut merged.local_state).speculative_access.take().unwrap();
+        let access = cost::make_mut(&mut merged.local_state).speculative_access.take().unwrap();
         for reg in access.writes.register_write_order {
             if !shared.untraced_registers.contains(&reg) {
                 solver.add_event(Event::WriteReg(
@@ -1101,6 +1110,8 @@ fn merge_states<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<LocalFrame<'ir, B>, ExecError> {
+    let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+    let _ = &cost_scope;
     let incompatible = || reject(base, SpeculativeRejectReason::IncompatibleState);
     let mut merged = base.clone();
     let lhs = left.local_state.speculative_access.as_ref().unwrap();
@@ -1332,8 +1343,8 @@ fn merge_states<'ir, B: BV>(
         petgraph::algo::toposort(&graph, None).map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?;
     let mut access = lhs.clone();
     access.published_reads = rhs.published_reads.clone();
-    Arc::make_mut(&mut merged.local_state).pure_definitions = left.local_state.pure_definitions.clone();
-    Arc::make_mut(&mut merged.local_state)
+    cost::make_mut(&mut merged.local_state).pure_definitions = left.local_state.pure_definitions.clone();
+    cost::make_mut(&mut merged.local_state)
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
@@ -1424,7 +1435,7 @@ fn merge_states<'ir, B: BV>(
     access.writes.read_regs.extend(&rhs.writes.read_regs);
     access.writes.modified_regs.extend(&rhs.writes.modified_regs);
     access.writes.register_write_order = write_order.into_iter().map(|node| graph[node]).collect();
-    Arc::make_mut(&mut merged.local_state).speculative_access = Some(access);
+    cost::make_mut(&mut merged.local_state).speculative_access = Some(access);
     merged.pc = left.pc;
     let prefix = base.region_merge_records.len();
     merged.region_merge_records.extend(left.region_merge_records[prefix..].iter().cloned());
@@ -1511,9 +1522,11 @@ fn promote_initials<'ir, B: BV>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) {
+    let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+    let _ = &cost_scope;
     // 首臂惰性初始化的前置寄存器在另臂复用；无读事件的提升不扩大足迹。
     let access = arm.local_state.speculative_access.as_ref().unwrap();
-    Arc::make_mut(&mut base.local_state).speculative_access.as_mut().unwrap().published_reads =
+    cost::make_mut(&mut base.local_state).speculative_access.as_mut().unwrap().published_reads =
         access.published_reads.clone();
     for (reg, initial) in &access.initial_registers {
         if base.regs().get_last_if_initialized(*reg).is_none() {
@@ -1565,6 +1578,8 @@ fn fold_loop_exit<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<LocalFrame<'ir, B>, ExecError> {
+    let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
+    let _ = &cost_scope;
     use smtlib::Exp::{Or, Var};
     for exit in [&previous, &next] {
         if !matches!(exit.instrs.get(exit.pc), Some(Instr::End))
@@ -1619,7 +1634,7 @@ fn fold_loop_exit<'ir, B: BV>(
         )
     })?;
     assert!(matches!(result, RegionResult::Merged), "两个存活退出前沿必须保留");
-    Arc::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard = Some(union);
+    cost::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard = Some(union);
     Ok(merged)
 }
 
@@ -1782,7 +1797,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let guard = if first { Var(work.condition) } else { Not(Box::new(Var(work.condition))) };
         let mut arm = work.base.clone();
         arm.pc = if first { work.target } else { work.original.pc + 1 };
-        let access = Arc::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
+        let access = cost::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
         let guard = match access.guard.take() {
             Some(parent) => And(Box::new(parent), Box::new(guard)),
             None => guard,
@@ -1882,7 +1897,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         })?;
                         assert!(matches!(result, RegionResult::Merged));
                         solver.compact_region_query_prefix();
-                        Arc::make_mut(&mut next.local_state).speculative_access.as_mut().unwrap().guard = Some(guard);
+                        cost::make_mut(&mut next.local_state).speculative_access.as_mut().unwrap().guard = Some(guard);
                         let id = NEXT_RECORD
                             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                             .expect("合并记录编号溢出");

@@ -29,6 +29,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use crate::executor::stats::region_cost as cost;
 use ahash;
 
 use std::collections::{HashMap, HashSet};
@@ -234,6 +235,16 @@ pub struct LocalFrame<'ir, B> {
 // 内存读取可能通过内部可变性更新路径状态，不能直接派生共享 Arc 的 Clone。
 impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
     fn clone(&self) -> Self {
+        let cost_scope = cost::Scope::enter(cost::Category::FrameClone);
+        let _ = &cost_scope;
+        if cost::enabled() {
+            cost::count(
+                cost::Category::FrameClone,
+                self.region_merge_records.len(),
+                self.region_merge_records.len() * std::mem::size_of::<super::RegionMergeRecord<B>>(),
+            );
+        }
+
         Self {
             path_timing: self.path_timing.clone(),
             path_smt_stats: self.path_smt_stats.clone(),
@@ -364,7 +375,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn vars_mut(&mut self) -> &mut Bindings<'ir, B> {
-        &mut Arc::make_mut(&mut self.local_state).vars
+        &mut cost::make_mut(&mut self.local_state).vars
     }
 
     pub fn vars(&self) -> &Bindings<'ir, B> {
@@ -402,7 +413,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     /// 单入口保留原签名；入口编号必须来自确定顺序，不能使用 worker 或 TaskId。
     pub fn with_path_root(mut self, index: usize, roots: usize) -> Self {
         assert!(roots > 0 && index < roots, "路径入口编号越界");
-        let state = Arc::make_mut(&mut self.execution_limit_state);
+        let state = cost::make_mut(&mut self.execution_limit_state);
         assert_eq!(state.total_forks(), 0, "只能给尚未分叉的初始帧设置入口");
         assert_eq!(state.control_flow_steps(), 0, "只能在执行开始前设置路径入口");
         assert_eq!(state.path_signature(), 0, "路径入口只能设置一次");
@@ -414,7 +425,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
-        &mut Arc::make_mut(&mut self.local_state).regs
+        &mut cost::make_mut(&mut self.local_state).regs
     }
 
     pub fn regs(&self) -> &RegisterBindings<'ir, B> {
@@ -423,13 +434,13 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn add_regs(&mut self, regs: &RegisterBindings<'ir, B>) -> &mut Self {
         for (k, v) in regs {
-            Arc::make_mut(&mut self.local_state).regs.insert_register(*k, v.clone())
+            cost::make_mut(&mut self.local_state).regs.insert_register(*k, v.clone())
         }
         self
     }
 
     pub fn lets_mut(&mut self) -> &mut Bindings<'ir, B> {
-        &mut Arc::make_mut(&mut self.local_state).lets
+        &mut cost::make_mut(&mut self.local_state).lets
     }
 
     pub fn lets(&self) -> &Bindings<'ir, B> {
@@ -438,7 +449,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn add_lets(&mut self, lets: &Bindings<'ir, B>) -> &mut Self {
         for (k, v) in lets {
-            Arc::make_mut(&mut self.local_state).lets.insert(*k, v.clone());
+            cost::make_mut(&mut self.local_state).lets.insert(*k, v.clone());
         }
         self
     }
@@ -465,7 +476,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn memory_mut(&mut self) -> &mut Memory<B> {
-        Arc::make_mut(&mut self.memory)
+        cost::make_mut(&mut self.memory)
     }
 
     pub fn set_memory(&mut self, memory: Memory<B>) -> &mut Self {
@@ -548,7 +559,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn write_set_mut(&mut self) -> Option<&mut WriteSet> {
-        Arc::make_mut(&mut self.local_state).speculative_access.as_mut().map(|access| &mut access.writes)
+        cost::make_mut(&mut self.local_state).speculative_access.as_mut().map(|access| &mut access.writes)
     }
 
     pub fn write_set(&self) -> Option<&WriteSet> {
@@ -569,7 +580,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             self.region_merge_records.is_empty() && self.local_state.pure_definitions.is_empty(),
             "只向新帧恢复合并历史"
         );
-        (self.region_merge_records, Arc::make_mut(&mut self.local_state).pure_definitions) = history;
+        (self.region_merge_records, cost::make_mut(&mut self.local_state).pure_definitions) = history;
     }
 
     pub fn new_call(
@@ -585,14 +596,14 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         new_frame.region_execution = self.region_execution.clone();
         new_frame.region_replay = self.region_replay;
         new_frame.region_merge_records = self.region_merge_records.clone();
-        Arc::make_mut(&mut new_frame.local_state).speculative_access = self.local_state.speculative_access.clone();
-        Arc::make_mut(&mut new_frame.local_state).pure_definitions = self.local_state.pure_definitions.clone();
-        Arc::make_mut(&mut new_frame.local_state).enumerate_merges = self.local_state.enumerate_merges;
+        cost::make_mut(&mut new_frame.local_state).speculative_access = self.local_state.speculative_access.clone();
+        cost::make_mut(&mut new_frame.local_state).pure_definitions = self.local_state.pure_definitions.clone();
+        cost::make_mut(&mut new_frame.local_state).enumerate_merges = self.local_state.enumerate_merges;
         new_frame.path_timing = self.path_timing.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
-        Arc::make_mut(&mut new_frame.local_state).regs = self.local_state.regs.clone();
-        Arc::make_mut(&mut new_frame.local_state).lets = self.local_state.lets.clone();
+        cost::make_mut(&mut new_frame.local_state).regs = self.local_state.regs.clone();
+        cost::make_mut(&mut new_frame.local_state).lets = self.local_state.lets.clone();
         new_frame.memory = Memory::fork_for_frame(&self.memory);
         #[cfg(feature = "tracetool")]
         {
@@ -608,7 +619,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         checkpoint: Checkpoint<B>,
     ) -> Task<'ir, 'task, B> {
         let mut frame = freeze_frame(self);
-        Arc::make_mut(&mut frame.local_state).enumerate_merges = state
+        cost::make_mut(&mut frame.local_state).enumerate_merges = state
             .execution_limits
             .as_ref()
             .is_some_and(|limits| limits.merge_enumeration.enabled || limits.collect_merge_definitions);
@@ -634,7 +645,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             self.backtrace.iter().any(|(n, _)| shared_state.probe_functions.contains(n))
         };
 
-        Arc::make_mut(&mut self.local_state).probes.probe_this_function = should_probe_here
+        cost::make_mut(&mut self.local_state).probes.probe_this_function = should_probe_here
     }
 }
 
@@ -659,11 +670,11 @@ impl<'ir, B: BV> Frame<'ir, B> {
 pub(super) fn push_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
     let mut vars = HashMap::default();
     mem::swap(&mut vars, frame.vars_mut());
-    Arc::make_mut(&mut frame.stack_vars).push(vars)
+    cost::make_mut(&mut frame.stack_vars).push(vars)
 }
 
 pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
-    if let Some(mut vars) = Arc::make_mut(&mut frame.stack_vars).pop() {
+    if let Some(mut vars) = cost::make_mut(&mut frame.stack_vars).pop() {
         mem::swap(&mut vars, frame.vars_mut())
     }
 }
@@ -751,6 +762,8 @@ mod tests {
 
     impl Clone for CountingReader {
         fn clone(&self) -> Self {
+            let cost_scope = cost::Scope::enter(cost::Category::FrameClone);
+            let _ = &cost_scope;
             Self(std::sync::atomic::AtomicU64::new(self.0.load(std::sync::atomic::Ordering::SeqCst)))
         }
     }
@@ -802,7 +815,7 @@ mod tests {
             assert!(Arc::ptr_eq(parent_bytes, sibling_bytes));
         }
 
-        Arc::make_mut(&mut child).write_byte(0x1000, 99);
+        cost::make_mut(&mut child).write_byte(0x1000, 99);
         assert_eq!(child.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(99, 8)));
         assert_eq!(parent.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(42, 8)));
         assert_eq!(sibling.read_initial(0x1000, 1).unwrap(), Val::Bits(B64::new(42, 8)));
@@ -993,8 +1006,8 @@ mod trace_tests {
 
         let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, instrs_ref);
 
-        Arc::make_mut(&mut local.trace_path).record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
-        Arc::make_mut(&mut local.trace_path).record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
+        cost::make_mut(&mut local.trace_path).record(Name::from_u32(1), vec![(Name::from_u32(10), 1)], 10);
+        cost::make_mut(&mut local.trace_path).record(Name::from_u32(2), vec![(Name::from_u32(20), 2)], 20);
         assert_eq!(local.trace_path.record_count(), 2);
 
         let frozen = freeze_frame(&local);
@@ -1007,9 +1020,9 @@ mod trace_tests {
         let mut fork_a = unfreeze_frame(&frozen);
         let mut fork_b = unfreeze_frame(&frozen);
 
-        Arc::make_mut(&mut fork_a.trace_path).record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
-        Arc::make_mut(&mut fork_b.trace_path).record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
-        Arc::make_mut(&mut fork_b.trace_path).record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
+        cost::make_mut(&mut fork_a.trace_path).record(Name::from_u32(3), vec![(Name::from_u32(30), 3)], 30);
+        cost::make_mut(&mut fork_b.trace_path).record(Name::from_u32(4), vec![(Name::from_u32(40), 4)], 40);
+        cost::make_mut(&mut fork_b.trace_path).record(Name::from_u32(5), vec![(Name::from_u32(50), 5)], 50);
 
         assert_eq!(fork_a.trace_path.record_count(), 3);
         assert_eq!(fork_b.trace_path.record_count(), 4);
@@ -1040,9 +1053,9 @@ mod trace_tests {
         let caller = symtab.intern("zsharing_caller");
         let instrs: Vec<Instr<Name, B64>> = Vec::new();
         let mut parent = LocalFrame::new(function, &[], &Ty::Unit, None, &instrs);
-        Arc::make_mut(&mut parent.trace_path).record_summary(function, vec![(caller, 8)], 0, "parent-summary");
-        Arc::make_mut(&mut parent.trace_path).push_branch_condition(smtlib::Exp::Bool(true));
-        Arc::make_mut(&mut parent.trace_path).record_branch_edge(function, vec![(caller, 8)], 0, 7, true);
+        cost::make_mut(&mut parent.trace_path).record_summary(function, vec![(caller, 8)], 0, "parent-summary");
+        cost::make_mut(&mut parent.trace_path).push_branch_condition(smtlib::Exp::Bool(true));
+        cost::make_mut(&mut parent.trace_path).record_branch_edge(function, vec![(caller, 8)], 0, 7, true);
         let identity = parent.trace_path.prefix_identity_for_test();
         assert!(identity.iter().all(|pointer| !pointer.is_null()));
         let frozen = freeze_frame(&parent);
@@ -1051,12 +1064,12 @@ mod trace_tests {
         for path in [&*frozen.trace_path, &left.trace_path, &right.trace_path] {
             assert_eq!(path.prefix_identity_for_test(), identity);
         }
-        Arc::make_mut(&mut left.trace_path).record_summary(function, vec![(caller, 9)], 7, "left-summary");
-        Arc::make_mut(&mut left.trace_path).push_branch_condition(smtlib::Exp::Bool(false));
-        Arc::make_mut(&mut left.trace_path).record_branch_edge(function, vec![(caller, 9)], 7, 8, false);
-        Arc::make_mut(&mut right.trace_path).record_summary(function, vec![(caller, 10)], 7, "right-summary");
-        Arc::make_mut(&mut right.trace_path).push_branch_condition(smtlib::Exp::Bool(true));
-        Arc::make_mut(&mut right.trace_path).record_branch_edge(function, vec![(caller, 10)], 7, 12, true);
+        cost::make_mut(&mut left.trace_path).record_summary(function, vec![(caller, 9)], 7, "left-summary");
+        cost::make_mut(&mut left.trace_path).push_branch_condition(smtlib::Exp::Bool(false));
+        cost::make_mut(&mut left.trace_path).record_branch_edge(function, vec![(caller, 9)], 7, 8, false);
+        cost::make_mut(&mut right.trace_path).record_summary(function, vec![(caller, 10)], 7, "right-summary");
+        cost::make_mut(&mut right.trace_path).push_branch_condition(smtlib::Exp::Bool(true));
+        cost::make_mut(&mut right.trace_path).record_branch_edge(function, vec![(caller, 10)], 7, 12, true);
         let filename = std::env::temp_dir().join(format!("itrace_shared_frame_{}.txt", std::process::id()));
         let handler = TraceHandler::default();
         handler.set_path(Some(filename.clone()));
@@ -1102,7 +1115,7 @@ mod trace_tests {
     fn new_call_carries_trace_path() {
         let instrs: Vec<Instr<Name, B64>> = vec![];
         let mut local = LocalFrame::new(Name::from_u32(0), &[], &Ty::Unit, None, &instrs);
-        Arc::make_mut(&mut local.trace_path).record(Name::from_u32(1), vec![], 10);
+        cost::make_mut(&mut local.trace_path).record(Name::from_u32(1), vec![], 10);
 
         let callee = local.new_call(Name::from_u32(99), &[], &Ty::Unit, None, &instrs);
         assert_eq!(callee.trace_path.record_count(), 1);

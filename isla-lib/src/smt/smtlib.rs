@@ -768,6 +768,10 @@ impl<'a, V: 'a> Exp<V> {
     where
         F: FnMut(&'a V) -> Result<Exp<V2>, Err>,
     {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Traverse);
+        let _ = &cost_scope;
+        crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::Traverse, 1, 0);
         use Exp::*;
         match self {
             Var(v) => Ok(f(v)?),
@@ -855,6 +859,10 @@ impl Exp<Sym> {
     }
 
     pub fn collect_variables(&self, vars: &mut HashSet<Sym, ahash::RandomState>) {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Traverse);
+        let _ = &cost_scope;
+        crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::Traverse, 1, 0);
         use Exp::*;
         match self {
             Var(v) => {
@@ -951,6 +959,10 @@ impl Exp<Sym> {
     }
 
     pub fn subst_once_in_place(&mut self, substs: &mut HashMap<Sym, Option<Self>>) {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Traverse);
+        let _ = &cost_scope;
+        crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::Traverse, 1, 0);
         use Exp::*;
         match self {
             Var(v) => {

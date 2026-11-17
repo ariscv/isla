@@ -5,6 +5,7 @@ pub mod merge_diagnostics;
 pub(crate) mod merge_timing;
 #[cfg(test)]
 mod merge_timing_tests;
+pub(crate) mod region_cost;
 pub(crate) mod region_progress;
 use super::{ForkSink, SpeculativeRejectReason, Task};
 use crate::bitvector::BV;

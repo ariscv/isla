@@ -1022,6 +1022,9 @@ static BV_SORT_AC: &[u8] = b"bv_sort_ac\0";
 
 impl<'ctx> Ast<'ctx> {
     fn simplify(&mut self) {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Simplify);
+        let _ = &cost_scope;
         unsafe {
             if SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default) {
                 let z3_ast = Z3_simplify(self.ctx.z3_ctx, self.z3_ast);
@@ -2419,6 +2422,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn translate_exp(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Translate);
+        let _ = &cost_scope;
+        crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::Translate, 1, 0);
         use Exp::*;
         if matches!(
             exp,
@@ -2577,6 +2584,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn z3_assert(&mut self, exp: &Exp<Sym>) {
+        let cost_scope = crate::executor::stats::region_cost::Scope::enter(
+            crate::executor::stats::region_cost::Category::ReplayAssert,
+        );
+        let _ = &cost_scope;
+        crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::ReplayAssert, 1, 0);
         let mut ast = self.translate_exp(exp);
         ast.simplify();
         unsafe {
@@ -2594,6 +2606,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn add_internal(&mut self, def: &Def, info: SourceLoc) {
+        let cost_scope = crate::executor::stats::region_cost::Scope::enter(
+            crate::executor::stats::region_cost::Category::Definitions,
+        );
+        let _ = &cost_scope;
         match &def {
             Def::Assert(exp) => {
                 self.knowledge.constrain();
@@ -2850,6 +2866,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 保存点内的全部事件共用缓冲出口；只有最外层提交才发布到迹。
     pub fn add_event(&mut self, event: Event<B>) {
+        let cost_scope = crate::executor::stats::region_cost::Scope::enter(
+            crate::executor::stats::region_cost::Category::EventBuffer,
+        );
+        let _ = &cost_scope;
         self.add_event_internal(&event);
         if self.savepoints.is_empty() {
             self.trace.head.push(event);

@@ -149,6 +149,9 @@ impl AttemptGuard {
             d.set(n + 1);
             n == 0
         });
+        if root {
+            super::region_cost::reset_boundary();
+        }
         if root && (EMITTED.load(Ordering::Relaxed) < 256 || crate::smt::probe_query_timings_enabled()) {
             ROOT.with(|r| {
                 *r.borrow_mut() = Some(Progress {
@@ -235,6 +238,9 @@ fn integers<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) -> Value {
     json!(values.into_iter().collect::<BTreeMap<_, _>>())
 }
 pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab, solver: &crate::smt::Solver<B>) {
+    let cost_scope =
+        crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Diagnostics);
+    let _ = &cost_scope;
     if !enabled() || frame.region_execution.is_none() {
         return;
     }
@@ -251,17 +257,19 @@ pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab, solver: &crate
                     if let Some(probe) = &mut p.probe {
                         let end = Instant::now();
                         let wall = end.duration_since(probe.last).as_secs_f64();
+                        let costs = super::region_cost::snapshot();
                         let snapshot_start = Instant::now();
                         let snapshot = solver.probe_transaction_snapshot();
                         probe.round += 1;
                         crate::smt::probe_query_event(|| json!({"type":"round", "attempt":probe.id,
                             "origin":p.origin,"call_instance":p.call_instance,"round":probe.round,
                             "back_edge_pc":frame.pc,"target":target,"integers":integers(frame,symtab),
-                            "deferred":solver.region_queries_deferred(), "wall_seconds":wall,
+                            "deferred":solver.region_queries_deferred(), "wall_seconds":wall, "costs":costs,
                             "queries":p.counts.queries-probe.queries,"smt_seconds":p.counts.smt_seconds-probe.smt_seconds,
                             "transaction":snapshot,"snapshot_seconds":snapshot_start.elapsed().as_secs_f64()}));
                         probe.queries=p.counts.queries;
                         probe.smt_seconds=p.counts.smt_seconds;
+                        super::region_cost::reset_boundary();
                         probe.last=Instant::now();
                     }
                 }

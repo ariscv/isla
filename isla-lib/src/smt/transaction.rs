@@ -152,6 +152,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 创建可嵌套的分支臂保存点。None 表示无条件层；Some(g) 在结束本层时配对 pop。
     pub fn start_transaction_with_guard(&mut self, guard: Option<Exp<Sym>>) -> SolverTransaction {
+        let cost_scope = crate::executor::stats::region_cost::Scope::enter(
+            crate::executor::stats::region_cost::Category::EventBuffer,
+        );
+        let _ = &cost_scope;
+
         assert!(
             self.transaction_depth() < MAX_TRANSACTION_DEPTH,
             "保存点嵌套深度超过上限 {}（当前 {}）",
@@ -184,28 +189,45 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 每层复制符号表、函数表、位向量集合和性能图：时间/空间为当前状态规模，
         // 总成本随路径规模和嵌套深度增长。后续可改为逐项记录旧值的增量撤销日志，
         // 提交合并父层日志、回滚按逆序恢复；届时仍须处理已有 Sym 重定义和模型引用。
-        self.savepoints.push(SolverSavepoint {
-            token,
-            events_len: self.transaction_events.len(),
-            invalid: self.transaction_invalid(),
-            decls: self.decls.clone(),
-            sail_bitvectors: self.sail_bitvectors.clone(),
-            func_decls: self.func_decls.clone(),
-            def_attrs: self.def_attrs,
-            cycles: self.cycles,
-            asserts_since_check: self.asserts_since_check,
-            floating_point_seen: self.floating_point_seen.get(),
-            last_check_sat: self.last_check_sat,
-            knowledge: self.knowledge,
-            model: SavedModel { model: self.stashed_model, ctx: self.ctx },
-            performance_info: self.performance_info.clone(),
-            smt_stats: path_smt_stats(),
-            condition_depth: self.transaction_conditions.len(),
-            guard,
-            order_register_reads: false,
-            deferred_input_facts_len: self.deferred_assertions.as_ref().map_or(0, |state| state.input_facts.len()),
-            deferred_obligations_len: self.deferred_assertions.as_ref().map_or(0, |state| state.obligations.len()),
-        });
+        {
+            let snapshot_scope = crate::executor::stats::region_cost::Scope::enter(
+                crate::executor::stats::region_cost::Category::Savepoint,
+            );
+            let _ = &snapshot_scope;
+            if crate::executor::stats::region_cost::enabled() {
+                let entries = self.decls.len() + self.sail_bitvectors.len() + self.func_decls.len();
+                let bytes = self.decls.capacity() * std::mem::size_of::<(Sym, Ast<'ctx>)>()
+                    + self.sail_bitvectors.capacity() * std::mem::size_of::<Sym>()
+                    + self.func_decls.capacity() * std::mem::size_of::<(Sym, FuncDecl<'ctx>)>();
+                crate::executor::stats::region_cost::count(
+                    crate::executor::stats::region_cost::Category::Savepoint,
+                    entries,
+                    bytes,
+                );
+            }
+            self.savepoints.push(SolverSavepoint {
+                token,
+                events_len: self.transaction_events.len(),
+                invalid: self.transaction_invalid(),
+                decls: self.decls.clone(),
+                sail_bitvectors: self.sail_bitvectors.clone(),
+                func_decls: self.func_decls.clone(),
+                def_attrs: self.def_attrs,
+                cycles: self.cycles,
+                asserts_since_check: self.asserts_since_check,
+                floating_point_seen: self.floating_point_seen.get(),
+                last_check_sat: self.last_check_sat,
+                knowledge: self.knowledge,
+                model: SavedModel { model: self.stashed_model, ctx: self.ctx },
+                performance_info: self.performance_info.clone(),
+                smt_stats: path_smt_stats(),
+                condition_depth: self.transaction_conditions.len(),
+                guard,
+                order_register_reads: false,
+                deferred_input_facts_len: self.deferred_assertions.as_ref().map_or(0, |state| state.input_facts.len()),
+                deferred_obligations_len: self.deferred_assertions.as_ref().map_or(0, |state| state.obligations.len()),
+            });
+        }
         if let Some(condition) = condition {
             let sat = self.guard_known_sat(self.savepoints.last().unwrap().guard.as_ref().unwrap());
             self.knowledge.change();
@@ -213,7 +235,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.clear_stashed_model();
             self.last_check_sat = false;
             unsafe {
+                let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                    crate::executor::stats::region_cost::Category::NativeScope,
+                );
+                let _ = &native_scope;
+
                 Z3_solver_push(self.ctx.z3_ctx, self.z3_solver);
+                crate::executor::stats::region_cost::count(
+                    crate::executor::stats::region_cost::Category::ReplayAssert,
+                    1,
+                    0,
+                );
                 Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, condition.z3_ast);
             }
             self.transaction_conditions.push(self.savepoints.last().unwrap().guard.clone().unwrap());
@@ -222,6 +254,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn rollback_transaction(&mut self, tx: SolverTransaction) {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Release);
+        let _ = &cost_scope;
+        if crate::executor::stats::region_cost::enabled() {
+            crate::executor::stats::region_cost::count(
+                crate::executor::stats::region_cost::Category::Release,
+                self.decls.len() + self.func_decls.len() + self.sail_bitvectors.len(),
+                self.decls.capacity() * std::mem::size_of::<(Sym, Ast<'ctx>)>(),
+            );
+        }
+
         let savepoint = self.savepoints.last().expect("没有可回滚的保存点");
         assert_eq!(savepoint.token, tx, "必须回滚当前求解器最内层的保存点");
         assert_eq!(
@@ -232,7 +275,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         assert_eq!(self.trace.head.len(), tx.head_len, "保存点期间不能改写已发布的迹");
         let mut savepoint = self.savepoints.pop().unwrap();
         if savepoint.guard.is_some() {
-            unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
+            unsafe {
+                let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                    crate::executor::stats::region_cost::Category::NativeScope,
+                );
+                let _ = &native_scope;
+                Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
+            };
             self.transaction_conditions.pop().unwrap();
         }
         self.clear_stashed_model();
@@ -278,6 +327,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 臂条件只在推演期间生效；正常返回、Err 返回及 panic 展开均配对 pop。
     pub(crate) fn with_transaction_condition<T>(&mut self, condition: &Exp<Sym>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Guard);
+        let _ = &cost_scope;
         assert!(!self.savepoints.is_empty(), "推测臂条件必须位于事务中");
         let saved = self.knowledge;
         // 暂时加入的臂条件不能使用调用者见证；纯定义范围退出后可归还它。
@@ -289,15 +341,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge.sat = sat;
         self.clear_stashed_model();
         self.last_check_sat = false;
-        unsafe { Z3_solver_push(self.ctx.z3_ctx, self.z3_solver) };
+        unsafe {
+            let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                crate::executor::stats::region_cost::Category::NativeScope,
+            );
+            let _ = &native_scope;
+            Z3_solver_push(self.ctx.z3_ctx, self.z3_solver)
+        };
         self.transaction_conditions.push(condition.clone());
         let depth = self.transaction_depth();
         let events_len = self.transaction_events.len();
         // 翻译条件也可能 panic，必须一并纳入清理范围。
+        drop(cost_scope);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.z3_assert(condition);
             f(self)
         }));
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Guard);
+        let _ = &cost_scope;
         let balanced = self.transaction_depth() == depth;
         // panic 或遗漏结束内层保存点时，先在所属臂条件内撤销它们，避免恢复带已退出条件的模型。
         while self.transaction_depth() > depth {
@@ -310,7 +372,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge.sat = unchanged && (self.knowledge.sat || saved.sat);
         self.knowledge.change();
         self.guard_transaction_events(events_len, condition);
-        unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
+        unsafe {
+            let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                crate::executor::stats::region_cost::Category::NativeScope,
+            );
+            let _ = &native_scope;
+            Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
+        };
         self.transaction_conditions.pop().unwrap();
         self.clear_stashed_model();
         self.last_check_sat = false;
@@ -328,6 +396,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn commit_transaction(&mut self) {
+        let cost_scope = crate::executor::stats::region_cost::Scope::enter(
+            crate::executor::stats::region_cost::Category::EventBuffer,
+        );
+        let _ = &cost_scope;
         let savepoint = self.savepoints.last().expect("没有可提交的保存点");
         assert!(!self.transaction_invalid(), "不能提交失效的保存点");
         assert_eq!(
@@ -341,7 +413,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge.sat = unchanged && (self.knowledge.sat || savepoint.knowledge.sat);
         self.knowledge.change();
         if let Some(guard) = &savepoint.guard {
-            unsafe { Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1) };
+            unsafe {
+                let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                    crate::executor::stats::region_cost::Category::NativeScope,
+                );
+                let _ = &native_scope;
+                Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
+            };
             self.transaction_conditions.pop().unwrap();
             self.guard_transaction_events(savepoint.events_len, guard);
             // 已缓存的模型满足全部前提、活动臂条件与缓冲断言。
@@ -415,6 +493,28 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn guard_transaction_events(&mut self, start: usize, guard: &Exp<Sym>) {
+        let cost_scope =
+            crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Guard);
+        let _ = &cost_scope;
+        if crate::executor::stats::region_cost::enabled() {
+            let diagnostic = crate::executor::stats::region_cost::Scope::enter(
+                crate::executor::stats::region_cost::Category::Diagnostics,
+            );
+            let g = crate::executor::stats::memory_stats::exp_stats(guard).0;
+            let mut nodes = g * (self.transaction_events.len() - start);
+            for event in &self.transaction_events[start..] {
+                if let Event::Smt(Def::Assert(exp), ..) = event {
+                    nodes += g + crate::executor::stats::memory_stats::exp_stats(exp).0;
+                }
+            }
+            crate::executor::stats::region_cost::count(
+                crate::executor::stats::region_cost::Category::Guard,
+                nodes,
+                nodes * std::mem::size_of::<Exp<Sym>>(),
+            );
+            drop(diagnostic);
+        }
+
         assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len(), "事件条件必须对齐");
         for (event, condition) in
             self.transaction_events[start..].iter_mut().zip(&mut self.transaction_event_guards[start..])
@@ -432,6 +532,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 查询所有尚未发布的断言。AST 必须存活到 Z3 check 返回，不能只收集裸指针。
     pub(super) fn transaction_assertions(&self) -> Vec<Ast<'ctx>> {
+        let cost_scope = crate::executor::stats::region_cost::Scope::enter(
+            crate::executor::stats::region_cost::Category::ReplayAssert,
+        );
+        let _ = &cost_scope;
         let timer = WorkTimer::start(WorkKind::BufferTranslate);
         let assertions = self
             .transaction_events
