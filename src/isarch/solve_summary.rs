@@ -11,6 +11,8 @@ pub(super) struct SolveSummary {
     pub smt_timeouts: usize,
     pub unfinished_paths: usize,
     pub model_exception_paths: usize,
+    pub filtered_model_exception_paths: usize,
+    pub filtered_model_exception_sites: std::collections::BTreeMap<String, usize>,
     pub assertion_filtered_paths: usize,
     pub omitted_cases: usize,
     pub model_query_timeouts: usize,
@@ -49,7 +51,28 @@ impl SolveSummary {
         value
     }
 
+    pub fn record_filtered_model_exception(&mut self, site: String) {
+        self.filtered_model_exception_paths += 1;
+        *self.filtered_model_exception_sites.entry(site).or_default() += 1;
+    }
+
+    pub fn print_model_exception_filter(&self) {
+        if self.filtered_model_exception_paths > 0 {
+            eprintln!(
+                "[MODEL_EXCEPTION_FILTER] {}",
+                serde_json::json!({
+                    "filtered-model-exception-paths": self.filtered_model_exception_paths,
+                    "filtered-model-exception-sites": self.filtered_model_exception_sites,
+                })
+            );
+        }
+    }
+
     pub fn merge(&mut self, other: &Self) {
+        self.filtered_model_exception_paths += other.filtered_model_exception_paths;
+        for (site, count) in &other.filtered_model_exception_sites {
+            *self.filtered_model_exception_sites.entry(site.clone()).or_default() += count;
+        }
         self.applicable_batches += other.applicable_batches;
         self.inapplicable_batches += other.inapplicable_batches;
         self.sampled_paths += other.sampled_paths;
@@ -103,6 +126,21 @@ pub(super) fn print_execution_stats<B>(shared_state: &isla_lib::ir::SharedState<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filtered_model_exception_sites_merge_without_hiding_failures() {
+        let mut summary = SolveSummary::default();
+        summary.record_filtered_model_exception("Generic: file.sail:7".into());
+        summary.merge(&summary.clone());
+        assert_eq!(summary.filtered_model_exception_paths, 2);
+        assert_eq!(summary.filtered_model_exception_sites["Generic: file.sail:7"], 2);
+        assert_eq!(summary.status(), "finished");
+        summary.errors = 1;
+        assert_eq!(summary.status(), "partial");
+        summary.errors = 0;
+        summary.unfinished_paths = 1;
+        assert_eq!(summary.status(), "partial");
+    }
 
     #[test]
     fn not_applicable_requires_empty_domain_without_errors_or_pending_work() {

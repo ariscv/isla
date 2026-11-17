@@ -26,6 +26,32 @@ isarch [全局选项] <子命令> [子命令参数]
 | `-g/--graphviz` | Graphviz 输出格式（tree 命令） |
 | `--timeout <n>` | 超时时间（秒） |
 
+## 过滤模型异常终态
+
+`solve-state` 与 `fuzz` 可按 Sail 异常构造子名过滤终态。默认集合为空，行为保持原样。TOML 可放在基础配置或 `--execution-limits-config` 指定的文件中：
+
+```toml
+[execution_limits]
+filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]
+```
+
+对应 CLI 参数可重复：
+
+```sh
+isarch -A model.ir -C model.toml \
+  --filter-model-exception Error_internal_error \
+  --filter-model-exception Error_reserved_behavior \
+  solve-state --clause LOAD
+```
+
+出现任意 `--filter-model-exception` 时，CLI 集合整体覆盖 TOML 集合。名称按解码后的完整构造子名精确匹配；不依据模型名、源码位置或消息关键词过滤。`Error_not_implemented` 只有显式列入集合才会被过滤。没有环境变量入口。
+
+过滤发生在完成终态收集处，早于见证求解、DAG 保存与样本检查。旧缓存读回后按同一策略重判，再交给 DAG 导出、corpus 初始化及 judge；缓存来源记录保持原样，不用文件或二进制哈希决定过滤。源缓存中已经剪掉的路径无法通过关闭开关恢复，需要重新探索。
+
+summary 中 `filtered-model-exception-paths` 记录总数，`filtered-model-exception-sites` 按“构造子＋完整载荷消息”记录次数；原消息里的 `file:line` 保留。stderr 的 `[MODEL_EXCEPTION_FILTER]` 输出同一统计。计数表示实际到达并被过滤的终态，不另做 SAT 查询或对合并守卫类计数。启用过滤后的 `finished` 只针对保留的终态域，不表示模型内部异常不存在。
+
+执行错误、超时、未知 Poison、panic 保留原有失败处理；`AssertionFailure` 仍由原有断言逻辑计数。fuzz 仍要求至少一个保留终态，外部 corpus 仍须完整通过认证；若旧 corpus 包含已排除的异常输入，应从保留路径重新生成。
+
 ## 枚举符号前态
 
 枚举寄存器可以在同一节配置允许成员：

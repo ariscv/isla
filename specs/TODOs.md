@@ -46,3 +46,7 @@
 edee95d + 只读环境变量诊断，count/-T 64：Sv39 LOAD 16592 类（49s）、Sv48 LOAD 122654 类（454s）、Sv48 STORE 51638 类（97s），全部完整结束。原约束图每路径 1 分量；候选分组 Sv39 20/20 路径守卫域可乘，两个 Sv48 场景各 6 条路径不可乘，均有原求解器确认的缺失组合 UNSAT。未实现生产分解或紧凑输出；片段域与完整状态组合仍待验证。isla-lib 709 通过／既有 12 失败／6 忽略，格式检查与指定 target_f7 构建通过。[结果与设计](../agents/path_merge_call_support/enumeration.md)、[机器记录](../agents/path_merge_call_support/component-results.json)、[状态和下一步](../agents/path_merge_call_support/status.md)。
 
 - 2026-11-09 [执行帧 CoW 与回调隔离](../agents/cow-local-frame/status.md)：候选实现与限定验证完成，原仓库主线引用待可写环境快进。
+
+## 模型异常终态过滤（2026-11-17 独立候选）
+
+配置与 collector／旧缓存策略已完成；配置 1、exec 76＋7、samples 8＋1、path_cache 7、匹配 1、summary 2、CLI 27 项通过，debug CLI 构建与 fmt 通过。真实 PMP=2 缓存 T32／4090 读回 14.6835s 退出 0，四份异常过滤、站点计数 4，原有 41 超时／partial 保留；不改模型或基础配置，不提交／合入。见 [本轮计划与状态](../agents/model_exception_filter_20261117/status.md)。

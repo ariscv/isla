@@ -543,3 +543,7 @@ timeout --signal=TERM --kill-after=5s 590s \
 ## 2026-11-09 执行帧 CoW 的回调隔离
 
 冻结／恢复以外，LocalFrame::clone 与 new_call 也会复制内存；有状态 &self 回调必须在这四个入口隔离。默认关闭未知回调的共享，SeqMemory／ImmutablePageTables 显式确认纯读取。Clone 必须独立复制路径私有状态。详见 [实现与测试](cow-local-frame/status.md)。
+
+## 模型异常终态过滤的收集边界（2026-11-17 独立候选）
+
+适用本工作树 96c41a82 加本轮未提交改动。`Run::Finished` 的 `frame.get_exception()` 可在见证查询及 `ResidentPath` 保存前识别 Sail 异常；`ExecError` 不走此过滤。缓存 `SamplePath.result` 保存异常值，配合 `Terminal::SailException` 可重用同一构造子匹配策略。筛选缓存路径必须同时筛选 facts 与当前路径签名；原始 manifest 保留来源记录，不能用原始路径签名断言筛选后的路径数。见 [状态](model_exception_filter_20261117/status.md)。

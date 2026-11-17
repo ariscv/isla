@@ -135,6 +135,10 @@ The `isla-axiomatic` tool has a seperate manual
 and a guide to its support for virtual memory and address translation
 [here](https://github.com/rems-project/isla/blob/master/doc/translation.adoc).
 
+## 模型异常终态过滤
+
+`[execution_limits].filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]` 可排除指定 Sail 异常终态；默认空集合。CLI 使用重复的 `--filter-model-exception <构造子名>`，并整体覆盖 TOML 集合。summary 与 `[MODEL_EXCEPTION_FILTER]` 保留消息及次数，现场执行和旧缓存采用同一规则；见 [完整用法与边界](specs/isarch-cli.md#过滤模型异常终态)。
+
 ## solve-state 执行统计
 
 设置 `ISLA_STATS=1` 时，solve-state 收尾向 stderr 输出一行 `[MERGE_STATS] {json}` 和一行 `[FORK_STATS] {json}`。

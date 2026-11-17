@@ -1732,9 +1732,10 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             &cache.stages,
         );
         super::path_cache::restore_target(&loaded.manifest, target);
-        let summary = super::path_cache::restored_summary(&loaded.manifest.errors);
+        let summary = loaded.filter_model_exceptions(&samples.filter_model_exceptions, shared_state);
+        summary.print_model_exception_filter();
         let paths = std::mem::take(&mut loaded.paths);
-        cache.summary = serde_json::to_value(&loaded.manifest.errors).unwrap();
+        cache.summary = summary.json();
         cache.loaded = Some(loaded);
         if let Some(session) = &samples.fuzz {
             super::fuzz::run(session, paths, shared_state, target, num_threads, 0.0, cache, execution_limits);
@@ -1923,6 +1924,22 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                 );
                 (std::time::Instant::now(), smt.wall)
             });
+            // 仅检查正常完成帧的通用异常槽；错误、超时及未知 Poison 不经过过滤。
+            // 早于见证查询、终态计数和 ResidentPath 保存，避免异常进入 DAG 或样本。
+            if let Ok((Run::Finished(_), frame)) = &exec_result {
+                if let Some((exception, _)) = frame.get_exception() {
+                    if let Some(site) =
+                        super::model_exception::filtered_site(&samples.filter_model_exceptions, exception, shared_state)
+                    {
+                        collected
+                            .lock()
+                            .expect("solve collector mutex poisoned")
+                            .summary
+                            .record_filtered_model_exception(site);
+                        return;
+                    }
+                }
+            }
             // 仅将带有明确 Sail 异常状态的完成终态独立保存；未知 Poison 与执行错误仍失败。
             // 用异常值替换无意义返回槽，终态类型与抛出位置由 samples::path 单独记录。
             let sail_exception = if samples.enabled() {
@@ -2892,6 +2909,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     state.summary.omitted_cases = collected_count - items.len();
     state.summary.model_query_timeouts = state.model_query_timeouts;
     state.summary.encoding_filtered_paths = state.encdec_guard_rejects;
+    state.summary.print_model_exception_filter();
     cache.summary = state.summary.json();
     if let Some(session) = &samples.fuzz {
         super::fuzz::run(
@@ -3582,6 +3600,7 @@ mod tests {
         ContradictoryPrestate,
         SailException,
         UnexplainedPoison,
+        MixedModelExceptions,
     }
 
     /// 内联 collector 夹具的译码器：原夹具只检查编码路径，这里补回环所需的
@@ -3612,6 +3631,10 @@ mod tests {
     }
 
     fn check_encoding_fixture_for_clause(mode: EncodingFixture, store: bool) {
+        check_encoding_fixture_with_filter(mode, store, &[]);
+    }
+
+    fn check_encoding_fixture_with_filter(mode: EncodingFixture, store: bool, filters: &[&str]) {
         use super::super::target::PreStateCtx;
         struct EncodingTarget {
             pre_state: PreStateCtx<B64>,
@@ -3659,6 +3682,10 @@ mod tests {
         let mstatus = symtab.intern("zmstatus");
         let bit = symtab.intern("zbit");
         let condition = symtab.intern("zcondition");
+        let model_error = symtab.intern("zModelError");
+        let internal = symtab.intern("zError_internal_error");
+        let reserved = symtab.intern("zError_reserved_behavior");
+        let not_implemented = symtab.intern("zError_not_implemented");
         let source = SourceLoc::unknown();
         let bit_guard = |position| {
             vec![
@@ -3837,8 +3864,59 @@ mod tests {
                 vec![Instr::Arbitrary]
             };
         }
+        if matches!(mode, EncodingFixture::MixedModelExceptions) {
+            execute_body = vec![Instr::Decl(bit, Ty::Bits(1), source), Instr::Decl(condition, Ty::Bool, source)];
+            let mut exits = Vec::new();
+            for (position, ctor, message) in [
+                (10, internal, "fixture.sail:42: internal"),
+                (11, reserved, "fixture.sail:57: reserved"),
+                (12, not_implemented, "fixture.sail:61: missing"),
+            ] {
+                execute_body.extend(bit_guard(position));
+                let next = execute_body.len() + 3;
+                execute_body.push(Instr::Jump(isla_lib::ir::Exp::Id(condition), next, source));
+                execute_body.push(Instr::Call(
+                    Loc::Id(isla_lib::ir::CURRENT_EXCEPTION),
+                    false,
+                    ctor,
+                    vec![isla_lib::ir::Exp::String(message.into())],
+                    source,
+                ));
+                exits.push(execute_body.len());
+                execute_body.push(Instr::Goto(0));
+            }
+            execute_body.extend(bit_guard(13));
+            let normal = execute_body.len() + 2;
+            execute_body.push(Instr::Jump(isla_lib::ir::Exp::Id(condition), normal, source));
+            execute_body.push(Instr::Exit(ExitCause::AssertionFailure, source));
+            execute_body.push(Instr::Call(
+                Loc::Id(RETURN),
+                false,
+                retire,
+                vec![isla_lib::ir::Exp::Id(mstatus)],
+                source,
+            ));
+            execute_body.push(Instr::End);
+            let exception_end = execute_body.len();
+            for exit in exits {
+                execute_body[exit] = Instr::Goto(exception_end);
+            }
+            execute_body.extend([
+                Instr::Copy(Loc::Id(isla_lib::ir::HAVE_EXCEPTION), isla_lib::ir::Exp::Bool(true), source),
+                Instr::Copy(
+                    Loc::Id(isla_lib::ir::THROW_LOCATION),
+                    isla_lib::ir::Exp::String("throw.sail:1".into()),
+                    source,
+                ),
+                Instr::Arbitrary,
+            ]);
+        }
         let mut defs = vec![
             Def::Register(mstatus, Ty::Bits(64), vec![]),
+            Def::Union(
+                model_error,
+                vec![(internal, Ty::String), (reserved, Ty::String), (not_implemented, Ty::String)],
+            ),
             Def::Union(instruction, vec![(requested, Ty::Unit), (payload, Ty::Unit)]),
             Def::Union(result_type, vec![(retire, Ty::Bits(64)), (execute_as, Ty::Union(instruction))]),
             Def::Val(execute, vec![Ty::Union(instruction)], Ty::Union(result_type)),
@@ -3890,8 +3968,12 @@ mod tests {
             mode as u8
         ));
         let mut options = super::super::samples::SampleOptions::default();
+        options.filter_model_exceptions = filters.iter().map(|name| name.to_string()).collect();
         let mut initial_lets = Bindings::default();
-        if matches!(mode, EncodingFixture::SailException | EncodingFixture::UnexplainedPoison) {
+        if matches!(
+            mode,
+            EncodingFixture::SailException | EncodingFixture::UnexplainedPoison | EncodingFixture::MixedModelExceptions
+        ) {
             options.path_cache.write = Some(cache_dir.clone());
             options.path_cache.format =
                 vec![super::super::path_cache::Encoding::Json, super::super::path_cache::Encoding::Bin];
@@ -3929,6 +4011,33 @@ mod tests {
         }
         let execution = execution.unwrap();
         let data = batch_json(&execution);
+        if matches!(mode, EncodingFixture::MixedModelExceptions) {
+            let filtered = filters.len();
+            assert!(execution.error.is_none());
+            assert_eq!(execution.summary.model_exception_paths, 3 - filtered);
+            assert_eq!(data["summary"]["filtered-model-exception-paths"], filtered);
+            assert_eq!(execution.summary.assertion_filtered_paths, 1);
+            assert_eq!(execution.summary.unfinished_paths, 0);
+            assert_eq!(execution.summary.status(), "finished");
+            let sites = data["summary"]["filtered-model-exception-sites"].as_object().unwrap();
+            assert_eq!(sites.values().map(|value| value.as_u64().unwrap()).sum::<u64>(), filtered as u64);
+            for name in filters {
+                assert!(sites.keys().any(|site| site.starts_with(name) && site.contains("fixture.sail:")));
+            }
+            let loaded = super::super::path_cache::load::<B64>(
+                &cache_dir,
+                super::super::path_cache::Encoding::Bin,
+                true,
+                &shared,
+                &clause,
+                &super::super::path_cache::Stages::new(None, std::time::Instant::now()),
+            );
+            assert_eq!(loaded.paths.len(), 4 - filtered);
+            assert_eq!(loaded.manifest.normal_paths, 1);
+            assert_eq!(loaded.manifest.model_exception_paths, (3 - filtered) as u64);
+            std::fs::remove_dir_all(cache_dir).unwrap();
+            return;
+        }
         if matches!(mode, EncodingFixture::SailException | EncodingFixture::UnexplainedPoison) {
             use isla_lib::executor::samples::Terminal;
             let exception = matches!(mode, EncodingFixture::SailException);
@@ -4033,6 +4142,14 @@ mod tests {
     #[test]
     fn collector_applies_encoding_guard_before_execute() {
         check_encoding_fixture(EncodingFixture::EntryGuard);
+    }
+
+    #[test]
+    fn collector_filters_only_configured_model_exceptions_and_counts_sites() {
+        for filters in [vec![], vec!["Error_internal_error", "Error_reserved_behavior"], vec!["Error_not_implemented"]]
+        {
+            check_encoding_fixture_with_filter(EncodingFixture::MixedModelExceptions, false, &filters);
+        }
     }
 
     #[test]

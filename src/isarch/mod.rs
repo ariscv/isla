@@ -7,6 +7,7 @@ pub mod exec;
 pub mod fuzz;
 pub mod memory_builder;
 pub mod memory_model;
+mod model_exception;
 pub mod path_cache;
 mod representation;
 pub mod samples;
