@@ -747,3 +747,29 @@ fn smt_guarded_read_order_respects_guard_symbol_definition() {
     assert!(matches!(&solver.trace.head[1], Event::Smt(DeclareConst(sym, ..), ..) if *sym == guard));
     assert!(matches!(&solver.trace.head[2], Event::ReadReg(..)));
 }
+
+#[test]
+fn probe_transaction_snapshot_counts_guarded_assertions_without_solver_work() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let guard = solver.declare_const(smtlib::Ty::Bool, info);
+    let value = solver.declare_const(smtlib::Ty::Bool, info);
+    let outer = solver.start_transaction();
+    solver.start_transaction_with_guard(Some(Var(guard)));
+    solver.assert(Var(value));
+    let queries = test_query_count();
+    let before = solver.probe_transaction_snapshot();
+    assert_eq!(before["savepoint_count"], 2);
+    assert_eq!(before["buffered_assertion_count"], 1);
+    assert_eq!(before["prefix_assertions"][0]["nodes"], 1);
+    solver.commit_transaction();
+    let after = solver.probe_transaction_snapshot();
+    assert_eq!(after["savepoint_count"], 1);
+    assert_eq!(after["buffered_assertion_count"], 1);
+    assert_eq!(after["prefix_assertions"][0]["nodes"], 4);
+    assert_eq!(test_query_count(), queries, "诊断不得调用求解器");
+    assert_eq!(solver.transaction_depth(), 1, "诊断不得创建或丢弃保存点");
+    solver.rollback_transaction(outer);
+}

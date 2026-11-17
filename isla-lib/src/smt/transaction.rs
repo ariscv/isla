@@ -54,6 +54,28 @@ pub(super) struct SolverSavepoint<'ctx> {
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
+    /// 仅显式探针读取：断言树节点与保存点表项，不建快照、不翻译表达式、不查询。
+    pub(crate) fn probe_transaction_snapshot(&self) -> serde_json::Value {
+        let mut count = 0;
+        let mut prefix = Vec::new();
+        for (index, event) in self.transaction_events.iter().enumerate() {
+            if let Event::Smt(Def::Assert(exp), _, location) = event {
+                count += 1;
+                if prefix.len() < 4096 {
+                    prefix.push(serde_json::json!({"event_index":index,
+                        "nodes":crate::executor::stats::memory_stats::exp_stats(exp).0,
+                        "source":location}));
+                }
+            }
+        }
+        serde_json::json!({"savepoint_count":self.savepoints.len(),
+            "saved_decl_entries":self.savepoints.iter().map(|s|s.decls.len()).sum::<usize>(),
+            "saved_function_entries":self.savepoints.iter().map(|s|s.func_decls.len()).sum::<usize>(),
+            "saved_assert_counters":self.savepoints.iter().map(|s|s.asserts_since_check).sum::<usize>(),
+            "buffered_event_count":self.transaction_events.len(),"buffered_assertion_count":count,
+            "omitted_assertions":count-prefix.len(),"prefix_assertions":prefix})
+    }
+
     pub fn transaction_depth(&self) -> usize {
         self.savepoints.len()
     }

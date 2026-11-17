@@ -540,13 +540,32 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let defer = solver.region_queries_deferred()
                     || *DEFER_EXIT
                         .get_or_init(|| std::env::var("ISLA_REGION_DEFER_EXIT_CHECK").is_ok_and(|value| value == "1"));
+                let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
+                    serde_json::json!({
+                    "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),
+                    "call_instance":frame.local_state.call_instance,
+                    "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1})
+                });
+                let log_phase = |phase: &str, result: Option<&SmtResult>| {
+                    if let Some(context) = &probe_context {
+                        crate::smt::probe_query_event(|| {
+                            serde_json::json!({"type":phase,"region":context,
+                            "result":result.map(|r|format!("{r:?}"))})
+                        });
+                    }
+                };
                 let execute = |solver: &mut Solver<B>| {
+                    log_phase("execute_start", None);
                     let output = execute_region(
                         condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame,
                         state, shared, solver, info,
                     );
+                    log_phase("execute_end", None);
                     if defer && !nested && output.is_ok() {
-                        match solver.check_deferred_assertions(info) {
+                        log_phase("obligation_start", None);
+                        let checked = solver.check_deferred_assertions(info);
+                        log_phase("obligation_end", Some(&checked));
+                        match checked {
                             SmtResult::Unsat => (),
                             SmtResult::Sat => return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion)),
                             SmtResult::Unknown => return Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
@@ -558,7 +577,10 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
                 let result = if defer && !nested && result.is_ok() {
-                    match solver.check_sat(info) {
+                    log_phase("exit_check_start", None);
+                    let checked = solver.check_sat(info);
+                    log_phase("exit_check_end", Some(&checked));
+                    match checked {
                         SmtResult::Sat => result,
                         // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
                         // 保守回滚，让普通执行分别判断两个前沿。
@@ -577,10 +599,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 match &result {
                     Ok(_) => {
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
+                        log_phase("commit_start", None);
                         solver.commit_transaction();
+                        log_phase("commit_end", None);
                         if !nested {
                             crate::smt::probe_query_event(
-                                || serde_json::json!({"type":"region_commit", "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1, "call_instance":frame.local_state.call_instance}),
+                                || serde_json::json!({"type":"region_commit", "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1, "call_instance":frame.local_state.call_instance,"region":probe_context}),
                             );
                             publish_committed_records(frame, record_start, task_id, shared, solver);
                             if let Some((returned, mut continued)) = continuation.take() {

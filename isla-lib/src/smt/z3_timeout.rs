@@ -79,16 +79,36 @@ thread_local! {
     static PATH_SMT_STATS: RefCell<SmtCallStats> = const { RefCell::new(SmtCallStats::empty()) };
 }
 
-/// 有界短探针逐查询记录；线程边界用于将提交后的查询与下一次任务恢复分开。
-pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
+/// 有界短探针逐查询记录；开关关闭时不计算事件、时钟或快照。
+pub(crate) fn probe_query_timings_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    static EMITTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    if *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_QUERY_TIMINGS").as_deref() == Ok("1"))
-        && EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 100_000
-    {
+    *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_QUERY_TIMINGS").as_deref() == Ok("1"))
+}
+pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
+    if !probe_query_timings_enabled() {
+        return;
+    }
+    static START: OnceLock<Instant> = OnceLock::new();
+    static EMITTED: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+    let clock = START.get_or_init(Instant::now);
+    let event = event();
+    let (bucket, limit) = match event["type"].as_str() {
+        Some("check") => (0, 200_000),
+        Some("round") => (1, 8192),
+        _ => (2, 250_000),
+    };
+    let ordinal = EMITTED[bucket].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if ordinal <= limit {
+        let event = if ordinal == limit {
+            serde_json::json!({"type":"truncated", "bucket":bucket,"limit":limit})
+        } else {
+            event
+        };
         eprintln!(
             "{}",
-            serde_json::json!({"kind":"probe_query_event", "thread":format!("{:?}",std::thread::current().id()), "event":event()})
+            serde_json::json!({"kind":"probe_query_event",
+            "wall_seconds":clock.elapsed().as_secs_f64(),
+            "thread":format!("{:?}",std::thread::current().id()), "event":event})
         );
     }
 }

@@ -4726,4 +4726,4 @@ impl<B: BV> Solver<'_, B> {
 }
 
 // 有界短探针的只读逐查询诊断。
-pub(crate) use z3_timeout::probe_query_event;
+pub(crate) use z3_timeout::{probe_query_event, probe_query_timings_enabled};

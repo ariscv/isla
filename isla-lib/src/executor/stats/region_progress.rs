@@ -111,6 +111,13 @@ pub(crate) fn footprint(mut value: Value) {
         }
     });
 }
+struct RoundProbe {
+    id: usize,
+    last: Instant,
+    queries: u64,
+    smt_seconds: f64,
+    round: usize,
+}
 struct Progress {
     origin: Value,
     outcome: String,
@@ -126,6 +133,7 @@ struct Progress {
     initial: Option<Value>,
     call_instance: Option<usize>,
     exhausted: Option<Value>,
+    probe: Option<RoundProbe>,
 }
 pub(crate) struct AttemptGuard {
     active: bool,
@@ -141,7 +149,7 @@ impl AttemptGuard {
             d.set(n + 1);
             n == 0
         });
-        if root && EMITTED.load(Ordering::Relaxed) < 256 {
+        if root && (EMITTED.load(Ordering::Relaxed) < 256 || crate::smt::probe_query_timings_enabled()) {
             ROOT.with(|r| {
                 *r.borrow_mut() = Some(Progress {
                     origin,
@@ -158,6 +166,16 @@ impl AttemptGuard {
                     initial: None,
                     call_instance: None,
                     exhausted: None,
+                    probe: crate::smt::probe_query_timings_enabled().then(|| {
+                        static NEXT_PROBE: AtomicUsize = AtomicUsize::new(1);
+                        RoundProbe {
+                            id: NEXT_PROBE.fetch_add(1, Ordering::Relaxed),
+                            last: Instant::now(),
+                            queries: 0,
+                            smt_seconds: 0.0,
+                            round: 0,
+                        }
+                    }),
                 })
             });
         }
@@ -181,6 +199,16 @@ impl Drop for AttemptGuard {
         DEPTH.with(|d| d.set(d.get().checked_sub(1).expect("诊断尝试栈失衡")));
         if self.root {
             let p = ROOT.with(|r| r.borrow_mut().take());
+            if let Some(p) = &p {
+                if let Some(probe) = &p.probe {
+                    crate::smt::probe_query_event(|| {
+                        json!({"type":"attempt_end","attempt":probe.id,
+                        "origin":p.origin,"call_instance":p.call_instance,"outcome":p.outcome,
+                        "last_completed_round":probe.round,"tail_wall_seconds":probe.last.elapsed().as_secs_f64(),
+                        "tail_queries":p.counts.queries-probe.queries,"tail_smt_seconds":p.counts.smt_seconds-probe.smt_seconds})
+                    });
+                }
+            }
             if let Some(p) = p.filter(|p| p.counts.steps >= 256 && !p.back_edges.is_empty()) {
                 if EMITTED.fetch_add(1, Ordering::Relaxed) < 256 {
                     eprintln!(
@@ -219,6 +247,24 @@ pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab, solver: &crate
         if p.initial.is_none() {p.initial=Some(json!({"function":function,"pc":frame.pc,"integers":integers(frame,symtab)}));}
         if let Some(Instr::Goto(target))=frame.instrs.get(frame.pc) {
             if *target<frame.pc && p.back_edges.len()<512 {
+                if p.origin["function"].as_str()==Some(function.as_str()) {
+                    if let Some(probe) = &mut p.probe {
+                        let end = Instant::now();
+                        let wall = end.duration_since(probe.last).as_secs_f64();
+                        let snapshot_start = Instant::now();
+                        let snapshot = solver.probe_transaction_snapshot();
+                        probe.round += 1;
+                        crate::smt::probe_query_event(|| json!({"type":"round", "attempt":probe.id,
+                            "origin":p.origin,"call_instance":p.call_instance,"round":probe.round,
+                            "back_edge_pc":frame.pc,"target":target,"integers":integers(frame,symtab),
+                            "deferred":solver.region_queries_deferred(), "wall_seconds":wall,
+                            "queries":p.counts.queries-probe.queries,"smt_seconds":p.counts.smt_seconds-probe.smt_seconds,
+                            "transaction":snapshot,"snapshot_seconds":snapshot_start.elapsed().as_secs_f64()}));
+                        probe.queries=p.counts.queries;
+                        probe.smt_seconds=p.counts.smt_seconds;
+                        probe.last=Instant::now();
+                    }
+                }
                 let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"work_seconds":p.work,"query_footprint":p.footprint,"query_phases":p.phases,"definition_footprint":solver.region_definition_footprint(),"integers":integers(frame,symtab)});
                 if p.origin["function"].as_str()==Some(function.as_str()) && LIVE_ROWS.fetch_add(1,Ordering::Relaxed)<2048 {
                     eprintln!("{}",json!({"kind":"region_iteration","origin":p.origin,"call_instance":p.call_instance,"edge":edge}));
@@ -378,4 +424,9 @@ pub(crate) fn query_metadata() -> Option<Value> {
         return None;
     }
     ROOT.with(|root|root.borrow().as_ref().map(|p|json!({"origin":p.origin,"call_instance":p.call_instance,"round":p.back_edges.len()+1,"site":p.current,"phase":query_label(),"ordinal":p.counts.queries+1})))
+}
+
+/// 与本线程根区域起止日志使用相同的纯诊断编号；不改执行调用身份。
+pub(crate) fn probe_attempt_id() -> Option<usize> {
+    ROOT.with(|root| root.borrow().as_ref().and_then(|p| p.probe.as_ref().map(|p| p.id)))
 }
