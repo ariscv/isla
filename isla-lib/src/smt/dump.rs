@@ -101,6 +101,57 @@ mod tests {
     use crate::source_loc::SourceLoc;
 
     #[test]
+    fn slow_query_dump_assertion_indices_match_unconditional_check() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.assert(Var(x));
+        for target in [None, Some(Bool(true))] {
+            let (text, metadata) = slow_query_artifact(solver.checkpoint_snapshot(), target.as_ref());
+            assert_eq!(text.matches("(assert").count(), metadata["assertions"].as_array().unwrap().len());
+        }
+    }
+
+    #[test]
+    fn slow_query_dump_threshold_limit_and_complete_formula() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.assert(Var(x));
+        let state = SlowQueryDump::new(std::path::PathBuf::new(), std::time::Duration::from_secs(2), 2);
+        assert_eq!(state.reserve(std::time::Duration::from_secs(1)), None);
+        assert_eq!(state.reserve(std::time::Duration::from_secs(2)), Some(0));
+        assert_eq!(state.reserve(std::time::Duration::from_secs(3)), Some(1));
+        assert_eq!(state.reserve(std::time::Duration::from_secs(3)), None);
+        let (text, metadata) = slow_query_artifact(solver.checkpoint_snapshot(), Some(&Not(Box::new(Var(x)))));
+        assert_eq!(metadata["assertions"].as_array().unwrap().len(), 2);
+        assert_eq!(metadata["assertions"][1]["role"], "query");
+        assert!(metadata["expanded_ast_nodes"].as_u64().unwrap() >= 3);
+        assert_eq!(text.matches("(assert").count(), 2);
+        assert!(text.contains("(check-sat)"));
+        assert!(text.contains("declare-fun"));
+        let replay = Solver::<B64>::new(&ctx);
+        let parsed = CString::new(text).unwrap();
+        unsafe {
+            Z3_solver_from_string(ctx.z3_ctx, replay.z3_solver, parsed.as_ptr());
+            assert_eq!(Z3_solver_check(ctx.z3_ctx, replay.z3_solver), Z3_L_FALSE);
+        }
+        let tx = solver.start_transaction_with_guard(Some(Not(Box::new(Var(x)))));
+        solver.assert(Var(x));
+        let (text, metadata) = slow_query_artifact(solver.checkpoint_snapshot(), Some(&Bool(true)));
+        assert_eq!(metadata["assertions"].as_array().unwrap().len(), 4);
+        let replay = Solver::<B64>::new(&ctx);
+        unsafe {
+            Z3_solver_from_string(ctx.z3_ctx, replay.z3_solver, CString::new(text).unwrap().as_ptr());
+            assert_eq!(Z3_solver_check(ctx.z3_ctx, replay.z3_solver), Z3_L_FALSE);
+        }
+        solver.rollback_transaction(tx);
+        assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+    }
+
+    #[test]
     fn checkpoint_dump_preserves_temporary_assumption_as_replayable_command() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -472,4 +523,231 @@ pub(super) fn write_obligation_diagnostic<B: BV>(
     let prefix = directory.join(format!("obligation-{ordinal}"));
     std::fs::write(prefix.with_extension("smt2"), smt).unwrap();
     std::fs::write(prefix.with_extension("json"),serde_json::to_vec_pretty(&serde_json::json!({"excluded_assertions":metadata,"two_bit_values":fields,"replay_seconds":replay_seconds,"check_seconds":check_seconds})).unwrap()).unwrap();
+}
+
+/// 返回后的慢查询取样；只用显式 CLI 配置，不改变执行判断。
+struct SlowQueryDump {
+    directory: std::path::PathBuf,
+    threshold: std::time::Duration,
+    limit: usize,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl SlowQueryDump {
+    fn new(directory: std::path::PathBuf, threshold: std::time::Duration, limit: usize) -> Self {
+        assert!(limit > 0 && !threshold.is_zero(), "慢查询导出阈值和上限必须大于零");
+        Self { directory, threshold, limit, next: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    fn reserve(&self, elapsed: std::time::Duration) -> Option<usize> {
+        if elapsed < self.threshold {
+            return None;
+        }
+        self.next
+            .fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |next| {
+                (next < self.limit).then_some(next + 1)
+            })
+            .ok()
+    }
+}
+
+static SLOW_QUERY_DUMP: std::sync::OnceLock<SlowQueryDump> = std::sync::OnceLock::new();
+
+pub fn configure_slow_query_dump(directory: std::path::PathBuf, threshold: std::time::Duration, limit: usize) {
+    std::fs::create_dir_all(&directory).expect("创建慢查询目录失败");
+    assert!(SLOW_QUERY_DUMP.set(SlowQueryDump::new(directory, threshold, limit)).is_ok(), "慢查询诊断重复初始化");
+}
+
+/// 展开 DefineConst 后的 DAG/树大小；树节点数饱和到 u64::MAX 并明确标记。
+fn ast_size(ctx: Z3_context, roots: &[Z3_ast]) -> serde_json::Value {
+    use std::collections::HashMap;
+    let mut sizes: HashMap<Z3_ast, u64> = HashMap::new();
+    let mut saturated = false;
+    let mut stack: Vec<_> = roots.iter().map(|root| (*root, false)).collect();
+    while let Some((node, visited)) = stack.pop() {
+        if sizes.contains_key(&node) {
+            continue;
+        }
+        let children: Vec<_> = unsafe {
+            match Z3_get_ast_kind(ctx, node) {
+                AstKind::App => {
+                    let app = Z3_to_app(ctx, node);
+                    (0..Z3_get_app_num_args(ctx, app)).map(|i| Z3_get_app_arg(ctx, app, i)).collect()
+                }
+                AstKind::Quantifier => vec![Z3_get_quantifier_body(ctx, node)],
+                _ => vec![],
+            }
+        };
+        if !visited {
+            stack.push((node, true));
+            stack.extend(children.iter().rev().map(|child| (*child, false)));
+        } else {
+            let size = children.iter().fold(1u64, |n, child| {
+                let (sum, overflow) = n.overflowing_add(sizes[child]);
+                saturated |= overflow;
+                if overflow {
+                    u64::MAX
+                } else {
+                    sum
+                }
+            });
+            sizes.insert(node, size);
+        }
+    }
+    let expanded = roots.iter().fold(0u64, |n, root| {
+        let (sum, overflow) = n.overflowing_add(sizes[root]);
+        saturated |= overflow;
+        if overflow {
+            u64::MAX
+        } else {
+            sum
+        }
+    });
+    serde_json::json!({"dag_nodes":sizes.len(),"expanded_ast_nodes":expanded,"expanded_ast_saturated":saturated})
+}
+
+/// 完整快照复用已有命名和重放。逐条保留断言以支持离线分量分析及来源检查。
+fn slow_query_artifact<B: BV>(checkpoint: Checkpoint<B>, exp: Option<&Exp<Sym>>) -> (String, serde_json::Value) {
+    let ctx = Context::new_smtlib2_dump(Config::new());
+    let mut solver = Solver::from_checkpoint_for_smtlib2_dump(&ctx, checkpoint, SmtDumpNames::default());
+    let mut preceding = super::SourceLoc::unknown();
+    let locations: Vec<_> = solver
+        .trace
+        .to_vec()
+        .into_iter()
+        .rev()
+        .filter_map(|event| {
+            if let super::Event::Smt(def, _, location) = event {
+                let prior = preceding;
+                if !location.is_unknown() {
+                    preceding = *location;
+                }
+                if let super::Def::Assert(_) = def {
+                    return Some((*location, prior));
+                }
+            }
+            None
+        })
+        .collect();
+    let mut definitions = Vec::new();
+    let mut declarations = Vec::new();
+    let mut reads = Vec::new();
+    let mut assertion_dependencies = Vec::new();
+    for event in solver.trace.to_vec().into_iter().rev() {
+        match event {
+            super::Event::Smt(super::Def::DefineConst(sym, value), _, source) => definitions.push(
+                serde_json::json!({"symbol":sym.id,"source":source,"dependencies":value.variables().iter().map(|v|v.id).collect::<Vec<_>>()})),
+            super::Event::Smt(super::Def::DeclareConst(sym, ty), _, source) => declarations.push(
+                serde_json::json!({"symbol":sym.id,"source":source,"type":format!("{ty:?}")})),
+            super::Event::Smt(super::Def::Assert(value), _, _) => assertion_dependencies.push(
+                serde_json::json!(value.variables().iter().map(|v|v.id).collect::<Vec<_>>())),
+            super::Event::ReadReg(..) | super::Event::ReadMem { .. } => reads.push(format!("{event:?}")),
+            _ => (),
+        }
+    }
+    let target = exp.map(|exp| solver.translate_exp(exp));
+    unsafe {
+        let vector = Z3_solver_get_assertions(ctx.z3_ctx, solver.z3_solver);
+        Z3_ast_vector_inc_ref(ctx.z3_ctx, vector);
+        let count = Z3_ast_vector_size(ctx.z3_ctx, vector);
+        assert_eq!(locations.len(), count as usize, "快照断言来源数不一致");
+        let assertions: Vec<_> = (0..count).map(|i| Z3_ast_vector_get(ctx.z3_ctx, vector, i)).collect();
+        let mut roots = assertions.clone();
+        roots.extend(target.iter().map(|ast| ast.z3_ast));
+        let mut metadata = ast_size(ctx.z3_ctx, &roots);
+        metadata["definitions"] = serde_json::json!(definitions);
+        metadata["declarations"] = serde_json::json!(declarations);
+        metadata["read_events"] = serde_json::json!(reads);
+        metadata["assertion_dependencies"] = serde_json::json!(assertion_dependencies);
+        metadata["query_dependencies"] =
+            serde_json::json!(exp.map(|value| value.variables().iter().map(|v| v.id).collect::<Vec<_>>()));
+
+        let mut sources: Vec<_> = locations
+            .iter()
+            .enumerate()
+            .map(|(index, (location, preceding))| serde_json::json!({"index":index,"role":"prefix","source":location,"preceding_source":preceding}))
+            .collect();
+        if target.is_some() {
+            sources.push(serde_json::json!({"index":sources.len(),"role":"query"}));
+        }
+        metadata["assertions"] = serde_json::json!(sources);
+        let name = CString::new("isla-slow-query").unwrap();
+        let empty = CString::new("").unwrap();
+        let status = CString::new("unknown").unwrap();
+        metadata["query_kind"] = serde_json::json!(if target.is_some() { "check_sat_with" } else { "check_sat" });
+        let formula = Z3_mk_true(ctx.z3_ctx);
+        let text = CStr::from_ptr(Z3_benchmark_to_smtlib_string(
+            ctx.z3_ctx,
+            name.as_ptr(),
+            empty.as_ptr(),
+            status.as_ptr(),
+            empty.as_ptr(),
+            roots.len().try_into().expect("导出断言数超限"),
+            roots.as_ptr(),
+            formula,
+        ))
+        .to_string_lossy()
+        .into_owned();
+        Z3_ast_vector_dec_ref(ctx.z3_ctx, vector);
+        (text, metadata)
+    }
+}
+
+pub(super) struct SlowQueryToken {
+    started: std::time::Instant,
+    before: serde_json::Value,
+}
+
+impl<'ctx, B: BV> Solver<'ctx, B> {
+    pub(super) fn slow_query_begin(&self, solver: Z3_solver) -> Option<SlowQueryToken> {
+        let config = SLOW_QUERY_DUMP.get()?;
+        if config.next.load(std::sync::atomic::Ordering::Relaxed) >= config.limit {
+            return None;
+        }
+        let before = self.diagnostic_solver_stats(solver);
+        Some(SlowQueryToken { started: std::time::Instant::now(), before })
+    }
+
+    pub(super) fn slow_query_finish(
+        &self,
+        token: Option<SlowQueryToken>,
+        solver: Z3_solver,
+        exp: Option<&Exp<Sym>>,
+        info: super::SourceLoc,
+        result: Z3_lbool,
+    ) {
+        let Some(token) = token else {
+            return;
+        };
+        let elapsed = token.started.elapsed();
+        let config = SLOW_QUERY_DUMP.get().unwrap();
+        let Some(index) = config.reserve(elapsed) else {
+            return;
+        };
+        let after = self.diagnostic_solver_stats(solver);
+        let dump_started = std::time::Instant::now();
+        let (text, mut metadata) = slow_query_artifact(self.checkpoint_snapshot(), exp);
+        metadata["kind"] = serde_json::json!("slow_query_dump");
+        metadata["source"] = serde_json::json!(info);
+        metadata["check_seconds"] = serde_json::json!(elapsed.as_secs_f64());
+        metadata["result"] = serde_json::json!(if result == Z3_L_TRUE {
+            "sat"
+        } else if result == Z3_L_FALSE {
+            "unsat"
+        } else {
+            "unknown"
+        });
+        metadata["solver"] = serde_json::json!(format!("{:p}", solver));
+        metadata["context"] = serde_json::json!(format!("{:p}", self.ctx.z3_ctx));
+        metadata["thread"] = serde_json::json!(format!("{:?}", std::thread::current().id()));
+        metadata["uses_main_solver"] = serde_json::json!(solver == self.z3_solver);
+        metadata["statistics_before"] = token.before;
+        metadata["statistics_after"] = after;
+        metadata["export_seconds"] = serde_json::json!(dump_started.elapsed().as_secs_f64());
+        let stem = config.directory.join(format!("query-{index:03}"));
+        std::fs::write(stem.with_extension("smt2"), text).expect("写出慢查询SMT失败");
+        std::fs::write(stem.with_extension("json"), serde_json::to_vec_pretty(&metadata).unwrap())
+            .expect("写出慢查询统计失败");
+        eprintln!("[SLOW_QUERY_DUMP] index={index} check_seconds={} path={}", elapsed.as_secs_f64(), stem.display());
+    }
 }

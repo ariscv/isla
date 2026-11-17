@@ -108,6 +108,19 @@ region_step_budget = -1
 也可使用 `--region-step-budget=-1`，它覆盖 TOML 中的同名字段。合法值为正整数或 `-1`；`0`、其他负数、非整数均报错。
 关闭预算时，`region_progress` 继续统计实际步数，预算耗尽位置 `exhausted` 为 `null`；循环日志中 `steps_since_budget_renewal` 为 `null`，`step_budget_unlimited=true`。
 
+## 慢 SMT 查询导出
+
+默认关闭；用显式 CLI 选项导出已返回的慢查询，不改变查询结果，也不依赖区域合并开关：
+
+```sh
+isarch -A <ir> -C <config> --slow-query-dump-dir queries \
+  --slow-query-threshold 20s --slow-query-dump-limit 5 solve-state --clause <name>
+```
+
+`--slow-query-dump-dir` 开启导出；阈值默认 `20s`，支持正整数秒及 `s/m/h` 后缀；份数上限默认 `5`，必须为正整数。单独传阈值或上限、零值、非法值均报错。每次进程最多配置一次，目录中生成 `query-NNN.smt2` 和同名 JSON；请为不同进程使用各自的输出目录。
+
+SMT2 包含已发布／事务缓冲断言、活动臂条件及临时查询条件，可以离线重放。JSON 记录源位置、结果、solver／Context／线程身份、是否主 solver、检查前后 statistics、断言来源与依赖、展开定义后的共享 DAG／树节点数及导出耗时。树节点数饱和会明确标记，不代表实际分配大小。只记录真正提交给 Z3 且正常返回的检查；缓存命中和中断错误不导出，中断错误仍走已有 timeout SMT 输出。
+
 ## 子命令
 
 ### `list-instructions`

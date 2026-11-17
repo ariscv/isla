@@ -201,6 +201,7 @@ mod dedup;
 mod deferred_assertions;
 mod query;
 mod z3_timeout;
+pub use dump::configure_slow_query_dump;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
 use z3_timeout::{
@@ -3094,6 +3095,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             None
         };
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
+        let slow_query = self.slow_query_begin(query.z3_solver);
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3116,6 +3118,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
             }
         };
+        self.slow_query_finish(slow_query, query.z3_solver, Some(exp), info, z3_result);
         if let Some(profile) = budget_profile {
             profile.finish(z3_result);
         }
@@ -3183,6 +3186,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
+        let slow_query = self.slow_query_begin(query.z3_solver);
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
                 Ok(result) => result,
@@ -3207,6 +3211,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else {
             Unknown
         };
+        self.slow_query_finish(slow_query, query.z3_solver, None, info, z3_result);
         self.record_check_result(&result, query.z3_solver);
         drop(query_scope);
         result

@@ -442,6 +442,9 @@ fn isla_main() -> i32 {
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
     opts.optopt("", "timeout", "超时时间，默认秒；支持 s/m/h 后缀", "<n[s|m|h]>");
+    opts.optopt("", "slow-query-dump-dir", "返回慢查询的完整SMT及统计目录；默认关闭", "<path>");
+    opts.optopt("", "slow-query-threshold", "返回慢查询的耗时阈值；默认20s", "<n[s|m|h]>");
+    opts.optopt("", "slow-query-dump-limit", "慢查询最多导出份数；默认5", "<n>");
     opts.optopt("", "smt-timeout", "单次 Z3 operation 的 soft interrupt 超时时间", "<n[s|m|h]>");
     opts.optopt("", "timeout-smt-output", "timeout SMT2 输出目标，逗号分隔：file,stdout,itrace", "<destinations>");
     opts.optopt("", "timeout-smt-dir", "timeout SMT2 文件输出目录", "<path>");
@@ -614,6 +617,30 @@ fn isla_main() -> i32 {
     };
 
     isla_lib::smt::configure_z3_timeout(smt_timeout);
+    if let Some(directory) = matches.opt_str("slow-query-dump-dir") {
+        let threshold = match parse_duration_arg(
+            "--slow-query-threshold",
+            Some(&matches.opt_str("slow-query-threshold").unwrap_or_else(|| "20s".into())),
+            false,
+        ) {
+            Ok(Some(value)) if !value.is_zero() => value,
+            _ => {
+                eprintln!("--slow-query-threshold 必须大于0且为合法时长");
+                return 1;
+            }
+        };
+        let limit = match matches.opt_str("slow-query-dump-limit").unwrap_or_else(|| "5".into()).parse::<usize>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                eprintln!("--slow-query-dump-limit 必须为正整数");
+                return 1;
+            }
+        };
+        isla_lib::smt::configure_slow_query_dump(directory.into(), threshold, limit);
+    } else if matches.opt_present("slow-query-threshold") || matches.opt_present("slow-query-dump-limit") {
+        eprintln!("慢查询诊断参数需要 --slow-query-dump-dir");
+        return 1;
+    }
 
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, merged_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);

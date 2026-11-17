@@ -460,6 +460,7 @@ pin_value = "0x0000000a00000000"
 探索配置优先启用
 `[execution_limits] path_merging = true`，重复分叉预算沿用区域分支限制。
 区域合并步数默认8192；可设置 `[execution_limits] region_step_budget = -1` 或 `--region-step-budget=-1` 关闭，CLI覆盖TOML。合法值为正整数或-1，详见 [CLI规范](specs/isarch-cli.md)。
+慢 SMT 查询可用 `--slow-query-dump-dir queries --slow-query-threshold 20s --slow-query-dump-limit 5` 导出完整公式与统计，默认关闭；用法和边界见 [CLI规范](specs/isarch-cli.md#慢-smt-查询导出)。
 当符号下标引起算子重试拆分时，沿用求解器原生无偏的模型候选顺序，严禁强加任何确定性重试偏好；跨进程由判定阶段的标准语义识别。完整语法及边界见 [CLI 规范](specs/isarch-cli.md)。
 
 ### 值域 signposting：`[[value_hints]]`（P1）
