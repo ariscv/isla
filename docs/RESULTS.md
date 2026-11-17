@@ -277,3 +277,12 @@ Sv39 STORE 同一新 IR／config-xs、380 个 corpus entry＋1000 个 mutant＋�
 预算缩至每设置 500 例，真实 6000 例加历史抽样 2000 例；每组命令和统计在本树 output/fuzz-step8/。只记录新分歧，不新增或放宽规则。
 
 - 2026-11-09 执行帧 CoW 候选（基线849900a6）：默认frame6通过，tracetool执行器498通过/5忽略，数组内存34通过，axiomatic检查通过；无新增性能或make验收。[范围与命令](../agents/cow-local-frame/status.md)。
+
+## 2026-11-17 模型异常终态过滤（独立未提交候选）
+
+96c41a82 加本轮工作树增量：配置 1、exec 76＋7、samples 8＋1、path_cache 7、匹配 1、summary 2、CLI 27 项与 debug 构建／fmt 通过。先失败后通过；IR 缺失及测试夹具初始化失败的初轮日志保留。真实 PMP=2 四终态过滤经 1 项 scheduler T32／4090 读回验证，14.6835s／退出 0／站点计数 4，原 41 超时及 partial 保留；无性能签收。见 [详细结果](../agents/model_exception_filter_20261117/result-section.md)。
+
+
+## 2026-11-18 分段去重线配置迁移
+
+a286b00c＋dbfc6e70源码整合＋本轮迁移：区域111通过5忽略、去重义务14、查询32、配置3、CLI2；exec76通过7缺IR失败、samples8、path_cache7，release／fmt通过。默认样本逐字节相同。单次本机T32／64GiB／judge310秒未进入resident，124退出、后态未比较，无遗留。不签整体合入PASS，Git写操作留Claude。[验证与边界](../agents/segdedup_flags_20261117/status.md)。

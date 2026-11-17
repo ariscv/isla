@@ -104,9 +104,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
         // 实验性的原生快照边界：同一完整公式在首次check前批量装入，不预先push。
         // 只改变求解调用形态；结果及模型仍须满足全部已发布/缓冲/活动臂前提。
-        static NATIVE_SNAPSHOT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let native_snapshot = snapshot_requested
-            && *NATIVE_SNAPSHOT.get_or_init(|| std::env::var("ISLA_REGION_NATIVE_SNAPSHOT").as_deref() == Ok("1"));
+        let native_snapshot = snapshot_requested && crate::config::RegionOptions::current().native_snapshot;
         if config.tactic == Tactic::Default
             && !native_snapshot
             && (snapshot_requested || self.floating_point_seen.get())
@@ -372,7 +370,7 @@ mod tests {
         ) {
             return;
         }
-        std::env::set_var("ISLA_REGION_BOOL_PROOF_RLIMIT", "1");
+        crate::config::RegionOptions { bool_proof_rlimit: 1, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
@@ -403,7 +401,7 @@ mod tests {
         if !default_tactic_child("smt::query::tests::boolean_proof_rlimit_unknown_keeps_exact_symbolic_relation") {
             return;
         }
-        std::env::set_var("ISLA_REGION_BOOL_PROOF_RLIMIT", "1");
+        crate::config::RegionOptions { bool_proof_rlimit: 1, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
@@ -433,7 +431,7 @@ mod tests {
         if !default_tactic_child("smt::query::tests::witness_native_sat_refreshes_pool_after_fast_miss") {
             return;
         }
-        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
+        crate::config::RegionOptions { witness_eval: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&ctx);
@@ -464,7 +462,7 @@ mod tests {
         ) {
             return;
         }
-        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
+        crate::config::RegionOptions { witness_eval: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -493,7 +491,7 @@ mod tests {
         if !default_tactic_child("smt::query::tests::witness_eval_rechecks_current_assertions_after_symbol_rebinding") {
             return;
         }
-        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
+        crate::config::RegionOptions { witness_eval: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -524,7 +522,7 @@ mod tests {
         if !default_tactic_child("smt::query::tests::region_prefix_compaction_keeps_full_model_and_bounds_scopes") {
             return;
         }
-        std::env::set_var("ISLA_REGION_PREFIX_COMPACT", "1");
+        crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -572,7 +570,7 @@ mod tests {
         ) {
             return;
         }
-        std::env::set_var("ISLA_REGION_PREFIX_COMPACT", "1");
+        crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -658,7 +656,7 @@ mod tests {
         {
             return;
         }
-        std::env::set_var("ISLA_REGION_NATIVE_SNAPSHOT", "1");
+        crate::config::RegionOptions { native_snapshot: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -702,8 +700,7 @@ mod tests {
 }
 
 fn prefix_compaction_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_PREFIX_COMPACT").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().prefix_compact
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {

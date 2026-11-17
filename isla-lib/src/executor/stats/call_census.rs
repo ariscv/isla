@@ -3,11 +3,9 @@ use crate::bitvector::BV;
 use crate::ir::{Name, Symtab, Val};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
 
 pub(crate) fn enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_CALL_CENSUS").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().call_census
 }
 fn emit(value: serde_json::Value) {
     static ROWS: AtomicUsize = AtomicUsize::new(0);

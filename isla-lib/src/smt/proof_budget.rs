@@ -2,18 +2,11 @@
 use super::*;
 
 pub(super) fn limit() -> Option<u32> {
-    static LIMIT: OnceLock<u32> = OnceLock::new();
-    let value = *LIMIT.get_or_init(|| {
-        std::env::var("ISLA_REGION_BOOL_PROOF_RLIMIT")
-            .unwrap_or_else(|_| "0".into())
-            .parse()
-            .expect("布尔证明rlimit必须为非负32位整数")
-    });
+    let value = crate::config::RegionOptions::current().bool_proof_rlimit;
     (value != 0).then_some(value)
 }
 fn profiling() -> bool {
-    static PROFILE: OnceLock<bool> = OnceLock::new();
-    *PROFILE.get_or_init(|| std::env::var("ISLA_REGION_BOOL_PROOF_PROFILE").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().bool_proof_profile
 }
 unsafe fn resource_count(ctx: &Context, solver: Z3_solver) -> Option<u64> {
     let stats = Z3_solver_get_statistics(ctx.z3_ctx, solver);

@@ -135,6 +135,10 @@ The `isla-axiomatic` tool has a seperate manual
 and a guide to its support for virtual memory and address translation
 [here](https://github.com/rems-project/isla/blob/master/doc/translation.adoc).
 
+## 模型异常终态过滤
+
+`[execution_limits].filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]` 可排除指定 Sail 异常终态；默认空集合。CLI 使用重复的 `--filter-model-exception <构造子名>`，并整体覆盖 TOML 集合。summary 与 `[MODEL_EXCEPTION_FILTER]` 保留消息及次数，现场执行和旧缓存采用同一规则；见 [完整用法与边界](specs/isarch-cli.md#过滤模型异常终态)。
+
 ## solve-state 执行统计
 
 设置 `ISLA_STATS=1` 时，solve-state 收尾向 stderr 输出一行 `[MERGE_STATS] {json}` 和一行 `[FORK_STATS] {json}`。
@@ -778,3 +782,15 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 
 
 路径缓存现使用 schema 3，旧 schema 1/2 明确拒绝读取。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。
+
+### 分段合并的可选配置
+
+分段去重线的候选及诊断使用 `[execution_limits.region_options]` 或对应 CLI 参数，默认全部关闭；布尔参数使用 `=true`／`=false`，CLI 覆盖 TOML。例如：
+
+```toml
+[execution_limits.region_options]
+defer_exit_check = true
+witness_eval = true
+```
+
+运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除；延迟 Z3 作用域候选不在此范围内。

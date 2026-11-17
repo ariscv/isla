@@ -4697,8 +4697,7 @@ fn deferred_exit_merge_preserves_relation_and_dead_guard() {
                     "executor::tests::region_merge_tests::deferred_exit_merge_preserves_relation_and_dead_guard",
                     "--nocapture",
                 ])
-                .env(CHILD, "1")
-                .env("ISLA_REGION_DEFER_EXIT_CHECK", enabled)
+                .env(CHILD, enabled)
                 .output()
                 .unwrap();
             assert!(
@@ -4710,6 +4709,8 @@ fn deferred_exit_merge_preserves_relation_and_dead_guard() {
         }
         return;
     }
+    crate::config::RegionOptions { defer_exit_check: std::env::var(CHILD).unwrap() == "1", ..Default::default() }
+        .configure();
     let shared = empty_shared_state();
     // 内层否定条件与入口条件矛盾，其返回值必须永远不能被观察到。
     let program = vec![
@@ -4737,7 +4738,6 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .env("ISLA_REGION_DEFER_EXIT_CHECK", "1")
             .output()
             .unwrap();
         assert!(
@@ -4748,6 +4748,7 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
         );
         return;
     }
+    crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let tmp = test_name(1900);
@@ -4793,16 +4794,16 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
     assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
 }
 
-// 环境开关按进程冻结；每项回归独立子进程，不污染并行区域套件。
+// 区域配置按进程冻结；每项回归独立子进程，不污染并行区域套件。
 fn dead_arm_candidate_child(test: &str) -> bool {
     const CHILD: &str = "ISLA_DEAD_ARM_TEST_CHILD";
     if std::env::var_os(CHILD).is_some() {
+        crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
         return true;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("executor::tests::region_merge_tests::{test}"), "--nocapture"])
         .env(CHILD, "1")
-        .env("ISLA_REGION_DEFER_EXIT_CHECK", "1")
         .output()
         .unwrap();
     assert!(

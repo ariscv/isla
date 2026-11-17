@@ -429,6 +429,13 @@ fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     isarch::path_cache::Options::add_cli(&mut opts);
+    isarch::region_options::add_cli(&mut opts);
+    opts.optmulti(
+        "",
+        "filter-model-exception",
+        "过滤指定 Sail 异常构造子，可重复；整体覆盖 TOML 集合",
+        "<constructor>",
+    );
     opts.optflag("", "memory-stats", "周期输出 Rust 内存估算、采样年龄及 RSS；默认关闭");
     opts.optopt("", "merge-diagnostics", "合并拒绝诊断，默认 off", "off|summary|detail");
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
@@ -616,6 +623,16 @@ fn isla_main() -> i32 {
         isa_config.execution_limits = Some(limits);
     }
 
+    let had_limits = isa_config.execution_limits.is_some();
+    let mut limits = isa_config.execution_limits.take().unwrap_or_default();
+    if let Err(error) = isarch::region_options::apply_cli(&matches, &mut limits) {
+        eprintln!("{error}");
+        return 1;
+    }
+    if had_limits || limits != ExecutionLimitsConfig::default() {
+        isa_config.execution_limits = Some(limits);
+    }
+
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
     if let Some(config) = isa_config.execution_limits.as_ref() {
         match validate_execution_limits_ir(config, configured_arch_path) {
@@ -756,6 +773,15 @@ fn isla_main() -> i32 {
             }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
             let sample_options = isarch::samples::SampleOptions {
+                filter_model_exceptions: if matches.opt_present("filter-model-exception") {
+                    matches.opt_strs("filter-model-exception")
+                } else {
+                    isa_config
+                        .execution_limits
+                        .as_ref()
+                        .map(|config| config.filter_model_exceptions.clone())
+                        .unwrap_or_default()
+                },
                 path_cache: isarch::path_cache::Options::parse(&matches),
                 fuzz: fuzz_options,
                 check: matches.opt_str("check-samples").map(std::path::PathBuf::from),

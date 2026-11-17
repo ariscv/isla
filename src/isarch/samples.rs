@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct SampleOptions {
+    pub filter_model_exceptions: Vec<String>,
     pub path_cache: super::path_cache::Options,
     pub fuzz: Option<super::fuzz::Options>,
     pub check: Option<PathBuf>,
@@ -25,6 +26,9 @@ pub struct SampleOptions {
 
 impl SampleOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.filter_model_exceptions.iter().any(|name| name.trim().is_empty() || name != name.trim()) {
+            return Err("异常过滤必须使用非空构造子名称，且不得有首尾空格".into());
+        }
         if self.path_cache.dag_only
             && (self.path_cache.write.is_none()
                 || self.fuzz.is_some()
@@ -71,6 +75,7 @@ impl SampleOptions {
 }
 
 pub struct SampleSession {
+    pub filter_model_exceptions: Vec<String>,
     pub path_cache: super::path_cache::Options,
     pub fuzz: Option<super::fuzz::Session>,
     pub writer: Option<SampleOutputs>,
@@ -135,6 +140,7 @@ impl SampleSession {
             None => SampleOutputs::open(&configured),
         });
         Ok(Self {
+            filter_model_exceptions: options.filter_model_exceptions.clone(),
             path_cache: options.path_cache.clone(),
             fuzz: options.fuzz.as_ref().map(super::fuzz::Session::new).transpose()?,
             writer,

@@ -222,6 +222,9 @@ pub fn initialize_architecture<'ir, B: BV>(
     mode: AssertionMode,
     use_model_register_init: bool,
 ) -> Initialized<'ir, B> {
+    if let Some(options) = isa_config.execution_limits.as_ref().and_then(|limits| limits.region_options.as_ref()) {
+        options.configure();
+    }
     insert_monomorphize(arch);
     insert_primops(arch, &symtab, mode, isa_config);
 

@@ -150,6 +150,115 @@ mod tests {
     }
 
     #[test]
+    fn old_cache_filters_exception_values_and_keeps_facts_aligned() {
+        use super::super::{solve_summary::SolveSummary, target::RV64};
+        use isla_lib::{
+            executor::samples::{SamplePath, Terminal},
+            ir::Val,
+            smt::checkpoint,
+        };
+        let mut symtab = Symtab::new();
+        isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        let internal = symtab.intern("zError_internal_error");
+        let other = symtab.intern("zError_not_implemented");
+        let shared = SharedState::<B64>::empty(symtab);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let paths: Vec<_> = (0..4)
+            .map(|index| ResidentPath {
+                signature: index,
+                checkpoint: checkpoint(&mut solver),
+                path: SamplePath {
+                    terminal: if index == 0 {
+                        Terminal::Normal
+                    } else {
+                        Terminal::SailException { throw_location: "throw.sail:1".into() }
+                    },
+                    pre: Default::default(),
+                    post: Default::default(),
+                    memory: vec![],
+                    memory_guards: Default::default(),
+                    result: Val::Ctor(
+                        if index == 3 { other } else { internal },
+                        Box::new(Val::String("site.sail:42: message".into())),
+                    ),
+                },
+                records: vec![],
+                pure_definitions: vec![],
+            })
+            .collect();
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("output/filter-old-cache-{}", std::process::id()));
+        let directory = root.join("old");
+        let facts: Vec<Facts> = (0..4)
+            .map(|index| Facts { guard_unique: index == 0, post_unique: index == 3, simple_pre: false })
+            .collect();
+        let stages = Stages::new(None, Instant::now());
+        let source = json!({"command":[],"inputs":{},"binary":{"path":"fixture","sha256":"fixture"}});
+        save(
+            &Options {
+                write: Some(directory.clone()),
+                format: vec![Encoding::Json, Encoding::Bin],
+                ..Default::default()
+            },
+            "generic",
+            &paths,
+            &facts.iter().cloned().map(Into::into).collect::<Vec<FastFacts>>(),
+            &shared,
+            &RV64::default(),
+            &SolveSummary { model_exception_paths: 3, ..Default::default() }.json(),
+            &source,
+            &mut Timing::default(),
+            &stages,
+        );
+        // 旧 schema=3 元数据没有过滤字段；路径格式和来源记录完全不改。
+        let mut manifest: Value =
+            serde_json::from_reader(File::open(directory.join("manifest.json")).unwrap()).unwrap();
+        manifest["errors"].as_object_mut().unwrap().remove("filtered-model-exception-paths");
+        manifest["errors"].as_object_mut().unwrap().remove("filtered-model-exception-sites");
+        fs::write(directory.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        for encoding in [Encoding::Json, Encoding::Bin] {
+            let mut loaded = load::<B64>(&directory, encoding, true, &shared, "generic", &stages);
+            let summary = loaded.filter_model_exceptions(&[], &shared);
+            assert_eq!(summary.model_exception_paths, 3);
+            assert_eq!(summary.filtered_model_exception_paths, 0);
+            assert_eq!(loaded.paths.len(), 4);
+            assert_eq!(loaded.facts, facts);
+            let mut loaded = load::<B64>(&directory, encoding, true, &shared, "generic", &stages);
+            let summary = loaded.filter_model_exceptions(&["Error_internal_error".into()], &shared);
+            assert_eq!(summary.model_exception_paths, 1);
+            assert_eq!(summary.filtered_model_exception_paths, 2);
+            assert_eq!(summary.filtered_model_exception_sites.values().copied().collect::<Vec<_>>(), vec![2]);
+            assert!(summary.filtered_model_exception_sites.keys().next().unwrap().contains("site.sail:42: message"));
+            assert_eq!(loaded.path_signatures, vec![0, 3]);
+            assert_eq!(loaded.paths.iter().map(|path| path.signature).collect::<Vec<_>>(), vec![0, 3]);
+            assert_eq!(loaded.facts, vec![facts[0].clone(), facts[3].clone()]);
+            assert_eq!(loaded.manifest.path_signatures, vec![0, 1, 2, 3], "保留原始缓存来源记录");
+            let new_directory = root.join(format!("filtered-{encoding:?}"));
+            save(
+                &Options {
+                    write: Some(new_directory.clone()),
+                    format: vec![Encoding::Json, Encoding::Bin],
+                    ..Default::default()
+                },
+                "generic",
+                &loaded.paths,
+                &loaded.facts.iter().cloned().map(Into::into).collect::<Vec<FastFacts>>(),
+                &shared,
+                &RV64::default(),
+                &summary.json(),
+                &source,
+                &mut Timing::default(),
+                &stages,
+            );
+            let mut roundtrip = load::<B64>(&new_directory, encoding, true, &shared, "generic", &stages);
+            let restored = roundtrip.filter_model_exceptions(&["Error_internal_error".into()], &shared);
+            assert_eq!(restored.json(), summary.json(), "重新读取不重复累计已过滤路径");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn 双编码_完整快照_target_与文件损坏检查() {
         use super::super::target::RV64;
         use isla_lib::{
@@ -410,6 +519,10 @@ pub struct ExplorationSummary {
     pub smt_timeouts: u64,
     pub unfinished_paths: u64,
     pub model_exception_paths: u64,
+    #[serde(default)]
+    pub filtered_model_exception_paths: u64,
+    #[serde(default)]
+    pub filtered_model_exception_sites: std::collections::BTreeMap<String, u64>,
     pub assertion_filtered_paths: u64,
     pub omitted_cases: u64,
     pub model_query_timeouts: u64,
@@ -462,10 +575,38 @@ pub struct Timing {
     pub unshared_segments: u64,
 }
 pub struct Loaded<B: BV> {
+    /// 当前策略下保留的路径清单；manifest 继续保留缓存原始来源记录。
+    pub path_signatures: Vec<u64>,
     pub paths: Vec<ResidentPath<B>>,
     pub facts: Vec<Facts>,
     pub manifest: Manifest<B>,
     pub timing: Timing,
+}
+impl<B: BV> Loaded<B> {
+    pub(super) fn filter_model_exceptions(
+        &mut self,
+        names: &[String],
+        shared: &SharedState<B>,
+    ) -> super::solve_summary::SolveSummary {
+        let mut summary = restored_summary(&self.manifest.errors);
+        assert_eq!(self.paths.len(), self.facts.len(), "缓存路径与分析结果数量不同");
+        let mut facts = std::mem::take(&mut self.facts).into_iter();
+        self.paths.retain(|path| {
+            let fact = facts.next().expect("缓存路径缺少分析结果");
+            if matches!(path.path.terminal, isla_lib::executor::samples::Terminal::SailException { .. }) {
+                if let Some(site) = super::model_exception::filtered_site(names, &path.path.result, shared) {
+                    summary.model_exception_paths =
+                        summary.model_exception_paths.checked_sub(1).expect("缓存异常终态计数不足");
+                    summary.record_filtered_model_exception(site);
+                    return false;
+                }
+            }
+            self.facts.push(fact);
+            true
+        });
+        self.path_signatures = self.paths.iter().map(|path| path.signature).collect();
+        summary
+    }
 }
 
 fn check_envelope<T>(envelope: &Envelope<T>, file: &DataFile, batch: &str) {
@@ -685,7 +826,7 @@ pub fn load<B: BV>(
         timing.rebuild_seconds,
         json!({"dto_equal":true,"paths":paths.len(),"segments":segments.len()}),
     );
-    Loaded { paths: restored_paths, facts, manifest, timing }
+    Loaded { path_signatures: manifest.path_signatures.clone(), paths: restored_paths, facts, manifest, timing }
 }
 
 pub fn restore_target<B: BV>(manifest: &Manifest<B>, target: &mut dyn Target<B>) {
@@ -871,6 +1012,12 @@ pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_sum
         smt_timeouts: field(summary.smt_timeouts),
         unfinished_paths: field(summary.unfinished_paths),
         model_exception_paths: field(summary.model_exception_paths),
+        filtered_model_exception_paths: field(summary.filtered_model_exception_paths),
+        filtered_model_exception_sites: summary
+            .filtered_model_exception_sites
+            .iter()
+            .map(|(site, count)| (site.clone(), field(*count)))
+            .collect(),
         assertion_filtered_paths: field(summary.assertion_filtered_paths),
         omitted_cases: field(summary.omitted_cases),
         model_query_timeouts: field(summary.model_query_timeouts),

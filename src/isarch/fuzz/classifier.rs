@@ -137,11 +137,7 @@ pub fn run<B: BV>(
     }
     let facts_started = Instant::now();
     let facts = if let Some(loaded) = &cache.loaded {
-        assert_eq!(
-            paths.iter().map(|p| p.signature).collect::<Vec<_>>(),
-            loaded.manifest.path_signatures,
-            "缓存路径顺序变化"
-        );
+        assert_eq!(paths.iter().map(|p| p.signature).collect::<Vec<_>>(), loaded.path_signatures, "缓存路径顺序变化");
         if cache.options.recompute_facts {
             let recomputed = crate::isarch::path_cache::analyze(&paths, &mut cache_timing);
             let verified =

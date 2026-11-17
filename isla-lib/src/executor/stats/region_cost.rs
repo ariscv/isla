@@ -1,7 +1,7 @@
 //! 默认关闭的每轮互斥成本分账；不参与执行决策。
 
 use std::cell::RefCell;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,8 +70,7 @@ pub(crate) fn enabled() -> bool {
     if let Some(value) = TEST_ENABLED.with(std::cell::Cell::get) {
         return value;
     }
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_ROUND_COST").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().probe_round_cost
 }
 pub(crate) struct Scope {
     previous: Option<Category>,

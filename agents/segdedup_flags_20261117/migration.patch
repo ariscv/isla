@@ -1,0 +1,769 @@
+--- a/README.md
++++ b/README.md
+@@ -782,3 +782,15 @@
+ 
+ 
+ 路径缓存现使用 schema 3，旧 schema 1/2 明确拒绝读取。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。
++
++### 分段合并的可选配置
++
++分段去重线的候选及诊断使用 `[execution_limits.region_options]` 或对应 CLI 参数，默认全部关闭；布尔参数使用 `=true`／`=false`，CLI 覆盖 TOML。例如：
++
++```toml
++[execution_limits.region_options]
++defer_exit_check = true
++witness_eval = true
++```
++
++运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除；延迟 Z3 作用域候选不在此范围内。
+--- a/isla-lib/src/config.rs
++++ b/isla-lib/src/config.rs
+@@ -1552,8 +1552,13 @@
+     }
+ }
+ 
++pub mod region_options;
++pub use region_options::RegionOptions;
++
+ #[derive(Debug, Clone, Default, PartialEq)]
+ pub struct ExecutionLimitsConfig {
++    /// 区域候选与诊断选项；未配置时保持原默认行为。
++    pub region_options: Option<RegionOptions>,
+     pub strict: bool,
+     pub ir_sha256: Option<String>,
+     pub enabled: Option<bool>,
+@@ -1871,6 +1876,7 @@
+             "merge_policy",
+             "merge_enumeration",
+             "case_quota",
++            "region_options",
+             "filter_model_exceptions",
+         ],
+     )?;
+@@ -2170,7 +2176,18 @@
+             .collect::<Result<Vec<_>, _>>()?,
+     };
+ 
++    let region_options = table
++        .get("region_options")
++        .map(|value| {
++            let options: RegionOptions =
++                value.clone().try_into().map_err(|e| format!("execution_limits.region_options: {e}"))?;
++            options.validate()?;
++            Ok::<_, String>(options)
++        })
++        .transpose()?;
++
+     Ok(Some(ExecutionLimitsConfig {
++        region_options,
+         strict,
+         ir_sha256,
+         enabled,
+@@ -2661,6 +2678,30 @@
+     }
+ 
+     #[test]
++    fn region_options_toml_accepts_switches_and_limits() {
++        assert!(merge_config(
++            "[execution_limits.region_options]\ndefer_exit_check=true\nwitness_eval=true\nbool_proof_rlimit=1"
++        )
++        .is_ok());
++        assert!(merge_config("[execution_limits.region_options]\nquery_dump_sites=['f@1']\nquery_dump_dir='queries'\nsame_context_sites=['f@1']").is_ok());
++    }
++
++    #[test]
++    fn region_options_toml_rejects_invalid_values() {
++        for field in [
++            "defer_exit_check=1",
++            "bool_proof_rlimit=-1",
++            "bool_proof_rlimit=4294967296",
++            "query_dump_sites='f@1'",
++            "unknown=true",
++            "same_context_sites=['a','b','c']",
++            "query_dump_sites=['f@1']",
++        ] {
++            assert!(merge_config(&format!("[execution_limits.region_options]\n{field}")).is_err(), "{field}");
++        }
++    }
++
++    #[test]
+     fn model_exception_filter_config_accepts_constructor_list() {
+         assert!(merge_config(
+             "[execution_limits]\nfilter_model_exceptions=['Error_internal_error','Error_reserved_behavior']"
+--- /dev/null
++++ b/isla-lib/src/config/region_options.rs
+@@ -0,0 +1,83 @@
++//! 分段合并候选与只读诊断；执行前确定，进程内保持不变。
++use serde::Deserialize;
++use std::path::PathBuf;
++use std::sync::OnceLock;
++
++#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
++#[serde(default, deny_unknown_fields)]
++pub struct RegionOptions {
++    /// 延迟区域出口检查；默认关闭。
++    pub defer_exit_check: bool,
++    /// 完整前提见证求值；默认关闭。
++    pub witness_eval: bool,
++    /// 见证影子诊断；默认关闭。
++    pub witness_shadow: bool,
++    /// 局部见证补全影子诊断；默认关闭。
++    pub witness_local_shadow: bool,
++    /// 迭代边界前缀固化；默认关闭。
++    pub prefix_compact: bool,
++    /// 可选布尔证明资源统计；默认关闭。
++    pub bool_proof_profile: bool,
++    /// 区域步数和查询进度诊断；默认关闭。
++    pub progress: bool,
++    /// 原生查询快照；默认关闭。
++    pub native_snapshot: bool,
++    /// 有界函数调用统计；默认关闭。
++    pub call_census: bool,
++    /// 逐轮成本分账；默认关闭。
++    pub probe_round_cost: bool,
++    /// 有界逐查询计时；默认关闭。
++    pub probe_query_timings: bool,
++    /// 可选布尔证明的资源上限；0 表示不限，不限制路径判定。
++    pub bool_proof_rlimit: u32,
++    pub query_dump_sites: Vec<String>,
++    pub same_context_sites: Vec<String>,
++    pub query_dump_dir: Option<PathBuf>,
++    pub obligation_dump_dir: Option<PathBuf>,
++}
++
++static OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
++static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
++
++impl RegionOptions {
++    pub fn validate(&self) -> Result<(), String> {
++        if self.same_context_sites.len() > 2 {
++            return Err("same_context_sites 最多选择两个位置".into());
++        }
++        for site in self.query_dump_sites.iter().chain(&self.same_context_sites) {
++            if site.is_empty() || site.trim() != site {
++                return Err("诊断位置必须非空且不含首尾空格".into());
++            }
++        }
++        if !self.query_dump_sites.is_empty() && self.query_dump_dir.is_none() {
++            return Err("query_dump_sites 需要 query_dump_dir".into());
++        }
++        for path in [&self.query_dump_dir, &self.obligation_dump_dir].into_iter().flatten() {
++            if path.as_os_str().is_empty() {
++                return Err("诊断导出目录不能为空".into());
++            }
++        }
++        Ok(())
++    }
++
++    /// 沿用 SMT 配置的进程内冻结约定；重复传入相同值可用，更改配置直接终止。
++    pub fn configure(&self) {
++        self.validate().expect("区域配置必须在执行前通过校验");
++        assert_eq!(OPTIONS.get_or_init(|| self.clone()), self, "不能更改已经初始化的区域配置");
++    }
++
++    pub fn current() -> &'static Self {
++        OPTIONS.get().unwrap_or_else(|| DEFAULT_OPTIONS.get_or_init(Self::default))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn region_options_defaults_preserve_disabled_behavior() {
++        assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
++        assert_eq!(RegionOptions::current(), &RegionOptions::default());
++        assert_eq!(RegionOptions::default().bool_proof_rlimit, 0);
++    }
++}
+--- a/isla-lib/src/executor/region_merge.rs
++++ b/isla-lib/src/executor/region_merge.rs
+@@ -543,10 +543,8 @@
+             } else {
+                 let record_start = frame.region_merge_records.len();
+                 let tx = solver.start_transaction();
+-                static DEFER_EXIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-                let defer = solver.region_queries_deferred()
+-                    || *DEFER_EXIT
+-                        .get_or_init(|| std::env::var("ISLA_REGION_DEFER_EXIT_CHECK").is_ok_and(|value| value == "1"));
++                let defer =
++                    solver.region_queries_deferred() || crate::config::RegionOptions::current().defer_exit_check;
+                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
+                     serde_json::json!({
+                     "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),
+--- a/isla-lib/src/executor/stats/call_census.rs
++++ b/isla-lib/src/executor/stats/call_census.rs
+@@ -3,11 +3,9 @@
+ use crate::ir::{Name, Symtab, Val};
+ use serde_json::json;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+-use std::sync::OnceLock;
+ 
+ pub(crate) fn enabled() -> bool {
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_CALL_CENSUS").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().call_census
+ }
+ fn emit(value: serde_json::Value) {
+     static ROWS: AtomicUsize = AtomicUsize::new(0);
+--- a/isla-lib/src/executor/stats/region_cost.rs
++++ b/isla-lib/src/executor/stats/region_cost.rs
+@@ -1,7 +1,7 @@
+ //! 默认关闭的每轮互斥成本分账；不参与执行决策。
+ 
+ use std::cell::RefCell;
+-use std::sync::{Arc, OnceLock};
++use std::sync::Arc;
+ use std::time::Instant;
+ 
+ #[derive(Clone, Copy, PartialEq, Eq)]
+@@ -70,8 +70,7 @@
+     if let Some(value) = TEST_ENABLED.with(std::cell::Cell::get) {
+         return value;
+     }
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_ROUND_COST").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().probe_round_cost
+ }
+ pub(crate) struct Scope {
+     previous: Option<Category>,
+--- a/isla-lib/src/executor/stats/region_progress.rs
++++ b/isla-lib/src/executor/stats/region_progress.rs
+@@ -7,7 +7,6 @@
+ use std::cell::{Cell, RefCell};
+ use std::collections::BTreeMap;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+-use std::sync::OnceLock;
+ use std::time::{Duration, Instant};
+ 
+ #[cfg(test)]
+@@ -17,8 +16,7 @@
+     if let Some(value) = TEST_ENABLED.with(Cell::get) {
+         return value;
+     }
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    cfg!(test) || *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_PROGRESS").as_deref() == Ok("1"))
++    cfg!(test) || crate::config::RegionOptions::current().progress
+ }
+ // 诊断身份独立于执行侧访问作用域，开关诊断不改变执行编号。
+ static NEXT_INVOCATION: AtomicUsize = AtomicUsize::new(1);
+@@ -91,7 +89,7 @@
+     if !enabled() || FOOTPRINT_SAMPLES.load(Ordering::Relaxed) >= 4096 {
+         return false;
+     }
+-    // 普通回归不做昂贵的AST普查；生产仍只由同一个ISLA_REGION_PROGRESS开关启用。
++    // 普通回归不做昂贵的AST普查；生产仍只由同一个 region-progress 配置开关启用。
+     #[cfg(test)]
+     if !TEST_ENABLED.with(|flag| flag.get() == Some(true)) {
+         return false;
+@@ -408,10 +406,10 @@
+ 
+ /// 由外部指定位置及轮次的单调用有界导出；不改变执行或查询策略。
+ pub(crate) fn query_dump_point() -> Option<Value> {
+-    static SITES: OnceLock<Option<Vec<String>>> = OnceLock::new();
+-    let sites = SITES
+-        .get_or_init(|| std::env::var("ISLA_QUERY_DUMP_SITES").ok().map(|s| s.split(',').map(str::to_owned).collect()));
+-    let sites = sites.as_ref()?;
++    let sites = &crate::config::RegionOptions::current().query_dump_sites;
++    if sites.is_empty() {
++        return None;
++    }
+     ROOT.with(|root| {
+         let root = root.borrow();
+         let p = root.as_ref()?;
+--- a/isla-lib/src/executor/tests/region_merge_tests.rs
++++ b/isla-lib/src/executor/tests/region_merge_tests.rs
+@@ -4697,8 +4697,7 @@
+                     "executor::tests::region_merge_tests::deferred_exit_merge_preserves_relation_and_dead_guard",
+                     "--nocapture",
+                 ])
+-                .env(CHILD, "1")
+-                .env("ISLA_REGION_DEFER_EXIT_CHECK", enabled)
++                .env(CHILD, enabled)
+                 .output()
+                 .unwrap();
+             assert!(
+@@ -4710,6 +4709,8 @@
+         }
+         return;
+     }
++    crate::config::RegionOptions { defer_exit_check: std::env::var(CHILD).unwrap() == "1", ..Default::default() }
++        .configure();
+     let shared = empty_shared_state();
+     // 内层否定条件与入口条件矛盾，其返回值必须永远不能被观察到。
+     let program = vec![
+@@ -4737,7 +4738,6 @@
+                 "--nocapture",
+             ])
+             .env(CHILD, "1")
+-            .env("ISLA_REGION_DEFER_EXIT_CHECK", "1")
+             .output()
+             .unwrap();
+         assert!(
+@@ -4748,6 +4748,7 @@
+         );
+         return;
+     }
++    crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+     let mut shared = empty_shared_state();
+     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+     let tmp = test_name(1900);
+@@ -4793,16 +4794,16 @@
+     assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
+ }
+ 
+-// 环境开关按进程冻结；每项回归独立子进程，不污染并行区域套件。
++// 区域配置按进程冻结；每项回归独立子进程，不污染并行区域套件。
+ fn dead_arm_candidate_child(test: &str) -> bool {
+     const CHILD: &str = "ISLA_DEAD_ARM_TEST_CHILD";
+     if std::env::var_os(CHILD).is_some() {
++        crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+         return true;
+     }
+     let output = std::process::Command::new(std::env::current_exe().unwrap())
+         .args(["--exact", &format!("executor::tests::region_merge_tests::{test}"), "--nocapture"])
+         .env(CHILD, "1")
+-        .env("ISLA_REGION_DEFER_EXIT_CHECK", "1")
+         .output()
+         .unwrap();
+     assert!(
+--- a/isla-lib/src/init.rs
++++ b/isla-lib/src/init.rs
+@@ -222,6 +222,9 @@
+     mode: AssertionMode,
+     use_model_register_init: bool,
+ ) -> Initialized<'ir, B> {
++    if let Some(options) = isa_config.execution_limits.as_ref().and_then(|limits| limits.region_options.as_ref()) {
++        options.configure();
++    }
+     insert_monomorphize(arch);
+     insert_primops(arch, &symtab, mode, isa_config);
+ 
+--- a/isla-lib/src/smt/deferred_assertions.rs
++++ b/isla-lib/src/smt/deferred_assertions.rs
+@@ -195,7 +195,7 @@
+         let check_seconds = check_started.elapsed().as_secs_f64();
+         // 仅显式诊断开关导出少量小检查；旧日志没有这些dump，不能冒充旧查询重放。
+         if matches!(result, Sat) && state.obligations.len() <= 8 {
+-            if let Some(directory) = std::env::var_os("ISLA_OBLIGATION_DUMP_DIR") {
++            if let Some(directory) = &crate::config::RegionOptions::current().obligation_dump_dir {
+                 static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                 let ordinal = DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                 if ordinal < 4 {
+--- a/isla-lib/src/smt/dump.rs
++++ b/isla-lib/src/smt/dump.rs
+@@ -337,7 +337,8 @@
+ impl<'ctx, B: BV> Solver<'ctx, B> {
+     pub(super) fn diagnostic_query_dump(&self, exp: &Exp<Sym>) -> Option<serde_json::Value> {
+         let mut point = crate::executor::stats::region_progress::query_dump_point()?;
+-        let directory = std::env::var_os("ISLA_QUERY_DUMP_DIR").expect("指定导出位置时必须指定数据目录");
++        let directory =
++            crate::config::RegionOptions::current().query_dump_dir.as_ref().expect("指定导出位置时必须指定数据目录");
+         std::fs::create_dir_all(&directory).expect("创建查询导出目录失败");
+         let filename = format!(
+             "round-{}-{}-query-{}.smt2",
+@@ -356,17 +357,8 @@
+ 
+ /// 默认关闭；只在已经选中的导出点做一次同Context对照，不参与执行决策。
+ pub(super) fn wants_same_context_pair(point: &serde_json::Value) -> bool {
+-    use std::sync::{
+-        atomic::{AtomicUsize, Ordering},
+-        OnceLock,
+-    };
+-    static SITES: OnceLock<Option<Vec<String>>> = OnceLock::new();
+-    let sites = SITES.get_or_init(|| {
+-        std::env::var("ISLA_SAME_CONTEXT_SITES").ok().map(|s| s.split(',').map(str::to_owned).collect())
+-    });
+-    let Some(sites) = sites.as_ref() else {
+-        return false;
+-    };
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    let sites = &crate::config::RegionOptions::current().same_context_sites;
+     let Some(index) = sites.iter().position(|s| Some(s.as_str()) == point["site"].as_str()) else {
+         return false;
+     };
+--- a/isla-lib/src/smt/proof_budget.rs
++++ b/isla-lib/src/smt/proof_budget.rs
+@@ -2,18 +2,11 @@
+ use super::*;
+ 
+ pub(super) fn limit() -> Option<u32> {
+-    static LIMIT: OnceLock<u32> = OnceLock::new();
+-    let value = *LIMIT.get_or_init(|| {
+-        std::env::var("ISLA_REGION_BOOL_PROOF_RLIMIT")
+-            .unwrap_or_else(|_| "0".into())
+-            .parse()
+-            .expect("布尔证明rlimit必须为非负32位整数")
+-    });
++    let value = crate::config::RegionOptions::current().bool_proof_rlimit;
+     (value != 0).then_some(value)
+ }
+ fn profiling() -> bool {
+-    static PROFILE: OnceLock<bool> = OnceLock::new();
+-    *PROFILE.get_or_init(|| std::env::var("ISLA_REGION_BOOL_PROOF_PROFILE").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().bool_proof_profile
+ }
+ unsafe fn resource_count(ctx: &Context, solver: Z3_solver) -> Option<u64> {
+     let stats = Z3_solver_get_statistics(ctx.z3_ctx, solver);
+--- a/isla-lib/src/smt/query.rs
++++ b/isla-lib/src/smt/query.rs
+@@ -104,9 +104,7 @@
+         let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
+         // 实验性的原生快照边界：同一完整公式在首次check前批量装入，不预先push。
+         // 只改变求解调用形态；结果及模型仍须满足全部已发布/缓冲/活动臂前提。
+-        static NATIVE_SNAPSHOT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-        let native_snapshot = snapshot_requested
+-            && *NATIVE_SNAPSHOT.get_or_init(|| std::env::var("ISLA_REGION_NATIVE_SNAPSHOT").as_deref() == Ok("1"));
++        let native_snapshot = snapshot_requested && crate::config::RegionOptions::current().native_snapshot;
+         if config.tactic == Tactic::Default
+             && !native_snapshot
+             && (snapshot_requested || self.floating_point_seen.get())
+@@ -372,7 +370,7 @@
+         ) {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_BOOL_PROOF_RLIMIT", "1");
++        crate::config::RegionOptions { bool_proof_rlimit: 1, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let ctx = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&ctx);
+@@ -403,7 +401,7 @@
+         if !default_tactic_child("smt::query::tests::boolean_proof_rlimit_unknown_keeps_exact_symbolic_relation") {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_BOOL_PROOF_RLIMIT", "1");
++        crate::config::RegionOptions { bool_proof_rlimit: 1, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let ctx = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&ctx);
+@@ -433,7 +431,7 @@
+         if !default_tactic_child("smt::query::tests::witness_native_sat_refreshes_pool_after_fast_miss") {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
++        crate::config::RegionOptions { witness_eval: true, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let ctx = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&ctx);
+@@ -464,7 +462,7 @@
+         ) {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
++        crate::config::RegionOptions { witness_eval: true, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let context = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&context);
+@@ -493,7 +491,7 @@
+         if !default_tactic_child("smt::query::tests::witness_eval_rechecks_current_assertions_after_symbol_rebinding") {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_WITNESS_EVAL", "1");
++        crate::config::RegionOptions { witness_eval: true, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let context = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&context);
+@@ -524,7 +522,7 @@
+         if !default_tactic_child("smt::query::tests::region_prefix_compaction_keeps_full_model_and_bounds_scopes") {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_PREFIX_COMPACT", "1");
++        crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let context = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&context);
+@@ -572,7 +570,7 @@
+         ) {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_PREFIX_COMPACT", "1");
++        crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let context = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&context);
+@@ -658,7 +656,7 @@
+         {
+             return;
+         }
+-        std::env::set_var("ISLA_REGION_NATIVE_SNAPSHOT", "1");
++        crate::config::RegionOptions { native_snapshot: true, ..Default::default() }.configure();
+         configure_tastic(Tactic::Default);
+         let context = Context::new(Config::new());
+         let mut solver = Solver::<B64>::new(&context);
+@@ -702,8 +700,7 @@
+ }
+ 
+ fn prefix_compaction_enabled() -> bool {
+-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_PREFIX_COMPACT").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().prefix_compact
+ }
+ 
+ impl<'ctx, B: BV> Solver<'ctx, B> {
+--- a/isla-lib/src/smt/witness_shadow.rs
++++ b/isla-lib/src/smt/witness_shadow.rs
+@@ -383,16 +383,13 @@
+     shadow_enabled() || fast_enabled() || local_shadow_enabled()
+ }
+ fn fast_enabled() -> bool {
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_EVAL").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().witness_eval
+ }
+ fn shadow_enabled() -> bool {
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_SHADOW").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().witness_shadow
+ }
+ fn local_shadow_enabled() -> bool {
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_LOCAL_SHADOW").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().witness_local_shadow
+ }
+ struct LocalSolver<'ctx> {
+     ctx: &'ctx Context,
+--- a/isla-lib/src/smt/z3_timeout.rs
++++ b/isla-lib/src/smt/z3_timeout.rs
+@@ -81,8 +81,7 @@
+ 
+ /// 有界短探针逐查询记录；开关关闭时不计算事件、时钟或快照。
+ pub(crate) fn probe_query_timings_enabled() -> bool {
+-    static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_QUERY_TIMINGS").as_deref() == Ok("1"))
++    crate::config::RegionOptions::current().probe_query_timings
+ }
+ pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
+     if !probe_query_timings_enabled() {
+--- a/specs/isarch-cli.md
++++ b/specs/isarch-cli.md
+@@ -415,3 +415,43 @@
+ `all_smt` 记录全进程已返回的受保护Z3调用，`outside_smt` 记录不在区域尝试内的调用；真实求解和模型取值分开，已有模型命中／恒值化简不增加真实查询数。时间是各执行线程的墙钟累计，包含等待和调度，不能当进程CPU时间或直接与进程墙钟相加。周期中尚在执行的区域不进入结束尝试聚合，已返回的内部SMT已进入 `all_smt`，由 `in_flight` 明示；全部尝试结束时，根SMT累计加区域外SMT等于全进程SMT，独占累计等于根累计。位置键另限4096个、每键1024字节，溢出计入 `other_sites`，结果总表不丢计数。关闭时不取时钟、不访问计时线程局部栈、不分配计时表或取计时锁，仅检查已有诊断开关。
+ 
+ 区域行的均值以尝试数为分母；`all_smt`／`outside_smt` 的 `count` 是全部已返回受保护Z3调用数（含模型取值），相应均值以该数为分母。单次真实求解的均值应按 `smt_seconds.sum / queries.sum` 计算；模型取值同理。
++
++## 分段合并候选与诊断配置
++
++这些选项放在主配置或 `--execution-limits-config` 文件的 `[execution_limits.region_options]` 表中。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。所有选项默认保持原执行行为，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
++
++| TOML 字段 | CLI 参数 | 默认值 | 用途 |
++| --- | --- | --- | --- |
++| `defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
++| `witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
++| `witness_shadow` | `--region-witness-shadow=true/false` | `false` | 见证影子诊断 |
++| `witness_local_shadow` | `--region-witness-local-shadow=true/false` | `false` | 局部见证补全影子诊断 |
++| `prefix_compact` | `--region-prefix-compact=true/false` | `false` | 迭代边界前缀固化 |
++| `bool_proof_profile` | `--region-bool-proof-profile=true/false` | `false` | 可选布尔证明资源统计 |
++| `progress` | `--region-progress=true/false` | `false` | 区域步数和查询进度诊断 |
++| `native_snapshot` | `--region-native-snapshot=true/false` | `false` | 原生查询快照 |
++| `call_census` | `--call-census=true/false` | `false` | 有界函数调用统计 |
++| `probe_round_cost` | `--probe-round-cost=true/false` | `false` | 逐轮成本分账 |
++| `probe_query_timings` | `--probe-query-timings=true/false` | `false` | 有界逐查询计时 |
++| `bool_proof_rlimit` | `--region-bool-proof-rlimit=<u32>` | `0` | 可选布尔证明资源上限；0 不限，路径可达性判定不受此上限影响 |
++| `query_dump_sites` | `--query-dump-sites=f@1,g@2` | `[]` | 按已有位置字符串选取有界查询导出点 |
++| `same_context_sites` | `--same-context-sites=f@1,g@2` | `[]` | 最多两个同 Context 配对位置 |
++| `query_dump_dir` | `--query-dump-dir=<path>` | 未配置 | 查询 SMT2 导出目录；配置 query_dump_sites 时必填 |
++| `obligation_dump_dir` | `--obligation-dump-dir=<path>` | 未配置 | 断言义务诊断目录 |
++
++```toml
++[execution_limits.region_options]
++defer_exit_check = true
++witness_eval = true
++progress = false
++```
++
++```bash
++isarch -A model.ir -C scenario.toml -T 32 --path-merging \
++  --region-progress=true --region-witness-eval=false \
++  solve-state --clause=CLAUSE
++```
++
++位置数组通过 CLI 以逗号分隔，传空串可清空，例如 `--query-dump-sites=`。非布尔开关值、负数／超范围 u32、空导出目录、未知 TOML 字段、超过两个配对位置或缺少必需导出目录均报错。位置名称沿用诊断原有格式，不增加模型或函数特判。
++
++配置在架构初始化前确定，执行期间按进程冻结；同一进程再次初始化架构时只能传入相同选项。诊断仍遵循已有条数／轮次限制。此接口只迁移已有候选和诊断，不包含延迟 Z3 作用域候选，也不改变默认启用策略。
+--- a/src/isarch/mod.rs
++++ b/src/isarch/mod.rs
+@@ -9,6 +9,7 @@
+ pub mod memory_model;
+ mod model_exception;
+ pub mod path_cache;
++pub mod region_options;
+ mod representation;
+ pub mod samples;
+ mod solve_summary;
+--- /dev/null
++++ b/src/isarch/region_options.rs
+@@ -0,0 +1,147 @@
++//! 区域合并候选及诊断的 CLI 配置。
++use isla_lib::config::ExecutionLimitsConfig;
++
++const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
++    ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
++    ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
++    ("witness_shadow", "region-witness-shadow", "见证影子诊断；默认关闭"),
++    ("witness_local_shadow", "region-witness-local-shadow", "局部见证补全影子诊断；默认关闭"),
++    ("prefix_compact", "region-prefix-compact", "迭代边界前缀固化；默认关闭"),
++    ("bool_proof_profile", "region-bool-proof-profile", "可选布尔证明资源统计；默认关闭"),
++    ("progress", "region-progress", "区域步数和查询进度诊断；默认关闭"),
++    ("native_snapshot", "region-native-snapshot", "原生查询快照；默认关闭"),
++    ("call_census", "call-census", "有界函数调用统计；默认关闭"),
++    ("probe_round_cost", "probe-round-cost", "逐轮成本分账；默认关闭"),
++    ("probe_query_timings", "probe-query-timings", "有界逐查询计时；默认关闭"),
++];
++
++pub fn add_cli(opts: &mut getopts::Options) {
++    for (_, flag, help) in BOOL_OPTIONS {
++        opts.optopt("", flag, help, "true|false");
++    }
++    opts.optopt("", "region-bool-proof-rlimit", "可选布尔证明资源上限，0 不限；默认 0", "u32");
++    opts.optopt("", "query-dump-sites", "查询导出位置；逗号分隔，空串清空", "sites");
++    opts.optopt("", "same-context-sites", "同 Context 配对位置，最多两个；空串清空", "sites");
++    opts.optopt("", "query-dump-dir", "查询 SMT2 导出目录", "path");
++    opts.optopt("", "obligation-dump-dir", "断言义务诊断导出目录", "path");
++}
++
++pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
++    let mut options = limits.region_options.clone().unwrap_or_default();
++    let mut changed = false;
++    for (field, flag, _) in BOOL_OPTIONS {
++        if let Some(value) = matches.opt_str(flag) {
++            let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
++            match *field {
++                "defer_exit_check" => options.defer_exit_check = value,
++                "witness_eval" => options.witness_eval = value,
++                "witness_shadow" => options.witness_shadow = value,
++                "witness_local_shadow" => options.witness_local_shadow = value,
++                "prefix_compact" => options.prefix_compact = value,
++                "bool_proof_profile" => options.bool_proof_profile = value,
++                "progress" => options.progress = value,
++                "native_snapshot" => options.native_snapshot = value,
++                "call_census" => options.call_census = value,
++                "probe_round_cost" => options.probe_round_cost = value,
++                "probe_query_timings" => options.probe_query_timings = value,
++                _ => unreachable!("区域 CLI 字段必须登记"),
++            }
++            changed = true;
++        }
++    }
++    if let Some(value) = matches.opt_str("region-bool-proof-rlimit") {
++        options.bool_proof_rlimit = value.parse().map_err(|_| "--region-bool-proof-rlimit 必须是非负32位整数")?;
++        changed = true;
++    }
++    for flag in ["query-dump-sites", "same-context-sites"] {
++        if let Some(value) = matches.opt_str(flag) {
++            let sites = if value.is_empty() { Vec::new() } else { value.split(',').map(str::to_owned).collect() };
++            match flag {
++                "query-dump-sites" => options.query_dump_sites = sites,
++                "same-context-sites" => options.same_context_sites = sites,
++                _ => unreachable!(),
++            }
++            changed = true;
++        }
++    }
++    for flag in ["query-dump-dir", "obligation-dump-dir"] {
++        if let Some(value) = matches.opt_str(flag) {
++            match flag {
++                "query-dump-dir" => options.query_dump_dir = Some(value.into()),
++                "obligation-dump-dir" => options.obligation_dump_dir = Some(value.into()),
++                _ => unreachable!(),
++            }
++            changed = true;
++        }
++    }
++    options.validate()?;
++    if changed {
++        limits.region_options = Some(options);
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use isla_lib::config::{ExecutionLimitsConfig, RegionOptions};
++
++    fn cli(config: &mut ExecutionLimitsConfig, args: &[&str]) -> Result<(), String> {
++        let mut opts = getopts::Options::new();
++        add_cli(&mut opts);
++        apply_cli(&opts.parse(args).map_err(|e| e.to_string())?, config)
++    }
++
++    #[test]
++    fn region_options_cli_defaults_and_boolean_overrides() {
++        let mut limits = ExecutionLimitsConfig::default();
++        cli(&mut limits, &[]).unwrap();
++        assert!(limits.region_options.is_none());
++        for (field, flag, _) in BOOL_OPTIONS {
++            let toml: RegionOptions = toml::from_str(&format!("{field}=true")).unwrap();
++            let mut enabled = ExecutionLimitsConfig::default();
++            cli(&mut enabled, &[&format!("--{flag}=true")]).unwrap();
++            assert_eq!(enabled.region_options, Some(toml.clone()), "{flag}");
++            let mut limits = ExecutionLimitsConfig { region_options: Some(toml), ..Default::default() };
++            cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
++            assert_eq!(limits.region_options, Some(RegionOptions::default()), "{flag}");
++        }
++    }
++
++    #[test]
++    fn region_options_cli_values_override_toml_and_validate() {
++        let mut limits = ExecutionLimitsConfig::default();
++        cli(
++            &mut limits,
++            &[
++                "--region-bool-proof-rlimit=17",
++                "--query-dump-sites=f@1,g@2",
++                "--query-dump-dir=queries",
++                "--same-context-sites=f@1",
++                "--obligation-dump-dir=obligations",
++            ],
++        )
++        .unwrap();
++        let options = limits.region_options.as_ref().unwrap();
++        assert_eq!(options.bool_proof_rlimit, 17);
++        assert_eq!(options.query_dump_sites, ["f@1", "g@2"]);
++        assert_eq!(options.same_context_sites, ["f@1"]);
++        assert_eq!(options.query_dump_dir.as_deref(), Some(std::path::Path::new("queries")));
++        assert_eq!(options.obligation_dump_dir.as_deref(), Some(std::path::Path::new("obligations")));
++        cli(&mut limits, &["--region-bool-proof-rlimit=0", "--query-dump-sites=", "--same-context-sites="]).unwrap();
++        assert_eq!(limits.region_options.as_ref().unwrap().bool_proof_rlimit, 0);
++        assert!(limits.region_options.as_ref().unwrap().query_dump_sites.is_empty());
++        for value in [
++            "--region-defer-exit-check=1",
++            "--region-bool-proof-rlimit=-1",
++            "--region-bool-proof-rlimit=4294967296",
++            "--query-dump-dir=",
++            "--obligation-dump-dir=",
++            "--query-dump-sites=a",
++            "--query-dump-sites=a,,b",
++            "--same-context-sites=a,b,c",
++        ] {
++            assert!(cli(&mut ExecutionLimitsConfig::default(), &[value]).is_err(), "{value}");
++        }
++    }
++}
+--- a/src/isarch_main.rs
++++ b/src/isarch_main.rs
+@@ -429,6 +429,7 @@
+ fn isla_main() -> i32 {
+     let mut opts = opts::common_opts();
+     isarch::path_cache::Options::add_cli(&mut opts);
++    isarch::region_options::add_cli(&mut opts);
+     opts.optmulti(
+         "",
+         "filter-model-exception",
+@@ -619,6 +620,16 @@
+     if matches.opt_present("path-merging") {
+         let mut limits = isa_config.execution_limits.take().unwrap_or_default();
+         limits.path_merging = Some(true);
++        isa_config.execution_limits = Some(limits);
++    }
++
++    let had_limits = isa_config.execution_limits.is_some();
++    let mut limits = isa_config.execution_limits.take().unwrap_or_default();
++    if let Err(error) = isarch::region_options::apply_cli(&matches, &mut limits) {
++        eprintln!("{error}");
++        return 1;
++    }
++    if had_limits || limits != ExecutionLimitsConfig::default() {
+         isa_config.execution_limits = Some(limits);
+     }
+ 

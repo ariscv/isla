@@ -81,8 +81,7 @@ thread_local! {
 
 /// 有界短探针逐查询记录；开关关闭时不计算事件、时钟或快照。
 pub(crate) fn probe_query_timings_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_PROBE_QUERY_TIMINGS").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().probe_query_timings
 }
 pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
     if !probe_query_timings_enabled() {

@@ -195,7 +195,7 @@ impl<B: BV> Solver<'_, B> {
         let check_seconds = check_started.elapsed().as_secs_f64();
         // 仅显式诊断开关导出少量小检查；旧日志没有这些dump，不能冒充旧查询重放。
         if matches!(result, Sat) && state.obligations.len() <= 8 {
-            if let Some(directory) = std::env::var_os("ISLA_OBLIGATION_DUMP_DIR") {
+            if let Some(directory) = &crate::config::RegionOptions::current().obligation_dump_dir {
                 static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let ordinal = DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if ordinal < 4 {

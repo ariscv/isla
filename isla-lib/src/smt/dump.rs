@@ -337,7 +337,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(super) fn diagnostic_query_dump(&self, exp: &Exp<Sym>) -> Option<serde_json::Value> {
         let mut point = crate::executor::stats::region_progress::query_dump_point()?;
-        let directory = std::env::var_os("ISLA_QUERY_DUMP_DIR").expect("指定导出位置时必须指定数据目录");
+        let directory =
+            crate::config::RegionOptions::current().query_dump_dir.as_ref().expect("指定导出位置时必须指定数据目录");
         std::fs::create_dir_all(&directory).expect("创建查询导出目录失败");
         let filename = format!(
             "round-{}-{}-query-{}.smt2",
@@ -356,17 +357,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
 /// 默认关闭；只在已经选中的导出点做一次同Context对照，不参与执行决策。
 pub(super) fn wants_same_context_pair(point: &serde_json::Value) -> bool {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        OnceLock,
-    };
-    static SITES: OnceLock<Option<Vec<String>>> = OnceLock::new();
-    let sites = SITES.get_or_init(|| {
-        std::env::var("ISLA_SAME_CONTEXT_SITES").ok().map(|s| s.split(',').map(str::to_owned).collect())
-    });
-    let Some(sites) = sites.as_ref() else {
-        return false;
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let sites = &crate::config::RegionOptions::current().same_context_sites;
     let Some(index) = sites.iter().position(|s| Some(s.as_str()) == point["site"].as_str()) else {
         return false;
     };

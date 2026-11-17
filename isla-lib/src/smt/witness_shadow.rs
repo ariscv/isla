@@ -383,16 +383,13 @@ pub(super) fn enabled() -> bool {
     shadow_enabled() || fast_enabled() || local_shadow_enabled()
 }
 fn fast_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_EVAL").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().witness_eval
 }
 fn shadow_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_SHADOW").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().witness_shadow
 }
 fn local_shadow_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_WITNESS_LOCAL_SHADOW").as_deref() == Ok("1"))
+    crate::config::RegionOptions::current().witness_local_shadow
 }
 struct LocalSolver<'ctx> {
     ctx: &'ctx Context,

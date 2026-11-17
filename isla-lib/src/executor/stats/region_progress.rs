@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -17,8 +16,7 @@ pub(crate) fn enabled() -> bool {
     if let Some(value) = TEST_ENABLED.with(Cell::get) {
         return value;
     }
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    cfg!(test) || *ENABLED.get_or_init(|| std::env::var("ISLA_REGION_PROGRESS").as_deref() == Ok("1"))
+    cfg!(test) || crate::config::RegionOptions::current().progress
 }
 // 诊断身份独立于执行侧访问作用域，开关诊断不改变执行编号。
 static NEXT_INVOCATION: AtomicUsize = AtomicUsize::new(1);
@@ -91,7 +89,7 @@ pub(crate) fn needs_footprint() -> bool {
     if !enabled() || FOOTPRINT_SAMPLES.load(Ordering::Relaxed) >= 4096 {
         return false;
     }
-    // 普通回归不做昂贵的AST普查；生产仍只由同一个ISLA_REGION_PROGRESS开关启用。
+    // 普通回归不做昂贵的AST普查；生产仍只由同一个 region-progress 配置开关启用。
     #[cfg(test)]
     if !TEST_ENABLED.with(|flag| flag.get() == Some(true)) {
         return false;
@@ -408,10 +406,10 @@ fn region_progress_disabled_has_no_collection_or_call_id_allocation() {
 
 /// 由外部指定位置及轮次的单调用有界导出；不改变执行或查询策略。
 pub(crate) fn query_dump_point() -> Option<Value> {
-    static SITES: OnceLock<Option<Vec<String>>> = OnceLock::new();
-    let sites = SITES
-        .get_or_init(|| std::env::var("ISLA_QUERY_DUMP_SITES").ok().map(|s| s.split(',').map(str::to_owned).collect()));
-    let sites = sites.as_ref()?;
+    let sites = &crate::config::RegionOptions::current().query_dump_sites;
+    if sites.is_empty() {
+        return None;
+    }
     ROOT.with(|root| {
         let root = root.borrow();
         let p = root.as_ref()?;

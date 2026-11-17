@@ -543,10 +543,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             } else {
                 let record_start = frame.region_merge_records.len();
                 let tx = solver.start_transaction();
-                static DEFER_EXIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                let defer = solver.region_queries_deferred()
-                    || *DEFER_EXIT
-                        .get_or_init(|| std::env::var("ISLA_REGION_DEFER_EXIT_CHECK").is_ok_and(|value| value == "1"));
+                let defer =
+                    solver.region_queries_deferred() || crate::config::RegionOptions::current().defer_exit_check;
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
                     serde_json::json!({
                     "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),

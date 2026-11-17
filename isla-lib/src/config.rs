@@ -1552,8 +1552,13 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
     }
 }
 
+pub mod region_options;
+pub use region_options::RegionOptions;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionLimitsConfig {
+    /// 区域候选与诊断选项；未配置时保持原默认行为。
+    pub region_options: Option<RegionOptions>,
     pub strict: bool,
     pub ir_sha256: Option<String>,
     pub enabled: Option<bool>,
@@ -1574,6 +1579,8 @@ pub struct ExecutionLimitsConfig {
     pub merge_enumeration: Option<MergeEnumerationConfig>,
     /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
     pub case_quota: Option<BTreeMap<String, u32>>,
+    /// isarch 在收集完成终态时过滤的 Sail 异常构造子；空集合保持默认行为。
+    pub filter_model_exceptions: Vec<String>,
 }
 
 /// 合并路径结束后的两级投影枚举；上限只限制输出，不改变执行路径条件。
@@ -1869,6 +1876,8 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "merge_policy",
             "merge_enumeration",
             "case_quota",
+            "region_options",
+            "filter_model_exceptions",
         ],
     )?;
 
@@ -2152,7 +2161,33 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         })
         .transpose()?;
 
+    let filter_model_exceptions = match table.get("filter_model_exceptions") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| "execution_limits.filter_model_exceptions 必须是构造子名称数组".to_string())?
+            .iter()
+            .map(|name| match name.as_str() {
+                Some(name) if !name.trim().is_empty() && name == name.trim() => Ok(name.to_string()),
+                _ => {
+                    Err("execution_limits.filter_model_exceptions 必须包含非空构造子名称，且不得有首尾空格".to_string())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
+    let region_options = table
+        .get("region_options")
+        .map(|value| {
+            let options: RegionOptions =
+                value.clone().try_into().map_err(|e| format!("execution_limits.region_options: {e}"))?;
+            options.validate()?;
+            Ok::<_, String>(options)
+        })
+        .transpose()?;
+
     Ok(Some(ExecutionLimitsConfig {
+        region_options,
         strict,
         ir_sha256,
         enabled,
@@ -2173,6 +2208,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
         merge_policy,
         merge_enumeration,
         case_quota: case_quota_table(table)?,
+        filter_model_exceptions,
     }))
 }
 
@@ -2639,6 +2675,52 @@ r0 = "0x0000000000000000"
 
     fn merge_config(text: &str) -> Result<ExecutionLimitsConfig, String> {
         get_execution_limits_config(&text.parse::<Value>().unwrap()).map(Option::unwrap)
+    }
+
+    #[test]
+    fn region_options_toml_accepts_switches_and_limits() {
+        assert!(merge_config(
+            "[execution_limits.region_options]\ndefer_exit_check=true\nwitness_eval=true\nbool_proof_rlimit=1"
+        )
+        .is_ok());
+        assert!(merge_config("[execution_limits.region_options]\nquery_dump_sites=['f@1']\nquery_dump_dir='queries'\nsame_context_sites=['f@1']").is_ok());
+    }
+
+    #[test]
+    fn region_options_toml_rejects_invalid_values() {
+        for field in [
+            "defer_exit_check=1",
+            "bool_proof_rlimit=-1",
+            "bool_proof_rlimit=4294967296",
+            "query_dump_sites='f@1'",
+            "unknown=true",
+            "same_context_sites=['a','b','c']",
+            "query_dump_sites=['f@1']",
+        ] {
+            assert!(merge_config(&format!("[execution_limits.region_options]\n{field}")).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn model_exception_filter_config_accepts_constructor_list() {
+        assert!(merge_config(
+            "[execution_limits]\nfilter_model_exceptions=['Error_internal_error','Error_reserved_behavior']"
+        )
+        .is_ok());
+        assert_eq!(
+            merge_config("[execution_limits]\nfilter_model_exceptions=[]").unwrap().filter_model_exceptions,
+            Vec::<String>::new()
+        );
+        assert!(merge_config("[execution_limits]").unwrap().filter_model_exceptions.is_empty());
+        assert_eq!(
+            merge_config("[execution_limits]\nfilter_model_exceptions=['Custom_error']")
+                .unwrap()
+                .filter_model_exceptions,
+            vec!["Custom_error"]
+        );
+        for value in ["true", "'Error_internal_error'", "[1]", "['']"] {
+            assert!(merge_config(&format!("[execution_limits]\nfilter_model_exceptions={value}")).is_err());
+        }
     }
 
     #[test]

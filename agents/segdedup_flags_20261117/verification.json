@@ -1,0 +1,94 @@
+{
+  "source": {
+    "candidate_head": "a286b00ca077f6edaadb9152b600d03eefe216b5",
+    "integrated_isarch": "dbfc6e70d2233ceb4057268a3ab41b17010eac3c",
+    "git_writes_performed": false,
+    "integration": "工作目录应用isarch唯一新增提交，Git merge留给Claude"
+  },
+  "tests": {
+    "baseline-region": "test result: ok. 111 passed; 0 failed; 5 ignored; 0 measured; 920 filtered out; finished in 39.27s",
+    "baseline-dedup": "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 1022 filtered out; finished in 0.16s",
+    "config-red": "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1036 filtered out; finished in 0.00s",
+    "cli-red": "编译失败：迁移API尚未实现",
+    "config-green": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1037 filtered out; finished in 0.00s",
+    "cli-green": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 274 filtered out; finished in 0.00s",
+    "region-green": "test result: ok. 111 passed; 0 failed; 5 ignored; 0 measured; 924 filtered out; finished in 32.22s",
+    "dedup-green": "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 1026 filtered out; finished in 0.13s",
+    "query-green": "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 1008 filtered out; finished in 1.46s",
+    "baseline-isarch-exec": "test result: FAILED. 75 passed; 7 failed; 0 ignored; 0 measured; 188 filtered out; finished in 201.97s",
+    "baseline-isarch-samples": "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 262 filtered out; finished in 0.05s",
+    "baseline-isarch-path_cache": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 264 filtered out; finished in 16.66s",
+    "isarch-exec-green": "test result: FAILED. 76 passed; 7 failed; 0 ignored; 0 measured; 193 filtered out; finished in 196.52s",
+    "isarch-samples-green": "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 268 filtered out; finished in 0.05s",
+    "isarch-path_cache-green": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 269 filtered out; finished in 0.18s"
+  },
+  "default_comparison": {
+    "sample_bytes_equal": true,
+    "bytes": 48948,
+    "sample_rows": 1,
+    "gen_equal": true,
+    "diagnostics_equal": true,
+    "state_domain_equal": true,
+    "expected_integration_summary_additions": {
+      "filtered-model-exception-paths": 0,
+      "filtered-model-exception-sites": {}
+    },
+    "provenance_difference": "仅冻结程序文件名before/after"
+  },
+  "judge": {
+    "path_timeout_seconds": 30,
+    "wall_limit_seconds": 310,
+    "wrapper_limit_seconds": 365,
+    "scheduler_limit_seconds": 420,
+    "threads": 32,
+    "node": "public-Super-Server",
+    "scope_memory_max_bytes": 68719476736,
+    "scope_swap_max_bytes": 0,
+    "process_results": [
+      {
+        "label": "before",
+        "return_code": 0,
+        "elapsed_seconds": 1.7288343629334122
+      },
+      {
+        "label": "after",
+        "return_code": 0,
+        "elapsed_seconds": 2.0288760289549828
+      },
+      {
+        "label": "judge",
+        "return_code": 124,
+        "elapsed_seconds": 310.8837718251161
+      }
+    ],
+    "resident_markers": [
+      "JUDGE_RESIDENT_INPUT"
+    ],
+    "judged_rows": 0,
+    "sample0_rejection_confirmed": false,
+    "sample1_acceptance_confirmed": false,
+    "historical_state_comparison": "未进入resident，没有可比较后态",
+    "peak_rss_gib_sampled": 7.359886169433594,
+    "last_active_tasks": 52,
+    "last_queue": {
+      "age_seconds": 8.474423439,
+      "active_at_census": 32,
+      "tasks": 57,
+      "frame_bytes": 35248332,
+      "checkpoint_bytes": 26483952
+    },
+    "last_resident_paths": 4027,
+    "scope_oom_observed": false
+  },
+  "exit_audit": {
+    "scheduler_state": "finished",
+    "scheduler_outcome": "success",
+    "wrapper_return_code": 0,
+    "execution_confirmed": true,
+    "retrieval": "in_place",
+    "elapsed_seconds": 314.9454852810595,
+    "remaining_group_cleanup": false,
+    "interpretation": "scheduler成功仅表示包装完整收尾，judge子程序124表示墙钟超时",
+    "matching_process_pids": []
+  }
+}

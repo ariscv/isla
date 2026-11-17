@@ -26,6 +26,32 @@ isarch [全局选项] <子命令> [子命令参数]
 | `-g/--graphviz` | Graphviz 输出格式（tree 命令） |
 | `--timeout <n>` | 超时时间（秒） |
 
+## 过滤模型异常终态
+
+`solve-state` 与 `fuzz` 可按 Sail 异常构造子名过滤终态。默认集合为空，行为保持原样。TOML 可放在基础配置或 `--execution-limits-config` 指定的文件中：
+
+```toml
+[execution_limits]
+filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]
+```
+
+对应 CLI 参数可重复：
+
+```sh
+isarch -A model.ir -C model.toml \
+  --filter-model-exception Error_internal_error \
+  --filter-model-exception Error_reserved_behavior \
+  solve-state --clause LOAD
+```
+
+出现任意 `--filter-model-exception` 时，CLI 集合整体覆盖 TOML 集合。名称按解码后的完整构造子名精确匹配；不依据模型名、源码位置或消息关键词过滤。`Error_not_implemented` 只有显式列入集合才会被过滤。没有环境变量入口。
+
+过滤发生在完成终态收集处，早于见证求解、DAG 保存与样本检查。旧缓存读回后按同一策略重判，再交给 DAG 导出、corpus 初始化及 judge；缓存来源记录保持原样，不用文件或二进制哈希决定过滤。源缓存中已经剪掉的路径无法通过关闭开关恢复，需要重新探索。
+
+summary 中 `filtered-model-exception-paths` 记录总数，`filtered-model-exception-sites` 按“构造子＋完整载荷消息”记录次数；原消息里的 `file:line` 保留。stderr 的 `[MODEL_EXCEPTION_FILTER]` 输出同一统计。计数表示实际到达并被过滤的终态，不另做 SAT 查询或对合并守卫类计数。启用过滤后的 `finished` 只针对保留的终态域，不表示模型内部异常不存在。
+
+执行错误、超时、未知 Poison、panic 保留原有失败处理；`AssertionFailure` 仍由原有断言逻辑计数。fuzz 仍要求至少一个保留终态，外部 corpus 仍须完整通过认证；若旧 corpus 包含已排除的异常输入，应从保留路径重新生成。
+
 ## 枚举符号前态
 
 枚举寄存器可以在同一节配置允许成员：
@@ -389,3 +415,43 @@ isarch [原 J1 探索参数] \
 `all_smt` 记录全进程已返回的受保护Z3调用，`outside_smt` 记录不在区域尝试内的调用；真实求解和模型取值分开，已有模型命中／恒值化简不增加真实查询数。时间是各执行线程的墙钟累计，包含等待和调度，不能当进程CPU时间或直接与进程墙钟相加。周期中尚在执行的区域不进入结束尝试聚合，已返回的内部SMT已进入 `all_smt`，由 `in_flight` 明示；全部尝试结束时，根SMT累计加区域外SMT等于全进程SMT，独占累计等于根累计。位置键另限4096个、每键1024字节，溢出计入 `other_sites`，结果总表不丢计数。关闭时不取时钟、不访问计时线程局部栈、不分配计时表或取计时锁，仅检查已有诊断开关。
 
 区域行的均值以尝试数为分母；`all_smt`／`outside_smt` 的 `count` 是全部已返回受保护Z3调用数（含模型取值），相应均值以该数为分母。单次真实求解的均值应按 `smt_seconds.sum / queries.sum` 计算；模型取值同理。
+
+## 分段合并候选与诊断配置
+
+这些选项放在主配置或 `--execution-limits-config` 文件的 `[execution_limits.region_options]` 表中。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。所有选项默认保持原执行行为，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
+
+| TOML 字段 | CLI 参数 | 默认值 | 用途 |
+| --- | --- | --- | --- |
+| `defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
+| `witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
+| `witness_shadow` | `--region-witness-shadow=true/false` | `false` | 见证影子诊断 |
+| `witness_local_shadow` | `--region-witness-local-shadow=true/false` | `false` | 局部见证补全影子诊断 |
+| `prefix_compact` | `--region-prefix-compact=true/false` | `false` | 迭代边界前缀固化 |
+| `bool_proof_profile` | `--region-bool-proof-profile=true/false` | `false` | 可选布尔证明资源统计 |
+| `progress` | `--region-progress=true/false` | `false` | 区域步数和查询进度诊断 |
+| `native_snapshot` | `--region-native-snapshot=true/false` | `false` | 原生查询快照 |
+| `call_census` | `--call-census=true/false` | `false` | 有界函数调用统计 |
+| `probe_round_cost` | `--probe-round-cost=true/false` | `false` | 逐轮成本分账 |
+| `probe_query_timings` | `--probe-query-timings=true/false` | `false` | 有界逐查询计时 |
+| `bool_proof_rlimit` | `--region-bool-proof-rlimit=<u32>` | `0` | 可选布尔证明资源上限；0 不限，路径可达性判定不受此上限影响 |
+| `query_dump_sites` | `--query-dump-sites=f@1,g@2` | `[]` | 按已有位置字符串选取有界查询导出点 |
+| `same_context_sites` | `--same-context-sites=f@1,g@2` | `[]` | 最多两个同 Context 配对位置 |
+| `query_dump_dir` | `--query-dump-dir=<path>` | 未配置 | 查询 SMT2 导出目录；配置 query_dump_sites 时必填 |
+| `obligation_dump_dir` | `--obligation-dump-dir=<path>` | 未配置 | 断言义务诊断目录 |
+
+```toml
+[execution_limits.region_options]
+defer_exit_check = true
+witness_eval = true
+progress = false
+```
+
+```bash
+isarch -A model.ir -C scenario.toml -T 32 --path-merging \
+  --region-progress=true --region-witness-eval=false \
+  solve-state --clause=CLAUSE
+```
+
+位置数组通过 CLI 以逗号分隔，传空串可清空，例如 `--query-dump-sites=`。非布尔开关值、负数／超范围 u32、空导出目录、未知 TOML 字段、超过两个配对位置或缺少必需导出目录均报错。位置名称沿用诊断原有格式，不增加模型或函数特判。
+
+配置在架构初始化前确定，执行期间按进程冻结；同一进程再次初始化架构时只能传入相同选项。诊断仍遵循已有条数／轮次限制。此接口只迁移已有候选和诊断，不包含延迟 Z3 作用域候选，也不改变默认启用策略。
