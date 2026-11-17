@@ -82,11 +82,11 @@ pub struct Record<B> {
     pub single_arm_reads: Vec<GuardedRead<B>>,
     pub memory_reads: Vec<(u64, Exp, Event<B>)>,
 }
-impl<B> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
+impl<B: Clone> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
     fn from(value: crate::executor::RegionMergeRecord<B>) -> Self {
-        let mut value_symbols = value.value_symbols.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        let mut value_symbols = value.value_symbols.iter().map(|s| s.id).collect::<Vec<_>>();
         value_symbols.sort_unstable();
-        let mut input_symbols = value.input_symbols.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        let mut input_symbols = value.input_symbols.iter().map(|s| s.id).collect::<Vec<_>>();
         input_symbols.sort_unstable();
         Self {
             record_id: value.record_id.try_into().unwrap(),
@@ -108,7 +108,8 @@ impl<B> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
             input_symbols,
             single_arm_reads: value
                 .single_arm_reads
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|r| GuardedRead {
                     register: r.register,
                     accessor: r.accessor,
@@ -118,7 +119,8 @@ impl<B> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
                 .collect(),
             memory_reads: value
                 .memory_reads
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|(i, g, e)| (i.try_into().unwrap(), g.into(), e.into()))
                 .collect(),
         }
@@ -141,8 +143,12 @@ impl<B> From<Record<B>> for crate::executor::RegionMergeRecord<B> {
             source_loc: value.source_loc,
             depth: value.depth.try_into().unwrap(),
             dead: value.dead,
-            value_symbols: value.value_symbols.into_iter().map(crate::smt::Sym::from_u32).collect(),
-            input_symbols: value.input_symbols.into_iter().map(crate::smt::Sym::from_u32).collect(),
+            value_symbols: std::sync::Arc::new(
+                value.value_symbols.into_iter().map(crate::smt::Sym::from_u32).collect(),
+            ),
+            input_symbols: std::sync::Arc::new(
+                value.input_symbols.into_iter().map(crate::smt::Sym::from_u32).collect(),
+            ),
             single_arm_reads: value
                 .single_arm_reads
                 .into_iter()

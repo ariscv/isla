@@ -3057,10 +3057,10 @@ mod tests {
             source_loc: loc,
             depth: 0,
             dead: false,
-            value_symbols: HashSet::new(),
-            input_symbols: HashSet::new(),
-            single_arm_reads: vec![],
-            memory_reads: vec![],
+            value_symbols: HashSet::new().into(),
+            input_symbols: HashSet::new().into(),
+            single_arm_reads: vec![].into(),
+            memory_reads: vec![].into(),
         }];
         let ranges = vec![(start.as_u32(), end.as_u32())];
         let memory = if store {
@@ -3114,7 +3114,7 @@ mod tests {
         limits.merge_enumeration.enumeration_threads = 1;
         let state = TaskState::new().with_execution_limits(limits.clone());
         let mut frame = LocalFrame::new(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
-        frame.restore_merge_history((records.clone(), ranges.clone()));
+        frame.restore_merge_history((records.clone().into(), ranges.clone()));
         let expected = Mutex::new(Vec::new());
         let enumeration = frame
             .enumerate_merges_output_with(

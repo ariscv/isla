@@ -1453,7 +1453,7 @@ fn region_merge_nested_single_read_keeps_complete_guard() {
             };
             let exact = smtlib::Exp::And(Box::new(smtlib::Exp::Var(g)), Box::new(smtlib::Exp::Var(h)));
             for record in frame.region_merge_records() {
-                for read in &record.single_arm_reads {
+                for read in record.single_arm_reads.iter() {
                     assert!(
                         solver
                             .check_sat_with(
@@ -2320,7 +2320,7 @@ fn region_merge_f2_pow_before_region_inputs() {
     assert_eq!(merged.len(), 1);
     assert_eq!(
         merged[0].records[0].input_symbols,
-        HashSet::from([Sym { id: 0 }, Sym { id: 1 }]),
+        HashSet::from([Sym { id: 0 }, Sym { id: 1 }]).into(),
         "区域前纯计算也必须展开到原始输入"
     );
     assert_eq!(differential(program, &shared, 2, true), (2, 1));
@@ -2337,7 +2337,7 @@ fn region_merge_f2_pow_before_region_inputs() {
     ];
     let merged = paths(program, &shared, 1, true);
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].records[0].input_symbols, HashSet::from([Sym { id: 0 }, Sym { id: 1 }]));
+    assert_eq!(merged[0].records[0].input_symbols, HashSet::from([Sym { id: 0 }, Sym { id: 1 }]).into());
 }
 
 fn f2_error(case: &str) -> ExecError {
@@ -2676,7 +2676,7 @@ fn merge_enumeration_nested_context_and_fork_inheritance() {
         solver.add_event(event.clone());
     }
     let mut frame = make_frame(vec![Instr::End]);
-    frame.region_merge_records = path.records.clone();
+    frame.region_merge_records = path.records.clone().into();
     let mut restored = make_frame(vec![Instr::End]);
     restored.restore_merge_history(frame.merge_history());
     assert_eq!(restored.region_merge_records().len(), 2);
@@ -2770,10 +2770,10 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         source_loc: info(),
         depth: 1,
         dead: false,
-        value_symbols: HashSet::new(),
-        input_symbols: HashSet::new(),
-        single_arm_reads: vec![],
-        memory_reads: Vec::new(),
+        value_symbols: HashSet::new().into(),
+        input_symbols: HashSet::new().into(),
+        single_arm_reads: vec![].into(),
+        memory_reads: Vec::new().into(),
     });
     let mut rollback_limits = ExecutionLimits::default();
     rollback_limits.merge_enumeration.enabled = true;
@@ -2883,10 +2883,10 @@ fn merge_enumeration_extract_of_derived_symbol() {
         source_loc: info(),
         depth: 1,
         dead: false,
-        value_symbols: HashSet::new(),
-        input_symbols: HashSet::new(),
-        single_arm_reads: vec![],
-        memory_reads: Vec::new(),
+        value_symbols: HashSet::new().into(),
+        input_symbols: HashSet::new().into(),
+        single_arm_reads: vec![].into(),
+        memory_reads: Vec::new().into(),
     });
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration.enabled = true;
@@ -2932,10 +2932,10 @@ fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
             source_loc: info(),
             depth: id + 1,
             dead: false,
-            value_symbols: HashSet::new(),
-            input_symbols: HashSet::new(),
-            single_arm_reads: vec![],
-            memory_reads: vec![],
+            value_symbols: HashSet::new().into(),
+            input_symbols: HashSet::new().into(),
+            single_arm_reads: vec![].into(),
+            memory_reads: vec![].into(),
         });
     }
     let mut limits = ExecutionLimits::default();
@@ -2979,10 +2979,10 @@ fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
             source_loc: info(),
             depth: 1,
             dead: false,
-            value_symbols: HashSet::new(),
-            input_symbols: HashSet::new(),
-            single_arm_reads: vec![],
-            memory_reads: vec![],
+            value_symbols: HashSet::new().into(),
+            input_symbols: HashSet::new().into(),
+            single_arm_reads: vec![].into(),
+            memory_reads: vec![].into(),
         });
     }
     let mut limits = ExecutionLimits::default();
@@ -3032,10 +3032,10 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
             source_loc: info(),
             depth: 1,
             dead: false,
-            value_symbols: HashSet::new(),
-            input_symbols: HashSet::new(),
-            single_arm_reads: vec![],
-            memory_reads: vec![],
+            value_symbols: HashSet::new().into(),
+            input_symbols: HashSet::new().into(),
+            single_arm_reads: vec![].into(),
+            memory_reads: vec![].into(),
         });
     }
     use smtlib::Exp::*;
@@ -4035,10 +4035,10 @@ fn merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规�
                 source_loc: info(),
                 depth: 1,
                 dead: false,
-                value_symbols: HashSet::new(),
-                input_symbols: HashSet::new(),
-                single_arm_reads: vec![],
-                memory_reads: vec![],
+                value_symbols: HashSet::new().into(),
+                input_symbols: HashSet::new().into(),
+                single_arm_reads: vec![].into(),
+                memory_reads: vec![].into(),
             });
         }
         let path = SamplePath {
@@ -4144,10 +4144,10 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
             source_loc: info(),
             depth: 1,
             dead: false,
-            value_symbols: HashSet::new(),
-            input_symbols: HashSet::new(),
-            single_arm_reads: vec![],
-            memory_reads: vec![],
+            value_symbols: HashSet::new().into(),
+            input_symbols: HashSet::new().into(),
+            single_arm_reads: vec![].into(),
+            memory_reads: vec![].into(),
         });
         // 守卫的派生依赖实际测试四位，类内也有多个解。
         let masked = solver.define_const(Extract(3, 0, Box::new(Var(input))), info());
@@ -4333,10 +4333,10 @@ fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
         source_loc: info(),
         depth: 1,
         dead: false,
-        value_symbols: HashSet::new(),
-        input_symbols: HashSet::new(),
-        single_arm_reads: vec![],
-        memory_reads: vec![],
+        value_symbols: HashSet::new().into(),
+        input_symbols: HashSet::new().into(),
+        single_arm_reads: vec![].into(),
+        memory_reads: vec![].into(),
     });
     let mut reference = None;
     for threads in [1, 4] {
@@ -4408,10 +4408,10 @@ fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截�
         source_loc: info(),
         depth: 1,
         dead: false,
-        value_symbols: HashSet::new(),
-        input_symbols: HashSet::new(),
-        single_arm_reads: vec![],
-        memory_reads: vec![],
+        value_symbols: HashSet::new().into(),
+        input_symbols: HashSet::new().into(),
+        single_arm_reads: vec![].into(),
+        memory_reads: vec![].into(),
     });
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration = crate::config::MergeEnumerationConfig {

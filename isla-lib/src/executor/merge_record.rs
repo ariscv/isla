@@ -47,13 +47,34 @@ pub struct RegionMergeRecord<B> {
     /// 两臂都死亡时没有存活合并值，但剪枝本身仍是一次成功提交。
     pub dead: bool,
     /// 合并值中的符号；最外层提交后展开 DefineConst 依赖，得到自由输入。
-    pub value_symbols: HashSet<Sym>,
+    pub value_symbols: Arc<HashSet<Sym>>,
     /// 仅输出开启时计算；关闭时保留空集，避免扫描完整执行迹。
-    pub input_symbols: HashSet<Sym>,
-    pub single_arm_reads: Vec<GuardedRegisterRead<B>>,
+    pub input_symbols: Arc<HashSet<Sym>>,
+    /// 整段读取载荷不可变共享；重命名记录不会复制 value、访问路径或守卫。
+    pub single_arm_reads: Arc<[GuardedRegisterRead<B>]>,
     /// (主迹访存序号, 完整保护条件, ReadMem)。仅最外层记录保存，包含嵌套条件。
     /// 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
-    pub memory_reads: Vec<(usize, smtlib::Exp<Sym>, Event<B>)>,
+    pub memory_reads: Arc<[(usize, smtlib::Exp<Sym>, Event<B>)]>,
+}
+
+impl<B> RegionMergeRecord<B> {
+    /// 更新位置元数据后，复用仍完全相同的历史前缀；载荷身份只用于共享判定。
+    pub(super) fn same_occurrence(&self, other: &Self) -> bool {
+        self.record_id == other.record_id
+            && self.parent_record == other.parent_record
+            && self.arm == other.arm
+            && self.function == other.function
+            && self.branch_pc == other.branch_pc
+            && self.join == other.join
+            && self.condition == other.condition
+            && self.source_loc == other.source_loc
+            && self.depth == other.depth
+            && self.dead == other.dead
+            && Arc::ptr_eq(&self.value_symbols, &other.value_symbols)
+            && Arc::ptr_eq(&self.input_symbols, &other.input_symbols)
+            && Arc::ptr_eq(&self.single_arm_reads, &other.single_arm_reads)
+            && Arc::ptr_eq(&self.memory_reads, &other.memory_reads)
+    }
 }
 
 pub(super) fn publish<B: BV>(
@@ -78,12 +99,14 @@ pub(super) fn publish<B: BV>(
         })
         .collect();
     for record in records.iter_mut() {
-        record.input_symbols = record
-            .value_symbols
-            .iter()
-            .flat_map(|symbol| references.dependencies(*symbol))
-            .filter(|symbol| declared.contains(symbol) && !derived.contains(symbol))
-            .collect();
+        record.input_symbols = Arc::new(
+            record
+                .value_symbols
+                .iter()
+                .flat_map(|symbol| references.dependencies(*symbol))
+                .filter(|symbol| declared.contains(symbol) && !derived.contains(symbol))
+                .collect(),
+        );
     }
     emit_records(records, task_id, shared, solver);
 }
