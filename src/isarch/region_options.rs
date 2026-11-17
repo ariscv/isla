@@ -3,6 +3,7 @@ use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
+    ("lazy_z3_scope", "region-lazy-z3-scope", "延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用"),
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
     ("witness_shadow", "region-witness-shadow", "见证影子诊断；默认关闭"),
     ("witness_local_shadow", "region-witness-local-shadow", "局部见证补全影子诊断；默认关闭"),
@@ -34,6 +35,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
                 "defer_exit_check" => options.defer_exit_check = value,
+                "lazy_z3_scope" => options.lazy_z3_scope = value,
                 "witness_eval" => options.witness_eval = value,
                 "witness_shadow" => options.witness_shadow = value,
                 "witness_local_shadow" => options.witness_local_shadow = value,
@@ -105,6 +107,26 @@ mod tests {
             let mut limits = ExecutionLimitsConfig { region_options: Some(toml), ..Default::default() };
             cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
             assert_eq!(limits.region_options, Some(RegionOptions::default()), "{flag}");
+        }
+    }
+
+    #[test]
+    fn region_options_cli_lazy_scope_preserves_and_overrides_toml() {
+        let options: RegionOptions = toml::from_str("lazy_z3_scope=true\ndefer_exit_check=true").unwrap();
+        let mut limits = ExecutionLimitsConfig { region_options: Some(options), ..Default::default() };
+        cli(&mut limits, &[]).unwrap();
+        assert!(limits.region_options.as_ref().unwrap().lazy_z3_scope);
+        cli(&mut limits, &["--region-lazy-z3-scope=false"]).unwrap();
+        let options = limits.region_options.as_ref().unwrap();
+        assert!(!options.lazy_z3_scope);
+        assert!(options.defer_exit_check, "CLI 仅覆盖指定字段");
+        let mut enabled = ExecutionLimitsConfig::default();
+        cli(&mut enabled, &["--region-lazy-z3-scope=true"]).unwrap();
+        let options = enabled.region_options.unwrap();
+        assert!(options.lazy_z3_scope);
+        assert!(!options.defer_exit_check, "仅 lazy 开启时静默无效，不报配置错误");
+        for value in ["1", "0", "TRUE", "", "yes"] {
+            assert!(cli(&mut limits, &[&format!("--region-lazy-z3-scope={value}")]).is_err(), "{value}");
         }
     }
 

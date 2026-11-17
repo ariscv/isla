@@ -1772,6 +1772,8 @@ pub struct Solver<'ctx, B> {
     committed_transaction_events: Vec<(Option<Exp<Sym>>, Event<B>)>,
     last_committed_transaction: Option<(SolverTransaction, usize)>,
     transaction_conditions: Vec<Exp<Sym>>,
+    // 与条件栈对齐：None 已创建 native scope；Some 持有创建时绑定的延迟 guard。
+    transaction_condition_scopes: Vec<Option<Ast<'ctx>>>,
 }
 
 impl<B> Drop for Solver<'_, B> {
@@ -2408,6 +2410,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 committed_transaction_events: Vec::new(),
                 last_committed_transaction: None,
                 transaction_conditions: Vec::new(),
+                transaction_condition_scopes: Vec::new(),
             }
         }
     }

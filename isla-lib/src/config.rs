@@ -2708,6 +2708,22 @@ r0 = "0x0000000000000000"
     }
 
     #[test]
+    fn region_options_lazy_scope_toml_defaults_and_dependency() {
+        let defaults = merge_config("[execution_limits.region_options]").unwrap().region_options.unwrap();
+        assert!(!defaults.lazy_z3_scope);
+        let enabled =
+            merge_config("[execution_limits.region_options]\nlazy_z3_scope=true").unwrap().region_options.unwrap();
+        assert!(enabled.lazy_z3_scope);
+        assert!(!enabled.defer_exit_check, "不依赖 defer 的配置校验；作用域创建时才决定是否生效");
+        let disabled =
+            merge_config("[execution_limits.region_options]\nlazy_z3_scope=false").unwrap().region_options.unwrap();
+        assert_eq!(disabled, defaults);
+        for value in ["1", "'true'", "[]"] {
+            assert!(merge_config(&format!("[execution_limits.region_options]\nlazy_z3_scope={value}")).is_err());
+        }
+    }
+
+    #[test]
     fn region_options_toml_rejects_invalid_values() {
         for field in [
             "defer_exit_check=1",

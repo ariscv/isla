@@ -448,6 +448,7 @@ isarch [原 J1 探索参数] \
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
 | `defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
+| `lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
 | `witness_shadow` | `--region-witness-shadow=true/false` | `false` | 见证影子诊断 |
 | `witness_local_shadow` | `--region-witness-local-shadow=true/false` | `false` | 局部见证补全影子诊断 |
@@ -479,4 +480,6 @@ isarch -A model.ir -C scenario.toml -T 32 --path-merging \
 
 位置数组通过 CLI 以逗号分隔，传空串可清空，例如 `--query-dump-sites=`。非布尔开关值、负数／超范围 u32、空导出目录、未知 TOML 字段、超过两个配对位置或缺少必需导出目录均报错。位置名称沿用诊断原有格式，不增加模型或函数特判。
 
-配置在架构初始化前确定，执行期间按进程冻结；同一进程再次初始化架构时只能传入相同选项。诊断仍遵循已有条数／轮次限制。此接口只迁移已有候选和诊断，不包含延迟 Z3 作用域候选，也不改变默认启用策略。
+配置在架构初始化前确定，执行期间按进程冻结；同一进程再次初始化架构时只能传入相同选项。诊断仍遵循已有条数／轮次限制。延迟 Z3 作用域也默认关闭，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。仅设置 `lazy_z3_scope=true` 而未开启 `defer_exit_check` 时静默无效；只有在 defer 推演内省去临时 push/pop，离开 defer 后的实际查询仍包含完整活动条件。
+
+开启可能增加内存占用。历史 STORE 两分钟探针峰值约 10.4 GiB，关闭侧约 8.9 GiB；PMP=2 的有限两输入 judge 峰值约 68.8 GiB，62 GiB 上限不足，须为该类验证选择更高的内存上限。这些测量仅针对特定输入与探索窗口，不代表任意规模的内存保证，也不签全域等价或完整 DAG。

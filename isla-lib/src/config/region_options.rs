@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 pub struct RegionOptions {
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
+    /// 延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用。
+    pub lazy_z3_scope: bool,
     /// 完整前提见证求值；默认关闭。
     pub witness_eval: bool,
     /// 见证影子诊断；默认关闭。

@@ -795,4 +795,6 @@ defer_exit_check = true
 witness_eval = true
 ```
 
-运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除；延迟 Z3 作用域候选不在此范围内。
+运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除。
+
+延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。

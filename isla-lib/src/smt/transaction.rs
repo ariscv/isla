@@ -69,11 +69,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
         }
         serde_json::json!({"savepoint_count":self.savepoints.len(),
+            "native_condition_scopes":unsafe { Z3_solver_get_num_scopes(self.ctx.z3_ctx, self.z3_solver) },
             "saved_decl_entries":self.savepoints.iter().map(|s|s.decls.len()).sum::<usize>(),
             "saved_function_entries":self.savepoints.iter().map(|s|s.func_decls.len()).sum::<usize>(),
             "saved_assert_counters":self.savepoints.iter().map(|s|s.asserts_since_check).sum::<usize>(),
             "buffered_event_count":self.transaction_events.len(),"buffered_assertion_count":count,
             "omitted_assertions":count-prefix.len(),"prefix_assertions":prefix})
+    }
+
+    fn lazy_condition_scopes(&self) -> bool {
+        self.deferred_region_queries && crate::config::RegionOptions::current().lazy_z3_scope
     }
 
     pub fn transaction_depth(&self) -> usize {
@@ -165,6 +170,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         );
         // 先翻译，非法符号不能留下半初始化的保存点或 Z3 scope。
         let condition = guard.as_ref().map(|exp| self.translate_exp(exp));
+        let lazy = self.lazy_condition_scopes();
         let token = SolverTransaction {
             // 全局唯一编号也能拒绝已销毁求解器的旧句柄，且不引入裸指针的 Send/Sync 限制。
             id: NEXT_TRANSACTION_ID
@@ -234,20 +240,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.knowledge.sat = sat;
             self.clear_stashed_model();
             self.last_check_sat = false;
-            unsafe {
-                let native_scope = crate::executor::stats::region_cost::Scope::enter(
-                    crate::executor::stats::region_cost::Category::NativeScope,
-                );
-                let _ = &native_scope;
+            if !lazy {
+                unsafe {
+                    let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                        crate::executor::stats::region_cost::Category::NativeScope,
+                    );
+                    let _ = &native_scope;
 
-                Z3_solver_push(self.ctx.z3_ctx, self.z3_solver);
-                crate::executor::stats::region_cost::count(
-                    crate::executor::stats::region_cost::Category::ReplayAssert,
-                    1,
-                    0,
-                );
-                Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, condition.z3_ast);
+                    Z3_solver_push(self.ctx.z3_ctx, self.z3_solver);
+                    crate::executor::stats::region_cost::count(
+                        crate::executor::stats::region_cost::Category::ReplayAssert,
+                        1,
+                        0,
+                    );
+                    Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, condition.z3_ast);
+                }
             }
+            self.transaction_condition_scopes.push(if lazy { Some(condition) } else { None });
             self.transaction_conditions.push(self.savepoints.last().unwrap().guard.clone().unwrap());
         }
         token
@@ -275,13 +284,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         assert_eq!(self.trace.head.len(), tx.head_len, "保存点期间不能改写已发布的迹");
         let mut savepoint = self.savepoints.pop().unwrap();
         if savepoint.guard.is_some() {
-            unsafe {
-                let native_scope = crate::executor::stats::region_cost::Scope::enter(
-                    crate::executor::stats::region_cost::Category::NativeScope,
-                );
-                let _ = &native_scope;
-                Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
-            };
+            if self.transaction_condition_scopes.pop().expect("条件作用域必须对齐").is_none() {
+                unsafe {
+                    let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                        crate::executor::stats::region_cost::Category::NativeScope,
+                    );
+                    let _ = &native_scope;
+                    Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
+                }
+            }
             self.transaction_conditions.pop().unwrap();
         }
         self.clear_stashed_model();
@@ -331,6 +342,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Guard);
         let _ = &cost_scope;
         assert!(!self.savepoints.is_empty(), "推测臂条件必须位于事务中");
+        let deferred_ast = self.lazy_condition_scopes().then(|| self.translate_exp(condition));
+        let native = deferred_ast.is_none();
         let saved = self.knowledge;
         // 暂时加入的臂条件不能使用调用者见证；纯定义范围退出后可归还它。
         // SavedModel接管同一引用，不复制模型；断言或改绑均会改变constraints版本。
@@ -341,20 +354,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge.sat = sat;
         self.clear_stashed_model();
         self.last_check_sat = false;
-        unsafe {
-            let native_scope = crate::executor::stats::region_cost::Scope::enter(
-                crate::executor::stats::region_cost::Category::NativeScope,
-            );
-            let _ = &native_scope;
-            Z3_solver_push(self.ctx.z3_ctx, self.z3_solver)
-        };
+        if native {
+            unsafe {
+                let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                    crate::executor::stats::region_cost::Category::NativeScope,
+                );
+                let _ = &native_scope;
+                Z3_solver_push(self.ctx.z3_ctx, self.z3_solver)
+            }
+        }
+        self.transaction_condition_scopes.push(deferred_ast);
         self.transaction_conditions.push(condition.clone());
         let depth = self.transaction_depth();
         let events_len = self.transaction_events.len();
         // 翻译条件也可能 panic，必须一并纳入清理范围。
         drop(cost_scope);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.z3_assert(condition);
+            if native {
+                self.z3_assert(condition);
+            }
             f(self)
         }));
         let cost_scope =
@@ -372,13 +390,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge.sat = unchanged && (self.knowledge.sat || saved.sat);
         self.knowledge.change();
         self.guard_transaction_events(events_len, condition);
-        unsafe {
-            let native_scope = crate::executor::stats::region_cost::Scope::enter(
-                crate::executor::stats::region_cost::Category::NativeScope,
-            );
-            let _ = &native_scope;
-            Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
-        };
+        if self.transaction_condition_scopes.pop().expect("条件作用域必须对齐").is_none() {
+            unsafe {
+                let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                    crate::executor::stats::region_cost::Category::NativeScope,
+                );
+                let _ = &native_scope;
+                Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
+            }
+        }
         self.transaction_conditions.pop().unwrap();
         self.clear_stashed_model();
         self.last_check_sat = false;
@@ -413,13 +433,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.knowledge.sat = unchanged && (self.knowledge.sat || savepoint.knowledge.sat);
         self.knowledge.change();
         if let Some(guard) = &savepoint.guard {
-            unsafe {
-                let native_scope = crate::executor::stats::region_cost::Scope::enter(
-                    crate::executor::stats::region_cost::Category::NativeScope,
-                );
-                let _ = &native_scope;
-                Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
-            };
+            if self.transaction_condition_scopes.pop().expect("条件作用域必须对齐").is_none() {
+                unsafe {
+                    let native_scope = crate::executor::stats::region_cost::Scope::enter(
+                        crate::executor::stats::region_cost::Category::NativeScope,
+                    );
+                    let _ = &native_scope;
+                    Z3_solver_pop(self.ctx.z3_ctx, self.z3_solver, 1)
+                }
+            }
             self.transaction_conditions.pop().unwrap();
             self.guard_transaction_events(savepoint.events_len, guard);
             // 已缓存的模型满足全部前提、活动臂条件与缓冲断言。
@@ -537,6 +559,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         );
         let _ = &cost_scope;
         let timer = WorkTimer::start(WorkKind::BufferTranslate);
+        assert_eq!(self.transaction_conditions.len(), self.transaction_condition_scopes.len(), "条件作用域必须对齐");
         let assertions = self
             .transaction_events
             .iter()
@@ -544,6 +567,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 Event::Smt(Def::Assert(exp), ..) => Some(self.translate_exp(exp)),
                 _ => None,
             })
+            .chain(self.transaction_condition_scopes.iter().flatten().cloned())
             .collect();
         drop(timer);
         assertions
@@ -642,6 +666,7 @@ impl<B: BV> Solver<'_, B> {
                 .iter()
                 .map(|(g, e)| g.as_ref().map_or(0, exp_heap_bytes) + event_heap_bytes(e))
                 .sum::<usize>()
+            + self.transaction_condition_scopes.capacity() * size_of::<Option<Ast>>()
             + self.transaction_conditions.capacity() * size_of::<Exp<Sym>>()
             + self.transaction_conditions.iter().map(exp_heap_bytes).sum::<usize>();
         SolverMemory { bytes, layers, model_caches: models }

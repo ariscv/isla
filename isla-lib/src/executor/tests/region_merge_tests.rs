@@ -4748,7 +4748,8 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
         );
         return;
     }
-    crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+    crate::config::RegionOptions { defer_exit_check: true, ..crate::config::RegionOptions::current().clone() }
+        .configure();
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let tmp = test_name(1900);
@@ -4798,7 +4799,8 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
 fn dead_arm_candidate_child(test: &str) -> bool {
     const CHILD: &str = "ISLA_DEAD_ARM_TEST_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+        crate::config::RegionOptions { defer_exit_check: true, ..crate::config::RegionOptions::current().clone() }
+            .configure();
         return true;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -5022,4 +5024,145 @@ fn region_merge_configurable_budget_long_region_equivalence() {
         }
         equivalent_paths(&forked, &merged, 1, true);
     }
+}
+
+// T1–T5 在独立进程中比较未配置、显式关闭和开启，配置直接通过 RegionOptions 安装。
+fn lazy_scope_child(test: &str) -> Option<bool> {
+    const CHILD: &str = "ISLA_LAZY_SCOPE_TEST_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let mut options = crate::config::RegionOptions { defer_exit_check: true, ..Default::default() };
+        match mode.as_str() {
+            "default" => (),
+            "false" => options.lazy_z3_scope = false,
+            "true" => options.lazy_z3_scope = true,
+            _ => panic!("未知测试配置"),
+        }
+        options.configure();
+        return Some(options.lazy_z3_scope);
+    }
+    for mode in ["default", "false", "true"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("executor::tests::region_merge_tests::{test}"), "--nocapture"])
+            .env(CHILD, mode)
+            .env("ISLA_DEAD_ARM_TEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "模式{mode}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    None
+}
+
+#[test]
+fn lazy_scope_t1_loop_match_equivalence() {
+    if lazy_scope_child("lazy_scope_t1_loop_match_equivalence").is_none() {
+        return;
+    }
+    deferred_dead_arm_three_rounds_equivalent();
+}
+
+#[test]
+fn lazy_scope_t2_early_return_full_guard() {
+    if lazy_scope_child("lazy_scope_t2_early_return_full_guard").is_none() {
+        return;
+    }
+    deferred_dead_arm_early_return_keeps_later_false_arm_input();
+}
+
+#[test]
+fn lazy_scope_t3_query_exit_materialization() {
+    let Some(lazy) = lazy_scope_child("lazy_scope_t3_query_exit_materialization") else {
+        return;
+    };
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let a = solver.declare_const(smtlib::Ty::Bool, info());
+    let b = solver.declare_const(smtlib::Ty::Bool, info());
+    let root = solver.start_transaction();
+    solver.with_deferred_region_queries(|solver| {
+        solver.start_transaction_with_guard(Some(Formula::Var(a)));
+        assert_eq!(
+            solver.probe_transaction_snapshot()["native_condition_scopes"],
+            usize::from(!lazy),
+            "延迟路径不应创建 native scope"
+        );
+        solver.assert(Formula::Var(b));
+        assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Unknown, "defer 必需查询仍拒绝");
+    });
+    // 离开 defer，臂仍活跃：差异检查必须同时看到创建时的 a 与缓冲的 b。
+    let expected = Formula::And(Box::new(Formula::Var(a)), Box::new(Formula::Var(b)));
+    assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(expected)), info()), crate::smt::SmtResult::Unsat);
+    solver.commit_transaction();
+    // 臂提交后只约束 a→b，不得遗留无条件 a。
+    let outside = Formula::And(
+        Box::new(Formula::Not(Box::new(Formula::Var(a)))),
+        Box::new(Formula::Not(Box::new(Formula::Var(b)))),
+    );
+    assert_eq!(solver.check_sat_with(&outside, info()), crate::smt::SmtResult::Sat);
+    solver.rollback_transaction(root);
+    assert_eq!(solver.transaction_depth(), 0);
+}
+
+#[test]
+fn lazy_scope_t4_effect_and_obligation_unchanged() {
+    if lazy_scope_child("lazy_scope_t4_effect_and_obligation_unchanged").is_none() {
+        return;
+    }
+    deferred_dead_arm_write_after_assertion_still_rejected();
+    deferred_dead_arm_symbolic_obligation_unchanged();
+}
+
+#[test]
+fn lazy_scope_t5_native_pairing_and_guard_binding() {
+    let Some(lazy) = lazy_scope_child("lazy_scope_t5_native_pairing_and_guard_binding") else {
+        return;
+    };
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let a = solver.declare_const(smtlib::Ty::Bool, info());
+    let root = solver.start_transaction();
+    let native = solver.start_transaction_with_guard(Some(Formula::Var(a)));
+    assert_eq!(
+        solver.probe_transaction_snapshot()["native_condition_scopes"],
+        1,
+        "即使 lazy 开启，defer 外仍创建 native scope"
+    );
+    solver.with_deferred_region_queries(|solver| {
+        // 创建时是 native，关闭时在 defer 内，仍须 pop。
+        solver.rollback_transaction(native);
+        solver.with_transaction_condition(&Formula::Var(a), |solver| {
+            let arm = solver.start_transaction_with_guard(Some(Formula::Var(a)));
+            solver.add(smtlib::Def::DefineConst(a, Formula::Bool(false)));
+            solver.rollback_transaction(arm);
+            assert_eq!(solver.probe_transaction_snapshot()["native_condition_scopes"], usize::from(!lazy));
+        });
+    });
+    // 内层改绑回滚后，原始 a 两值都可达。
+    assert_eq!(solver.check_sat_with(&Formula::Var(a), info()), crate::smt::SmtResult::Sat);
+    assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
+    let arm = solver.with_deferred_region_queries(|solver| {
+        let arm = solver.start_transaction_with_guard(Some(Formula::Var(a)));
+        solver.add(smtlib::Def::DefineConst(a, Formula::Bool(false)));
+        arm
+    });
+    assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Sat, "延迟 guard 须保持创建时绑定");
+    solver.rollback_transaction(arm);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        solver.with_deferred_region_queries(|solver| {
+            solver.with_transaction_condition(&Formula::Var(a), |solver| {
+                solver.start_transaction_with_guard(Some(Formula::Var(a)));
+                panic!("验证嵌套 scope 的异常清理");
+            });
+        })
+    }));
+    assert!(caught.is_err());
+    assert_eq!(solver.transaction_depth(), 1);
+    solver.rollback_transaction(root);
+    assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
 }
