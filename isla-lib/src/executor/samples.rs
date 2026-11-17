@@ -976,8 +976,8 @@ mod tests {
             dead: false,
             value_symbols: Default::default(),
             input_symbols: Default::default(),
-            single_arm_reads: Vec::new(),
-            memory_reads: Vec::new(),
+            single_arm_reads: Vec::new().into(),
+            memory_reads: Vec::new().into(),
         }
     }
 

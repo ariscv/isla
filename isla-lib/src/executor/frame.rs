@@ -135,7 +135,7 @@ pub struct Frame<'ir, B> {
     // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
-    pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
+    pub(super) region_merge_records: super::MergeHistory<B>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -202,7 +202,7 @@ pub struct LocalFrame<'ir, B> {
     // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
-    pub(super) region_merge_records: Vec<super::RegionMergeRecord<B>>,
+    pub(super) region_merge_records: super::MergeHistory<B>,
     // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
@@ -525,7 +525,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             speculation_mode: SpeculationMode::Off,
             region_execution: None,
             region_replay: None,
-            region_merge_records: Vec::new(),
+            region_merge_records: super::MergeHistory::default(),
             pending_retry_operand: None,
             execution_limit_state: Arc::new(ExecutionLimitPathState::default()),
             local_state: Arc::new(LocalState {
@@ -571,11 +571,11 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         &self.local_state.pure_definitions
     }
 
-    pub fn merge_history(&self) -> (Vec<super::RegionMergeRecord<B>>, Vec<(u32, u32)>) {
+    pub fn merge_history(&self) -> (super::MergeHistory<B>, Vec<(u32, u32)>) {
         (self.region_merge_records.clone(), self.local_state.pure_definitions.clone())
     }
 
-    pub fn restore_merge_history(&mut self, history: (Vec<super::RegionMergeRecord<B>>, Vec<(u32, u32)>)) {
+    pub fn restore_merge_history(&mut self, history: (super::MergeHistory<B>, Vec<(u32, u32)>)) {
         assert!(
             self.region_merge_records.is_empty() && self.local_state.pure_definitions.is_empty(),
             "只向新帧恢复合并历史"
