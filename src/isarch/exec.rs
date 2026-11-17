@@ -885,7 +885,7 @@ impl SolveCollectorState {
 
     fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
         SolveCollectorState {
-            summary: SolveSummary::default(),
+            summary: SolveSummary { uncertified: isla_lib::smt::no_smt::options().no_smt, ..Default::default() },
             first_error: None,
             diagnostics: Vec::new(),
             cases: Vec::new(),
@@ -984,6 +984,12 @@ impl ErrorRecorder<'_> {
         shared_state: &SharedState<'ir, B>,
     ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
         frame.configure_timeout_smt_dump(error, shared_state);
+        if let ExecError::Smt(SmtError::NoSmt { reason, source_loc }) = error {
+            eprintln!(
+                "{}",
+                serde_json::json!({"kind":"no_smt_terminated_path", "reason":reason,"source":source_loc,"signature":frame.path_signature(),"certification":"uncertified"})
+            );
+        }
         self.collected.lock().expect("solve collector mutex poisoned").diagnostics.push(serde_json::json!({
             "status": "incomplete",
             "reason": "path-error",
@@ -1831,13 +1837,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     } */
 
     // 先区分互相矛盾的前态与真正的空编码域，求解不确定仍作为错误传播。
-    match solver.check_sat(SourceLoc::unknown()) {
-        isla_lib::smt::SmtResult::Sat => (),
-        isla_lib::smt::SmtResult::Unsat => {
-            return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
+    if !solver.no_smt() {
+        match solver.check_sat(SourceLoc::unknown()) {
+            isla_lib::smt::SmtResult::Sat => (),
+            isla_lib::smt::SmtResult::Unsat => {
+                return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
+            }
+            isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+            isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
         }
-        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
-        isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
 
     let instruction = if let Some(fixed) = fixed_inputs.instruction {
@@ -2030,7 +2038,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 .enumerate_merges(&mut solver, &task_state, shared_state, ret_val)
                                 .expect("完成路径的合并计数失败")
                         } else if samples.enabled() {
-                            if !solver.has_stashed_model() {
+                            if !solver.no_smt() && !solver.has_stashed_model() {
                                 if !error_recorder.terminal_path_is_sat(
                                     solver.check_sat(SourceLoc::unknown()),
                                     frame,
@@ -2074,11 +2082,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             }
                             if samples.path_cache.dag_only {
                                 // 不生成代表值，也不枚举守卫组合；恢复入口保留原公式及全部守卫。
-                                // 终态 SAT 已在上方验证，错误路径仍由原 ErrorRecorder 计入摘要。
+                                // 普通终态在上方检查SAT；无SMT候选明确未认证，错误仍计入摘要。
                                 eprintln!(
-                                    "[PATH_CACHE_TERMINAL] paths={} terminal={}",
+                                    "[PATH_CACHE_TERMINAL] paths={} terminal={} certification={}",
                                     resident_paths.lock().unwrap().len(),
-                                    if sail_exception { "sail_exception" } else { "normal" }
+                                    if sail_exception { "sail_exception" } else { "normal" },
+                                    if solver.no_smt() { "uncertified" } else { "checked" }
                                 );
                                 if let Some((started, smt_before)) = path_profile {
                                     eprintln!(

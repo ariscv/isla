@@ -131,6 +131,40 @@ mod tests {
                 json!({"SailException":{"throw_location":"fixture.sail:42"}})
             );
         }
+        let candidate_dir = directory.with_extension("uncertified");
+        let candidate_options = Options { write: Some(candidate_dir.clone()), ..options.clone() };
+        let mut candidate_summary = summary.clone();
+        candidate_summary["uncertified"] = json!(true);
+        candidate_summary["status"] = json!("partial");
+        save(
+            &candidate_options,
+            "generic",
+            &paths,
+            &[Facts { guard_unique: false, post_unique: false, simple_pre: false }.into()],
+            &shared,
+            &RV64::default(),
+            &candidate_summary,
+            &json!({"command":[],"inputs":{},"binary":{"path":"fixture","sha256":"fixture"}}),
+            &mut Timing::default(),
+            &Stages::new(None, Instant::now()),
+        );
+        let candidate: Value =
+            serde_json::from_reader(File::open(candidate_dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(candidate["certification"], "uncertified");
+        assert_eq!(candidate["completeness"], "partial");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load::<B64>(
+                &candidate_dir,
+                Encoding::Bin,
+                false,
+                &shared,
+                "generic",
+                &Stages::new(None, Instant::now())
+            )))
+            .is_err(),
+            "未认证缓存不能直接送入样例认证"
+        );
+        fs::remove_dir_all(candidate_dir).unwrap();
         let mut manifest: Value =
             serde_json::from_reader(File::open(directory.join("manifest.json")).unwrap()).unwrap();
         for version in [1, 2] {
@@ -513,6 +547,8 @@ pub struct SourceRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ExplorationSummary {
+    #[serde(default)]
+    pub uncertified: bool,
     pub sampled_paths: u64,
     pub errors: u64,
     pub execution_timeouts: u64,
@@ -713,7 +749,9 @@ pub fn load<B: BV>(
         serde_json::from_reader(File::open(dir.join("manifest.json")).expect("缓存 manifest 缺失，目录尚未发布"))
             .expect("缓存 manifest 损坏");
     assert_eq!(raw["schema_version"], json!(3), "缓存 schema 不兼容");
+    assert_ne!(raw["certification"], json!("uncertified"), "未认证候选缓存必须先离线检查，不能直接用于样例或fuzz");
     let manifest: Manifest<B> = serde_json::from_value(raw).expect("缓存 manifest 字段损坏");
+    assert!(!manifest.errors.uncertified, "未认证候选摘要不能作为已检查缓存读入");
     assert_eq!(manifest.bit_width, B::MAX_WIDTH, "缓存位宽不兼容");
     assert_eq!(manifest.current_ir_review, "未做当前 IR 复核", "缓存 IR 复核标注无效");
     assert!(matches!(manifest.completeness.as_str(), "complete" | "partial"), "缓存完整性标注无效");
@@ -934,7 +972,9 @@ pub fn save<B: BV>(
         names,
     };
     let mut output = BufWriter::new(File::create(dir.join("manifest.pending")).expect("创建 manifest 失败"));
-    serde_json::to_writer_pretty(&mut output, &manifest).expect("写入 manifest 失败");
+    let mut manifest_value = serde_json::to_value(&manifest).unwrap();
+    manifest_value["certification"] = json!(if manifest.errors.uncertified { "uncertified" } else { "checked" });
+    serde_json::to_writer_pretty(&mut output, &manifest_value).expect("写入 manifest 失败");
     output.flush().unwrap();
     output.get_ref().sync_all().unwrap();
     drop(output);
@@ -1006,6 +1046,7 @@ pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_sum
     super::solve_summary::SolveSummary {
         applicable_batches: 1,
         inapplicable_batches: 0,
+        uncertified: summary.uncertified,
         sampled_paths: field(summary.sampled_paths),
         errors: field(summary.errors),
         execution_timeouts: field(summary.execution_timeouts),

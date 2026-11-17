@@ -87,6 +87,9 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         return Ok(true);
     }
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
+    if solver.no_smt() {
+        return Err(ExecError::Smt(solver.no_smt_cannot_continue(op, info)));
+    }
     // 只枚举消费者必须具体化的参数：长度、索引和字符串转换的输入。
     // 向量元素及其余位向量数据仍然保留符号关系。
     let indices: &[usize] = match op {

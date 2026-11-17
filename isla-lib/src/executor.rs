@@ -316,13 +316,15 @@ fn read_register_from_vector<'ir, B: BV>(
                 if regs.len() == 1 {
                     let zero = Eq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
                     let nonzero = Neq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
-                    let zero_sat = !solver.check_sat_with(&zero, info).is_unsat()?;
-                    let nonzero_sat = !solver.check_sat_with(&nonzero, info).is_unsat()?;
-                    if zero_sat && nonzero_sat {
-                        return Err(ExecError::SymbolicLength("read_register_from_vector", info));
-                    }
-                    if !zero_sat {
-                        return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                    if !solver.no_smt_safety(&zero, info) {
+                        let zero_sat = !solver.check_sat_with(&zero, info).is_unsat()?;
+                        let nonzero_sat = !solver.check_sat_with(&nonzero, info).is_unsat()?;
+                        if zero_sat && nonzero_sat {
+                            return Err(ExecError::SymbolicLength("read_register_from_vector", info));
+                        }
+                        if !zero_sat {
+                            return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                        }
                     }
                     ConcreteIndex(0)
                 } else {
@@ -331,8 +333,9 @@ fn read_register_from_vector<'ir, B: BV>(
                         let limit = smtlib::bits64(regs.len() as u64, len);
                         let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
                         let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
-                        let in_bounds_sat = !solver.check_sat_with(&in_bounds, info).is_unsat()?;
-                        let out_of_bounds_sat = !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
+                        let in_bounds_sat = solver.no_smt() || !solver.check_sat_with(&in_bounds, info).is_unsat()?;
+                        let out_of_bounds_sat = !solver.no_smt_safety(&in_bounds, info)
+                            && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
                         if in_bounds_sat && out_of_bounds_sat {
                             return Err(ExecError::SymbolicLength("read_register_from_vector", info));
                         }
@@ -487,13 +490,15 @@ fn write_register_from_vector<'ir, B: BV>(
                 if regs.len() == 1 {
                     let zero = Eq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
                     let nonzero = Neq(Box::new(Var(v)), Box::new(primop::smt_zeros(i128::from(len))));
-                    let zero_sat = !solver.check_sat_with(&zero, info).is_unsat()?;
-                    let nonzero_sat = !solver.check_sat_with(&nonzero, info).is_unsat()?;
-                    if zero_sat && nonzero_sat {
-                        return Err(ExecError::SymbolicLength("write_register_from_vector", info));
-                    }
-                    if !zero_sat {
-                        return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                    if !solver.no_smt_safety(&zero, info) {
+                        let zero_sat = !solver.check_sat_with(&zero, info).is_unsat()?;
+                        let nonzero_sat = !solver.check_sat_with(&nonzero, info).is_unsat()?;
+                        if zero_sat && nonzero_sat {
+                            return Err(ExecError::SymbolicLength("write_register_from_vector", info));
+                        }
+                        if !zero_sat {
+                            return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                        }
                     }
                     ConcreteIndex(0)
                 } else {
@@ -502,8 +507,9 @@ fn write_register_from_vector<'ir, B: BV>(
                         let limit = smtlib::bits64(regs.len() as u64, len);
                         let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
                         let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
-                        let in_bounds_sat = !solver.check_sat_with(&in_bounds, info).is_unsat()?;
-                        let out_of_bounds_sat = !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
+                        let in_bounds_sat = solver.no_smt() || !solver.check_sat_with(&in_bounds, info).is_unsat()?;
+                        let out_of_bounds_sat = !solver.no_smt_safety(&in_bounds, info)
+                            && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
                         if in_bounds_sat && out_of_bounds_sat {
                             return Err(ExecError::SymbolicLength("write_register_from_vector", info));
                         }
@@ -714,16 +720,18 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                     Some(v) => {
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
                         let mismatch = smtlib::Exp::Not(Box::new(matches_tag.clone()));
-                        if speculative && !solver.check_sat_with(&mismatch, info).is_unsat()? {
-                            return Err(ExecError::IncompatibleMerge);
-                        }
-                        if solver.check_sat_with(&matches_tag, info).is_unsat()? {
-                            return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
-                        }
-                        if !speculative && solver.check_sat_with(&mismatch, info).is_sat()? {
-                            // 载荷表达式已缓存，两个任务重试时不会重复记录读取副作用。
-                            local_state.expression_retry_operands = Some(Vec::new());
-                            return Err(ExecError::RetryCondition(matches_tag, info));
+                        if !solver.no_smt_safety(&matches_tag, info) {
+                            if speculative && !solver.check_sat_with(&mismatch, info).is_unsat()? {
+                                return Err(ExecError::IncompatibleMerge);
+                            }
+                            if solver.check_sat_with(&matches_tag, info).is_unsat()? {
+                                return Err(ExecError::Type(format!("Constructors didn't match {:?}", ctor_a), info));
+                            }
+                            if !speculative && solver.check_sat_with(&mismatch, info).is_sat()? {
+                                // 载荷表达式已缓存，两个任务重试时不会重复记录读取副作用。
+                                local_state.expression_retry_operands = Some(Vec::new());
+                                return Err(ExecError::RetryCondition(matches_tag, info));
+                            }
                         }
                         Owned(v)
                     }
@@ -2163,12 +2171,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let test_false = Not(Box::new(Var(v)));
 
                         let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
-                        let can_be_true = if frame.region_execution.is_some() {
+                        let can_be_true = if solver.branch_checks_skipped() {
+                            true
+                        } else if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_true, *info)?
                         } else {
                             solver.check_sat_with_for_branch(&test_true, *info, false).is_sat()?
                         };
-                        let can_be_false = if frame.region_execution.is_some() {
+                        let can_be_false = if solver.branch_checks_skipped() {
+                            true
+                        } else if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_false, *info)?
                         } else {
                             solver.check_sat_with_for_branch(&test_false, *info, false).is_sat()?
@@ -2957,6 +2969,22 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     value => value.clone(),
                 };
                 if let Val::Symbolic(v) = val {
+                    if solver.no_smt() {
+                        if let Some(value) = solver.structural_scalar(v, ty) {
+                            assign(
+                                tid,
+                                &Loc::Id(*id),
+                                value,
+                                cost::make_mut(&mut frame.local_state),
+                                shared_state,
+                                solver,
+                                *info,
+                            )?;
+                            frame.pc += 1;
+                            continue 'main_loop;
+                        }
+                        return Err(ExecError::Smt(solver.no_smt_cannot_continue("monomorphize", *info)));
+                    }
                     use smtlib::bits64;
                     use smtlib::Def::*;
                     use smtlib::Exp::*;

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) struct SolveSummary {
+    pub uncertified: bool,
     pub sampled_paths: usize,
     pub errors: usize,
     pub execution_timeouts: usize,
@@ -24,13 +25,14 @@ pub(super) struct SolveSummary {
 
 impl SolveSummary {
     pub fn status(&self) -> &'static str {
-        if self.sampled_paths
-            + self.errors
-            + self.unfinished_paths
-            + self.omitted_cases
-            + self.model_query_timeouts
-            + self.pending_batches
-            > 0
+        if self.uncertified
+            || self.sampled_paths
+                + self.errors
+                + self.unfinished_paths
+                + self.omitted_cases
+                + self.model_query_timeouts
+                + self.pending_batches
+                > 0
         {
             "partial"
         } else if self.inapplicable_batches > 0 && self.applicable_batches == 0 {
@@ -69,6 +71,7 @@ impl SolveSummary {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        self.uncertified |= other.uncertified;
         self.filtered_model_exception_paths += other.filtered_model_exception_paths;
         for (site, count) in &other.filtered_model_exception_sites {
             *self.filtered_model_exception_sites.entry(site.clone()).or_default() += count;
@@ -156,5 +159,18 @@ mod tests {
         summary.merge(&SolveSummary { applicable_batches: 1, ..SolveSummary::default() });
         assert_eq!(summary.status(), "finished");
         assert!(summary.json().get("reason").is_none());
+    }
+}
+
+#[cfg(test)]
+mod no_smt_tests {
+    use super::*;
+    #[test]
+    fn uncertified_is_partial_without_execution_errors() {
+        let mut summary = SolveSummary { uncertified: true, applicable_batches: 1, ..Default::default() };
+        assert_eq!(summary.status(), "partial");
+        assert_eq!(summary.json()["uncertified"], true);
+        summary.merge(&SolveSummary::default());
+        assert_eq!(summary.status(), "partial");
     }
 }

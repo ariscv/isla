@@ -56,6 +56,7 @@ impl IslaError for VoidError {
 
 #[derive(Clone, Debug)]
 pub enum SmtError {
+    NoSmt { reason: &'static str, source_loc: SourceLoc },
     Timeout(Arc<SmtTimeout>),
 }
 
@@ -63,6 +64,7 @@ impl SmtError {
     pub fn source_loc(&self) -> SourceLoc {
         match self {
             SmtError::Timeout(timeout) => timeout.source_loc(),
+            SmtError::NoSmt { source_loc, .. } => *source_loc,
         }
     }
 }
@@ -71,6 +73,10 @@ impl PartialEq for SmtError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (SmtError::Timeout(lhs), SmtError::Timeout(rhs)) => Arc::ptr_eq(lhs, rhs),
+            (SmtError::NoSmt { reason: a, source_loc: x }, SmtError::NoSmt { reason: b, source_loc: y }) => {
+                a == b && x == y
+            }
+            _ => false,
         }
     }
 }
@@ -80,6 +86,7 @@ impl Eq for SmtError {}
 impl fmt::Display for SmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SmtError::NoSmt { reason, source_loc } => write!(f, "无 SMT 无法继续：{reason}，位置{source_loc:?}"),
             SmtError::Timeout(timeout) => write!(
                 f,
                 "SMT timeout during {:?} at {:?} after {:?} (operation wall {:?})",

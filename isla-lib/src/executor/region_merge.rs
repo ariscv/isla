@@ -136,7 +136,7 @@ pub(super) fn feasible<B: BV>(
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
-    if solver.region_queries_deferred() {
+    if solver.region_queries_deferred() || solver.branch_checks_skipped() {
         // 两臂只是候选；调用处不得把此结果登记为可满足性证明。
         return Ok(true);
     }
@@ -541,8 +541,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             } else {
                 let record_start = frame.region_merge_records.len();
                 let tx = solver.start_transaction();
-                let defer =
-                    solver.region_queries_deferred() || crate::config::RegionOptions::current().defer_exit_check;
+                let defer = solver.no_smt()
+                    || solver.region_queries_deferred()
+                    || crate::config::RegionOptions::current().defer_exit_check;
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
                     serde_json::json!({
                     "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),
@@ -564,7 +565,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         state, shared, solver, info,
                     );
                     log_phase("execute_end", None);
-                    if defer && !nested && output.is_ok() {
+                    if defer && !nested && output.is_ok() && !solver.no_smt() {
                         log_phase("obligation_start", None);
                         let checked = solver.check_deferred_assertions(info);
                         log_phase("obligation_end", Some(&checked));
@@ -579,7 +580,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result = if defer && !nested && result.is_ok() {
+                let result = if defer && !nested && result.is_ok() && !solver.no_smt() {
                     log_phase("exit_check_start", None);
                     let checked = solver.check_sat(info);
                     log_phase("exit_check_end", Some(&checked));
@@ -817,8 +818,11 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result =
-                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(info) };
+                let close_result = if solver.region_queries_deferred() || solver.no_smt() {
+                    SmtResult::Sat
+                } else {
+                    solver.check_sat_for_arm(info)
+                };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Unsat => {
@@ -1804,8 +1808,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result =
-                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(work.info) };
+                let close_result = if solver.region_queries_deferred() || solver.no_smt() {
+                    SmtResult::Sat
+                } else {
+                    solver.check_sat_for_arm(work.info)
+                };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Sat => (),

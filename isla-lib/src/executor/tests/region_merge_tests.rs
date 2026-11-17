@@ -5166,3 +5166,93 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
     solver.rollback_transaction(root);
     assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
 }
+
+#[test]
+fn no_smt_stage1_synthetic_jump_keeps_full_guards() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for skip in [false, true] {
+        let mut cfg = Config::new();
+        cfg.solver_options.skip_branch_checks = skip;
+        let context = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&context);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        solver.assert(smtlib::Exp::Var(condition));
+        let mut frame = make_frame(vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+        let state = TaskState::new();
+        let shared = empty_shared_state();
+        let queue = Worker::new_lifo();
+        assert!(matches!(
+            run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver
+            ),
+            Ok(Run::Finished(_))
+        ));
+        assert_eq!(queue.is_empty(), !skip);
+        if skip {
+            let child = queue.pop().unwrap();
+            let Some((Def::Assert(guard), _)) = child.fork_cond else { panic!("候选必须保留分叉守卫") };
+            let verification = Context::new(Config::new());
+            let mut replay = Solver::from_checkpoint(&verification, child.checkpoint);
+            replay.assert(guard);
+            assert_eq!(replay.check_sat(info()), SmtResult::Unsat);
+            // 子任务是未剪枝的不可行臂；完整前态和负守卫必须留下矛盾。
+            assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+        }
+    }
+}
+
+#[test]
+fn no_smt_candidate_merge_does_not_check_assertion_or_exit() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut cfg = Config::new();
+    cfg.solver_options.no_smt = true;
+    let context = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ]);
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let shared = empty_shared_state();
+    let queue = Worker::new_lifo();
+    assert!(matches!(
+        run_loop(
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver
+        ),
+        Ok(Run::Finished(_))
+    ));
+    assert_eq!(crate::smt::path_smt_stats().calls, 0);
+    assert!(queue.is_empty());
+    assert!(!frame.region_merge_records().is_empty());
+    assert!(!solver.has_stashed_model());
+}

@@ -673,6 +673,20 @@ fn isla_main() -> i32 {
         eprintln!("{error}");
         return 1;
     }
+    let solver_region_options = limits.region_options.clone().unwrap_or_default();
+    if let Err(error) = isarch::region_options::validate_no_smt_mode(&matches, &solver_region_options) {
+        eprintln!("{error}");
+        return 1;
+    }
+    isla_lib::smt::configure_solver_options(isla_lib::smt::SolverOptions {
+        skip_branch_checks: solver_region_options.skip_branch_checks,
+        skip_bool_proofs: solver_region_options.skip_bool_proofs,
+        no_smt: solver_region_options.no_smt,
+        keep_bool_proofs: solver_region_options.no_smt_keep_bool_proofs,
+    });
+    if solver_region_options.no_smt {
+        eprintln!("未认证候选构造：no_smt=true keep_bool_proofs={}", solver_region_options.no_smt_keep_bool_proofs);
+    }
     if had_limits || limits != ExecutionLimitsConfig::default() {
         isa_config.execution_limits = Some(limits);
     }

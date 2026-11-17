@@ -798,3 +798,22 @@ witness_eval = true
 运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除。
 
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
+
+### 无 SMT 候选 DAG 实验
+
+以下开关默认关闭，供定位求解成本使用。它们不修改 Sail 模型或区域步数预算。
+
+- `--skip-branch-checks`：符号分支两臂都作为候选，保留完整守卫，不登记为已证明 SAT；其它查询照常。
+- `--skip-bool-proofs`：停止可选布尔恒值证明，保留符号表达式；必需安全查询照常。
+- `--no-smt`：仅支持 `solve-state --path-cache-only --path-cache-write <新目录>`，停止所有 check。必需检查先做结构化推理，未证明时加入显式安全前提并计入 `assumed_safe_checks`；无法取得执行所需具体值的路径按原因及源码位置终止。
+- `--no-smt --no-smt-keep-bool-proofs`：第三种实验，只恢复可选布尔恒值证明，包括 defer 内的该类查询。分支、区域臂／出口、断言、终态及必需 General／RangeProof 的真实查询仍关闭；不能再指定 `--skip-bool-proofs`。
+
+全局模式仍使用 Z3 的 AST 构造、化简及作用域操作。`--memory-stats` 附带输出 `no_smt_summary`，逐位置列出结构证明、假定安全和未验证断言计数；无法继续的路径另输出 `no_smt_terminated_path`。这两种全局模式的产物都是 `uncertified`，探索摘要保持 partial，manifest 不写 complete，不能直接用普通缓存读回入口生成样例或开始 fuzz。终态计数包括不可行候选，不能作为已认证覆盖数。
+
+这些开关也可放在 `[execution_limits.region_options]`：`skip_branch_checks`、`skip_bool_proofs`、`no_smt`、`no_smt_keep_bool_proofs`，默认均为 `false`。CLI 保留上述裸 flag，并支持 `--no-smt=false` 等显式布尔值覆盖 TOML。不读取对应环境变量。
+
+```toml
+[execution_limits.region_options]
+no_smt = true
+# 可选第三种：no_smt_keep_bool_proofs = true
+```
