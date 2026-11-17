@@ -147,3 +147,32 @@ fn dedup_continuation_cannot_reuse_sat_across_guarded_constraints() {
     assert_eq!(s.check_sat(info), Sat);
     assert!(s.has_stashed_model(), "继续执行后普通取值仍能获得模型");
 }
+
+#[test]
+fn deferred_exit_queries_never_publish_sat_and_restore_after_error() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = s.declare_const(Ty::Bool, info);
+    s.assert(Var(x));
+    reset_path_smt_stats();
+    s.with_deferred_region_queries(|s| {
+        assert!(s.region_queries_deferred());
+        assert_eq!(s.check_sat_with_for_bool(&Var(x), info), Unknown);
+        assert_eq!(s.check_sat_with_for_range(&Var(x), info), Unknown);
+        assert_eq!(s.check_sat(info), Unknown);
+        s.note_jump_results(x, true, true);
+        assert!(s.knowledge.both.is_none());
+        assert!(!s.knowledge.sat);
+    });
+    assert_eq!(path_smt_stats().calls, 0);
+    assert!(!s.region_queries_deferred());
+    assert_eq!(s.check_sat_with(&Not(Box::new(Var(x))), info), Unsat);
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.with_deferred_region_queries(|_| panic!("检查作用域恢复"));
+    }));
+    assert!(error.is_err());
+    assert!(!s.region_queries_deferred());
+    assert_eq!(s.check_sat(info), Sat);
+}

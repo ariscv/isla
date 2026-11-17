@@ -4685,3 +4685,43 @@ fn dedup_executor_guard_change_prunes_poison_before_execution() {
     ];
     assert_eq!(differential(program, &shared, 1, true), (2, 1));
 }
+
+#[test]
+fn deferred_exit_merge_preserves_relation_and_dead_guard() {
+    const CHILD: &str = "ISLA_EXIT_CHECK_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        for enabled in ["0", "1"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "executor::tests::region_merge_tests::deferred_exit_merge_preserves_relation_and_dead_guard",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ISLA_REGION_DEFER_EXIT_CHECK", enabled)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    let shared = empty_shared_state();
+    // 内层否定条件与入口条件矛盾，其返回值必须永远不能被观察到。
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(8),
+        Instr::Jump(Exp::Call(Op::Not, vec![input(0)]), 6, info()),
+        Instr::Copy(Loc::Id(RETURN), input(1), info()),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Goto(8),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, true), (2, 1));
+}

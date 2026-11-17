@@ -133,6 +133,10 @@ pub(super) fn feasible<B: BV>(
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
+    if solver.region_queries_deferred() {
+        // 两臂只是候选；调用处不得把此结果登记为可满足性证明。
+        return Ok(true);
+    }
     match solver.check_sat_with_for_branch(exp, info, true) {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
@@ -532,10 +536,30 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             } else {
                 let record_start = frame.region_merge_records.len();
                 let tx = solver.start_transaction();
-                let result = execute_region(
-                    condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame, state,
-                    shared, solver, info,
-                );
+                static DEFER_EXIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let defer = solver.region_queries_deferred()
+                    || *DEFER_EXIT
+                        .get_or_init(|| std::env::var("ISLA_REGION_DEFER_EXIT_CHECK").is_ok_and(|value| value == "1"));
+                let execute = |solver: &mut Solver<B>| {
+                    execute_region(
+                        condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame,
+                        state, shared, solver, info,
+                    )
+                };
+                let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
+                // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
+                let result = if defer && !nested && result.is_ok() {
+                    match solver.check_sat(info) {
+                        SmtResult::Sat => result,
+                        // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
+                        // 保守回滚，让普通执行分别判断两个前沿。
+                        SmtResult::Unsat => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        SmtResult::Unknown => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        SmtResult::Error(error) => Err(ExecError::Smt(error)),
+                    }
+                } else {
+                    result
+                };
                 let mut continuation = None;
                 let result = result.map(|output| {
                     continuation = output.continuation;
@@ -754,7 +778,8 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = solver.check_sat_for_arm(info);
+                let close_result =
+                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(info) };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Unsat => {
@@ -791,6 +816,10 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
             }
             Ok(Run::Dead) | Err(ExecError::AssertionFailure(..)) => {
+                if solver.region_queries_deferred() {
+                    solver.rollback_transaction(tx);
+                    return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
+                }
                 solver.commit_dead_transaction();
                 arms.push(None);
             }
@@ -1726,7 +1755,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = solver.check_sat_for_arm(work.info);
+                let close_result =
+                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(work.info) };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Sat => (),
@@ -1949,6 +1979,10 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
             }
             Ok(Run::Dead) | Err(ExecError::AssertionFailure(..)) => {
+                if solver.region_queries_deferred() {
+                    solver.rollback_transaction(tx);
+                    return Err(reject(&arm, SpeculativeRejectReason::SymbolicAssertion));
+                }
                 solver.commit_dead_transaction();
                 work.arms.push(None);
                 work.arm_start = None;

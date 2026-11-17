@@ -32,6 +32,22 @@ pub(super) fn literal(exp: &Exp<Sym>) -> Option<(Sym, bool)> {
     }
 }
 impl<B: BV> Solver<'_, B> {
+    pub(crate) fn region_queries_deferred(&self) -> bool {
+        self.deferred_region_queries
+    }
+
+    /// 推演可嵌套；错误和 panic 均恢复父作用域，不能把延迟状态带入普通执行。
+    pub(crate) fn with_deferred_region_queries<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.deferred_region_queries;
+        self.deferred_region_queries = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.deferred_region_queries = previous;
+        match result {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+
     pub(crate) fn check_sat_with_for_branch(
         &mut self,
         exp: &Exp<Sym>,
@@ -39,6 +55,9 @@ impl<B: BV> Solver<'_, B> {
         speculative: bool,
     ) -> SmtResult {
         // 这里只回答可行性，不承诺交付模型。普通查询与最终取值仍用原接口。
+        if self.deferred_region_queries {
+            return Unknown;
+        }
         if literal(exp).is_some_and(|(sym, _)| self.knowledge.both == Some((sym, self.knowledge.version))) {
             return Sat;
         }
@@ -52,7 +71,7 @@ impl<B: BV> Solver<'_, B> {
         self.knowledge.both = both.then_some((sym, self.knowledge.version));
     }
     pub(crate) fn note_jump_results(&mut self, sym: Sym, a: bool, b: bool) {
-        if a && b {
+        if !self.deferred_region_queries && a && b {
             self.knowledge.both = Some((sym, self.knowledge.version));
         }
     }
