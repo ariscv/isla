@@ -36,7 +36,7 @@ impl FunctionEffect {
 }
 
 /// 已加载的原语调用通常已改写为 Primop；特殊内建仍保留 Call 形态。
-fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effect {
+pub(crate) fn direct_effect<B: BV>(instr: &Instr<Name, B>, shared: &SharedState<B>) -> Effect {
     match instr {
         Instr::PrimopUnary(_, f, _, _) => effects::unary_effect(*f).expect("一元原语必须分类"),
         Instr::PrimopBinary(_, f, _, _, _) => effects::binary_effect(*f).expect("二元原语必须分类"),

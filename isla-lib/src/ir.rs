@@ -64,6 +64,7 @@ use crate::zencode;
 mod dead_formatting;
 pub mod linearize;
 pub mod partial_linearize;
+pub mod pure;
 pub mod regions;
 pub mod serialize;
 pub mod ssa;
