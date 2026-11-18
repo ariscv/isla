@@ -106,6 +106,16 @@ fn scan_paths(
     merge: bool,
     reg: Option<Name>,
 ) -> Vec<Path> {
+    scan_paths_with_limits(shared, n, budget, reg, ExecutionLimits::default().with_path_merging(merge))
+}
+
+fn scan_paths_with_limits(
+    shared: &SharedState<'static, B64>,
+    n: usize,
+    budget: usize,
+    reg: Option<Name>,
+    limits: ExecutionLimits,
+) -> Vec<Path> {
     let counter = test_name(1800);
     let choices = test_name(1801);
     let choice = test_name(1802);
@@ -113,10 +123,7 @@ fn scan_paths(
         scan_program(counter, choices, choice, n, reg),
         shared,
         n,
-        ExecutionLimits::default()
-            .with_path_merging(merge)
-            .with_region_loop_analysis(true)
-            .with_region_global_state(true),
+        limits.with_region_loop_analysis(true).with_region_global_state(true),
         budget,
         crate::memory::Memory::new(),
         |frame| {
@@ -241,9 +248,17 @@ fn loop_segment_register_state_and_continue_guard_are_exact() {
     let reg = shared.symtab.intern("ziteration_state");
     shared.registers.insert(reg, Ty::I128);
     let off = scan_paths(&shared, 8, 40, false, Some(reg));
-    let on = scan_paths(&shared, 8, 40, true, Some(reg));
-    equivalent_scalar_paths(&off, &on, 8);
-    equivalent_register_paths(&off, &on, 8);
+    let counts = [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat].map(|strategy| {
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        limits.merge_strategy = strategy;
+        let on = scan_paths_with_limits(&shared, 8, 40, Some(reg), limits);
+        equivalent_scalar_paths(&off, &on, 8);
+        equivalent_register_paths(&off, &on, 8);
+        let mut counts: Vec<_> = on.iter().map(|path| path.records.len()).collect();
+        counts.sort_unstable();
+        counts
+    });
+    assert_eq!(counts[0], counts[1], "有限预算下，两组织者必须留下相同数量的前沿和记录");
 }
 #[test]
 fn loop_segment_zero_budget_keeps_ordinary_fallback() {

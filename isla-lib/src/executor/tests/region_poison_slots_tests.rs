@@ -123,10 +123,10 @@ fn union_case(
             true,
         )
     };
-    let (reference, reference_errors) = run(ExecutionLimits::default());
+    let (reference, reference_errors, _) = run(ExecutionLimits::default().with_path_merging(false));
     let mut limits = strategy.limits();
     limits.merge_poison_slots = enabled;
-    let (merged, merged_errors) = run(limits);
+    let (merged, merged_errors, _) = run(limits);
     (
         reference,
         merged,

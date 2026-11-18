@@ -2,8 +2,8 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 pub fn add_cli(opts: &mut getopts::Options) {
-    opts.optopt("", "merge-strategy", "路径合并策略；默认 recursive", "recursive|flat");
-    opts.optopt("", "ordered-events", "flat 保留事件偏序；默认 false", "true|false");
+    opts.optopt("", "merge-strategy", "区域组织者，缺省 recursive", "recursive|flat");
+    opts.optopt("", "ordered-events", "两种组织者共用的访问偏序设置，缺省 false", "true|false");
 }
 
 pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
