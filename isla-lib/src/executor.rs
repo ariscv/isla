@@ -4051,6 +4051,7 @@ mod tests {
     mod cow_tests;
     mod merge_history_tests;
     mod nested_enum_tests;
+    mod nested_merge_failure_tests;
     mod region_measurement_tests;
     mod region_merge_tests;
     mod review27_tests;

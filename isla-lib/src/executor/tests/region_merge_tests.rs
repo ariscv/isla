@@ -42,8 +42,8 @@ fn run_in_diagnostics_process(test_path: &str) -> bool {
     false
 }
 
-struct Path {
-    records: Vec<RegionMergeRecord<B64>>,
+pub(super) struct Path {
+    pub(super) records: Vec<RegionMergeRecord<B64>>,
     value: Val<B64>,
     events: Vec<Event<B64>>,
     variables: Bindings<'static, B64>,
@@ -66,7 +66,7 @@ fn paths_with_memory(
     paths_with_state(instrs, shared, inputs, ExecutionLimits::default().with_path_merging(merge), memory, |_| ())
 }
 
-fn paths_with_state(
+pub(super) fn paths_with_state(
     instrs: Vec<Instr<Name, B64>>,
     shared: &SharedState<'static, B64>,
     inputs: usize,
@@ -212,7 +212,7 @@ fn differential(
 }
 
 /// 也供预期拒绝合并的用例复用等价判据，拒绝行为由用例另外检查。
-fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: bool) -> (usize, usize) {
+pub(super) fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: bool) -> (usize, usize) {
     use smtlib::Exp::*;
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -250,7 +250,7 @@ fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: b
     (forked.len(), merged.len())
 }
 
-fn input(index: u32) -> Exp<Name> {
+pub(super) fn input(index: u32) -> Exp<Name> {
     Exp::Id(test_name(900 + index))
 }
 
