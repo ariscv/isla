@@ -3416,13 +3416,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         result
     }
 
-    pub fn dump_solver(&mut self, filename: &str) {
-        let mut file = std::fs::File::create(filename).expect("Failed to open solver dump file");
+    /// 输出当前求解器的声明与断言，供外部工具重放。
+    pub fn write_smtlib(&self, mut output: impl Write) -> std::io::Result<()> {
         unsafe {
-            let s = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
-            let cs = CStr::from_ptr(s);
-            file.write_all(cs.to_bytes()).expect("Failed to write solver dump");
+            let text = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
+            output.write_all(CStr::from_ptr(text).to_bytes())
         }
+    }
+
+    pub fn dump_solver(&mut self, filename: &str) {
+        let file = std::fs::File::create(filename).expect("Failed to open solver dump file");
+        self.write_smtlib(file).expect("Failed to write solver dump");
     }
 
     pub fn dump_solver_with(&mut self, filename: &str, exp: &Exp<Sym>) {

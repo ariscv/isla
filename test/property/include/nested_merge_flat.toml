@@ -1,0 +1,4 @@
+includes = ["../../../configs/plain.toml"]
+
+[execution_limits.path_merge]
+strategy = "flat"

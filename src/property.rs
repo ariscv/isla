@@ -29,17 +29,16 @@
 
 use sha2::{Digest, Sha256};
 use std::process::exit;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use isla_lib::bitvector::b64::B64;
-use isla_lib::executor;
 use isla_lib::executor::{ExecutionLimits, LocalFrame, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, Initialized};
 use isla_lib::ir::*;
 use isla_lib::zencode;
 
 mod opts;
+#[path = "property/paths.rs"]
+mod paths;
 use opts::CommonOpts;
 
 fn main() {
@@ -53,11 +52,22 @@ fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     opts.reqopt("p", "property", "check property in architecture", "<id>");
     opts.optflag("", "optimistic", "assume assertions succeed");
+    paths::add_options(&mut opts);
 
     let mut hasher = Sha256::new();
     let (matches, arch) = opts::parse::<B64>(&mut hasher, &opts);
-    let CommonOpts { num_threads, mut arch, symtab, type_info, isa_config, source_path: _, .. } =
+    let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, source_path: _, .. } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
+    let path_options = match paths::PathOptions::parse(&matches) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+    if matches.opt_present("path-merging") {
+        isa_config.execution_limits.get_or_insert_with(Default::default).path_merge.enabled = Some(true);
+    }
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");
 
     let assertion_mode =
@@ -70,25 +80,17 @@ fn isla_main() -> i32 {
 
     let function_id = shared_state.symtab.lookup(&property);
     let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
-    let task_state = TaskState::new().with_execution_limits(
-        ExecutionLimits::default()
+    let limits = match &isa_config.execution_limits {
+        Some(config) => ExecutionLimits::default().with_config(config, &shared_state.symtab),
+        None => ExecutionLimits::default()
             .with_max_backjumps_per_loop(1000)
             .with_max_path_depth(1_000_000)
             .with_max_forks_per_branch(1024),
-    );
+    };
+    let task_state = TaskState::new().with_execution_limits(limits);
     let task = LocalFrame::new(function_id, args, ret_ty, None, instrs)
         .add_lets(&lets)
         .add_regs(&regs)
         .task(TaskId::fresh(), &task_state);
-    let result = Arc::new(AtomicBool::new(true));
-
-    executor::start_multi(num_threads, None, vec![task], &shared_state, result.clone(), &executor::all_unsat_collector);
-
-    if result.load(Ordering::Acquire) {
-        println!("ok");
-        0
-    } else {
-        println!("fail");
-        1
-    }
+    path_options.run(num_threads, task, &shared_state)
 }
