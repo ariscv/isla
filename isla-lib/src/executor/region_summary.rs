@@ -326,3 +326,86 @@ impl CachedReject {
         }
     }
 }
+
+/// 对静态终止调用做额外证明。任何能够经过其它出口的函数仍由原有准入拒绝。
+pub(super) fn filtered_exception_calls<B: BV>(
+    shared: &SharedState<B>,
+    summaries: &HashMap<Name, FunctionEffect>,
+    filters: &[String],
+) -> HashSet<Name> {
+    let constructors: HashSet<_> = shared
+        .type_info
+        .union_ctors
+        .iter()
+        .copied()
+        .filter(|ctor| super::model_exception::filtered_constructor(filters, *ctor, &shared.symtab).is_some())
+        .collect();
+    let candidates: Vec<_> = shared
+        .functions
+        .iter()
+        .filter(|(function, _)| summaries[*function].non_returning)
+        .map(|(function, (_, _, body))| (*function, *body, RegionCfg::new(body, RegionOptions::default())))
+        .collect();
+    let mut proven = HashSet::new();
+    loop {
+        let previous = proven.len();
+        for (function, body, cfg) in &candidates {
+            if !proven.contains(function) && stops_at_filtered_throw(body, cfg, &constructors, &proven, shared) {
+                proven.insert(*function);
+            }
+        }
+        if proven.len() == previous {
+            return proven;
+        }
+    }
+}
+
+fn stops_at_filtered_throw<B: BV>(
+    body: &[Instr<Name, B>],
+    cfg: &RegionCfg,
+    constructors: &HashSet<Name>,
+    proven: &HashSet<Name>,
+    shared: &SharedState<B>,
+) -> bool {
+    use crate::ir::regions::RegionPoint;
+    let mut pending = vec![RegionPoint::Instruction(0)];
+    let mut visited = HashSet::new();
+    while let Some(point) = pending.pop() {
+        let RegionPoint::Instruction(pc) = point else { return false };
+        if !visited.insert(pc) {
+            continue;
+        }
+        let suffix = &body[pc..];
+        match suffix {
+            // 从构造指令开始证明连续的 throw 序列。跳到序列中间的路径仍须独立证明。
+            [Instr::Call(Loc::Id(slot), _, ctor, _, _), Instr::Copy(Loc::Id(exception), Exp::Id(source), _), Instr::Copy(Loc::Id(flag), Exp::Bool(true), _), ..]
+                if constructors.contains(ctor)
+                    && !shared.functions.contains_key(ctor)
+                    && slot == source
+                    && *exception == CURRENT_EXCEPTION
+                    && *flag == HAVE_EXCEPTION =>
+            {
+                continue
+            }
+            [Instr::Call(Loc::Id(exception), _, ctor, _, _), Instr::Copy(Loc::Id(flag), Exp::Bool(true), _), ..]
+                if constructors.contains(ctor)
+                    && !shared.functions.contains_key(ctor)
+                    && *exception == CURRENT_EXCEPTION
+                    && *flag == HAVE_EXCEPTION =>
+            {
+                continue
+            }
+            [Instr::Call(_, _, callee, _, _), ..] if proven.contains(callee) => continue,
+            [Instr::Call(_, _, callee, _, _), ..]
+                if shared.functions.contains_key(callee) || !shared.type_info.union_ctors.contains(callee) =>
+            {
+                return false;
+            }
+            [] => return false,
+            _ => (),
+        }
+        pending.extend(cfg.successors(pc).map(|(point, _)| point));
+    }
+    // 候选已通过有限终止证明。所有可达的终止边都必须被上面的 throw 或已证明调用截断。
+    true
+}

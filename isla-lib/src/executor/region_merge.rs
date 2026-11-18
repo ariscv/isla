@@ -259,7 +259,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
 }
 
 pub(super) fn preflight<B: BV>(
-    frame: &LocalFrame<B>,
+    frame: &mut LocalFrame<B>,
     state: &TaskState<B>,
     shared: &SharedState<B>,
 ) -> Result<(), ExecError> {
@@ -268,10 +268,26 @@ pub(super) fn preflight<B: BV>(
     }
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state));
-    if matches!(&frame.instrs[frame.pc], Instr::Call(_, _, callee, _, _) if summaries.get(callee).is_some_and(|summary| summary.non_returning))
+    if let Instr::Call(_, _, callee, _, _) = &frame.instrs[frame.pc] {
+        if summaries.get(callee).is_some_and(|summary| summary.non_returning) {
+            let filters = state.execution_limits.as_ref().unwrap().filter_model_exceptions.as_ref();
+            // 只有所有终止路径都在已过滤的 throw 处结束，才允许推演执行这个出口。
+            if filters.is_empty()
+                || !state
+                    .filtered_exception_calls
+                    .get_or_init(|| super::region_summary::filtered_exception_calls(shared, summaries, filters))
+                    .contains(callee)
+            {
+                return Err(reject(frame, SpeculativeRejectReason::RegionEscaped));
+            }
+        }
+    }
+    // 已证明直接结束的异常写入属于死臂保存点，可以在严格的被调函数作用域内记账。
+    if !global_state
+        && matches!(&frame.instrs[frame.pc], Instr::Copy(Loc::Id(CURRENT_EXCEPTION | HAVE_EXCEPTION), ..))
+        && state.filtered_exception_calls.get().is_some_and(|calls| calls.contains(&frame.function_name))
     {
-        // 此调用是静态 CFG 的异常出口，推演必须在执行其任何效应之前离开区域。
-        return Err(reject(frame, SpeculativeRejectReason::RegionEscaped));
+        cost::make_mut(&mut frame.local_state).speculative_access.as_mut().unwrap().writes_allowed = true;
     }
     // 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
     // Custom 可执行设备 IO，Constrained 是任意闭包，均不能靠 solver 回滚外部效应。

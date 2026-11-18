@@ -16,6 +16,7 @@ use crate::zencode;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// 取得 IR 指令携带的 Sail 源码位置，供执行统计与异常诊断共用。
@@ -92,6 +93,8 @@ struct RejectSite {
 
 pub struct ExecutionStats {
     enabled: bool,
+    filtered_model_exception_arms: AtomicUsize,
+    filtered_model_exception_paths: AtomicUsize,
     snapshot_symbols: Mutex<Option<(Vec<String>, Vec<String>)>>,
     merge: Mutex<MergeStats>,
     forks: Mutex<HashMap<(Name, SourceLoc), usize>>,
@@ -106,6 +109,8 @@ impl ExecutionStats {
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
+            filtered_model_exception_arms: AtomicUsize::new(0),
+            filtered_model_exception_paths: AtomicUsize::new(0),
             snapshot_symbols: Mutex::new(None),
             merge: Mutex::new(MergeStats::default()),
             forks: Mutex::new(HashMap::new()),
@@ -192,14 +197,34 @@ impl ExecutionStats {
     }
     /// 正常收尾与 Force 强退共用，确保强退不依赖析构或 worker panic。
     pub fn print<B>(&self, shared: &crate::ir::SharedState<B>) {
-        merge_diagnostics::print();
+        merge_diagnostics::print(self);
+        if let Some(counts) = self.model_exception_filter_counts() {
+            eprintln!("[MODEL_EXCEPTION_THROW_FILTER] {counts}");
+        }
         if self.enabled {
             eprintln!("[MERGE_STATS] {}", self.merge_json());
             eprintln!("[FORK_STATS] {}", self.fork_json(&shared.symtab));
             eprintln!("[SPECULATION_REJECT_STATS] {}", self.arm_unsupported_json(&shared.symtab));
         }
     }
+    pub(super) fn filtered_model_exception(&self, in_region: bool) {
+        let counter =
+            if in_region { &self.filtered_model_exception_arms } else { &self.filtered_model_exception_paths };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(super) fn model_exception_filter_counts(&self) -> Option<Value> {
+        let arms = self.filtered_model_exception_arms.load(Ordering::Relaxed);
+        let paths = self.filtered_model_exception_paths.load(Ordering::Relaxed);
+        (arms != 0 || paths != 0).then(|| {
+            json!({
+                "filtered_model_exception_arms": arms,
+                "filtered_model_exception_paths_at_throw": paths,
+            })
+        })
+    }
     pub fn reset(&self) {
+        self.filtered_model_exception_arms.store(0, Ordering::Relaxed);
+        self.filtered_model_exception_paths.store(0, Ordering::Relaxed);
         let mut merge = self.merge.lock().unwrap();
         let rules = merge.rules.keys().map(|index| (*index, RuleStats::default())).collect();
         *merge = MergeStats { rules, ..MergeStats::default() };
@@ -285,7 +310,11 @@ impl ExecutionStats {
         self.forks.lock().unwrap().values().sum()
     }
     pub fn merge_json(&self) -> Value {
-        serde_json::to_value(&*self.merge.lock().unwrap()).unwrap()
+        let mut value = serde_json::to_value(&*self.merge.lock().unwrap()).unwrap();
+        if let Some(Value::Object(counts)) = self.model_exception_filter_counts() {
+            value.as_object_mut().unwrap().extend(counts);
+        }
+        value
     }
     pub fn fork_json(&self, symtab: &Symtab<'_>) -> Value {
         let forks = self.forks.lock().unwrap();

@@ -1392,7 +1392,9 @@ pub fn solve_state_main<'ir, B: BV>(
     let num_clauses = clause_set.len();
     assert!(!samples.path_cache.enabled() || num_clauses == 1, "缓存一次只能保存或恢复一个 clause");
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
-    let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
+    let mut execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
+    // 样本入口已经决定 CLI 与 TOML 的优先级，执行器及终态过滤使用同一份有效配置。
+    execution_limits.filter_model_exceptions = samples.filter_model_exceptions.clone().into();
     let model_timeout = execution_limits_config
         .and_then(|config| config.solver.model_timeout_ms)
         .map(|value| Duration::from_millis(value.get()));
@@ -1908,9 +1910,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             // 早于见证查询、终态计数和 ResidentPath 保存，避免异常进入 DAG 或样本。
             if let Ok((Run::Finished(_), frame)) = &exec_result {
                 if let Some((exception, _)) = frame.get_exception() {
-                    if let Some(site) =
-                        super::model_exception::filtered_site(&samples.filter_model_exceptions, exception, shared_state)
-                    {
+                    if let Some(site) = isla_lib::executor::model_exception::filtered_site(
+                        &samples.filter_model_exceptions,
+                        exception,
+                        shared_state,
+                    ) {
                         collected
                             .lock()
                             .expect("solve collector mutex poisoned")

@@ -16,6 +16,8 @@ mod global_state_tests;
 
 #[path = "region_poison_slots_tests.rs"]
 mod poison_slots_tests;
+#[path = "region_filtered_exception_tests.rs"]
+mod filtered_exception_tests;
 
 // 调试构建的真实执行循环需要大于 libtest 默认线程栈。只扩大已复现的深夹具，
 // 不改变整个测试进程或产品的栈设置。
@@ -48,6 +50,7 @@ fn run_in_diagnostics_process(test_path: &str) -> bool {
 pub(super) struct Path {
     pub(super) records: Vec<RegionMergeRecord<B64>>,
     value: Val<B64>,
+    exception: Option<Val<B64>>,
     events: Vec<Event<B64>>,
     variables: Bindings<'static, B64>,
     registers: RegisterBindings<'static, B64>,
@@ -114,6 +117,7 @@ fn paths_with_solver_state(
                 Some(SmtResult::Sat) => output.lock().unwrap().0.push(Path {
                     records: frame.region_merge_records().to_vec(),
                     value,
+                    exception: frame.get_exception().map(|(value, _)| value.clone()),
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
                     variables: frame.vars().clone(),
                     registers: frame.regs().clone(),

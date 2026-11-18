@@ -3,6 +3,7 @@ use crate::bitvector::BV;
 use crate::error::ExecError;
 use crate::ir::{BitsSegment, Name, Symtab, Ty, UVal, Val};
 use crate::smt::{smtlib, Solver};
+use crate::source_loc::SourceLoc;
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -535,6 +536,40 @@ pub(crate) fn record_depth(depth: usize, call_depth: usize, transaction_depth: u
     counts.max_transaction_depth = counts.max_transaction_depth.max(transaction_depth);
 }
 
+pub(in crate::executor) fn filtered_model_exception<B: BV>(
+    frame: &super::super::LocalFrame<B>,
+    shared: &crate::ir::SharedState<B>,
+    location: SourceLoc,
+    constructor: &str,
+    payload: &Val<B>,
+) {
+    if MODE.load(Ordering::Relaxed) != 2 {
+        return;
+    }
+    let symtab = &shared.symtab;
+    let site = |function, pc, loc: SourceLoc| {
+        json!({
+            "function":name_string(function, symtab), "pc":pc,
+            "location":loc, "sail":loc.location_string(symtab.files())
+        })
+    };
+    let caller = frame.backtrace.last().map(|&(function, pc)| {
+        let loc =
+            shared.functions.get(&function).and_then(|(_, _, body)| body.get(pc)).and_then(super::instr_source_loc);
+        site(function, pc, loc.unwrap_or(SourceLoc::unknown()))
+    });
+    let attempt = ATTEMPTS.with(|stack| stack.borrow().last().map(|attempt| attempt.id));
+    let kind =
+        if frame.region_execution.is_some() { "filtered_model_exception_arm" } else { "filtered_model_exception_path" };
+    eprintln!(
+        "{}",
+        json!({
+            "schema":1, "kind":kind, "constructor":constructor, "payload":payload.to_str(shared),
+            "throw":site(frame.function_name, frame.pc, location), "caller":caller, "attempt":attempt,
+        })
+    );
+}
+
 pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::SourceLoc) {
     if !enabled() {
         return;
@@ -683,7 +718,7 @@ impl DiagnosticCounts {
     }
 }
 /// 每组累计快照带编号；末行是完整组的标记，不清空计数。
-fn print_with_trigger(trigger: &str) {
+fn print_with_trigger(trigger: &str, stats: &super::ExecutionStats) {
     if !enabled() {
         return;
     }
@@ -718,6 +753,13 @@ fn print_with_trigger(trigger: &str) {
             json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count})).collect::<Vec<_>>()})
     )
     .unwrap();
+    if let Some(mut filters) = stats.model_exception_filter_counts() {
+        filters["schema"] = json!(1);
+        filters["kind"] = json!("filtered_model_exception_summary");
+        filters["snapshot"] = json!(snapshot);
+        filters["trigger"] = json!(trigger);
+        writeln!(out, "{filters}").unwrap();
+    }
     super::merge_timing::write_snapshot(&mut out, snapshot, trigger);
     let mut totals = counts.totals();
     totals["snapshot"] = json!(snapshot);
@@ -725,8 +767,8 @@ fn print_with_trigger(trigger: &str) {
     writeln!(out, "{totals}").unwrap();
     out.flush().unwrap();
 }
-pub(crate) fn print() {
-    print_with_trigger("final");
+pub(crate) fn print(stats: &super::ExecutionStats) {
+    print_with_trigger("final", stats);
 }
 
 static TERMINATION: AtomicI32 = AtomicI32::new(0);
@@ -777,7 +819,7 @@ impl SnapshotReporter {
                 if diagnostic {
                     let signal = TERMINATION.swap(0, Ordering::Relaxed);
                     if signal != 0 {
-                        print_with_trigger("signal");
+                        print_with_trigger("signal", &stats);
                         super::memory_stats::print();
                         // 恢复原动作后重新投递，保留默认的信号退出状态或原处理器行为。
                         let previous = &handlers.iter().find(|(number, _)| *number == signal).unwrap().1;
@@ -789,7 +831,7 @@ impl SnapshotReporter {
                     }
                 }
                 if Instant::now() >= deadline {
-                    print_with_trigger("periodic");
+                    print_with_trigger("periodic", &stats);
                     super::memory_stats::print();
                     if stats.enabled() {
                         let (merge, forks, arms) = stats.snapshot_json();

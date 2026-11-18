@@ -88,6 +88,7 @@ impl<B> TaskInterrupt<B> {
 pub struct TaskState<B> {
     pub(super) force_regions_validated: std::sync::OnceLock<()>,
     pub(super) region_effect_summaries: std::sync::OnceLock<HashMap<Name, super::region_summary::FunctionEffect>>,
+    pub(super) filtered_exception_calls: std::sync::OnceLock<HashSet<Name>>,
     region_step_budget: Option<usize>,
     pub(super) region_negative_cache: std::sync::Mutex<HashMap<(Name, usize), super::region_summary::CachedReject>>,
     pub(super) speculation_stats: SpeculationStats,
@@ -127,6 +128,7 @@ impl<B> TaskState<B> {
         TaskState {
             force_regions_validated: std::sync::OnceLock::new(),
             region_effect_summaries: std::sync::OnceLock::new(),
+            filtered_exception_calls: std::sync::OnceLock::new(),
             region_step_budget: None,
             region_negative_cache: std::sync::Mutex::new(HashMap::new()),
             speculation_stats: SpeculationStats::default(),
