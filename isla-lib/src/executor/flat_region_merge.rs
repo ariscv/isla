@@ -1,5 +1,5 @@
 //! 单队列区域推演。片段共享一个根事务；每段只有完整守卫作用域，不创建嵌套保存点。
-use super::region_engine::{advance_arm, append_loop_exit, finish_arrivals, loop_exit_guard};
+use super::region_engine::{advance_arm, append_loop_exit, branch_arm, finish_arrivals, loop_exit_guard};
 use super::region_merge::{self, RegionOutput, RegionResult};
 use super::region_summary::function_effect_summaries;
 use super::stats::merge_diagnostics as diagnostics;
@@ -102,16 +102,11 @@ pub(super) fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Si
                 (0, target, smtlib::Exp::Var(condition)),
                 (1, original.pc + 1, smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition)))),
             ] {
-                let mut arm = base.clone();
-                arm.pc = pc;
+                let owner = solver.new_logical_arm(original.region_arm);
+                let mut arm = branch_arm(&base, pc, arm_guard, owner);
                 let access = cost::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
-                let guard = match access.guard.take() {
-                    Some(parent) => smtlib::Exp::And(Box::new(parent), Box::new(arm_guard)),
-                    None => arm_guard,
-                };
                 // 定义共享完整守卫，嵌套 if 不复制整棵守卫树。
-                access.guard = Some(smtlib::Exp::Var(solver.define_const(guard, info)));
-                arm.region_arm = Some(solver.new_logical_arm(original.region_arm));
+                access.guard = Some(smtlib::Exp::Var(solver.define_const(access.guard.take().unwrap(), info)));
                 ready.push_back(Work::Run(arm, (index, side)));
             }
             let record = region_merge::NEXT_RECORD
@@ -137,11 +132,14 @@ pub(super) fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Si
                 let owner = arm.region_arm.expect("片段必须有逻辑臂");
                 let guard = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
                 let tx = solver.start_transaction_with_guard(Some(guard));
-                let alive = solver.with_logical_arm(owner, |solver| {
-                    advance_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info)
-                })?;
+                let alive = solver
+                    .with_logical_arm(owner, |solver| {
+                        advance_arm(
+                            tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info,
+                        )
+                    })?
+                    .expect("平铺子区域只由队列产生多个片段");
                 if alive {
-                    assert!(arm.region_arrivals.is_empty(), "平铺子区域只由队列产生多个片段");
                     (destination, Some(arm))
                 } else {
                     solver.discard_logical_arm_effects(owner);

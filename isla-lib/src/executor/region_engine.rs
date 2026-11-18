@@ -8,6 +8,25 @@ use crate::ir::regions::Region;
 mod dependencies;
 pub(super) use dependencies::LoopDependencies;
 
+/// 构造具体臂帧并保存完整守卫；片段由调用栈或队列持有。
+pub(super) fn branch_arm<'ir, B: BV>(
+    base: &LocalFrame<'ir, B>,
+    pc: usize,
+    guard: smtlib::Exp<Sym>,
+    owner: crate::smt::LogicalArm,
+) -> LocalFrame<'ir, B> {
+    let mut arm = base.clone();
+    arm.pc = pc;
+    arm.region_arm = Some(owner);
+    let access = cost::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
+    access.guard = Some(match access.guard.take() {
+        Some(parent) => smtlib::Exp::And(Box::new(parent), Box::new(guard)),
+        None => guard,
+    });
+    arm
+}
+
+/// Some 表示本次前沿已关闭；None 表示调用栈需继续分开的片段，臂保存点仍打开。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     tid: usize,
@@ -22,51 +41,14 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     solver: &mut Solver<B>,
     tx: crate::smt::SolverTransaction,
     info: SourceLoc,
-) -> Result<bool, ExecError> {
+) -> Result<Option<bool>, ExecError> {
     let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
     if arm.region_arrivals.is_empty() {
-        return close_arm(result, tx, arm, shared, solver, info);
-    }
-    assert!(matches!(result, Ok(Run::Suspended)), "只有区域挂起点可以交付未合并片段");
-    // 本臂已经分成互斥片段；分别关闭，不把任何一个临时条件留在主求解器上。
-    let mut pending = std::mem::take(&mut arm.region_arrivals);
-    pending.reverse();
-    let mut reached = Vec::new();
-    while let Some(mut fragment) = pending.pop() {
-        let owner = fragment.region_arm.expect("独立片段必须拥有逻辑臂");
-        let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
-        let part_tx = solver.start_transaction_with_guard(Some(guard));
-        let outcome = solver.with_logical_arm(owner, |solver| {
-            let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut fragment, state, shared, solver);
-            if fragment.region_arrivals.is_empty() {
-                close_arm(result, part_tx, &fragment, shared, solver, info).map(Some)
-            } else {
-                assert!(matches!(result, Ok(Run::Suspended)));
-                solver.commit_transaction();
-                Ok(None)
-            }
-        });
-        match outcome {
-            Ok(Some(true)) => reached.push(fragment),
-            Ok(Some(false)) => solver.discard_logical_arm_effects(owner),
-            Ok(None) => pending.extend(fragment.region_arrivals.into_iter().rev()),
-            Err(error) => {
-                solver.rollback_transaction(tx);
-                return Err(error);
-            }
-        }
-    }
-    if reached.is_empty() {
-        solver.commit_dead_transaction();
-        return Ok(false);
-    }
-    solver.commit_transaction();
-    if reached.len() == 1 {
-        *arm = reached.pop().unwrap();
+        close_arm(result, tx, arm, shared, solver, info).map(Some)
     } else {
-        arm.region_arrivals = reached;
+        assert!(matches!(result, Ok(Run::Suspended)), "只有区域挂起点可以交付未合并片段");
+        Ok(None)
     }
-    Ok(true)
 }
 
 /// true 表示可作为到达前沿或待展开片段保留；延迟模式的保留不代表已认证。

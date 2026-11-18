@@ -1,7 +1,7 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
 use super::region_engine::{
-    advance_arm, append_loop_exit, finish_arrivals, finish_region, loop_exit_guard, publish_committed_records,
-    LoopDependencies,
+    advance_arm, append_loop_exit, branch_arm, finish_arrivals, finish_region, loop_exit_guard,
+    publish_committed_records, LoopDependencies,
 };
 use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
 use super::stats::merge_diagnostics as diagnostics;
@@ -810,6 +810,76 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn advance_recursive_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+    tid: usize,
+    task_id: TaskId,
+    fraction: &mut Fraction,
+    timeout: PathTimeout,
+    stop: Option<&'task StopConditions>,
+    sink: &S,
+    arm: &mut LocalFrame<'ir, B>,
+    state: &'task TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    tx: crate::smt::SolverTransaction,
+    info: SourceLoc,
+) -> Result<bool, ExecError> {
+    if let Some(alive) = advance_arm(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver, tx, info)?
+    {
+        return Ok(alive);
+    }
+    // 本臂已经分成互斥片段；分别关闭，不把任何一个临时条件留在主求解器上。
+    let mut pending = std::mem::take(&mut arm.region_arrivals);
+    pending.reverse();
+    let mut reached = Vec::new();
+    while let Some(mut fragment) = pending.pop() {
+        let owner = fragment.region_arm.expect("独立片段必须拥有逻辑臂");
+        let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
+        let part_tx = solver.start_transaction_with_guard(Some(guard));
+        let outcome = solver.with_logical_arm(owner, |solver| {
+            let step = advance_arm(
+                tid,
+                task_id,
+                fraction,
+                timeout,
+                stop,
+                sink,
+                &mut fragment,
+                state,
+                shared,
+                solver,
+                part_tx,
+                info,
+            )?;
+            if step.is_none() {
+                solver.commit_transaction();
+            }
+            Ok(step)
+        });
+        match outcome {
+            Ok(Some(true)) => reached.push(fragment),
+            Ok(Some(false)) => solver.discard_logical_arm_effects(owner),
+            Ok(None) => pending.extend(fragment.region_arrivals.into_iter().rev()),
+            Err(error) => {
+                solver.rollback_transaction(tx);
+                return Err(error);
+            }
+        }
+    }
+    if reached.is_empty() {
+        solver.commit_dead_transaction();
+        return Ok(false);
+    }
+    solver.commit_transaction();
+    if reached.len() == 1 {
+        *arm = reached.pop().unwrap();
+    } else {
+        arm.region_arrivals = reached;
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     condition: Sym,
     target: usize,
@@ -845,16 +915,11 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     {
         let owner = solver.new_logical_arm(solver.current_logical_arm());
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
-        let mut arm = base.clone();
-        arm.region_arm = Some(owner);
-        arm.pc = pc;
-        let access = cost::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
-        access.guard = Some(match access.guard.take() {
-            Some(parent) => smtlib::Exp::And(Box::new(parent), Box::new(guard.clone())),
-            None => guard.clone(),
-        });
+        let mut arm = branch_arm(&base, pc, guard, owner);
         if solver.with_logical_arm(owner, |solver| {
-            advance_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info)
+            advance_recursive_arm(
+                tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info,
+            )
         })? {
             if arm.region_arrivals.is_empty() {
                 promote_initials(&mut base, &arm, shared, solver);
@@ -1284,18 +1349,13 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         work.active_arm = Some(owner);
         let first = work.completed == 0;
         let guard = if first { Var(work.condition) } else { Not(Box::new(Var(work.condition))) };
-        let mut arm = work.base.clone();
-        arm.region_arm = Some(owner);
-        arm.pc = if first { work.target } else { work.original.pc + 1 };
-        let access = cost::make_mut(&mut arm.local_state).speculative_access.as_mut().unwrap();
-        let guard = match access.guard.take() {
-            Some(parent) => And(Box::new(parent), Box::new(guard)),
-            None => guard,
-        };
-        access.guard = Some(guard.clone());
+        let mut arm = branch_arm(&work.base, if first { work.target } else { work.original.pc + 1 }, guard, owner);
+        let guard = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
         let tx = solver.start_transaction_with_guard(Some(guard));
         if solver.with_logical_arm(owner, |solver| {
-            advance_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, work.info)
+            advance_recursive_arm(
+                tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, work.info,
+            )
         })? {
             if !arm.region_arrivals.is_empty() {
                 let side = work.completed;
