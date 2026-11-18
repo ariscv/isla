@@ -166,6 +166,10 @@ pub(super) fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
 }
 #[test]
 fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths() {
+    run_deep_region_test(loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths_body);
+}
+
+fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths_body() {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let off = scan_paths(&shared, 64, 128, false, None);
@@ -181,6 +185,10 @@ fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths() {
 }
 #[test]
 fn loop_segment_multiple_real_ends_use_virtual_exit() {
+    run_deep_region_test(loop_segment_multiple_real_ends_use_virtual_exit_body);
+}
+
+fn loop_segment_multiple_real_ends_use_virtual_exit_body() {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let n = 64;
@@ -368,6 +376,10 @@ fn loop_segment_failed_exit_merge_does_not_submit_a_continuation() {
 
 #[test]
 fn loop_segment_discards_dead_preexisting_locals_at_function_exit() {
+    run_deep_region_test(loop_segment_discards_dead_preexisting_locals_at_function_exit_body);
+}
+
+fn loop_segment_discards_dead_preexisting_locals_at_function_exit_body() {
     let shared = empty_shared_state();
     let n = 64;
     let counter = test_name(1800);
@@ -427,6 +439,10 @@ fn loop_segment_discards_dead_preexisting_locals_at_function_exit() {
 
 #[test]
 fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region() {
+    run_deep_region_test(loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body);
+}
+
+fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body() {
     let shared = empty_shared_state();
     let off = scan_paths(&shared, 64, 128, false, None);
     let on = scan_paths(&shared, 64, 128, true, None);
@@ -440,6 +456,10 @@ fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region() {
 
 #[test]
 fn loop_iteration_frontiers_nested_call_preserves_complete_relation() {
+    run_deep_region_test(loop_iteration_frontiers_nested_call_preserves_complete_relation_body);
+}
+
+fn loop_iteration_frontiers_nested_call_preserves_complete_relation_body() {
     let mut shared = empty_shared_state();
     let function = shared.symtab.intern("zfinite_scan");
     let counter = test_name(1800);

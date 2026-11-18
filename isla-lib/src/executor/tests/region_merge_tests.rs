@@ -14,6 +14,12 @@ mod loop_round_review_tests;
 #[path = "region_global_state_tests.rs"]
 mod global_state_tests;
 
+// 调试构建的真实执行循环需要大于 libtest 默认线程栈。只扩大已复现的深夹具，
+// 不改变整个测试进程或产品的栈设置。
+fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(test).unwrap().join().unwrap();
+}
+
 type Formula = smtlib::Exp<Sym>;
 
 struct Path {
@@ -5209,6 +5215,10 @@ fn region_util_depth_above_sixteen_keeps_all_input_behavior() {
         }
         return;
     };
+    run_deep_region_test(move || check_region_util_depth(mode));
+}
+
+fn check_region_util_depth(mode: String) {
     let mut options = crate::config::RegionOptions::default();
     if mode != "default" {
         options.max_merge_depth = Some(mode.parse().unwrap());
@@ -5416,3 +5426,6 @@ fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
         "普通执行只能正常结束或命中原断言"
     );
 }
+
+#[path = "region_engine_tests.rs"]
+mod region_engine_tests;

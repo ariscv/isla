@@ -1,4 +1,5 @@
 //! 单队列区域推演。片段共享一个根事务；每段只有完整守卫作用域，不创建嵌套保存点。
+use super::region_engine::finish_region;
 use super::region_merge::{self, AccessLog, RegionExecution, RegionOutput, RegionResult};
 use super::region_summary::function_effect_summaries;
 use super::stats::merge_diagnostics as diagnostics;
@@ -303,7 +304,7 @@ pub(super) fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Si
             join.base.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap_or(smtlib::Exp::Bool(true));
         let mut restored = if join.loop_prefix.is_some() { join.base.clone() } else { join.original.clone() };
         let result = solver.with_transaction_condition(&guard, |solver| {
-            region_merge::finish_region(
+            finish_region(
                 join.record,
                 join.condition,
                 &join.region,
@@ -333,7 +334,7 @@ pub(super) fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Si
             restored = prefix.original;
             solver.with_transaction_condition(&parent_guard, |solver| {
                 solver.assert_region_exit(exit_guard);
-                region_merge::finish_region(
+                finish_region(
                     prefix.record,
                     condition,
                     &join.region,

@@ -66,6 +66,7 @@ mod merge_history;
 mod merge_record;
 pub mod path_cache;
 mod path_timing;
+mod region_engine;
 mod region_merge;
 mod region_summary;
 pub mod samples;
