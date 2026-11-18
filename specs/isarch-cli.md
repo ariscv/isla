@@ -98,7 +98,7 @@ strict = false
 enabled = true
 ```
 
-区域合并默认共享 8192 步；两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
+区域合并默认不设步数预算（-1）。配置正整数后，两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
 步数用尽只拒绝本次合并尝试，不截断普通执行路径。设置 `-1` 时，以上区域一律不扣步、不会因步数耗尽拒绝；路径限时仍有效。
 
 ```toml
@@ -516,7 +516,7 @@ witness_eval = true
 progress = true
 ```
 
-全局无 SMT 模式只支持 `solve-state --path-cache-only --path-cache-write <新目录>`，不能同时认证样本或读回缓存。产物标 `uncertified`，探索保持 partial；候选计数不能作为已认证覆盖。`--memory-stats` 输出 `no_smt_summary`；全关应为零真实 check，第三种仍会运行可选布尔恒值证明。旧 `[execution_limits.region_options]`（包括其中的 `no_smt`）报错；四个开关也不能放在 `path_merge` 或其 `diagnostics` 表中。
+全局无 SMT 模式只支持 `solve-state --path-cache-only --path-cache-write <新目录>`，不能同时认证样本或读回缓存。产物标 `uncertified`，探索保持 partial；候选计数不能作为已认证覆盖。`--memory-stats` 输出 `no_smt_summary`；全关应为零真实 check，第三种仍会运行可选布尔恒值证明。旧 `[execution_limits.path_merge]`（包括其中的 `no_smt`）报错；四个开关也不能放在 `path_merge` 或其 `diagnostics` 表中。
 
 
 ## resident judge 分批恢复
@@ -525,9 +525,12 @@ progress = true
 
 `--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。
 
+区域嵌套默认不限；TOML `[execution_limits.path_merge] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
+
+实验选项 `[execution_limits.path_merge] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
 ## 配置布局与迁移
 
-`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，局部规则统一放 `regions` 数组。`step_budget` 缺省仍是8192，`-1`关闭；CLI名字和优先级不变。
+`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
 
 每条局部规则必须显式指定 `kind`，不得靠缺失字段猜类别：
 

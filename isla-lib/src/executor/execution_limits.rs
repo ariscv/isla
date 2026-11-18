@@ -152,7 +152,7 @@ impl Default for ExecutionLimits {
             path_merging: false,
             merge_strategy: Default::default(),
             ordered_events: false,
-            region_step_budget: Some(super::region_merge::DEFAULT_REGION_STEP_BUDGET),
+            region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
             region_global_state: false,
             region_loop_analysis: false,
             merge_enumeration: Default::default(),

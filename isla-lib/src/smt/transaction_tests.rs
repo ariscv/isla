@@ -457,14 +457,25 @@ fn smt_rollback_direct_model_single_and_nested() {
 }
 
 #[test]
-#[should_panic(expected = "保存点嵌套深度超过上限")]
-fn smt_savepoint_depth_limit_panics() {
+fn region_util_savepoints_above_sixty_four_rollback_and_commit() {
+    configure_tastic(Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
-    for depth in 0..=transaction::MAX_TRANSACTION_DEPTH {
+    let info = SourceLoc::unknown();
+    let flag = solver.declare_const(smtlib::Ty::Bool, info);
+    let outer = solver.start_transaction();
+    for depth in 1..96 {
         assert_eq!(solver.transaction_depth(), depth);
         solver.start_transaction();
     }
+    solver.assert(Var(flag));
+    while solver.transaction_depth() > 1 {
+        solver.commit_transaction();
+    }
+    assert_eq!(solver.check_sat_with(&Not(Box::new(Var(flag))), info), Unsat);
+    solver.rollback_transaction(outer);
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(solver.check_sat_with(&Not(Box::new(Var(flag))), info), Sat);
 }
 
 // 条件查询使用真实 Z3，同时检查发布后的检查点重放，避免仅验证日志形状。

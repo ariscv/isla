@@ -431,7 +431,7 @@ fn isla_main() -> i32 {
     isarch::path_cache::Options::add_cli(&mut opts);
     isarch::region_options::add_cli(&mut opts);
     isarch::path_merge_options::add_cli(&mut opts);
-    opts.optopt("", "region-step-budget", "区域合并步数预算，默认8192；-1关闭，覆盖TOML", "<正整数|-1>");
+    opts.optopt("", "region-step-budget", "区域合并步数预算，默认-1关闭，覆盖TOML", "<正整数|-1>");
     opts.optmulti(
         "",
         "filter-model-exception",

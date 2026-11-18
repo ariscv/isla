@@ -49,7 +49,13 @@ pub struct PathMergeConfig {
     /// flat 模式保留兼容的访问偏序；默认 false。
     pub ordered_events: Option<bool>,
     pub enabled: Option<bool>,
-    /// None 沿用运行时8192；-1关闭；其余合法值为正数。
+    /// 区域推演嵌套上限；缺省或-1不限。
+    pub max_merge_depth: Option<i64>,
+    /// 范围证明转为出口待证义务；默认关闭。
+    pub defer_range_proofs: bool,
+    /// 构造子解包标签转为出口待证义务；默认关闭。
+    pub defer_ctor_checks: bool,
+    /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,
     /// 仅在延迟出口检查内生效。

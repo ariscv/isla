@@ -2,9 +2,6 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 完整快照的显式资源上限；达到上限仍可提交/回滚，新增一层则 panic。
-pub const MAX_TRANSACTION_DEPTH: usize = 64;
-
 static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 事务句柄只用于定位保存点，必须按后进先出顺序回滚。
@@ -162,12 +159,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         );
         let _ = &cost_scope;
 
-        assert!(
-            self.transaction_depth() < MAX_TRANSACTION_DEPTH,
-            "保存点嵌套深度超过上限 {}（当前 {}）",
-            MAX_TRANSACTION_DEPTH,
-            self.transaction_depth()
-        );
         // 先翻译，非法符号不能留下半初始化的保存点或 Z3 scope。
         let condition = guard.as_ref().map(|exp| self.translate_exp(exp));
         let lazy = self.lazy_condition_scopes();
