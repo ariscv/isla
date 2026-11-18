@@ -1,3 +1,4 @@
+use super::super::nested_merge_failure_tests::{strategies, Strategy};
 use super::*;
 use crate::config::{ExecutionLimitsConfig, RegionOptions};
 use crate::memory::Memory;
@@ -153,7 +154,7 @@ fn region_filtered_exception_empty_and_unmatched_keep_rejection() {
     }
 }
 
-fn check_region() {
+fn check_region(strategy: Strategy) {
     for (nested, both, global) in
         [(false, false, true), (true, false, true), (false, true, true), (false, false, false)]
     {
@@ -169,7 +170,7 @@ fn check_region() {
             fixture.program.clone(),
             &fixture.shared,
             fixture.inputs,
-            fixture.limits(true, &[FILTERED]).with_region_global_state(global),
+            strategy.apply(fixture.limits(true, &[FILTERED]).with_region_global_state(global)),
             Memory::new(),
             |_| (),
         );
@@ -206,7 +207,9 @@ fn region_filtered_exception_deferred_and_immediate() {
         RegionOptions { defer_exit_check: actual.contains(&"--include-ignored".to_string()), ..Default::default() }
             .configure();
         stats::merge_diagnostics::configure("detail").unwrap();
-        check_region();
+        for strategy in strategies() {
+            check_region(strategy);
+        }
         return;
     }
     for deferred in [false, true] {

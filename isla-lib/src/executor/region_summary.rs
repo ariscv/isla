@@ -328,17 +328,20 @@ impl CachedReject {
 }
 
 /// 对静态终止调用做额外证明。任何能够经过其它出口的函数仍由原有准入拒绝。
-pub(super) fn filtered_exception_calls<B: BV>(
+pub(super) fn filtered_terminal_calls<B: BV>(
     shared: &SharedState<B>,
     summaries: &HashMap<Name, FunctionEffect>,
-    filters: &[String],
+    limits: &ExecutionLimits,
 ) -> HashSet<Name> {
     let constructors: HashSet<_> = shared
         .type_info
         .union_ctors
         .iter()
         .copied()
-        .filter(|ctor| super::model_exception::filtered_constructor(filters, *ctor, &shared.symtab).is_some())
+        .filter(|ctor| {
+            super::model_exception::filtered_constructor(&limits.filter_model_exceptions, *ctor, &shared.symtab)
+                .is_some()
+        })
         .collect();
     let candidates: Vec<_> = shared
         .functions
@@ -350,7 +353,9 @@ pub(super) fn filtered_exception_calls<B: BV>(
     loop {
         let previous = proven.len();
         for (function, body, cfg) in &candidates {
-            if !proven.contains(function) && stops_at_filtered_throw(body, cfg, &constructors, &proven, shared) {
+            if !proven.contains(function)
+                && stops_at_filtered_exit(body, cfg, &constructors, &proven, shared, limits.filter_match_failures)
+            {
                 proven.insert(*function);
             }
         }
@@ -360,12 +365,13 @@ pub(super) fn filtered_exception_calls<B: BV>(
     }
 }
 
-fn stops_at_filtered_throw<B: BV>(
+fn stops_at_filtered_exit<B: BV>(
     body: &[Instr<Name, B>],
     cfg: &RegionCfg,
     constructors: &HashSet<Name>,
     proven: &HashSet<Name>,
     shared: &SharedState<B>,
+    filter_match_failures: bool,
 ) -> bool {
     use crate::ir::regions::RegionPoint;
     let mut pending = vec![RegionPoint::Instruction(0)];
@@ -377,6 +383,7 @@ fn stops_at_filtered_throw<B: BV>(
         }
         let suffix = &body[pc..];
         match suffix {
+            [Instr::Exit(ExitCause::MatchFailure, _), ..] if filter_match_failures => continue,
             // 从构造指令开始证明连续的 throw 序列。跳到序列中间的路径仍须独立证明。
             [Instr::Call(Loc::Id(slot), _, ctor, _, _), Instr::Copy(Loc::Id(exception), Exp::Id(source), _), Instr::Copy(Loc::Id(flag), Exp::Bool(true), _), ..]
                 if constructors.contains(ctor)
@@ -406,6 +413,6 @@ fn stops_at_filtered_throw<B: BV>(
         }
         pending.extend(cfg.successors(pc).map(|(point, _)| point));
     }
-    // 候选已通过有限终止证明。所有可达的终止边都必须被上面的 throw 或已证明调用截断。
+    // 候选已通过有限终止证明。所有可达的终止边都必须被已过滤的出口或已证明调用截断。
     true
 }

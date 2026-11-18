@@ -273,6 +273,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
     let collected: Arc<Mutex<Vec<Result<Option<Val<B>>, String>>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let sink = Arc::clone(&collected);
+        let filter_match_failures = execution_limits.filter_match_failures;
         isla_lib::executor::execute_ir_function_with_limits(
             function,
             &[encdec_bits.clone()],
@@ -286,6 +287,9 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
                 // 一致。
                 Err((ExecError::MatchFailure(_), _)) => {
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(Ok(None))
+                }
+                Ok((Run::Dead, _)) if filter_match_failures => {
+                    sink.lock().expect("回环译码收集器 mutex poisoned").push(Ok(None));
                 }
                 Err((error, _)) => {
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(Err(error.to_string()));

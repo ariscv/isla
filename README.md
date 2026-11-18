@@ -139,6 +139,8 @@ and a guide to its support for virtual memory and address translation
 
 `[execution_limits].filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]` 会在指定 Sail 异常抛出时结束该路径，默认集合为空。CLI 使用重复的 `--filter-model-exception <构造子名>` 并整体覆盖 TOML 集合。现场丢弃计数见 `[MODEL_EXCEPTION_THROW_FILTER]`，位置见 `--merge-diagnostics detail`。旧缓存仍按构造子过滤异常终态。见 [完整用法与边界](specs/isarch-cli.md#过滤模型异常终态)。
 
+配置 `filter_match_failures = true` 或加 `--filter-match-failures` 可在 Sail IR 的 `exit match` 处丢弃路径。缺省关闭。
+
 ## solve-state 执行统计
 
 设置 `ISLA_STATS=1` 时，solve-state 收尾向 stderr 输出一行 `[MERGE_STATS] {json}` 和一行 `[FORK_STATS] {json}`。

@@ -1,6 +1,7 @@
 //! 显式开启的通用合并诊断；不发查询，不初始化值，不参与事务或缓存。
 use crate::bitvector::BV;
 use crate::error::ExecError;
+use crate::executor::model_exception::FilteredPath;
 use crate::ir::{BitsSegment, Name, Symtab, Ty, UVal, Val};
 use crate::smt::{smtlib, Solver};
 use crate::source_loc::SourceLoc;
@@ -536,12 +537,11 @@ pub(crate) fn record_depth(depth: usize, call_depth: usize, transaction_depth: u
     counts.max_transaction_depth = counts.max_transaction_depth.max(transaction_depth);
 }
 
-pub(in crate::executor) fn filtered_model_exception<B: BV>(
+pub(in crate::executor) fn filtered_path<B: BV>(
     frame: &super::super::LocalFrame<B>,
     shared: &crate::ir::SharedState<B>,
     location: SourceLoc,
-    constructor: &str,
-    payload: &Val<B>,
+    reason: FilteredPath<'_, B>,
 ) {
     if MODE.load(Ordering::Relaxed) != 2 {
         return;
@@ -559,15 +559,22 @@ pub(in crate::executor) fn filtered_model_exception<B: BV>(
         site(function, pc, loc.unwrap_or(SourceLoc::unknown()))
     });
     let attempt = ATTEMPTS.with(|stack| stack.borrow().last().map(|attempt| attempt.id));
-    let kind =
-        if frame.region_execution.is_some() { "filtered_model_exception_arm" } else { "filtered_model_exception_path" };
-    eprintln!(
-        "{}",
-        json!({
-            "schema":1, "kind":kind, "constructor":constructor, "payload":payload.to_str(shared),
-            "throw":site(frame.function_name, frame.pc, location), "caller":caller, "attempt":attempt,
-        })
-    );
+    let suffix = if frame.region_execution.is_some() { "arm" } else { "path" };
+    let mut record = json!({"schema":1, "caller":caller, "attempt":attempt});
+    let location = site(frame.function_name, frame.pc, location);
+    match reason {
+        FilteredPath::ModelException { constructor, payload } => {
+            record["kind"] = json!(format!("filtered_model_exception_{suffix}"));
+            record["constructor"] = json!(constructor);
+            record["payload"] = json!(payload.to_str(shared));
+            record["throw"] = location;
+        }
+        FilteredPath::MatchFailure => {
+            record["kind"] = json!(format!("filtered_match_failure_{suffix}"));
+            record["exit"] = location;
+        }
+    }
+    eprintln!("{record}");
 }
 
 pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::SourceLoc) {
@@ -753,12 +760,17 @@ fn print_with_trigger(trigger: &str, stats: &super::ExecutionStats) {
             json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count})).collect::<Vec<_>>()})
     )
     .unwrap();
-    if let Some(mut filters) = stats.model_exception_filter_counts() {
-        filters["schema"] = json!(1);
-        filters["kind"] = json!("filtered_model_exception_summary");
-        filters["snapshot"] = json!(snapshot);
-        filters["trigger"] = json!(trigger);
-        writeln!(out, "{filters}").unwrap();
+    for (kind, filters) in [
+        ("filtered_model_exception_summary", stats.model_exception_filter_counts()),
+        ("filtered_match_failure_summary", stats.match_failure_filter_counts()),
+    ] {
+        if let Some(mut filters) = filters {
+            filters["schema"] = json!(1);
+            filters["kind"] = json!(kind);
+            filters["snapshot"] = json!(snapshot);
+            filters["trigger"] = json!(trigger);
+            writeln!(out, "{filters}").unwrap();
+        }
     }
     super::merge_timing::write_snapshot(&mut out, snapshot, trigger);
     let mut totals = counts.totals();

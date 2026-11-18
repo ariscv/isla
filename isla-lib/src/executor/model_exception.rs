@@ -50,16 +50,29 @@ mod tests {
     }
 }
 
-pub(super) fn discard<B: BV>(
+pub(super) enum FilteredPath<'a, B> {
+    ModelException { constructor: &'a str, payload: &'a Val<B> },
+    MatchFailure,
+}
+
+pub(super) fn discard_throw<B: BV>(
     frame: &super::LocalFrame<B>,
     names: &[String],
     shared: &SharedState<B>,
     location: crate::source_loc::SourceLoc,
-) -> bool {
-    let Some((exception, _)) = frame.get_exception() else { return false };
-    let Some((constructor, payload)) = filtered_exception(names, exception, &shared.symtab) else { return false };
-    let in_region = frame.region_execution.is_some();
-    shared.execution_stats.filtered_model_exception(in_region);
-    super::stats::merge_diagnostics::filtered_model_exception(frame, shared, location, &constructor, payload);
-    true
+) -> Option<super::Run<B>> {
+    let (exception, _) = frame.get_exception()?;
+    let (constructor, payload) = filtered_exception(names, exception, &shared.symtab)?;
+    Some(discard_path(frame, shared, location, FilteredPath::ModelException { constructor: &constructor, payload }))
+}
+
+pub(super) fn discard_path<B: BV>(
+    frame: &super::LocalFrame<B>,
+    shared: &SharedState<B>,
+    location: crate::source_loc::SourceLoc,
+    reason: FilteredPath<'_, B>,
+) -> super::Run<B> {
+    shared.execution_stats.filtered_path(frame.region_execution.is_some(), &reason);
+    super::stats::merge_diagnostics::filtered_path(frame, shared, location, reason);
+    super::Run::Dead
 }

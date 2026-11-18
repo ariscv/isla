@@ -7,6 +7,7 @@ pub(crate) mod merge_timing;
 mod merge_timing_tests;
 pub(crate) mod region_cost;
 pub(crate) mod region_progress;
+use super::model_exception::FilteredPath;
 use super::{ForkSink, SpeculativeRejectReason, Task};
 use crate::bitvector::BV;
 use crate::ir::{Instr, Name, Symtab};
@@ -91,10 +92,34 @@ struct RejectSite {
     location: SourceLoc,
 }
 
+#[derive(Default)]
+struct FilterCounts {
+    arms: AtomicUsize,
+    paths: AtomicUsize,
+}
+
+impl FilterCounts {
+    fn record(&self, in_region: bool) {
+        let counter = if in_region { &self.arms } else { &self.paths };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn json(&self, arm_key: &str, path_key: &str) -> Option<Value> {
+        let arms = self.arms.load(Ordering::Relaxed);
+        let paths = self.paths.load(Ordering::Relaxed);
+        (arms != 0 || paths != 0).then(|| json!({arm_key: arms, path_key: paths}))
+    }
+
+    fn reset(&self) {
+        self.arms.store(0, Ordering::Relaxed);
+        self.paths.store(0, Ordering::Relaxed);
+    }
+}
+
 pub struct ExecutionStats {
     enabled: bool,
-    filtered_model_exception_arms: AtomicUsize,
-    filtered_model_exception_paths: AtomicUsize,
+    filtered_model_exceptions: FilterCounts,
+    filtered_match_failures: FilterCounts,
     snapshot_symbols: Mutex<Option<(Vec<String>, Vec<String>)>>,
     merge: Mutex<MergeStats>,
     forks: Mutex<HashMap<(Name, SourceLoc), usize>>,
@@ -109,8 +134,8 @@ impl ExecutionStats {
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
-            filtered_model_exception_arms: AtomicUsize::new(0),
-            filtered_model_exception_paths: AtomicUsize::new(0),
+            filtered_model_exceptions: FilterCounts::default(),
+            filtered_match_failures: FilterCounts::default(),
             snapshot_symbols: Mutex::new(None),
             merge: Mutex::new(MergeStats::default()),
             forks: Mutex::new(HashMap::new()),
@@ -201,30 +226,31 @@ impl ExecutionStats {
         if let Some(counts) = self.model_exception_filter_counts() {
             eprintln!("[MODEL_EXCEPTION_THROW_FILTER] {counts}");
         }
+        if let Some(counts) = self.match_failure_filter_counts() {
+            eprintln!("[MATCH_FAILURE_FILTER] {counts}");
+        }
         if self.enabled {
             eprintln!("[MERGE_STATS] {}", self.merge_json());
             eprintln!("[FORK_STATS] {}", self.fork_json(&shared.symtab));
             eprintln!("[SPECULATION_REJECT_STATS] {}", self.arm_unsupported_json(&shared.symtab));
         }
     }
-    pub(super) fn filtered_model_exception(&self, in_region: bool) {
-        let counter =
-            if in_region { &self.filtered_model_exception_arms } else { &self.filtered_model_exception_paths };
-        counter.fetch_add(1, Ordering::Relaxed);
+    pub(super) fn filtered_path<B: BV>(&self, in_region: bool, reason: &FilteredPath<'_, B>) {
+        match reason {
+            FilteredPath::ModelException { .. } => &self.filtered_model_exceptions,
+            FilteredPath::MatchFailure => &self.filtered_match_failures,
+        }
+        .record(in_region);
     }
     pub(super) fn model_exception_filter_counts(&self) -> Option<Value> {
-        let arms = self.filtered_model_exception_arms.load(Ordering::Relaxed);
-        let paths = self.filtered_model_exception_paths.load(Ordering::Relaxed);
-        (arms != 0 || paths != 0).then(|| {
-            json!({
-                "filtered_model_exception_arms": arms,
-                "filtered_model_exception_paths_at_throw": paths,
-            })
-        })
+        self.filtered_model_exceptions.json("filtered_model_exception_arms", "filtered_model_exception_paths_at_throw")
+    }
+    pub(super) fn match_failure_filter_counts(&self) -> Option<Value> {
+        self.filtered_match_failures.json("filtered_match_failure_arms", "filtered_match_failure_paths")
     }
     pub fn reset(&self) {
-        self.filtered_model_exception_arms.store(0, Ordering::Relaxed);
-        self.filtered_model_exception_paths.store(0, Ordering::Relaxed);
+        self.filtered_model_exceptions.reset();
+        self.filtered_match_failures.reset();
         let mut merge = self.merge.lock().unwrap();
         let rules = merge.rules.keys().map(|index| (*index, RuleStats::default())).collect();
         *merge = MergeStats { rules, ..MergeStats::default() };
@@ -311,8 +337,10 @@ impl ExecutionStats {
     }
     pub fn merge_json(&self) -> Value {
         let mut value = serde_json::to_value(&*self.merge.lock().unwrap()).unwrap();
-        if let Some(Value::Object(counts)) = self.model_exception_filter_counts() {
-            value.as_object_mut().unwrap().extend(counts);
+        for counts in [self.model_exception_filter_counts(), self.match_failure_filter_counts()] {
+            if let Some(Value::Object(counts)) = counts {
+                value.as_object_mut().unwrap().extend(counts);
+            }
         }
         value
     }

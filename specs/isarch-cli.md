@@ -57,6 +57,12 @@ Sail IR 设置 `have_exception = true` 时执行过滤。普通执行立即结�
 
 执行错误、超时、未知 Poison、panic 保留原有失败处理；`AssertionFailure` 仍由原有断言逻辑计数。fuzz 仍要求至少一个保留终态，外部 corpus 仍须完整通过认证；若旧 corpus 包含已排除的异常输入，应从保留路径重新生成。
 
+## 过滤 Sail match 失败出口
+
+`[execution_limits].filter_match_failures = true` 可在 Sail IR 的 `exit match` 处结束该路径。缺省关闭，命令行 `--filter-match-failures` 可直接开启。此开关独立于模型异常列表，普通 `exit` 和断言按各自的 IR 类型处理。
+
+区域沿用死臂事务。stderr 的 `[MATCH_FAILURE_FILTER]` 记录现场丢弃的普通路径和推演臂。`--merge-diagnostics summary` 输出计数快照，`detail` 逐次记录 IR 指令位置、Sail 源码位置及直接调用者。
+
 ## 枚举符号前态
 
 枚举寄存器可以在同一节配置允许成员：

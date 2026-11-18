@@ -16,6 +16,10 @@ mod global_state_tests;
 
 #[path = "region_poison_slots_tests.rs"]
 mod poison_slots_tests;
+
+#[path = "region_filtered_match_tests.rs"]
+mod filtered_match_tests;
+
 #[path = "region_filtered_exception_tests.rs"]
 mod filtered_exception_tests;
 

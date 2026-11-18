@@ -567,3 +567,7 @@ timeout --signal=TERM --kill-after=5s 590s \
 Sail IR 先设置 `current_exception`，再用 `have_exception = true` 生效。执行器在第二次写入后用配置的完整构造子名匹配，直接返回 `Run::Dead`。普通执行结束，区域的直线与循环臂事务都复用 `commit_dead_transaction`。
 
 区域对静态终止调用继续使用完整 CFG 判断。确认路径只能到达匹配构造子写入与异常标志写入的连续序列，或到达已证明的终止调用时，才执行该调用。显式 `exit match` 仍形成单独的拒绝。终态收集和旧缓存回读使用同一构造子匹配，现场诊断另记推演臂和普通路径。
+
+## 2026-11-18：Sail match 失败在退出指令处丢弃
+
+Sail IR 的 `exit match` 由解析器标记为 `ExitCause::MatchFailure`。`filter_match_failures` 分派在普通错误／区域拒绝之前，沿用抛出模型异常的计数、诊断和 `Run::Dead`。终止调用的静态准入识别同一退出类型。普通 `exit` 和断言仍使用各自的类型。

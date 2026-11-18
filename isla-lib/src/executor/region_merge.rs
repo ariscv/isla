@@ -270,12 +270,12 @@ pub(super) fn preflight<B: BV>(
     let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state));
     if let Instr::Call(_, _, callee, _, _) = &frame.instrs[frame.pc] {
         if summaries.get(callee).is_some_and(|summary| summary.non_returning) {
-            let filters = state.execution_limits.as_ref().unwrap().filter_model_exceptions.as_ref();
-            // 只有所有终止路径都在已过滤的 throw 处结束，才允许推演执行这个出口。
-            if filters.is_empty()
+            let limits = state.execution_limits.as_ref().unwrap();
+            // 只有所有终止路径都到达已配置过滤的出口，才允许推演执行这个调用。
+            if (limits.filter_model_exceptions.is_empty() && !limits.filter_match_failures)
                 || !state
-                    .filtered_exception_calls
-                    .get_or_init(|| super::region_summary::filtered_exception_calls(shared, summaries, filters))
+                    .filtered_terminal_calls
+                    .get_or_init(|| super::region_summary::filtered_terminal_calls(shared, summaries, limits))
                     .contains(callee)
             {
                 return Err(reject(frame, SpeculativeRejectReason::RegionEscaped));
@@ -285,7 +285,7 @@ pub(super) fn preflight<B: BV>(
     // 已证明直接结束的异常写入属于死臂保存点，可以在严格的被调函数作用域内记账。
     if !global_state
         && matches!(&frame.instrs[frame.pc], Instr::Copy(Loc::Id(CURRENT_EXCEPTION | HAVE_EXCEPTION), ..))
-        && state.filtered_exception_calls.get().is_some_and(|calls| calls.contains(&frame.function_name))
+        && state.filtered_terminal_calls.get().is_some_and(|calls| calls.contains(&frame.function_name))
     {
         cost::make_mut(&mut frame.local_state).speculative_access.as_mut().unwrap().writes_allowed = true;
     }
