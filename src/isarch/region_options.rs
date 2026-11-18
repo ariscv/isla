@@ -2,6 +2,7 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
+    ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认关闭"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
@@ -49,6 +50,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
                 "defer_ctor_checks" => updated.path_merge.defer_ctor_checks = value,
                 "defer_range_proofs" => updated.path_merge.defer_range_proofs = value,
                 "defer_exit_check" => updated.path_merge.defer_exit_check = value,
+                "finite_domain_enumeration" => updated.path_merge.finite_domain_enumeration = value,
                 "lazy_z3_scope" => updated.path_merge.lazy_z3_scope = value,
                 "witness_eval" => updated.path_merge.witness_eval = value,
                 "witness_shadow" => updated.path_merge.diagnostics.witness_shadow = value,
@@ -147,6 +149,7 @@ mod tests {
                 "defer_range_proofs",
                 "defer_exit_check",
                 "lazy_z3_scope",
+                "finite_domain_enumeration",
                 "witness_eval",
                 "prefix_compact",
             ]

@@ -2622,7 +2622,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         return Ok(Run::Dead);
                                     }
                                     branch_decision(frame, task_state, SpeculativeRejectReason::AnnouncePc)?;
-                                    if symbolic_length::fork_symbolic_value(
+                                    match symbolic_length::fork_symbolic_value(
                                         sym,
                                         operands.as_ref().unwrap(),
                                         *info,
@@ -2634,7 +2634,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         task_state,
                                         solver,
                                     )? {
-                                        continue 'main_loop;
+                                        symbolic_length::ValueRetry::Forked => continue 'main_loop,
+                                        symbolic_length::ValueRetry::Dead => return Ok(Run::Dead),
+                                        symbolic_length::ValueRetry::Unique => (),
                                     }
                                 }
                             }
@@ -4058,6 +4060,7 @@ mod tests {
     mod review33_tests;
     mod review35_tests;
     mod symbolic_ctor_unwrap_tests;
+    mod symbolic_finite_domain_tests;
     mod task_queue_tests;
     mod union_vector_tests;
 
@@ -13401,7 +13404,8 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
-                    ),
+                    )
+                    .map(|retry| retry != symbolic_length::ValueRetry::Dead),
                     RetryOperand => symbolic_length::fork_retry_operand(
                         sym,
                         condition.clone(),

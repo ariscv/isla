@@ -2620,6 +2620,22 @@ end_column = 0
     }
 
     #[test]
+    fn region_merge_finite_domain_config() {
+        let defaults = merge_config("[execution_limits.path_merge]").unwrap().path_merge;
+        assert!(!defaults.finite_domain_enumeration);
+        assert_eq!(defaults.finite_domain_max, None);
+        let config = merge_config("[execution_limits.path_merge]\nfinite_domain_enumeration=true\nfinite_domain_max=4")
+            .unwrap()
+            .path_merge;
+        assert!(config.finite_domain_enumeration);
+        assert_eq!(config.finite_domain_max.unwrap().get(), 4);
+        for value in ["0", "-1", "true", "'4'", "1.5"] {
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nfinite_domain_max={value}")).is_err());
+        }
+        assert!(merge_config("[execution_limits]\nfinite_domain_enumeration=true").is_err());
+    }
+
+    #[test]
     fn region_newbase_path_merge_fields_and_defaults() {
         let limits = merge_config("[execution_limits.path_merge]\nmax_merge_depth=32\ndefer_range_proofs=true\ndefer_ctor_checks=true\nstep_budget=-1\n[execution_limits.solver]\nno_smt=true").unwrap();
         let options = RegionOptions::from_config(&limits);

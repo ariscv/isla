@@ -42,6 +42,7 @@ pub struct SmtCallSite {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SmtCallStats {
     pub calls: u64,
+    pub(crate) solver_checks: u64,
     pub wall: Duration,
     pub slowest: Option<SlowestSmtCall>,
     pub timeouts: u64,
@@ -54,6 +55,7 @@ impl SmtCallStats {
     pub const fn empty() -> Self {
         SmtCallStats {
             calls: 0,
+            solver_checks: 0,
             wall: Duration::ZERO,
             slowest: None,
             timeouts: 0,
@@ -64,6 +66,7 @@ impl SmtCallStats {
 
     pub fn record(&mut self, operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
         self.calls += 1;
+        self.solver_checks += u64::from(operation != SmtOperation::ModelEval);
         self.wall = self.wall.saturating_add(wall);
         if self.slowest.map_or(true, |slowest| wall > slowest.wall) {
             self.slowest = Some(SlowestSmtCall { operation, source_loc, wall });
@@ -415,6 +418,7 @@ mod tests {
     fn smt_stats(calls: u64, wall: u64, timeouts: u64, timeout_wall: u64, slowest: u64) -> SmtCallStats {
         SmtCallStats {
             calls,
+            solver_checks: calls,
             wall: secs(wall),
             slowest: Some(SlowestSmtCall {
                 operation: SmtOperation::CheckSatAssuming,

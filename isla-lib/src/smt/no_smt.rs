@@ -61,12 +61,7 @@ impl<B: BV> Solver<'_, B> {
 
     /// 只用表达式本身，不使用路径可满足性或模型；上限递推不会把回绕当成数学加法。
     pub(crate) fn structural_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
-        let mut ast = self.translate_exp(exp);
-        if let Some(value) = unsafe { structural_comparison(self.ctx, ast.z3_ast) } {
-            return Some(value);
-        }
-        ast.simplify();
-        ast.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, ast.z3_ast) })
+        self.translate_exp(exp).structural_bool().or_else(|| self.finite_domain_bool(exp))
     }
 
     /// 返回 true 仅表示实验模式已经处理；未证明时明确计数并加入安全前提。
@@ -133,6 +128,16 @@ impl<B: BV> Solver<'_, B> {
         } else {
             Some(((bits << (128 - width)) as i128) >> (128 - width))
         }
+    }
+}
+
+impl Ast<'_> {
+    pub(super) fn structural_bool(&mut self) -> Option<bool> {
+        if let Some(value) = unsafe { structural_comparison(self.ctx, self.z3_ast) } {
+            return Some(value);
+        }
+        self.simplify();
+        self.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, self.z3_ast) })
     }
 }
 

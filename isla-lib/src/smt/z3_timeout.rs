@@ -145,6 +145,10 @@ pub fn path_smt_stats() -> SmtCallStats {
     PATH_SMT_STATS.with(|stats| stats.borrow().clone())
 }
 
+pub(crate) fn path_smt_check_count() -> u64 {
+    PATH_SMT_STATS.with(|stats| stats.borrow().solver_checks)
+}
+
 /// 用调度快照恢复当前线程正在推进的路径级 SMT 统计。
 pub fn restore_path_smt_stats(stats: SmtCallStats) {
     probe_query_event(|| serde_json::json!({"type":"task_restore"}));

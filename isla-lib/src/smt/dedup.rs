@@ -42,6 +42,10 @@ impl<B: BV> Solver<'_, B> {
         info: SourceLoc,
         speculative: bool,
     ) -> Option<SmtResult> {
+        if self.finite_domain_enabled() && self.finite_domain_bool(exp) == Some(false) {
+            self.note_finite_domain_use("finite_domain_dead_condition", info);
+            return Some(Unsat);
+        }
         // 这里只回答可行性，不承诺交付模型。普通查询与最终取值仍用原接口。
         if self.deferred_region_queries || self.branch_checks_skipped() {
             if self.deferred_region_queries {

@@ -199,6 +199,8 @@ mod tactic;
 pub use tactic::Tactic;
 mod dedup;
 mod deferred_assertions;
+mod finite_domain;
+pub(crate) use finite_domain::FiniteDomain;
 pub mod no_smt;
 mod query;
 mod z3_timeout;
@@ -639,23 +641,13 @@ impl<B: BV> Trace<B> {
         Checkpoint { num: self.checkpoints, trace: tail, next_var }
     }
 
-    pub fn to_vec<'a>(&'a self) -> Vec<&'a Event<B>> {
-        let mut vec: Vec<&'a Event<B>> = Vec::new();
+    fn events_rev(&self) -> impl Iterator<Item = &Event<B>> {
+        std::iter::successors(Some(self), |trace| trace.tail.as_ref().as_ref())
+            .flat_map(|trace| trace.head.iter().rev())
+    }
 
-        let mut current_head = &self.head;
-        let mut current_tail = self.tail.as_ref();
-        loop {
-            for def in current_head.iter().rev() {
-                vec.push(def)
-            }
-            match current_tail {
-                Some(trace) => {
-                    current_head = &trace.head;
-                    current_tail = trace.tail.as_ref();
-                }
-                None => return vec,
-            }
-        }
+    pub fn to_vec(&self) -> Vec<&Event<B>> {
+        self.events_rev().collect()
     }
 }
 
@@ -666,6 +658,7 @@ pub struct SolverOptions {
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
     pub keep_bool_proofs: bool,
+    pub finite_domain_max: Option<usize>,
 }
 
 static SOLVER_OPTIONS: OnceLock<SolverOptions> = OnceLock::new();
@@ -4817,4 +4810,4 @@ impl<B: BV> Solver<'_, B> {
 }
 
 // 有界短探针的只读逐查询诊断。
-pub(crate) use z3_timeout::{probe_query_event, probe_query_timings_enabled};
+pub(crate) use z3_timeout::{path_smt_check_count, probe_query_event, probe_query_timings_enabled};

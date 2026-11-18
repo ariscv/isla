@@ -712,6 +712,9 @@ fn print_with_trigger(trigger: &str) {
             json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count})).collect::<Vec<_>>()})
     )
     .unwrap();
+    if crate::config::RegionOptions::current().progress {
+        writeln!(out, "{}", super::super::symbolic_length::finite_domain_diagnostics(trigger)).unwrap();
+    }
     super::merge_timing::write_snapshot(&mut out, snapshot, trigger);
     let mut totals = counts.totals();
     totals["snapshot"] = json!(snapshot);

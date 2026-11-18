@@ -1298,6 +1298,31 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     info: SourceLoc,
 ) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
+    use crate::smt::FiniteDomain;
+    let domain = solver.finite_domain(sym);
+    match &domain {
+        FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
+            if matches!(&domain, FiniteDomain::Bounded(_)) && !solver.region_queries_deferred() {
+                // 单值上界只证明取值。可查询的普通路径仍沿用前缀可行性检查。
+                match solver.check_candidate_sat(info) {
+                    None | Some(SmtResult::Sat) => (),
+                    Some(SmtResult::Unsat | SmtResult::Unknown) => return Ok(None),
+                    Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
+                }
+            }
+            let concrete = match &values[0] {
+                Exp::Bits64(value) => Some(value.signed()),
+                Exp::Bits(bits) => i128_from_model_bits(bits),
+                _ => unreachable!("已知有限域必须只包含位向量常量"),
+            };
+            if concrete.is_some() {
+                solver.note_finite_domain_use("finite_domain_concrete_i128", info);
+            }
+            return Ok(concrete);
+        }
+        FiniteDomain::Known(_) => return Ok(None),
+        FiniteDomain::Bounded(_) | FiniteDomain::Unknown => (),
+    }
     if solver.no_smt() {
         return Ok(solver.structural_i128(sym));
     }

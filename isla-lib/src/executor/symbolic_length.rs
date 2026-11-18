@@ -1,5 +1,6 @@
 //! 在具体长度消费者处，将合并产生的符号长度拆回具体候选路径。
 
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 
 use super::execution_limits::{ExecutionLimitDecision, ExecutionLimitHandler};
@@ -13,8 +14,36 @@ use crate::error::ExecError;
 use crate::fraction::Fraction;
 use crate::ir::{Exp, Name, SharedState, Val};
 use crate::primop;
-use crate::smt::{checkpoint, smtlib, Event, Model, ModelVal, Solver};
+use crate::smt::{checkpoint, smtlib, Event, FiniteDomain, Model, ModelVal, Solver};
 use crate::source_loc::SourceLoc;
+
+static ENUMERATION_CALLS: AtomicU64 = AtomicU64::new(0);
+static ENUMERATION_CHECKS: AtomicU64 = AtomicU64::new(0);
+static ENUMERATION_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static STRUCTURAL_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+static MODEL_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+
+struct EnumerationChecks(u64);
+
+impl Drop for EnumerationChecks {
+    fn drop(&mut self) {
+        ENUMERATION_CHECKS.fetch_add(crate::smt::path_smt_check_count() - self.0, Relaxed);
+        ENUMERATION_COMPLETED.fetch_add(1, Relaxed);
+    }
+}
+
+/// 进度诊断中，仅统计具体值枚举函数内实际发出的 SMT check 与尝试的候选。
+pub(super) fn finite_domain_diagnostics(trigger: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "symbolic_value_enumeration_summary",
+        "trigger": trigger,
+        "calls": ENUMERATION_CALLS.load(Relaxed),
+        "completed": ENUMERATION_COMPLETED.load(Relaxed),
+        "solver_checks": ENUMERATION_CHECKS.load(Relaxed),
+        "structural_candidates": STRUCTURAL_CANDIDATES.load(Relaxed),
+        "model_candidates": MODEL_CANDIDATES.load(Relaxed),
+    })
+}
 
 /// 同一条 primop 重试时复用全部操作数，保持它们与已有拆分约束之间的关系。
 pub(super) fn eval_operands<'exp, 'ir, B: BV>(
@@ -87,7 +116,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         return Ok(true);
     }
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
-    if solver.no_smt() {
+    let finite_enabled = solver.finite_domain_enabled();
+    if !finite_enabled && solver.no_smt() {
         return Err(ExecError::Smt(solver.no_smt_cannot_continue(op, info)));
     }
     // 只枚举消费者必须具体化的参数：长度、索引和字符串转换的输入。
@@ -120,7 +150,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         "eq_anything" => &[0, 1],
         _ => return Err(error),
     };
-    if solver.check_sat(info).is_unsat()? {
+    if !finite_enabled && solver.check_sat(info).is_unsat()? {
         return Ok(false);
     }
 
@@ -215,22 +245,22 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                             if let Some(bytes) = primop::proven_symbolic_i128(*bytes_sym, solver, info)? {
                                 u32::try_from(bytes).expect("内存访问字节数必须能用 u32 表示")
                             } else {
-                                assert!(
-                                    fork_symbolic_value(
-                                        *bytes_sym,
-                                        operands,
-                                        info,
-                                        task_id,
-                                        task_fraction,
-                                        stop_conditions,
-                                        fork_sink,
-                                        frame,
-                                        task_state,
-                                        solver,
-                                    )?,
-                                    "无法证明的内存访问长度必须能够分叉"
-                                );
-                                return Ok(true);
+                                return match fork_symbolic_value(
+                                    *bytes_sym,
+                                    operands,
+                                    info,
+                                    task_id,
+                                    task_fraction,
+                                    stop_conditions,
+                                    fork_sink,
+                                    frame,
+                                    task_state,
+                                    solver,
+                                )? {
+                                    ValueRetry::Forked => Ok(true),
+                                    ValueRetry::Dead => Ok(false),
+                                    ValueRetry::Unique => panic!("无法证明的内存访问长度必须能够分叉"),
+                                };
                             }
                         }
                         _ => {
@@ -372,7 +402,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 // 不可满足的探测会使当前模型失效，单值枚举前须重新建立前缀模型。
                 assert!(solver.check_sat(info).is_sat()?, "边界探测不得改变路径可满足性");
             }
-            if fork_symbolic_value(
+            match fork_symbolic_value(
                 sym,
                 operands,
                 info,
@@ -384,11 +414,20 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 task_state,
                 solver,
             )? {
-                return Ok(true);
+                ValueRetry::Forked => return Ok(true),
+                ValueRetry::Dead => return Ok(false),
+                ValueRetry::Unique => (),
             }
         }
     }
     Err(error)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValueRetry {
+    Forked,
+    Unique,
+    Dead,
 }
 
 /// 将符号值拆为当前候选和剩余候选；唯一值不需要分叉。
@@ -404,13 +443,53 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     solver: &mut Solver<B>,
-) -> Result<bool, ExecError> {
+) -> Result<ValueRetry, ExecError> {
     use smtlib::Exp::*;
+    let diagnostics = crate::config::RegionOptions::current().progress;
+    let _checks = diagnostics.then(|| {
+        ENUMERATION_CALLS.fetch_add(1, Relaxed);
+        EnumerationChecks(crate::smt::path_smt_check_count())
+    });
     if frame.region_execution.is_none() {
         branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicValueEnumeration)?;
     };
     let width = solver.length(sym).expect("长度参数必须是位向量");
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
+    if let FiniteDomain::Known(values) = solver.finite_domain(sym) {
+        let [candidate, _, ..] = values.as_slice() else {
+            return Ok(if values.is_empty() { ValueRetry::Dead } else { ValueRetry::Unique });
+        };
+        if frame.region_execution.is_some() {
+            // 事务只拥有当前推演臂，两边可行时交回区域外重放。
+            return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
+        }
+        if diagnostics {
+            STRUCTURAL_CANDIDATES.fetch_add(1, Relaxed);
+        }
+        fork_retry_operand(
+            sym,
+            Eq(Box::new(Var(sym)), Box::new(candidate.clone())),
+            Neq(Box::new(Var(sym)), Box::new(candidate.clone())),
+            operands,
+            info,
+            task_id,
+            task_fraction,
+            stop_conditions,
+            fork_sink,
+            frame,
+            task_state,
+            solver,
+        )?;
+        return Ok(ValueRetry::Forked);
+    }
+    if solver.finite_domain_enabled() {
+        let result = solver
+            .check_candidate_sat(info)
+            .ok_or_else(|| ExecError::Smt(solver.no_smt_cannot_continue("symbolic_value_enumeration", info)))?;
+        if result.is_unsat()? {
+            return Ok(ValueRetry::Dead);
+        }
+    }
     let candidate = {
         let mut model = Model::new(solver);
         model.set_complete_model(true);
@@ -419,6 +498,9 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
             value => panic!("长度参数的模型不是位向量：{value:?}"),
         }
     };
+    if diagnostics {
+        MODEL_CANDIDATES.fetch_add(1, Relaxed);
+    }
     let equal = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
     let remainder = Neq(Box::new(Var(sym)), Box::new(candidate));
     assert!(solver.check_sat_with(&equal, info).is_sat()?, "模型中的长度候选必须可满足");
@@ -429,7 +511,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     };
     if !has_remainder {
         assert!(solver.check_sat(info).is_sat()?, "探测不应改变路径可满足性");
-        return Ok(false);
+        return Ok(ValueRetry::Unique);
     }
 
     fork_retry_operand(
@@ -446,7 +528,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         task_state,
         solver,
     )?;
-    Ok(true)
+    Ok(ValueRetry::Forked)
 }
 
 /// 两种重试都必须保存操作数，并沿用同一套执行限制和检查点语义。
