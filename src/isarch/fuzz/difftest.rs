@@ -37,13 +37,49 @@ pub(super) fn cancelled_requested() -> bool {
     CANCELLED.load(Ordering::SeqCst)
 }
 
+pub(super) struct CampaignCancellation(Vec<(i32, libc::sigaction)>);
+
+impl CampaignCancellation {
+    pub(super) fn is_requested(&self) -> bool {
+        cancelled_requested()
+    }
+
+    pub(super) fn new() -> Self {
+        assert!(!ACTIVE.swap(true, Ordering::SeqCst), "一个进程只能管理一场 campaign 的取消信号");
+        CANCELLED.store(false, Ordering::SeqCst);
+        let mut handlers = Vec::new();
+        unsafe {
+            for signal in [libc::SIGINT, libc::SIGTERM] {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = cancelled as *const () as usize;
+                libc::sigemptyset(&mut action.sa_mask);
+                assert_eq!(libc::sigaction(signal, &action, &mut previous), 0);
+                handlers.push((signal, previous));
+            }
+        }
+        Self(handlers)
+    }
+}
+
+impl Drop for CampaignCancellation {
+    fn drop(&mut self) {
+        for (signal, action) in &self.0 {
+            unsafe {
+                assert_eq!(libc::sigaction(*signal, action, std::ptr::null_mut()), 0);
+            }
+        }
+        ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct DifftestExecutor {
     input: Option<crossbeam::channel::Sender<(usize, Sample)>>,
     output: crossbeam::channel::Receiver<(usize, Value)>,
     pending: usize,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
-    handlers: Vec<(i32, libc::sigaction)>,
+    cancellation: CampaignCancellation,
     subreaper: i32,
 }
 
@@ -173,24 +209,18 @@ fn run(config: &Config, index: usize, sample: &Sample, stop: &AtomicBool) -> Val
 }
 
 impl DifftestExecutor {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_requested()
+    }
+
     pub fn new(config: Config) -> Self {
         assert!((1..=12).contains(&config.workers), "emu 并发数必须在 1 到 12 之间");
         assert!((1..=600).contains(&config.timeout));
-        assert!(!ACTIVE.swap(true, Ordering::SeqCst), "一个进程只能持有一个硬件执行池");
-        CANCELLED.store(false, Ordering::SeqCst);
-        let mut handlers = Vec::new();
+        let cancellation = CampaignCancellation::new();
         let mut subreaper = 0;
         unsafe {
             assert_eq!(libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut subreaper), 0);
             assert_eq!(libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1), 0);
-            for signal in [libc::SIGINT, libc::SIGTERM] {
-                let mut action: libc::sigaction = std::mem::zeroed();
-                let mut previous: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = cancelled as *const () as usize;
-                libc::sigemptyset(&mut action.sa_mask);
-                assert_eq!(libc::sigaction(signal, &action, &mut previous), 0);
-                handlers.push((signal, previous));
-            }
         }
         let (input_tx, input_rx) = crossbeam::channel::bounded::<(usize, Sample)>(config.workers * 2);
         let (output_tx, output) = crossbeam::channel::unbounded();
@@ -221,7 +251,7 @@ impl DifftestExecutor {
                 })
             })
             .collect();
-        Self { input: Some(input_tx), output, pending: 0, stop, workers, handlers, subreaper }
+        Self { input: Some(input_tx), output, pending: 0, stop, workers, cancellation, subreaper }
     }
 }
 impl Executor for DifftestExecutor {
@@ -251,12 +281,8 @@ impl Drop for DifftestExecutor {
             worker.join().expect("硬件 worker 异常退出");
         }
         unsafe {
-            for (signal, action) in &self.handlers {
-                assert_eq!(libc::sigaction(*signal, action, std::ptr::null_mut()), 0);
-            }
             assert_eq!(libc::prctl(libc::PR_SET_CHILD_SUBREAPER, self.subreaper), 0);
         }
-        ACTIVE.store(false, Ordering::SeqCst);
     }
 }
 

@@ -7,6 +7,8 @@ use isla_lib::source_loc::SourceLoc;
 
 #[test]
 fn thread_interrupt_wrapper_uses_the_public_solver_and_model_types() {
+    isla_lib::smt::configure_z3_timeout(None);
+    assert_eq!(isla_lib::smt::configured_smt_operation_timeout(), None);
     isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
     let context = Context::new(isla_lib::smt::Config::new());
     let mut solver = Solver::<B64>::new(&context);

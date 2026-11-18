@@ -2018,6 +2018,9 @@ fn parse_merge_enumeration(table: &toml::value::Table) -> Result<Option<MergeEnu
                 config.predict_domain_cap =
                     Some(usize::try_from(value).map_err(|error| format!("{root}.predict_domain_cap: {error}"))?);
             }
+            if config.predict_probes.is_some() && config.predict_domain_cap.is_none() {
+                return Err(format!("{root}.predict_probes 要求显式设置 predict_domain_cap"));
+            }
             if let Some(value) = optional_u64(sub, "max_output_bytes", root)? {
                 if value == 0 {
                     return Err(format!("{root}.max_output_bytes 必须大于零"));
@@ -2918,6 +2921,7 @@ obligation_dump_dir = "obligations"
         assert_eq!(config.predict_probes, Some(256));
         assert_eq!(config.predict_domain_cap, Some(256));
         assert!(merge_config(&text.replace("predict_probes=256", "")).is_err());
+        assert!(merge_config(&text.replace("predict_domain_cap=256", "")).is_err());
         for probes in ["0", "199", "-1"] {
             assert!(merge_config(&text.replace("predict_probes=256", &format!("predict_probes={probes}"))).is_err());
         }

@@ -425,7 +425,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "slow-query-threshold", "返回慢查询的耗时阈值；默认20s", "<n[s|m|h]>");
     opts.optopt("", "slow-query-dump-limit", "慢查询最多导出份数；默认5", "<n>");
     let smt_timeout_help = if cfg!(feature = "smt-thread-interrupt") {
-        "单次 Z3 调用的软中断限时，缺省 60 秒。终态专用限时独立生效"
+        "单次 Z3 调用的软中断限时，缺省不限。终态专用限时独立生效"
     } else {
         "当前构建直接调用 Z3，此选项不生效"
     };
@@ -454,7 +454,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "fuzz-output", "新建输出目录（绝对路径），输出 samples v1 / judged v1", "<directory>");
     opts.optopt("", "fuzz-seed", "随机数初值，每个 mutant 按场景与编号派生独立随机流，默认 0", "<u64>");
     opts.optopt("", "fuzz-batch-size", "批量大小，整批完成后更新调度，默认 256", "<number>");
-    opts.optopt("", "fuzz-budget", "campaign 的 mutant 预算，默认 2000", "<number>");
+    opts.optopt("", "fuzz-budget", "campaign 的变异体数量上限，缺省不限", "<number>");
     opts.optopt(
         "",
         "fuzz-control-percent",

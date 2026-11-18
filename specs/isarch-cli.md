@@ -417,7 +417,7 @@ isarch [原 J1 探索参数] \
 
 回放 P1b 使用 `--fuzz-mode replay-log --fuzz-mutations <mutations.json>`；原始输入从同目录 `judge-batches.json` 定位，也可用 `--fuzz-inputs` 显式指定。`--fuzz-seed` 指定随机数初值（默认 0），`--fuzz-batch-size` 指定批量大小（默认 256）。默认使用模型执行器；`campaign --executor difftest` 连接 emu 和独立 NEMU。
 
-路径引导使用 `--fuzz-mode campaign --fuzz-budget 2000`。形态 A 固定父类，在活动输入字段的 8 位切片中换满足约束的值；形态 B 在同一条完成路径的规范向量目录中选择距离近的类，仅放开差异守卫及关联约束涉及的位。默认 `--fuzz-feedback coverage` 用实际类的 PTE 字段桶及未知不一致签名接纳 corpus entry，并在批次边界更新父输入和目标类的评分；`--fuzz-feedback none` 保留既有轮转基线。字段桶复用已有 Python 分页覆盖接口，评分公式见 [第 5 步](../agents/path_merge_call_support/fuzz-step5.md)。默认 5% 对照从 `--fuzz-mutations` 与原始输入构成的 replay-log 记录池抽样，统一在 A/B 之后生成；不提供对照池时显式设 `--fuzz-control-percent 0`。新 corpus entry 必须先认证；验收使用 `--fuzz-certify-all` 对全部接纳输入做两档逐字段比较。
+路径引导使用 `--fuzz-mode campaign`。变异体数量缺省不限，显式 `--fuzz-budget 2000` 在完成 2000 个后收尾。不限时，SIGINT 或 SIGTERM 请求在当前批次完成后写出结果，`timing.json` 记录 `cancelled`。形态 A 固定父类，在活动输入字段的 8 位切片中换满足约束的值；形态 B 在同一条完成路径的规范向量目录中选择距离近的类，仅放开差异守卫及关联约束涉及的位。默认 `--fuzz-feedback coverage` 用实际类的 PTE 字段桶及未知不一致签名接纳 corpus entry，并在批次边界更新父输入和目标类的评分；`--fuzz-feedback none` 保留既有轮转基线。字段桶复用已有 Python 分页覆盖接口，评分公式见 [第 5 步](../agents/path_merge_call_support/fuzz-step5.md)。默认 5% 对照从 `--fuzz-mutations` 与原始输入构成的 replay-log 记录池抽样，有数量上限时在 A/B 之后生成，数量不限时按每 100 个编号安排；不提供对照池时显式设 `--fuzz-control-percent 0`。新 corpus entry 必须先认证；验收使用 `--fuzz-certify-all` 对全部接纳输入做两档逐字段比较。
 
 `--fuzz-avoid-known-ppn-overflow` 默认关闭。开启后，分页 A/B 优先令活动叶 PTE[53:46]=0；若目标类要求超宽，则撤下本次偏好，保留取值并在 `ppn-preference-summary.json` 计数。它不约束编码空间对照，不改变模型和窄规则；详见 [第 8 步](../agents/path_merge_call_support/fuzz-step8.md)。
 
@@ -521,7 +521,7 @@ progress = true
 全局无 SMT 模式只支持 `solve-state --path-cache-only --path-cache-write <新目录>`，不能同时认证样本或读回缓存。产物标 `uncertified`，探索保持 partial；候选计数不能作为已认证覆盖。`--memory-stats` 输出 `no_smt_summary`；全关应为零真实 check，第三种仍会运行可选布尔恒值证明。旧 `[execution_limits.path_merge]`（包括其中的 `no_smt`）报错；四个开关也不能放在 `path_merge` 或其 `diagnostics` 表中。
 
 
-使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，缺省 60 秒。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
+使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
 ## 投影枚举与样本输出
 
@@ -531,7 +531,7 @@ progress = true
 
 单 binary 后端且 `sample_stride=1` 时使用二进制 schema 2 流式写出，字节数缺省不限。显式 `max_output_bytes` 至少为 1024，并要求这种输出配置。每 60 秒刷新并记录写入进度。创建与输出同名、扩展名为 `.stop` 的文件会在轮询后停止接收新样本。字节到限与文件停止在汇总中分别记为 `output_budget`、`stop_file`，收尾时保存截断统计和正常结束标记。
 
-`mode="count"` 只计数。`mode="predict"` 缺省精确计数并以十进制字符串输出。浮点表示超出范围时可省略浮点统计。显式设置 `predict_probes`（至少 200）启用近似预测，此时可用 `predict_domain_cap` 设置每个分量的精确验证额度，额度缺省为 256。超过额度后进行探测，保留精确前缀与下界。两种模式均不写见证。
+`mode="count"` 只计数。`mode="predict"` 缺省精确计数并以十进制字符串输出。浮点表示超出范围时可省略浮点统计。近似预测须同时显式设置 `predict_probes`（至少 200）和 `predict_domain_cap`（正整数），后者规定每个分量的精确验证额度。超过额度后进行探测，保留精确前缀与下界。两种模式均不写见证。
 
 终值重解可在 `[execution_limits.solver]` 显式设置正整数 `model_timeout_ms`。查询取此限时、`--smt-timeout` 和路径剩余时间中的最小值。
 

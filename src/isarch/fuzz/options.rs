@@ -17,7 +17,7 @@ pub struct Options {
     pub output: PathBuf,
     pub random_seed: u64,
     pub batch_size: usize,
-    pub budget: usize,
+    pub budget: Option<usize>,
     pub control_percent: usize,
     pub certify_all: bool,
     pub avoid_known_ppn_overflow: bool,
@@ -52,8 +52,8 @@ impl Options {
                 .map_err(|e| format!("批量大小无效：{e}"))?,
             budget: matches
                 .opt_str("fuzz-budget")
-                .unwrap_or_else(|| "2000".into())
-                .parse()
+                .map(|value| value.parse::<usize>())
+                .transpose()
                 .map_err(|e| format!("预算无效：{e}"))?,
             control_percent: matches
                 .opt_str("fuzz-control-percent")
@@ -127,7 +127,7 @@ impl Options {
         if options.scenario.is_empty() || options.batch_size == 0 {
             return Err("场景 id 不得为空，批量大小必须大于零".into());
         }
-        if options.budget == 0 || options.control_percent > 100 {
+        if options.budget == Some(0) || options.control_percent > 100 {
             return Err("预算必须大于零，对照百分比必须在 0 到 100 之间".into());
         }
         if matches!(options.mode, Mode::Campaign) && options.control_percent > 0 && options.mutations.is_none() {
@@ -207,6 +207,13 @@ mod cache_fuzz_tests {
         assert!(Options::parse(&without).is_err());
         let mut args = args.to_vec();
         args.extend(["--path-cache-read", "cache"]);
-        assert!(Options::parse(&parser.parse(args).unwrap()).is_ok());
+        let options = Options::parse(&parser.parse(&args).unwrap()).unwrap();
+        assert_eq!(options.budget, None);
+        let mut finite_args = args;
+        finite_args.extend(["--fuzz-budget", "20"]);
+        let options = Options::parse(&parser.parse(&finite_args).unwrap()).unwrap();
+        assert_eq!(options.budget, Some(20));
+        *finite_args.last_mut().unwrap() = "0";
+        assert!(Options::parse(&parser.parse(&finite_args).unwrap()).is_err());
     }
 }

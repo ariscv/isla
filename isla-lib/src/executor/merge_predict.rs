@@ -215,8 +215,9 @@ pub(super) fn run<B: BV>(
     assert_eq!(guards.len(), record_ids.len());
     let probes = config.predict_probes;
     assert!(probes.is_none_or(|probes| probes >= 200));
-    assert!(config.predict_domain_cap.is_none_or(|cap| cap > 0 && probes.is_some()));
-    let domain_cap = probes.map(|_| config.predict_domain_cap.unwrap_or(256));
+    let domain_cap = config.predict_domain_cap;
+    assert_eq!(probes.is_some(), domain_cap.is_some());
+    assert!(domain_cap.is_none_or(|cap| cap > 0));
     let started = std::time::Instant::now();
     let mut workers = 0;
     eprintln!(

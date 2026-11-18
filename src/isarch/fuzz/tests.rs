@@ -50,7 +50,7 @@ fn feedback_downweights_only_known_stale_classes_and_rewards_missing_buckets() {
 #[test]
 fn feedback_scheduler_scores_are_frozen_until_batch_commit() {
     use super::campaign::FeedbackScheduler;
-    let mut scheduler = FeedbackScheduler::new(vec![1.0, 4.0], 20);
+    let mut scheduler = FeedbackScheduler::new(vec![1.0, 4.0], Some(20));
     let batch = scheduler.next_batch(10);
     assert_eq!(batch, scheduler.next_batch(10));
     assert!(batch.iter().filter(|i| **i == 1).count() > batch.iter().filter(|i| **i == 0).count());
@@ -76,7 +76,7 @@ fn feedback_infrastructure_without_buckets_is_not_coverage() {
 
 #[test]
 fn campaign_scheduler_rotates_and_balances_class_attempts() {
-    let mut scheduler = super::campaign::ClassScheduler::new(3, 8);
+    let mut scheduler = super::campaign::ClassScheduler::new(3, Some(8));
     assert_eq!(scheduler.next_batch(2), vec![0, 1]);
     assert_eq!(scheduler.next_batch(2), vec![0, 1]);
     scheduler.on_batch_end(2);
@@ -85,6 +85,18 @@ fn campaign_scheduler_rotates_and_balances_class_attempts() {
     assert_eq!(scheduler.next_batch(4), vec![0, 1]);
     scheduler.on_batch_end(2);
     assert!(scheduler.next_batch(1).is_empty());
+}
+
+#[test]
+fn campaign_schedulers_with_no_budget_continue_across_batches() {
+    let mut balanced = super::campaign::ClassScheduler::new(2, None);
+    let mut weighted = super::campaign::FeedbackScheduler::new(vec![1.0, 1.0], None);
+    for scheduler in [&mut balanced as &mut dyn Scheduler, &mut weighted] {
+        for _ in 0..3 {
+            assert_eq!(scheduler.next_batch(1000).len(), 1000);
+            scheduler.on_batch_end(1000);
+        }
+    }
 }
 
 #[test]
@@ -195,7 +207,7 @@ fn p1b_path_aliases_start_at_one() {
         output: output.clone(),
         random_seed: 0,
         batch_size: 2,
-        budget: 20,
+        budget: Some(20),
         control_percent: 0,
         certify_all: false,
         avoid_known_ppn_overflow: false,
@@ -280,7 +292,7 @@ fn mutation_metadata_identifies_current_corpus_entry() {
         output: output.clone(),
         random_seed: 0,
         batch_size: 2,
-        budget: 20,
+        budget: Some(20),
         control_percent: 0,
         certify_all: false,
         avoid_known_ppn_overflow: false,
@@ -322,7 +334,7 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
         output: output.clone(),
         random_seed: 0,
         batch_size: 2,
-        budget: 20,
+        budget: Some(20),
         control_percent: 0,
         certify_all: false,
         avoid_known_ppn_overflow: false,

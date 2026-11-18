@@ -117,16 +117,16 @@ solve-VFMVSF: ISA_CONFIG = ./configs/riscv64_difftest_fd.toml
 solve-VABS_V: ISA_CONFIG = ./configs/riscv64_difftest_vabs_v.toml
 # Z3 timeout wrapper 的实现由构建 feature 选择。
 Z3_TIMEOUT_IMPL ?= thread_interrupt
+# 只在显式配置时为单次 Z3 调用安装限时。
+SMT_TIMEOUT ?=
 ifeq ($(Z3_TIMEOUT_IMPL),direct)
 CARGO_SMT_FEATURE =
-SMT_TIMEOUT ?=
 else ifeq ($(Z3_TIMEOUT_IMPL),thread_interrupt)
 CARGO_SMT_FEATURE = --features smt-thread-interrupt
-SMT_TIMEOUT ?= 1m
 else
 $(error Z3_TIMEOUT_IMPL 必须是 direct 或 thread_interrupt)
 endif
-# 外层命令、isarch 符号执行和单条 Z3 operation 的默认验收时间上限。
+# Make 的进程外限与 isarch 单路径活跃限时。
 # OUTER_TIMEOUT 是整条 solve-% 命令的墙上时钟上限；SOLVE_TIMEOUT 透传给 isarch 的
 # --timeout，是**单条路径**的活跃墙上时钟预算（executor::PathTimeout），不是全局上限。
 OUTER_TIMEOUT ?= 60m

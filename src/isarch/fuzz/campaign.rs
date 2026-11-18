@@ -16,10 +16,10 @@ pub struct ClassScheduler {
     counts: Vec<usize>,
     cursor: usize,
     position: usize,
-    total: usize,
+    total: Option<usize>,
 }
 impl ClassScheduler {
-    pub fn new(classes: usize, total: usize) -> Self {
+    pub fn new(classes: usize, total: Option<usize>) -> Self {
         assert!(classes > 0);
         Self { counts: vec![0; classes], cursor: 0, position: 0, total }
     }
@@ -29,7 +29,7 @@ impl Scheduler for ClassScheduler {
         assert!(limit > 0);
         let mut counts = self.counts.clone();
         let mut cursor = self.cursor;
-        (0..limit.min(self.total - self.position))
+        (0..self.total.map_or(limit, |total| limit.min(total - self.position)))
             .map(|_| {
                 let index = (0..counts.len())
                     .map(|offset| (cursor + offset) % counts.len())
@@ -47,7 +47,7 @@ impl Scheduler for ClassScheduler {
             self.cursor = (index + 1) % self.counts.len();
         }
         self.position += completed;
-        assert!(self.position <= self.total);
+        assert!(self.total.is_none_or(|total| self.position <= total));
     }
 }
 
@@ -55,10 +55,10 @@ pub struct FeedbackScheduler {
     counts: Vec<usize>,
     scores: Vec<f64>,
     position: usize,
-    total: usize,
+    total: Option<usize>,
 }
 impl FeedbackScheduler {
-    pub fn new(scores: Vec<f64>, total: usize) -> Self {
+    pub fn new(scores: Vec<f64>, total: Option<usize>) -> Self {
         assert!(!scores.is_empty());
         assert!(scores.iter().all(|s| s.is_finite() && *s > 0.0));
         Self { counts: vec![0; scores.len()], scores, position: 0, total }
@@ -73,7 +73,7 @@ impl Scheduler for FeedbackScheduler {
     fn next_batch(&self, limit: usize) -> Vec<usize> {
         assert!(limit > 0);
         let mut counts = self.counts.clone();
-        (0..limit.min(self.total - self.position))
+        (0..self.total.map_or(limit, |total| limit.min(total - self.position)))
             .map(|_| {
                 let index = (0..counts.len())
                     .min_by(|a, b| {
@@ -92,7 +92,7 @@ impl Scheduler for FeedbackScheduler {
             self.counts[index] += 1;
         }
         self.position += completed;
-        assert!(self.position <= self.total);
+        assert!(self.total.is_none_or(|total| self.position <= total));
     }
 }
 
@@ -179,9 +179,10 @@ pub(super) fn run<B: BV>(
         let mut judged = Vec::new();
         let mut certifications = Vec::new();
         let mut hits = vec![0; classes.len()];
-        let quota = options.budget.div_ceil(classes.len());
-        // 对照允许独立重复，统一在 A/B 之后产生；A 的历史因此覆盖此前全部 mutant。
-        let guided_budget = options.budget - options.budget * options.control_percent / 100;
+        let quota = options.budget.map(|budget| budget.div_ceil(classes.len()));
+        // 有限配额沿用原批末对照顺序。不限时按每百个编号安排同一比例的对照。
+        let guided_budget =
+            options.budget.map(|budget| budget - ((budget as u128 * options.control_percent as u128) / 100) as usize);
         let mut attempts = 0;
         let exhausted = 0;
         let mut generate_seconds = 0.0;
@@ -191,6 +192,8 @@ pub(super) fn run<B: BV>(
         let mut observations = Vec::new();
         let mut batch_scores = Vec::new();
         let mut corpus_added = Vec::new();
+        let model_cancellation =
+            (options.budget.is_none() && options.difftest.is_none()).then(super::difftest::CampaignCancellation::new);
         let mut hardware = options.difftest.clone().map(super::difftest::DifftestExecutor::new);
         let oracle = super::oracle::ThreeWayOracle;
         let mut hardware_results = Vec::new();
@@ -202,7 +205,11 @@ pub(super) fn run<B: BV>(
         let mut infrastructure = 0usize;
         let mut filtered = 0usize;
         let mut hardware_seconds = 0.0;
-        loop {
+        let cancelled = |hardware: &Option<super::difftest::DifftestExecutor>| {
+            model_cancellation.as_ref().is_some_and(super::difftest::CampaignCancellation::is_requested)
+                || hardware.as_ref().is_some_and(super::difftest::DifftestExecutor::is_cancelled)
+        };
+        while !cancelled(&hardware) {
             let batch = if options.feedback {
                 weighted.next_batch(options.batch_size)
             } else {
@@ -224,7 +231,9 @@ pub(super) fn run<B: BV>(
             for (offset, parent_index) in batch.iter().enumerate() {
                 let id = (begin + offset) as u64;
                 let mut rng = random_stream(options.random_seed, &options.scenario, id);
-                if id as usize >= guided_budget {
+                let is_control = guided_budget
+                    .map_or(id % 100 >= (100 - options.control_percent) as u64, |guided| id >= guided as u64);
+                if is_control {
                     let index = (rng.next_u64() % controls.len() as u64) as usize;
                     let mut sample = controls[index].clone();
                     sample.sample_id = id;
@@ -266,7 +275,10 @@ pub(super) fn run<B: BV>(
                 let candidates = neighbors(parent_identity, &classes, &pending_hits);
                 let use_neighbor = rng.next_u64() & 1 != 0 && !candidates.is_empty();
                 let targets = if use_neighbor {
-                    candidates.into_iter().filter(|i| options.feedback || pending_hits[*i] < quota).collect::<Vec<_>>()
+                    candidates
+                        .into_iter()
+                        .filter(|i| options.feedback || quota.is_none_or(|quota| pending_hits[*i] < quota))
+                        .collect::<Vec<_>>()
                 } else {
                     vec![*parent_index]
                 };
@@ -500,9 +512,6 @@ pub(super) fn run<B: BV>(
             );
             super::io::write_lines(&options.output.join("feedback-observations.jsonl"), &observations);
             super::io::write_lines(&options.output.join("schedule-scores.jsonl"), &batch_scores);
-            if hardware.is_some() && super::difftest::cancelled_requested() {
-                break;
-            }
             eprintln!(
                 "[FUZZ_CAMPAIGN] {}",
                 json!({"mutants":samples.len(),"budget":options.budget,"attempts":attempts,"exhausted":exhausted,"seconds":started.elapsed().as_secs_f64()})
@@ -518,7 +527,7 @@ pub(super) fn run<B: BV>(
             samples,
             records,
             judged,
-            json!({"campaign_seconds":started.elapsed().as_secs_f64(),"generate_seconds":generate_seconds,"fast_seconds":fast_seconds,"hardware_seconds":hardware_seconds,"certify_seconds":certify_seconds,"solver_attempts":attempts,"exhausted_requests":exhausted,"certified":certifications.len(),"corpus_added":corpus_added.len()}),
+            json!({"campaign_seconds":started.elapsed().as_secs_f64(),"generate_seconds":generate_seconds,"fast_seconds":fast_seconds,"hardware_seconds":hardware_seconds,"certify_seconds":certify_seconds,"solver_attempts":attempts,"exhausted_requests":exhausted,"certified":certifications.len(),"corpus_added":corpus_added.len(),"cancelled":cancelled(&hardware)}),
         )
     })
 }

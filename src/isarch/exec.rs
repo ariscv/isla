@@ -3278,7 +3278,7 @@ mod tests {
                 output: output.clone(),
                 random_seed: 0,
                 batch_size: 2,
-                budget: 2,
+                budget: Some(2),
                 control_percent: 0,
                 certify_all: true,
                 avoid_known_ppn_overflow: false,

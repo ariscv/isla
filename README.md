@@ -746,6 +746,8 @@ isarch 在执行前检查正常／压缩编码映射。只有当前配置、初�
 
 ### 探索期间的求解器超时
 
+线程中断构建下，isarch 和 `make solve-*` 缺省不设单次 Z3 调用限时。需要时显式传 `--smt-timeout`，Make 对应 `SMT_TIMEOUT`。
+
 `[execution_limits.solver] on_unknown = "dead"` 是缺省策略。真实求解返回 Unknown 或超时时，探索丢弃对应路径并继续。根区域出口的整体查询无法归属单臂时，执行器撤销推演，让普通分叉逐路径查询。
 
 只要丢弃过路径，isarch 收尾时报告首个 Sail 位置和用途，返回 **66**，并在运行摘要和路径缓存 manifest 写入 `valid=false`、`invalid_reasons` 及丢弃记录。judge、`--check-samples` 和 fuzz 拒绝加载该缓存。程序外限、信号和资源失败保留各自状态。使用 `--solver-on-unknown=error` 可让未判定直接终止探索。样本绑定与验收查询失败沿用其错误处理。
@@ -789,7 +791,7 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 
 `--path-cache-write <新目录> --path-cache-only solve-state --clause=<clause>` 只保存完成路径的符号 DAG、merge 守卫及执行摘要，不生成具体样例或枚举类。可选快档事实全部记为未证明，完整 judge 仍使用原求解。用 `--path-cache-read` 配合样本输出或 fuzz 入口可在后续独立枚举。启用投影枚举后，`class_cap` 与 `path_cap` 缺省均不限，`sample_stride` 缺省为 1。缓存仍受原错误摘要约束，partial 不能当完整探索。异常和未完成路径保留原摘要，不被改写为正常后态。
 
-单 binary 后端且 `sample_stride=1` 时使用 schema 2 流式落盘，`max_output_bytes` 缺省不限。显式字节限额和同名 `.stop` 文件的停止原因写入汇总。预测缺省精确计数，设置 `predict_probes` 后可使用近似探测。配置及代表输出见 [投影枚举与样本输出](specs/isarch-cli.md#投影枚举与样本输出)。
+单 binary 后端且 `sample_stride=1` 时使用 schema 2 流式落盘，`max_output_bytes` 缺省不限。显式字节限额和同名 `.stop` 文件的停止原因写入汇总。预测缺省精确计数，显式设置 `predict_probes` 和 `predict_domain_cap` 后可使用近似探测。配置及代表输出见 [投影枚举与样本输出](specs/isarch-cli.md#投影枚举与样本输出)。
 
 
 路径缓存使用 schema 4，fork ID 为 64 位。schema 3 的 JSON 可用 `--path-cache-encoding=json` 读取，须省略 `--path-cache-crosscheck`。schema 3 的二进制及 schema 1/2 需要重新生成。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。

@@ -66,13 +66,14 @@ impl Z3InterruptHandle {
     }
 }
 
-static OPERATION_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+static OPERATION_TIMEOUT: OnceLock<Option<Duration>> = OnceLock::new();
 
 /// 单次 SMT 调用的实际限时。直接调用构建无单次限时。
 pub fn configured_operation_timeout() -> Option<Duration> {
     #[cfg(feature = "smt-thread-interrupt")]
     {
-        Some(operation_timeout())
+        // 非 isarch 入口未调用配置接口时沿用原线程中断策略。
+        OPERATION_TIMEOUT.get().copied().unwrap_or(Some(Duration::from_secs(60)))
     }
     #[cfg(not(feature = "smt-thread-interrupt"))]
     {
@@ -226,21 +227,12 @@ pub(super) fn take_smtperf_report() -> String {
     solve_timing_report(&timings)
 }
 
-#[cfg(feature = "smt-thread-interrupt")]
-fn operation_timeout() -> Duration {
-    OPERATION_TIMEOUT.get().copied().unwrap_or(Duration::from_secs(60))
-}
-
 pub fn configure_z3_timeout(timeout: Option<Duration>) {
     if let Some(timeout) = timeout {
-        assert!(!timeout.is_zero(), "Z3 timeout must be non-zero");
         assert!(timeout.as_millis() > 0, "Z3 timeout must be at least one millisecond");
-        if let Some(configured) = OPERATION_TIMEOUT.get() {
-            assert_eq!(*configured, timeout, "Z3 timeout was configured more than once with different values");
-        } else {
-            OPERATION_TIMEOUT.set(timeout).expect("Z3 timeout configuration changed concurrently");
-        }
     }
+    let configured = OPERATION_TIMEOUT.get_or_init(|| timeout);
+    assert_eq!(*configured, timeout, "Z3 timeout was configured more than once with different values");
 }
 
 pub(super) fn timeout_error(
@@ -270,7 +262,10 @@ pub(super) fn timeout_error(
 
 #[cfg(feature = "smt-thread-interrupt")]
 fn thread_interrupt_call<T>(context: Z3_context, call: impl FnOnce() -> T) -> Result<T, Z3TimeoutError> {
-    thread_interrupt_call_with_timeout(context, operation_timeout(), call)
+    match configured_operation_timeout() {
+        Some(timeout) => thread_interrupt_call_with_timeout(context, timeout, call),
+        None => Ok(call()),
+    }
 }
 
 #[cfg(feature = "smt-thread-interrupt")]
