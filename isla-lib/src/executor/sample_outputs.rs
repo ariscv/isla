@@ -102,11 +102,8 @@ impl SampleOutputs {
         }
     }
 
-    pub fn open_budget(configs: &[SampleOutputConfig], limit: u64) -> Self {
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].format, SampleOutputFormat::Binary);
-        let path = &configs[0].path;
-        if let Some(parent) = path.parent() {
+    pub fn open_streaming(path: &Path, limit: Option<u64>) -> Self {
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).unwrap();
         }
         let writer = std::sync::Arc::new(Mutex::new(budget::BudgetWriter::open(path, limit)));
@@ -114,25 +111,10 @@ impl SampleOutputs {
         let stop_file = path.with_extension("stop");
         let (sender, receiver) = std::sync::mpsc::channel();
         let monitor = std::thread::spawn(move || {
-            let mut previous = 0;
-            let mut changed = std::time::Instant::now();
-            loop {
-                match receiver.recv_timeout(std::time::Duration::from_secs(60)) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
-                }
-                let mut writer = progress.lock().unwrap();
-                writer.flush_pending();
-                let report = writer.progress();
-                let total = report["combinations"].as_u64().unwrap();
-                if total != previous {
-                    previous = total;
-                    changed = std::time::Instant::now();
-                }
-                if changed.elapsed().as_secs() >= 3600 || stop_file.exists() {
-                    writer.stop_stalled();
-                }
-                eprintln!("[MERGE_ENUMERATION_PROGRESS] {}", report);
+            while receiver.recv_timeout(std::time::Duration::from_secs(60))
+                == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            {
+                progress.lock().unwrap().poll_progress(&stop_file);
             }
         });
         Self {
@@ -445,11 +427,11 @@ mod tests {
         ]
         .map(|(format, path)| SampleOutputConfig { format, path: root.join(path) });
         let outputs = SampleOutputs::open(&configs);
-        let budget = SampleOutputs::open_budget(
-            &[SampleOutputConfig { format: SampleOutputFormat::Binary, path: root.join("budget.bin") }],
-            1_000_000,
-        );
+        let budget = SampleOutputs::open_streaming(&root.join("budget.bin"), Some(1_000_000));
+        let unlimited = SampleOutputs::open_streaming(&root.join("unlimited.bin"), None);
         let path = outputs.start_path(7);
+        assert_eq!(budget.start_path(7), path);
+        assert_eq!(unlimited.start_path(7), path);
         for class in 0..2 {
             for solution in 0..3 {
                 let sample = Sample {
@@ -474,9 +456,12 @@ mod tests {
                     ret_val: "保留原显示文本".into(),
                 };
                 assert!(budget.append(path, solution as usize, &[format!("#b{solution:02b}")], sample.clone()));
+                assert!(unlimited.append(path, solution as usize, &[format!("#b{solution:02b}")], sample.clone()));
                 outputs.append(path, solution as usize, &[format!("#b{solution:02b}")], sample);
             }
-            budget.finish_class(path, Some(class), &json!({"truncated":class == 1}));
+            let metadata = json!({"truncated":class == 1});
+            budget.finish_class(path, Some(class), &metadata);
+            unlimited.finish_class(path, Some(class), &metadata);
             outputs.finish_class(
                 path,
                 Some(class),
@@ -485,7 +470,16 @@ mod tests {
         }
         budget.finish_path(path, false);
         budget.finish();
+        unlimited.finish_path(path, false);
+        unlimited.finish();
         outputs.finish();
+        assert_eq!(std::fs::read(root.join("budget.bin")).unwrap(), std::fs::read(root.join("unlimited.bin")).unwrap());
+        let report: Value =
+            serde_json::from_slice(&std::fs::read(root.join("unlimited.summary.json")).unwrap()).unwrap();
+        assert_eq!(report["max_output_bytes"], Value::Null);
+        assert_eq!(report["combinations"], 6);
+        assert_eq!(report["truncated"], true);
+        assert_eq!(report["reason"], Value::Null);
         let rows = SampleChecker::load(&root.join("v1.jsonl"), None).unwrap().samples;
         assert_eq!(rows.len(), 6);
         assert_eq!(rows.iter().map(|row| row.sample_id).collect::<Vec<_>>(), (0..6).collect::<Vec<_>>());

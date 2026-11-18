@@ -255,13 +255,13 @@ impl PredictionGraph {
                         solver.add(Def::Assert(literal.clone()));
                     }
                     assert!(satisfiable(solver, &Bool(true))?);
-                    super::super::predict::domain_count(solver, bits, 256)
+                    super::super::predict::domain_count(solver, bits, Some(256))
                 })();
                 solver.rollback_transaction(class_tx);
                 result
             });
             solver.rollback_transaction(tx);
-            let count = counted?;
+            let count = counted?.map(|count| usize::try_from(count).unwrap());
             report["first_class_domain_at_cap_256"] =
                 json!({"complete":count.is_some(),"exact":count,"lower_bound":count.unwrap_or(257)});
             let definitions: std::collections::BTreeMap<_, _> =

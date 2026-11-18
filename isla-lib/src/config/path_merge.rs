@@ -23,6 +23,8 @@ pub struct SolverConfig {
     pub no_smt_keep_bool_proofs: bool,
     /// 0 表示不限，不限制路径判定。
     pub bool_proof_rlimit: u32,
+    /// isarch 终值重解的单次时限（毫秒）。省略时沿用已有时限。
+    pub model_timeout_ms: Option<std::num::NonZeroU64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

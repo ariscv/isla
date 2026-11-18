@@ -110,6 +110,8 @@ python3 agents/path_merge_call_support/pt_decode/compare_sample_outputs.py \
 
 ## F11：有预算的二进制流式会话
 
+> 本节记录 F11 历史版本的缺省上限与实验配方。当前配置见 [投影枚举与样本输出](../../specs/isarch-cli.md#投影枚举与样本输出)。
+
 只配置一个 binary 后端时，默认 `max_output_bytes=25000000000`（十进制25 GB）。也可以显式设置该字段；显式预算要求只配置 binary，且 `sample_stride=1`。多后端 F9 会话保留原格式和逐类暂存方式。有界会话使用二进制 schema=2；samples v1 的字段及含义不变。预算至少1024字节，以容纳正常协议头尾。
 
 ```toml
