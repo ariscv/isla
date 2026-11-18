@@ -50,6 +50,35 @@ static OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 
 impl RegionOptions {
+    /// 只保留执行前冻结的运行时快照；外部配置不再有 region_options 表。
+    pub fn from_config(limits: &super::ExecutionLimitsConfig) -> Self {
+        let merge = &limits.path_merge;
+        let diagnostics = &merge.diagnostics;
+        Self {
+            skip_branch_checks: limits.solver.skip_branch_checks,
+            skip_bool_proofs: limits.solver.skip_bool_proofs,
+            no_smt: limits.solver.no_smt,
+            no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
+            defer_exit_check: merge.defer_exit_check,
+            lazy_z3_scope: merge.lazy_z3_scope,
+            witness_eval: merge.witness_eval,
+            prefix_compact: merge.prefix_compact,
+            bool_proof_rlimit: limits.solver.bool_proof_rlimit,
+            witness_shadow: diagnostics.witness_shadow,
+            witness_local_shadow: diagnostics.witness_local_shadow,
+            bool_proof_profile: diagnostics.bool_proof_profile,
+            progress: diagnostics.progress,
+            native_snapshot: diagnostics.native_snapshot,
+            call_census: diagnostics.call_census,
+            probe_round_cost: diagnostics.probe_round_cost,
+            probe_query_timings: diagnostics.probe_query_timings,
+            query_dump_sites: diagnostics.query_dump_sites.clone(),
+            same_context_sites: diagnostics.same_context_sites.clone(),
+            query_dump_dir: diagnostics.query_dump_dir.clone(),
+            obligation_dump_dir: diagnostics.obligation_dump_dir.clone(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.no_smt_keep_bool_proofs && (!self.no_smt || self.skip_bool_proofs) {
             return Err("no_smt_keep_bool_proofs 需要 no_smt=true 且 skip_bool_proofs=false".into());
@@ -92,32 +121,5 @@ mod tests {
         assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
         assert_eq!(RegionOptions::current(), &RegionOptions::default());
         assert_eq!(RegionOptions::default().bool_proof_rlimit, 0);
-    }
-}
-
-#[cfg(test)]
-mod no_smt_port_tests {
-    use super::*;
-    #[test]
-    fn no_smt_toml_defaults_and_switches() {
-        assert_eq!(toml::from_str::<RegionOptions>("no_smt=false").unwrap(), RegionOptions::default());
-        for field in ["skip_branch_checks", "skip_bool_proofs", "no_smt", "no_smt_keep_bool_proofs"] {
-            let options = toml::from_str::<RegionOptions>(&format!("{field}=true")).unwrap();
-            assert_ne!(options, RegionOptions::default());
-            assert!(toml::from_str::<RegionOptions>(&format!("{field}=1")).is_err());
-        }
-    }
-}
-
-#[cfg(test)]
-mod no_smt_validation_tests {
-    use super::*;
-    #[test]
-    fn no_smt_toml_proof_dependency() {
-        for text in ["no_smt_keep_bool_proofs=true", "no_smt=true\nno_smt_keep_bool_proofs=true\nskip_bool_proofs=true"]
-        {
-            assert!(toml::from_str::<RegionOptions>(text).unwrap().validate().is_err());
-        }
-        toml::from_str::<RegionOptions>("no_smt=true\nno_smt_keep_bool_proofs=true").unwrap().validate().unwrap();
     }
 }

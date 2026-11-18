@@ -664,7 +664,7 @@ fn isla_main() -> i32 {
 
     if matches.opt_present("path-merging") {
         let mut limits = isa_config.execution_limits.take().unwrap_or_default();
-        limits.path_merging = Some(true);
+        limits.path_merge.enabled = Some(true);
         isa_config.execution_limits = Some(limits);
     }
 
@@ -674,7 +674,7 @@ fn isla_main() -> i32 {
         eprintln!("{error}");
         return 1;
     }
-    let solver_region_options = limits.region_options.clone().unwrap_or_default();
+    let solver_region_options = isla_lib::config::RegionOptions::from_config(&limits);
     if let Err(error) = isarch::region_options::validate_no_smt_mode(&matches, &solver_region_options) {
         eprintln!("{error}");
         return 1;
@@ -698,7 +698,7 @@ fn isla_main() -> i32 {
             eprintln!("execution_limits.enabled=false 时不能指定 --region-step-budget");
             return 1;
         }
-        limits.region_step_budget = Some(value);
+        limits.path_merge.step_budget = Some(value);
     }
 
     let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
@@ -1036,7 +1036,7 @@ mod tests {
                 "未匹配任何 IR 分支",
             ),
         ] {
-            let text = format!("[execution_limits]\nstrict = true\nir_sha256 = \"{}\"\n[[execution_limits.merge_policy]]\nmode = \"adaptive\"\n{}", "0".repeat(64), rule);
+            let text = format!("[execution_limits]\nstrict = true\nir_sha256 = \"{}\"\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"adaptive\"\n{}", "0".repeat(64), rule);
             let path = std::env::temp_dir().join(format!("i3-loaded-policy-{}.toml", std::process::id()));
             std::fs::write(&path, text).unwrap();
             let config = ExecutionLimitsConfig::from_file(&path).unwrap();

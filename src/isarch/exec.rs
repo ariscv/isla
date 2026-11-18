@@ -1340,7 +1340,7 @@ pub fn solve_state_main<'ir, B: BV>(
 ) -> bool {
     let samples = match super::samples::SampleSession::new(
         sample_options,
-        execution_limits_config.and_then(|limits| limits.merge_enumeration.as_ref()),
+        execution_limits_config.and_then(|limits| limits.path_merge.enumeration.as_ref()),
     ) {
         Ok(samples) => samples,
         Err(error) => {
@@ -3480,7 +3480,14 @@ mod tests {
         ExecutionLimitsConfig {
             max_forks_per_branch: Some(max_forks_per_branch),
             on_limit_reached: Some(LimitBehaviorConfig::Concretize),
-            region_fork_limits: Some(region_limits),
+            path_merge: isla_lib::config::PathMergeConfig {
+                regions: if region_limits.is_empty() {
+                    None
+                } else {
+                    Some(region_limits.into_iter().map(isla_lib::config::PathMergeRegionConfig::ForkLimit).collect())
+                },
+                ..Default::default()
+            },
             ..ExecutionLimitsConfig::default()
         }
     }
@@ -4830,7 +4837,10 @@ mod tests {
         assert!(!ExecutionLimits::default().with_path_merging(true).region_loop_analysis);
         assert!(!solve_execution_limits(&symtab, None).region_loop_analysis);
         for enabled in [false, true] {
-            let config = ExecutionLimitsConfig { path_merging: Some(enabled), ..ExecutionLimitsConfig::default() };
+            let config = ExecutionLimitsConfig {
+                path_merge: isla_lib::config::PathMergeConfig { enabled: Some(enabled), ..Default::default() },
+                ..ExecutionLimitsConfig::default()
+            };
             let limits = solve_execution_limits(&symtab, Some(&config));
             assert_eq!(limits.region_global_state, enabled);
             assert_eq!(limits.region_loop_analysis, enabled);
@@ -5004,7 +5014,14 @@ mod tests {
         let config = ExecutionLimitsConfig {
             max_forks_per_branch: Some(7),
             max_forks_per_path: Some(11),
-            regions: Some(vec![SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7))]),
+            path_merge: isla_lib::config::PathMergeConfig {
+                regions: Some(vec![isla_lib::config::PathMergeRegionConfig::LimitFilter(SourceRegionSpec::new(
+                    "extensions/V/vext_arith_insts.sail",
+                    (186, 6),
+                    (192, 7),
+                ))]),
+                ..Default::default()
+            },
             ..ExecutionLimitsConfig::default()
         };
 

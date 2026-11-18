@@ -286,3 +286,12 @@ Sv39 STORE 同一新 IR／config-xs、380 个 corpus entry＋1000 个 mutant＋�
 ## 2026-11-18 分段去重线配置迁移
 
 a286b00c＋dbfc6e70源码整合＋本轮迁移：区域111通过5忽略、去重义务14、查询32、配置3、CLI2；exec76通过7缺IR失败、samples8、path_cache7，release／fmt通过。默认样本逐字节相同。单次本机T32／64GiB／judge310秒未进入resident，124退出、后态未比较，无遗留。不签整体合入PASS，Git写操作留Claude。[验证与边界](../agents/segdedup_flags_20261117/status.md)。
+
+## 2026-11-18 配置统一迁移候选
+
+fe2c9e08加本轮未提交差异：配置63、区域118通过/5忽略、去重义务14、共享历史4、限制31、CLI3、isarch配置应用9、样本8、缓存7、主入口27通过；release isarch及isla-execute-function、fmt通过。ITYPE/0x00000013/T32两侧48945字节一致；78份现存workaround和混合规则运行时策略一致。全exec debug180秒/release90秒未完成，基线integration夹具编译错误；树外迁移仅提供补丁，不能签全仓迁移PASS。[状态与证据](../agents/config_layout_20261118/status.md)。
+
+
+## 2026-11-18：无 SMT 与内存修复并入新配置结构
+
+任务分支 perf/nosmt-memory-20261118 在6ff879d5上合入固定isarch@ae8db4b3，并将四个无SMT开关迁到execution_limits.solver。限定验证：config66、区域121（5忽略）、去重义务18、共享历史5、执行限制31、CLI5、缓存7、resident3、summary3、配置应用9、样本8、主入口27均通过；cargo fmt及release构建通过。ITYPE/0x00000013两侧48945字节一致；本机T32的LOAD30秒包装/50秒scheduler外限，真实check0，72个sail_exception候选全标uncertified，退出124，无manifest/完整DAG。旧位置明确报错；无新版本PMP=2签收。只提交任务分支、不push。父仓库报告与文本证据位于agents/fuzz_strategy_20261112/exp/fullsym-timeout/iter/result.md及raw/nosmt-merge-newconfig-20261118/。

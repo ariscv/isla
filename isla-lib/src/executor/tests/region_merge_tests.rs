@@ -910,15 +910,20 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
 fn policy_limits(shared: &SharedState<B64>, rules: Vec<(Name, crate::config::MergeMode)>) -> ExecutionLimits {
     use crate::config::{ExecutionLimitsConfig, MergePolicyConfig, MergePolicySelectorConfig};
     let config = ExecutionLimitsConfig {
-        merge_policy: Some(
-            rules
-                .into_iter()
-                .map(|(name, mode)| MergePolicyConfig {
-                    mode,
-                    selector: MergePolicySelectorConfig::Function(shared.symtab.to_str(name).to_owned()),
-                })
-                .collect(),
-        ),
+        path_merge: crate::config::PathMergeConfig {
+            regions: Some(
+                rules
+                    .into_iter()
+                    .map(|(name, mode)| {
+                        crate::config::PathMergeRegionConfig::MergePolicy(MergePolicyConfig {
+                            mode,
+                            selector: MergePolicySelectorConfig::Function(shared.symtab.to_str(name).to_owned()),
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
         ..ExecutionLimitsConfig::default()
     };
     ExecutionLimits::default().with_config(&config, &shared.symtab)
@@ -1968,7 +1973,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
     let path = std::env::temp_dir().join(format!("isla-i3-force-{}.toml", std::process::id()));
     std::fs::write(
         &path,
-        "[execution_limits]\n[[execution_limits.merge_policy]]\nmode = \"force\"\nfunction = \"force_rejected\"\n",
+        "[execution_limits]\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"force\"\nfunction = \"force_rejected\"\n",
     )
     .unwrap();
     let started = Instant::now();
@@ -5008,8 +5013,11 @@ fn region_merge_configurable_budget_long_region_equivalence() {
         let mut shared = empty_shared_state();
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let config = crate::config::ExecutionLimitsConfig {
-            path_merging: Some(true),
-            region_step_budget: budget,
+            path_merge: crate::config::PathMergeConfig {
+                enabled: Some(true),
+                step_budget: budget,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let limits = ExecutionLimits::default().with_config(&config, &shared.symtab);
