@@ -383,7 +383,7 @@ mod tests {
         let tx = solver.start_transaction();
         assert_eq!(solver.check_sat_with_for_bool(&goal, info), Unknown, "只限制可选的布尔证明");
         assert!(
-            solver.check_sat_with_for_branch(&goal, info, true).is_sat().unwrap(),
+            solver.check_sat_with_for_branch(&goal, info, true).unwrap().is_sat().unwrap(),
             "区域分支不是可选布尔化简，不能继承预算"
         );
         solver.clear_stashed_model();
@@ -556,7 +556,7 @@ mod tests {
         }
         let nested = solver.start_transaction();
         solver.assert(Exp::Not(Box::new(Exp::Var(symbols[0]))));
-        assert!(solver.check_sat_for_arm(info).is_unsat().unwrap());
+        assert!(solver.check_sat_for_arm(info).unwrap().is_unsat().unwrap());
         solver.rollback_transaction(nested);
         assert!(solver.check_sat(info).is_sat().unwrap());
         solver.rollback_transaction(tx);

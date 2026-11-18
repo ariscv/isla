@@ -36,6 +36,24 @@ impl<B: BV> Solver<'_, B> {
         self.ctx.solver_options.no_smt
     }
 
+    /// 候选验证返回 None 表示未查询、未认证；Some(Unknown) 仍是真实查询失败。
+    /// 复用 SmtResult，不把未判定候选伪装成 Sat，也不放行必需查询。
+    pub fn check_candidate_sat(&mut self, info: SourceLoc) -> Option<SmtResult> {
+        self.validates_candidates().then(|| self.check_sat(info))
+    }
+
+    pub fn check_candidate_sat_with(&mut self, condition: &Exp<Sym>, info: SourceLoc) -> Option<SmtResult> {
+        self.validates_candidates().then(|| self.check_sat_with(condition, info))
+    }
+
+    pub(crate) fn validates_candidates(&self) -> bool {
+        !self.no_smt()
+    }
+
+    pub(crate) fn defer_region_checks(&self) -> bool {
+        self.no_smt() || self.region_queries_deferred() || crate::config::RegionOptions::current().defer_exit_check
+    }
+
     pub fn no_smt_cannot_continue(&self, reason: &'static str, info: SourceLoc) -> SmtError {
         record(reason, info);
         SmtError::NoSmt { reason, source_loc: info }
@@ -65,10 +83,14 @@ impl<B: BV> Solver<'_, B> {
         true
     }
 
-    /// 符号断言只登记失败义务、假设成功；常量 false 由原死臂路径处理。
-    pub(crate) fn no_smt_assertion(&mut self, condition: Exp<Sym>, info: SourceLoc) {
-        assert!(self.no_smt());
-        record("unverified_assertions", info);
+    /// 判定层统一选择立即验证或登记义务；常量 false 仍由调用方的死臂路径处理。
+    pub(crate) fn defer_symbolic_assertion(&mut self, condition: Exp<Sym>, info: SourceLoc) -> bool {
+        if !self.no_smt() && !self.deferred_region_queries {
+            return false;
+        }
+        if self.no_smt() {
+            record("unverified_assertions", info);
+        }
         if self.deferred_region_queries {
             self.defer_assertion(condition, info);
         } else {
@@ -76,6 +98,7 @@ impl<B: BV> Solver<'_, B> {
             self.define_const(Exp::Not(Box::new(condition.clone())), info);
             self.assert(condition);
         }
+        true
     }
 
     pub(crate) fn structural_scalar(&mut self, sym: Sym, ty: &crate::ir::Ty<Name>) -> Option<Val<B>> {

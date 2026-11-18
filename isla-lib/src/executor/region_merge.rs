@@ -127,22 +127,18 @@ pub(super) fn reject<B: BV>(frame: &LocalFrame<B>, reason: SpeculativeRejectReas
     }
 }
 
-/// 各分叉口复用三值查询；Unknown 在推演中始终是拒绝，不能隐含地当作 Unsat。
+/// 各分叉口复用可选三值查询；未查询保留候选，实际 Unknown 仍拒绝推演。
 pub(super) fn feasible<B: BV>(
     frame: &LocalFrame<B>,
     solver: &mut Solver<B>,
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
-    if solver.region_queries_deferred() || solver.branch_checks_skipped() {
-        // 两臂只是候选；调用处不得把此结果登记为可满足性证明。
-        return Ok(true);
-    }
     match solver.check_sat_with_for_branch(exp, info, true) {
-        SmtResult::Sat => Ok(true),
-        SmtResult::Unsat => Ok(false),
-        SmtResult::Unknown => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-        SmtResult::Error(error) => Err(ExecError::Smt(error)),
+        None | Some(SmtResult::Sat) => Ok(true),
+        Some(SmtResult::Unsat) => Ok(false),
+        Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+        Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
     }
 }
 
@@ -546,11 +542,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
                 let record_start = frame.region_merge_records.len();
-                let mut candidate_frame = if solver.no_smt() { None } else { Some(frame.clone()) };
+                let mut candidate_frame = solver.validates_candidates().then(|| frame.clone());
                 let tx = solver.start_transaction();
-                let defer = solver.no_smt()
-                    || solver.region_queries_deferred()
-                    || crate::config::RegionOptions::current().defer_exit_check;
+                let defer = solver.defer_region_checks();
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
                     serde_json::json!({
                     "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),
@@ -589,32 +583,36 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         info,
                     );
                     log_phase("execute_end", None);
-                    if defer && !nested && output.is_ok() && !solver.no_smt() {
+                    if defer && !nested && output.is_ok() {
                         log_phase("obligation_start", None);
                         let checked = solver.check_deferred_assertions(info);
-                        log_phase("obligation_end", Some(&checked));
+                        log_phase("obligation_end", checked.as_ref());
                         match checked {
-                            SmtResult::Unsat => (),
-                            SmtResult::Sat => return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion)),
-                            SmtResult::Unknown => return Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-                            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+                            None | Some(SmtResult::Unsat) => (),
+                            Some(SmtResult::Sat) => {
+                                return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
+                            }
+                            Some(SmtResult::Unknown) => {
+                                return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                            }
+                            Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                         }
                     }
                     output
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result = if defer && !nested && result.is_ok() && !solver.no_smt() {
+                let result = if defer && !nested && result.is_ok() {
                     log_phase("exit_check_start", None);
-                    let checked = solver.check_sat(info);
-                    log_phase("exit_check_end", Some(&checked));
+                    let checked = solver.check_candidate_sat(info);
+                    log_phase("exit_check_end", checked.as_ref());
                     match checked {
-                        SmtResult::Sat => result,
+                        None | Some(SmtResult::Sat) => result,
                         // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
                         // 保守回滚，让普通执行分别判断两个前沿。
-                        SmtResult::Unsat => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-                        SmtResult::Unknown => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-                        SmtResult::Error(error) => Err(ExecError::Smt(error)),
+                        Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
                     }
                 } else {
                     result
@@ -846,27 +844,23 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = if solver.region_queries_deferred() || solver.no_smt() {
-                    SmtResult::Sat
-                } else {
-                    solver.check_sat_for_arm(info)
-                };
+                let close_result = solver.check_sat_for_arm(info);
                 drop(close_scope);
                 match close_result {
-                    SmtResult::Unsat => {
+                    Some(SmtResult::Unsat) => {
                         solver.commit_dead_transaction();
                         arms.push(None);
                         continue;
                     }
-                    SmtResult::Unknown => {
+                    Some(SmtResult::Unknown) => {
                         solver.rollback_transaction(tx);
                         return Err(reject(&arm, SpeculativeRejectReason::SolverUnknown));
                     }
-                    SmtResult::Error(error) => {
+                    Some(SmtResult::Error(error)) => {
                         solver.rollback_transaction(tx);
                         return Err(ExecError::Smt(error));
                     }
-                    SmtResult::Sat => (),
+                    None | Some(SmtResult::Sat) => (),
                 }
                 assert!(!solver.transaction_invalid(), "臂提交前保存点必须有效");
                 solver.commit_transaction();
@@ -1841,25 +1835,21 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result = if solver.region_queries_deferred() || solver.no_smt() {
-                    SmtResult::Sat
-                } else {
-                    solver.check_sat_for_arm(work.info)
-                };
+                let close_result = solver.check_sat_for_arm(work.info);
                 drop(close_scope);
                 match close_result {
-                    SmtResult::Sat => (),
-                    SmtResult::Unsat => {
+                    None | Some(SmtResult::Sat) => (),
+                    Some(SmtResult::Unsat) => {
                         solver.commit_dead_transaction();
                         work.arms.push(None);
                         work.arm_start = None;
                         continue;
                     }
-                    SmtResult::Unknown => {
+                    Some(SmtResult::Unknown) => {
                         solver.rollback_transaction(tx);
                         return Err(reject(&arm, SpeculativeRejectReason::SolverUnknown));
                     }
-                    SmtResult::Error(error) => {
+                    Some(SmtResult::Error(error)) => {
                         solver.rollback_transaction(tx);
                         return Err(ExecError::Smt(error));
                     }
