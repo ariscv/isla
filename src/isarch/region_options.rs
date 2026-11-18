@@ -28,65 +28,59 @@ pub fn add_cli(opts: &mut getopts::Options) {
 }
 
 pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
-    let mut options = limits.region_options.clone().unwrap_or_default();
-    let mut changed = false;
+    let mut updated = limits.clone();
     for (field, flag, _) in BOOL_OPTIONS {
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
-                "defer_exit_check" => options.defer_exit_check = value,
-                "lazy_z3_scope" => options.lazy_z3_scope = value,
-                "witness_eval" => options.witness_eval = value,
-                "witness_shadow" => options.witness_shadow = value,
-                "witness_local_shadow" => options.witness_local_shadow = value,
-                "prefix_compact" => options.prefix_compact = value,
-                "bool_proof_profile" => options.bool_proof_profile = value,
-                "progress" => options.progress = value,
-                "native_snapshot" => options.native_snapshot = value,
-                "call_census" => options.call_census = value,
-                "probe_round_cost" => options.probe_round_cost = value,
-                "probe_query_timings" => options.probe_query_timings = value,
+                "defer_exit_check" => updated.path_merge.defer_exit_check = value,
+                "lazy_z3_scope" => updated.path_merge.lazy_z3_scope = value,
+                "witness_eval" => updated.path_merge.witness_eval = value,
+                "witness_shadow" => updated.path_merge.diagnostics.witness_shadow = value,
+                "witness_local_shadow" => updated.path_merge.diagnostics.witness_local_shadow = value,
+                "prefix_compact" => updated.path_merge.prefix_compact = value,
+                "bool_proof_profile" => updated.path_merge.diagnostics.bool_proof_profile = value,
+                "progress" => updated.path_merge.diagnostics.progress = value,
+                "native_snapshot" => updated.path_merge.diagnostics.native_snapshot = value,
+                "call_census" => updated.path_merge.diagnostics.call_census = value,
+                "probe_round_cost" => updated.path_merge.diagnostics.probe_round_cost = value,
+                "probe_query_timings" => updated.path_merge.diagnostics.probe_query_timings = value,
                 _ => unreachable!("区域 CLI 字段必须登记"),
             }
-            changed = true;
         }
     }
     if let Some(value) = matches.opt_str("region-bool-proof-rlimit") {
-        options.bool_proof_rlimit = value.parse().map_err(|_| "--region-bool-proof-rlimit 必须是非负32位整数")?;
-        changed = true;
+        updated.solver.bool_proof_rlimit =
+            value.parse().map_err(|_| "--region-bool-proof-rlimit 必须是非负32位整数")?;
     }
     for flag in ["query-dump-sites", "same-context-sites"] {
         if let Some(value) = matches.opt_str(flag) {
             let sites = if value.is_empty() { Vec::new() } else { value.split(',').map(str::to_owned).collect() };
             match flag {
-                "query-dump-sites" => options.query_dump_sites = sites,
-                "same-context-sites" => options.same_context_sites = sites,
+                "query-dump-sites" => updated.path_merge.diagnostics.query_dump_sites = sites,
+                "same-context-sites" => updated.path_merge.diagnostics.same_context_sites = sites,
                 _ => unreachable!(),
             }
-            changed = true;
         }
     }
     for flag in ["query-dump-dir", "obligation-dump-dir"] {
         if let Some(value) = matches.opt_str(flag) {
             match flag {
-                "query-dump-dir" => options.query_dump_dir = Some(value.into()),
-                "obligation-dump-dir" => options.obligation_dump_dir = Some(value.into()),
+                "query-dump-dir" => updated.path_merge.diagnostics.query_dump_dir = Some(value.into()),
+                "obligation-dump-dir" => updated.path_merge.diagnostics.obligation_dump_dir = Some(value.into()),
                 _ => unreachable!(),
             }
-            changed = true;
         }
     }
-    options.validate()?;
-    if changed {
-        limits.region_options = Some(options);
-    }
+    isla_lib::config::RegionOptions::from_config(&updated).validate()?;
+    *limits = updated;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isla_lib::config::{ExecutionLimitsConfig, RegionOptions};
+    use isla_lib::config::RegionOptions;
 
     fn cli(config: &mut ExecutionLimitsConfig, args: &[&str]) -> Result<(), String> {
         let mut opts = getopts::Options::new();
@@ -98,35 +92,40 @@ mod tests {
     fn region_options_cli_defaults_and_boolean_overrides() {
         let mut limits = ExecutionLimitsConfig::default();
         cli(&mut limits, &[]).unwrap();
-        assert!(limits.region_options.is_none());
+        assert_eq!(limits, ExecutionLimitsConfig::default());
         for (field, flag, _) in BOOL_OPTIONS {
-            let toml: RegionOptions = toml::from_str(&format!("{field}=true")).unwrap();
-            let mut enabled = ExecutionLimitsConfig::default();
-            cli(&mut enabled, &[&format!("--{flag}=true")]).unwrap();
-            assert_eq!(enabled.region_options, Some(toml.clone()), "{flag}");
-            let mut limits = ExecutionLimitsConfig { region_options: Some(toml), ..Default::default() };
+            let section = if ["defer_exit_check", "lazy_z3_scope", "witness_eval", "prefix_compact"].contains(field) {
+                "execution_limits.path_merge"
+            } else {
+                "execution_limits.path_merge.diagnostics"
+            };
+            let text = format!("[{section}]\n{field}=true");
+            let table: toml::Value = text.parse().unwrap();
+            let expected: ExecutionLimitsConfig = table["execution_limits"].clone().try_into().unwrap();
+            let mut limits = ExecutionLimitsConfig::default();
+            cli(&mut limits, &[&format!("--{flag}=true")]).unwrap();
+            assert_eq!(limits, expected, "{flag}");
             cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
-            assert_eq!(limits.region_options, Some(RegionOptions::default()), "{flag}");
+            assert_eq!(limits, ExecutionLimitsConfig::default(), "{flag}");
         }
     }
 
     #[test]
     fn region_options_cli_lazy_scope_preserves_and_overrides_toml() {
-        let options: RegionOptions = toml::from_str("lazy_z3_scope=true\ndefer_exit_check=true").unwrap();
-        let mut limits = ExecutionLimitsConfig { region_options: Some(options), ..Default::default() };
+        let value: toml::Value =
+            "[execution_limits.path_merge]\nlazy_z3_scope=true\ndefer_exit_check=true".parse().unwrap();
+        let mut limits: ExecutionLimitsConfig = value["execution_limits"].clone().try_into().unwrap();
         cli(&mut limits, &[]).unwrap();
-        assert!(limits.region_options.as_ref().unwrap().lazy_z3_scope);
+        assert!(limits.path_merge.lazy_z3_scope);
         cli(&mut limits, &["--region-lazy-z3-scope=false"]).unwrap();
-        let options = limits.region_options.as_ref().unwrap();
-        assert!(!options.lazy_z3_scope);
-        assert!(options.defer_exit_check, "CLI 仅覆盖指定字段");
+        assert!(!limits.path_merge.lazy_z3_scope);
+        assert!(limits.path_merge.defer_exit_check, "CLI仅覆盖指定字段");
         let mut enabled = ExecutionLimitsConfig::default();
         cli(&mut enabled, &["--region-lazy-z3-scope=true"]).unwrap();
-        let options = enabled.region_options.unwrap();
-        assert!(options.lazy_z3_scope);
-        assert!(!options.defer_exit_check, "仅 lazy 开启时静默无效，不报配置错误");
+        assert!(enabled.path_merge.lazy_z3_scope);
+        assert!(!enabled.path_merge.defer_exit_check);
         for value in ["1", "0", "TRUE", "", "yes"] {
-            assert!(cli(&mut limits, &[&format!("--region-lazy-z3-scope={value}")]).is_err(), "{value}");
+            assert!(cli(&mut limits, &[&format!("--region-lazy-z3-scope={value}")]).is_err());
         }
     }
 
@@ -144,15 +143,15 @@ mod tests {
             ],
         )
         .unwrap();
-        let options = limits.region_options.as_ref().unwrap();
-        assert_eq!(options.bool_proof_rlimit, 17);
+        assert_eq!(limits.solver.bool_proof_rlimit, 17);
+        let options = RegionOptions::from_config(&limits);
         assert_eq!(options.query_dump_sites, ["f@1", "g@2"]);
         assert_eq!(options.same_context_sites, ["f@1"]);
         assert_eq!(options.query_dump_dir.as_deref(), Some(std::path::Path::new("queries")));
         assert_eq!(options.obligation_dump_dir.as_deref(), Some(std::path::Path::new("obligations")));
         cli(&mut limits, &["--region-bool-proof-rlimit=0", "--query-dump-sites=", "--same-context-sites="]).unwrap();
-        assert_eq!(limits.region_options.as_ref().unwrap().bool_proof_rlimit, 0);
-        assert!(limits.region_options.as_ref().unwrap().query_dump_sites.is_empty());
+        assert_eq!(limits.solver.bool_proof_rlimit, 0);
+        assert!(limits.path_merge.diagnostics.query_dump_sites.is_empty());
         for value in [
             "--region-defer-exit-check=1",
             "--region-bool-proof-rlimit=-1",

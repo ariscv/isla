@@ -552,3 +552,7 @@ timeout --signal=TERM --kill-after=5s 590s \
 ## 2026-11-18：区域候选和诊断统一从显式配置读取
 
 适用a286b00c＋dbfc6e70工作目录整合＋未提交segdedup-flags迁移：16项新增功能／诊断使用config::RegionOptions，TOML在[execution_limits.region_options]，isarch CLI逐字段覆盖，initialize_architecture在创建共享状态前冻结配置；求解热路径只读该配置，不读环境变量。4项新增测试内部通信仍保留。区域111／去重义务14／查询32通过；PMP=2本机310秒未进入resident，不能继承历史后态PASS。[状态](segdedup_flags_20261117/status.md)。
+
+## 2026-11-18：execution_limits 配置分组迁移候选
+
+适用本工作树 fe2c9e08 加本轮未提交差异。配置只保留 solver 与 path_merge 两个新增分组；RegionOptions 继续作为进程冻结的运行时快照，已不是TOML配置表。局部规则统一到 path_merge.regions，显式kind区分limit_filter/branch_limit/fork_limit/merge_policy；with_config仍先应用筛选范围并清除预置预算，再应用本配置的覆盖，策略编号仍按merge_policy子序列计数。默认运行时预算8192不变。78份现存workaround及混合规则转换后运行时策略逐项一致；树外实际配置尚未应用补丁，不转署正式主线。[状态](config_layout_20261118/status.md)。

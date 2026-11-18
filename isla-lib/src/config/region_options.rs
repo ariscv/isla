@@ -42,6 +42,31 @@ static OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 
 impl RegionOptions {
+    /// 只保留执行前冻结的运行时快照；外部配置不再有 region_options 表。
+    pub fn from_config(limits: &super::ExecutionLimitsConfig) -> Self {
+        let merge = &limits.path_merge;
+        let diagnostics = &merge.diagnostics;
+        Self {
+            defer_exit_check: merge.defer_exit_check,
+            lazy_z3_scope: merge.lazy_z3_scope,
+            witness_eval: merge.witness_eval,
+            prefix_compact: merge.prefix_compact,
+            bool_proof_rlimit: limits.solver.bool_proof_rlimit,
+            witness_shadow: diagnostics.witness_shadow,
+            witness_local_shadow: diagnostics.witness_local_shadow,
+            bool_proof_profile: diagnostics.bool_proof_profile,
+            progress: diagnostics.progress,
+            native_snapshot: diagnostics.native_snapshot,
+            call_census: diagnostics.call_census,
+            probe_round_cost: diagnostics.probe_round_cost,
+            probe_query_timings: diagnostics.probe_query_timings,
+            query_dump_sites: diagnostics.query_dump_sites.clone(),
+            same_context_sites: diagnostics.same_context_sites.clone(),
+            query_dump_dir: diagnostics.query_dump_dir.clone(),
+            obligation_dump_dir: diagnostics.obligation_dump_dir.clone(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.same_context_sites.len() > 2 {
             return Err("same_context_sites 最多选择两个位置".into());

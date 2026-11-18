@@ -116,7 +116,7 @@ fn isla_main() -> i32 {
         };
     }
     if matches.opt_present("path-merging") {
-        isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merging = Some(true);
+        isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merge.enabled = Some(true);
     }
     if let Some(config) = &isa_config.execution_limits {
         if config.strict {

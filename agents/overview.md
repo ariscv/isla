@@ -37,3 +37,5 @@
 - 可复用代码事实见 [findings.md](findings.md)，其他既有议题继续按各自目录维护。
 
 - 2026-11-09 [执行帧 CoW 与回调隔离](cow-local-frame/status.md)：基于849900a6完成候选；frame6、trace执行器498/5忽略、数组内存34及axiomatic检查通过。
+
+- 2026-11-18 [配置统一迁移](config_layout_20261118/status.md)：solver/path_merge与局部/诊断分组候选及限定回归完成；树外配置迁移补丁待应用，未提交。

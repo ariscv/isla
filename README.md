@@ -458,8 +458,8 @@ pin_value = "0x0000000a00000000"
 也不固定通用寄存器的 `--prestate`。指令的寄存器索引、立即数等字段由原生接口建立符号变量；
 `setup_pre_state` 已将 x1–x31 的初值全量符号化，无需额外声明某个通用寄存器。
 探索配置优先启用
-`[execution_limits] path_merging = true`，重复分叉预算沿用区域分支限制。
-区域合并步数默认8192；可设置 `[execution_limits] region_step_budget = -1` 或 `--region-step-budget=-1` 关闭，CLI覆盖TOML。合法值为正整数或-1，详见 [CLI规范](specs/isarch-cli.md)。
+`[execution_limits.path_merge] enabled = true`，重复分叉预算沿用区域分支限制。
+区域合并步数默认8192；可设置 `[execution_limits.path_merge] step_budget = -1` 或 `--region-step-budget=-1` 关闭，CLI覆盖TOML。合法值为正整数或-1，详见 [CLI规范](specs/isarch-cli.md)。
 慢 SMT 查询可用 `--slow-query-dump-dir queries --slow-query-threshold 20s --slow-query-dump-limit 5` 导出完整公式与统计，默认关闭；用法和边界见 [CLI规范](specs/isarch-cli.md#慢-smt-查询导出)。
 当符号下标引起算子重试拆分时，沿用求解器原生无偏的模型候选顺序，严禁强加任何确定性重试偏好；跨进程由判定阶段的标准语义识别。完整语法及边界见 [CLI 规范](specs/isarch-cli.md)。
 
@@ -787,10 +787,10 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 
 ### 分段合并的可选配置
 
-分段去重线的候选及诊断使用 `[execution_limits.region_options]` 或对应 CLI 参数，默认全部关闭；布尔参数使用 `=true`／`=false`，CLI 覆盖 TOML。例如：
+分段去重线的候选及诊断使用 `[execution_limits.path_merge]` 的功能字段、其 `diagnostics` 子表或对应 CLI 参数，默认全部关闭；布尔参数使用 `=true`／`=false`，CLI 覆盖 TOML。例如：
 
 ```toml
-[execution_limits.region_options]
+[execution_limits.path_merge]
 defer_exit_check = true
 witness_eval = true
 ```

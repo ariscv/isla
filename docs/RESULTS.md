@@ -286,3 +286,7 @@ Sv39 STORE 同一新 IR／config-xs、380 个 corpus entry＋1000 个 mutant＋�
 ## 2026-11-18 分段去重线配置迁移
 
 a286b00c＋dbfc6e70源码整合＋本轮迁移：区域111通过5忽略、去重义务14、查询32、配置3、CLI2；exec76通过7缺IR失败、samples8、path_cache7，release／fmt通过。默认样本逐字节相同。单次本机T32／64GiB／judge310秒未进入resident，124退出、后态未比较，无遗留。不签整体合入PASS，Git写操作留Claude。[验证与边界](../agents/segdedup_flags_20261117/status.md)。
+
+## 2026-11-18 配置统一迁移候选
+
+fe2c9e08加本轮未提交差异：配置63、区域118通过/5忽略、去重义务14、共享历史4、限制31、CLI3、isarch配置应用9、样本8、缓存7、主入口27通过；release isarch及isla-execute-function、fmt通过。ITYPE/0x00000013/T32两侧48945字节一致；78份现存workaround和混合规则运行时策略一致。全exec debug180秒/release90秒未完成，基线integration夹具编译错误；树外迁移仅提供补丁，不能签全仓迁移PASS。[状态与证据](../agents/config_layout_20261118/status.md)。
