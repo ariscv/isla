@@ -67,3 +67,19 @@ fn engine_close_rejects_non_assertion_failure_without_dropping_arm() {
     ));
     assert_eq!(solver.transaction_depth(), 1);
 }
+
+#[test]
+fn loop_dependencies_keep_both_children_and_outer_completion() {
+    use crate::executor::region_engine::LoopDependencies;
+    let (mut graph, root) = LoopDependencies::new("入口");
+    let then_arm = graph.attach(root, 0, "先到出口");
+    let else_arm = graph.attach(root, 1, "继续轮次");
+    let nested = graph.attach(else_arm, 0, "嵌套出口");
+    assert!(!graph.can_complete(root));
+    assert_eq!(graph.ancestors(nested).copied().collect::<Vec<_>>(), ["嵌套出口", "继续轮次", "入口"]);
+    assert_eq!(graph.complete(then_arm), ("先到出口", Some((root, 0))));
+    assert!(!graph.can_complete(root));
+    assert_eq!(graph.complete(nested), ("嵌套出口", Some((else_arm, 0))));
+    assert_eq!(graph.complete(else_arm), ("继续轮次", Some((root, 1))));
+    assert_eq!(graph.complete(root), ("入口", None));
+}

@@ -82,31 +82,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.savepoints.len()
     }
 
-    /// 标记当前逻辑臂的事件起点；不创建求解器保存点或臂条件。
-    pub(crate) fn transaction_effect_mark(&self) -> usize {
-        assert!(!self.savepoints.is_empty(), "逻辑臂标记必须位于事务中");
-        self.transaction_events.len()
-    }
-
-    /// 整条逻辑臂已证明死亡后撤去其事件足迹。定义与死亡约束仍保留，
-    /// 因为外层求解和其他已保留约束可能引用这些符号；最外层回滚仍会全部撤销。
-    pub(crate) fn discard_transaction_effects_since(&mut self, start: usize) {
-        assert!(!self.savepoints.is_empty(), "丢弃死臂足迹必须位于事务中");
-        assert!(self.savepoints.iter().all(|point| start >= point.events_len), "死臂后缀不能越过活动保存点");
-        assert!(start <= self.transaction_events.len(), "死臂事件起点越界");
-        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len(), "事件条件必须对齐");
-        let retained: Vec<_> = self
-            .transaction_events
-            .drain(start..)
-            .zip(self.transaction_event_guards.drain(start..))
-            .filter(|(event, _)| matches!(event, Event::Smt(..)))
-            .collect();
-        for (event, guard) in retained {
-            self.transaction_events.push(event);
-            self.transaction_event_guards.push(guard);
-        }
-    }
-
     /// 在保存点内用同一 Context、同一断言集做只读增量查询。
     /// tactic solver 每次查询可能重新执行预处理；计数 DFS 需要复用查询间的学习结果。
     /// 现有构造接口不能临时切换后端，因此在此资源边界配对替换、恢复 solver。
@@ -310,16 +285,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             .zip(self.transaction_event_guards.drain(savepoint.events_len..))
             .filter(|(event, _)| matches!(event, Event::Smt(Def::DefineEnum(..), ..)))
             .collect();
+        self.logical_arms.truncate(savepoint.events_len);
         for (event, _) in enums {
             self.transaction_events.push(event);
             // 枚举 sort 是 Context 全局状态，不属于已回滚的分支臂。
             self.transaction_event_guards.push(None);
+            self.logical_arms.record_global_event();
         }
         if self.savepoints.is_empty() {
             // 查询前缀只供活动区域复用；回滚后不能让辅助solver继续持有废弃AST。
             self.region_query = None;
             self.trace.head.append(&mut self.transaction_events);
             self.transaction_event_guards.clear();
+            self.logical_arms.clear();
         }
     }
 
@@ -465,6 +443,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.transaction_event_guards.drain(..).zip(self.transaction_events.iter().cloned()).collect();
             self.trace.head.append(&mut self.transaction_events);
             self.last_committed_transaction = Some((savepoint.token, self.trace.head.len()));
+            self.logical_arms.clear();
         }
         // 内层提交保留定义、带条件事件与统计；父层回滚仍可完整撤销。
     }
@@ -649,6 +628,7 @@ impl<B: BV> Solver<'_, B> {
         }
         bytes += self.transaction_events.capacity() * size_of::<Event<B>>()
             + self.transaction_events.iter().map(event_heap_bytes).sum::<usize>()
+            + self.logical_arms.heap_bytes()
             + self.transaction_event_guards.capacity() * size_of::<Option<Exp<Sym>>>()
             + self.transaction_event_guards.iter().flatten().map(exp_heap_bytes).sum::<usize>()
             + self.committed_transaction_events.capacity() * size_of::<(Option<Exp<Sym>>, Event<B>)>()

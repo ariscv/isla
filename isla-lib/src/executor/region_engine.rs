@@ -5,6 +5,9 @@ use super::*;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::Region;
 
+mod dependencies;
+pub(super) use dependencies::LoopDependencies;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     tid: usize,

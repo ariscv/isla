@@ -1,5 +1,5 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
-use super::region_engine::{advance_arm, finish_region, publish_committed_records};
+use super::region_engine::{advance_arm, finish_region, publish_committed_records, LoopDependencies};
 use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
 use super::stats::merge_diagnostics as diagnostics;
 use super::*;
@@ -924,7 +924,8 @@ struct LoopWork<'ir, B> {
     info: SourceLoc,
     record_id: usize,
     arms: Vec<Option<LocalFrame<'ir, B>>>,
-    arm_start: Option<usize>,
+    parent_arm: Option<crate::smt::LogicalArm>,
+    active_arm: Option<crate::smt::LogicalArm>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1056,7 +1057,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let mut largest_round = 0;
     let mut continuation = None;
     let mut return_guard = None;
-    let mut pending = vec![LoopWork {
+    let (mut pending, mut frontier) = LoopDependencies::new(LoopWork {
         original: frame.clone(),
         base,
         region,
@@ -1065,12 +1066,13 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         info,
         record_id,
         arms: Vec::new(),
-        arm_start: None,
-    }];
+        parent_arm: solver.current_logical_arm(),
+        active_arm: None,
+    });
     loop {
         super::stats::memory_stats::poll(frame, solver);
-        if pending.last().unwrap().arms.len() == 2 {
-            let mut work = pending.pop().unwrap();
+        if pending.work(frontier).arms.len() == 2 {
+            let (mut work, parent) = pending.complete(frontier);
             // 子循环段已提交为完整条件保护的约束；汇合时也保留所属臂条件。
             let finish = |solver: &mut Solver<B>| {
                 finish_region(
@@ -1093,23 +1095,30 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     None => Var(returned),
                 });
             }
-            let result = match guard {
+            let finish_with_guard = |solver: &mut Solver<B>| match guard {
                 Some(guard) => solver.with_transaction_condition(&guard, finish),
                 None => finish(solver),
+            };
+            let result = match work.parent_arm {
+                Some(owner) => solver.with_logical_arm(owner, finish_with_guard),
+                None => finish_with_guard(solver),
             }?;
-            if let Some(parent) = pending.last_mut() {
+            if let Some((parent, side)) = parent {
+                frontier = parent;
+                let parent = pending.work_mut(parent);
+                assert_eq!(parent.arms.len(), side, "调用栈组织者按两臂顺序收尾");
                 match result {
                     RegionResult::Merged => {
                         promote_initials(&mut parent.base, &work.original, shared, solver);
                         parent.arms.push(Some(work.original));
                     }
                     RegionResult::Dead => {
-                        solver.discard_transaction_effects_since(parent.arm_start.expect("挂起臂必须有事件标记"));
+                        solver.discard_logical_arm_effects(parent.active_arm.expect("挂起臂必须持有逻辑事务"));
                         parent.arms.push(None);
                     }
                     RegionResult::Rejected | RegionResult::Suspended => panic!("汇合只能成功或两臂死亡"),
                 }
-                parent.arm_start = None;
+                parent.active_arm = None;
             } else {
                 if let Some(prefix) = exit_prefix.take() {
                     let complete = match result {
@@ -1158,20 +1167,21 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
             continue;
         }
-        let single_work = pending.len() == 1;
+        let completed_exits = pending.ancestors(frontier).count();
+        let single_work = completed_exits == 1;
         let exit_spine = (eligible || iterative)
             && continuation.is_none()
-            && pending.iter().all(|work| {
+            && pending.ancestors(frontier).all(|work| {
                 work.arms.len() == 1
                     && work.arms[0].as_ref().is_some_and(|arm| {
                         matches!(arm.instrs.get(arm.pc), Some(Instr::End))
                             && arm.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty()
                     })
             });
-        let completed_exits = pending.len();
-        let work = pending.last_mut().unwrap();
-        assert!(work.arm_start.is_none(), "前一逻辑臂必须先收尾");
-        work.arm_start = Some(solver.transaction_effect_mark());
+        let work = pending.work_mut(frontier);
+        assert!(work.active_arm.is_none(), "前一逻辑臂必须先收尾");
+        let owner = solver.new_logical_arm(work.parent_arm);
+        work.active_arm = Some(owner);
         let first = work.arms.is_empty();
         let guard = if first { Var(work.condition) } else { Not(Box::new(Var(work.condition))) };
         let mut arm = work.base.clone();
@@ -1183,7 +1193,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         };
         access.guard = Some(guard.clone());
         let tx = solver.start_transaction_with_guard(Some(guard));
-        if advance_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, work.info)? {
+        if solver.with_logical_arm(owner, |solver| {
+            advance_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, work.info)
+        })? {
             let branch = arm.region_execution.as_mut().unwrap().pending_branch.take();
             if let Some((condition, target, region, info)) = branch {
                 let used = state.region_step_budget().map(|budget| {
@@ -1274,7 +1286,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         info,
                         record_id: id,
                         arms: Vec::new(),
-                        arm_start: None,
+                        parent_arm: work.parent_arm,
+                        active_arm: None,
                     };
                     // 预算由实际回边更新；此处只收敛前沿，避免半轮重复授予预算。
                     last_boundary = 0;
@@ -1340,24 +1353,30 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     return_guard = Some(returned);
                     // 继续臂已单独保存；这里只折叠已完成出口，补集将在最外层提交后成为普通任务。
                     work.arms.push(None);
-                    work.arm_start = None;
+                    work.active_arm = None;
                     continue;
                 }
 
                 let record_id = NEXT_RECORD
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                     .expect("合并记录编号溢出");
-                pending.push(LoopWork {
-                    original: arm.clone(),
-                    base: arm,
-                    region,
-                    condition,
-                    target,
-                    info,
-                    record_id,
-                    arms: Vec::new(),
-                    arm_start: None,
-                });
+                let side = work.arms.len();
+                frontier = pending.attach(
+                    frontier,
+                    side,
+                    LoopWork {
+                        original: arm.clone(),
+                        base: arm,
+                        region,
+                        condition,
+                        target,
+                        info,
+                        record_id,
+                        arms: Vec::new(),
+                        parent_arm: Some(owner),
+                        active_arm: None,
+                    },
+                );
             } else {
                 assert!(
                     work.region.join == RegionPoint::Instruction(arm.pc)
@@ -1366,11 +1385,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 );
                 promote_initials(&mut work.base, &arm, shared, solver);
                 work.arms.push(Some(arm));
-                work.arm_start = None;
+                work.active_arm = None;
             }
         } else {
             work.arms.push(None);
-            work.arm_start = None;
+            work.active_arm = None;
         }
     }
 }
