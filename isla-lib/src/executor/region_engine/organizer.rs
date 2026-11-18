@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn organizers_choose_distinct_next_fragments_when_both_are_ready() {
         for (strategy, expected) in [(MergeStrategy::Recursive, 3), (MergeStrategy::Flat, 2)] {
-            let mut limits = ExecutionLimits::default();
+            let mut limits = ExecutionLimits::default().with_path_merging(true);
             limits.merge_strategy = strategy;
             let state = TaskState::<B64>::new().with_execution_limits(limits);
             let mut ready = ReadyFragments::new(&state);
