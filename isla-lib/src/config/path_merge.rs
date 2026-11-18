@@ -48,6 +48,7 @@ pub struct PathMergeConfig {
     pub strategy: Option<super::MergeStrategy>,
     /// flat 模式保留兼容的访问偏序；默认 false。
     pub ordered_events: Option<bool>,
+    /// 省略时沿用入口缺省值。完整符号 DAG 缺省开启。
     pub enabled: Option<bool>,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,

@@ -1294,12 +1294,7 @@ fn apply_case_quota(cases: Vec<CollectedCase>, quota: &CaseQuota) -> Vec<Collect
 }
 
 fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig>) -> ExecutionLimits {
-    let limits = match config {
-        Some(config) => ExecutionLimits::default().with_config(config, symtab),
-        None => ExecutionLimits::default(),
-    };
-    let global_state = limits.path_merging;
-    limits.with_region_global_state(global_state).with_region_loop_analysis(global_state)
+    ExecutionLimits::for_symbolic_dag(config, symtab)
 }
 
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
@@ -4639,7 +4634,7 @@ mod tests {
             });
             let mut limits = ExecutionLimits::default();
             limits.max_forks_per_branch = (mode == "sampled").then_some(0);
-            limits.on_limit_reached = LimitBehavior::Concretize;
+            limits.on_limit_reached = Some(LimitBehavior::Concretize);
             let outcome = run_symbolic_execute_with_target(
                 &mut target,
                 &clause,
@@ -4830,14 +4825,12 @@ mod tests {
     fn solve_execution_limits_enables_global_state_only_with_path_merging() {
         let symtab = Symtab::new();
         assert!(!ExecutionLimits::default().with_path_merging(true).region_global_state);
-        assert!(!solve_execution_limits(&symtab, None).region_global_state);
+        assert!(solve_execution_limits(&symtab, None).region_global_state);
         assert!(!ExecutionLimits::default().with_path_merging(true).region_loop_analysis);
-        assert!(!solve_execution_limits(&symtab, None).region_loop_analysis);
+        assert!(solve_execution_limits(&symtab, None).region_loop_analysis);
         for enabled in [false, true] {
-            let config = ExecutionLimitsConfig {
-                path_merge: isla_lib::config::PathMergeConfig { enabled: Some(enabled), ..Default::default() },
-                ..ExecutionLimitsConfig::default()
-            };
+            let config =
+                toml::from_str::<ExecutionLimitsConfig>(&format!("[path_merge]\nenabled = {enabled}")).unwrap();
             let limits = solve_execution_limits(&symtab, Some(&config));
             assert_eq!(limits.region_global_state, enabled);
             assert_eq!(limits.region_loop_analysis, enabled);
@@ -4866,7 +4859,7 @@ mod tests {
         let limits = solve_execution_limits(&symtab, Some(&config));
 
         assert_eq!(limits.max_forks_per_branch, Some(1));
-        assert_eq!(limits.on_limit_reached, LimitBehavior::Concretize);
+        assert_eq!(limits.on_limit_reached, Some(LimitBehavior::Concretize));
         // 不配 `regions`：per-scope 预算必须全局生效，否则选不中没有 Sail 源码位置的分支点。
         assert_eq!(limits.regions, None);
         assert!(limits.branch_region_limits.is_empty());
@@ -4953,7 +4946,7 @@ mod tests {
         assert_eq!(limits.max_forks_per_branch, Some(7));
         assert_eq!(limits.max_forks_per_path, Some(11));
         assert_eq!(limits.call_context_depth, Some(3));
-        assert_eq!(limits.on_limit_reached, LimitBehavior::Truncate);
+        assert_eq!(limits.on_limit_reached, Some(LimitBehavior::Truncate));
         assert!(limits.regions.is_none());
         assert!(limits.branch_region_limits.is_empty());
     }
@@ -4971,8 +4964,15 @@ mod tests {
     }
 
     #[test]
-    fn solve_execution_limits_without_toml_is_inactive() {
-        let limits = solve_execution_limits(&Symtab::new(), None);
+    fn solve_execution_limits_without_toml_has_adaptive_merge_and_no_budgets() {
+        let symtab = Symtab::new();
+        let limits = solve_execution_limits(&symtab, None);
+
+        assert!(limits.path_merging);
+        assert_eq!(
+            limits.merge_mode(Name::from_u32(0), SourceLoc::unknown(), None),
+            isla_lib::config::MergeMode::Adaptive
+        );
 
         assert_eq!(limits.max_forks_per_branch, None);
         assert_eq!(limits.max_forks_per_path, None);

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event<B> {
     Smt(Def, DefAttrs, SourceLoc),
-    Fork(u32, u32, u32, SourceLoc),
+    Fork(u64, u32, u32, SourceLoc),
     Merge(u32, u64, SourceLoc),
     Function {
         name: Name,

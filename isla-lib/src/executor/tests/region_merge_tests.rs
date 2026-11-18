@@ -1417,6 +1417,60 @@ fn region_merge_unique_monomorphize_and_retry_in_real_arms() {
 }
 
 #[test]
+fn default_symbolic_dag_merges_a_diamond_and_honors_explicit_disable() {
+    let shared = empty_shared_state();
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ];
+    let disabled = crate::config::ExecutionLimitsConfig {
+        path_merge: crate::config::PathMergeConfig { enabled: Some(false), ..Default::default() },
+        ..Default::default()
+    };
+    for (config, expected_paths) in [(None, 1), (Some(&disabled), 2)] {
+        let results = paths_with_state(
+            program.clone(),
+            &shared,
+            1,
+            ExecutionLimits::for_symbolic_dag(config, &shared.symtab),
+            crate::memory::Memory::new(),
+            |_| {},
+        );
+        assert_eq!(results.len(), expected_paths);
+        assert_eq!(results.iter().map(|path| path.records.len()).sum::<usize>(), usize::from(config.is_none()));
+    }
+}
+
+#[test]
+fn region_merge_retry_rejection_preserves_all_candidates() {
+    let shared = empty_shared_state();
+    let length = test_name(990);
+    let result = test_name(991);
+    let program = vec![
+        Instr::Decl(length, Ty::I128, info()),
+        Instr::Decl(result, Ty::I128, info()),
+        Instr::Jump(input(0), 7, info()),
+        Instr::PrimopUnary(Loc::Id(length), primop::unary_primops()["isla_bool_to_bit"], input(1), info()),
+        Instr::PrimopUnary(Loc::Id(length), primop::unary_primops()["sail_unsigned"], Exp::Id(length), info()),
+        Instr::PrimopBinary(
+            Loc::Id(result),
+            primop::binary_primops()["pow_int"],
+            Exp::I128(3),
+            Exp::Id(length),
+            info(),
+        ),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(result), Exp::I128(3), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(result), Exp::I128(3)]), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, true), (3, 3));
+}
+
+#[test]
 fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
     let shared = empty_shared_state();
     let mut frame = make_frame(vec![Instr::Jump(input(0), 1, info()), Instr::End]);
