@@ -313,22 +313,15 @@ pub(crate) fn branch_result(a: bool, b: bool) {
         });
     }
 }
-fn query_label() -> &'static str {
+pub(crate) fn query_label() -> &'static str {
     LABEL.with(Cell::get)
 }
 pub(crate) struct QueryScope(Option<&'static str>);
 impl QueryScope {
     pub(crate) fn enter(label: &'static str) -> Self {
-        if enabled() {
-            Self(Some(LABEL.with(|l| l.replace(label))))
-        } else {
-            Self(None)
-        }
+        Self(Some(LABEL.with(|l| l.replace(label))))
     }
     pub(crate) fn fallback(label: &'static str) -> Self {
-        if !enabled() {
-            return Self(None);
-        }
         if query_label() == "unclassified" {
             Self::enter(label)
         } else {
@@ -390,7 +383,7 @@ fn region_progress_disabled_has_no_collection_or_call_id_allocation() {
     assert!(timer.started.is_none());
     assert!(!needs_footprint());
     drop(timer);
-    assert_eq!(query_label(), "unclassified");
+    assert_eq!(query_label(), "disabled");
     assert_eq!(frame.local_state.call_instance, 0);
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = crate::smt::Context::new(crate::smt::Config::new());

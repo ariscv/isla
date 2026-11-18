@@ -216,7 +216,7 @@ pub(super) fn take_smtperf_report() -> String {
 }
 
 #[cfg(feature = "smt-thread-interrupt")]
-fn operation_timeout() -> Duration {
+pub(super) fn operation_timeout() -> Duration {
     OPERATION_TIMEOUT.get().copied().unwrap_or(Duration::from_secs(60))
 }
 
@@ -243,6 +243,7 @@ pub(super) fn timeout_error(
         SmtError::Timeout(Arc::new(SmtTimeout {
             source_loc,
             operation,
+            query_purpose: crate::executor::stats::region_progress::query_label(),
             limit: operation_timeout(),
             operation_wall,
             dump,
@@ -365,6 +366,10 @@ pub(super) fn timeout_Z3_solver_check(
         TEST_QUERY_COUNT.with(|count| count.set(count.get() + 1));
         last.set(Some((solver as usize, assumptions.len())));
     });
+    #[cfg(test)]
+    if let Some(result) = super::test_queries::next() {
+        return Ok(result);
+    }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe {
         if assumptions.is_empty() {
@@ -392,6 +397,10 @@ pub(super) fn timeout_Z3_solver_check_deadline(
         last.set(Some((solver as usize, assumptions.len())));
     });
     let started = Instant::now();
+    #[cfg(test)]
+    if let Some(result) = super::test_queries::next() {
+        return Ok(result);
+    }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     let check = || unsafe {
         let timer = crate::executor::stats::region_progress::WorkTimer::start(
@@ -434,6 +443,10 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
         TEST_QUERY_COUNT.with(|count| count.set(count.get() + 1));
         last.set(Some((solver as usize, assumptions.len())));
     });
+    #[cfg(test)]
+    if let Some(result) = super::test_queries::next() {
+        return Ok(result);
+    }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     interruptible_z3_call!(SmtOperation::CheckSatAssuming, source_loc, context, unsafe {
         if assumptions.is_empty() {

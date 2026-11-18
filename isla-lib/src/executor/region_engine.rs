@@ -80,8 +80,14 @@ pub(super) fn close_arm<B: BV>(
                     Err(reject(arm, SpeculativeRejectReason::SolverUnknown))
                 }
                 Some(SmtResult::Error(error)) => {
-                    solver.rollback_transaction(tx);
-                    Err(ExecError::Smt(error))
+                    let error = ExecError::Smt(error);
+                    if stats::solver_failures::discard_solver_path(solver.on_unknown(), &error, arm, shared, None) {
+                        solver.commit_dead_transaction();
+                        Ok(false)
+                    } else {
+                        solver.rollback_transaction(tx);
+                        Err(error)
+                    }
                 }
             }
         }

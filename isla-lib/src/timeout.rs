@@ -351,6 +351,7 @@ impl fmt::Debug for TimeoutSmtDump {
 pub struct SmtTimeout {
     pub source_loc: SourceLoc,
     pub operation: SmtOperation,
+    pub query_purpose: &'static str,
     pub limit: Duration,
     pub operation_wall: Duration,
     pub dump: Arc<TimeoutSmtDump>,

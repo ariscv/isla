@@ -11,6 +11,7 @@ use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
 use isla_lib::error::{ExecError, SmtError};
+use isla_lib::executor::stats::solver_failures::{discard_solver_path, is_solver_failure};
 use isla_lib::executor::{backtrace_string, execute_ir_function, LocalFrame, Run, ScopedCollector};
 use isla_lib::executor::{ExecutionLimits, TaskId, TaskState};
 use isla_lib::fmtval::FmtVal;
@@ -966,7 +967,7 @@ impl ErrorRecorder<'_> {
             Ok(sat) => sat,
             Err(error) => {
                 // 超时或 Unknown 只拒绝当前路径；沿用错误摘要与迹诊断，不能签成完整结果。
-                let diagnostics = self.record_error_diagnostic(&error, frame, shared_state);
+                let diagnostics = self.record_terminal_error_diagnostic(&error, frame, shared_state);
                 eprintln!(
                     "[TERMINAL_QUERY_REJECT] {}",
                     serde_json::json!({"path-signature": frame.path_signature(), "error": error.to_string()}),
@@ -999,6 +1000,30 @@ impl ErrorRecorder<'_> {
         self.record_configured_error_diagnostic(error)
     }
 
+    fn record_terminal_error_diagnostic<'ir, B: BV>(
+        &self,
+        error: &ExecError,
+        frame: &LocalFrame<'ir, B>,
+        shared_state: &SharedState<'ir, B>,
+    ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
+        let terminal_deadline = match error {
+            ExecError::Smt(SmtError::Timeout(timeout)) if timeout.query_purpose == "terminal_model" => {
+                Some(model_query_deadline())
+            }
+            _ => None,
+        };
+        if discard_solver_path(
+            isla_lib::smt::no_smt::options().on_unknown,
+            error,
+            frame,
+            shared_state,
+            Some(("terminal_value", terminal_deadline)),
+        ) {
+            return Vec::new();
+        }
+        self.record_error_diagnostic(error, frame, shared_state)
+    }
+
     fn record_configured_error_diagnostic(
         &self,
         error: &ExecError,
@@ -1015,6 +1040,10 @@ impl ErrorRecorder<'_> {
         self.reporter.report_error(self.clause, error);
         diagnostics
     }
+}
+
+pub fn exploration_exit_code<B: BV>(code: i32, shared: &SharedState<'_, B>) -> i32 {
+    super::solve_summary::exploration_exit_code(code, &shared.execution_stats.solver_path_drops_since(0))
 }
 
 fn should_collect_unfinished_path<B: BV>(run: &Run<B>) -> bool {
@@ -1613,7 +1642,7 @@ pub fn solve_state_main<'ir, B: BV>(
                                 batch_label.unwrap_or("自由批")
                             )
                         );
-                        if samples.fuzz.is_none() {
+                        if samples.fuzz.is_none() || is_solver_failure(&error) {
                             success = false;
                         }
                     }
@@ -1650,8 +1679,15 @@ pub fn solve_state_main<'ir, B: BV>(
                 json.skip.insert("encdec-guard-reject".to_string(), merged_encdec_guard_rejects);
             }
             json.to_json(Some(format!("output/{}_{}.json", target.arch_pretty_name(), clause)));
+            if shared_state.execution_stats.solver_failed() {
+                success = false;
+                break;
+            }
         }
 
+        if shared_state.execution_stats.solver_failed() {
+            break;
+        }
         #[cfg(feature = "tracetool")]
         if trace_path.is_some() {
             shared_state.trace.dump();
@@ -1723,6 +1759,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 ) -> Result<BatchOutcome, ExecError> {
     use isla_lib::smt::checkpoint;
 
+    let drop_start = shared_state.execution_stats.solver_path_drop_count();
     let mut cache = super::path_cache::Run::new(
         &samples.path_cache,
         instruction_name,
@@ -2000,6 +2037,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                 );
             };
             let error_recorder = ErrorRecorder { collected, reporter: timeout_reporter, clause: instruction_name };
+            if exec_result.is_ok() && shared_state.execution_stats.solver_failed() {
+                return;
+            }
             if let Err((error, _)) = &exec_result {
                 error.assert_normal_execution();
             }
@@ -2273,7 +2313,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     isla_lib::smt::SmtResult::Error(error) => ExecError::Smt(error),
                                     _ => unreachable!(),
                                 };
-                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics =
+                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
@@ -2287,7 +2328,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         ) {
                             Ok(paths) => paths,
                             Err(error) => {
-                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics =
+                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
                                 log!(log::PATH_RESULT, &format!("clause{} 符号编码失败: {}", instruction_name, error));
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
@@ -2298,7 +2340,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "Illegal_Instruction")
                         {
                             let error = ExecError::Unreachable("当前执行路径不存在合法机器编码".to_string());
-                            trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                            trace_diagnostics =
+                                error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
                             log!(log::PATH_RESULT, &format!("clause{} {}", instruction_name, error));
                             submit_trace(frame, &mut trace_diagnostics);
                             return;
@@ -2324,8 +2367,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 let mstatus_exp = match isla_lib::primop_util::smt_value(bits, SourceLoc::unknown()) {
                                     Ok(value) => value,
                                     Err(error) => {
-                                        trace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                            &error,
+                                            frame,
+                                            shared_state,
+                                        );
                                         submit_trace(frame, &mut trace_diagnostics);
                                         return;
                                     }
@@ -2344,8 +2390,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
                                     isla_lib::smt::SmtResult::Error(error) => {
                                         let error = ExecError::Smt(error);
-                                        trace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                            &error,
+                                            frame,
+                                            shared_state,
+                                        );
                                         submit_trace(frame, &mut trace_diagnostics);
                                         return;
                                     }
@@ -2375,8 +2424,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 ) {
                                     Ok(()) => (),
                                     Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
-                                        trace_diagnostics =
-                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                        trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                            &error,
+                                            frame,
+                                            shared_state,
+                                        );
                                         log!(
                                             log::SYM_EXEC,
                                             &format!("finite-domain diversification failed: {}", error)
@@ -2404,7 +2456,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         .expect("solve collector mutex poisoned")
                                         .record_model_query_timeout();
                                 }
-                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics =
+                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
                                 log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
@@ -2418,7 +2471,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     isla_lib::smt::SmtResult::Unknown => ExecError::Z3Unknown,
                                     _ => unreachable!(),
                                 };
-                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics =
+                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
@@ -2435,8 +2489,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     match target.solve_pre_state(&mut model, shared_state) {
                                         Ok(state) => isa_state.extend(state),
                                         Err(error) => {
-                                            trace_diagnostics =
-                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                &error,
+                                                frame,
+                                                shared_state,
+                                            );
                                             log!(
                                                 log::PATH_RESULT,
                                                 &format!(
@@ -2460,8 +2517,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                     "指令字段含未具体化或 Poison 值".to_string(),
                                                     SourceLoc::unknown(),
                                                 );
-                                                trace_diagnostics =
-                                                    error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                                trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                    &error,
+                                                    frame,
+                                                    shared_state,
+                                                );
                                                 submit_trace(frame, &mut trace_diagnostics);
                                                 return;
                                             }
@@ -2472,11 +2532,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 let concrete = match model.get_val(value) {
                                                     Ok(value) => value,
                                                     Err(error) => {
-                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
-                                                            &error,
-                                                            frame,
-                                                            shared_state,
-                                                        );
+                                                        trace_diagnostics = error_recorder
+                                                            .record_terminal_error_diagnostic(
+                                                                &error,
+                                                                frame,
+                                                                shared_state,
+                                                            );
                                                         submit_trace(frame, &mut trace_diagnostics);
                                                         return;
                                                     }
@@ -2491,11 +2552,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                             ) {
                                                 Ok(assembly) => assembly,
                                                 Err(error) => {
-                                                    trace_diagnostics = error_recorder.record_error_diagnostic(
-                                                        &error,
-                                                        frame,
-                                                        shared_state,
-                                                    );
+                                                    trace_diagnostics = error_recorder
+                                                        .record_terminal_error_diagnostic(&error, frame, shared_state);
                                                     log!(
                                                         log::PATH_RESULT,
                                                         &format!(
@@ -2548,7 +2606,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                                     Err(message) => {
                                                                         let error = ExecError::Unreachable(message);
                                                                         trace_diagnostics = error_recorder
-                                                                            .record_error_diagnostic(
+                                                                            .record_terminal_error_diagnostic(
                                                                                 &error,
                                                                                 frame,
                                                                                 shared_state,
@@ -2562,7 +2620,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                                 Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
                                                                 Err(err) => {
                                                                     trace_diagnostics = error_recorder
-                                                                        .record_error_diagnostic(
+                                                                        .record_terminal_error_diagnostic(
                                                                             &err,
                                                                             frame,
                                                                             shared_state,
@@ -2582,11 +2640,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    trace_diagnostics = error_recorder.record_error_diagnostic(
-                                                        &error,
-                                                        frame,
-                                                        shared_state,
-                                                    );
+                                                    trace_diagnostics = error_recorder
+                                                        .record_terminal_error_diagnostic(&error, frame, shared_state);
                                                     log!(
                                                         log::PATH_RESULT,
                                                         &format!(
@@ -2602,11 +2657,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 match FmtVal::from_val(&symbolic_encoding, &mut model) {
                                                     Ok(value) => value.to_str(shared_state),
                                                     Err(error) => {
-                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
-                                                            &error,
-                                                            frame,
-                                                            shared_state,
-                                                        );
+                                                        trace_diagnostics = error_recorder
+                                                            .record_terminal_error_diagnostic(
+                                                                &error,
+                                                                frame,
+                                                                shared_state,
+                                                            );
                                                         submit_trace(frame, &mut trace_diagnostics);
                                                         return;
                                                     }
@@ -2629,11 +2685,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                         let error = ExecError::Unreachable(
                                                             "成功执行路径没有合法机器编码".to_string(),
                                                         );
-                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
-                                                            &error,
-                                                            frame,
-                                                            shared_state,
-                                                        );
+                                                        trace_diagnostics = error_recorder
+                                                            .record_terminal_error_diagnostic(
+                                                                &error,
+                                                                frame,
+                                                                shared_state,
+                                                            );
                                                         submit_trace(frame, &mut trace_diagnostics);
                                                     }
                                                     return;
@@ -2641,8 +2698,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                             }
                                         }
                                         Err(e) => {
-                                            trace_diagnostics =
-                                                error_recorder.record_error_diagnostic(&e, frame, shared_state);
+                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                &e,
+                                                frame,
+                                                shared_state,
+                                            );
                                             log!(
                                                 log::PATH_RESULT,
                                                 &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
@@ -2728,8 +2788,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     {
                                         Ok(value) => value,
                                         Err(error) => {
-                                            trace_diagnostics =
-                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                &error,
+                                                frame,
+                                                shared_state,
+                                            );
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
@@ -2738,8 +2801,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         match target.solve_post_state(frame.regs(), &mut model, shared_state) {
                                             Ok(value) => value,
                                             Err(error) => {
-                                                trace_diagnostics =
-                                                    error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                                trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                    &error,
+                                                    frame,
+                                                    shared_state,
+                                                );
                                                 submit_trace(frame, &mut trace_diagnostics);
                                                 return;
                                             }
@@ -2751,14 +2817,20 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 format!("返回值含未具体化或 Poison 分量: {:?}", value),
                                                 SourceLoc::unknown(),
                                             );
-                                            trace_diagnostics =
-                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                &error,
+                                                frame,
+                                                shared_state,
+                                            );
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
                                         Err(error) => {
-                                            trace_diagnostics =
-                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                &error,
+                                                frame,
+                                                shared_state,
+                                            );
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
@@ -2767,8 +2839,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     (memory_events, pre_memory, post_memory) = match witness {
                                         Ok(witness) => witness,
                                         Err(error) => {
-                                            trace_diagnostics =
-                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
+                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
+                                                &error,
+                                                frame,
+                                                shared_state,
+                                            );
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
@@ -2870,7 +2945,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     loop {
         isla_lib::executor::start_multi(num_threads, timeout, tasks, shared_state, result.clone(), collector);
         let next = std::mem::take(&mut *continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned"));
-        if next.is_empty() {
+        if next.is_empty() || shared_state.execution_stats.solver_failed() {
             break;
         }
         tasks = next
@@ -2935,9 +3010,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     state.summary.omitted_cases = collected_count - items.len();
     state.summary.model_query_timeouts = state.model_query_timeouts;
     state.summary.encoding_filtered_paths = state.encdec_guard_rejects;
+    state.summary.solver_path_drops = shared_state.execution_stats.solver_path_drops_since(drop_start);
+    let invalid_exploration = state.summary.solver_path_drops.count > 0 || shared_state.execution_stats.solver_failed();
     state.summary.print_model_exception_filter();
     cache.summary = state.summary.json();
-    if let Some(session) = &samples.fuzz {
+    if let Some(session) = samples.fuzz.as_ref().filter(|_| !invalid_exploration) {
         super::fuzz::run(
             session,
             resident_paths.into_inner().unwrap(),
@@ -2948,12 +3025,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             cache,
             execution_limits,
         );
-    } else if samples.path_cache.write.is_some() {
+    } else if samples.path_cache.write.is_some() && !shared_state.execution_stats.solver_failed() {
         let mut paths = resident_paths.into_inner().unwrap();
         paths.sort_by_key(|p| p.signature);
         let mut timing = super::path_cache::Timing::default();
         let facts_started = std::time::Instant::now();
-        let facts = if samples.path_cache.dag_only {
+        let facts = if samples.path_cache.dag_only || invalid_exploration {
             // 三个 false 都只表示没有充分证明，恢复后的完整 judge 仍走原求解。
             // 这避免 DAG 写出之前为可选快档重放每条路径，不改变可接受输入集合。
             paths
@@ -2979,7 +3056,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             &mut timing,
             &cache.stages,
         );
-    } else if let Some(checker) = &samples.resident {
+    } else if let Some(checker) = samples.resident.as_ref().filter(|_| !invalid_exploration) {
         super::resident::run(
             resident_paths.into_inner().unwrap(),
             checker,
@@ -3530,6 +3607,7 @@ mod tests {
         let timeout = Arc::new(SmtTimeout {
             source_loc: SourceLoc::unknown(),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_secs(1),
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
@@ -3564,11 +3642,12 @@ mod tests {
         let timeout = Arc::new(SmtTimeout {
             source_loc: SourceLoc::unknown(),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_secs(1),
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
         });
-        for (result, expected_timeouts) in
+        for (result, expected_drops) in
             [(isla_lib::smt::SmtResult::Unknown, 0), (isla_lib::smt::SmtResult::Error(SmtError::Timeout(timeout)), 1)]
         {
             let collected = Mutex::new(SolveCollectorState::new());
@@ -3579,13 +3658,18 @@ mod tests {
             let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
             assert!(!recorder.terminal_path_is_sat(result, &frame, &shared_state));
             // 拒绝发生在样本与常驻路径入库之前，不能伪装成完整结果。
-            let state = collected.into_inner().unwrap();
+            let mut state = collected.into_inner().unwrap();
+            let drops = shared_state.execution_stats.solver_path_drops_since(0);
+            assert_eq!(drops.count, expected_drops);
+            state.summary.solver_path_drops = drops;
             assert!(state.cases.is_empty());
-            assert_eq!(state.summary.errors, 1);
-            assert_eq!(state.summary.smt_timeouts, expected_timeouts);
+            assert_eq!(state.summary.errors, usize::from(expected_drops == 0));
+            assert_eq!(state.summary.smt_timeouts, 0);
             assert_eq!(state.summary.status(), "partial");
-            assert_eq!(state.diagnostics.len(), 1);
-            assert_eq!(state.diagnostics[0]["path-signature"], frame.path_signature());
+            assert_eq!(state.diagnostics.len(), usize::from(expected_drops == 0));
+            if expected_drops == 1 {
+                assert_eq!(state.summary.json()["valid"], false);
+            }
         }
     }
 

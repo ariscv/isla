@@ -133,18 +133,35 @@ pub(super) fn reject<B: BV>(frame: &LocalFrame<B>, reason: SpeculativeRejectReas
     }
 }
 
-/// 各分叉口复用可选三值查询；未查询保留候选，实际 Unknown 仍拒绝推演。
+/// 判定各侧可行性。未查询的候选保留守卫，真实失败只丢弃被查询的一侧。
 pub(super) fn feasible<B: BV>(
     frame: &LocalFrame<B>,
     solver: &mut Solver<B>,
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
+    shared: &SharedState<B>,
 ) -> Result<bool, ExecError> {
-    match solver.check_sat_with_for_branch(exp, info, true) {
-        None | Some(SmtResult::Sat) => Ok(true),
-        Some(SmtResult::Unsat) => Ok(false),
-        Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-        Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
+    let speculative = frame.region_execution.is_some();
+    match solver.check_sat_with_for_branch(exp, info, speculative) {
+        None => Ok(true),
+        Some(SmtResult::Unknown) if speculative => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+        Some(result) => path_is_feasible(result, frame, solver, shared),
+    }
+}
+
+pub(super) fn path_is_feasible<B: BV>(
+    result: SmtResult,
+    frame: &LocalFrame<B>,
+    solver: &Solver<B>,
+    shared: &SharedState<B>,
+) -> Result<bool, ExecError> {
+    match result.is_sat() {
+        Err(error)
+            if super::stats::solver_failures::discard_solver_path(solver.on_unknown(), &error, frame, shared, None) =>
+        {
+            Ok(false)
+        }
+        result => result,
     }
 }
 
@@ -560,6 +577,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     log_phase("execute_end", None);
                     if defer && !nested && output.is_ok() {
                         log_phase("obligation_start", None);
+                        let _scope = stats::region_progress::QueryScope::enter("exit_obligations");
                         let checked = solver.check_deferred_assertions(info);
                         log_phase("obligation_end", checked.as_ref());
                         match checked {
@@ -570,6 +588,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             Some(SmtResult::Unknown) => {
                                 return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
                             }
+                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                                if solver.on_unknown() == crate::config::SolverOnUnknown::Dead =>
+                            {
+                                return Err(reject(frame, SpeculativeRejectReason::SolverUnknown));
+                            }
                             Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                         }
                     }
@@ -577,8 +600,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result = if defer && !nested && result.is_ok() {
+                let result = if defer
+                    && !nested
+                    && result.as_ref().is_ok_and(|output| !matches!(output.result, RegionResult::Dead))
+                {
                     log_phase("exit_check_start", None);
+                    let _scope = stats::region_progress::QueryScope::enter("region_exit");
                     let checked = solver.check_candidate_sat(info);
                     log_phase("exit_check_end", checked.as_ref());
                     match checked {
@@ -587,6 +614,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         // 保守回滚，让普通执行分别判断两个前沿。
                         Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
                         Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                            if solver.on_unknown() == crate::config::SolverOnUnknown::Dead =>
+                        {
+                            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                        }
                         Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
                     }
                 } else {
@@ -713,6 +745,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             state.speculation_stats.record_reject(reason);
             shared.execution_stats.rule_finished(rule, Some(reason));
             shared.execution_stats.merge_finished(false);
+            if solver.on_unknown() == crate::config::SolverOnUnknown::Error
+                && stats::solver_failures::is_solver_failure(&error)
+            {
+                return Err(error);
+            }
             if mode == MergeMode::Force {
                 speculation::force_failure(frame, state, shared, info, &error);
             }

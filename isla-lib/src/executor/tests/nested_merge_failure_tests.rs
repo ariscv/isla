@@ -449,3 +449,72 @@ fn nested_failure_defer_and_immediate() {
 fn nested_failure_defer_and_immediate_control() {
     check_both_exit_modes(concat!(module_path!(), "::nested_failure_defer_and_immediate_control"), false);
 }
+
+#[test]
+fn solver_unknown_nested_arm_keeps_root_and_survivor() {
+    for strategy in strategies() {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(7),
+            Instr::Jump(input(1), 6, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(7),
+            copy_return(Exp::Bool(true)),
+            Instr::End,
+        ];
+        let paths = crate::smt::test_queries::with_results([None, None, Some(z3_sys::Z3_L_UNDEF)], || {
+            paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+        });
+        assert_eq!(paths.len(), 1);
+        assert!(matches!(paths[0].value, Val::Bool(false)));
+        assert!(paths[0].records.iter().any(|record| record.branch_pc == 0 && !record.dead));
+        let diagnostics = shared.execution_stats.merge_json();
+        assert_eq!(diagnostics["solver_timeout_dropped_paths"], 1);
+        assert_eq!(diagnostics["failures"], 0);
+    }
+}
+
+#[test]
+fn solver_unknown_exit_obligation_replays_and_drops_per_path() {
+    const TEST: &str =
+        "executor::tests::nested_merge_failure_tests::solver_unknown_exit_obligation_replays_and_drops_per_path";
+    let args = ["--exact", TEST, "--nocapture", "--test-threads=1"];
+    if !std::env::args().skip(1).eq(args) {
+        let result = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+    for strategy in strategies() {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let check = || {
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::optimistic_assert::<B64>,
+                input(1),
+                Exp::String("assertion".into()),
+                info(),
+            )
+        };
+        let program = vec![Instr::Jump(input(0), 3, info()), check(), Instr::Goto(4), check(), Instr::End];
+        let paths =
+            crate::smt::test_queries::with_unknown_purposes(&["exit_obligations", "assertion", "assertion"], || {
+                paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+            });
+        assert!(paths.is_empty());
+        let diagnostics = shared.execution_stats.merge_json();
+        assert_eq!(diagnostics["solver_timeout_dropped_paths"], 2);
+        assert_eq!(diagnostics["failure_reasons"]["solver_unknown"], 1);
+        let drops = shared.execution_stats.solver_path_drops_since(0);
+        assert!(drops.first_locations.iter().all(|drop| drop.purpose == "assertion"));
+    }
+}

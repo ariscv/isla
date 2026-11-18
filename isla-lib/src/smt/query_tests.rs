@@ -165,7 +165,10 @@ fn default_snapshot_keeps_context_configuration_and_explicit_seed() {
         let limited = Context::new(config);
         let mut solver = Solver::<B64>::new(&limited);
         let value = solver.declare_bitvector(64, info);
-        assert_eq!(solver.check_sat_with(&Eq(Box::new(Var(value)), Box::new(smtlib::bits64(12, 64))), info), Unknown);
+        assert!(matches!(
+            solver.check_sat_with(&Eq(Box::new(Var(value)), Box::new(smtlib::bits64(12, 64))), info),
+            Error(SmtError::Unknown { .. })
+        ));
         assert!(!solver.has_stashed_model());
     });
 }

@@ -664,6 +664,7 @@ impl<B: BV> Trace<B> {
 /// 求解实验选项；默认保持现有认证流程。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SolverOptions {
+    pub on_unknown: crate::config::SolverOnUnknown,
     pub skip_branch_checks: bool,
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
@@ -2289,6 +2290,82 @@ pub enum SmtResult {
 
 use SmtResult::*;
 
+fn unknown_result(info: SourceLoc, wall: Duration, deadline: Option<Duration>) -> SmtResult {
+    #[cfg(feature = "smt-thread-interrupt")]
+    let limit = Some(deadline.unwrap_or_else(z3_timeout::operation_timeout));
+    #[cfg(not(feature = "smt-thread-interrupt"))]
+    let limit = {
+        let _ = deadline;
+        None
+    };
+    Error(SmtError::Unknown {
+        source_loc: info,
+        wall,
+        limit,
+        purpose: crate::executor::stats::region_progress::query_label(),
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod test_queries {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    thread_local! {
+        static RESULTS: RefCell<VecDeque<Option<z3_sys::Z3_lbool>>> = const { RefCell::new(VecDeque::new()) };
+        static PURPOSES: RefCell<VecDeque<&'static str>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    pub(crate) fn with_results<T>(
+        results: impl IntoIterator<Item = Option<z3_sys::Z3_lbool>>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        RESULTS.with(|slot| {
+            assert!(slot.borrow().is_empty());
+            slot.borrow_mut().extend(results);
+        });
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RESULTS.with(|slot| slot.borrow_mut().clear());
+            }
+        }
+        let _reset = Reset;
+        let result = run();
+        RESULTS.with(|slot| assert!(slot.borrow().is_empty(), "部分注入查询未被消费"));
+        result
+    }
+
+    pub(crate) fn with_unknown_purposes<T>(purposes: &[&'static str], run: impl FnOnce() -> T) -> T {
+        PURPOSES.with(|slot| {
+            assert!(slot.borrow().is_empty());
+            slot.borrow_mut().extend(purposes);
+        });
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                PURPOSES.with(|slot| slot.borrow_mut().clear());
+            }
+        }
+        let _reset = Reset;
+        let result = run();
+        PURPOSES.with(|slot| assert!(slot.borrow().is_empty(), "部分注入查询未被消费：{:?}", slot.borrow()));
+        result
+    }
+
+    pub(super) fn take_unknown_purpose() -> bool {
+        let label = crate::executor::stats::region_progress::query_label();
+        PURPOSES.with(|slot| {
+            let mut list = slot.borrow_mut();
+            list.front().is_some_and(|purpose| *purpose == label) && list.pop_front().is_some()
+        })
+    }
+
+    pub(super) fn next() -> Option<z3_sys::Z3_lbool> {
+        RESULTS.with(|slot| slot.borrow_mut().pop_front().flatten())
+    }
+}
+
 impl SmtResult {
     pub fn is_sat(&self) -> Result<bool, ExecError> {
         match self {
@@ -2309,7 +2386,7 @@ impl SmtResult {
     }
 
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Unknown)
+        matches!(self, Unknown | Error(SmtError::Unknown { .. }))
     }
 }
 
@@ -3027,6 +3104,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         solver
     }
 
+    pub fn on_unknown(&self) -> crate::config::SolverOnUnknown {
+        self.ctx.solver_options.on_unknown
+    }
+
     pub fn branch_checks_skipped(&self) -> bool {
         self.ctx.solver_options.skip_branch_checks || self.no_smt()
     }
@@ -3093,6 +3174,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             query::QueryPurpose::BranchFeasibility => "branch_feasibility",
         };
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
+        #[cfg(test)]
+        if test_queries::take_unknown_purpose() {
+            return unknown_result(info, Duration::ZERO, None);
+        }
+
         let proof_limit = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
             proof_budget::limit()
         } else {
@@ -3162,6 +3248,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         };
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let slow_query = self.slow_query_begin(query.z3_solver);
+        let check_started = Instant::now();
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3184,6 +3271,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
             }
         };
+        let check_elapsed = check_started.elapsed();
         self.slow_query_finish(slow_query, query.z3_solver, Some(exp), info, z3_result);
         if let Some(profile) = budget_profile {
             profile.finish(z3_result);
@@ -3215,8 +3303,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Sat
         } else if z3_result == Z3_L_FALSE {
             Unsat
-        } else {
+        } else if proof_limit.is_some() {
+            // 显式限额只约束可选折叠，耗尽时保留原布尔表达式。
             Unknown
+        } else {
+            unknown_result(info, check_elapsed, None)
         };
 
         self.record_check_result(&result, query.z3_solver);
@@ -3256,6 +3347,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let slow_query = self.slow_query_begin(query.z3_solver);
+        let check_started = Instant::now();
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
                 Ok(result) => result,
@@ -3278,7 +3370,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            Unknown
+            unknown_result(info, check_started.elapsed(), None)
         };
         self.slow_query_finish(slow_query, query.z3_solver, None, info, z3_result);
         self.record_check_result(&result, query.z3_solver);
@@ -3383,6 +3475,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
+        let _query_scope = crate::executor::stats::region_progress::QueryScope::fallback("terminal_model");
+        let check_started = Instant::now();
         let z3_result = match timeout_Z3_solver_check_deadline(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3410,7 +3504,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            Unknown
+            unknown_result(info, check_started.elapsed(), Some(deadline))
         };
         self.record_check_result(&result, query.z3_solver);
         result
@@ -4039,6 +4133,7 @@ mod tests {
         Arc::new(SmtTimeout {
             source_loc: SourceLoc::new(0, 1, 0, 1, 1),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_secs(10),
             operation_wall: Duration::from_secs(11),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),

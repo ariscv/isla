@@ -743,6 +743,12 @@ isarch 不再探测模型扩展能力或内置这些合法值。`domain-manifest
 
 isarch 在执行前检查正常／压缩编码映射。只有当前配置、初态和输入约束下的合法编码域可证为空时，才输出 `summary.status = "not-applicable"` 和 `reason = "no-encoding-in-current-config"`；该结论仅适用于本次配置和输入域，不表示这个 clause 在所有环境都不适用。前态自身矛盾、求解 Unknown、超时和模型异常均报错。RISC-V 平台熵接口的无函数体声明仅由 isarch 接入，每次调用声明新的自由 16 位值；模型已有函数体继续执行原实现。
 
+### 探索期间的求解器超时
+
+`[execution_limits.solver] on_unknown = "dead"` 是缺省策略。真实求解返回 Unknown 或超时时，探索丢弃对应路径并继续。根区域出口的整体查询无法归属单臂时，执行器撤销推演，让普通分叉逐路径查询。
+
+只要丢弃过路径，isarch 收尾时报告首个 Sail 位置和用途，返回 **66**，并在运行摘要和路径缓存 manifest 写入 `valid=false`、`invalid_reasons` 及丢弃记录。judge、`--check-samples` 和 fuzz 拒绝加载该缓存。程序外限、信号和资源失败保留各自状态。使用 `--solver-on-unknown=error` 可让未判定直接终止探索。样本绑定与验收查询失败沿用其错误处理。
+
 ### 求解策略
 
 直接运行 `isarch` 时，不传 `--tastic` 使用 Z3 的 `default` 策略；也可显式选择

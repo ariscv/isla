@@ -44,7 +44,7 @@ fn run_in_diagnostics_process(test_path: &str) -> bool {
 
 pub(super) struct Path {
     pub(super) records: Vec<RegionMergeRecord<B64>>,
-    value: Val<B64>,
+    pub(super) value: Val<B64>,
     events: Vec<Event<B64>>,
     variables: Bindings<'static, B64>,
     registers: RegisterBindings<'static, B64>,
@@ -1442,6 +1442,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         &mut frame,
         &state,
         &mut solver,
+        &empty_shared_state(),
     )
     .unwrap();
     assert!(queue.is_empty());
@@ -2379,19 +2380,7 @@ fn f2_error(case: &str) -> ExecError {
     if case == "assertion" {
         return ExecError::AssertionFailure(None, info());
     }
-    struct Dump;
-    impl crate::timeout::SmtDumpSource for Dump {
-        fn materialize(&self) -> Result<String, String> {
-            Ok("(check-sat)".into())
-        }
-    }
-    ExecError::Smt(crate::error::SmtError::Timeout(Arc::new(crate::timeout::SmtTimeout {
-        source_loc: info(),
-        operation: crate::timeout::SmtOperation::CheckSat,
-        limit: Duration::from_millis(1),
-        operation_wall: Duration::from_millis(1),
-        dump: Arc::new(crate::timeout::TimeoutSmtDump::new(Arc::new(Dump))),
-    })))
+    ExecError::Smt(crate::error::SmtError::NoSmt { reason: "test", source_loc: info() })
 }
 
 #[test]
@@ -4493,6 +4482,7 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
     }
     crate::smt::configure_tastic(crate::smt::Tactic::Default);
     let frame = make_frame(vec![]);
+    let shared = SharedState::<B64>::empty(Symtab::new());
     for limited in [false, true] {
         let mut config = Config::new();
         if limited {
@@ -4510,18 +4500,25 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
         let condition = Formula::Eq(Box::new(Formula::Var(value)), Box::new(crate::primop_util::smt_i128(17)));
         let tx = solver.start_transaction_with_guard(Some(condition.clone()));
         if limited {
-            assert!(matches!(
-                region_merge::feasible(&frame, &mut solver, &condition, info()),
-                Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. })
-            ));
+            let result = solver.check_sat_with_for_branch(&condition, info(), true).unwrap();
+            assert!(result.is_unknown());
+            assert!(!region_merge::path_is_feasible(result, &frame, &solver, &shared).unwrap());
+            assert_eq!(shared.execution_stats.solver_path_drop_count(), 1);
         } else {
-            assert!(region_merge::feasible(&frame, &mut solver, &condition, info()).unwrap());
-            assert!(!region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition.clone())), info())
-                .unwrap());
+            assert!(region_merge::feasible(&frame, &mut solver, &condition, info(), &shared).unwrap());
+            assert!(!region_merge::feasible(
+                &frame,
+                &mut solver,
+                &Formula::Not(Box::new(condition.clone())),
+                info(),
+                &shared
+            )
+            .unwrap());
         }
         solver.rollback_transaction(tx);
         if !limited {
-            assert!(region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition)), info()).unwrap());
+            assert!(region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition)), info(), &shared)
+                .unwrap());
         }
     }
 }

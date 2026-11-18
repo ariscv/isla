@@ -32,6 +32,7 @@ pub fn add_cli(opts: &mut getopts::Options) {
     for (_, flag, help) in BOOL_OPTIONS {
         opts.optopt("", flag, help, "true|false");
     }
+    opts.optopt("", "solver-on-unknown", "求解未判定时丢弃路径或立即报错，缺省 dead", "dead|error");
     opts.optopt("", "region-max-merge-depth", "区域嵌套上限，默认不限；-1不限", "正整数|-1");
     opts.optopt("", "region-bool-proof-rlimit", "可选布尔证明资源上限，0 不限；默认 0", "u32");
     opts.optopt("", "query-dump-sites", "查询导出位置；逗号分隔，空串清空", "sites");
@@ -42,6 +43,14 @@ pub fn add_cli(opts: &mut getopts::Options) {
 
 pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
     let mut updated = limits.clone();
+    if let Some(value) = matches.opt_str("solver-on-unknown") {
+        use isla_lib::config::SolverOnUnknown;
+        updated.solver.on_unknown = match value.as_str() {
+            "dead" => SolverOnUnknown::Dead,
+            "error" => SolverOnUnknown::Error,
+            _ => return Err("--solver-on-unknown 必须是 dead 或 error".into()),
+        };
+    }
     for (field, flag, _) in BOOL_OPTIONS {
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
@@ -255,6 +264,21 @@ mod no_smt_port_tests {
         super::super::path_cache::Options::add_cli(&mut opts);
         opts.optopt("", "check-samples", "", "path");
         opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn solver_unknown_policy_uses_only_solver_table_and_cli() {
+        use isla_lib::config::SolverOnUnknown;
+        assert_eq!(ExecutionLimitsConfig::default().solver.on_unknown, SolverOnUnknown::Dead);
+        let mut limits: ExecutionLimitsConfig =
+            "[solver]\non_unknown='error'".parse::<toml::Value>().unwrap().try_into().unwrap();
+        apply_cli(&parse(&[]), &mut limits).unwrap();
+        assert_eq!(limits.solver.on_unknown, SolverOnUnknown::Error);
+        assert!(apply_cli(&parse(&["--solver-on-unknown=ignore"]), &mut limits).is_err());
+        apply_cli(&parse(&["--solver-on-unknown=dead"]), &mut limits).unwrap();
+        assert_eq!(limits.solver.on_unknown, SolverOnUnknown::Dead);
+        assert!(toml::from_str::<ExecutionLimitsConfig>("[path_merge]\non_unknown='error'").is_err());
+        assert!(toml::from_str::<ExecutionLimitsConfig>("[solver]\non_unknown='ignore'").is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub(crate) mod merge_timing;
 mod merge_timing_tests;
 pub(crate) mod region_cost;
 pub(crate) mod region_progress;
+pub mod solver_failures;
 use super::{ForkSink, SpeculativeRejectReason, Task};
 use crate::bitvector::BV;
 use crate::ir::{Instr, Name, Symtab};
@@ -91,6 +92,8 @@ struct RejectSite {
 }
 
 pub struct ExecutionStats {
+    solver_path_drops: Mutex<Vec<solver_failures::SolverPathDrop>>,
+    solver_failed: std::sync::atomic::AtomicBool,
     enabled: bool,
     snapshot_symbols: Mutex<Option<(Vec<String>, Vec<String>)>>,
     merge: Mutex<MergeStats>,
@@ -105,6 +108,8 @@ impl Default for ExecutionStats {
 impl ExecutionStats {
     pub fn new(enabled: bool) -> Self {
         Self {
+            solver_path_drops: Mutex::default(),
+            solver_failed: std::sync::atomic::AtomicBool::default(),
             enabled,
             snapshot_symbols: Mutex::new(None),
             merge: Mutex::new(MergeStats::default()),
@@ -285,7 +290,13 @@ impl ExecutionStats {
         self.forks.lock().unwrap().values().sum()
     }
     pub fn merge_json(&self) -> Value {
-        serde_json::to_value(&*self.merge.lock().unwrap()).unwrap()
+        let mut stats = serde_json::to_value(&*self.merge.lock().unwrap()).unwrap();
+        let drops = self.solver_path_drops_since(0);
+        if drops.count > 0 {
+            stats["solver_timeout_dropped_paths"] = json!(drops.count);
+            stats["solver_timeout_drop_locations"] = json!(drops.first_locations);
+        }
+        stats
     }
     pub fn fork_json(&self, symtab: &Symtab<'_>) -> Value {
         let forks = self.forks.lock().unwrap();

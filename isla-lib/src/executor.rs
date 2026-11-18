@@ -1984,6 +1984,11 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Ok(result) => return Ok(result),
             Err(error) => error,
         };
+        if matches!(error, ExecError::SolverDroppedPath)
+            || stats::solver_failures::discard_solver_path(solver.on_unknown(), &error, frame, shared_state, None)
+        {
+            return Ok(Run::Dead);
+        }
         let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
         if matches!(
             &error,
@@ -1993,7 +1998,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 branch_decision(frame, task_state, SpeculativeRejectReason::ExpressionRetry)?;
             }
         }
-        if !symbolic_length::retry_symbolic_length(
+        match symbolic_length::retry_symbolic_length(
             error,
             &operands,
             task_id,
@@ -2003,8 +2008,22 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             frame,
             task_state,
             solver,
-        )? {
-            return Ok(Run::Dead);
+            shared_state,
+        ) {
+            Ok(true) => (),
+            Ok(false) | Err(ExecError::SolverDroppedPath) => return Ok(Run::Dead),
+            Err(error)
+                if stats::solver_failures::discard_solver_path(
+                    solver.on_unknown(),
+                    &error,
+                    frame,
+                    shared_state,
+                    None,
+                ) =>
+            {
+                return Ok(Run::Dead);
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -2026,6 +2045,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        if solver.on_unknown() == crate::config::SolverOnUnknown::Error && shared_state.execution_stats.solver_failed()
+        {
+            return Ok(Run::Dead);
+        }
         stats::memory_stats::poll(frame, solver);
         let region_step = region_merge::step(frame);
         if matches!(&region_step, Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::StepBudget, .. }))
@@ -2193,24 +2216,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let test_false = Not(Box::new(Var(v)));
 
                         let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
-                        let can_be_true = if frame.region_execution.is_some() {
-                            region_merge::feasible(frame, solver, &test_true, *info)?
-                        } else {
-                            solver
-                                .check_sat_with_for_branch(&test_true, *info, false)
-                                .map(|result| result.is_sat())
-                                .transpose()?
-                                .unwrap_or(true)
-                        };
-                        let can_be_false = if frame.region_execution.is_some() {
-                            region_merge::feasible(frame, solver, &test_false, *info)?
-                        } else {
-                            solver
-                                .check_sat_with_for_branch(&test_false, *info, false)
-                                .map(|result| result.is_sat())
-                                .transpose()?
-                                .unwrap_or(true)
-                        };
+                        let can_be_true = region_merge::feasible(frame, solver, &test_true, *info, shared_state)?;
+                        let can_be_false = region_merge::feasible(frame, solver, &test_false, *info, shared_state)?;
 
                         stats::region_progress::branch_result(can_be_true, can_be_false);
                         drop(branch_queries);
@@ -2435,6 +2442,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame,
                             task_state,
                             solver,
+                            shared_state,
                         )? {
                             continue 'main_loop;
                         }
@@ -2483,9 +2491,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if frame.region_execution.is_some() && matches!(&error, ExecError::AssertionFailure(..)) {
                             let false_for_arm = match &arg1 {
                                 Val::Bool(value) => !value,
-                                Val::Symbolic(symbol) => {
-                                    !region_merge::feasible(frame, solver, &smtlib::Exp::Var(*symbol), *info)?
-                                }
+                                Val::Symbolic(symbol) => !region_merge::feasible(
+                                    frame,
+                                    solver,
+                                    &smtlib::Exp::Var(*symbol),
+                                    *info,
+                                    shared_state,
+                                )?,
                                 _ => false,
                             };
                             if !false_for_arm {
@@ -2512,6 +2524,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame,
                             task_state,
                             solver,
+                            shared_state,
                         )? {
                             continue 'main_loop;
                         }
@@ -2553,6 +2566,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame,
                             task_state,
                             solver,
+                            shared_state,
                         )? {
                             continue 'main_loop;
                         }
@@ -2637,6 +2651,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         frame,
                                         task_state,
                                         solver,
+                                        shared_state,
                                     )? {
                                         continue 'main_loop;
                                     }
@@ -2682,6 +2697,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                             frame,
                                             task_state,
                                             solver,
+                                            shared_state,
                                         )?;
                                         continue 'main_loop;
                                     }
@@ -2716,6 +2732,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         frame,
                                         task_state,
                                         solver,
+                                        shared_state,
                                     )?;
                                 }
                             }
@@ -2760,6 +2777,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     frame,
                                     task_state,
                                     solver,
+                                    shared_state,
                                 )? {
                                     continue 'main_loop;
                                 }
@@ -3015,6 +3033,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                     use smtlib::bits64;
                     use smtlib::Def::*;
+                    let _scope = stats::region_progress::QueryScope::enter("concretization");
                     use smtlib::Exp::*;
 
                     if frame.region_execution.is_none() {
@@ -3109,11 +3128,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     };
 
                     let remainder = Neq(Box::new(Var(v)), Box::new(result_exp.clone()));
-                    let has_remainder = if frame.region_execution.is_some() {
-                        region_merge::feasible(frame, solver, &remainder, *info)?
-                    } else {
-                        solver.check_sat_with(&remainder, *info).is_sat()?
-                    };
+                    let has_remainder = region_merge::feasible(frame, solver, &remainder, *info, shared_state)?;
                     if has_remainder {
                         branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
                         let decision = match limit_handler.as_ref() {
@@ -4348,6 +4363,7 @@ mod tests {
                     &mut frame,
                     &state,
                     &mut solver,
+                    &empty_shared_state(),
                 )
                 .unwrap());
                 let child = queue.pop().expect("未固定长度必须拆为当前候选与剩余候选");
@@ -4392,6 +4408,7 @@ mod tests {
                 &mut frame,
                 &state,
                 &mut solver,
+                &empty_shared_state(),
             )
             .unwrap();
         }
@@ -4593,6 +4610,7 @@ mod tests {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     )
                     .unwrap());
                     let child = queue.pop().expect("合法与排除子域必须一次拆开");
@@ -4648,6 +4666,7 @@ mod tests {
                     &mut frame,
                     &state,
                     &mut solver,
+                    &empty_shared_state(),
                 )
                 .unwrap());
                 let child = queue.pop().expect("地址零必须留在区域外路径");
@@ -4877,6 +4896,7 @@ mod tests {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     )
                     .unwrap());
                     let child = queue.pop().unwrap();
@@ -4940,6 +4960,7 @@ mod tests {
                 &mut frame,
                 &state,
                 &mut solver,
+                &empty_shared_state(),
             );
             assert!(matches!(result, Err(ExecError::SymbolicLength("read_mem_address", _))));
             assert!(queue.is_empty(), "不支持的符号区域内部访问不得启动单点枚举");
@@ -12871,6 +12892,16 @@ fn zcaller(za, zb) {
         regs: RegisterBindings<'ir, B64>,
         lets: Bindings<'ir, B64>,
     ) -> Vec<Result<Run<B64>, ExecError>> {
+        run_all_with_shared_bindings(instrs, limits, &shared_state, regs, lets)
+    }
+
+    fn run_all_with_shared_bindings<'ir>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: &SharedState<'ir, B64>,
+        regs: RegisterBindings<'ir, B64>,
+        lets: Bindings<'ir, B64>,
+    ) -> Vec<Result<Run<B64>, ExecError>> {
         let frame = make_frame_with_bindings(instrs, &regs, &lets);
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
@@ -12897,12 +12928,150 @@ fn zcaller(za, zb) {
                 &SingleForkSink { queue: &queue },
                 &mut task_frame,
                 task.state,
-                &shared_state,
+                shared_state,
                 &mut solver,
             ));
         }
 
         results
+    }
+
+    #[test]
+    fn solver_unknown_jump_drops_only_the_indeterminate_side() {
+        let mut shared = empty_shared_state();
+        shared.symtab.set_files(vec!["branch.sail"]);
+        let source = SourceLoc::new(0, 7, 3, 7, 9);
+        let flag = test_name(100);
+        let program = vec![
+            Instr::Decl(flag, Ty::Bool, info()),
+            Instr::Jump(Exp::Id(flag), 4, source),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::End,
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        let run = |results| {
+            crate::smt::test_queries::with_results(results, || {
+                run_all_with_shared_bindings(
+                    program.clone(),
+                    ExecutionLimits::default(),
+                    &shared,
+                    RegisterBindings::new(),
+                    Bindings::default(),
+                )
+            })
+        };
+        let paths = run(vec![Some(z3_sys::Z3_L_UNDEF)]);
+        assert!(matches!(paths.as_slice(), [Ok(Run::Finished(Val::Bool(false)))]));
+        let drops = shared.execution_stats.solver_path_drops_since(0);
+        assert_eq!(drops.count, 1);
+        assert_eq!(drops.first_locations[0].sail_location, "branch.sail:7");
+        assert_eq!(drops.first_locations[0].purpose, "branch_feasibility");
+        let paths = run(vec![Some(z3_sys::Z3_L_UNDEF), Some(z3_sys::Z3_L_UNDEF)]);
+        assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
+        assert_eq!(shared.execution_stats.solver_path_drops_since(1).count, 2);
+    }
+
+    #[test]
+    fn solver_unknown_assertion_drops_the_path() {
+        let shared = empty_shared_state();
+        let flag = test_name(100);
+        let program = vec![
+            Instr::Decl(flag, Ty::Bool, info()),
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::optimistic_assert::<B64>,
+                Exp::Id(flag),
+                Exp::String("assertion".into()),
+                info(),
+            ),
+            Instr::End,
+        ];
+        let paths = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            run_all_with_shared_bindings(
+                program,
+                ExecutionLimits::default(),
+                &shared,
+                RegisterBindings::new(),
+                Bindings::default(),
+            )
+        });
+        assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
+        let drops = shared.execution_stats.solver_path_drops_since(0);
+        assert_eq!(drops.count, 1);
+        assert_eq!(drops.first_locations[0].purpose, "assertion");
+    }
+
+    #[test]
+    fn solver_unknown_error_mode_stops_exploration() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let mut config = Config::new();
+        config.solver_options.on_unknown = crate::config::SolverOnUnknown::Error;
+        let context = Context::new(config);
+        let mut solver = Solver::new(&context);
+        let flag = test_name(100);
+        let mut frame =
+            make_frame(vec![Instr::Decl(flag, Ty::Bool, info()), Instr::Jump(Exp::Id(flag), 2, info()), Instr::End]);
+        let state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let result = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver,
+            )
+        });
+        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))));
+        assert!(shared.execution_stats.solver_failed());
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn solver_unknown_length_candidate_retains_the_remainder() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let symbol = solver.declare_const(smtlib::Ty::BitVec(1), info());
+        assert!(solver.check_sat(info()).is_sat().unwrap());
+        let original = {
+            let mut model = Model::new(&solver);
+            model.set_complete_model(true);
+            model.get_var(symbol).unwrap().unwrap_exp()
+        };
+        let mut frame = make_frame(vec![Instr::End]);
+        let state = TaskState::new();
+        let queue = Worker::new_lifo();
+        crate::smt::test_queries::with_unknown_purposes(&["concretization"], || {
+            assert!(symbolic_length::fork_symbolic_value(
+                symbol,
+                &[Val::Symbolic(symbol)],
+                info(),
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &mut solver,
+                &shared,
+            )
+            .unwrap());
+        });
+        let eq = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(symbol)), Box::new(original));
+        assert_eq!(solver.check_sat_with(&eq, info()), SmtResult::Unsat);
+        assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+        assert!(queue.is_empty());
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 1);
     }
 
     #[test]
@@ -13396,6 +13565,7 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     ),
                     SymbolicValueEnumeration => symbolic_length::fork_symbolic_value(
                         sym,
@@ -13408,6 +13578,7 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     ),
                     RetryOperand => symbolic_length::fork_retry_operand(
                         sym,
@@ -13422,6 +13593,7 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     )
                     .map(|()| true),
                     _ => panic!("测试位置未覆盖"),

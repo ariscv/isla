@@ -1556,7 +1556,7 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
 pub mod region_options;
 pub use region_options::RegionOptions;
 pub mod path_merge;
-pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig};
+pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig, SolverOnUnknown};
 
 /// 路径合并执行策略；递归是兼容默认值。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

@@ -662,6 +662,7 @@ fn isla_main() -> i32 {
         return 1;
     }
     isla_lib::smt::configure_solver_options(isla_lib::smt::SolverOptions {
+        on_unknown: limits.solver.on_unknown,
         skip_branch_checks: solver_region_options.skip_branch_checks,
         skip_bool_proofs: solver_region_options.skip_bool_proofs,
         no_smt: solver_region_options.no_smt,
@@ -931,11 +932,7 @@ fn isla_main() -> i32 {
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),
             };
-            if success {
-                0
-            } else {
-                1
-            }
+            isarch::exec::exploration_exit_code(if success { 0 } else { 1 }, shared_state)
         }
     }
 }

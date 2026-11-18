@@ -1,10 +1,13 @@
 //! 求解产物的执行范围摘要；正常结束不等于源码控制流已全覆盖。
+use isla_lib::executor::stats::solver_failures::SolverPathDrops;
 use serde::Serialize;
 use serde_json::{json, Value};
 
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) struct SolveSummary {
+    #[serde(skip)]
+    pub solver_path_drops: SolverPathDrops,
     pub uncertified: bool,
     pub sampled_paths: usize,
     pub errors: usize,
@@ -25,7 +28,8 @@ pub(super) struct SolveSummary {
 
 impl SolveSummary {
     pub fn status(&self) -> &'static str {
-        if self.uncertified
+        if self.solver_path_drops.count > 0
+            || self.uncertified
             || self.sampled_paths
                 + self.errors
                 + self.unfinished_paths
@@ -50,6 +54,13 @@ impl SolveSummary {
             value["scope"] = json!("current-config-prestate-and-input-domain");
         }
         value["model-coverage"] = json!("not-measured");
+        if self.solver_path_drops.count > 0 {
+            value["valid"] = json!(false);
+            value["invalid_reasons"] = json!(["solver_timeout_dropped_paths"]);
+            value["solver_timeout_dropped_paths"] = json!(self.solver_path_drops.count);
+            value["solver_timeout_drop_locations"] = json!(self.solver_path_drops.first_locations);
+            value["invalid_message"] = json!(solver_path_drop_message(&self.solver_path_drops));
+        }
         value
     }
 
@@ -71,6 +82,7 @@ impl SolveSummary {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        self.solver_path_drops.merge(&other.solver_path_drops);
         self.uncertified |= other.uncertified;
         self.filtered_model_exception_paths += other.filtered_model_exception_paths;
         for (site, count) in &other.filtered_model_exception_sites {
@@ -88,6 +100,27 @@ impl SolveSummary {
         self.omitted_cases += other.omitted_cases;
         self.model_query_timeouts += other.model_query_timeouts;
         self.encoding_filtered_paths += other.encoding_filtered_paths;
+    }
+}
+
+pub const SOLVER_TIMEOUT_DROPPED_PATHS_EXIT_CODE: i32 = 66;
+
+fn solver_path_drop_message(drops: &SolverPathDrops) -> String {
+    let first = drops.first_locations.first().expect("丢弃统计必须保存首个位置");
+    format!(
+        "结果作废：求解器超时或 Unknown 导致 {} 条路径被丢弃（首个位置 {}，IR {}@{}，用途 {}）。请检查并修复后重跑。",
+        drops.count, first.sail_location, first.function, first.pc, first.purpose,
+    )
+}
+
+pub(super) fn exploration_exit_code(code: i32, drops: &SolverPathDrops) -> i32 {
+    if drops.count == 0 {
+        return code;
+    }
+    eprintln!("{}", solver_path_drop_message(drops));
+    match code {
+        0 | 1 => SOLVER_TIMEOUT_DROPPED_PATHS_EXIT_CODE,
+        _ => code,
     }
 }
 
@@ -129,6 +162,54 @@ pub(super) fn print_execution_stats<B>(shared_state: &isla_lib::ir::SharedState<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solver_timeout_exit_and_invalid_summary() {
+        const NAME: &str = "isarch::solve_summary::tests::solver_timeout_exit_and_invalid_summary";
+        let args = ["--exact", NAME, "--nocapture", "--test-threads=1"];
+        if std::env::args().skip(1).eq(args) {
+            use isla_lib::executor::stats::solver_failures::SolverPathDrop;
+            let mut summary = SolveSummary::default();
+            assert_eq!(exploration_exit_code(0, &summary.solver_path_drops), 0);
+            assert_eq!(exploration_exit_code(1, &summary.solver_path_drops), 1);
+            assert!(summary.json().get("valid").is_none());
+            summary.solver_path_drops = SolverPathDrops {
+                count: 1,
+                first_locations: vec![SolverPathDrop {
+                    path_count: 1,
+                    function: "access_check".into(),
+                    pc: 3,
+                    path_signature: 1,
+                    sail_location: "test.sail:7".into(),
+                    source_loc: isla_lib::source_loc::SourceLoc::new(0, 7, 0, 7, 3),
+                    purpose: "range_proof".into(),
+                    reason: "timeout".into(),
+                    seconds: 5.0,
+                    limit_seconds: Some(5.0),
+                }],
+            };
+            assert_eq!(summary.status(), "partial");
+            assert_eq!(exploration_exit_code(1, &summary.solver_path_drops), SOLVER_TIMEOUT_DROPPED_PATHS_EXIT_CODE);
+            for code in [86, 101, 124, 125, 143] {
+                assert_eq!(exploration_exit_code(code, &summary.solver_path_drops), code);
+            }
+            println!("SUMMARY {}", summary.json());
+            std::process::exit(exploration_exit_code(0, &summary.solver_path_drops));
+        }
+        let result = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+        assert_eq!(result.status.code(), Some(SOLVER_TIMEOUT_DROPPED_PATHS_EXIT_CODE));
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("结果作废：求解器超时或 Unknown 导致 1 条路径被丢弃"));
+        assert!(
+            stderr.contains("test.sail:7") && stderr.contains("range_proof") && stderr.contains("请检查并修复后重跑")
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let json: Value = serde_json::from_str(stdout.split_once("SUMMARY ").unwrap().1.trim()).unwrap();
+        assert_eq!(json["valid"], false);
+        assert_eq!(json["invalid_reasons"], json!(["solver_timeout_dropped_paths"]));
+        assert_eq!(json["solver_timeout_dropped_paths"], 1);
+        assert_eq!(json["solver_timeout_drop_locations"][0]["limit_seconds"], 5.0);
+    }
 
     #[test]
     fn filtered_model_exception_sites_merge_without_hiding_failures() {

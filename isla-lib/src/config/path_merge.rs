@@ -10,9 +10,18 @@ use super::{
 };
 use crate::source_loc::SourceRegionSpec;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SolverOnUnknown {
+    #[default]
+    Dead,
+    Error,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SolverConfig {
+    pub on_unknown: SolverOnUnknown,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
     pub skip_branch_checks: bool,
     /// 跳过可选布尔恒值证明；默认关闭。

@@ -25,6 +25,29 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]
+    fn solver_timeout_invalid_cache_is_rejected_before_loading_data() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("output/path-cache/solver-invalid-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let shared = SharedState::<B64>::empty(Symtab::new());
+        for raw in [
+            json!({"schema_version":3, "valid":false, "invalid_reasons":["solver_timeout_dropped_paths"]}),
+            json!({"schema_version":3, "errors":{"valid":false}}),
+        ] {
+            fs::write(directory.join("manifest.json"), serde_json::to_vec(&raw).unwrap()).unwrap();
+            let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                load::<B64>(&directory, Encoding::Json, false, &shared, "generic", &Stages::new(None, Instant::now()))
+            }));
+            let Err(error) = error else {
+                panic!("已作废的缓存被接纳");
+            };
+            let message = error.downcast_ref::<String>().expect("期望明确的作废错误");
+            assert!(message.contains("路径缓存结果作废") && message.contains("--check-samples"));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[should_panic(expected = "manifest")]
     fn 残缺目录必须拒绝() {
         let shared = SharedState::<B64>::empty(Symtab::new());
@@ -547,6 +570,20 @@ pub struct SourceRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ExplorationSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "invalid_reasons")]
+    pub invalid_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "solver_timeout_dropped_paths")]
+    pub solver_timeout_dropped_paths: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "solver_timeout_drop_locations")]
+    pub solver_timeout_drop_locations: Vec<isla_lib::executor::stats::solver_failures::SolverPathDrop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "invalid_message")]
+    pub invalid_message: Option<String>,
     #[serde(default)]
     pub uncertified: bool,
     pub sampled_paths: u64,
@@ -749,6 +786,11 @@ pub fn load<B: BV>(
         serde_json::from_reader(File::open(dir.join("manifest.json")).expect("缓存 manifest 缺失，目录尚未发布"))
             .expect("缓存 manifest 损坏");
     assert_eq!(raw["schema_version"], json!(3), "缓存 schema 不兼容");
+    assert!(
+        raw["valid"] != json!(false) && raw["errors"]["valid"] != json!(false),
+        "路径缓存结果作废，拒绝用于 judge、--check-samples 或 fuzz：{}",
+        raw["invalid_reasons"]
+    );
     assert_ne!(raw["certification"], json!("uncertified"), "未认证候选缓存必须先离线检查，不能直接用于样例或fuzz");
     let manifest: Manifest<B> = serde_json::from_value(raw).expect("缓存 manifest 字段损坏");
     assert!(!manifest.errors.uncertified, "未认证候选摘要不能作为已检查缓存读入");
@@ -973,6 +1015,13 @@ pub fn save<B: BV>(
     };
     let mut output = BufWriter::new(File::create(dir.join("manifest.pending")).expect("创建 manifest 失败"));
     let mut manifest_value = serde_json::to_value(&manifest).unwrap();
+    for key in
+        ["valid", "invalid_reasons", "solver_timeout_dropped_paths", "solver_timeout_drop_locations", "invalid_message"]
+    {
+        if let Some(value) = summary.get(key) {
+            manifest_value[key] = value.clone();
+        }
+    }
     manifest_value["certification"] = json!(if manifest.errors.uncertified { "uncertified" } else { "checked" });
     serde_json::to_writer_pretty(&mut output, &manifest_value).expect("写入 manifest 失败");
     output.flush().unwrap();
@@ -1044,6 +1093,7 @@ impl<B: BV> Run<B> {
 pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_summary::SolveSummary {
     let field = |value: u64| value.try_into().expect("缓存执行摘要越界");
     super::solve_summary::SolveSummary {
+        solver_path_drops: Default::default(),
         applicable_batches: 1,
         inapplicable_batches: 0,
         uncertified: summary.uncertified,

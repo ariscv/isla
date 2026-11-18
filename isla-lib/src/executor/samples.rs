@@ -920,6 +920,15 @@ impl SampleChecker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn solver_unknown_acceptance_is_an_error() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = crate::smt::Context::new(crate::smt::Config::new());
+        let mut solver = Solver::<crate::bitvector::b64::B64>::new(&context);
+        let result = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || super::sat(&mut solver));
+        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))));
+    }
+
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::smt::{Config, Context};

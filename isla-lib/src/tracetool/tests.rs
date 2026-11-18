@@ -413,6 +413,7 @@ fn completed_path_renders_smt_timeout_metadata() {
     let timeout = Arc::new(SmtTimeout {
         source_loc: crate::source_loc::SourceLoc::unknown(),
         operation: SmtOperation::ModelEval,
+        query_purpose: "unclassified",
         limit: Duration::from_secs(2),
         operation_wall: Duration::from_secs(2),
         dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
@@ -452,6 +453,7 @@ fn metadata_only_timeout_diagnostic_does_not_materialize_smt() {
     let timeout = Arc::new(SmtTimeout {
         source_loc: crate::source_loc::SourceLoc::unknown(),
         operation: SmtOperation::ModelEval,
+        query_purpose: "unclassified",
         limit: Duration::from_secs(2),
         operation_wall: Duration::from_secs(2),
         dump: Arc::new(TimeoutSmtDump::new(Arc::new(PanicDump))),
