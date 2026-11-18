@@ -166,6 +166,12 @@ pub(super) fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
 }
 #[test]
 fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths"
+    )) {
+        return;
+    }
     run_deep_region_test(loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths_body);
 }
 

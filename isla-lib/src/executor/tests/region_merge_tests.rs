@@ -22,6 +22,26 @@ fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
 
 type Formula = smtlib::Exp<Sym>;
 
+// 任意测试的 SMT 查询都可能写入进程级诊断。在只运行本用例的进程内启用诊断。
+fn run_in_diagnostics_process(test_path: &str) -> bool {
+    let (_, test_name) = test_path.split_once("::").unwrap();
+    let args = ["--exact", test_name, "--nocapture", "--test-threads=1"];
+    if std::env::args_os().skip(1).eq(args.map(std::ffi::OsStr::new)) {
+        return true;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && stdout.lines().any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "诊断子进程必须执行并通过一项测试（{}）\n{stdout}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
 struct Path {
     records: Vec<RegionMergeRecord<B64>>,
     value: Val<B64>,
@@ -4508,6 +4528,9 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
 /// 同一合成程序比较诊断开关、结果域、原拒绝理由及完整 SMT／事件轨迹。
 #[test]
 fn merge_diagnostics_execution_is_observational() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::merge_diagnostics_execution_is_observational")) {
+        return;
+    }
     use crate::executor::stats::merge_diagnostics as diag;
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
