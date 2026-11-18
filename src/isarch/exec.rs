@@ -1837,15 +1837,13 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     } */
 
     // 先区分互相矛盾的前态与真正的空编码域，求解不确定仍作为错误传播。
-    if !solver.no_smt() {
-        match solver.check_sat(SourceLoc::unknown()) {
-            isla_lib::smt::SmtResult::Sat => (),
-            isla_lib::smt::SmtResult::Unsat => {
-                return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
-            }
-            isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
-            isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+    match solver.check_candidate_sat(SourceLoc::unknown()) {
+        None | Some(isla_lib::smt::SmtResult::Sat) => (),
+        Some(isla_lib::smt::SmtResult::Unsat) => {
+            return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
         }
+        Some(isla_lib::smt::SmtResult::Unknown) => return Err(ExecError::Z3Unknown),
+        Some(isla_lib::smt::SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
     }
 
     let instruction = if let Some(fixed) = fixed_inputs.instruction {
@@ -2038,13 +2036,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 .enumerate_merges(&mut solver, &task_state, shared_state, ret_val)
                                 .expect("完成路径的合并计数失败")
                         } else if samples.enabled() {
-                            if !solver.no_smt() && !solver.has_stashed_model() {
-                                if !error_recorder.terminal_path_is_sat(
-                                    solver.check_sat(SourceLoc::unknown()),
-                                    frame,
-                                    shared_state,
-                                ) {
-                                    return;
+                            if !solver.has_stashed_model() {
+                                if let Some(result) = solver.check_candidate_sat(SourceLoc::unknown()) {
+                                    if !error_recorder.terminal_path_is_sat(result, frame, shared_state) {
+                                        return;
+                                    }
                                 }
                             }
                             collected.lock().unwrap().summary.model_exception_paths += usize::from(sail_exception);

@@ -41,20 +41,20 @@ impl<B: BV> Solver<'_, B> {
         exp: &Exp<Sym>,
         info: SourceLoc,
         speculative: bool,
-    ) -> SmtResult {
+    ) -> Option<SmtResult> {
         // 这里只回答可行性，不承诺交付模型。普通查询与最终取值仍用原接口。
         if self.deferred_region_queries || self.branch_checks_skipped() {
-            return Unknown;
+            return None;
         }
         if literal(exp).is_some_and(|(sym, _)| self.knowledge.both == Some((sym, self.knowledge.version))) {
-            return Sat;
+            return Some(Sat);
         }
-        if speculative {
+        Some(if speculative {
             // 分支可行性必须完整判定；仅复用复杂查询策略，不复用可选常量证明预算。
             self.check_sat_with_strategy(exp, info, query::QueryPurpose::BranchFeasibility)
         } else {
             self.check_sat_with(exp, info)
-        }
+        })
     }
     pub(crate) fn note_bool_proof(&mut self, sym: Sym, both: bool) {
         self.knowledge.both = both.then_some((sym, self.knowledge.version));
@@ -64,13 +64,16 @@ impl<B: BV> Solver<'_, B> {
             self.knowledge.both = Some((sym, self.knowledge.version));
         }
     }
-    pub(crate) fn check_sat_for_arm(&mut self, info: SourceLoc) -> SmtResult {
+    pub(crate) fn check_sat_for_arm(&mut self, info: SourceLoc) -> Option<SmtResult> {
+        if self.deferred_region_queries || !self.validates_candidates() {
+            return None;
+        }
         // 入口已证可行之后，仅新增定义与纯定义提交不会缩小解集。
         // 真正断言、符号改绑与带约束的嵌套提交均清除此标记。
         if self.knowledge.sat {
-            return Sat;
+            return Some(Sat);
         }
-        self.check_sat(info)
+        Some(self.check_sat(info))
     }
     pub(super) fn guard_known_sat(&self, guard: &Exp<Sym>) -> bool {
         literal(guard).is_some_and(|lit| {

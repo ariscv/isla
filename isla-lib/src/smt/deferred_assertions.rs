@@ -146,10 +146,13 @@ impl<B: BV> Solver<'_, B> {
         serde_json::json!({"definition_events":definitions,"definition_expression_nodes":nodes,"assertion_expression_nodes":assertions,"obligations":self.deferred_assertions.as_ref().map_or(0,|s|s.obligations.len())})
     }
 
-    pub(crate) fn check_deferred_assertions(&mut self, info: SourceLoc) -> SmtResult {
+    pub(crate) fn check_deferred_assertions(&mut self, info: SourceLoc) -> Option<SmtResult> {
+        if !self.validates_candidates() {
+            return None;
+        }
         let state = self.deferred_assertions.as_ref().expect("验证必须在活动义务作用域中");
         if state.obligations.is_empty() {
-            return Unsat;
+            return Some(Unsat);
         }
         let started = Instant::now();
         let bad = state.obligations.iter().cloned().fold(Exp::Bool(false), |a, b| Exp::Or(Box::new(a), Box::new(b)));
@@ -240,6 +243,6 @@ impl<B: BV> Solver<'_, B> {
                 serde_json::json!({"kind":"region_assert_obligation_check","obligations":state.obligations.len(),"definition_events":count,"definition_expression_nodes":definition_nodes,"obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0,"seconds":seconds,"replay_seconds":replay_seconds,"check_seconds":check_seconds,"result":format!("{result:?}")})
             );
         }
-        result
+        Some(result)
     }
 }

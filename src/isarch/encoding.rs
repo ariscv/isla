@@ -56,15 +56,11 @@ fn mapping_paths<B: BV>(
             // 可满足性只依赖断言，不需要为它重建未参与约束的终态运算。
             // 返回给最终状态求值的combined仍保留完整执行定义和事件。
             let mut verified = Solver::from_checkpoint(&ctx, combined.smt_for_inputs(&Default::default()));
-            let viability = if solver.no_smt() {
-                Ok(())
-            } else {
-                match verified.check_sat(SourceLoc::unknown()) {
-                    SmtResult::Sat => Ok(()),
-                    SmtResult::Unsat => return,
-                    SmtResult::Unknown => Err(ExecError::Z3Unknown),
-                    SmtResult::Error(error) => Err(ExecError::Smt(error)),
-                }
+            let viability = match verified.check_candidate_sat(SourceLoc::unknown()) {
+                None | Some(SmtResult::Sat) => Ok(()),
+                Some(SmtResult::Unsat) => return,
+                Some(SmtResult::Unknown) => Err(ExecError::Z3Unknown),
+                Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
             };
             if let Err(error) = viability {
                 let mut paths = paths.lock().expect("编码收集器锁中毒");
