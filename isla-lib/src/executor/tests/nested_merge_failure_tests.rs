@@ -19,7 +19,11 @@ pub(super) fn strategies() -> impl IntoIterator<Item = Strategy> {
 
 impl Strategy {
     pub(super) fn limits(self) -> ExecutionLimits {
-        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        self.apply(ExecutionLimits::default())
+    }
+
+    pub(super) fn apply(self, mut limits: ExecutionLimits) -> ExecutionLimits {
+        limits.path_merging = true;
         if let Self::Flat { ordered_events } = self {
             limits.merge_strategy = crate::config::MergeStrategy::Flat;
             limits.ordered_events = ordered_events;

@@ -33,6 +33,7 @@ fn segment_paths(
         &|_, _, result, _, mut solver, output| match result {
             Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
                 SmtResult::Sat => output.lock().unwrap().push(Path {
+                    exception: frame.get_exception().map(|(value, _)| value.clone()),
                     records: frame.region_merge_records().to_vec(),
                     value,
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),

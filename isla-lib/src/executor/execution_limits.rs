@@ -32,6 +32,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::config::{
     ExecutionLimitsConfig, LimitBehaviorConfig, MergeMode, MergePolicySelectorConfig, PathMergeRegionConfig,
@@ -123,6 +124,9 @@ pub struct ExecutionLimits {
     pub merge_strategy: crate::config::MergeStrategy,
     pub ordered_events: bool,
     pub max_region_fragments: Option<usize>,
+    /// 已选定的 Sail 异常构造子，在设置 have_exception 时过滤。
+    pub filter_model_exceptions: Arc<[String]>,
+    pub filter_match_failures: bool,
     /// 普通区域共享，按轮折叠循环逐轮续配；None 表示关闭步数预算。
     pub region_step_budget: Option<usize>,
     pub merge_poison_slots: bool,
@@ -156,6 +160,8 @@ impl Default for ExecutionLimits {
             merge_strategy: Default::default(),
             ordered_events: false,
             max_region_fragments: None,
+            filter_model_exceptions: Arc::from([]),
+            filter_match_failures: false,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
             merge_poison_slots: false,
             region_global_state: false,
@@ -267,9 +273,14 @@ impl ExecutionLimits {
     /// 将配置 DTO 覆盖到运行时策略，并在这里一次性解析配置中的源码 region。
     pub fn with_config(mut self, config: &ExecutionLimitsConfig, symtab: &Symtab) -> Self {
         if config.enabled == Some(false) {
-            return ExecutionLimits::default();
+            return ExecutionLimits {
+                filter_match_failures: config.filter_match_failures,
+                ..ExecutionLimits::default()
+            };
         }
 
+        self.filter_model_exceptions = config.filter_model_exceptions.clone().into();
+        self.filter_match_failures = config.filter_match_failures;
         if let Some(value) = config.max_forks_per_branch {
             self = self.with_max_forks_per_branch(value);
         }
@@ -481,6 +492,8 @@ impl ExecutionLimits {
             || !self.region_fork_limits.is_empty()
             || !self.merge_policy.is_empty()
             || self.path_merging
+            || !self.filter_model_exceptions.is_empty()
+            || self.filter_match_failures
             || self.merge_enumeration.enabled
     }
 }

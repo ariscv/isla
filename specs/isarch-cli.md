@@ -31,7 +31,7 @@ isarch 使用实际 IR 检查区域规则。旧 TOML 的 `ir_sha256` 仍可解�
 
 ## 过滤模型异常终态
 
-`solve-state` 与 `fuzz` 可按 Sail 异常构造子名过滤终态。默认集合为空，行为保持原样。TOML 可放在基础配置或 `--execution-limits-config` 指定的文件中：
+`solve-state` 与 `fuzz` 可按 Sail 异常构造子名在抛出时结束路径。默认集合为空，行为保持原样。TOML 可放在基础配置或 `--execution-limits-config` 指定的文件中：
 
 ```toml
 [execution_limits]
@@ -49,11 +49,19 @@ isarch -A model.ir -C model.toml \
 
 出现任意 `--filter-model-exception` 时，CLI 集合整体覆盖 TOML 集合。名称按解码后的完整构造子名精确匹配；不依据模型名、源码位置或消息关键词过滤。`Error_not_implemented` 只有显式列入集合才会被过滤。没有环境变量入口。
 
-过滤发生在完成终态收集处，早于见证求解、DAG 保存与样本检查。旧缓存读回后按同一策略重判，再交给 DAG 导出、corpus 初始化及 judge；缓存来源记录保持原样，不用文件或二进制哈希决定过滤。源缓存中已经剪掉的路径无法通过关闭开关恢复，需要重新探索。
+Sail IR 设置 `have_exception = true` 时执行过滤。普通执行立即结束该路径，区域推演沿用死臂事务，撤销该臂的效应并排除它的到达守卫。配置中的异常在任何捕获或返回之前结束路径。区域只有在静态确认终止调用会到达已过滤的 throw 时才放行该调用。
 
-summary 中 `filtered-model-exception-paths` 记录总数，`filtered-model-exception-sites` 按“构造子＋完整载荷消息”记录次数；原消息里的 `file:line` 保留。stderr 的 `[MODEL_EXCEPTION_FILTER]` 输出同一统计。计数表示实际到达并被过滤的终态，不另做 SAT 查询或对合并守卫类计数。启用过滤后的 `finished` 只针对保留的终态域，不表示模型内部异常不存在。
+`[MODEL_EXCEPTION_THROW_FILTER]` 记录现场丢弃的普通路径与推演臂。开启 `--merge-diagnostics summary` 可在诊断快照读到这两个计数，`detail` 还会逐次记录构造子、载荷、throw 与直接调用者的 IR 和 Sail 位置。推演计数包含后来被外层回滚的尝试，普通执行再次到达时另计。
+
+终态收集和旧缓存读回继续按同一个构造子规则处理已有的异常终态。`[MODEL_EXCEPTION_FILTER]` 与摘要的 `filtered-model-exception-paths`、`filtered-model-exception-sites` 保留这部分终态的次数和载荷消息。旧缓存只有原探索实际保存的路径，需重新探索才能应用抛出时策略或恢复已剪路径。
 
 执行错误、超时、未知 Poison、panic 保留原有失败处理；`AssertionFailure` 仍由原有断言逻辑计数。fuzz 仍要求至少一个保留终态，外部 corpus 仍须完整通过认证；若旧 corpus 包含已排除的异常输入，应从保留路径重新生成。
+
+## 过滤 Sail match 失败出口
+
+`[execution_limits].filter_match_failures = true` 可在 Sail IR 的 `exit match` 处结束该路径。缺省关闭，命令行 `--filter-match-failures` 可直接开启。此开关独立于模型异常列表，普通 `exit` 和断言按各自的 IR 类型处理。
+
+区域沿用死臂事务。stderr 的 `[MATCH_FAILURE_FILTER]` 记录现场丢弃的普通路径和推演臂。`--merge-diagnostics summary` 输出计数快照，`detail` 逐次记录 IR 指令位置、Sail 源码位置及直接调用者。
 
 ## 枚举符号前态
 
