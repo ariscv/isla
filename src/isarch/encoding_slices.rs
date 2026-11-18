@@ -71,7 +71,7 @@ const IDX_SEG_LAYOUT: &[EncodingField] = &[
 
 /// 内置维度表：clause（归一名）→ 载荷元组语义布局。条目按位置与 IR
 /// union 载荷结构体字段序一一对应，展开前用 [`validate_layout_against_ir`]
-/// 逐位核对类型，IR 漂移（重生成/重绑 workaround）即硬失败，不静默产出
+/// 逐位核对类型，重生成 IR 后如有类型变化则报错，不静默产出
 /// 错位编码。
 pub fn clause_layout(clause: &str) -> Option<&'static [EncodingField]> {
     match normalize_clause_name(clause).as_str() {

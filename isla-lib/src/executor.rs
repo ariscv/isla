@@ -2727,7 +2727,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     {
                                         branch_decision(frame, task_state, SpeculativeRejectReason::Interrupt)?;
                                         let cond = solver.define_const(equal, *info);
-                                        symbolic_length::fork_retry_operand(
+                                        if !symbolic_length::fork_retry_operand(
                                             cond,
                                             smtlib::Exp::Var(cond),
                                             smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
@@ -2740,7 +2740,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                             frame,
                                             task_state,
                                             solver,
-                                        )?;
+                                        )? {
+                                            return Ok(Run::Dead);
+                                        }
                                         continue 'main_loop;
                                     }
                                     break;
@@ -2761,7 +2763,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 {
                                     branch_decision(frame, task_state, SpeculativeRejectReason::ZeroInstruction)?;
                                     let cond = solver.define_const(zero, *info);
-                                    symbolic_length::fork_retry_operand(
+                                    if !symbolic_length::fork_retry_operand(
                                         cond,
                                         smtlib::Exp::Var(cond),
                                         smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
@@ -2774,7 +2776,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         frame,
                                         task_state,
                                         solver,
-                                    )?;
+                                    )? {
+                                        return Ok(Run::Dead);
+                                    }
                                 }
                             }
                         }
@@ -9196,24 +9200,30 @@ mod tests {
                 } else {
                     Exp::Id(data)
                 };
-                let results = run_all_with_bindings(
-                    vec![
-                        Instr::Decl(data, Ty::Bits(1), info()),
-                        Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bool)), info()),
-                        Instr::Call(Loc::Id(vector), false, op, vec![arg], info()),
-                        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
-                        Instr::End,
-                    ],
-                    ExecutionLimits::default().with_max_path_depth(1),
-                    empty_shared_state(),
-                    RegisterBindings::new(),
-                    HashMap::default(),
+                let frame = make_frame(vec![
+                    Instr::Decl(data, Ty::Bits(1), info()),
+                    Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bool)), info()),
+                    Instr::Call(Loc::Id(vector), false, op, vec![arg], info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                    Instr::End,
+                ]);
+                let state = TaskState::new()
+                    .with_execution_limits(ExecutionLimits::default().with_max_path_depth(1))
+                    .with_zero_announce_exit(op == INSTR_ANNOUNCE);
+                let count = AtomicUsize::new(0);
+                start_single(
+                    frame.task(TaskId::fresh(), &state),
+                    &empty_shared_state(),
+                    &count,
+                    &|_, _, result, _, _, count| {
+                        assert!(
+                            matches!(result, Ok((Run::Finished(_) | Run::Exit, _))),
+                            "内部重试不能重复计入 Call 深度"
+                        );
+                        count.fetch_add(1, Ordering::Relaxed);
+                    },
                 );
-                assert_eq!(results.len(), 2);
-                assert!(
-                    results.iter().all(|r| matches!(r, Ok(Run::Finished(_) | Run::Exit))),
-                    "内部重试不能重复计入 Call 深度"
-                );
+                assert_eq!(count.load(Ordering::Relaxed), 2);
             }
         }
 
@@ -9389,11 +9399,11 @@ mod tests {
 
         #[test]
         fn zero_instruction_announce() {
-            for enabled in [false, true] {
-                let branch = test_name(310);
-                let data = test_name(311);
-                let results = run_all_with_bindings(
-                    vec![
+            for merge in [false, true] {
+                for sentinel in [None, Some(true)] {
+                    let branch = test_name(310);
+                    let data = test_name(311);
+                    let frame = make_frame(vec![
                         Instr::Decl(branch, Ty::Bool, info()),
                         Instr::Decl(data, Ty::Bits(8), info()),
                         Instr::Jump(Exp::Id(branch), 5, info()),
@@ -9402,17 +9412,32 @@ mod tests {
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
                         Instr::Call(Loc::Id(RETURN), false, INSTR_ANNOUNCE, vec![Exp::Id(data)], info()),
                         Instr::End,
-                    ],
-                    ExecutionLimits::default().with_path_merging(enabled),
-                    empty_shared_state(),
-                    RegisterBindings::new(),
-                    HashMap::default(),
-                );
-                let exits = results.iter().filter(|r| matches!(r, Ok(Run::Exit))).count();
-                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
-                eprintln!("合并={enabled}，Exit={exits}，Finished={finished}");
-                assert_eq!(exits, 1, "必须保留零指令的停止路径");
-                assert_eq!(finished, 1, "必须保留非零指令的继续路径");
+                    ]);
+                    let mut state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
+                    if let Some(sentinel) = sentinel {
+                        state = state.with_zero_announce_exit(sentinel);
+                    }
+                    let (mut exits, mut finished) = (0, 0);
+                    let results = std::sync::Mutex::new(Vec::new());
+                    start_single(
+                        frame.task(TaskId::fresh(), &state),
+                        &empty_shared_state(),
+                        &results,
+                        &|_, _, result, _, _, results| {
+                            results.lock().unwrap().push(result.map(|(run, _)| run).map_err(|(error, _)| error));
+                        },
+                    );
+                    for result in results.into_inner().unwrap() {
+                        match result {
+                            Ok(Run::Exit) => exits += 1,
+                            Ok(Run::Finished(_)) => finished += 1,
+                            _ => panic!("指令公告结果异常"),
+                        }
+                    }
+                    assert_eq!(exits, usize::from(sentinel == Some(true)));
+                    assert_eq!(finished, if sentinel == Some(true) || merge { 1 } else { 2 });
+                }
             }
         }
 
@@ -13392,13 +13417,16 @@ fn zcaller(za, zb) {
                 if reason == AnnouncePc {
                     state = state.with_pc_limit(reg, 1);
                 }
+                if reason == ZeroInstruction {
+                    state = state.with_zero_announce_exit(true);
+                }
                 if reason == Interrupt {
                     state.add_interrupt(TaskInterrupt::new(1, reg, B64::new(1, 2), HashMap::new()));
                 }
                 if matches!(reason, LimitSampling | LimitTruncation) {
                     let mut limits = ExecutionLimits::default().with_max_path_depth(0);
                     limits.on_limit_reached =
-                        if reason == LimitSampling { LimitBehavior::Concretize } else { LimitBehavior::Truncate };
+                        Some(if reason == LimitSampling { LimitBehavior::Concretize } else { LimitBehavior::Truncate });
                     state = state.with_execution_limits(limits);
                 }
                 state.speculation_stats = SpeculationStats::new(true);
@@ -13484,8 +13512,7 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
-                    )
-                    .map(|()| true),
+                    ),
                     _ => panic!("测试位置未覆盖"),
                 };
                 assert_rejected(
@@ -13549,7 +13576,7 @@ fn zcaller(za, zb) {
                 } else {
                     ExecutionLimits::default().with_max_backjumps_per_loop(0)
                 };
-                limits.on_limit_reached = LimitBehavior::Concretize;
+                limits.on_limit_reached = Some(LimitBehavior::Concretize);
                 let state = TaskState::new().with_execution_limits(limits);
                 let instr = if call {
                     Instr::Call(Loc::Id(RETURN), false, INTERNAL_VECTOR_INIT, vec![Exp::I64(1)], info())
@@ -13914,7 +13941,7 @@ fn zcaller(za, zb) {
     }
 
     struct ForkCountCaptureSink<'a> {
-        child_fork_counts: &'a std::sync::Mutex<Vec<u32>>,
+        child_fork_counts: &'a std::sync::Mutex<Vec<u64>>,
     }
 
     impl<'a, 'ir, 'task> ForkSink<'ir, 'task, B64> for ForkCountCaptureSink<'a> {
@@ -15087,7 +15114,7 @@ fn zmemreadfork(zu) {
         instrs
     }
 
-    fn run_worker_invariant_limit_program(num_threads: usize) -> Vec<(String, u32)> {
+    fn run_worker_invariant_limit_program(num_threads: usize) -> Vec<(String, u64)> {
         let shared_state = empty_shared_state();
         let instrs: &'static [Instr<Name, B64>] = Box::leak(worker_invariant_limit_program().into_boxed_slice());
         let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Bool));
@@ -15096,7 +15123,7 @@ fn zmemreadfork(zu) {
             ExecutionLimits::default().with_max_forks_per_branch(1).with_limit_behavior(LimitBehavior::Truncate),
         );
         let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
-        let collected: Arc<std::sync::Mutex<Vec<(String, u32)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected: Arc<std::sync::Mutex<Vec<(String, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         start_multi(
             num_threads,
@@ -15144,7 +15171,7 @@ fn zmemreadfork(zu) {
         instrs
     }
 
-    fn run_worker_invariant_sampling_program(num_threads: usize) -> Vec<(i64, u32)> {
+    fn run_worker_invariant_sampling_program(num_threads: usize) -> Vec<(i64, u64)> {
         let shared_state = empty_shared_state();
         let instrs: &'static [Instr<Name, B64>] = Box::leak(worker_invariant_sampling_program().into_boxed_slice());
         let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::I64));
@@ -15153,7 +15180,7 @@ fn zmemreadfork(zu) {
             ExecutionLimits::default().with_max_forks_per_path(1).with_limit_behavior(LimitBehavior::Concretize),
         );
         let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
-        let collected: Arc<std::sync::Mutex<Vec<(i64, u32)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected: Arc<std::sync::Mutex<Vec<(i64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         start_multi(
             num_threads,

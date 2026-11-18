@@ -555,7 +555,7 @@ timeout --signal=TERM --kill-after=5s 590s \
 
 ## 2026-11-18：execution_limits 配置分组迁移候选
 
-适用本工作树 fe2c9e08 加本轮未提交差异。配置只保留 solver 与 path_merge 两个新增分组；RegionOptions 继续作为进程冻结的运行时快照，已不是TOML配置表。局部规则统一到 path_merge.regions，显式kind区分limit_filter/branch_limit/fork_limit/merge_policy；with_config仍先应用筛选范围并清除预置预算，再应用本配置的覆盖，策略编号仍按merge_policy子序列计数。默认运行时预算8192不变。78份现存workaround及混合规则转换后运行时策略逐项一致；树外实际配置尚未应用补丁，不转署正式主线。[状态](config_layout_20261118/status.md)。
+适用本工作树 fe2c9e08 加本轮未提交差异。配置只保留 solver 与 path_merge 两个新增分组；RegionOptions 继续作为进程冻结的运行时快照，已不是TOML配置表。局部规则统一到 path_merge.regions，显式kind区分limit_filter/branch_limit/fork_limit/merge_policy；with_config仍先应用筛选范围并清除预置预算，再应用本配置的覆盖，策略编号仍按merge_policy子序列计数。默认运行时预算8192不变。 8192 是该冻结版本的缺省值。0c985a9f 经 220d30c1 进入后续版本，省略 `step_budget` 即不限。78份现存workaround及混合规则转换后运行时策略逐项一致；树外实际配置尚未应用补丁，不转署正式主线。[状态](config_layout_20261118/status.md)。
 
 
 ## 2026-11-18：无 SMT 字段合入统一配置布局

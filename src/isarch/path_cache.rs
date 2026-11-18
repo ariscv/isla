@@ -110,7 +110,7 @@ mod tests {
         for encoding in [Encoding::Json, Encoding::Bin] {
             let loaded =
                 load::<B64>(&directory, encoding, true, &shared, "generic", &Stages::new(None, Instant::now()));
-            assert_eq!(loaded.manifest.schema_version, 3);
+            assert_eq!(loaded.manifest.schema_version, CACHE_SCHEMA_VERSION);
             assert_eq!(loaded.manifest.normal_paths, 0);
             assert_eq!(loaded.manifest.model_exception_paths, 1);
             let restored = &loaded.paths[0].path;
@@ -167,7 +167,7 @@ mod tests {
         fs::remove_dir_all(candidate_dir).unwrap();
         let mut manifest: Value =
             serde_json::from_reader(File::open(directory.join("manifest.json")).unwrap()).unwrap();
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             manifest["schema_version"] = json!(version);
             fs::write(directory.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load::<B64>(
@@ -180,6 +180,10 @@ mod tests {
             )))
             .is_err());
         }
+        // 旧 JSON 的窄编号可直接读入；旧二进制的字段宽度不兼容。
+        let loaded =
+            load::<B64>(&directory, Encoding::Json, false, &shared, "generic", &Stages::new(None, Instant::now()));
+        assert_eq!(loaded.manifest.schema_version, 3);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -314,6 +318,12 @@ mod tests {
         )
         .unwrap();
         target.model_bindings.push(("pma_regions.generic.size".into(), symbol));
+        solver.add_event(smt::Event::Fork(
+            u64::from(u32::MAX) + 1,
+            symbol,
+            0,
+            isla_lib::source_loc::SourceLoc::unknown(),
+        ));
         let paths = vec![ResidentPath {
             pure_definitions: vec![],
             signature: 42,
@@ -383,7 +393,7 @@ mod tests {
         changed["schema_version"] = json!(1);
         fs::write(directory.join("manifest.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
         reject();
-        changed["schema_version"] = json!(3);
+        changed["schema_version"] = json!(CACHE_SCHEMA_VERSION);
         changed["paths"][0]["entries"] = json!(2);
         fs::write(directory.join("manifest.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
         reject();
@@ -447,6 +457,8 @@ impl Stages {
         eprintln!("[PATH_CACHE_STAGE] {text}");
     }
 }
+
+const CACHE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Encoding {
@@ -748,7 +760,11 @@ pub fn load<B: BV>(
     let raw: Value =
         serde_json::from_reader(File::open(dir.join("manifest.json")).expect("缓存 manifest 缺失，目录尚未发布"))
             .expect("缓存 manifest 损坏");
-    assert_eq!(raw["schema_version"], json!(3), "缓存 schema 不兼容");
+    assert!(
+        raw["schema_version"] == json!(CACHE_SCHEMA_VERSION)
+            || (raw["schema_version"] == json!(3) && encoding == Encoding::Json && !crosscheck),
+        "缓存 schema 不兼容。schema 3 请显式读取 JSON 且关闭双格式核对，或重新生成缓存"
+    );
     assert_ne!(raw["certification"], json!("uncertified"), "未认证候选缓存必须先离线检查，不能直接用于样例或fuzz");
     let manifest: Manifest<B> = serde_json::from_value(raw).expect("缓存 manifest 字段损坏");
     assert!(!manifest.errors.uncertified, "未认证候选摘要不能作为已检查缓存读入");
@@ -954,7 +970,7 @@ pub fn save<B: BV>(
         && summary["errors"].as_u64() == Some(0)
         && summary["unfinished-paths"].as_u64() == Some(0);
     let manifest = Manifest {
-        schema_version: 3,
+        schema_version: CACHE_SCHEMA_VERSION,
         bit_width: B::MAX_WIDTH,
         batch_id,
         source: serde_json::from_value(source.clone()).expect("缓存来源记录字段无效"),

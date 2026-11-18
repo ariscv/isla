@@ -1,9 +1,9 @@
-//! 有预算的二进制流式写出；预算耗尽是正常停止。
+//! 二进制流式写出，支持可选字节预算和显式停止。
 use super::*;
 
 pub(super) struct BudgetWriter {
     file: File,
-    limit: u64,
+    limit: Option<u64>,
     written: u64,
     buffered: u64,
     pending: BTreeMap<(u64, Option<usize>), Chunk>,
@@ -22,11 +22,11 @@ struct Chunk {
 }
 
 impl BudgetWriter {
-    pub(super) fn open(path: &Path, limit: u64) -> Self {
+    pub(super) fn open(path: &Path, limit: Option<u64>) -> Self {
         let mut file = OpenOptions::new().write(true).create_new(true).open(path).unwrap();
         binary::header_version(&mut file, 2);
         let written = file.stream_position().unwrap();
-        assert!(limit >= written + 112, "预算必须容纳文件头、空汇总和正常结束标记");
+        assert!(limit.is_none_or(|limit| limit >= written + 112), "预算必须容纳文件头、空汇总和正常结束标记");
         Self {
             file,
             limit,
@@ -59,7 +59,7 @@ impl BudgetWriter {
         match self.reason {
             0 => None,
             1 => Some("output_budget"),
-            2 => Some("no_progress"),
+            3 => Some("stop_file"),
             _ => unreachable!(),
         }
     }
@@ -68,10 +68,13 @@ impl BudgetWriter {
         self.reason != 0
     }
 
-    pub(super) fn stop_stalled(&mut self) {
-        if self.reason == 0 {
-            self.reason = 2;
+    pub(super) fn poll_progress(&mut self, stop_file: &Path) {
+        self.flush_pending();
+        if self.reason == 0 && stop_file.exists() {
+            // 原协议的 2 是停滞超时，保留给已有文件。
+            self.reason = 3;
         }
+        eprintln!("[MERGE_ENUMERATION_PROGRESS] {}", self.progress());
     }
 
     pub(super) fn append(&mut self, path: u64, solution: usize, slices: &[String], sample: Value) -> bool {
@@ -112,16 +115,16 @@ impl BudgetWriter {
             binary::encode(&mut header, &chunk.header);
             extra += 40 + header.len() as u64;
         }
-        if self
-            .written
-            .checked_add(self.buffered_bytes())
-            .unwrap()
-            .checked_add(self.reserved())
-            .unwrap()
-            .checked_add(extra)
-            .unwrap()
-            > self.limit
-        {
+        if self.limit.is_some_and(|limit| {
+            self.written
+                .checked_add(self.buffered_bytes())
+                .unwrap()
+                .checked_add(self.reserved())
+                .unwrap()
+                .checked_add(extra)
+                .unwrap()
+                > limit
+        }) {
             self.reason = 1;
             return false;
         }
@@ -215,7 +218,7 @@ impl BudgetWriter {
         }
         self.file.flush().unwrap();
         self.written = self.file.stream_position().unwrap();
-        assert!(self.written <= self.limit);
+        assert!(self.limit.is_none_or(|limit| self.written <= limit));
         self.finished = true;
         let paths: Vec<_> = self
             .seen_paths
@@ -228,12 +231,7 @@ impl BudgetWriter {
                 json!({"path_nonce":path,"path_signature":signature,"combinations":count,"truncated":truncated})
             })
             .collect();
-        let reason = match self.reason {
-            0 => None,
-            1 => Some("output_budget"),
-            2 => Some("no_progress"),
-            _ => unreachable!(),
-        };
+        let reason = self.stop_reason();
         json!({"combinations":self.total,"bytes":self.written,"max_output_bytes":self.limit,
             "truncated":self.reason != 0 || self.paths.values().any(|stats| stats.2) || self.classes.values().any(|stats| stats.1),"reason":reason,"paths":paths})
     }
@@ -253,14 +251,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("f11-budget-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let baseline = root.join("baseline.bin");
-        let mut writer = BudgetWriter::open(&baseline, 1_000_000);
+        let mut writer = BudgetWriter::open(&baseline, None);
         assert!(writer.append(0, 0, &[], sample(0)));
         writer.finish_path(0, false);
         writer.finish();
         let exact = std::fs::metadata(&baseline).unwrap().len();
         for (name, cap, expected) in [("exact", exact, 1), ("short", exact - 1, 0)] {
             let path = root.join(name);
-            let mut writer = BudgetWriter::open(&path, cap);
+            let mut writer = BudgetWriter::open(&path, Some(cap));
             assert_eq!(writer.append(0, 0, &[], sample(0)), expected == 1);
             if expected == 1 {
                 assert!(!writer.append(0, 1, &[], sample(1)));
@@ -280,7 +278,7 @@ mod tests {
     fn budget_单个大类连续写入有界缓冲且并发共享预算() {
         let root = std::env::temp_dir().join(format!("f11-concurrent-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let writer = Mutex::new(BudgetWriter::open(&root.join("samples.bin"), 200_000));
+        let writer = Mutex::new(BudgetWriter::open(&root.join("samples.bin"), Some(200_000)));
         std::thread::scope(|scope| {
             for path in 0..4 {
                 let writer = &writer;
@@ -302,27 +300,30 @@ mod tests {
         assert!(std::fs::metadata(root.join("samples.bin")).unwrap().len() <= 200_000);
         std::fs::remove_dir_all(root).unwrap();
     }
-}
 
-#[cfg(test)]
-mod stop_tests {
-    use super::*;
     #[test]
-    fn budget_无进展停止保存已接受的组合() {
+    fn budget_a1_反复空轮询继续输出且显式停止保存已写样本() {
         let root = std::env::temp_dir().join(format!("f11-stall-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let mut writer = BudgetWriter::open(&root.join("samples.bin"), 10000);
-        assert!(writer.append(
-            0,
-            0,
-            &[],
-            json!({"schema_version":1,"sample_id":0,"path_signature":7,"class_id":0,"truncated":false})
-        ));
-        writer.stop_stalled();
-        assert!(!writer.append(0, 1, &[], json!(null)));
+        let path = root.join("samples.bin");
+        let stop_file = path.with_extension("stop");
+        let mut writer = BudgetWriter::open(&path, None);
+        assert!(writer.append(0, 0, &[], sample(0)));
+        // 直接驱动监控的 60 秒轮询事件，模拟超过一小时没有新增组合。
+        for _ in 0..61 {
+            writer.poll_progress(&stop_file);
+            assert_eq!(writer.stop_reason(), None);
+        }
+        assert!(writer.append(0, 1, &[], sample(1)));
+        std::fs::write(&stop_file, []).unwrap();
+        writer.poll_progress(&stop_file);
+        assert!(!writer.append(0, 2, &[], sample(2)));
         let report = writer.finish();
-        assert_eq!(report["combinations"], 1);
-        assert_eq!(report["reason"], "no_progress");
+        assert_eq!(report["combinations"], 2);
+        assert_eq!(report["reason"], "stop_file");
+        assert_eq!(report["truncated"], true);
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(&bytes[bytes.len() - 8..], &u64::MAX.to_le_bytes());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

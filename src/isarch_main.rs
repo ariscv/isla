@@ -36,7 +36,6 @@
 
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
 use std::process::exit;
 use std::time::Duration;
 
@@ -377,28 +376,6 @@ fn parse_timeout_smt_output(
     Ok(isarch::exec::TimeoutSmtOutput::new(file, stdout, trace))
 }
 
-fn validate_execution_limits_ir(config: &ExecutionLimitsConfig, arch_path: &Path) -> Result<Option<String>, String> {
-    let Some(expected) = config.ir_sha256.as_deref() else {
-        return Ok(None);
-    };
-    let contents =
-        std::fs::read(arch_path).map_err(|error| format!("无法读取 IR {}：{}", arch_path.display(), error))?;
-    let actual = format!("{:x}", Sha256::digest(&contents));
-    if config.strict {
-        config.validate_ir_sha256(&actual).map_err(|error| format!("{}（IR 文件：{}）", error, arch_path.display()))?;
-        Ok(None)
-    } else if expected.eq_ignore_ascii_case(&actual) {
-        Ok(None)
-    } else {
-        Ok(Some(format!(
-            "IR SHA-256 不匹配：期望 {}，实际 {}（IR 文件：{}）；继续执行",
-            expected,
-            actual,
-            arch_path.display()
-        )))
-    }
-}
-
 fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool::TraceOptions, String> {
     let instruction_path = matches.opt_str("itrace");
     let output = matches.opt_str("trace-output");
@@ -446,13 +423,18 @@ fn isla_main() -> i32 {
     opts.optopt("", "slow-query-dump-dir", "返回慢查询的完整SMT及统计目录；默认关闭", "<path>");
     opts.optopt("", "slow-query-threshold", "返回慢查询的耗时阈值；默认20s", "<n[s|m|h]>");
     opts.optopt("", "slow-query-dump-limit", "慢查询最多导出份数；默认5", "<n>");
-    opts.optopt("", "smt-timeout", "单次 Z3 operation 的 soft interrupt 超时时间", "<n[s|m|h]>");
+    let smt_timeout_help = if cfg!(feature = "smt-thread-interrupt") {
+        "单次 Z3 调用的软中断限时，缺省 60 秒。终态专用限时独立生效"
+    } else {
+        "当前构建直接调用 Z3，此选项不生效"
+    };
+    opts.optopt("", "smt-timeout", smt_timeout_help, "<n[s|m|h]>");
     opts.optopt("", "timeout-smt-output", "timeout SMT2 输出目标，逗号分隔：file,stdout,itrace", "<destinations>");
     opts.optopt("", "timeout-smt-dir", "timeout SMT2 文件输出目录", "<path>");
     opts.optopt(
         "",
         "execution-limits-config",
-        "加载独立的执行限制 TOML 配置；Force 合并失败立即以退出码 86 终止",
+        "用独立 TOML 整体替换 -C 的 execution_limits。缺省使用 -C 的设置。Force 合并失败时退出码为 86",
         "<path>",
     );
     opts.optmulti("", "clause", "指定要符号执行的clause名", "<name>");
@@ -504,11 +486,7 @@ fn isla_main() -> i32 {
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
-    opts.optflag(
-        "",
-        "path-merging",
-        "启用自适应区域路径合并；ISLA_MERGE_RECORDS=<路径> 输出 JSON Lines，ISLA_STATS=1 输出规则统计",
-    );
+    opts::add_path_merge_flags(&mut opts);
     opts.optopt("", "itrace", "把完整逐指令轨迹写入文件，可与 ftrace/btrace 组合", "<path>");
     opts.optflag("", "ftrace", "记录函数调用和返回");
     opts.optflag("", "btrace", "输出静态分支清单和实际条件分支轨迹");
@@ -663,10 +641,16 @@ fn isla_main() -> i32 {
         isa_config.execution_limits = Some(config);
     }
 
-    if matches.opt_present("path-merging") {
-        let mut limits = isa_config.execution_limits.take().unwrap_or_default();
-        limits.path_merge.enabled = Some(true);
-        isa_config.execution_limits = Some(limits);
+    match opts::path_merge_cli(&matches) {
+        Ok(Some(enabled)) => {
+            isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merge.enabled =
+                Some(enabled);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
     }
 
     let had_limits = isa_config.execution_limits.is_some();
@@ -704,18 +688,6 @@ fn isla_main() -> i32 {
             return 1;
         }
         limits.path_merge.step_budget = Some(value);
-    }
-
-    let configured_arch_path = arch_path.as_deref().expect("-A/--arch 在解析 execution limits 前必须存在");
-    if let Some(config) = isa_config.execution_limits.as_ref() {
-        match validate_execution_limits_ir(config, configured_arch_path) {
-            Ok(Some(warning)) => eprintln!("警告：{}", warning),
-            Ok(None) => {}
-            Err(error) => {
-                eprintln!("{}", error);
-                return 1;
-            }
-        }
     }
 
     let assertion_mode = AssertionMode::Optimistic;
@@ -766,7 +738,11 @@ fn isla_main() -> i32 {
             eprintln!("{}", error);
             return 1;
         }
-        let limits = isla_lib::executor::ExecutionLimits::default().with_config(config, &shared_state.symtab);
+        let limits = if matches!(subcommand, Subcommand::SolveState { .. }) {
+            isla_lib::executor::ExecutionLimits::for_symbolic_dag(Some(config), &shared_state.symtab)
+        } else {
+            isla_lib::executor::ExecutionLimits::default().with_config(config, &shared_state.symtab)
+        };
         if let Err(error) = isla_lib::executor::validate_force_regions(shared_state, &limits) {
             eprintln!("{}", error);
             return isla_lib::executor::FORCE_MERGE_EXIT_CODE;
@@ -978,7 +954,16 @@ fn isla_main() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn path_merge_cli_supports_explicit_disable() {
+        let mut opts = getopts::Options::new();
+        opts::add_path_merge_flags(&mut opts);
+        assert_eq!(opts::path_merge_cli(&opts.parse(Vec::<String>::new()).unwrap()), Ok(None));
+        assert_eq!(opts::path_merge_cli(&opts.parse(["--path-merging"]).unwrap()), Ok(Some(true)));
+        assert_eq!(opts::path_merge_cli(&opts.parse(["--no-path-merging"]).unwrap()), Ok(Some(false)));
+        assert!(opts::path_merge_cli(&opts.parse(["--path-merging", "--no-path-merging"]).unwrap()).is_err());
+    }
 
     #[test]
     fn fuzz_inherits_solve_state_filters() {
@@ -1085,47 +1070,6 @@ mod tests {
     fn parse_tastic_option() {
         let matches = make_matches(&["--tastic", "qfaufbv", "list-instructions"]);
         assert_eq!(matches.opt_str("tastic").as_deref(), Some("qfaufbv"));
-    }
-
-    #[test]
-    fn strict_execution_limits_rejects_changed_ir() {
-        let path = std::env::temp_dir().join(format!(
-            "isarch-strict-limits-{}-{}.ir",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::write(&path, "changed IR").unwrap();
-        let config = ExecutionLimitsConfig {
-            strict: true,
-            ir_sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
-            ..ExecutionLimitsConfig::default()
-        };
-
-        let error = validate_execution_limits_ir(&config, &path).unwrap_err();
-
-        std::fs::remove_file(&path).unwrap();
-        assert!(error.contains("IR SHA-256 不匹配"));
-    }
-
-    #[test]
-    fn non_strict_execution_limits_warns_changed_ir() {
-        let path = std::env::temp_dir().join(format!(
-            "isarch-warning-limits-{}-{}.ir",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::write(&path, "changed IR").unwrap();
-        let config = ExecutionLimitsConfig {
-            strict: false,
-            ir_sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
-            ..ExecutionLimitsConfig::default()
-        };
-
-        let warning = validate_execution_limits_ir(&config, &path).unwrap().expect("IR 哈希不匹配应当告警");
-
-        std::fs::remove_file(&path).unwrap();
-        assert!(warning.contains("IR SHA-256 不匹配"));
-        assert!(warning.contains("继续执行"));
     }
 
     #[test]

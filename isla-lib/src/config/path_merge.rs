@@ -23,6 +23,8 @@ pub struct SolverConfig {
     pub no_smt_keep_bool_proofs: bool,
     /// 0 表示不限，不限制路径判定。
     pub bool_proof_rlimit: u32,
+    /// isarch 终值重解的单次时限（毫秒）。省略时沿用已有时限。
+    pub model_timeout_ms: Option<std::num::NonZeroU64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -48,6 +50,7 @@ pub struct PathMergeConfig {
     pub strategy: Option<super::MergeStrategy>,
     /// 两种组织者共用。true 要求访问偏序，缺省 false。
     pub ordered_events: Option<bool>,
+    /// 省略时沿用入口缺省值。完整符号 DAG 缺省开启。
     pub enabled: Option<bool>,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
@@ -57,6 +60,8 @@ pub struct PathMergeConfig {
     pub defer_range_proofs: bool,
     /// 构造子解包标签转为出口待证义务；默认关闭。
     pub defer_ctor_checks: bool,
+    /// 只消除已证明不可观察的未初始化槽位；默认关闭。
+    pub merge_poison_slots: bool,
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,

@@ -8,17 +8,17 @@ use serde_json::Value;
 type Program = Vec<Instr<Name, B64>>;
 
 #[derive(Clone, Copy, Debug)]
-enum Strategy {
+pub(super) enum Strategy {
     Recursive,
     Flat { ordered_events: bool },
 }
 
-fn strategies() -> impl IntoIterator<Item = Strategy> {
+pub(super) fn strategies() -> impl IntoIterator<Item = Strategy> {
     [Strategy::Recursive, Strategy::Flat { ordered_events: false }, Strategy::Flat { ordered_events: true }]
 }
 
 impl Strategy {
-    fn limits(self) -> ExecutionLimits {
+    pub(super) fn limits(self) -> ExecutionLimits {
         let mut limits = ExecutionLimits::default().with_path_merging(true);
         if let Self::Flat { ordered_events } = self {
             limits.merge_strategy = crate::config::MergeStrategy::Flat;

@@ -42,7 +42,7 @@ pub(super) fn last_solver_query() -> (usize, usize) {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum Z3TimeoutError {
     #[cfg_attr(not(feature = "smt-thread-interrupt"), allow(dead_code))]
-    Interrupted,
+    Interrupted(Duration),
 }
 
 #[cfg(feature = "smt-thread-interrupt")]
@@ -68,9 +68,16 @@ impl Z3InterruptHandle {
 
 static OPERATION_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 
-/// 已配置的单次 SMT operation deadline；未配置 `--smt-timeout` 时为 `None`。
+/// 单次 SMT 调用的实际限时。直接调用构建无单次限时。
 pub fn configured_operation_timeout() -> Option<Duration> {
-    OPERATION_TIMEOUT.get().copied()
+    #[cfg(feature = "smt-thread-interrupt")]
+    {
+        Some(operation_timeout())
+    }
+    #[cfg(not(feature = "smt-thread-interrupt"))]
+    {
+        None
+    }
 }
 
 // 每条路径的 SMT 调用统计。一个 worker 线程同一时刻只推进一条路径；调度器在 fork 时
@@ -236,21 +243,16 @@ pub(super) fn timeout_error(
     operation: SmtOperation,
     source_loc: SourceLoc,
     operation_wall: Duration,
+    limit: Duration,
     dump: Arc<TimeoutSmtDump>,
 ) -> SmtError {
     #[cfg(feature = "smt-thread-interrupt")]
     {
-        SmtError::Timeout(Arc::new(SmtTimeout {
-            source_loc,
-            operation,
-            limit: operation_timeout(),
-            operation_wall,
-            dump,
-        }))
+        SmtError::Timeout(Arc::new(SmtTimeout { source_loc, operation, limit, operation_wall, dump }))
     }
     #[cfg(not(feature = "smt-thread-interrupt"))]
     {
-        drop((operation, source_loc, operation_wall, dump));
+        drop((operation, source_loc, operation_wall, limit, dump));
         panic!("local Z3 wrapper reported an interrupt")
     }
 }
@@ -314,7 +316,7 @@ fn thread_interrupt_call_with_timeout<T>(
         result
     });
     if call_state.load(std::sync::atomic::Ordering::Acquire) == INTERRUPTING {
-        Err(Z3TimeoutError::Interrupted)
+        Err(Z3TimeoutError::Interrupted(duration))
     } else {
         Ok(result)
     }
@@ -376,7 +378,7 @@ pub(super) fn timeout_Z3_solver_check(
 }
 
 /// 带独立 deadline 的 `Z3_solver_check`：与全局 `--smt-timeout` 相互独立，
-/// 供需要单独预算的查询（如 solve-state 的路径终值物化）使用。未启用
+/// 供需要单独预算的查询（如 solve-state 的路径返回值具体化）使用。未启用
 /// `smt-thread-interrupt` 时无法中断，deadline 不生效。
 #[allow(non_snake_case)]
 pub(super) fn timeout_Z3_solver_check_deadline(
@@ -474,10 +476,12 @@ mod direct_tests {
     #[test]
     #[should_panic(expected = "local Z3 wrapper reported an interrupt")]
     fn direct_timeout_error_panics() {
+        assert_eq!(configured_operation_timeout(), None);
         timeout_error(
             SmtOperation::CheckSat,
             SourceLoc::unknown(),
             Duration::from_secs(1),
+            Duration::from_millis(100),
             Arc::new(TimeoutSmtDump::new(Arc::new(TestDump))),
         );
     }
@@ -496,7 +500,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(40));
             7
         });
-        assert_eq!(result, Err(Z3TimeoutError::Interrupted));
+        assert_eq!(result, Err(Z3TimeoutError::Interrupted(Duration::from_millis(10))));
         assert!(started.elapsed() >= Duration::from_millis(40));
     }
 }
@@ -512,7 +516,7 @@ mod smtperf_tests {
     #[test]
     fn smtperf_wrapper_only_records_completed_solve_times() {
         let completed = Ok(Z3_L_TRUE);
-        let timed_out: Result<Z3_lbool, Z3TimeoutError> = Err(Z3TimeoutError::Interrupted);
+        let timed_out: Result<Z3_lbool, Z3TimeoutError> = Err(Z3TimeoutError::Interrupted(Duration::from_millis(10)));
 
         record_solve_result(SmtOperation::CheckSat, Duration::from_millis(7), &completed);
         record_solve_result(SmtOperation::CheckSatAssuming, Duration::from_secs(10), &timed_out);

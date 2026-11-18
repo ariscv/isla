@@ -152,7 +152,7 @@ def value(source):
 
 
 def binary_summary(source):
-    """从固定文件尾定位预算会话汇总，不扫描或展开组合。"""
+    """从固定文件尾定位流式会话汇总，无需展开组合。"""
     source.seek(-40,2)
     tail=struct.unpack('<QQQQQ',exact(source,40))
     assert tail[:3] == (0,0,0) and tail[4] == (1<<64)-1
@@ -161,7 +161,8 @@ def binary_summary(source):
     signature,cls,count,size,flags=struct.unpack('<QQQQQ',exact(source,40))
     assert (signature,cls,count,flags) == (0,0,0,2)
     reason,total,path_count,class_count=struct.unpack('<QQQQ',exact(source,32))
-    assert reason in (0,1,2) and size == 32+32*(path_count+class_count)
+    reasons={0:None,1:"output_budget",2:"no_progress",3:"stop_file"}
+    assert reason in reasons and size == 32+32*(path_count+class_count)
     paths={}
     classes={}
     for index in range(path_count):
@@ -176,7 +177,7 @@ def binary_summary(source):
     assert sum(c['combinations'] for c in classes.values()) == total
     assert source.tell() == offset+40+size
     assert struct.unpack('<QQQQQ',exact(source,40)) == tail and source.read(1) == b''
-    return dict(reason={0:None,1:'output_budget',2:'no_progress'}[reason], combinations=total,
+    return dict(reason=reasons[reason], combinations=total,
                 paths=paths,classes=classes,offset=offset)
 
 

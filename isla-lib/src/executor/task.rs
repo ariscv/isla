@@ -133,7 +133,7 @@ impl<B> TaskState<B> {
             reset_registers: HashMap::new(),
             pc_limit: None,
             execution_limits: None,
-            zero_announce_exit: true,
+            zero_announce_exit: false,
             interrupts: Vec::new(),
         }
     }
