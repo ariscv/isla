@@ -2,7 +2,7 @@
 
 `isarch fuzz` 支持路径引导 campaign、corpus 认证、只判定与历史变异记录回放，支持确定性并行生成与 `--executor difftest` 三方闭环，并导出路径 DAG。默认用类内字段桶和不一致签名驱动 corpus 增长与调度，`--fuzz-feedback none` 切回轮转基线；公式与评估见 [第 5 步](agents/path_merge_call_support/fuzz-step5.md)。第 4 步的接口、验收与复现见 [闭环记录](agents/path_merge_call_support/fuzz-step4.md)。用法见 [命令说明](specs/isarch-cli.md#fuzz)，回放见 [第 2 步](agents/path_merge_call_support/fuzz-step2.md)，路径引导实验见 [第 3 步](agents/path_merge_call_support/fuzz-step3.md)。
 
-`--path-cache-read` 跳过探索。省略 `--fuzz-corpus` 时，从缓存按 `class_cap=1` 生成初始 corpus 并完整认证后进入 fuzz loop；提供它时直接复用并认证已有 corpus。用法与缓存版本见 [命令说明](specs/isarch-cli.md#fuzz)。
+`--path-cache-read` 跳过探索。省略 `--fuzz-corpus` 时，从缓存按 `class_cap=1` 为每个成功遍历的守卫类生成一份初始 corpus entry，并完整认证后进入 fuzz loop；提供它时直接复用并认证已有 corpus。用法与缓存版本见 [命令说明](specs/isarch-cli.md#fuzz)。
 
 历史版本的可选 `--fuzz-avoid-known-ppn-overflow`（默认关闭）使分页 A/B 优先清零活动叶 PTE[53:46]；目标类要求超宽时保留并计数，编码空间对照不受影响。该选项现已废弃，当前 CLI 明确拒绝使用。旧版本的设计和对比保留在 [第 8 步](agents/path_merge_call_support/fuzz-step8.md)。
 
@@ -137,7 +137,9 @@ and a guide to its support for virtual memory and address translation
 
 ## 模型异常终态过滤
 
-`[execution_limits].filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]` 可排除指定 Sail 异常终态；默认空集合。CLI 使用重复的 `--filter-model-exception <构造子名>`，并整体覆盖 TOML 集合。summary 与 `[MODEL_EXCEPTION_FILTER]` 保留消息及次数，现场执行和旧缓存采用同一规则；见 [完整用法与边界](specs/isarch-cli.md#过滤模型异常终态)。
+`[execution_limits].filter_model_exceptions = ["Error_internal_error", "Error_reserved_behavior"]` 会在指定 Sail 异常抛出时结束该路径，默认集合为空。CLI 使用重复的 `--filter-model-exception <构造子名>` 并整体覆盖 TOML 集合。现场丢弃计数见 `[MODEL_EXCEPTION_THROW_FILTER]`，位置见 `--merge-diagnostics detail`。旧缓存仍按构造子过滤异常终态。见 [完整用法与边界](specs/isarch-cli.md#过滤模型异常终态)。
+
+配置 `filter_match_failures = true` 或加 `--filter-match-failures` 可在 Sail IR 的 `exit match` 处丢弃路径。缺省关闭。
 
 ## solve-state 执行统计
 
@@ -457,9 +459,8 @@ pin_value = "0x0000000a00000000"
 通用符号探索使用 `solve-state --clause=LOAD` 或 `--clause=STORE`，不传 `--instruction-bits`，
 也不固定通用寄存器的 `--prestate`。指令的寄存器索引、立即数等字段由原生接口建立符号变量；
 `setup_pre_state` 已将 x1–x31 的初值全量符号化，无需额外声明某个通用寄存器。
-探索配置优先启用
-`[execution_limits.path_merge] enabled = true`，重复分叉预算沿用区域分支限制。
-区域合并步数默认关闭（-1）；可设置 `[execution_limits.path_merge] step_budget = -1` 或 `--region-step-budget=-1` 关闭，CLI覆盖TOML。合法值为正整数或-1，详见 [CLI规范](specs/isarch-cli.md)。
+`solve-state`（含 DAG 导出）和 `isla-execute-function` 缺省尝试自适应区域合并，并启用循环区域分析。用 `[execution_limits.path_merge] enabled = false` 或 `--no-path-merging` 显式关闭。通用探索省略分支、路径、回跳、比例及区域额度即不限。加载 workaround 时，其中显式设置的额度仍可生效。显式有限预算触发的截断或具体化会缩小探索范围。
+区域合并步数、嵌套深度、片段数均缺省不限，`-1` 与省略等价。步数也可由 `--region-step-budget` 覆盖 TOML。[CLI 规范](specs/isarch-cli.md)
 慢 SMT 查询可用 `--slow-query-dump-dir queries --slow-query-threshold 20s --slow-query-dump-limit 5` 导出完整公式与统计，默认关闭；用法和边界见 [CLI规范](specs/isarch-cli.md#慢-smt-查询导出)。
 当符号下标引起算子重试拆分时，沿用求解器原生无偏的模型候选顺序，严禁强加任何确定性重试偏好；跨进程由判定阶段的标准语义识别。完整语法及边界见 [CLI 规范](specs/isarch-cli.md)。
 
@@ -521,7 +522,8 @@ RV64 不存在的 `ldu` = `LOAD(is_unsigned=true, width=8)`，生成 16 条、
 求值会放行；而 `zext_decode`（encdec 映射的 backwards 方向，守卫在
 此方向正常生效）对同一编码正确译出 ILLEGAL。
 
-因此物化门对 asm/encdec 之外加**第三查——译码回环**：`zencdec_forwards`
+旧 `gen` 的用例具体化阶段在 asm/encdec 之外增加译码回环。该检查只影响旧 `gen`，路径缓存和投影样本沿用先前保存的原路径约束。
+`zencdec_forwards`
 产出的编码经 `zext_decode`（16 位走 `zext_decode_compressed`）译回，
 构造子与原指令一致才落盘；不一致（编码被守卫拒绝）丢弃该路径并计数
 `encdec-guard-reject`（JSON 顶层 `skip` 字段 + SYM_EXEC 日志，零拒绝时
@@ -530,7 +532,7 @@ RV64 不存在的 `ldu` = `LOAD(is_unsigned=true, width=8)`，生成 16 条、
 
 环境变量 `ISLA_RISCV_ALLOW_RESERVED_ENCODINGS`：
 
-* `0` 或未设（默认）：过滤启用——非法编码变体（ldu 类）不进产物；
+* `0` 或未设（默认）：过滤启用，非法编码变体（ldu 类）不进旧 `gen`。
 * `1`：跳过回环校验，保留编码照常产出——用于故意测试保留编码的场景
   （如非法编码的译码/trap 行为对照）；
 * 其他值硬失败（panic，与 `ISLA_RISCV_MEMORY_MODEL` 同风格）。
@@ -602,11 +604,10 @@ RAM 区域（如 difftest 重放兜底），两种显式方式二选一：
 * 若路径最后一次 `check_sat` 已返回 Sat 且其后没有新增断言，直接复用
   solver 中仍持有的那次模型，跳过重复求解（数组模型的读写约束是在最后
   一次 check 之后直接 Assert 的，重解代价可能远高于执行期查询）。
-* 否则按时间盒重解：环境变量 `ISLA_RISCV_MODEL_TIMEOUT_MS`（毫秒，默认
-  30000）。超时路径不进入 `gen`，在 `diagnostics` 记录不完整路径，
-  `summary.status` 为 `partial`。
-  真正中断 Z3 需要 `smt-thread-interrupt` feature（`make solve-%` 默认
-  启用）；未启用该 feature 的构建无法中断，行为退化为普通 `check_sat`。
+* 需要重解时，沿用路径剩余时间和 `--smt-timeout`。可在 `[execution_limits.solver]`
+  显式设置正整数 `model_timeout_ms`，取适用时限中的最小值。超时在 `diagnostics`
+  记录不完整路径，`summary.status` 为 `partial`。Z3 查询中断需要
+  `smt-thread-interrupt` feature（`make solve-%` 默认启用）。
 
 历史问题（W6/W7 已定位，W8 落定分层，W9 移除白名单机制）：配置显式
 `symbolic` 区域（如 `riscv64_difftest_mem.toml` 的 `sym_ram`）且无条件
@@ -786,10 +787,12 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 
 ### 分开探索与类枚举（全符号实验入口）
 
-`--path-cache-write <新目录> --path-cache-only solve-state --clause=<clause>` 只保存完成路径的符号 DAG、merge 守卫及执行摘要，不生成具体样例或枚举类。可选快档事实全部记为未证明，完整 judge 仍使用原求解。用 `--path-cache-read` 配合样本输出或 fuzz 入口可在后续独立枚举，`class_cap` 仅控制每类代表数量。缓存仍受原错误摘要约束，partial 不能当完整探索。异常和未完成路径保留原摘要，不被改写为正常后态。
+`--path-cache-write <新目录> --path-cache-only solve-state --clause=<clause>` 只保存完成路径的符号 DAG、merge 守卫及执行摘要，不生成具体样例或枚举类。可选快档事实全部记为未证明，完整 judge 仍使用原求解。用 `--path-cache-read` 配合样本输出或 fuzz 入口可在后续独立枚举。启用投影枚举后，`class_cap` 与 `path_cap` 缺省均不限，`sample_stride` 缺省为 1。缓存仍受原错误摘要约束，partial 不能当完整探索。异常和未完成路径保留原摘要，不被改写为正常后态。
+
+单 binary 后端且 `sample_stride=1` 时使用 schema 2 流式落盘，`max_output_bytes` 缺省不限。显式字节限额和同名 `.stop` 文件的停止原因写入汇总。预测缺省精确计数，设置 `predict_probes` 后可使用近似探测。配置及代表输出见 [投影枚举与样本输出](specs/isarch-cli.md#投影枚举与样本输出)。
 
 
-路径缓存现使用 schema 3，旧 schema 1/2 明确拒绝读取。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。
+路径缓存使用 schema 4，fork ID 为 64 位。schema 3 的 JSON 可用 `--path-cache-encoding=json` 读取，须省略 `--path-cache-crosscheck`。schema 3 的二进制及 schema 1/2 需要重新生成。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。
 
 ### 分段合并的可选配置
 
@@ -805,10 +808,11 @@ witness_eval = true
 
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
 
-区域嵌套默认不限；`[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16` 可设正整数上限，`-1` 关闭。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布和最大深度；保存点不再另设硬编码深度上限。
-`[execution_limits.path_merge] max_fragments` 缺省或 `-1` 不限；正整数限制每次根区域尝试因局部汇合失败保留的片段预算，超限计为 `fragment_limit`，保留普通分叉。
+区域嵌套和片段数均缺省不限，显式 `-1` 与省略等价。有限深度对照可用 `[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16`。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布与最大深度。保存点深度不限，调用深度另计。正整数 `max_fragments` 限制每次根区域尝试因局部汇合失败保留的片段，超限计为 `fragment_limit`，后续可走普通分叉。
 
 `defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。
+
+`[execution_limits.path_merge]` 的 `merge_poison_slots` 默认关闭，可用 `--merge-poison-slots=true/false` 覆盖。开启后，已证明不活动且后续通过标签检查读取的联合载荷可保留另一臂的有效值。普通局部槽仅在原内容于读取前必被覆盖、重建或随帧结束时跳过合并。
 ### 无 SMT 候选 DAG 实验
 
 以下开关默认关闭，供定位求解成本使用。它们不修改 Sail 模型或区域步数预算。
@@ -834,3 +838,5 @@ no_smt = true
 `[execution_limits.path_merge]` 接受 `strategy = "recursive" | "flat"` 和 `ordered_events = false | true`；默认 recursive / false。CLI `--merge-strategy`、`--ordered-events` 只覆盖显式字段。旧 `[execution_limits] merge_strategy/ordered_events` 和旧 region_options 位置报错，不保留兼容。
 
 flat 在单个根事务内调度片段，循环按调用实例、PC、轮次折叠退出前沿。两事件模式分别保持访问偏序或规范访问足迹；实际 SMT 定义和访存事件顺序仍需保留。不能收敛的循环形状以 flat_loop_shape 拒绝；区域步数耗尽以 step_budget 拒绝，不静默截断输入域。实验候选不改变 recursive 默认值，有限验证不代表完整模型等价。
+
+`--bv-rewrite` 启用三条通用等价改写，默认关闭。可用 `--bv-rewrite=mask-and,sign-bound` 单独选规则，或用 `--bv-rewrite=false` 覆盖 TOML。TOML 在 `[execution_limits.solver]` 下接受 `bv_rewrite = true`、`false` 或规则名列表；规则名为 `data-ite-eq`、`mask-and`、`sign-bound`。加 `--memory-stats` 可查看进程累计命中次数。

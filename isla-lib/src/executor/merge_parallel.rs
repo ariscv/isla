@@ -58,19 +58,10 @@ pub(super) fn enumerate<B: BV>(
     assert_eq!(solver.transaction_depth(), 0, "仅在路径结束后枚举");
     if guard_catalog {
         assert_eq!(config.mode, MergeEnumerationMode::Count);
-        assert_eq!(config.class_cap, 1);
-        assert_eq!(config.path_cap, usize::MAX);
+        assert_eq!(config.class_cap, None);
+        assert_eq!(config.path_cap, None);
     }
-    let streaming = config.max_output_bytes.is_some() && config.mode == MergeEnumerationMode::Samples;
-    let guard_state = if streaming {
-        let mut limits = state.execution_limits.as_ref().unwrap().clone();
-        limits.merge_enumeration.class_cap = 1;
-        limits.merge_enumeration.path_cap = usize::MAX;
-        limits.merge_enumeration.max_output_bytes = None;
-        Some(TaskState::<B>::new().with_execution_limits(limits))
-    } else {
-        None
-    };
+    let streaming = config.streams_binary() && config.mode == MergeEnumerationMode::Samples;
     let accepted = std::sync::atomic::AtomicUsize::new(0);
     let cancelled = Mutex::new(None);
     let stream_consume = |class, solution, slices: &[String], truncated, model: &mut Model<B>| {
@@ -78,10 +69,11 @@ pub(super) fn enumerate<B: BV>(
         if let Some(reason) = *cancelled.lock().unwrap() {
             return Err(ExecError::SampleOutputStopped(reason));
         }
-        if accepted
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| (value < config.path_cap).then(|| value + 1))
-            .is_err()
-        {
+        if config.path_cap.is_some_and(|cap| {
+            accepted
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| (value < cap).then(|| value + 1))
+                .is_err()
+        }) {
             *cancelled.lock().unwrap() = Some("path_cap");
             return Err(ExecError::SampleOutputStopped("path_cap"));
         }
@@ -120,7 +112,8 @@ pub(super) fn enumerate<B: BV>(
         // 先证明每个前缀可满足，再把任务数增加到线程数的四倍；空前缀不占工作线程。
         // 单线程沿用单任务，路径/类预算仍由下面的规范类目录统一分配。
         // 当全路径预算最多容纳一个满额类时，更多预计数分区只会放大被丢弃的工作。
-        let task_target = if config.enumeration_threads == 1 || config.path_cap <= config.class_cap {
+        let one_full_class = config.path_cap.is_some_and(|path_cap| config.class_cap.is_none_or(|cap| path_cap <= cap));
+        let task_target = if config.enumeration_threads == 1 || one_full_class {
             config.enumeration_threads
         } else {
             config.enumeration_threads.checked_mul(4).unwrap()
@@ -184,7 +177,6 @@ pub(super) fn enumerate<B: BV>(
             let sender = sender.clone();
             let partitions = &partitions;
             let replay_events = &replay_events;
-            let guard_state = guard_state.as_ref();
             let stream_consume = &stream_consume;
             let next_probe = &next_probe;
             let next_export = &next_export;
@@ -205,7 +197,7 @@ pub(super) fn enumerate<B: BV>(
                     }
                     let output = frame.enumerate_merges_partition(
                         &mut solver,
-                        guard_state.unwrap_or(state),
+                        state,
                         shared,
                         result,
                         &|_, _, _, _, _| unreachable!(),
@@ -213,6 +205,7 @@ pub(super) fn enumerate<B: BV>(
                         true,
                         Some(&partitions[index]),
                         None,
+                        streaming || guard_catalog,
                     );
                     if shared.execution_stats.enabled() {
                         if let Ok(Some(output)) = &output {
@@ -252,6 +245,7 @@ pub(super) fn enumerate<B: BV>(
                             retain_solutions,
                             Some(&partitions[index]),
                             Some(&selected),
+                            false,
                         )?
                         .unwrap();
                     outputs.push(output);
@@ -315,12 +309,12 @@ pub(super) fn enumerate<B: BV>(
         let mut truncated_classes = 0;
         let mut partition_counts = vec![(0usize, 0usize); partitions.len()];
         for (key, (partition, count, truncated)) in classes {
-            if total == config.path_cap {
+            if Some(total) == config.path_cap {
                 path_truncated = true;
                 break;
             }
             assert!(count > 0);
-            let kept = count.min(config.path_cap - total);
+            let kept = config.path_cap.map_or(count, |cap| count.min(cap - total));
             let truncated = truncated || kept < count;
             let class_id = selected.len();
             selected.insert(
@@ -328,7 +322,7 @@ pub(super) fn enumerate<B: BV>(
                 ClassPlan {
                     class_id,
                     ordinal: if streaming { 0 } else { total },
-                    count: if streaming { config.class_cap } else { kept },
+                    count: kept,
                     truncated,
                     path_truncated: false,
                     partition,
@@ -338,7 +332,7 @@ pub(super) fn enumerate<B: BV>(
             truncated_classes += usize::from(truncated);
             partition_counts[partition].0 += 1;
             partition_counts[partition].1 += kept;
-            path_truncated |= kept < count || (truncated && total == config.path_cap);
+            path_truncated |= kept < count || (truncated && Some(total) == config.path_cap);
         }
         for plan in selected.values_mut() {
             plan.path_truncated = path_truncated;

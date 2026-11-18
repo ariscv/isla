@@ -386,7 +386,7 @@ impl DefAttrs {
 pub enum Event<B> {
     Smt(Def, DefAttrs, SourceLoc),
     /// Fork ID, assertion, branch number, source location
-    Fork(u32, Sym, u32, SourceLoc),
+    Fork(u64, Sym, u32, SourceLoc),
     /// Fork group ID, number of merged paths, source location
     Merge(u32, usize, SourceLoc),
     /// Used to delimit function calls and returns in the trace
@@ -669,6 +669,7 @@ pub struct SolverOptions {
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
     pub keep_bool_proofs: bool,
+    pub bv_rewrite: rewrite::BvRewrite,
 }
 
 static SOLVER_OPTIONS: OnceLock<SolverOptions> = OnceLock::new();
@@ -1043,6 +1044,9 @@ macro_rules! z3_float_binary_op {
 }
 
 mod arithmetic;
+pub mod rewrite;
+#[cfg(test)]
+mod rewrite_tests;
 
 static PUSH_ITE_BV: &[u8] = b"push_ite_bv\0";
 static BV_LE_EXTRA: &[u8] = b"bv_le_extra\0";
@@ -1932,9 +1936,15 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.complete_model = b;
     }
 
-    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext) -> ExecError {
+    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext, limit: std::time::Duration) -> ExecError {
         let dump = timeout_dump_from_checkpoint(self.solver.checkpoint_snapshot(), timeout.dump_request.clone());
-        ExecError::Smt(z3_timeout_error(SmtOperation::ModelEval, SourceLoc::unknown(), timeout.started.elapsed(), dump))
+        ExecError::Smt(z3_timeout_error(
+            SmtOperation::ModelEval,
+            SourceLoc::unknown(),
+            timeout.started.elapsed(),
+            limit,
+            dump,
+        ))
     }
 
     fn eval_with_timeout(
@@ -1947,7 +1957,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         match timeout_Z3_model_eval(self.ctx.z3_ctx, self.z3_model, ast, model_completion, result, SourceLoc::unknown())
         {
             Ok(evaluated) => Ok(evaluated),
-            Err(Z3TimeoutError::Interrupted) => Err(self.model_eval_timeout_error(timeout_context)),
+            Err(Z3TimeoutError::Interrupted(limit)) => Err(self.model_eval_timeout_error(timeout_context, limit)),
         }
     }
 
@@ -2292,7 +2302,7 @@ use SmtResult::*;
 
 fn unknown_result(info: SourceLoc, wall: Duration, deadline: Option<Duration>) -> SmtResult {
     #[cfg(feature = "smt-thread-interrupt")]
-    let limit = Some(deadline.unwrap_or_else(z3_timeout::operation_timeout));
+    let limit = deadline.or_else(z3_timeout::configured_operation_timeout);
     #[cfg(not(feature = "smt-thread-interrupt"))]
     let limit = {
         let _ = deadline;
@@ -2550,7 +2560,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         ) {
             self.floating_point_seen.set(true);
         }
-        match exp {
+        let ast = match exp {
             Var(v) => match self.decls.get(v) {
                 None => panic!("Could not get Z3 func_decl {}", *v),
                 Some(ast) => ast.clone(),
@@ -2561,7 +2571,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Bool(b) => Ast::mk_bool(self.ctx, *b),
             Not(exp) => Ast::mk_not(&self.translate_exp(exp)),
             Eq(lhs, rhs) => Ast::mk_eq(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Neq(lhs, rhs) => Ast::mk_not(&Ast::mk_eq(&self.translate_exp(lhs), &self.translate_exp(rhs))),
+            Neq(lhs, rhs) => {
+                let equality = self.translate_exp(lhs).mk_eq(&self.translate_exp(rhs));
+                rewrite::apply(equality, self.ctx.solver_options.bv_rewrite).mk_not()
+            }
             And(lhs, rhs) => Ast::mk_and(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Or(lhs, rhs) => Ast::mk_or(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Bvnot(exp) => Ast::mk_bvnot(&self.translate_exp(exp)),
@@ -2691,7 +2704,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 &self.translate_exp(y),
                 &self.translate_exp(z),
             ),
-        }
+        };
+        rewrite::apply(ast, self.ctx.solver_options.bv_rewrite)
     }
 
     fn z3_assert(&mut self, exp: &Exp<Sym>) {
@@ -3256,7 +3270,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             info,
         ) {
             Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
+            Err(Z3TimeoutError::Interrupted(limit)) => {
                 if let Some(profile) = budget_profile {
                     profile.finish(Z3_L_UNDEF);
                 }
@@ -3268,7 +3282,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.asserts_since_check = 0;
                 let dump =
                     timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(exp.clone()));
-                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
+                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), limit, dump));
             }
         };
         let check_elapsed = check_started.elapsed();
@@ -3351,7 +3365,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
                 Ok(result) => result,
-                Err(Z3TimeoutError::Interrupted) => {
+                Err(Z3TimeoutError::Interrupted(limit)) => {
                     if let Some(shadow) = shadow {
                         shadow.finish(Z3_L_UNDEF);
                     }
@@ -3359,7 +3373,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.last_check_sat = false;
                     self.asserts_since_check = 0;
                     let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), limit, dump));
                 }
             };
         if let Some(shadow) = shadow {
@@ -3485,7 +3499,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             deadline,
         ) {
             Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
+            Err(Z3TimeoutError::Interrupted(limit)) => {
                 if let Some(shadow) = shadow {
                     shadow.finish(Z3_L_UNDEF);
                 }
@@ -3493,7 +3507,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.last_check_sat = false;
                 self.asserts_since_check = 0;
                 let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), limit, dump));
             }
         };
         if let Some(shadow) = shadow {
@@ -3510,13 +3524,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         result
     }
 
-    pub fn dump_solver(&mut self, filename: &str) {
-        let mut file = std::fs::File::create(filename).expect("Failed to open solver dump file");
+    /// 输出当前求解器的声明与断言，供外部工具重放。
+    pub fn write_smtlib(&self, mut output: impl Write) -> std::io::Result<()> {
         unsafe {
-            let s = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
-            let cs = CStr::from_ptr(s);
-            file.write_all(cs.to_bytes()).expect("Failed to write solver dump");
+            let text = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
+            output.write_all(CStr::from_ptr(text).to_bytes())
         }
+    }
+
+    pub fn dump_solver(&mut self, filename: &str) {
+        let file = std::fs::File::create(filename).expect("Failed to open solver dump file");
+        self.write_smtlib(file).expect("Failed to write solver dump");
     }
 
     pub fn dump_solver_with(&mut self, filename: &str, exp: &Exp<Sym>) {
@@ -3555,7 +3573,7 @@ pub fn restore_path_smt_stats(stats: crate::timeout::SmtCallStats) {
     z3_timeout::restore_path_smt_stats(stats)
 }
 
-/// 已配置的单次 SMT operation deadline（`--smt-timeout`）。
+/// 单次 SMT 调用的实际限时。线程中断构建缺省 60 秒，直接调用构建无单次限时。
 pub fn configured_smt_operation_timeout() -> Option<std::time::Duration> {
     z3_timeout::configured_operation_timeout()
 }

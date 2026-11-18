@@ -68,11 +68,7 @@ fn main() {
 #[allow(clippy::mutex_atomic)]
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
-    opts.optflag(
-        "",
-        "path-merging",
-        "启用自适应区域路径合并；ISLA_MERGE_RECORDS=<路径> 输出 JSON Lines，ISLA_STATS=1 输出规则统计",
-    );
+    opts::add_path_merge_flags(&mut opts);
     opts.optopt(
         "",
         "execution-limits-config",
@@ -115,8 +111,16 @@ fn isla_main() -> i32 {
             }
         };
     }
-    if matches.opt_present("path-merging") {
-        isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merge.enabled = Some(true);
+    match opts::path_merge_cli(&matches) {
+        Ok(Some(enabled)) => {
+            isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merge.enabled =
+                Some(enabled);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
     }
     if let Some(config) = &isa_config.execution_limits {
         if config.strict {
@@ -201,9 +205,7 @@ fn isla_main() -> i32 {
     let smt_ctx = smt::Context::new(smt_cfg);
     let mut solver = Solver::new(&smt_ctx);
 
-    let limits = isa_config.execution_limits.as_ref().map_or_else(ExecutionLimits::default, |config| {
-        ExecutionLimits::default().with_config(config, &shared_state.symtab)
-    });
+    let limits = ExecutionLimits::for_symbolic_dag(isa_config.execution_limits.as_ref(), &shared_state.symtab);
     if let Some(config) = &isa_config.execution_limits {
         if let Err(error) = shared_state.validate_merge_policy(config) {
             eprintln!("{}", error);

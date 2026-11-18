@@ -32,6 +32,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::config::{
     ExecutionLimitsConfig, LimitBehaviorConfig, MergeMode, MergePolicySelectorConfig, PathMergeRegionConfig,
@@ -123,8 +124,12 @@ pub struct ExecutionLimits {
     pub merge_strategy: crate::config::MergeStrategy,
     pub ordered_events: bool,
     pub max_region_fragments: Option<usize>,
+    /// 已选定的 Sail 异常构造子，在设置 have_exception 时过滤。
+    pub filter_model_exceptions: Arc<[String]>,
+    pub filter_match_failures: bool,
     /// 普通区域共享，按轮折叠循环逐轮续配；None 表示关闭步数预算。
     pub region_step_budget: Option<usize>,
+    pub merge_poison_slots: bool,
     /// 区域内按前态足迹合并全局状态；需要精确寄存器事件顺序的调用方保持关闭。
     pub region_global_state: bool,
     /// 启用断言死端过滤、重新声明槽位活跃性和预算内含回边区域推演。
@@ -133,7 +138,8 @@ pub struct ExecutionLimits {
     /// 缓存即使暂不枚举，也必须保存纯计算定义来源。
     pub collect_merge_definitions: bool,
     merge_policy: Vec<MergePolicy>,
-    pub on_limit_reached: LimitBehavior,
+    /// 只有显式额度触限时才读取。省略策略沿用该额度的截断行为。
+    pub on_limit_reached: Option<LimitBehavior>,
 }
 
 impl Default for ExecutionLimits {
@@ -154,18 +160,34 @@ impl Default for ExecutionLimits {
             merge_strategy: Default::default(),
             ordered_events: false,
             max_region_fragments: None,
+            filter_model_exceptions: Arc::from([]),
+            filter_match_failures: false,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
+            merge_poison_slots: false,
             region_global_state: false,
             region_loop_analysis: false,
             merge_enumeration: Default::default(),
             collect_merge_definitions: false,
             merge_policy: Vec::new(),
-            on_limit_reached: LimitBehavior::Truncate,
+            on_limit_reached: None,
         }
     }
 }
 
 impl ExecutionLimits {
+    /// 完整符号探索默认尝试区域合并；库的通用入口仍可独立选择。
+    pub fn for_symbolic_dag(config: Option<&ExecutionLimitsConfig>, symtab: &Symtab) -> Self {
+        let mut limits = Self::default().with_path_merging(true);
+        if let Some(config) = config {
+            limits = limits.with_config(config, symtab);
+            if config.path_merge.enabled == Some(false) {
+                limits.merge_policy.clear();
+            }
+        }
+        let enabled = limits.path_merging;
+        limits.with_region_global_state(enabled).with_region_loop_analysis(enabled)
+    }
+
     pub fn with_max_forks_per_branch(self, max_forks_per_branch: u32) -> Self {
         ExecutionLimits { max_forks_per_branch: Some(max_forks_per_branch), ..self }
     }
@@ -198,7 +220,7 @@ impl ExecutionLimits {
     }
 
     pub fn with_limit_behavior(self, on_limit_reached: LimitBehavior) -> Self {
-        ExecutionLimits { on_limit_reached, ..self }
+        ExecutionLimits { on_limit_reached: Some(on_limit_reached), ..self }
     }
 
     pub fn with_max_fork_pct_per_branch(self, max_fork_pct_per_branch: f64) -> Self {
@@ -251,9 +273,14 @@ impl ExecutionLimits {
     /// 将配置 DTO 覆盖到运行时策略，并在这里一次性解析配置中的源码 region。
     pub fn with_config(mut self, config: &ExecutionLimitsConfig, symtab: &Symtab) -> Self {
         if config.enabled == Some(false) {
-            return ExecutionLimits::default();
+            return ExecutionLimits {
+                filter_match_failures: config.filter_match_failures,
+                ..ExecutionLimits::default()
+            };
         }
 
+        self.filter_model_exceptions = config.filter_model_exceptions.clone().into();
+        self.filter_match_failures = config.filter_match_failures;
         if let Some(value) = config.max_forks_per_branch {
             self = self.with_max_forks_per_branch(value);
         }
@@ -281,6 +308,7 @@ impl ExecutionLimits {
         if let Some(value) = config.path_merge.step_budget {
             self.region_step_budget = crate::config::parse_region_step_budget(value).expect("区域预算配置必须已校验");
         }
+        self.merge_poison_slots = config.path_merge.merge_poison_slots;
         self.max_region_fragments = config.path_merge.fragment_limit().expect("区域片段上限必须已校验");
         if let Some(value) = config.path_merge.strategy {
             self.merge_strategy = value;
@@ -464,6 +492,8 @@ impl ExecutionLimits {
             || !self.region_fork_limits.is_empty()
             || !self.merge_policy.is_empty()
             || self.path_merging
+            || !self.filter_model_exceptions.is_empty()
+            || self.filter_match_failures
             || self.merge_enumeration.enabled
     }
 }
@@ -499,18 +529,18 @@ impl ControlFlowScope {
 /// 因此各路径独立演化。
 #[derive(Clone, Debug, Default)]
 pub(super) struct ExecutionLimitPathState {
-    control_flow_steps: u32,
-    total_forks: u32,
-    pub(super) loop_counts: HashMap<ControlFlowScope, u32>,
-    branch_forks: HashMap<ControlFlowScope, u32>,
-    region_forks: HashMap<(usize, ControlFlowScope), u32>,
-    sample_ordinals: HashMap<ControlFlowScope, u32>,
+    control_flow_steps: u64,
+    total_forks: u64,
+    pub(super) loop_counts: HashMap<ControlFlowScope, u64>,
+    branch_forks: HashMap<ControlFlowScope, u64>,
+    region_forks: HashMap<(usize, ControlFlowScope), u64>,
+    sample_ordinals: HashMap<ControlFlowScope, u64>,
     sampled_execution_domain: bool,
     path_signature: u64,
 }
 
 impl ExecutionLimitPathState {
-    pub(super) fn total_forks(&self) -> u32 {
+    pub(super) fn total_forks(&self) -> u64 {
         self.total_forks
     }
 
@@ -534,26 +564,26 @@ impl ExecutionLimitPathState {
     }
 
     /// 这条路径迄今执行过的控制流步数（jump/goto/call）。
-    pub(super) fn control_flow_steps(&self) -> u32 {
+    pub(super) fn control_flow_steps(&self) -> u64 {
         self.control_flow_steps
     }
 
-    pub(super) fn advance_control_flow(&mut self) -> u32 {
+    pub(super) fn advance_control_flow(&mut self) -> u64 {
         self.control_flow_steps = self.control_flow_steps.checked_add(1).expect("control-flow step count overflow");
         self.control_flow_steps
     }
 
-    pub(super) fn record_fork(&mut self) -> u32 {
+    pub(super) fn record_fork(&mut self) -> u64 {
         let fork_id = self.total_forks;
         self.total_forks = self.total_forks.checked_add(1).expect("path fork count overflow");
         fork_id
     }
 
-    fn branch_forks(&self, scope: &ControlFlowScope) -> u32 {
+    fn branch_forks(&self, scope: &ControlFlowScope) -> u64 {
         self.branch_forks.get(scope).copied().unwrap_or(0)
     }
 
-    fn region_forks(&self, region: usize, scope: &ControlFlowScope) -> u32 {
+    fn region_forks(&self, region: usize, scope: &ControlFlowScope) -> u64 {
         self.region_forks.get(&(region, scope.clone())).copied().unwrap_or(0)
     }
 
@@ -562,7 +592,7 @@ impl ExecutionLimitPathState {
         *count = count.checked_add(1).expect("region fork count overflow");
     }
 
-    fn sample_ordinal(&self, scope: &ControlFlowScope) -> u32 {
+    fn sample_ordinal(&self, scope: &ControlFlowScope) -> u64 {
         self.sample_ordinals.get(scope).copied().unwrap_or(0)
     }
 
@@ -577,11 +607,11 @@ impl ExecutionLimitPathState {
 /// 执行限制触发的具体原因，携带当前值与阈值，用于构造 `ExecError` 和 itrace 记录。
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(super) enum ExecutionLimitReason {
-    MaxForksPerPath { actual: u32, max: u32 },
-    MaxForksPerBranch { actual: u32, max: u32 },
-    MaxForksPerRegion { region: usize, actual: u32, max: u32 },
-    MaxForkPctPerBranch { branch_actual: u32, path_actual: u32, max_pct: f64, check_delay: u32 },
-    MaxBackjumpsPerLoop { target: usize, actual: u32, max: u32 },
+    MaxForksPerPath { actual: u64, max: u32 },
+    MaxForksPerBranch { actual: u64, max: u32 },
+    MaxForksPerRegion { region: usize, actual: u64, max: u32 },
+    MaxForkPctPerBranch { branch_actual: u64, path_actual: u64, max_pct: f64, check_delay: u32 },
+    MaxBackjumpsPerLoop { target: usize, actual: u64, max: u32 },
     MaxPathDepth { actual: u64, max: u64 },
 }
 
@@ -593,7 +623,7 @@ pub(super) enum ExecutionLimitReason {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct BranchSample {
     scope: ControlFlowScope,
-    ordinal: u32,
+    ordinal: u64,
     preferred: bool,
 }
 
@@ -612,7 +642,7 @@ impl BranchSample {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ExecutionLimitDecision {
     Continue,
-    Fork { fork_id: u32 },
+    Fork { fork_id: u64 },
     Truncate(ExecutionLimitReason),
     ConcretizeBranch { reason: ExecutionLimitReason, sample: BranchSample },
     KeepCurrentModel { reason: ExecutionLimitReason },
@@ -646,22 +676,8 @@ impl<'config> ExecutionLimitHandler<'config> {
         if let Some(max) = self.config.max_backjumps_per_loop {
             if target <= pc {
                 let loop_scope = self.loop_scope(function_name, target, backtrace, source_location);
-                if self.config.applies_to(&loop_scope) {
-                    let actual = {
-                        let count = path.loop_counts.entry(loop_scope).or_insert(0);
-                        *count = count.checked_add(1).expect("loop backjump count overflow");
-                        *count
-                    };
-                    if actual > max {
-                        return self.conditional_limit(
-                            path,
-                            function_name,
-                            pc,
-                            backtrace,
-                            source_location,
-                            ExecutionLimitReason::MaxBackjumpsPerLoop { target, actual, max },
-                        );
-                    }
+                if let Some(reason) = self.backjump_limit(path, loop_scope, target, max) {
+                    return self.conditional_limit(path, function_name, pc, backtrace, source_location, reason);
                 }
             }
         }
@@ -685,19 +701,8 @@ impl<'config> ExecutionLimitHandler<'config> {
             if target <= pc {
                 // Goto 没有 SourceLoc；配置源码 region 时不会命中，region 为空时仍按全局限制处理。
                 let loop_scope = self.loop_scope(function_name, target, backtrace, SourceLoc::unknown());
-                if self.config.applies_to(&loop_scope) {
-                    let actual = {
-                        let count = path.loop_counts.entry(loop_scope).or_insert(0);
-                        *count = count.checked_add(1).expect("loop backjump count overflow");
-                        *count
-                    };
-                    if actual > max {
-                        return ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxBackjumpsPerLoop {
-                            target,
-                            actual,
-                            max,
-                        });
-                    }
+                if let Some(reason) = self.backjump_limit(path, loop_scope, target, max) {
+                    return ExecutionLimitDecision::Truncate(reason);
                 }
             }
         }
@@ -733,7 +738,7 @@ impl<'config> ExecutionLimitHandler<'config> {
             if max_forks_per_branch.is_some() || percentage_applies {
                 let branch_actual = path.branch_forks(&scope);
                 if let Some(max) = max_forks_per_branch {
-                    if branch_actual >= max {
+                    if branch_actual >= u64::from(max) {
                         return self.branch_limit(
                             path,
                             scope,
@@ -744,7 +749,7 @@ impl<'config> ExecutionLimitHandler<'config> {
                 if let Some(max_pct) = self.config.max_fork_pct_per_branch.filter(|_| percentage_applies) {
                     let path_actual = path.total_forks;
                     let check_delay = self.config.max_fork_pct_check_delay.unwrap_or(0);
-                    if path_actual > check_delay && (branch_actual as f64) > (path_actual as f64) * max_pct {
+                    if path_actual > u64::from(check_delay) && (branch_actual as f64) > (path_actual as f64) * max_pct {
                         return self.branch_limit(
                             path,
                             scope,
@@ -770,7 +775,7 @@ impl<'config> ExecutionLimitHandler<'config> {
             (!region_budgets.is_empty()).then(|| self.branch_scope(function_name, pc, backtrace, source_location));
         for &(region, max) in &region_budgets {
             let actual = path.region_forks(region, region_scope.as_ref().unwrap());
-            if actual >= max {
+            if actual >= u64::from(max) {
                 let scope = branch_scope.unwrap_or_else(|| region_scope.as_ref().unwrap().clone());
                 return self.branch_limit(path, scope, ExecutionLimitReason::MaxForksPerRegion { region, actual, max });
             }
@@ -803,7 +808,7 @@ impl<'config> ExecutionLimitHandler<'config> {
         let max_forks_per_branch = self.config.max_forks_per_branch_for_scope(&scope);
         if let Some(max) = max_forks_per_branch {
             let actual = path.branch_forks(&scope);
-            if actual >= max {
+            if actual >= u64::from(max) {
                 return self.monomorphize_limit(ExecutionLimitReason::MaxForksPerBranch { actual, max });
             }
         }
@@ -811,7 +816,7 @@ impl<'config> ExecutionLimitHandler<'config> {
         let region_budgets = self.config.region_fork_budgets(source_location);
         for &(region, max) in &region_budgets {
             let actual = path.region_forks(region, &scope);
-            if actual >= max {
+            if actual >= u64::from(max) {
                 return self.monomorphize_limit(ExecutionLimitReason::MaxForksPerRegion { region, actual, max });
             }
         }
@@ -832,19 +837,41 @@ impl<'config> ExecutionLimitHandler<'config> {
     }
 
     fn advance_control_flow(&self, path: &mut ExecutionLimitPathState) -> Option<ExecutionLimitReason> {
-        let actual = path.advance_control_flow() as u64;
+        let actual = path.advance_control_flow();
         self.config
             .max_path_depth
             .and_then(|max| (actual > max).then_some(ExecutionLimitReason::MaxPathDepth { actual, max }))
     }
 
-    fn record_path_fork(path: &mut ExecutionLimitPathState) -> u32 {
+    fn record_path_fork(path: &mut ExecutionLimitPathState) -> u64 {
         path.record_fork()
+    }
+
+    fn backjump_limit(
+        &self,
+        path: &mut ExecutionLimitPathState,
+        scope: ControlFlowScope,
+        target: usize,
+        max: u32,
+    ) -> Option<ExecutionLimitReason> {
+        if !self.config.applies_to(&scope) {
+            return None;
+        }
+        let count = path.loop_counts.entry(scope).or_insert(0);
+        // 额度是 u32，触限尝试不写回计数；用宽计数显示首次超额的编号。
+        let actual = *count + 1;
+        if actual > u64::from(max) {
+            Some(ExecutionLimitReason::MaxBackjumpsPerLoop { target, actual, max })
+        } else {
+            *count = actual;
+            None
+        }
     }
 
     fn path_fork_limit(&self, path: &ExecutionLimitPathState) -> Option<ExecutionLimitReason> {
         self.config.max_forks_per_path.and_then(|max| {
-            (path.total_forks >= max).then_some(ExecutionLimitReason::MaxForksPerPath { actual: path.total_forks, max })
+            (path.total_forks >= u64::from(max))
+                .then_some(ExecutionLimitReason::MaxForksPerPath { actual: path.total_forks, max })
         })
     }
 
@@ -858,8 +885,8 @@ impl<'config> ExecutionLimitHandler<'config> {
         reason: ExecutionLimitReason,
     ) -> ExecutionLimitDecision {
         match self.config.on_limit_reached {
-            LimitBehavior::Truncate => ExecutionLimitDecision::Truncate(reason),
-            LimitBehavior::Concretize => {
+            None | Some(LimitBehavior::Truncate) => ExecutionLimitDecision::Truncate(reason),
+            Some(LimitBehavior::Concretize) => {
                 let scope = self.branch_scope(function_name, pc, backtrace, source_location);
                 ExecutionLimitDecision::ConcretizeBranch { reason, sample: self.branch_sample(path, scope) }
             }
@@ -873,8 +900,8 @@ impl<'config> ExecutionLimitHandler<'config> {
         reason: ExecutionLimitReason,
     ) -> ExecutionLimitDecision {
         match self.config.on_limit_reached {
-            LimitBehavior::Truncate => ExecutionLimitDecision::Truncate(reason),
-            LimitBehavior::Concretize => {
+            None | Some(LimitBehavior::Truncate) => ExecutionLimitDecision::Truncate(reason),
+            Some(LimitBehavior::Concretize) => {
                 ExecutionLimitDecision::ConcretizeBranch { reason, sample: self.branch_sample(path, scope) }
             }
         }
@@ -882,8 +909,8 @@ impl<'config> ExecutionLimitHandler<'config> {
 
     fn monomorphize_limit(&self, reason: ExecutionLimitReason) -> ExecutionLimitDecision {
         match self.config.on_limit_reached {
-            LimitBehavior::Truncate => ExecutionLimitDecision::Truncate(reason),
-            LimitBehavior::Concretize => ExecutionLimitDecision::KeepCurrentModel { reason },
+            None | Some(LimitBehavior::Truncate) => ExecutionLimitDecision::Truncate(reason),
+            Some(LimitBehavior::Concretize) => ExecutionLimitDecision::KeepCurrentModel { reason },
         }
     }
 
@@ -896,7 +923,12 @@ impl<'config> ExecutionLimitHandler<'config> {
         // "具体化抽样"就退化成"把这个分支钉死成一个取值"。
         path.path_signature.hash(&mut hasher);
         scope.hash(&mut hasher);
-        pair_ordinal.hash(&mut hasher);
+        // 保留旧编号范围的采样序列。
+        if let Ok(pair_ordinal) = u32::try_from(pair_ordinal) {
+            pair_ordinal.hash(&mut hasher);
+        } else {
+            pair_ordinal.hash(&mut hasher);
+        }
         let mixed = splitmix64(hasher.finish());
         let preferred = match self.config.sample_bias(scope.source_location) {
             // 配了偏置就不做奇偶交替：交替会把比例硬拉回 50/50，抵消偏置。
@@ -1060,7 +1092,7 @@ mod tests {
         assert_eq!(limits.max_backjumps_per_loop, Some(5));
         assert_eq!(limits.max_path_depth, Some(100));
         assert_eq!(limits.call_context_depth, Some(2));
-        assert_eq!(limits.on_limit_reached, LimitBehavior::Concretize);
+        assert_eq!(limits.on_limit_reached, Some(LimitBehavior::Concretize));
     }
 
     #[test]
@@ -1428,6 +1460,41 @@ mod tests {
             ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxForkPctPerBranch { .. })
         ));
         assert!(matches!(branch(&handler, &mut sibling_path), ExecutionLimitDecision::Fork { .. }));
+    }
+
+    #[test]
+    fn unlimited_execution_crosses_32_bit_counts() {
+        let limits = ExecutionLimits::default().with_limit_behavior(LimitBehavior::Truncate);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let mut path = ExecutionLimitPathState {
+            control_flow_steps: u32::MAX.into(),
+            total_forks: u32::MAX.into(),
+            ..Default::default()
+        };
+
+        assert_eq!(handler.on_call(&mut path), ExecutionLimitDecision::Continue);
+        assert_eq!(path.control_flow_steps(), u64::from(u32::MAX) + 1);
+        assert!(matches!(branch(&handler, &mut path), ExecutionLimitDecision::Fork { .. }));
+        assert!(matches!(monomorphize(&handler, &mut path), ExecutionLimitDecision::Fork { .. }));
+        assert_eq!(path.total_forks(), u64::from(u32::MAX) + 2);
+        assert!(!path.has_sampled_branch());
+    }
+
+    #[test]
+    fn maximum_backjump_budget_reports_next_attempt() {
+        let limits = ExecutionLimits::default().with_max_backjumps_per_loop(u32::MAX);
+        let handler = ExecutionLimitHandler::new(&limits);
+        let function = Name::from_u32(3);
+        let target = 10;
+        let mut path = ExecutionLimitPathState::default();
+        let scope = handler.loop_scope(function, target, &[], SourceLoc::unknown());
+        path.loop_counts.insert(scope, u32::MAX.into());
+        let ExecutionLimitDecision::Truncate(ExecutionLimitReason::MaxBackjumpsPerLoop { actual, max, .. }) =
+            handler.on_goto(&mut path, function, target, target, &[])
+        else {
+            panic!("最后一次允许的回跳之后必须触限");
+        };
+        assert_eq!(actual, u64::from(max) + 1);
     }
 
     #[test]

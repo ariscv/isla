@@ -2,6 +2,7 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
+    ("merge_poison_slots", "merge-poison-slots", "只合并已证明不可观察的未初始化槽位；默认关闭"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
@@ -26,6 +27,7 @@ const NO_SMT_OPTIONS: &[(&str, &str)] = &[
 ];
 
 pub fn add_cli(opts: &mut getopts::Options) {
+    opts.optflagopt("", "bv-rewrite", "通用等价改写；默认关闭；裸flag启用三条规则", "true|false|规则名列表");
     for (_, flag) in NO_SMT_OPTIONS {
         opts.optflagopt("", flag, "无 SMT 实验选项；裸 flag 等于 true，覆盖 TOML，默认 false", "true|false");
     }
@@ -51,10 +53,15 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
             _ => return Err("--solver-on-unknown 必须是 dead 或 error".into()),
         };
     }
+    if matches.opt_present("bv-rewrite") {
+        updated.solver.bv_rewrite =
+            isla_lib::smt::rewrite::BvRewrite::parse(&matches.opt_str("bv-rewrite").unwrap_or_else(|| "true".into()))?;
+    }
     for (field, flag, _) in BOOL_OPTIONS {
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
+                "merge_poison_slots" => updated.path_merge.merge_poison_slots = value,
                 "defer_ctor_checks" => updated.path_merge.defer_ctor_checks = value,
                 "defer_range_proofs" => updated.path_merge.defer_range_proofs = value,
                 "defer_exit_check" => updated.path_merge.defer_exit_check = value,
@@ -146,12 +153,27 @@ mod tests {
     }
 
     #[test]
+    fn bv_rewrite_cli_overrides_toml_and_rejects_unknown_rules() {
+        let mut config = ExecutionLimitsConfig::default();
+        cli(&mut config, &["--bv-rewrite"]).unwrap();
+        assert_eq!(config.solver.bv_rewrite, isla_lib::smt::rewrite::BvRewrite::parse("true").unwrap());
+        cli(&mut config, &["--bv-rewrite=false"]).unwrap();
+        assert!(!config.solver.bv_rewrite.enabled());
+        cli(&mut config, &["--bv-rewrite=mask-and,sign-bound"]).unwrap();
+        assert_eq!(isla_lib::config::RegionOptions::from_config(&config).bv_rewrite, config.solver.bv_rewrite);
+        let prior = config.clone();
+        assert!(cli(&mut config, &["--bv-rewrite=unknown"]).is_err());
+        assert_eq!(config, prior);
+    }
+
+    #[test]
     fn region_options_cli_defaults_and_boolean_overrides() {
         let mut limits = ExecutionLimitsConfig::default();
         cli(&mut limits, &[]).unwrap();
         assert_eq!(limits, ExecutionLimitsConfig::default());
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
+                "merge_poison_slots",
                 "defer_ctor_checks",
                 "defer_range_proofs",
                 "defer_exit_check",
@@ -174,6 +196,17 @@ mod tests {
             cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
             assert_eq!(limits, ExecutionLimitsConfig::default(), "{flag}");
         }
+    }
+
+    #[test]
+    fn region_options_poison_slots_require_path_merge_section_and_boolean() {
+        for section in ["execution_limits", "execution_limits.solver", "execution_limits.path_merge.diagnostics"] {
+            let value: toml::Value = format!("[{section}]\nmerge_poison_slots=true").parse().unwrap();
+            assert!(value["execution_limits"].clone().try_into::<ExecutionLimitsConfig>().is_err());
+        }
+        let mut limits = ExecutionLimitsConfig::default();
+        assert!(cli(&mut limits, &["--merge-poison-slots=yes"]).is_err());
+        assert!(!limits.path_merge.merge_poison_slots);
     }
 
     #[test]

@@ -6,7 +6,6 @@ use crate::executor::LocalFrame;
 use crate::ir::SharedState;
 use crate::timeout::SmtOperation;
 use serde::Deserialize;
-use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SolverPathDrop {
@@ -67,7 +66,7 @@ pub fn discard_solver_path<B: BV>(
     error: &ExecError,
     frame: &LocalFrame<'_, B>,
     shared: &SharedState<'_, B>,
-    classification: Option<(&str, Option<Duration>)>,
+    classification: Option<&str>,
 ) -> bool {
     let (source, purpose, reason, wall, limit) = match error {
         ExecError::Smt(SmtError::Timeout(timeout)) => (
@@ -87,10 +86,7 @@ pub fn discard_solver_path<B: BV>(
         stats.solver_failed.store(true, std::sync::atomic::Ordering::Relaxed);
         return false;
     }
-    let (purpose, limit) = match classification {
-        Some((purpose, override_limit)) => (purpose, override_limit.or(limit)),
-        None => (purpose, limit),
-    };
+    let purpose = classification.unwrap_or(purpose);
     let source = if source.is_unknown() {
         frame.instrs[..(frame.pc() + 1).min(frame.instrs.len())]
             .iter()

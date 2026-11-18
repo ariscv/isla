@@ -39,7 +39,7 @@ impl<B: BV> LocalFrame<'_, B> {
         if !config.enabled {
             return Ok(None);
         }
-        assert!(config.class_cap > 0 && config.path_cap > 0, "枚举上限必须大于零");
+        assert!(config.class_cap != Some(0) && config.path_cap != Some(0), "枚举上限必须大于零");
         assert_eq!(solver.transaction_depth(), 0, "仅在路径结束后枚举");
         let records = &self.region_merge_records;
         let by_id: HashMap<_, _> = records.iter().map(|record| (record.record_id, record)).collect();
@@ -74,7 +74,7 @@ impl<B: BV> LocalFrame<'_, B> {
             let mut total = 0;
             let mut path_truncated = false;
             while blocking_satisfiable(solver)? {
-                if total == config.path_cap {
+                if Some(total) == config.path_cap {
                     path_truncated = true;
                     break;
                 }
@@ -112,9 +112,9 @@ impl<B: BV> LocalFrame<'_, B> {
                     let mut truncated = false;
                     while blocking_satisfiable(solver)? {
                         // 多查一次区分“刚好完整”与确有未输出的可行解。
-                        if solutions.len() == config.class_cap || total == config.path_cap {
+                        if Some(solutions.len()) == config.class_cap || Some(total) == config.path_cap {
                             truncated = true;
-                            path_truncated |= total == config.path_cap;
+                            path_truncated |= Some(total) == config.path_cap;
                             break;
                         }
                         let mut model = Model::new(solver);

@@ -274,6 +274,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
     let collected: Arc<Mutex<Vec<Result<Option<Val<B>>, String>>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let sink = Arc::clone(&collected);
+        let filter_match_failures = execution_limits.filter_match_failures;
         isla_lib::executor::execute_ir_function_with_limits(
             function,
             &[encdec_bits.clone()],
@@ -287,6 +288,9 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
                 // 一致。
                 Err((ExecError::MatchFailure(_), _)) => {
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(Ok(None))
+                }
+                Ok((Run::Dead, _)) if filter_match_failures => {
+                    sink.lock().expect("回环译码收集器 mutex poisoned").push(Ok(None));
                 }
                 Err((error, _)) => {
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(Err(error.to_string()));
@@ -915,32 +919,6 @@ impl SolveCollectorState {
     }
 }
 
-/// solve-state 路径终值物化（最终 `check_sat` + 取模型）的时间盒。
-///
-/// 环境变量 `ISLA_RISCV_MODEL_TIMEOUT_MS`（毫秒，默认 30000）。数组内存模型
-/// （W2）在路径尾部累积的 Select/Store + 区域约束可能让终值重解远慢于执行期
-/// 查询；超时路径记录不完整诊断，不进入 gen。
-/// clause。真正中断 Z3 需 `smt-thread-interrupt` feature（`make solve-%` 默认
-/// 开启），否则 deadline 不生效、行为与普通 `check_sat` 一致。
-fn parse_model_timeout_ms(raw: Option<&str>) -> Duration {
-    const DEFAULT_MODEL_TIMEOUT_MS: u64 = 30_000;
-    match raw {
-        None => Duration::from_millis(DEFAULT_MODEL_TIMEOUT_MS),
-        Some(raw) => match raw.trim().parse::<u64>() {
-            Ok(ms) if ms > 0 => Duration::from_millis(ms),
-            _ => panic!("ISLA_RISCV_MODEL_TIMEOUT_MS 必须是正整数毫秒，实际 '{}'", raw),
-        },
-    }
-}
-
-fn model_query_deadline() -> Duration {
-    match std::env::var("ISLA_RISCV_MODEL_TIMEOUT_MS") {
-        Ok(value) => parse_model_timeout_ms(Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_model_timeout_ms(None),
-        Err(err) => panic!("读取环境变量 ISLA_RISCV_MODEL_TIMEOUT_MS 失败: {}", err),
-    }
-}
-
 fn dump_unsat_path<B: BV>(solver: &mut Solver<B>, clause: &str, thread: usize) {
     if let Ok(dir) = std::env::var("ISLA_RISCV_DUMP_UNSAT_DIR") {
         std::fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("创建 Unsat dump 目录 {} 失败: {}", dir, error));
@@ -1006,18 +984,12 @@ impl ErrorRecorder<'_> {
         frame: &LocalFrame<'ir, B>,
         shared_state: &SharedState<'ir, B>,
     ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
-        let terminal_deadline = match error {
-            ExecError::Smt(SmtError::Timeout(timeout)) if timeout.query_purpose == "terminal_model" => {
-                Some(model_query_deadline())
-            }
-            _ => None,
-        };
         if discard_solver_path(
             isla_lib::smt::no_smt::options().on_unknown,
             error,
             frame,
             shared_state,
-            Some(("terminal_value", terminal_deadline)),
+            Some("terminal_value"),
         ) {
             return Vec::new();
         }
@@ -1323,12 +1295,7 @@ fn apply_case_quota(cases: Vec<CollectedCase>, quota: &CaseQuota) -> Vec<Collect
 }
 
 fn solve_execution_limits(symtab: &Symtab, config: Option<&ExecutionLimitsConfig>) -> ExecutionLimits {
-    let limits = match config {
-        Some(config) => ExecutionLimits::default().with_config(config, symtab),
-        None => ExecutionLimits::default(),
-    };
-    let global_state = limits.path_merging;
-    limits.with_region_global_state(global_state).with_region_loop_analysis(global_state)
+    ExecutionLimits::for_symbolic_dag(config, symtab)
 }
 
 /// 基于用户指定的 itrace 基路径和 clause 名，生成每个 clause 独立的输出文件路径。
@@ -1452,7 +1419,12 @@ pub fn solve_state_main<'ir, B: BV>(
     let num_clauses = clause_set.len();
     assert!(!samples.path_cache.enabled() || num_clauses == 1, "缓存一次只能保存或恢复一个 clause");
     log!(log::SYM_EXEC, &format!("solve_state: 共 {} 个 clause 待执行", num_clauses));
-    let execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
+    let mut execution_limits = solve_execution_limits(&shared_state.symtab, execution_limits_config);
+    // 样本入口已经决定 CLI 与 TOML 的优先级，执行器及终态过滤使用同一份有效配置。
+    execution_limits.filter_model_exceptions = samples.filter_model_exceptions.clone().into();
+    let model_timeout = execution_limits_config
+        .and_then(|config| config.solver.model_timeout_ms)
+        .map(|value| Duration::from_millis(value.get()));
     let timeout_reporter = TimeoutReporter::new(timeout_report_config);
 
     for clause in clause_set {
@@ -1598,6 +1570,7 @@ pub fn solve_state_main<'ir, B: BV>(
                 initial_memory.clone(),
                 num_threads,
                 batch_timeout,
+                model_timeout,
                 &execution_limits,
                 &timeout_reporter,
                 case_quota.clone(),
@@ -1748,6 +1721,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     initial_memory: Option<isla_lib::memory::Memory<B>>,
     num_threads: usize,
     timeout: Option<u64>,
+    model_timeout: Option<Duration>,
     execution_limits: &ExecutionLimits,
     timeout_reporter: &TimeoutReporter,
     case_quota: Option<CaseQuota>,
@@ -1971,9 +1945,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             // 早于见证查询、终态计数和 ResidentPath 保存，避免异常进入 DAG 或样本。
             if let Ok((Run::Finished(_), frame)) = &exec_result {
                 if let Some((exception, _)) = frame.get_exception() {
-                    if let Some(site) =
-                        super::model_exception::filtered_site(&samples.filter_model_exceptions, exception, shared_state)
-                    {
+                    if let Some(site) = isla_lib::executor::model_exception::filtered_site(
+                        &samples.filter_model_exceptions,
+                        exception,
+                        shared_state,
+                    ) {
                         collected
                             .lock()
                             .expect("solve collector mutex poisoned")
@@ -2065,6 +2041,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         }));
                     }
                     Run::Finished(ret_val) => {
+                        let path_budget = timeout.map(|seconds| {
+                            let remaining =
+                                Duration::from_secs(seconds).saturating_sub(frame.path_time_snapshot().active_wall);
+                            (remaining, std::time::Instant::now())
+                        });
                         // 检查原路径约束：必须早于有限域代表值钉选和 encdec/输出过滤。
                         // 样本功能独立于旧 JSON 是否被消费方过滤，每条可行完成路径均参与。
                         let count_enumeration = execution_limits.merge_enumeration.enabled
@@ -2225,7 +2206,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 )
                                 .expect("完成路径的合并枚举失败");
                             if let Some(writer) = &samples.writer {
-                                if merge_enumeration.is_none() {
+                                // 未启动投影枚举时，每条终态路径输出一份原路径模型作为代表。
+                                if merge_enumeration.is_none() && writer.stop_reason().is_none() {
                                     match solver.check_sat(SourceLoc::unknown()) {
                                         isla_lib::smt::SmtResult::Sat => (),
                                         result => panic!("样本导出必须有完整模型：{result:?}"),
@@ -2237,8 +2219,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     sample.isa_state =
                                         super::samples::isa_state(target, &sample, &mut model, shared_state)
                                             .expect("样本前置状态物化失败");
-                                    writer.append(output_path.unwrap(), 0, &[], sample);
-                                    if grouped {
+                                    let accepted = writer.append(output_path.unwrap(), 0, &[], sample);
+                                    if grouped && accepted {
                                         writer.finish_class(
                                             output_path.unwrap(),
                                             None,
@@ -2346,6 +2328,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             submit_trace(frame, &mut trace_diagnostics);
                             return;
                         }
+                        // 旧 gen 为每个可编码分支具体化一个代表，完整投影见证在上方按原路径枚举。
                         for (symbolic_encoding, encoding_checkpoint) in encodings {
                             // 复用当前执行的AST管理器，避免每个终态再次复制完整数学表达式。
                             // 新Solver仍独立保存全部编码／执行约束，不沿用其他分支的断言。
@@ -2446,7 +2429,27 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             let smt_result = if solver.has_stashed_model() {
                                 isla_lib::smt::SmtResult::Sat
                             } else {
-                                solver.check_sat_deadline(SourceLoc::unknown(), model_query_deadline())
+                                let path_remaining =
+                                    path_budget.map(|(remaining, started)| remaining.saturating_sub(started.elapsed()));
+                                let info = SourceLoc::unknown();
+                                match path_remaining.into_iter().chain(model_timeout).min() {
+                                    Some(deadline) if deadline.is_zero() => {
+                                        collected.lock().unwrap().record_model_query_timeout();
+                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                            &ExecError::Timeout,
+                                            frame,
+                                            shared_state,
+                                        );
+                                        submit_trace(frame, &mut trace_diagnostics);
+                                        return;
+                                    }
+                                    Some(deadline) => {
+                                        let deadline = isla_lib::smt::configured_smt_operation_timeout()
+                                            .map_or(deadline, |operation| deadline.min(operation));
+                                        solver.check_sat_deadline(info, deadline)
+                                    }
+                                    None => solver.check_sat(info),
+                                }
                             };
                             if let isla_lib::smt::SmtResult::Error(error) = &smt_result {
                                 let error = ExecError::Smt(error.clone());
@@ -2481,10 +2484,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             let (memory_events, pre_memory, post_memory);
                             {
                                 {
+                                    // 代表的前态、后态和返回值均从同一个最终求解模型具体化。
                                     let mut model = solver.take_stashed_model().expect("SAT 路径必须持有最终求解模型");
-                                    // 开启 model completion：未被约束的 pre-state 符号变量也会得到一个具体值，
-                                    // 这样所有主动符号化的 pre-state 寄存器都能输出（与 testgen 一致）。
-                                    // model.set_complete_model(true);
                                     // pre-state 取值：通过 target 和 setup 阶段生成的 PreStateCtx 查询具体解。
                                     match target.solve_pre_state(&mut model, shared_state) {
                                         Ok(state) => isa_state.extend(state),
@@ -3213,7 +3214,7 @@ mod tests {
         };
         let mut limits = ExecutionLimits::default();
         limits.merge_enumeration.enabled = true;
-        limits.merge_enumeration.class_cap = 1;
+        limits.merge_enumeration.class_cap = Some(1);
         limits.merge_enumeration.enumeration_threads = 1;
         let state = TaskState::new().with_execution_limits(limits.clone());
         let mut frame = LocalFrame::new(TOP_LEVEL_LET, &[], &Ty::Unit, None, &[]);
@@ -3340,6 +3341,7 @@ mod tests {
             None,
             1,
             None,
+            None,
             &limits,
             &reporter,
             None,
@@ -3377,6 +3379,7 @@ mod tests {
             &Bindings::default(),
             None,
             1,
+            None,
             None,
             &normal_limits,
             &reporter,
@@ -4078,7 +4081,7 @@ mod tests {
         if matches!(mode, EncodingFixture::MergeExecuteAs) {
             limits.path_merging = true;
             limits.merge_enumeration.enabled = true;
-            limits.merge_enumeration.class_cap = 1;
+            limits.merge_enumeration.class_cap = Some(1);
         }
         let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
             "output/terminal-collector-{}-{}-{store}",
@@ -4109,6 +4112,7 @@ mod tests {
             &initial_lets,
             None,
             1,
+            None,
             None,
             &limits,
             &reporter,
@@ -4442,6 +4446,7 @@ mod tests {
                 None,
                 1,
                 None,
+                None,
                 &ExecutionLimits::default(),
                 &reporter,
                 None,
@@ -4594,6 +4599,7 @@ mod tests {
                 None,
                 1,
                 None,
+                None,
                 &ExecutionLimits::default(),
                 &reporter,
                 None,
@@ -4723,7 +4729,7 @@ mod tests {
             });
             let mut limits = ExecutionLimits::default();
             limits.max_forks_per_branch = (mode == "sampled").then_some(0);
-            limits.on_limit_reached = LimitBehavior::Concretize;
+            limits.on_limit_reached = Some(LimitBehavior::Concretize);
             let outcome = run_symbolic_execute_with_target(
                 &mut target,
                 &clause,
@@ -4732,6 +4738,7 @@ mod tests {
                 &Bindings::default(),
                 None,
                 1,
+                None,
                 None,
                 &limits,
                 &reporter,
@@ -4914,14 +4921,12 @@ mod tests {
     fn solve_execution_limits_enables_global_state_only_with_path_merging() {
         let symtab = Symtab::new();
         assert!(!ExecutionLimits::default().with_path_merging(true).region_global_state);
-        assert!(!solve_execution_limits(&symtab, None).region_global_state);
+        assert!(solve_execution_limits(&symtab, None).region_global_state);
         assert!(!ExecutionLimits::default().with_path_merging(true).region_loop_analysis);
-        assert!(!solve_execution_limits(&symtab, None).region_loop_analysis);
+        assert!(solve_execution_limits(&symtab, None).region_loop_analysis);
         for enabled in [false, true] {
-            let config = ExecutionLimitsConfig {
-                path_merge: isla_lib::config::PathMergeConfig { enabled: Some(enabled), ..Default::default() },
-                ..ExecutionLimitsConfig::default()
-            };
+            let config =
+                toml::from_str::<ExecutionLimitsConfig>(&format!("[path_merge]\nenabled = {enabled}")).unwrap();
             let limits = solve_execution_limits(&symtab, Some(&config));
             assert_eq!(limits.region_global_state, enabled);
             assert_eq!(limits.region_loop_analysis, enabled);
@@ -4950,7 +4955,7 @@ mod tests {
         let limits = solve_execution_limits(&symtab, Some(&config));
 
         assert_eq!(limits.max_forks_per_branch, Some(1));
-        assert_eq!(limits.on_limit_reached, LimitBehavior::Concretize);
+        assert_eq!(limits.on_limit_reached, Some(LimitBehavior::Concretize));
         // 不配 `regions`：per-scope 预算必须全局生效，否则选不中没有 Sail 源码位置的分支点。
         assert_eq!(limits.regions, None);
         assert!(limits.branch_region_limits.is_empty());
@@ -5037,7 +5042,7 @@ mod tests {
         assert_eq!(limits.max_forks_per_branch, Some(7));
         assert_eq!(limits.max_forks_per_path, Some(11));
         assert_eq!(limits.call_context_depth, Some(3));
-        assert_eq!(limits.on_limit_reached, LimitBehavior::Truncate);
+        assert_eq!(limits.on_limit_reached, Some(LimitBehavior::Truncate));
         assert!(limits.regions.is_none());
         assert!(limits.branch_region_limits.is_empty());
     }
@@ -5055,8 +5060,15 @@ mod tests {
     }
 
     #[test]
-    fn solve_execution_limits_without_toml_is_inactive() {
-        let limits = solve_execution_limits(&Symtab::new(), None);
+    fn solve_execution_limits_without_toml_has_adaptive_merge_and_no_budgets() {
+        let symtab = Symtab::new();
+        let limits = solve_execution_limits(&symtab, None);
+
+        assert!(limits.path_merging);
+        assert_eq!(
+            limits.merge_mode(Name::from_u32(0), SourceLoc::unknown(), None),
+            isla_lib::config::MergeMode::Adaptive
+        );
 
         assert_eq!(limits.max_forks_per_branch, None);
         assert_eq!(limits.max_forks_per_path, None);
@@ -5528,19 +5540,6 @@ mod tests {
         let finalized = finalize_cases(cases, &None);
         assert_eq!(finalized.len(), 1, "超时路径不能冒充可重放见证");
         assert_eq!(finalized[0].test_ins, "sd x1, 0(x2)");
-    }
-
-    #[test]
-    fn parse_model_timeout_ms_默认与显式值() {
-        assert_eq!(parse_model_timeout_ms(None), Duration::from_millis(30_000));
-        assert_eq!(parse_model_timeout_ms(Some("5000")), Duration::from_millis(5000));
-        assert_eq!(parse_model_timeout_ms(Some(" 5000 ")), Duration::from_millis(5000));
-    }
-
-    #[test]
-    #[should_panic(expected = "ISLA_RISCV_MODEL_TIMEOUT_MS")]
-    fn parse_model_timeout_ms_拒绝零与非数字() {
-        let _ = parse_model_timeout_ms(Some("0"));
     }
 
     #[test]
