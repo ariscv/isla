@@ -2709,6 +2709,20 @@ end_column = 0
     }
 
     #[test]
+    fn bv_rewrite_config_bool_lists_and_strict_location() {
+        for value in ["true", "false", "[]", "[\"mask-and\"]", "[\"data-ite-eq\",\"sign-bound\"]"] {
+            let config = merge_config(&format!("[execution_limits.solver]\nbv_rewrite={value}")).unwrap();
+            assert_eq!(RegionOptions::from_config(&config).bv_rewrite, config.solver.bv_rewrite);
+        }
+        assert!(!SolverConfig::default().bv_rewrite.enabled());
+        for text in
+            ["[execution_limits.solver]\nbv_rewrite=[\"oops\"]", "[execution_limits.path_merge]\nbv_rewrite=true"]
+        {
+            assert!(merge_config(text).is_err());
+        }
+    }
+
+    #[test]
     fn config_layout_freeze_snapshot_preserves_all_twenty_options() {
         let config = merge_config(
             r#"
@@ -2743,6 +2757,7 @@ obligation_dump_dir = "obligations"
         assert_eq!(
             options,
             RegionOptions {
+                bv_rewrite: Default::default(),
                 max_merge_depth: None,
                 defer_range_proofs: false,
                 defer_ctor_checks: false,

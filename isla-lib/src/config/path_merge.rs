@@ -13,6 +13,8 @@ use crate::source_loc::SourceRegionSpec;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SolverConfig {
+    /// 通用等价改写；默认关闭，可按规则名独立启用。
+    pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
     pub skip_branch_checks: bool,
     /// 跳过可选布尔恒值证明；默认关闭。

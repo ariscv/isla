@@ -668,6 +668,7 @@ pub struct SolverOptions {
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
     pub keep_bool_proofs: bool,
+    pub bv_rewrite: rewrite::BvRewrite,
 }
 
 static SOLVER_OPTIONS: OnceLock<SolverOptions> = OnceLock::new();
@@ -1042,6 +1043,9 @@ macro_rules! z3_float_binary_op {
 }
 
 mod arithmetic;
+pub mod rewrite;
+#[cfg(test)]
+mod rewrite_tests;
 
 static PUSH_ITE_BV: &[u8] = b"push_ite_bv\0";
 static BV_LE_EXTRA: &[u8] = b"bv_le_extra\0";
@@ -2479,7 +2483,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         ) {
             self.floating_point_seen.set(true);
         }
-        match exp {
+        let ast = match exp {
             Var(v) => match self.decls.get(v) {
                 None => panic!("Could not get Z3 func_decl {}", *v),
                 Some(ast) => ast.clone(),
@@ -2490,7 +2494,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Bool(b) => Ast::mk_bool(self.ctx, *b),
             Not(exp) => Ast::mk_not(&self.translate_exp(exp)),
             Eq(lhs, rhs) => Ast::mk_eq(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Neq(lhs, rhs) => Ast::mk_not(&Ast::mk_eq(&self.translate_exp(lhs), &self.translate_exp(rhs))),
+            Neq(lhs, rhs) => {
+                let equality = self.translate_exp(lhs).mk_eq(&self.translate_exp(rhs));
+                rewrite::apply(equality, self.ctx.solver_options.bv_rewrite).mk_not()
+            }
             And(lhs, rhs) => Ast::mk_and(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Or(lhs, rhs) => Ast::mk_or(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Bvnot(exp) => Ast::mk_bvnot(&self.translate_exp(exp)),
@@ -2620,7 +2627,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 &self.translate_exp(y),
                 &self.translate_exp(z),
             ),
-        }
+        };
+        rewrite::apply(ast, self.ctx.solver_options.bv_rewrite)
     }
 
     fn z3_assert(&mut self, exp: &Exp<Sym>) {

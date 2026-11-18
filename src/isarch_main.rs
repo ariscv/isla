@@ -673,6 +673,7 @@ fn isla_main() -> i32 {
         skip_bool_proofs: solver_region_options.skip_bool_proofs,
         no_smt: solver_region_options.no_smt,
         keep_bool_proofs: solver_region_options.no_smt_keep_bool_proofs,
+        bv_rewrite: solver_region_options.bv_rewrite,
     });
     if solver_region_options.no_smt {
         eprintln!("未认证候选构造：no_smt=true keep_bool_proofs={}", solver_region_options.no_smt_keep_bool_proofs);

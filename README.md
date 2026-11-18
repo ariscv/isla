@@ -830,3 +830,5 @@ no_smt = true
 `[execution_limits.path_merge]` 接受 `strategy = "recursive" | "flat"` 和 `ordered_events = false | true`；默认 recursive / false。CLI `--merge-strategy`、`--ordered-events` 只覆盖显式字段。旧 `[execution_limits] merge_strategy/ordered_events` 和旧 region_options 位置报错，不保留兼容。
 
 flat 在单个根事务内调度片段，循环按调用实例、PC、轮次折叠退出前沿。两事件模式分别保持访问偏序或规范访问足迹；实际 SMT 定义和访存事件顺序仍需保留。不能收敛的循环形状以 flat_loop_shape 拒绝；区域步数耗尽以 step_budget 拒绝，不静默截断输入域。实验候选不改变 recursive 默认值，有限验证不代表完整模型等价。
+
+`--bv-rewrite` 启用三条通用等价改写，默认关闭。可用 `--bv-rewrite=mask-and,sign-bound` 单独选规则，或用 `--bv-rewrite=false` 覆盖 TOML。TOML 在 `[execution_limits.solver]` 下接受 `bv_rewrite = true`、`false` 或规则名列表；规则名为 `data-ite-eq`、`mask-and`、`sign-bound`。加 `--memory-stats` 可查看进程累计命中次数。
