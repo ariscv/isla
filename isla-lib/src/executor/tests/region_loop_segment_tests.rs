@@ -160,6 +160,12 @@ fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
 }
 #[test]
 fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths"
+    )) {
+        return;
+    }
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let off = scan_paths(&shared, 64, 128, false, None);
