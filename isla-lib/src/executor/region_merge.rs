@@ -376,7 +376,7 @@ pub(super) enum RegionResult {
     Suspended,
 }
 
-/// 只有这里捕获推演拒绝。内层拒绝原样传播，直到最外层回滚后才恢复普通分叉。
+/// 组织区域事务。可局部化的汇合失败保留原片段；其余推演拒绝沿原错误出口处理。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     condition: Sym,
@@ -660,8 +660,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             if let Some(attempt) = diagnostics_attempt.as_mut() {
                 attempt.finish_local_rejection(reason);
             }
-            shared.execution_stats.merge_rejected(key.0, key.1, &reject(frame, reason));
-            state.speculation_stats.record_reject(reason);
             shared.execution_stats.rule_finished(rule, Some(reason));
             shared.execution_stats.merge_finished(false);
             Ok(RegionResult::Separate(reason))

@@ -302,6 +302,8 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
             );
             let mut separate: Vec<_> = saved.unwrap().into_iter().flatten().collect();
             assert!(separate.len() >= 2, "局部汇合拒绝必须保留两条以上片段");
+            shared.execution_stats.merge_rejected(frame.function_name, region.branch_pc, &error);
+            state.speculation_stats.record_reject(reason);
             charge_fragment_growth(frame, separate.len() - 1)?;
             for fragment in &mut separate {
                 fragment.region_execution = frame.region_execution.clone();
