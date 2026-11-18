@@ -6,6 +6,7 @@ use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::Region;
 
 mod dependencies;
+mod join_groups;
 mod organizer;
 mod poison_slots;
 pub(super) use dependencies::LoopDependencies;
@@ -236,7 +237,7 @@ fn charge_fragment_growth<B: BV>(frame: &LocalFrame<B>, additional: usize) -> Re
     Ok(())
 }
 
-/// 汇合动作在自己的保存点内；失败时保留已执行两臂的帧与完整守卫。
+/// 先尝试完整汇合，失败后以原片段形成兼容组。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_arrivals<'ir, B: BV>(
     record_id: usize,
@@ -250,9 +251,11 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
-    let keep_separate =
-        frame.region_execution.as_ref().is_some_and(|execution| execution.mode == crate::config::MergeMode::Adaptive)
-            && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
+    let count = arms.iter().map(Vec::len).sum::<usize>();
+    let nested = frame.region_execution.is_some();
+    let keep_separate = (nested || count > 2)
+        && frame.region_execution.as_ref().is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)
+        && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
     let saved = keep_separate.then(|| arms.clone());
     let tx = keep_separate.then(|| solver.start_transaction());
     let finish = |solver: &mut Solver<B>| {
@@ -290,20 +293,98 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
                 serde_json::json!({"stage":"local_join_rejected","difference":"local_join_rejected","reason":reason,
                 "at":{"function":diagnostics::name_string(function,&shared.symtab),"pc":pc,"location":location}}),
             );
-            let mut separate: Vec<_> = saved.unwrap().into_iter().flatten().collect();
-            assert!(separate.len() >= 2, "局部汇合拒绝必须保留两条以上片段");
+            let arrivals: Vec<_> = saved.unwrap().into_iter().flatten().collect();
+            assert!(arrivals.len() >= 2, "局部汇合拒绝必须保留两条以上片段");
+            let groups = if count > 2 {
+                join_groups::merge_compatible(arrivals, base, region, state, shared, solver, info)?
+            } else {
+                arrivals.into_iter().map(|part| (part, false)).collect()
+            };
+            let merged_groups = groups.len() < count;
             shared.execution_stats.merge_rejected(frame.function_name, region.branch_pc, &error);
             state.speculation_stats.record_reject(reason);
-            charge_fragment_growth(frame, separate.len() - 1)?;
-            for fragment in &mut separate {
+            charge_fragment_growth(base, groups.len() - 1)?;
+            let mut separate = Vec::with_capacity(groups.len());
+            for (mut fragment, combined) in groups {
+                if !nested && !combined {
+                    record_projected_arrival(&mut fragment, base, region, solver, info);
+                }
                 fragment.region_execution = frame.region_execution.clone();
                 fragment.speculation_mode = frame.speculation_mode;
+                separate.push(fragment);
             }
             assert!(frame.region_arrivals.is_empty());
             frame.region_arrivals = separate;
-            Ok(RegionResult::Separate(reason))
+            Ok(RegionResult::Separate { reason, merged_groups })
         }
     }
+}
+
+/// 单片段也需要一条出口记录承载条件内存读取。
+pub(super) fn record_projected_arrival<B: BV>(
+    fragment: &mut LocalFrame<B>,
+    base: &LocalFrame<B>,
+    region: &Region,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) {
+    let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.as_ref().unwrap();
+    let selector = solver.define_const(guard.clone(), info);
+    let id = super::region_merge::next_region_record();
+    attach_child_records(fragment, base.region_merge_records.len(), id, "then");
+    record_single_arrival(fragment, base, region, id, selector, info);
+    cost::make_mut(&mut fragment.local_state).speculative_access.as_mut().unwrap().guard =
+        Some(smtlib::Exp::Var(selector));
+}
+
+fn attach_child_records<B: BV>(arm: &mut LocalFrame<B>, start: usize, parent: usize, side: &'static str) {
+    arm.region_merge_records.edit_suffix(start, |records| {
+        for record in records {
+            if record.parent_record.is_none() {
+                record.parent_record = Some(parent);
+                record.arm = side;
+            }
+        }
+    });
+}
+
+fn record_single_arrival<B: BV>(
+    arm: &mut LocalFrame<B>,
+    base: &LocalFrame<B>,
+    region: &Region,
+    record_id: usize,
+    condition: Sym,
+    info: SourceLoc,
+) {
+    let access = arm.local_state.speculative_access.as_ref().unwrap();
+    let single_arm_reads: Vec<_> = access
+        .reads
+        .iter()
+        .zip(&access.read_guards)
+        .skip(base.local_state.speculative_access.as_ref().unwrap().reads.len())
+        .map(|((register, accessor, value), guard)| GuardedRegisterRead {
+            register: *register,
+            accessor: accessor.clone(),
+            value: value.clone(),
+            guard: guard.clone(),
+        })
+        .collect();
+    arm.region_merge_records.push(RegionMergeRecord {
+        record_id,
+        parent_record: None,
+        arm: "root",
+        function: base.function_name,
+        branch_pc: region.branch_pc,
+        join: region.join,
+        condition,
+        source_loc: info,
+        depth: base.region_execution.as_ref().unwrap().depth,
+        dead: false,
+        value_symbols: HashSet::from([condition]).into(),
+        input_symbols: HashSet::new().into(),
+        single_arm_reads: single_arm_reads.into(),
+        memory_reads: Vec::new().into(),
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,18 +406,13 @@ pub(super) fn finish_region<'ir, B: BV>(
     // 只修改本次推演产生的根记录。历史前缀和已连接的后代保持原上下文。
     for (index, arm) in arms.iter_mut().enumerate() {
         if let Some(arm) = arm {
-            arm.region_merge_records.edit_suffix(frame.region_merge_records.len(), |records| {
-                for record in records {
-                    if record.parent_record.is_none() {
-                        record.parent_record = Some(record_id);
-                        record.arm = if index == 0 { "then" } else { "else" };
-                    }
-                }
-            });
+            let side = if index == 0 { "then" } else { "else" };
+            attach_child_records(arm, frame.region_merge_records.len(), record_id, side);
         }
     }
     let right = arms.pop().unwrap();
     let left = arms.pop().unwrap();
+    let sources = [left.as_ref().and_then(|arm| arm.region_arm), right.as_ref().and_then(|arm| arm.region_arm)];
     let mut merged = match (left, right) {
         (None, None) => {
             frame.region_merge_records.push(RegionMergeRecord {
@@ -358,35 +434,7 @@ pub(super) fn finish_region<'ir, B: BV>(
             return Ok(RegionResult::Dead);
         }
         (Some(mut arm), None) | (None, Some(mut arm)) => {
-            let access = arm.local_state.speculative_access.as_ref().unwrap();
-            let single_arm_reads: Vec<_> = access
-                .reads
-                .iter()
-                .zip(&access.read_guards)
-                .skip(base.local_state.speculative_access.as_ref().unwrap().reads.len())
-                .map(|((register, accessor, value), guard)| GuardedRegisterRead {
-                    register: *register,
-                    accessor: accessor.clone(),
-                    value: value.clone(),
-                    guard: guard.clone(),
-                })
-                .collect();
-            arm.region_merge_records.push(RegionMergeRecord {
-                record_id,
-                parent_record: None,
-                arm: "root",
-                function: frame.function_name,
-                branch_pc: region.branch_pc,
-                join: region.join,
-                condition,
-                source_loc: info,
-                depth,
-                dead: false,
-                value_symbols: HashSet::new().into(),
-                input_symbols: HashSet::new().into(),
-                single_arm_reads: single_arm_reads.into(),
-                memory_reads: Vec::new().into(),
-            });
+            record_single_arrival(&mut arm, base, region, record_id, condition, info);
             arm
         }
         (Some(left), Some(right)) => {
@@ -418,23 +466,30 @@ pub(super) fn finish_region<'ir, B: BV>(
     merged.region_arm = frame.region_arm;
     merged.speculation_mode = frame.speculation_mode;
     if merged.region_execution.is_none() {
-        // 仅前置状态/访问足迹可信，需要逐条精确读写顺序时不可信。
-        // 读取在真实读取处缓冲，提交时按并集发布；此处补发以 ITE 保留原值的条件写入。
-        let access = cost::make_mut(&mut merged.local_state).speculative_access.take().unwrap();
-        for reg in access.writes.register_write_order {
-            if !shared.untraced_registers.contains(&reg) {
-                solver.add_event(Event::WriteReg(
-                    reg,
-                    Vec::new(),
-                    merged.regs().get_last_if_initialized(reg).unwrap().clone(),
-                ));
-            }
-        }
+        publish_register_writes(&mut merged, shared, solver);
+    }
+    if let Some(owner) = merged.region_arm {
+        solver.join_logical_arm(owner, sources.into_iter().flatten());
     }
     solver.add_event(Event::Fork(0, condition, 0, info));
     solver.add_event(Event::Merge(0, 2, info));
     *frame = merged;
     Ok(RegionResult::Merged)
+}
+
+/// 读取已条件缓冲；离开根区域时补发所选汇合组的最终寄存器写入。
+pub(super) fn publish_register_writes<B: BV>(
+    frame: &mut LocalFrame<B>,
+    shared: &SharedState<B>,
+    solver: &mut Solver<B>,
+) {
+    let access = cost::make_mut(&mut frame.local_state).speculative_access.take().unwrap();
+    for reg in access.writes.register_write_order {
+        if !shared.untraced_registers.contains(&reg) {
+            let value = frame.regs().get_last_if_initialized(reg).unwrap().clone();
+            solver.add_event(Event::WriteReg(reg, Vec::new(), value));
+        }
+    }
 }
 
 /// 配置注入的具体枚举可能从未经过 IR 常量读取；登记必须进入当前合并事务的事件迹。

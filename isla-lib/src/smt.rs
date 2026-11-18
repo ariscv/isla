@@ -219,11 +219,12 @@ pub struct Checkpoint<B> {
     num: usize,
     next_var: u32,
     trace: Arc<Option<Trace<B>>>,
+    cycles: i128,
 }
 
 impl<B> Checkpoint<B> {
     pub fn new() -> Self {
-        Checkpoint { num: 0, next_var: 0, trace: Arc::new(None) }
+        Checkpoint { num: 0, next_var: 0, trace: Arc::new(None), cycles: 0 }
     }
 
     pub fn trace(&self) -> &Option<Trace<B>> {
@@ -275,6 +276,7 @@ impl<B: BV> Checkpoint<B> {
             num: 1,
             next_var: self.next_var,
             trace: Arc::new(Some(Trace { checkpoints: 0, head: events, tail: Arc::new(None) })),
+            cycles: 0,
         }
     }
 
@@ -297,7 +299,7 @@ impl<B: BV> Checkpoint<B> {
             trace = Arc::new(Some(Trace { checkpoints: num, head, tail: trace }));
             num += 1;
         }
-        Checkpoint { num, next_var: candidate.next_var, trace }
+        Checkpoint { num, next_var: candidate.next_var, trace, cycles: candidate.cycles }
     }
 }
 
@@ -638,7 +640,7 @@ impl<B: BV> Trace<B> {
         let tail = Arc::new(Some(Trace { checkpoints: self.checkpoints, head, tail: self.tail.clone() }));
         self.checkpoints += 1;
         self.tail = tail.clone();
-        Checkpoint { num: self.checkpoints, trace: tail, next_var }
+        Checkpoint { num: self.checkpoints, trace: tail, next_var, cycles: 0 }
     }
 
     pub fn to_vec<'a>(&'a self) -> Vec<&'a Event<B>> {
@@ -3120,10 +3122,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.trace.tail = trace
     }
 
-    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace }: Checkpoint<B>) -> Self {
+    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace, cycles }: Checkpoint<B>) -> Self {
         let mut solver = Solver::new(ctx);
         solver.replay(num, trace);
         solver.next_var = next_var;
+        solver.cycles = cycles;
         solver
     }
 
@@ -4894,7 +4897,7 @@ impl<B> Checkpoint<B> {
         (self.num, self.next_var, &self.trace)
     }
     pub(crate) fn from_path_cache_parts(num: usize, next_var: u32, trace: Arc<Option<Trace<B>>>) -> Self {
-        Self { num, next_var, trace }
+        Self { num, next_var, trace, cycles: 0 }
     }
 }
 impl<B> Trace<B> {

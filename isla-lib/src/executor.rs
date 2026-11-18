@@ -2308,9 +2308,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 )? {
                                     region_merge::RegionResult::Merged => continue 'main_loop,
                                     region_merge::RegionResult::Dead => return Ok(Run::Dead),
-                                    region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate(_) => {
-                                        return Ok(Run::Suspended)
-                                    }
+                                    region_merge::RegionResult::Suspended
+                                    | region_merge::RegionResult::Separate { .. } => return Ok(Run::Suspended),
                                     region_merge::RegionResult::Rejected => (),
                                 }
                             }
@@ -12981,7 +12980,7 @@ fn zcaller(za, zb) {
         Ok(match result {
             region_merge::RegionResult::Merged => Some(frame.pc),
             region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
-            region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate(_) => {
+            region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate { .. } => {
                 panic!("最外层不能挂起区域片段")
             }
         })

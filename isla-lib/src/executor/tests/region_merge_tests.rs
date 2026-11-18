@@ -371,6 +371,94 @@ pub(super) fn input(index: u32) -> Exp<Name> {
     Exp::Id(test_name(900 + index))
 }
 
+#[test]
+fn region_merge_grouped_arrivals_keep_guards_and_register_traces() {
+    let mut shared = empty_shared_state();
+    let slot = shared.symtab.intern("zgrouped_string");
+    let register_a = shared.symtab.intern("zgrouped_reg_a");
+    let register_b = shared.symtab.intern("zgrouped_reg_b");
+    shared.registers.insert(register_a, Ty::Bool);
+    shared.registers.insert(register_b, Ty::Bool);
+    let store = |value: Exp<Name>| Instr::Copy(Loc::Id(slot), value, info());
+    let write = |reg, value| Instr::Copy(Loc::Id(reg), Exp::Bool(value), info());
+    let strings = |names: [&str; 4]| names.map(|name| Exp::String(name.into()));
+    for (values, ty, expected) in [
+        (strings(["a", "b", "a", "b"]), Ty::String, 2),
+        (strings(["a", "a", "a", "a"]), Ty::String, 1),
+        (strings(["a", "b", "c", "d"]), Ty::String, 4),
+        // 具体机器整数不在字符串分桶键中，需实际试合并并回滚不兼容组。
+        ([Exp::I64(1), Exp::I64(2), Exp::I64(1), Exp::I64(2)], Ty::I64, 2),
+    ] {
+        let compare = if ty == Ty::String {
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["eq_string"],
+                Exp::Id(slot),
+                Exp::String("a".into()),
+                info(),
+            )
+        } else {
+            Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(slot), Exp::I64(1)]), info())
+        };
+        let [a, b, c, d] = values;
+        let program = vec![
+            Instr::Decl(slot, ty, info()),
+            Instr::Jump(input(0), 9, info()),
+            Instr::Jump(input(1), 6, info()),
+            store(a),
+            write(register_a, false),
+            Instr::Goto(8),
+            store(b),
+            write(register_b, false),
+            Instr::Goto(16),
+            Instr::Jump(input(1), 13, info()),
+            store(c),
+            write(register_a, true),
+            Instr::Goto(15),
+            store(d),
+            write(register_b, true),
+            Instr::Goto(16),
+            compare,
+            Instr::End,
+        ];
+        let run = |limits| {
+            paths_with_state(program.clone(), &shared, 2, limits, crate::memory::Memory::new(), |frame| {
+                for register in [register_a, register_b] {
+                    frame.regs_mut().insert(register, false, UVal::Init(Val::Bool(false)));
+                }
+            })
+        };
+        let ordinary = run(ExecutionLimits::default().with_path_merging(false));
+        for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+            let mut limits = ExecutionLimits::default().with_path_merging(true);
+            limits.merge_strategy = strategy;
+            let grouped = run(limits);
+            assert_eq!(equivalent_paths(&ordinary, &grouped, 2, true), (4, expected), "{strategy:?}");
+            equivalent_register_paths(&ordinary, &grouped, 2);
+            if expected == 2 {
+                let mut footprints: Vec<_> = grouped
+                    .iter()
+                    .map(|path| {
+                        let writes: Vec<_> = path
+                            .events
+                            .iter()
+                            .filter_map(|event| match event {
+                                Event::WriteReg(reg, _, _) => Some(*reg),
+                                _ => None,
+                            })
+                            .collect();
+                        assert!(!path.records.is_empty());
+                        assert_eq!(writes.len(), 1, "每组只发布自身的寄存器写入");
+                        writes[0]
+                    })
+                    .collect();
+                footprints.sort_unstable();
+                assert_eq!(footprints, [register_a, register_b]);
+            }
+        }
+    }
+}
+
 /// 每条分叉路径都与覆盖它的合并路径比较完整最终寄存器映射，结构字段递归展开。
 fn equivalent_register_paths(forked: &[Path], merged: &[Path], inputs: usize) {
     use smtlib::Exp::*;
@@ -4830,21 +4918,27 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::End,
     ];
-    let result = paths_with_state(
-        nested,
-        &shared,
-        2,
-        ExecutionLimits::default().with_path_merging(true),
-        crate::memory::Memory::new(),
-        |frame| {
-            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
-            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
-        },
-    );
-    assert_eq!(result.len(), 3);
+    let run_nested = || {
+        paths_with_state(
+            nested.clone(),
+            &shared,
+            2,
+            ExecutionLimits::default().with_path_merging(true),
+            crate::memory::Memory::new(),
+            |frame| {
+                frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+                frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+            },
+        )
+    };
+    diag::configure("off").unwrap();
+    let without_diagnostics = run_nested();
+    diag::configure("detail").unwrap();
+    let result = run_nested();
     let diagnostics = diag::summary_for_test();
     assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
     assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
+    assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (2, 2));
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);

@@ -12,6 +12,12 @@ pub struct SolverTransaction {
     pub(super) head_len: usize,
 }
 
+/// 同一最外层汇合组的已提交条件事件和周期。
+pub(crate) struct RegionGroupEffects<B> {
+    events: Vec<(Option<Exp<Sym>>, Event<B>)>,
+    cycles: i128,
+}
+
 // 独立持有保存点的模型引用，提交、回滚以及带活动保存点销毁 Solver 都会正确释放。
 struct SavedModel<'ctx> {
     model: Option<Z3_model>,
@@ -446,6 +452,49 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.logical_arms.clear();
         }
         // 内层提交保留定义、带条件事件与统计；父层回滚仍可完整撤销。
+    }
+
+    pub(crate) fn commit_region_groups(&mut self, arms: &[LogicalArm]) -> Vec<RegionGroupEffects<B>> {
+        let [root] = self.savepoints.as_slice() else { panic!("只能从最外层事务交付多个汇合组") };
+        assert!(!root.order_register_reads);
+        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
+        let prefix = root.token.head_len;
+        let groups = arms
+            .iter()
+            .map(|arm| {
+                let mut cycles = root.cycles;
+                let events = self
+                    .transaction_events
+                    .iter()
+                    .zip(&self.transaction_event_guards)
+                    .zip(self.logical_arms.group_events(*arm))
+                    .filter_map(|((event, guard), (selected, cycle))| {
+                        cycles += i128::from(selected && cycle);
+                        // 未进入本组的定义仍可能被守卫或条件断言引用。
+                        (selected || matches!(event, Event::Smt(..))).then(|| (guard.clone(), event.clone()))
+                    })
+                    .collect();
+                RegionGroupEffects { events, cycles }
+            })
+            .collect();
+        self.commit_transaction();
+        self.trace.head.truncate(prefix);
+        self.trace.checkpoint(self.next_var);
+        self.last_committed_transaction = None;
+        groups
+    }
+
+    /// 各组共用事务前的迹和已提交 SMT 约束，分别发布组内非 SMT 事件。
+    pub(crate) fn select_region_group(&mut self, effects: RegionGroupEffects<B>) {
+        self.trace.head = effects.events.iter().map(|(_, event)| event.clone()).collect();
+        self.committed_transaction_events = effects.events;
+        self.cycles = effects.cycles;
+    }
+
+    pub(crate) fn region_group_checkpoint(&self) -> Checkpoint<B> {
+        let mut point = self.trace.clone().checkpoint(self.next_var);
+        point.cycles = self.cycles;
+        point
     }
 
     /// 提交已判死的臂：撤销本层全部状态，仅向父层加入 g→false。
