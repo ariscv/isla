@@ -282,3 +282,98 @@ fn obligation_domain_excludes_even_earlier_normal_exit_and_keeps_outer_guard() {
     });
     s.rollback_transaction(root);
 }
+
+#[test]
+fn no_smt_stage1_switches_are_independent_and_never_certify_branches() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    for branches in [false, true] {
+        for booleans in [false, true] {
+            let mut cfg = Config::new();
+            cfg.solver_options =
+                SolverOptions { skip_branch_checks: branches, skip_bool_proofs: booleans, ..Default::default() };
+            let ctx = Context::new(cfg);
+            let mut s = Solver::<B64>::new(&ctx);
+            let x = s.declare_const(Ty::Bool, info);
+            s.assert(Var(x));
+            reset_path_smt_stats();
+            assert_eq!(
+                s.check_sat_with_for_branch(&Not(Box::new(Var(x))), info, false),
+                if branches { Unknown } else { Unsat }
+            );
+            if branches {
+                assert_eq!(path_smt_stats().calls, 0);
+                s.note_jump_results(x, true, true);
+                assert!(s.knowledge.both.is_none());
+                assert!(!s.knowledge.sat);
+            }
+            reset_path_smt_stats();
+            assert_eq!(s.check_sat_with_for_bool(&Not(Box::new(Var(x))), info), if booleans { Unknown } else { Unsat });
+            if booleans {
+                assert_eq!(path_smt_stats().calls, 0);
+            }
+            assert_eq!(s.check_sat_with_for_range(&Not(Box::new(Var(x))), info), Unsat);
+            assert_eq!(s.check_sat_with(&Not(Box::new(Var(x))), info), Unsat);
+            s.with_deferred_region_queries(|s| {
+                assert_eq!(s.check_sat_with_for_range(&Var(x), info), Unknown);
+            });
+        }
+    }
+}
+
+#[test]
+fn no_smt_global_zero_checks_and_explicit_safety_assumptions() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    let mut cfg = Config::new();
+    cfg.solver_options.no_smt = true;
+    let ctx = Context::new(cfg);
+    let mut s = Solver::<B64>::new(&ctx);
+    let x = s.declare_const(Ty::BitVec(5), info);
+    let index = s.define_const(ZeroExtend(123, Box::new(Var(x))), info);
+    reset_path_smt_stats();
+    assert!(s.no_smt_safety(&Bvult(Box::new(Var(index)), Box::new(bits64(32, 128))), info));
+    let unknown = s.declare_const(Ty::Bool, info);
+    assert!(s.no_smt_safety(&Var(unknown), info));
+    assert_eq!(s.check_sat_with_for_bool(&Var(unknown), info), Unknown);
+    assert!(matches!(s.check_sat(info), Error(SmtError::NoSmt { .. })));
+    assert_eq!(path_smt_stats().calls, 0);
+    assert!(!s.knowledge.sat);
+    assert!(!s.has_stashed_model());
+}
+
+#[test]
+fn no_smt_third_mode_only_permits_boolean_proofs_even_in_defer() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    let mut cfg = Config::new();
+    cfg.solver_options.no_smt = true;
+    cfg.solver_options.keep_bool_proofs = true;
+    let ctx = Context::new(cfg);
+    let mut s = Solver::<B64>::new(&ctx);
+    let x = s.declare_const(Ty::Bool, info);
+    s.assert(Var(x));
+    s.with_deferred_region_queries(|s| {
+        reset_path_smt_stats();
+        assert_eq!(s.check_sat_with_for_bool(&Not(Box::new(Var(x))), info), Unsat);
+        assert!(path_smt_stats().calls > 0);
+        reset_path_smt_stats();
+        assert_eq!(s.check_sat_with_for_branch(&Var(x), info, true), Unknown);
+        assert!(matches!(s.check_sat(info), Error(SmtError::NoSmt { .. })));
+        assert!(matches!(s.check_sat_with_for_range(&Var(x), info), Error(SmtError::NoSmt { .. })));
+        assert_eq!(path_smt_stats().calls, 0);
+    });
+}
+
+#[test]
+fn no_smt_structural_ranges_respect_wraparound() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let b = s.declare_const(Ty::Bool, info);
+    let x = s.define_const(Ite(Box::new(Var(b)), Box::new(bits64(3, 8)), Box::new(bits64(7, 8))), info);
+    assert_eq!(s.structural_bool(&Bvult(Box::new(Var(x)), Box::new(bits64(8, 8)))), Some(true));
+    let wrapped = s.define_const(Bvadd(Box::new(Var(x)), Box::new(bits64(250, 8))), info);
+    assert_ne!(s.structural_bool(&Bvult(Box::new(Var(wrapped)), Box::new(bits64(8, 8)))), Some(true));
+}

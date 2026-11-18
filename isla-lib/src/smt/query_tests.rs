@@ -186,7 +186,7 @@ fn default_snapshot_interrupt_keeps_dump_and_restores_queries() {
             other => panic!("应中断真实求解，得到{other:?}"),
         };
         // 实际中断错误携带的转储来自原执行保存点，仍保留全部乘法断言。
-        let SmtError::Timeout(timeout) = error;
+        let SmtError::Timeout(timeout) = error else { panic!("应为超时错误") };
         assert!(timeout.dump.materialize().unwrap().contains("bvmul"));
         solver.rollback_transaction(tx);
         assert!(solver.check_sat_with(&Bool(false), info).is_unsat().unwrap());

@@ -16,7 +16,17 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("probe_query_timings", "probe-query-timings", "有界逐查询计时；默认关闭"),
 ];
 
+const NO_SMT_OPTIONS: &[(&str, &str)] = &[
+    ("skip_branch_checks", "skip-branch-checks"),
+    ("skip_bool_proofs", "skip-bool-proofs"),
+    ("no_smt", "no-smt"),
+    ("no_smt_keep_bool_proofs", "no-smt-keep-bool-proofs"),
+];
+
 pub fn add_cli(opts: &mut getopts::Options) {
+    for (_, flag) in NO_SMT_OPTIONS {
+        opts.optflagopt("", flag, "无 SMT 实验选项；裸 flag 等于 true，覆盖 TOML，默认 false", "true|false");
+    }
     for (_, flag, help) in BOOL_OPTIONS {
         opts.optopt("", flag, help, "true|false");
     }
@@ -76,9 +86,40 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
             changed = true;
         }
     }
+    for (field, flag) in NO_SMT_OPTIONS {
+        if matches.opt_present(flag) {
+            let value = matches.opt_str(flag).unwrap_or_else(|| "true".into());
+            let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
+            match *field {
+                "skip_branch_checks" => options.skip_branch_checks = value,
+                "skip_bool_proofs" => options.skip_bool_proofs = value,
+                "no_smt" => options.no_smt = value,
+                "no_smt_keep_bool_proofs" => options.no_smt_keep_bool_proofs = value,
+                _ => unreachable!("无 SMT CLI 字段必须登记"),
+            }
+            changed = true;
+        }
+    }
     options.validate()?;
     if changed {
         limits.region_options = Some(options);
+    }
+    Ok(())
+}
+
+/// 全局无 SMT 只允许导出未认证候选，禁止生成样例、认证或普通缓存读回。
+pub fn validate_no_smt_mode(
+    matches: &getopts::Matches,
+    options: &isla_lib::config::RegionOptions,
+) -> Result<(), String> {
+    if options.no_smt
+        && (!matches.opt_present("path-cache-only")
+            || !matches.opt_present("path-cache-write")
+            || matches.opt_present("path-cache-read")
+            || matches.opt_present("check-samples")
+            || matches.free.first().map(String::as_str) != Some("solve-state"))
+    {
+        return Err("no_smt 只支持 solve-state --path-cache-only --path-cache-write，不支持样例认证或缓存读回".into());
     }
     Ok(())
 }
@@ -165,5 +206,75 @@ mod tests {
         ] {
             assert!(cli(&mut ExecutionLimitsConfig::default(), &[value]).is_err(), "{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod no_smt_port_tests {
+    use super::*;
+    use isla_lib::config::RegionOptions;
+
+    fn parse(args: &[&str]) -> getopts::Matches {
+        let mut opts = getopts::Options::new();
+        add_cli(&mut opts);
+        super::super::path_cache::Options::add_cli(&mut opts);
+        opts.optopt("", "check-samples", "", "path");
+        opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn no_smt_cli_preserves_toml_and_supports_bare_and_false() {
+        for (field, flag) in NO_SMT_OPTIONS {
+            let text = if *field == "no_smt_keep_bool_proofs" {
+                format!("no_smt=true\n{field}=true")
+            } else {
+                format!("{field}=true")
+            };
+            let toml: RegionOptions = toml::from_str(&text).unwrap();
+            let mut limits = ExecutionLimitsConfig { region_options: Some(toml.clone()), ..Default::default() };
+            apply_cli(&parse(&[]), &mut limits).unwrap();
+            assert_eq!(limits.region_options, Some(toml));
+            apply_cli(&parse(&[&format!("--{flag}=false")]), &mut limits).unwrap();
+            let expected = if *field == "no_smt_keep_bool_proofs" {
+                RegionOptions { no_smt: true, ..Default::default() }
+            } else {
+                RegionOptions::default()
+            };
+            assert_eq!(limits.region_options, Some(expected));
+            let args = if *field == "no_smt_keep_bool_proofs" {
+                vec!["--no-smt", "--no-smt-keep-bool-proofs"]
+            } else {
+                vec![*flag]
+            };
+            let args: Vec<String> = args
+                .into_iter()
+                .map(|arg| if arg.starts_with("--") { arg.into() } else { format!("--{arg}") })
+                .collect();
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            apply_cli(&parse(&args), &mut limits).unwrap();
+            assert!(limits.region_options.is_some());
+            assert!(apply_cli(&parse(&[&format!("--{flag}=1")]), &mut limits).is_err());
+        }
+    }
+
+    #[test]
+    fn no_smt_cli_rejects_conflicting_proofs_and_unsafe_modes() {
+        for args in
+            [vec!["--no-smt-keep-bool-proofs"], vec!["--no-smt", "--no-smt-keep-bool-proofs", "--skip-bool-proofs"]]
+        {
+            assert!(apply_cli(&parse(&args), &mut ExecutionLimitsConfig::default()).is_err());
+        }
+        let options = RegionOptions { no_smt: true, ..Default::default() };
+        for args in [
+            vec!["solve-state"],
+            vec!["solve-state", "--path-cache-only"],
+            vec!["fuzz", "--path-cache-only", "--path-cache-write=cache"],
+            vec!["solve-state", "--path-cache-only", "--path-cache-write=cache", "--path-cache-read=old"],
+            vec!["solve-state", "--path-cache-only", "--path-cache-write=cache", "--check-samples=x.jsonl"],
+        ] {
+            assert!(validate_no_smt_mode(&parse(&args), &options).is_err(), "{args:?}");
+        }
+        validate_no_smt_mode(&parse(&["solve-state", "--path-cache-only", "--path-cache-write=cache"]), &options)
+            .unwrap();
     }
 }

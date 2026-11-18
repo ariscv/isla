@@ -6,6 +6,14 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegionOptions {
+    /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
+    pub skip_branch_checks: bool,
+    /// 跳过可选布尔恒值证明；默认关闭。
+    pub skip_bool_proofs: bool,
+    /// 不调用 SMT check，仅构造未认证候选；默认关闭。
+    pub no_smt: bool,
+    /// 无 SMT 模式下只恢复可选布尔恒值证明；默认关闭。
+    pub no_smt_keep_bool_proofs: bool,
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
     /// 延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用。
@@ -43,6 +51,9 @@ static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 
 impl RegionOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if self.no_smt_keep_bool_proofs && (!self.no_smt || self.skip_bool_proofs) {
+            return Err("no_smt_keep_bool_proofs 需要 no_smt=true 且 skip_bool_proofs=false".into());
+        }
         if self.same_context_sites.len() > 2 {
             return Err("same_context_sites 最多选择两个位置".into());
         }
@@ -81,5 +92,32 @@ mod tests {
         assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
         assert_eq!(RegionOptions::current(), &RegionOptions::default());
         assert_eq!(RegionOptions::default().bool_proof_rlimit, 0);
+    }
+}
+
+#[cfg(test)]
+mod no_smt_port_tests {
+    use super::*;
+    #[test]
+    fn no_smt_toml_defaults_and_switches() {
+        assert_eq!(toml::from_str::<RegionOptions>("no_smt=false").unwrap(), RegionOptions::default());
+        for field in ["skip_branch_checks", "skip_bool_proofs", "no_smt", "no_smt_keep_bool_proofs"] {
+            let options = toml::from_str::<RegionOptions>(&format!("{field}=true")).unwrap();
+            assert_ne!(options, RegionOptions::default());
+            assert!(toml::from_str::<RegionOptions>(&format!("{field}=1")).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod no_smt_validation_tests {
+    use super::*;
+    #[test]
+    fn no_smt_toml_proof_dependency() {
+        for text in ["no_smt_keep_bool_proofs=true", "no_smt=true\nno_smt_keep_bool_proofs=true\nskip_bool_proofs=true"]
+        {
+            assert!(toml::from_str::<RegionOptions>(text).unwrap().validate().is_err());
+        }
+        toml::from_str::<RegionOptions>("no_smt=true\nno_smt_keep_bool_proofs=true").unwrap().validate().unwrap();
     }
 }

@@ -51,3 +51,43 @@ fn 符号构造子的直接与字段解包必须检查标签可满足性() {
         }
     }
 }
+
+#[test]
+fn no_smt_constructor_unwrap_assumes_matching_tag_without_query() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let tag_a = test_name(740);
+    let tag_b = test_name(741);
+    let value = test_name(742);
+    let shared = empty_shared_state();
+    let mut cfg = Config::new();
+    cfg.solver_options.no_smt = true;
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&ctx);
+    let tag = solver.declare_const(Name::smt_ty(), info());
+    let mut frame = make_frame(vec![Instr::End]);
+    frame.vars_mut().insert(
+        value,
+        UVal::Init(Val::SymbolicCtor(
+            tag,
+            HashMap::from_iter([(tag_a, Val::Bits(B64::new(11, 8))), (tag_b, Val::Bits(B64::new(22, 8)))]),
+        )),
+    );
+    crate::smt::reset_path_smt_stats();
+    let result = eval_exp(
+        &Exp::Unwrap(tag_a, Box::new(Exp::Id(value))),
+        Arc::make_mut(&mut frame.local_state),
+        &shared,
+        &mut solver,
+        info(),
+    )
+    .map(Cow::into_owned);
+    assert_eq!(result.unwrap(), Val::Bits(B64::new(11, 8)));
+    assert_eq!(crate::smt::path_smt_stats().calls, 0);
+    let point = checkpoint(&mut solver);
+    let verification = Context::new(Config::new());
+    let mut restored = Solver::from_checkpoint(&verification, point);
+    assert!(restored
+        .check_sat_with(&smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(tag_b.to_smt())), info())
+        .is_unsat()
+        .unwrap());
+}

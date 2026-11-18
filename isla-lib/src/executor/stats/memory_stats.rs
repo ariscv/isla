@@ -165,6 +165,9 @@ pub fn print() {
     }
     EPOCH.fetch_add(1, Ordering::Relaxed);
     eprintln!("[MEMORY_STATS] {}", snapshot());
+    if crate::smt::no_smt::options().no_smt {
+        eprintln!("{}", crate::smt::no_smt::diagnostics());
+    }
 }
 
 /// HashMap 的 capacity 只估算可装载 payload，不冒充实际 bucket/control 分配。
