@@ -5,7 +5,7 @@ use isla_lib::{
     bitvector::BV,
     executor::samples::Sample,
     ir::SharedState,
-    smt::{Config, Context},
+    smt::{smtlib::Exp, Config, Context, Sym},
 };
 use rand_chacha::ChaCha8Rng;
 use serde_json::{json, Value};
@@ -22,12 +22,12 @@ pub(super) fn owner(target: usize, threads: usize) -> usize {
 }
 pub(super) struct GenerationPool {
     inputs: Vec<crossbeam::channel::Sender<Job>>,
-    output: crossbeam::channel::Receiver<(u64, Sample, Value)>,
+    output: crossbeam::channel::Receiver<(u64, Option<Sample>, Value)>,
     pending: usize,
 }
 impl Executor for GenerationPool {
     type Input = Job;
-    type Output = (u64, Sample, Value);
+    type Output = (u64, Option<Sample>, Value);
     fn submit(&mut self, batch: Vec<Job>) {
         assert_eq!(self.pending, 0, "上一批生成尚未完成");
         self.pending = batch.len();
@@ -48,6 +48,18 @@ impl GenerationPool {
         shared: &SharedState<B>,
         target: &dyn Target<B>,
         threads: usize,
+        mutation_config: &super::MutationConfig,
+        run: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        Self::with_domain(paths, shared, target, threads, mutation_config, |_| Exp::Bool(true), run)
+    }
+    pub(super) fn with_domain<B: BV, R>(
+        paths: &[ResidentPath<B>],
+        shared: &SharedState<B>,
+        target: &dyn Target<B>,
+        threads: usize,
+        mutation_config: &super::MutationConfig,
+        domain: impl Fn(&ResidentPath<B>) -> Exp<Sym> + Sync,
         run: impl FnOnce(&mut Self) -> R,
     ) -> R {
         assert!(threads > 0);
@@ -58,6 +70,7 @@ impl GenerationPool {
                 let (input_tx, input_rx) = crossbeam::channel::bounded::<Job>(2);
                 inputs.push(input_tx);
                 let output_tx = output_tx.clone();
+                let domain = &domain;
                 scope.spawn(move || {
                     let mut config = Config::new();
                     config.set_param_value("model", "true");
@@ -66,20 +79,19 @@ impl GenerationPool {
                     for mut job in input_rx {
                         let signature = job.parent.path_signature;
                         let mutator = mutators.entry(signature).or_insert_with(|| {
-                            SolverMutator::new(
-                                paths.iter().find(|p| p.signature == signature).unwrap(),
-                                &context,
-                                shared,
-                                target,
-                            )
+                            let path = paths.iter().find(|p| p.signature == signature).unwrap();
+                            SolverMutator::new(path, &context, shared, target, mutation_config)
+                                .with_input_domain(domain(path))
                         });
-                        let sample = mutator
-                            .try_mutate(&job.parent, &job.record, &mut job.rng)
-                            .expect("预约目标类的可变空间已耗尽");
-                        job.record["ppn_overflow_retained_for_class"] =
-                            json!(*mutator.ppn_overflow_retained_for_class.borrow());
+                        let sample = mutator.try_mutate(&job.parent, &job.record, &mut job.rng);
                         job.record["changes"] = json!(*mutator.changes.borrow());
-                        output_tx.send((sample.sample_id, sample, job.record)).unwrap();
+                        if let Some(selected) = &*mutator.selected.borrow() {
+                            job.record["mutation_fields"] = json!(selected);
+                            if sample.is_none() {
+                                job.record["generation_status"] = json!("mutation_subset_unsatisfiable_or_seen");
+                            }
+                        }
+                        output_tx.send((job.record["sample_id"].as_u64().unwrap(), sample, job.record)).unwrap();
                     }
                 });
             }
@@ -103,11 +115,13 @@ pub(super) fn test_executor_order() {
         rng: super::random_stream(0, "测试", 0),
     }]);
     assert!(input_rx.recv().is_ok());
-    output_tx.send((3, sample.clone(), json!({}))).unwrap();
+    output_tx.send((3, Some(sample.clone()), json!({}))).unwrap();
     assert_eq!(pool.drain()[0].0, 3);
     pool.pending = 2;
-    output_tx.send((9, sample.clone(), json!({}))).unwrap();
-    output_tx.send((1, sample, json!({}))).unwrap();
-    assert_eq!(pool.drain().iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 9]);
+    output_tx.send((9, Some(sample.clone()), json!({}))).unwrap();
+    output_tx.send((1, None, json!({}))).unwrap();
+    let drained = pool.drain();
+    assert_eq!(drained.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 9]);
+    assert!(drained[0].1.is_none(), "耗尽结果必须传回 campaign");
     assert_eq!(pool.pending, 0);
 }

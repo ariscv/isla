@@ -177,6 +177,19 @@ pub fn export_cached_path<B: BV>(
     writer: Option<&SampleOutputs>,
     checker: Option<&SampleChecker>,
 ) -> Result<Option<serde_json::Value>, isla_lib::error::ExecError> {
+    export_cached_path_randomized(path, solver, shared, target, limits, writer, checker, None)
+}
+
+pub fn export_cached_path_randomized<B: BV>(
+    path: &super::resident::ResidentPath<B>,
+    solver: &mut isla_lib::smt::Solver<B>,
+    shared: &SharedState<B>,
+    target: &dyn Target<B>,
+    limits: &isla_lib::executor::ExecutionLimits,
+    writer: Option<&SampleOutputs>,
+    checker: Option<&SampleChecker>,
+    randomization: Option<&isla_lib::executor::samples::SampleRandomization<'_, B>>,
+) -> Result<Option<serde_json::Value>, isla_lib::error::ExecError> {
     use isla_lib::error::ExecError;
     use isla_lib::executor::{MergeEnumeration, TaskState};
     if let Some(checker) = checker {
@@ -197,7 +210,7 @@ pub fn export_cached_path<B: BV>(
         pure_definitions: &path.pure_definitions,
         signature: path.signature,
     }
-    .enumerate_merges_output_with(
+    .enumerate_merges_randomized_output_with(
         solver,
         &state,
         shared,
@@ -216,6 +229,7 @@ pub fn export_cached_path<B: BV>(
         },
         if writer.grouped() { Some(&complete) } else { None },
         false,
+        randomization,
     )?;
     if enumeration.is_none() {
         assert_eq!(

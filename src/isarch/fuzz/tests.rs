@@ -187,6 +187,7 @@ fn p1b_path_aliases_start_at_one() {
     let identity = ClassIdentity { scenario_config_id: "场景".into(), path_signature: 123, guard_vector: "0".into() };
     let directory = Directory { classes: [(identity, (0, 10))].into_iter().collect() };
     let options = Options {
+        mutation_config: Default::default(),
         mode: Mode::ReplayLog,
         scenario: "场景".into(),
         corpus: Some("unused".into()),
@@ -272,6 +273,7 @@ fn mutation_metadata_identifies_current_corpus_entry() {
     let output = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/fuzz-step2/unit/metadata");
     std::fs::create_dir_all(&output).unwrap();
     let options = Options {
+        mutation_config: Default::default(),
         mode: Mode::ReplayLog,
         scenario: "场景".into(),
         corpus: Some("unused".into()),
@@ -314,6 +316,7 @@ fn judge_only_does_not_invent_a_parent_class_transition() {
     let identity = ClassIdentity { scenario_config_id: "场景".into(), path_signature: 123, guard_vector: "0".into() };
     let directory = Directory { classes: [(identity, (0, 10))].into_iter().collect() };
     let options = Options {
+        mutation_config: Default::default(),
         mode: Mode::JudgeOnly,
         scenario: "场景".into(),
         corpus: Some("unused".into()),
@@ -386,4 +389,31 @@ fn difftest_oracle_keeps_unknown_causes_and_counts_rule_identity() {
     agree["xs_cause"] = json!(15);
     agree["nemu_cause"] = json!(15);
     assert!(oracle.compare(&expected, &agree).is_none());
+}
+
+#[test]
+fn reconfirm_sampled_corpus_keeps_guard_identity_and_records_source_numbers() {
+    let mut sample = example_sample();
+    sample.class_id = Some(7);
+    let row = json!({"path_signature":123,"guard_vector":"1","guard_unique":true,"post_unique":true,"sample":sample});
+    let output = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/fuzz-step2/unit/sampled-reconfirm");
+    std::fs::create_dir_all(&output).unwrap();
+    let directory =
+        super::corpus::Directory::reconfirm_sampled("场景", &[sample.clone()], &[Some(row.clone())], &output);
+    let (identity, (local_id, _)) = directory.classes.iter().next().unwrap();
+    assert_eq!(identity.guard_vector, "1");
+    assert_eq!(*local_id, 0);
+    assert_eq!(sample.class_id, Some(7), "原始导出编号不能被原地改写");
+    let sources: Value =
+        serde_json::from_reader(std::fs::File::open(output.join("corpus-source-class-ids.json")).unwrap()).unwrap();
+    assert_eq!(sources[0]["export_class_id"], 7);
+    let mut wrong = row;
+    wrong["path_signature"] = json!(124);
+    assert!(std::panic::catch_unwind(|| super::corpus::Directory::reconfirm_sampled(
+        "场景",
+        &[sample],
+        &[Some(wrong)],
+        &output
+    ))
+    .is_err());
 }

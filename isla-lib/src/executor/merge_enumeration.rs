@@ -1,5 +1,6 @@
 //! 合并路径终态的两级枚举，与具体 ISA 无关。
 //! 主迹仍采用寄存器读取并集语义，枚举不恢复精确事件顺序。
+use super::samples::SampleRandomization;
 use super::*;
 use serde_json::{json, Value};
 use smtlib::Exp as Formula;
@@ -280,6 +281,33 @@ impl<B: BV> LocalFrame<'_, B> {
         }
         .enumerate_merges_output_with(solver, state, shared, result, consume, complete, retain_solutions)
     }
+    pub fn enumerate_merges_randomized_output_with(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
+        consume: &SampleConsumer<'_, B>,
+        complete: Option<&ClassConsumer<'_>>,
+        retain_solutions: bool,
+        randomization: Option<&SampleRandomization<'_, B>>,
+    ) -> Result<Option<Value>, ExecError> {
+        MergeEnumeration {
+            records: &self.region_merge_records,
+            pure_definitions: &self.local_state.pure_definitions,
+            signature: self.path_signature(),
+        }
+        .enumerate_merges_randomized_output_with(
+            solver,
+            state,
+            shared,
+            result,
+            consume,
+            complete,
+            retain_solutions,
+            randomization,
+        )
+    }
 }
 
 /// 完成路径枚举所需的完整元数据；不依赖执行中的局部帧。
@@ -301,6 +329,30 @@ impl<B: BV> MergeEnumeration<'_, B> {
         complete: Option<&ClassConsumer<'_>>,
         retain_solutions: bool,
     ) -> Result<Option<Value>, ExecError> {
+        self.enumerate_merges_randomized_output_with(
+            solver,
+            state,
+            shared,
+            result,
+            consume,
+            complete,
+            retain_solutions,
+            None,
+        )
+    }
+
+    /// 用独立随机相位求解器取得所属类的模型，再导出全部前后态。
+    pub fn enumerate_merges_randomized_output_with(
+        &self,
+        solver: &mut Solver<B>,
+        state: &TaskState<B>,
+        shared: &SharedState<B>,
+        result: &Val<B>,
+        consume: &SampleConsumer<'_, B>,
+        complete: Option<&ClassConsumer<'_>>,
+        retain_solutions: bool,
+        randomization: Option<&SampleRandomization<'_, B>>,
+    ) -> Result<Option<Value>, ExecError> {
         let Some(config) = state.execution_limits.as_ref().map(|limits| &limits.merge_enumeration) else {
             return Ok(None);
         };
@@ -321,11 +373,24 @@ impl<B: BV> MergeEnumeration<'_, B> {
                 consume,
                 complete,
                 retain_solutions,
+                randomization,
                 None,
                 None,
             );
         }
-        parallel::enumerate(self, solver, state, shared, result, consume, complete, retain_solutions, false).map(Some)
+        parallel::enumerate(
+            self,
+            solver,
+            state,
+            shared,
+            result,
+            consume,
+            complete,
+            retain_solutions,
+            randomization,
+            false,
+        )
+        .map(Some)
     }
 
     fn enumerate_merges_partition(
@@ -337,6 +402,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
         consume: &SampleConsumer<'_, B>,
         complete: Option<&ClassConsumer<'_>>,
         retain_solutions: bool,
+        randomization: Option<&SampleRandomization<'_, B>>,
         partition: Option<&parallel::Partition>,
         plans: Option<&HashMap<Vec<bool>, parallel::ClassPlan>>,
     ) -> Result<Option<Value>, ExecError> {
@@ -439,6 +505,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                 &|_, _, _, _, _| unreachable!("一级类目录不物化样本"),
                 None,
                 true,
+                None,
                 true,
             )?;
             let classes: Vec<Vec<bool>> = serde_json::from_value(catalog["guard_assignments"].clone()).unwrap();
@@ -513,7 +580,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
         // 复用现有事件重放接口隔离 DFS 与逐解物化，避免 stride 改变样本内容。
         let replay_events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
         // 同一路径的全部代表复用固定变量序；只收集可观察的有限域自由度。
-        let canonical_symbols = if !counting && config.class_cap == 1 {
+        let canonical_symbols = if !counting && config.class_cap == 1 && randomization.is_none() {
             let mut types = HashMap::new();
             let mut functions = HashMap::new();
             let mut opaque = HashSet::new();
@@ -718,11 +785,14 @@ impl<B: BV> MergeEnumeration<'_, B> {
                     drop(model);
                     if export {
                         let context = crate::smt::Context::new(crate::smt::Config::new());
-                        let mut representative_solver = Solver::new_seeded(&context, 0);
+                        let mut representative_solver = Solver::new_for_samples(
+                            &context,
+                            randomization.map(|options| (options.seed)(class_id, solution_count)),
+                        );
                         for event in &replay_events {
                             representative_solver.add_event(event.clone());
                         }
-                        let condition = if config.class_cap == 1 {
+                        let mut condition = if config.class_cap == 1 {
                             // 代表只由活动守卫赋值决定，不钉选投影求解器任意发现的首个叶子。
                             order.iter().zip(&assignment).fold(Bool(true), |condition, (index, value)| {
                                 let record = &records[*index];
@@ -736,8 +806,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                                 .fold(prefix.clone(), |condition, bit| And(Box::new(condition), Box::new(bit.clone())))
                         };
                         assert!(satisfiable(&mut representative_solver, &condition)?, "DFS 见证必须可重放");
-                        if config.class_cap == 1 {
-                            let mut condition = condition;
+                        if config.class_cap == 1 && randomization.is_none() {
                             let transaction = representative_solver.start_transaction();
                             let canonical = representative_solver.with_incremental_checks(|solver| {
                                 // 固定声明序下全部自由标量，再固定数组/函数的实际读取。
@@ -753,6 +822,9 @@ impl<B: BV> MergeEnumeration<'_, B> {
                                 satisfiable(&mut representative_solver, &condition)?,
                                 "规范代表必须满足原路径及所属守卫类"
                             );
+                        }
+                        if let Some(options) = randomization {
+                            (options.prepare)(class_id, solution_count, &mut representative_solver, &mut condition)?;
                         }
                         let mut model = Model::new(&representative_solver);
                         model.set_complete_model(true);

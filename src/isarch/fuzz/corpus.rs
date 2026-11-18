@@ -23,6 +23,37 @@ impl Directory {
             guard_vector: row["guard_vector"].as_str().unwrap().into(),
         }
     }
+    /// 有界抽样／过滤可留下类号空洞；身份仍由路径与完整守卫向量确认。
+    pub fn reconfirm_sampled(scenario: &str, corpus: &[Sample], judged: &[Option<Value>], output: &Path) -> Self {
+        assert_eq!(corpus.len(), judged.len());
+        let mut selected = BTreeMap::new();
+        for (index, row) in judged.iter().enumerate() {
+            let row = row.as_ref().expect("corpus entry 未被任何路径接纳");
+            let identity = ClassIdentity {
+                scenario_config_id: scenario.into(),
+                path_signature: row["path_signature"].as_u64().unwrap(),
+                guard_vector: row["guard_vector"].as_str().unwrap().into(),
+            };
+            assert!(selected.insert(identity, index).is_none(), "corpus中类重复");
+        }
+        let mut normalized = corpus.to_vec();
+        let mut sources = Vec::new();
+        let mut previous = None;
+        let mut rank = 0;
+        for (identity, index) in selected {
+            if previous != Some(identity.path_signature) {
+                previous = Some(identity.path_signature);
+                rank = 0;
+            }
+            sources.push(json!({"sample_id":corpus[index].sample_id,"identity":identity,"export_class_id":corpus[index].class_id,"local_class_id":rank}));
+            normalized[index].class_id = Some(rank);
+            rank += 1;
+        }
+        // 只改兼容输出编号，原来的完整语义、路径与唯一性核对全部保留。
+        let directory = Self::reconfirm(scenario, &normalized, judged, output);
+        write_json(&output.join("corpus-source-class-ids.json"), &sources);
+        directory
+    }
     pub fn reconfirm(scenario: &str, corpus: &[Sample], judged: &[Option<Value>], output: &Path) -> Self {
         assert_eq!(corpus.len(), judged.len());
         let mut classes = BTreeMap::new();

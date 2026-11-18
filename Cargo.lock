@@ -421,6 +421,7 @@ dependencies = [
  "pretty",
  "rand",
  "rand_chacha",
+ "regex",
  "serde",
  "serde-saphyr",
  "serde_json",

@@ -26,10 +26,6 @@ Isla is a symbolic execution engine for Sail instruction set
 architecture specifications.
 """
 
-[[example]]
-name = "misaligned-access"
-path = "test/isarch/misaligned_access/runner.rs"
-
 [[bin]]
 name = "isla-property"
 path = "src/property.rs"
@@ -89,11 +85,17 @@ doc = false
 name = "smt_contract"
 path = "test/smt/contract.rs"
 
+[[bin]]
+name = "ablation-case"
+path = "src/isarch/fuzz/ablation_case.rs"
+doc = false
+
 [[test]]
 name = "smt_thread_interrupt"
 path = "test/smt/thread_interrupt.rs"
 
 [dependencies]
+regex = "1.3.1"
 libc = "0.2.5"
 crossbeam = "0.8.1"
 getopts = "0.2.21"

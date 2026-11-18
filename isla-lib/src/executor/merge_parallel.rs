@@ -50,6 +50,7 @@ pub(super) fn enumerate<B: BV>(
     consume: &SampleConsumer<'_, B>,
     complete: Option<&ClassConsumer<'_>>,
     retain_solutions: bool,
+    randomization: Option<&SampleRandomization<'_, B>>,
     guard_catalog: bool,
 ) -> Result<Value, ExecError> {
     use Formula::*;
@@ -211,6 +212,7 @@ pub(super) fn enumerate<B: BV>(
                         &|_, _, _, _, _| unreachable!(),
                         None,
                         true,
+                        None,
                         Some(&partitions[index]),
                         None,
                     );
@@ -250,6 +252,7 @@ pub(super) fn enumerate<B: BV>(
                             if streaming { stream_consume } else { consume },
                             complete,
                             retain_solutions,
+                            randomization,
                             Some(&partitions[index]),
                             Some(&selected),
                         )?

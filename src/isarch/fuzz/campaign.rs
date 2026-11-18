@@ -130,14 +130,14 @@ pub(super) fn run<B: BV>(
     threads: usize,
 ) -> (Vec<Sample>, Vec<Value>, Vec<Option<Value>>, Value) {
     let started = Instant::now();
-    GenerationPool::with(paths, shared, target, threads, |generator| {
+    GenerationPool::with(paths, shared, target, threads, &options.mutation_config, |generator| {
         let classes = directory.classes.keys().cloned().collect::<Vec<_>>();
         let initial_identities = corpus
             .iter()
             .map(|sample| classes.iter().find(|key| directory.classes[*key].1 == sample.sample_id).unwrap().clone())
             .collect::<Vec<_>>();
         let initial_features = if options.feedback {
-            super::feedback::extract(corpus, &initial_identities, &options.output)
+            super::feedback::extract(corpus, &initial_identities)
         } else {
             initial_identities
                 .iter()
@@ -183,7 +183,9 @@ pub(super) fn run<B: BV>(
         // 对照允许独立重复，统一在 A/B 之后产生；A 的历史因此覆盖此前全部 mutant。
         let guided_budget = options.budget - options.budget * options.control_percent / 100;
         let mut attempts = 0;
-        let exhausted = 0;
+        let mut exhausted = 0;
+        let mut requests = 0usize;
+        let mut skipped = Vec::new();
         let mut generate_seconds = 0.0;
         let mut fast_seconds = 0.0;
         let mut certify_seconds = 0.0;
@@ -222,7 +224,7 @@ pub(super) fn run<B: BV>(
             let mut jobs = Vec::new();
             let mut completed = Vec::new();
             for (offset, parent_index) in batch.iter().enumerate() {
-                let id = (begin + offset) as u64;
+                let id = (if options.mutation_config.is_legacy() { begin + offset } else { requests + offset }) as u64;
                 let mut rng = random_stream(options.random_seed, &options.scenario, id);
                 if id as usize >= guided_budget {
                     let index = (rng.next_u64() % controls.len() as u64) as usize;
@@ -307,10 +309,29 @@ pub(super) fn run<B: BV>(
                 jobs.push(Job { target_index, parent: parent.clone(), record, rng });
             }
             generator.submit(jobs);
-            completed.extend(generator.drain());
+            requests += batch.len();
+            for (id, sample, record) in generator.drain() {
+                if let Some(sample) = sample {
+                    completed.push((id, sample, record));
+                } else if !options.mutation_config.is_legacy() {
+                    exhausted += 1;
+                    skipped.push(record);
+                } else {
+                    panic!("目标类输入耗尽");
+                }
+            }
+            if !options.mutation_config.is_legacy() {
+                super::io::write_lines(&options.output.join("mutation-skipped.jsonl"), &skipped);
+            }
             completed.sort_by_key(|(id, _, _)| *id);
-            for (offset, (id, sample, record)) in completed.into_iter().enumerate() {
-                assert_eq!(id as usize, begin + offset);
+            for (offset, (id, mut sample, mut record)) in completed.into_iter().enumerate() {
+                if options.mutation_config.is_legacy() {
+                    assert_eq!(id as usize, begin + offset);
+                } else {
+                    record["request_id"] = json!(id);
+                    record["sample_id"] = json!(begin + offset);
+                    sample.sample_id = (begin + offset) as u64;
+                }
                 samples.push(sample);
                 records.push(record);
             }
@@ -330,7 +351,7 @@ pub(super) fn run<B: BV>(
                 accepted
                     .iter()
                     .map(|(i, _)| begin + i)
-                    .zip(super::feedback::extract(&feature_samples, &feature_identities, &options.output))
+                    .zip(super::feedback::extract(&feature_samples, &feature_identities))
                     .collect::<BTreeMap<_, _>>()
             } else {
                 accepted

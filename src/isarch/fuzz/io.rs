@@ -32,3 +32,10 @@ pub fn canonical_coordinates(row: &mut Value) {
             .collect(),
     );
 }
+
+/// 沿用T3对差异签名的规范序列化；不引入输入哈希有效性锁。
+pub fn canonical_json(value: &serde_json::Value) -> String {
+    let mut value = value.clone();
+    value.sort_all_objects();
+    serde_json::to_string(&value).expect("规范JSON序列化失败")
+}

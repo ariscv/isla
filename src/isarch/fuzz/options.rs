@@ -6,6 +6,10 @@ pub enum Mode {
     JudgeOnly,
     ReplayLog,
     Campaign,
+    ExportCorpus,
+    Ablation,
+    MutationProbe,
+    ReproducibilityProbe,
 }
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -16,6 +20,7 @@ pub struct Options {
     pub mutations: Option<PathBuf>,
     pub output: PathBuf,
     pub random_seed: u64,
+    pub mutation_config: super::MutationConfig,
     pub batch_size: usize,
     pub budget: usize,
     pub control_percent: usize,
@@ -30,6 +35,10 @@ impl Options {
             Some("judge-only") => Mode::JudgeOnly,
             Some("replay-log") => Mode::ReplayLog,
             Some("campaign") => Mode::Campaign,
+            Some("export-corpus") => Mode::ExportCorpus,
+            Some("ablation") => Mode::Ablation,
+            Some("mutation-probe") => Mode::MutationProbe,
+            Some("reproducibility-probe") => Mode::ReproducibilityProbe,
             _ => return Err("--fuzz-mode 必须是 judge-only、replay-log 或 campaign".into()),
         };
         let required = |name: &str| matches.opt_str(name).ok_or_else(|| format!("fuzz 需要 --{name}"));
@@ -40,6 +49,14 @@ impl Options {
             inputs: matches.opt_str("fuzz-inputs").map(Into::into),
             mutations: matches.opt_str("fuzz-mutations").map(Into::into),
             output: required("fuzz-output")?.into(),
+            mutation_config: matches
+                .opt_str("fuzz-mutation-config")
+                .map(|path| {
+                    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取变异配置 {path} 失败：{e}"))?;
+                    super::MutationConfig::parse(&text)
+                })
+                .transpose()?
+                .unwrap_or_default(),
             random_seed: matches
                 .opt_str("fuzz-seed")
                 .unwrap_or_else(|| "0".into())
@@ -172,6 +189,7 @@ mod cache_fuzz_tests {
             "fuzz-batch-size",
             "fuzz-budget",
             "fuzz-feedback",
+            "fuzz-mutation-config",
             "executor",
         ] {
             parser.optopt("", name, "", "VALUE");
@@ -202,5 +220,16 @@ mod cache_fuzz_tests {
         let mut args = args.to_vec();
         args.extend(["--path-cache-read", "cache"]);
         assert!(Options::parse(&parser.parse(args).unwrap()).is_ok());
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TestcaseOptions {
+    pub compiler: PathBuf,
+    pub entry_mode: super::testcase::EntryMode,
+}
+impl Default for TestcaseOptions {
+    fn default() -> Self {
+        Self { compiler: "riscv64-unknown-elf-gcc".into(), entry_mode: super::testcase::EntryMode::Mprv }
     }
 }

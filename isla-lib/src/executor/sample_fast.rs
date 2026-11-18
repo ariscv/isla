@@ -258,11 +258,6 @@ impl<B: BV> SamplePath<B> {
         if !facts.is_complete() || !functional {
             return self.judge(solver, shared, input, records, signature, consume);
         }
-        for name in self.pre.keys() {
-            if !input.pre_registers.contains_key(name) {
-                return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
-            }
-        }
         assert_eq!(solver.transaction_depth(), 0, "快档必须在路径结束后运行");
         let timing = profile::Span::new("fast_bind");
         let mut condition = Exp::Bool(true);
@@ -307,6 +302,11 @@ impl<B: BV> SamplePath<B> {
         drop(timing);
         match result {
             SmtResult::Sat => {
+                for name in self.pre.keys() {
+                    if !input.pre_registers.contains_key(name) {
+                        return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
+                    }
+                }
                 Ok(Some(self.concretize_judged(solver, shared, input.sample_id, records, signature, consume)?.0))
             }
             SmtResult::Unsat => Ok(None),

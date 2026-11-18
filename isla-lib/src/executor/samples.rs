@@ -269,7 +269,8 @@ fn bytes<B: BV>(event: &Event<B>) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
 }
 
 impl<B: BV> SamplePath<B> {
-    fn accesses(&self) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
+    /// 返回逐字节地址、值、活动条件及读写方向，供调用方构造通用输入约束。
+    pub fn accesses(&self) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
         for index in self.memory_guards.keys() {
             assert!(self.memory.get(*index).expect("读取条件的访存序号必须存在").is_memory_read());
         }
@@ -478,11 +479,6 @@ impl<B: BV> SamplePath<B> {
         signature: u64,
         mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<Option<JudgedSample>, ExecError> {
-        for name in self.pre.keys() {
-            if !input.pre_registers.contains_key(name) {
-                return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
-            }
-        }
         assert_eq!(solver.transaction_depth(), 0, "judge 必须在路径结束后运行");
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let outcome = (|| {
@@ -494,6 +490,12 @@ impl<B: BV> SamplePath<B> {
             };
             if !accepted {
                 return Ok(None);
+            }
+            // 不匹配的候选路径可能读取其他寄存器；只有匹配后才要求其前态完整。
+            for name in self.pre.keys() {
+                if !input.pre_registers.contains_key(name) {
+                    return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
+                }
             }
             let (judged, different) =
                 self.concretize_judged(solver, shared, input.sample_id, records, signature, &mut consume)?;
@@ -882,20 +884,18 @@ impl SampleChecker {
         mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<(), ExecError> {
         for (index, sample) in self.samples.iter().enumerate() {
-            if self.judge_output.is_some() {
-                for name in path.pre.keys() {
-                    if !sample.pre_registers.contains_key(name) {
-                        return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
-                    }
-                }
-            }
+            let judged = if self.judge_output.is_some() {
+                let Some(judged) = path.judge(solver, shared, sample, records, signature, &mut consume)? else {
+                    continue;
+                };
+                Some(judged)
+            } else {
+                None
+            };
             if let Some(consistent) = path.check(solver, shared, sample)? {
                 if let Some(output) = &self.judge_output {
-                    let judged = path
-                        .judge(solver, shared, sample, records, signature, &mut consume)?
-                        .expect("J1 接纳的输入必须可被 judge 接纳");
                     let mut output = output.lock().unwrap();
-                    serde_json::to_writer(&mut *output, &judged).expect("judge 输出序列化失败");
+                    serde_json::to_writer(&mut *output, judged.as_ref().unwrap()).expect("judge 输出序列化失败");
                     output.write_all(b"\n").expect("写入 judge 输出失败");
                 }
                 let mut counts = self.counts.lock().unwrap();
@@ -1119,6 +1119,70 @@ mod tests {
         let error = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).err().unwrap();
         assert!(error.to_string().contains("后态不唯一"));
         assert_eq!(solver.transaction_depth(), 0);
+    }
+
+    fn admission_requires_fields_only_for_matching_path(mode: u8) {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let selector = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let extra = solver.declare_const(crate::smt::smtlib::Ty::BitVec(8), SourceLoc::unknown());
+        solver.assert(Exp::Var(selector));
+        let path = SamplePath {
+            terminal: Default::default(),
+            pre: BTreeMap::from([("selector".into(), Val::Symbolic(selector)), ("extra".into(), Val::Symbolic(extra))]),
+            post: BTreeMap::new(),
+            result: Val::Unit,
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        let facts = fast::FastFacts::analyze(&path, &mut solver, &[]).unwrap();
+        assert!(facts.is_complete(), "必须覆盖快档，不能转回完整 judge");
+        assert!(sat(&mut solver).unwrap());
+        let mut sample = path.materialize(&mut Model::new(&solver), &shared, "fork", 1, None).unwrap();
+        sample.pre_registers.remove("extra");
+        let mut check = |sample: &Sample| -> Result<bool, ExecError> {
+            let result = match mode {
+                0 => path.judge(&mut solver, &shared, sample, &[], 1, |_, _| Ok(())).map(|value| value.is_some()),
+                1 => path
+                    .classify(&mut solver, &shared, sample, &[], 1, &facts, |_, _| Ok(()))
+                    .map(|value| value.is_some()),
+                2 => {
+                    let output = std::env::temp_dir().join(format!("admission-shape-{}.jsonl", std::process::id()));
+                    let checker = SampleChecker::new(vec![sample.clone()]).with_judge_output(&output).unwrap();
+                    let result = checker.check_path_with_judge(&path, &mut solver, &shared, 1, &[], |_, _| Ok(()));
+                    let accepted = checker.report()["samples"][0]["accepted_paths"] == 1;
+                    drop(checker);
+                    std::fs::remove_file(output).unwrap();
+                    result.map(|()| accepted)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(solver.transaction_depth(), 0, "拒绝和错误均必须结束事务");
+            result
+        };
+        sample.pre_registers.insert("selector".into(), json!({"bool":false}));
+        assert!(!check(&sample).unwrap(), "已知字段排除路径后，不要求无关字段");
+        sample.pre_registers.insert("selector".into(), json!({"bool":true}));
+        assert!(check(&sample).unwrap_err().to_string().contains("缺少前态寄存器：extra"));
+        sample.pre_registers.insert("extra".into(), json!({"bits":"00000111"}));
+        assert!(check(&sample).unwrap(), "匹配且完整的输入必须接纳");
+    }
+
+    #[test]
+    fn admission_shape_full_judge() {
+        admission_requires_fields_only_for_matching_path(0);
+    }
+
+    #[test]
+    fn admission_shape_fast_classify() {
+        admission_requires_fields_only_for_matching_path(1);
+    }
+
+    #[test]
+    fn admission_shape_checker_with_judge_output() {
+        admission_requires_fields_only_for_matching_path(2);
     }
 
     #[test]
@@ -1414,4 +1478,17 @@ mod tests {
             assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
         }
     }
+}
+
+#[path = "sample_random.rs"]
+mod random;
+pub use random::fill_arbitrary_inputs;
+#[cfg(test)]
+#[path = "sample_random_tests.rs"]
+mod random_tests;
+
+/// 所属守卫类不变，调用方可选择代表解的求解策略。
+pub struct SampleRandomization<'a, B> {
+    pub seed: &'a (dyn Fn(usize, usize) -> u32 + Sync),
+    pub prepare: &'a (dyn Fn(usize, usize, &mut Solver<B>, &mut Exp<Sym>) -> Result<(), ExecError> + Sync),
 }

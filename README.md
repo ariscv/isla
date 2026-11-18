@@ -1,5 +1,7 @@
 # Isla
 
+可用 `--fuzz-mutation-config <toml>` 配置 A 形态的字段名权重与均匀子集；不指定时保持原默认和随机流。语法、失败请求计数和模式边界见 [命令说明](specs/isarch-cli.md#fuzz)。
+
 `isarch fuzz` 支持路径引导 campaign、corpus 认证、只判定与历史变异记录回放，支持确定性并行生成与 `--executor difftest` 三方闭环，并导出路径 DAG。默认用类内字段桶和不一致签名驱动 corpus 增长与调度，`--fuzz-feedback none` 切回轮转基线；公式与评估见 [第 5 步](agents/path_merge_call_support/fuzz-step5.md)。第 4 步的接口、验收与复现见 [闭环记录](agents/path_merge_call_support/fuzz-step4.md)。用法见 [命令说明](specs/isarch-cli.md#fuzz)，回放见 [第 2 步](agents/path_merge_call_support/fuzz-step2.md)，路径引导实验见 [第 3 步](agents/path_merge_call_support/fuzz-step3.md)。
 
 `--path-cache-read` 跳过探索。省略 `--fuzz-corpus` 时，从缓存按 `class_cap=1` 生成初始 corpus 并完整认证后进入 fuzz loop；提供它时直接复用并认证已有 corpus。用法与缓存版本见 [命令说明](specs/isarch-cli.md#fuzz)。

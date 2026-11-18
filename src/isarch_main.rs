@@ -459,6 +459,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "fuzz-output", "新建输出目录（绝对路径），输出 samples v1 / judged v1", "<directory>");
     opts.optopt("", "fuzz-seed", "随机数初值，每个 mutant 按场景与编号派生独立随机流，默认 0", "<u64>");
     opts.optopt("", "fuzz-batch-size", "批量大小，整批完成后更新调度，默认 256", "<number>");
+    opts.optopt("", "fuzz-mutation-config", "字段名模式与变异权重 TOML；默认保持原取点", "<file.toml>");
     opts.optopt("", "fuzz-budget", "campaign 的 mutant 预算，默认 2000", "<number>");
     opts.optopt(
         "",

@@ -3186,6 +3186,7 @@ mod tests {
                 ..Default::default()
             },
             fuzz: Some(fuzz::Options {
+                mutation_config: Default::default(),
                 mode: fuzz::Mode::JudgeOnly,
                 scenario: "fixture".into(),
                 corpus: None,

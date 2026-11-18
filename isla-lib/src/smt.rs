@@ -2358,6 +2358,107 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Integer, Some(seed))
     }
 
+    /// 样本导出使用独立求解器；不传种子时保留既有的固定种子行为。
+    /// C API 的 tactic 参数名为 phase/random_seed，对应命令行 sat.phase/sat.random_seed。
+    pub fn new_for_samples(ctx: &'ctx Context, random_seed: Option<u32>) -> Self {
+        let mut solver = Self::new_seeded(ctx, random_seed.unwrap_or(0));
+        if let Some(seed) = random_seed {
+            unsafe {
+                // qfaufbv 内部的 qfbv 会按全进程 Z3 内存是否低于 300 MiB
+                // 决定是否运行 simplify/solve-eqs/aig，导致并行取样同种子不同值。
+                // 导出使用固定子策略序列；数组残留时按公式类型交给 smt。
+                // fpa2bv 在没有浮点表达式时不改变公式，也支持浮点样本导出。
+                let sequences: &[&[&str]] = &[
+                    &[
+                        "simplify",
+                        "fpa2bv",
+                        "propagate-values",
+                        "solve-eqs",
+                        "elim-uncnstr",
+                        "reduce-bv-size",
+                        "max-bv-sharing",
+                        "ackermannize_bv",
+                    ],
+                    &["bit-blast", "simplify", "solve-eqs", "aig", "sat"],
+                    &["smt"],
+                ];
+                let mut pipelines = Vec::new();
+                for names in sequences {
+                    let mut sequence: Z3_tactic = ptr::null_mut();
+                    for name in *names {
+                        let name = CString::new(*name).unwrap();
+                        assert!(
+                            (0..Z3_get_num_tactics(ctx.z3_ctx))
+                                .any(|i| { CStr::from_ptr(Z3_get_tactic_name(ctx.z3_ctx, i)) == name.as_c_str() }),
+                            "Z3 {} 缺少样本子策略 {name:?}",
+                            z3_version()
+                        );
+                        let tactic = Z3_mk_tactic(ctx.z3_ctx, name.as_ptr());
+                        Z3_tactic_inc_ref(ctx.z3_ctx, tactic);
+                        if sequence.is_null() {
+                            sequence = tactic;
+                        } else {
+                            let combined = Z3_tactic_and_then(ctx.z3_ctx, sequence, tactic);
+                            Z3_tactic_inc_ref(ctx.z3_ctx, combined);
+                            Z3_tactic_dec_ref(ctx.z3_ctx, sequence);
+                            Z3_tactic_dec_ref(ctx.z3_ctx, tactic);
+                            sequence = combined;
+                        }
+                    }
+                    pipelines.push(sequence);
+                }
+                let probe = Z3_mk_probe(ctx.z3_ctx, b"is-qfbv\0".as_ptr().cast());
+                Z3_probe_inc_ref(ctx.z3_ctx, probe);
+                let dispatch = Z3_tactic_cond(ctx.z3_ctx, probe, pipelines[1], pipelines[2]);
+                Z3_tactic_inc_ref(ctx.z3_ctx, dispatch);
+                let tactic = Z3_tactic_and_then(ctx.z3_ctx, pipelines[0], dispatch);
+                Z3_tactic_inc_ref(ctx.z3_ctx, tactic);
+                Z3_solver_dec_ref(ctx.z3_ctx, solver.z3_solver);
+                solver.z3_solver = Z3_mk_solver_from_tactic(ctx.z3_ctx, tactic);
+                Z3_solver_inc_ref(ctx.z3_ctx, solver.z3_solver);
+                Z3_tactic_dec_ref(ctx.z3_ctx, tactic);
+                Z3_tactic_dec_ref(ctx.z3_ctx, dispatch);
+                Z3_probe_dec_ref(ctx.z3_ctx, probe);
+                for pipeline in pipelines {
+                    Z3_tactic_dec_ref(ctx.z3_ctx, pipeline);
+                }
+                static RANDOM_PHASE_SUPPORTED: OnceLock<()> = OnceLock::new();
+                RANDOM_PHASE_SUPPORTED.get_or_init(|| {
+                    let descrs = Z3_solver_get_param_descrs(ctx.z3_ctx, solver.z3_solver);
+                    Z3_param_descrs_inc_ref(ctx.z3_ctx, descrs);
+                    for (name, kind) in
+                        [(b"phase\0".as_slice(), ParamKind::Symbol), (b"random_seed\0".as_slice(), ParamKind::UInt)]
+                    {
+                        let name = CStr::from_bytes_with_nul(name).unwrap();
+                        let exists = (0..Z3_param_descrs_size(ctx.z3_ctx, descrs)).any(|i| {
+                            let symbol = Z3_param_descrs_get_name(ctx.z3_ctx, descrs, i);
+                            Z3_get_symbol_kind(ctx.z3_ctx, symbol) == SymbolKind::String
+                                && CStr::from_ptr(Z3_get_symbol_string(ctx.z3_ctx, symbol)) == name
+                        });
+                        assert!(exists, "Z3 {} 的样本求解器缺少参数 {name:?}", z3_version());
+                        let symbol = Z3_mk_string_symbol(ctx.z3_ctx, name.as_ptr());
+                        assert_eq!(
+                            Z3_param_descrs_get_kind(ctx.z3_ctx, descrs, symbol),
+                            kind,
+                            "Z3 样本参数类型不符：{name:?}"
+                        );
+                    }
+                    Z3_param_descrs_dec_ref(ctx.z3_ctx, descrs);
+                });
+                let params = Z3_mk_params(ctx.z3_ctx);
+                Z3_params_inc_ref(ctx.z3_ctx, params);
+                let phase = Z3_mk_string_symbol(ctx.z3_ctx, b"phase\0".as_ptr().cast());
+                let random = Z3_mk_string_symbol(ctx.z3_ctx, b"random\0".as_ptr().cast());
+                let random_seed = Z3_mk_string_symbol(ctx.z3_ctx, b"random_seed\0".as_ptr().cast());
+                Z3_params_set_symbol(ctx.z3_ctx, params, phase, random);
+                Z3_params_set_uint(ctx.z3_ctx, params, random_seed, seed);
+                Z3_solver_set_params(ctx.z3_ctx, solver.z3_solver, params);
+                Z3_params_dec_ref(ctx.z3_ctx, params);
+            }
+        }
+        solver
+    }
+
     fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: Option<u32>) -> Self {
         let config = SMT_CONFIG.get().expect("SMT 尚未初始化，请在程序启动时调用 smt::configure_tastic");
         unsafe {
@@ -2955,6 +3056,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace }: Checkpoint<B>) -> Self {
         let mut solver = Solver::new(ctx);
+        solver.replay(num, trace);
+        solver.next_var = next_var;
+        solver
+    }
+
+    /// 按样本随机选项重放检查点，并保留原路径的符号编号边界。
+    pub fn from_checkpoint_for_samples(
+        ctx: &'ctx Context,
+        Checkpoint { num, next_var, trace }: Checkpoint<B>,
+        random_seed: Option<u32>,
+    ) -> Self {
+        let mut solver = Self::new_for_samples(ctx, random_seed);
         solver.replay(num, trace);
         solver.next_var = next_var;
         solver

@@ -360,6 +360,24 @@ isarch [原 J1 探索参数] \
 
 回放 P1b 使用 `--fuzz-mode replay-log --fuzz-mutations <mutations.json>`；原始输入从同目录 `judge-batches.json` 定位，也可用 `--fuzz-inputs` 显式指定。`--fuzz-seed` 指定随机数初值（默认 0），`--fuzz-batch-size` 指定批量大小（默认 256）。默认使用模型执行器；`campaign --executor difftest` 连接 emu 和独立 NEMU。
 
+**字段权重配置（2026-11-18，独立候选）**：新增 `--fuzz-mutation-config <toml>`。省略或设置 `mode = "legacy"` 完全保持现有整类求解和随机流。可选 `mode = "uniform-subset"` 按字段名的连续数字串归并字段族，再无放回选若干族、每族选一个叶字段；未选字段及活动状态保持父值，选中字段必须变化。仅作用于 A，B 保持邻类求解。字段是否能变化最终由原模型和守卫判定；无新解的子集明确跳过，不扩大变异面。
+
+```toml
+mode = "uniform-subset"
+field_counts = [1, 2, 3]
+default_weight = 1.0
+
+[[fields]]
+pattern = "pre.flag"
+weight = 8.0
+```
+
+`field_counts` 中的每个位置等概率抽取，可用重复值改变数量分布；不足指定族数时取全部候选族。模式支持 `*` 任意串、`?` 单字符，其余字符按字面匹配；最后一条匹配规则覆盖前面的规则，零权重排除该字段。族权重取其最大叶权重，族内按叶权重选择，避免大数组自动获得更多族预算。配置解析拒绝未知键、非法模式、非有限或负权重、空或含零的数量数组；legacy 拒绝策略覆盖项。
+
+ablation 的有效硬件预算仍只统计完整观察；普通 campaign 的 `--fuzz-budget` 为请求额度，配置模式中的失败请求写入 `mutation-skipped.jsonl`，因此成功 mutant 数可小于预算；成功样本保持连续 sample_id，另存 request_id。每次运行在 provenance.json 记录解析后的配置，变异记录在 changes 之外记录 mutation_fields。
+
+**历史说明**：下面的8位切片、Python字段桶和PPN偏好描述适用于旧步骤3／5／8，不代表本候选。当前 A 从目标类重求整份输入，字段桶已迁至 Rust；旧 `--fuzz-avoid-known-ppn-overflow` 已拒绝。以下保留历史入口与适用版本。
+
 路径引导使用 `--fuzz-mode campaign --fuzz-budget 2000`。形态 A 固定父类，在活动输入字段的 8 位切片中换满足约束的值；形态 B 在同一条完成路径的规范向量目录中选择距离近的类，仅放开差异守卫及关联约束涉及的位。默认 `--fuzz-feedback coverage` 用实际类的 PTE 字段桶及未知不一致签名接纳 corpus entry，并在批次边界更新父输入和目标类的评分；`--fuzz-feedback none` 保留既有轮转基线。字段桶复用已有 Python 分页覆盖接口，评分公式见 [第 5 步](../agents/path_merge_call_support/fuzz-step5.md)。默认 5% 对照从 `--fuzz-mutations` 与原始输入构成的 replay-log 记录池抽样，统一在 A/B 之后生成；不提供对照池时显式设 `--fuzz-control-percent 0`。新 corpus entry 必须先认证；验收使用 `--fuzz-certify-all` 对全部接纳输入做两档逐字段比较。
 
 `--fuzz-avoid-known-ppn-overflow` 默认关闭。开启后，分页 A/B 优先令活动叶 PTE[53:46]=0；若目标类要求超宽，则撤下本次偏好，保留取值并在 `ppn-preference-summary.json` 计数。它不约束编码空间对照，不改变模型和窄规则；详见 [第 8 步](../agents/path_merge_call_support/fuzz-step8.md)。

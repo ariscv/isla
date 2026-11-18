@@ -1,10 +1,9 @@
 //! 实际类的字段桶、不一致签名及批次评分；不把已知规则当成整类过滤器。
-use super::{corpus::ClassIdentity, io, Feedback};
+use super::{corpus::ClassIdentity, Feedback};
 use isla_lib::executor::samples::Sample;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Feature {
@@ -104,32 +103,14 @@ impl CoverageFeedback {
     }
 }
 
-pub fn extract(samples: &[Sample], identities: &[ClassIdentity], output: &Path) -> Vec<Feature> {
+pub fn extract(samples: &[Sample], identities: &[ClassIdentity]) -> Vec<Feature> {
     assert_eq!(samples.len(), identities.len());
-    let input = output.join("feature-input.jsonl");
-    let result = output.join("feature-output.json");
-    io::write_lines(&input, samples);
-    let status = std::process::Command::new("python3")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/fuzz/value_features.py"))
-        .arg(&input)
-        .arg(&result)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .status()
-        .expect("无法启动字段桶解码器");
-    assert!(status.success(), "字段桶提取失败");
-    let rows: Vec<Value> = serde_json::from_reader(std::fs::File::open(&result).unwrap()).unwrap();
-    assert_eq!(rows.len(), samples.len());
-    let features = rows
-        .into_iter()
+    samples
+        .iter()
         .zip(identities)
-        .map(|(row, key)| Feature {
-            identity: key.clone(),
-            buckets: serde_json::from_value(row["buckets"].clone()).unwrap(),
-            potential: row["potential"].as_u64().unwrap() as usize,
-            mismatch: None,
+        .map(|(sample, key)| {
+            let (buckets, potential) = super::value_features::extract(sample);
+            Feature { identity: key.clone(), buckets, potential, mismatch: None }
         })
-        .collect();
-    std::fs::remove_file(input).unwrap();
-    std::fs::remove_file(result).unwrap();
-    features
+        .collect()
 }

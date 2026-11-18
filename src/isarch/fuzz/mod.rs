@@ -1,4 +1,5 @@
 //! 常驻 fuzz 骨架：一次探索、corpus 认证、确定性批次与 v1 输出。
+pub mod ablation;
 mod campaign;
 mod classifier;
 mod corpus;
@@ -8,11 +9,18 @@ mod feedback;
 mod generation;
 mod io;
 mod mutator;
+mod mutator_config;
 mod options;
 mod oracle;
+mod prefilter;
 mod replay;
 mod report;
+mod sampling;
+pub mod testcase;
 mod traits;
+mod value_features;
+pub use mutator_config::MutationConfig;
+pub use options::TestcaseOptions;
 
 use isla_lib::executor::samples::{Sample, SampleChecker};
 pub use options::{Mode, Options};
@@ -72,6 +80,7 @@ impl Session {
             &options.output.join("provenance.json"),
             &serde_json::json!({
                 "source_records":source_records,"current_executable":std::env::current_exe().unwrap(),
+                "mutation_config":options.mutation_config,
                 "validity":"当前模型语义重新确认；来源哈希仅记录，不作为门槛"
             }),
         );
