@@ -6,8 +6,10 @@ use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::Region;
 
 mod dependencies;
+mod organizer;
 mod poison_slots;
 pub(super) use dependencies::LoopDependencies;
+pub(super) use organizer::ReadyFragments;
 
 /// 构造具体臂帧并保存完整守卫；片段由调用栈或队列持有。
 pub(super) fn branch_arm<'ir, B: BV>(
@@ -188,7 +190,7 @@ pub(super) fn append_loop_exit<'ir, B: BV>(
         }
         Err(error) => {
             solver.rollback_transaction(tx);
-            if !matches!(&error, ExecError::SpeculativeReject { reason, .. } if is_join_rejection(*reason) || matches!(reason, SpeculativeRejectReason::FlatLoopShape | SpeculativeRejectReason::StateEffect))
+            if !matches!(&error, ExecError::SpeculativeReject { reason, .. } if is_join_rejection(*reason) || matches!(reason, SpeculativeRejectReason::StateEffect))
             {
                 return Err(error);
             }
@@ -240,19 +242,17 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
     condition: Sym,
     region: &Region,
     base: &LocalFrame<'ir, B>,
-    mut arms: [Vec<LocalFrame<'ir, B>>; 2],
+    arms: [Vec<LocalFrame<'ir, B>>; 2],
     frame: &mut LocalFrame<'ir, B>,
     state: &TaskState<B>,
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-    prepare: impl FnOnce(&mut [Vec<LocalFrame<'ir, B>>; 2]),
 ) -> Result<RegionResult, ExecError> {
     let keep_separate =
         frame.region_execution.as_ref().is_some_and(|execution| execution.mode == crate::config::MergeMode::Adaptive)
             && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
     let saved = keep_separate.then(|| arms.clone());
-    prepare(&mut arms);
     let tx = keep_separate.then(|| solver.start_transaction());
     let finish = |solver: &mut Solver<B>| {
         let mut sides = Vec::with_capacity(2);
@@ -697,11 +697,26 @@ fn merge_states<'ir, B: BV>(
     let read_or_written: std::collections::BTreeSet<_> =
         lhs.writes.read_regs.union(&rhs.writes.read_regs).chain(registers.iter()).collect();
     for reg in read_or_written {
-        if base.regs().is_relaxed(*reg) || base.regs().has_old_writes(*reg) {
+        if lhs.ordered_events && (base.regs().is_relaxed(*reg) || base.regs().has_old_writes(*reg)) {
             return Err(reject(base, SpeculativeRejectReason::RelaxedRegister));
         }
         let a = left.regs().get_last_if_initialized(*reg);
         let b = right.regs().get_last_if_initialized(*reg);
+        if base.regs().is_relaxed(*reg) {
+            if a.is_none() || b.is_none() {
+                let value = merged.regs_mut().get_latest(*reg, shared, solver, info)?.expect("寄存器必须存在").clone();
+                solver.add_event(Event::AssumeReg(*reg, Vec::new(), value.clone()));
+                retained_initials.push((*reg, value));
+            }
+            merged.regs_mut().merge_relaxed(*reg, condition, left.regs(), right.regs(), solver, info).map_err(
+                |error| match error {
+                    ExecError::Smt(_) | ExecError::Timeout => error,
+                    ExecError::IncompatibleUnionPayload => reject(base, SpeculativeRejectReason::UnionPayload),
+                    _ => incompatible(),
+                },
+            )?;
+            continue;
+        }
         let value = if registers.contains(reg) {
             let initial = if a.is_none() || b.is_none() {
                 let value = merged.regs_mut().get(*reg, shared, solver, info)?.expect("写入寄存器必须存在").clone();
@@ -755,34 +770,39 @@ fn merge_states<'ir, B: BV>(
         merged.regs_mut().assign(*reg, value, shared);
     }
     let shared_regs: HashSet<_> = lhs.writes.read_regs.intersection(&rhs.writes.read_regs).copied().collect();
-    let common_a: Vec<_> = lhs
-        .reads
-        .iter()
-        .filter(|(reg, _, _)| shared_regs.contains(reg))
-        .map(|(reg, accessor, _)| (reg, accessor))
-        .collect();
-    let common_b: Vec<_> = rhs
-        .reads
-        .iter()
-        .filter(|(reg, _, _)| shared_regs.contains(reg))
-        .map(|(reg, accessor, _)| (reg, accessor))
-        .collect();
-    if !lhs.global_state && common_a != common_b {
-        return Err(reject(base, SpeculativeRejectReason::RegisterSequence));
-    }
-    // 合并两臂的写入偏序，拓扑序必须同时保持每一臂的先后关系；形成环则拒绝。
-    let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
-    let mut nodes = HashMap::new();
-    for order in [&lhs.writes.register_write_order, &rhs.writes.register_write_order] {
-        for reg in order {
-            nodes.entry(*reg).or_insert_with(|| graph.add_node(*reg));
+    let write_order = if lhs.ordered_events {
+        let common = |access: &AccessLog<B>| {
+            access
+                .reads
+                .iter()
+                .filter(|(reg, _, _)| shared_regs.contains(reg))
+                .map(|(reg, accessor, _)| (*reg, accessor.clone()))
+                .collect::<Vec<_>>()
+        };
+        if !lhs.global_state && common(lhs) != common(rhs) {
+            return Err(reject(base, SpeculativeRejectReason::RegisterSequence));
         }
-        for pair in order.windows(2) {
-            graph.update_edge(nodes[&pair[0]], nodes[&pair[1]], ());
+        // 严格模式同时保留两臂的写偏序。
+        let mut graph = petgraph::graph::DiGraph::<Name, ()>::new();
+        let mut nodes = HashMap::new();
+        for order in [&lhs.writes.register_write_order, &rhs.writes.register_write_order] {
+            for reg in order {
+                nodes.entry(*reg).or_insert_with(|| graph.add_node(*reg));
+            }
+            for pair in order.windows(2) {
+                graph.update_edge(nodes[&pair[0]], nodes[&pair[1]], ());
+            }
         }
-    }
-    let write_order =
-        petgraph::algo::toposort(&graph, None).map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?;
+        petgraph::algo::toposort(&graph, None)
+            .map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?
+            .into_iter()
+            .map(|node| graph[node])
+            .collect()
+    } else {
+        let mut order: Vec<_> = registers.iter().copied().collect();
+        order.sort_unstable();
+        order
+    };
     let mut access = lhs.clone();
     access.published_reads = rhs.published_reads.clone();
     cost::make_mut(&mut merged.local_state).pure_definitions = left.local_state.pure_definitions.clone();
@@ -790,7 +810,7 @@ fn merge_states<'ir, B: BV>(
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
-    if lhs.global_state {
+    if lhs.global_state || !lhs.ordered_events {
         // 与写入相同，前态读取按两臂首次访问的偏序合并；节点包含完整 accessor。
         let mut graph = petgraph::graph::DiGraph::new();
         let mut nodes = HashMap::new();
@@ -799,11 +819,13 @@ fn merge_states<'ir, B: BV>(
             let mut previous = None;
             for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
                 let key = (*reg, accessor.clone());
-                let node = *nodes.entry(key.clone()).or_insert_with(|| graph.add_node(key.clone()));
-                if let Some(previous) = previous {
-                    graph.update_edge(previous, node, ());
+                if lhs.ordered_events {
+                    let node = *nodes.entry(key.clone()).or_insert_with(|| graph.add_node(key.clone()));
+                    if let Some(previous) = previous {
+                        graph.update_edge(previous, node, ());
+                    }
+                    previous = Some(node);
                 }
-                previous = Some(node);
                 reads
                     .entry(key)
                     .and_modify(|(_, old_guard): &mut (Val<B>, smtlib::Exp<Sym>)| {
@@ -817,24 +839,39 @@ fn merge_states<'ir, B: BV>(
                     .or_insert_with(|| (value.clone(), guard.clone()));
             }
         }
-        let order = petgraph::algo::toposort(&graph, None)
-            .map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?;
+        let order = if lhs.ordered_events {
+            petgraph::algo::toposort(&graph, None)
+                .map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?
+                .into_iter()
+                .map(|node| graph[node].clone())
+                .collect::<Vec<_>>()
+        } else {
+            let mut order: Vec<_> = reads.keys().cloned().collect();
+            order.sort_unstable_by(|(a, p), (b, q)| {
+                a.cmp(b).then_with(|| {
+                    let name = |accessor: &Accessor| match accessor {
+                        Accessor::Field(name) => *name,
+                    };
+                    p.iter().map(name).cmp(q.iter().map(name))
+                })
+            });
+            order
+        };
         access.reads.clear();
         access.read_guards.clear();
-        for node in order {
-            let (reg, accessor) = &graph[node];
-            let (value, guard) = reads.remove(&(*reg, accessor.clone())).unwrap();
+        for (reg, accessor) in order {
+            let (value, guard) = reads.remove(&(reg, accessor.clone())).unwrap();
             let in_arm =
-                |source: &AccessLog<B>| source.reads.iter().any(|(name, path, _)| name == reg && path == accessor);
+                |source: &AccessLog<B>| source.reads.iter().any(|(name, path, _)| *name == reg && *path == accessor);
             if !in_arm(lhs) || !in_arm(rhs) {
                 single_arm_reads.push(GuardedRegisterRead {
-                    register: *reg,
+                    register: reg,
                     accessor: accessor.clone(),
                     value: value.clone(),
                     guard: guard.clone(),
                 });
             }
-            access.reads.push((*reg, accessor.clone(), value));
+            access.reads.push((reg, accessor, value));
             access.read_guards.push(guard);
         }
     } else {
@@ -876,7 +913,7 @@ fn merge_states<'ir, B: BV>(
     access.writes.modified_vars.extend(&rhs.writes.modified_vars);
     access.writes.read_regs.extend(&rhs.writes.read_regs);
     access.writes.modified_regs.extend(&rhs.writes.modified_regs);
-    access.writes.register_write_order = write_order.into_iter().map(|node| graph[node]).collect();
+    access.writes.register_write_order = write_order;
     cost::make_mut(&mut merged.local_state).speculative_access = Some(access);
     merged.pc = left.pc;
     let prefix = base.region_merge_records.len();

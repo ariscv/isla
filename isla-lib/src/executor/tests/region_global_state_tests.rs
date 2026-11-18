@@ -535,14 +535,24 @@ fn region_m2_read_footprint_topology_and_write_cycle() {
         check(diamond(vec![read(regs[0]), read(regs[1])], vec![read(regs[1]), read(regs[2])], finish()), &shared, 1);
     assert_eq!(paths[0].records.last().unwrap().single_arm_reads.len(), 2);
     assert_eq!(paths[0].events.iter().filter(|event| matches!(event, Event::ReadReg(..))).count(), 3);
-    // 相反的共同读取和相反的写入偏序分别形成环，都必须拒绝。
+    // 相反的共同读取和写入次序只在严格模式触发拒绝。
     for write in [false, true] {
         let access = |reg| if write { Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()) } else { read(reg) };
         let program = diamond(vec![access(regs[0]), access(regs[1])], vec![access(regs[1]), access(regs[0])], finish());
-        let forked = run(program.clone(), &shared, 1, false, |_| ());
-        let merged = run(program, &shared, 1, true, |_| ());
-        assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 2));
-        equivalent_register_paths(&forked, &merged, 1);
+        let configure = |frame: &mut LocalFrame<'static, B64>| {
+            for reg in &regs {
+                frame.regs_mut().assign(*reg, Val::Bool(false), &shared);
+            }
+        };
+        let forked = run(program.clone(), &shared, 1, false, configure);
+        for ordered_events in [false, true] {
+            let mut limits = ExecutionLimits::default().with_region_global_state(true);
+            limits.ordered_events = ordered_events;
+            check_organizers(program.clone(), &shared, 1, limits, configure, |merged| {
+                assert_eq!(equivalent_paths(&forked, merged, 1, true), (2, if ordered_events { 2 } else { 1 }));
+                equivalent_register_paths(&forked, merged, 1);
+            });
+        }
     }
     assert!(shared.execution_stats.merge_json()["failure_reasons"]["register_sequence"].as_u64().unwrap() >= 2);
 }
@@ -632,7 +642,7 @@ fn region_m2_nested_conditional_write_then_outer_read() {
 }
 
 #[test]
-fn region_m2_relaxed_and_address_writes_remain_rejected() {
+fn region_m2_address_writes_remain_rejected_and_relaxed_obeys_event_policy() {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let reg = shared.symtab.intern("zstate");
@@ -650,17 +660,47 @@ fn region_m2_relaxed_and_address_writes_remain_rejected() {
         );
         let configure = |frame: &mut LocalFrame<'static, B64>| {
             frame.vars_mut().insert(reference, UVal::Init(Val::Ref(reg)));
-            if !address {
-                frame.regs_mut().insert(reg, true, UVal::Init(Val::Bool(false)));
-            }
+            frame.regs_mut().insert(reg, !address, UVal::Init(Val::Bool(false)));
         };
         let forked = run(program.clone(), &shared, 1, false, configure);
-        let merged = run(program, &shared, 1, true, configure);
-        assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 2));
-        equivalent_register_paths(&forked, &merged, 1);
-        assert!(merged.iter().all(|path| path.records.is_empty()));
+        for ordered_events in [false, true] {
+            let mut limits = ExecutionLimits::default().with_region_global_state(true);
+            limits.ordered_events = ordered_events;
+            check_organizers(program.clone(), &shared, 1, limits, configure, |merged| {
+                assert_eq!(
+                    equivalent_paths(&forked, merged, 1, true),
+                    (2, if address || ordered_events { 2 } else { 1 })
+                );
+                equivalent_register_paths(&forked, merged, 1);
+            });
+        }
     }
     assert!(shared.execution_stats.merge_json()["failure_reasons"]["relaxed_register"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn region_unordered_relaxed_reads_latest_even_when_history_is_visible() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zrelaxed_latest");
+    shared.registers.insert(reg, Ty::Bool);
+    let read = Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info());
+    let program =
+        diamond(vec![read.clone()], vec![Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()), read], vec![Instr::End]);
+    // 顺序寄存器的普通执行给出同一个“最新值”关系。
+    let reference = run(program.clone(), &shared, 1, false, |frame| {
+        frame.regs_mut().assign(reg, Val::Bool(true), &shared);
+    });
+    let configure = |frame: &mut LocalFrame<'static, B64>| {
+        frame.regs_mut().insert(reg, true, UVal::Init(Val::Bool(false)));
+        frame.regs_mut().assign(reg, Val::Bool(true), &shared);
+        frame.regs_mut().forget_last_reads();
+    };
+    check_organizers(program, &shared, 1, ExecutionLimits::default(), configure, |merged| {
+        assert_eq!(equivalent_paths(&reference, merged, 1, true), (2, 1));
+        equivalent_register_paths(&reference, merged, 1);
+        assert!(merged[0].registers.has_old_writes(reg), "无序合并仍需保留区域之外可能读到的历史");
+        assert_eq!(merged[0].events.iter().filter(|event| matches!(event, Event::ReadReg(..))).count(), 1);
+    });
 }
 
 #[test]

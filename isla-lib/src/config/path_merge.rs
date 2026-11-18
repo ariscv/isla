@@ -59,7 +59,7 @@ pub struct PathMergeDiagnostics {
 #[serde(default, deny_unknown_fields)]
 pub struct PathMergeConfig {
     pub strategy: Option<super::MergeStrategy>,
-    /// flat 模式保留兼容的访问偏序；默认 false。
+    /// 两种组织者共用。true 要求访问偏序，缺省 false。
     pub ordered_events: Option<bool>,
     /// 省略时沿用入口缺省值。完整符号 DAG 缺省开启。
     pub enabled: Option<bool>,

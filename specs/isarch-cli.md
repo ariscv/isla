@@ -589,6 +589,8 @@ step_budget = 8192
 
 ### 平铺合并实验策略
 
-`[execution_limits.path_merge]` 接受 `strategy = "recursive" | "flat"` 和 `ordered_events = false | true`；默认 recursive / false。CLI `--merge-strategy`、`--ordered-events` 只覆盖显式字段。旧 `[execution_limits] merge_strategy/ordered_events` 和旧 region_options 位置报错，不保留兼容。
+在 `[execution_limits.path_merge]` 中，`strategy = "recursive" | "flat"` 选择就绪片段的栈或 FIFO 队列。缺省为 `recursive`。两者共用区域准入、汇合、循环和出口检查。CLI 使用 `--merge-strategy` 覆盖此字段。
 
-flat 在单个根事务内调度片段，循环按调用实例、PC、轮次折叠退出前沿。两事件模式分别保持访问偏序或规范访问足迹；实际 SMT 定义和访存事件顺序仍需保留。不能收敛的循环形状以 flat_loop_shape 拒绝；区域步数耗尽以 step_budget 拒绝，不静默截断输入域。实验候选不改变 recursive 默认值，有限验证不代表完整模型等价。
+`ordered_events` 缺省为 `false`，CLI 使用 `--ordered-events=true|false`。无序时，区域臂读取本臂最新的寄存器和变量值，前态读足迹按寄存器与字段合并。若需要保留寄存器访问偏序，可显式设为 `true`。两种策略都使用此配置。
+
+区域步数、嵌套深度与片段数缺省不限。循环的可配置步数预算及切段规则由两个组织者共用。旧 `[execution_limits]` 下的策略字段和旧 `region_options` 配置位置报错。

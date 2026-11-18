@@ -1,7 +1,7 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
 use super::region_engine::{
     advance_arm, append_loop_exit, branch_arm, finish_arrivals, finish_region, loop_exit_guard,
-    publish_committed_records, LoopDependencies,
+    publish_committed_records, LoopDependencies, ReadyFragments,
 };
 use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
 use super::stats::merge_diagnostics as diagnostics;
@@ -53,6 +53,7 @@ pub(super) struct AccessLog<B> {
     pub location: SourceLoc,
     pub writes_allowed: bool,
     pub global_state: bool,
+    pub ordered_events: bool,
 }
 
 impl<B: BV> AccessLog<B> {
@@ -61,7 +62,7 @@ impl<B: BV> AccessLog<B> {
     pub fn record_read(&mut self, reg: Name, accessor: Vec<Accessor>, value: Val<B>) -> Result<bool, ExecError> {
         let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
         let _ = &cost_scope;
-        if self.global_state {
+        if self.global_state || !self.ordered_events {
             // 内部读取使用当前臂的值；前态足迹按寄存器和字段路径只记录一次。
             if self.writes.modified_regs.contains(&reg) {
                 return Ok(false);
@@ -190,10 +191,10 @@ pub(super) fn record_write<B: BV>(state: &mut LocalState<B>, id: Name, register:
         }
         if register {
             let first = log.writes.modified_regs.insert(id);
-            if !log.global_state && !first {
+            if log.ordered_events && !log.global_state && !first {
                 return Err(log.reject(SpeculativeRejectReason::RepeatedRegisterWrite));
             }
-            if !log.global_state && log.writes.read_regs.contains(&id) {
+            if log.ordered_events && !log.global_state && log.writes.read_regs.contains(&id) {
                 return Err(log.reject(SpeculativeRejectReason::RegisterReadWrite));
             }
             if first {
@@ -430,13 +431,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     assert_ne!(mode, MergeMode::Off, "Off 不能进入区域合并");
     let nested = frame.region_execution.is_some();
-    let flat = state
-        .execution_limits
-        .as_ref()
-        .is_some_and(|limits| limits.merge_strategy == crate::config::MergeStrategy::Flat);
-    if flat && nested {
-        return super::flat_region_merge::suspend(condition, target, frame, state, shared, info);
-    }
     // 同一调用层、同一出口的有环分叉属于当前展开，不另开递归事务。
     // 不同出口的内层循环仍走正常嵌套；其后续轮次由内层自己的工作栈接续。
     if frame.region_execution.as_ref().is_some_and(|execution| {
@@ -568,7 +562,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let execute = |solver: &mut Solver<B>| {
                     log_phase("execute_start", None);
-                    let execute_region = if flat { super::flat_region_merge::execute_region } else { execute_region };
                     let output = execute_region(
                         condition,
                         target,
@@ -857,13 +850,14 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
             location: info,
             writes_allowed: true,
             global_state: state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state),
+            ordered_events: state.execution_limits.as_ref().is_some_and(|limits| limits.ordered_events),
         });
     }
     base
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_recursive_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     tid: usize,
     task_id: TaskId,
     fraction: &mut Fraction,
@@ -882,10 +876,12 @@ fn advance_recursive_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         return Ok(alive);
     }
     // 本臂已经分成互斥片段；分别关闭，不把任何一个临时条件留在主求解器上。
-    let mut pending = std::mem::take(&mut arm.region_arrivals);
-    pending.reverse();
+    let mut pending = ReadyFragments::new(state);
+    pending.extend(
+        std::mem::take(&mut arm.region_arrivals).into_iter().enumerate().map(|(index, frame)| (vec![index], frame)),
+    );
     let mut reached = Vec::new();
-    while let Some(mut fragment) = pending.pop() {
+    while let Some((branch, mut fragment)) = pending.pop() {
         let owner = fragment.region_arm.expect("独立片段必须拥有逻辑臂");
         let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
         let part_tx = solver.start_transaction_with_guard(Some(guard));
@@ -910,9 +906,13 @@ fn advance_recursive_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             Ok(step)
         });
         match outcome {
-            Ok(Some(true)) => reached.push(fragment),
+            Ok(Some(true)) => reached.push((branch, fragment)),
             Ok(Some(false)) => solver.discard_logical_arm_effects(owner),
-            Ok(None) => pending.extend(fragment.region_arrivals.into_iter().rev()),
+            Ok(None) => pending.extend(fragment.region_arrivals.into_iter().enumerate().map(|(index, frame)| {
+                let mut path = branch.clone();
+                path.push(index);
+                (path, frame)
+            })),
             Err(error) => {
                 solver.rollback_transaction(tx);
                 return Err(error);
@@ -925,9 +925,11 @@ fn advance_recursive_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     }
     solver.commit_transaction();
     if reached.len() == 1 {
-        *arm = reached.pop().unwrap();
+        *arm = reached.pop().unwrap().1;
     } else {
-        arm.region_arrivals = reached;
+        // 汇合用逻辑臂顺序，不能让调度产生不同的 ITE 折叠或历史父子关系。
+        reached.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        arm.region_arrivals = reached.into_iter().map(|(_, frame)| frame).collect();
     }
     Ok(true)
 }
@@ -963,16 +965,14 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         );
     }
     let mut arms = [Vec::new(), Vec::new()];
-    for (side, (pc, guard)) in
-        [(target, Var(condition)), (frame.pc + 1, Not(Box::new(Var(condition))))].into_iter().enumerate()
-    {
+    let mut ready = ReadyFragments::new(state);
+    ready.extend([(target, Var(condition)), (frame.pc + 1, Not(Box::new(Var(condition))))].into_iter().enumerate());
+    while let Some((side, (pc, guard))) = ready.pop() {
         let owner = solver.new_logical_arm(solver.current_logical_arm());
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
         let mut arm = branch_arm(&base, pc, guard, owner);
         if solver.with_logical_arm(owner, |solver| {
-            advance_recursive_arm(
-                tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info,
-            )
+            advance_region_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info)
         })? {
             if arm.region_arrivals.is_empty() {
                 promote_initials(&mut base, &arm, shared, solver);
@@ -985,7 +985,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
         }
     }
-    finish_arrivals(record_id, condition, &region, &base, arms, frame, state, shared, solver, info, |_| ())
+    finish_arrivals(record_id, condition, &region, &base, arms, frame, state, shared, solver, info)
         .map(RegionOutput::complete)
 }
 
@@ -1093,7 +1093,7 @@ struct LoopWork<'ir, B> {
     record_id: usize,
     arms: [Vec<LocalFrame<'ir, B>>; 2],
     completed: usize,
-    continuations: Vec<LocalFrame<'ir, B>>,
+    continuations: ReadyFragments<LocalFrame<'ir, B>>,
     parent_arm: Option<crate::smt::LogicalArm>,
     active_arm: Option<crate::smt::LogicalArm>,
 }
@@ -1189,7 +1189,7 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
 }
 
 /// 展开同一循环中尚未到达出口的独立片段，等待关系仍指向原臂槽位。
-fn take_loop_continuation<'ir, B: BV>(work: &mut LoopWork<'ir, B>) -> Option<LoopWork<'ir, B>> {
+fn take_loop_continuation<'ir, B: BV>(work: &mut LoopWork<'ir, B>, state: &TaskState<B>) -> Option<LoopWork<'ir, B>> {
     let mut arm = work.continuations.pop()?;
     let (condition, target, region, info) = arm.region_execution.as_mut().unwrap().pending_branch.take().unwrap();
     let record_id = NEXT_RECORD
@@ -1206,7 +1206,7 @@ fn take_loop_continuation<'ir, B: BV>(work: &mut LoopWork<'ir, B>) -> Option<Loo
         record_id,
         arms: [Vec::new(), Vec::new()],
         completed: 0,
-        continuations: Vec::new(),
+        continuations: ReadyFragments::new(state),
         parent_arm,
         active_arm: None,
     })
@@ -1261,7 +1261,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         record_id,
         arms: [Vec::new(), Vec::new()],
         completed: 0,
-        continuations: Vec::new(),
+        continuations: ReadyFragments::new(state),
         parent_arm: solver.current_logical_arm(),
         active_arm: None,
     });
@@ -1282,7 +1282,6 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     shared,
                     solver,
                     work.info,
-                    |_| (),
                 )
             };
             let mut guard = work.base.local_state.speculative_access.as_ref().unwrap().guard.clone();
@@ -1320,7 +1319,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                     RegionResult::Rejected | RegionResult::Suspended => panic!("汇合结果必须已经收尾"),
                 }
-                if let Some(next) = take_loop_continuation(parent) {
+                if let Some(next) = take_loop_continuation(parent, state) {
                     frontier = pending.attach(frontier, side, next);
                 } else {
                     parent.completed += 1;
@@ -1374,7 +1373,6 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         shared,
                         solver,
                         info,
-                        |_| (),
                     )?;
                     *frame = restored;
                     return Ok(RegionOutput::complete(result));
@@ -1406,22 +1404,23 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let guard = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
         let tx = solver.start_transaction_with_guard(Some(guard));
         if solver.with_logical_arm(owner, |solver| {
-            advance_recursive_arm(
+            advance_region_arm(
                 tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, work.info,
             )
         })? {
             if !arm.region_arrivals.is_empty() {
                 let side = work.completed;
+                let mut continuing = Vec::new();
                 for part in std::mem::take(&mut arm.region_arrivals) {
                     if part.region_execution.as_ref().unwrap().pending_branch.is_some() {
-                        work.continuations.push(part);
+                        continuing.push(part);
                     } else {
                         promote_initials(&mut work.base, &part, shared, solver);
                         work.arms[side].push(part);
                     }
                 }
-                work.continuations.reverse();
-                if let Some(next) = take_loop_continuation(work) {
+                work.continuations.extend(continuing.into_iter());
+                if let Some(next) = take_loop_continuation(work, state) {
                     frontier = pending.attach(frontier, side, next);
                 } else {
                     work.completed += 1;
@@ -1517,7 +1516,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         record_id: id,
                         arms: [Vec::new(), Vec::new()],
                         completed: 0,
-                        continuations: Vec::new(),
+                        continuations: ReadyFragments::new(state),
                         parent_arm: work.parent_arm,
                         active_arm: None,
                     };
@@ -1606,7 +1605,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         record_id,
                         arms: [Vec::new(), Vec::new()],
                         completed: 0,
-                        continuations: Vec::new(),
+                        continuations: ReadyFragments::new(state),
                         parent_arm: Some(owner),
                         active_arm: None,
                     },

@@ -60,7 +60,6 @@ use crate::timeout::PathTimeoutDiagnostic;
 use crate::zencode;
 
 mod execution_limits;
-mod flat_region_merge;
 mod frame;
 mod merge_history;
 mod merge_record;
@@ -138,6 +137,22 @@ fn get_and_initialize<'state, 'ir, B: BV>(
     })
 }
 
+/// 正常执行和有序区域保留模型规定的寄存器读，无序区域读当前臂的最新赋值。
+fn read_register<'a, 'ir, B: BV>(
+    regs: &'a mut RegisterBindings<'ir, B>,
+    access: Option<&region_merge::AccessLog<B>>,
+    id: Name,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<&'a Val<B>>, ExecError> {
+    if access.is_some_and(|log| !log.ordered_events) {
+        regs.get_latest(id, shared, solver, info)
+    } else {
+        regs.get(id, shared, solver, info)
+    }
+}
+
 fn get_id_and_initialize<'state, 'ir, B: BV>(
     id: Name,
     local_state: &'state mut LocalState<'ir, B>,
@@ -160,7 +175,14 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
             info,
         )? {
             Some(value) => Borrowed(value),
-            None => match local_state.regs.get(id, shared_state, solver, info)? {
+            None => match read_register(
+                &mut local_state.regs,
+                local_state.speculative_access.as_ref(),
+                id,
+                shared_state,
+                solver,
+                info,
+            )? {
                 Some(value) => {
                     if let Some(access) = &mut local_state.speculative_access {
                         if !access.writes.modified_regs.contains(&id) {
@@ -368,7 +390,16 @@ fn read_register_from_vector<'ir, B: BV>(
     match index {
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
-            let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap().clone();
+            let value = read_register(
+                &mut local_state.regs,
+                local_state.speculative_access.as_ref(),
+                regs[i],
+                shared_state,
+                solver,
+                info,
+            )?
+            .unwrap()
+            .clone();
             stats::call_census::read(local_state.call_instance, regs[i], &value, &shared_state.symtab);
             let publish = region_merge::record_read(local_state, regs[i], Vec::new(), value.clone())?;
             if publish {
@@ -378,7 +409,16 @@ fn read_register_from_vector<'ir, B: BV>(
         }
         SymbolicIndex(i) => {
             // See above case for unwrap safety
-            let mut chain = local_state.regs.get(regs[0], shared_state, solver, info)?.unwrap().clone();
+            let mut chain = read_register(
+                &mut local_state.regs,
+                local_state.speculative_access.as_ref(),
+                regs[0],
+                shared_state,
+                solver,
+                info,
+            )?
+            .unwrap()
+            .clone();
             stats::call_census::read(local_state.call_instance, regs[0], &chain, &shared_state.symtab);
             if local_state.speculative_access.is_some()
                 && region_merge::record_read(local_state, regs[0], Vec::new(), chain.clone())?
@@ -390,7 +430,16 @@ fn read_register_from_vector<'ir, B: BV>(
                 let choice = solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
                     solver.define_const(Eq(Box::new(Var(i)), Box::new(Bits64(B64::new((j + 1) as u64, rib)))), info)
                 });
-                let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone();
+                let value = read_register(
+                    &mut local_state.regs,
+                    local_state.speculative_access.as_ref(),
+                    *reg,
+                    shared_state,
+                    solver,
+                    info,
+                )?
+                .unwrap()
+                .clone();
                 stats::call_census::read(local_state.call_instance, *reg, &value, &shared_state.symtab);
                 if local_state.speculative_access.is_some()
                     && region_merge::record_read(local_state, *reg, Vec::new(), value.clone())?
@@ -579,7 +628,16 @@ fn write_register_from_vector<'ir, B: BV>(
                 });
                 let current_value = match updates.get(reg) {
                     Some(value) => value.clone(),
-                    None => local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone(),
+                    None => read_register(
+                        &mut local_state.regs,
+                        local_state.speculative_access.as_ref(),
+                        *reg,
+                        shared_state,
+                        solver,
+                        info,
+                    )?
+                    .unwrap()
+                    .clone(),
                 };
                 if let Some(access) = &mut local_state.speculative_access {
                     access.initial_registers.entry(*reg).or_insert_with(|| current_value.clone());
@@ -1514,11 +1572,11 @@ fn run_special_primop<'ir, B: BV>(
         if let Val::Ref(reg) =
             eval_exp(&args[0], cost::make_mut(&mut frame.local_state), shared_state, solver, info)?.into_owned()
         {
-            let value = frame
-                .regs_mut()
-                .get(reg, shared_state, solver, info)?
-                .cloned()
-                .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
+            let local = cost::make_mut(&mut frame.local_state);
+            let value =
+                read_register(&mut local.regs, local.speculative_access.as_ref(), reg, shared_state, solver, info)?
+                    .cloned()
+                    .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
             stats::call_census::read(frame.local_state.call_instance, reg, &value, &shared_state.symtab);
             let publish =
                 region_merge::record_read(cost::make_mut(&mut frame.local_state), reg, Vec::new(), value.clone())?;
@@ -12888,8 +12946,12 @@ fn zcaller(za, zb) {
         limited_pc: Option<Name>,
     ) -> Result<Option<usize>, ExecError> {
         shared.function_regions.lock().unwrap().clear();
-        let limits =
+        let mut limits =
             handler.map_or_else(ExecutionLimits::default, |handler| handler.config.clone()).with_path_merging(true);
+        // 旧菱形兼容夹具的拒绝和事件断言以严格次序为判据。
+        if handler.is_none() {
+            limits.ordered_events = true;
+        }
         let mut state = TaskState::new().with_execution_limits(limits);
         state.pc_limit = limited_pc.map(|pc| (pc, usize::MAX));
         let queue = Worker::new_lifo();
