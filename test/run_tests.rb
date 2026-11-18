@@ -214,7 +214,7 @@ def run_tests()
         marker = "#{variant}.xfail"
         xfail = File.file?(marker) ? File.read(marker).strip : nil
         abort "#{marker} 必须说明预期失败原因" if xfail&.empty?
-        label = file + variant.delete_prefix(basename)
+        label = (file + variant.delete_prefix(basename)).ljust(48) + " "
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         pid = fork { exit(run_property_variant(isla_property, basename, args, shape) ? 0 : 2) }
         _, status = Process.wait2(pid)
@@ -223,14 +223,14 @@ def run_tests()
         run_ms = ((ending - start) * 1000).to_i
         timing = "(#{build_ms}ms/#{run_ms}ms)"
         if xfail && status.exitstatus == 2
-          puts "#{label.ljust(48)}#{"XFAIL".yellow} #{timing} #{xfail}"
+          puts "#{label}#{"XFAIL".yellow} #{timing} #{xfail}"
         elsif xfail && status.success?
-          puts "#{label.ljust(48)}#{"XPASS".red} #{timing} 请删除 #{marker}"
+          puts "#{label}#{"XPASS".red} #{timing} 请删除 #{marker}"
           variants_passed = false
         elsif status.success?
-          puts "#{label.ljust(48)}#{"ok".green} #{timing} #{Shellwords.join(args)}"
+          puts "#{label}#{"ok".green} #{timing} #{Shellwords.join(args)}"
         else
-          puts "#{label.ljust(48)}#{"Failed".red} #{timing} (#{status})"
+          puts "#{label}#{"Failed".red} #{timing} (#{status})"
           variants_passed = false
         end
       end
