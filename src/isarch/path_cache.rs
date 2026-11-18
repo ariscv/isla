@@ -82,7 +82,7 @@ mod tests {
             signature: 42,
             checkpoint: checkpoint(&mut solver),
             path,
-            records: vec![],
+            records: Vec::new().into(),
             pure_definitions: vec![],
         }];
         let directory =
@@ -217,7 +217,7 @@ mod tests {
                         Box::new(Val::String("site.sail:42: message".into())),
                     ),
                 },
-                records: vec![],
+                records: Vec::new().into(),
                 pure_definitions: vec![],
             })
             .collect();
@@ -326,7 +326,7 @@ mod tests {
                 memory: vec![],
                 memory_guards: Default::default(),
             },
-            records: vec![],
+            records: Vec::new().into(),
         }];
         let facts = vec![Facts { guard_unique: true, post_unique: false, simple_pre: true }.into()];
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
@@ -841,7 +841,7 @@ pub fn load<B: BV>(
                 pure_definitions: p.pure_definitions.clone(),
                 checkpoint: reader.restore(&p.checkpoint),
                 path: p.path.clone().into(),
-                records: p.records.iter().cloned().map(Into::into).collect(),
+                records: p.records.iter().cloned().map(Into::into).collect::<Vec<_>>().into(),
             }
         })
         .collect();

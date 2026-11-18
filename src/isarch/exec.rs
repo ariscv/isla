@@ -2048,6 +2048,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 }
                             }
                             collected.lock().unwrap().summary.model_exception_paths += usize::from(sail_exception);
+                            let copy_profile = isla_lib::config::RegionOptions::current().probe_round_cost;
+                            let path_cpu = copy_profile.then(isla_lib::timing::thread_cpu_time);
                             let sample_path = super::samples::path(
                                 target,
                                 &symbolic_regs,
@@ -2061,10 +2063,28 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 || samples.fuzz.is_some()
                                 || samples.path_cache.write.is_some()
                             {
+                                let path_cpu_seconds = path_cpu.map(|start| {
+                                    isla_lib::timing::thread_cpu_time().saturating_sub(start).as_secs_f64()
+                                });
+                                let records_cpu = copy_profile.then(isla_lib::timing::thread_cpu_time);
+                                let records = frame.region_merge_records().clone();
+                                if let Some(start) = records_cpu {
+                                    eprintln!(
+                                        "[PATH_STATE_COPY_COST] {}",
+                                        serde_json::json!({
+                                            "signature":frame.path_signature(), "records":records.len(),
+                                            "record_bytes":records.len() * std::mem::size_of::<isla_lib::executor::RegionMergeRecord<B>>(),
+                                            "copied_record_bytes":0,
+                                            "handle_bytes":std::mem::size_of_val(&records),
+                                            "records_cpu_seconds":isla_lib::timing::thread_cpu_time().saturating_sub(start).as_secs_f64(),
+                                            "sample_path_cpu_seconds":path_cpu_seconds
+                                        })
+                                    );
+                                }
                                 let resident = super::resident::ResidentPath {
                                     checkpoint: checkpoint(&mut solver),
                                     path: sample_path.clone(),
-                                    records: frame.region_merge_records().to_vec(),
+                                    records,
                                     signature: frame.path_signature(),
                                     pure_definitions: frame.pure_definitions().to_vec(),
                                 };
@@ -3172,7 +3192,7 @@ mod tests {
             signature: 42,
             checkpoint: checkpoint(&mut solver),
             path,
-            records,
+            records: records.into(),
             pure_definitions: ranges.clone(),
         }];
         let cache_dir = root.join("cache");

@@ -298,7 +298,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
-    pub fn region_merge_records(&self) -> &[super::RegionMergeRecord<B>] {
+    pub fn region_merge_records(&self) -> &super::MergeHistory<B> {
         &self.region_merge_records
     }
 

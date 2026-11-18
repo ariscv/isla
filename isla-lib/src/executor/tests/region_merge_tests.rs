@@ -5256,3 +5256,82 @@ fn no_smt_candidate_merge_does_not_check_assertion_or_exit() {
     assert!(!frame.region_merge_records().is_empty());
     assert!(!solver.has_stashed_model());
 }
+
+#[test]
+fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
+    if !dead_arm_candidate_child("deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped") {
+        return;
+    }
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.skip_branch_checks = true;
+    config.solver_options.skip_bool_proofs = true;
+    let context = Context::new(config);
+    let mut solver = Solver::<B64>::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    solver.assert(smtlib::Exp::Bool(false));
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ]);
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    let original_vars = frame.vars().clone();
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let queue = Worker::new_lifo();
+    let result = region_merge::try_region(
+        condition,
+        3,
+        0,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    );
+    assert!(matches!(result, Ok(region_merge::RegionResult::Rejected)), "必须拒绝推演");
+    assert_eq!(
+        shared.execution_stats.merge_json()["failure_reasons"]["solver_unknown"].as_u64(),
+        Some(1),
+        "必须在不可满足出口处拒绝：{}",
+        shared.execution_stats.merge_json()
+    );
+    assert_eq!(frame.pc, 0, "拒绝后必须恢复入口执行位置");
+    assert_eq!(frame.vars().len(), original_vars.len(), "拒绝后不能留下推演绑定");
+    for (name, value) in &original_vars {
+        if let UVal::Init(value) = value {
+            assert!(
+                matches!(frame.vars().get(name), Some(UVal::Init(actual)) if actual == value),
+                "拒绝后不能留下已回滚定义的新符号"
+            );
+        }
+    }
+    assert!(frame.region_merge_records().is_empty());
+    assert_eq!(solver.transaction_depth(), 0);
+    // 普通执行接续仍须保留原始输入声明，不能因推演污染而缺声明。
+    let resumed = run_loop(
+        0,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+    );
+    assert!(
+        matches!(resumed, Ok(Run::Finished(_)) | Err(ExecError::AssertionFailure(..))),
+        "普通执行只能正常结束或命中原断言"
+    );
+}

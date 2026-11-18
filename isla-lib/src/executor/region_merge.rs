@@ -538,6 +538,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
                 let record_start = frame.region_merge_records.len();
+                let mut candidate_frame = if solver.no_smt() { None } else { Some(frame.clone()) };
                 let tx = solver.start_transaction();
                 let defer = solver.no_smt()
                     || solver.region_queries_deferred()
@@ -559,8 +560,25 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let execute = |solver: &mut Solver<B>| {
                     log_phase("execute_start", None);
                     let output = execute_region(
-                        condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame,
-                        state, shared, solver, info,
+                        condition,
+                        target,
+                        region,
+                        depth,
+                        mode,
+                        tid,
+                        task_id,
+                        fraction,
+                        timeout,
+                        stop,
+                        sink,
+                        match &mut candidate_frame {
+                            Some(candidate) => candidate,
+                            None => &mut *frame,
+                        },
+                        state,
+                        shared,
+                        solver,
+                        info,
                     );
                     log_phase("execute_end", None);
                     if defer && !nested && output.is_ok() && !solver.no_smt() {
@@ -604,6 +622,10 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         log_phase("commit_start", None);
                         solver.commit_transaction();
                         log_phase("commit_end", None);
+                        // 出口义务或可行性验证拒绝时，调用者帧仍停留在入口。
+                        if let Some(candidate_frame) = candidate_frame {
+                            *frame = candidate_frame;
+                        }
                         if !nested {
                             crate::smt::probe_query_event(
                                 || serde_json::json!({"type":"region_commit", "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1, "call_instance":frame.local_state.call_instance,"region":probe_context}),

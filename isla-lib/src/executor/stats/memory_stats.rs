@@ -122,7 +122,12 @@ pub fn reset_resident() {
     state.resident_count = 0;
     state.resident_bytes = 0;
 }
-pub fn retain<B: BV>(checkpoint: &Checkpoint<B>, path: &SamplePath<B>, records: &[RegionMergeRecord<B>], extra: usize) {
+pub fn retain<B: BV>(
+    checkpoint: &Checkpoint<B>,
+    path: &SamplePath<B>,
+    records: &super::super::MergeHistory<B>,
+    extra: usize,
+) {
     if !enabled() {
         return;
     }
