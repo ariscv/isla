@@ -642,7 +642,8 @@ impl<B: BV> Loaded<B> {
         self.paths.retain(|path| {
             let fact = facts.next().expect("缓存路径缺少分析结果");
             if matches!(path.path.terminal, isla_lib::executor::samples::Terminal::SailException { .. }) {
-                if let Some(site) = super::model_exception::filtered_site(names, &path.path.result, shared) {
+                if let Some(site) = isla_lib::executor::model_exception::filtered_site(names, &path.path.result, shared)
+                {
                     summary.model_exception_paths =
                         summary.model_exception_paths.checked_sub(1).expect("缓存异常终态计数不足");
                     summary.record_filtered_model_exception(site);

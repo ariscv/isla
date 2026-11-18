@@ -1598,8 +1598,10 @@ pub struct ExecutionLimitsConfig {
     pub on_limit_reached: Option<LimitBehaviorConfig>,
     /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
     pub case_quota: Option<BTreeMap<String, u32>>,
-    /// isarch 在收集完成终态时过滤的 Sail 异常构造子；空集合保持默认行为。
+    /// 抛出时丢弃的 Sail 异常构造子，终态收集也使用此列表。
     pub filter_model_exceptions: Vec<String>,
+    /// 在 Sail IR 的 match 失败出口处丢弃路径。
+    pub filter_match_failures: bool,
 }
 
 /// 合并路径结束后的两级投影枚举；上限只限制输出，不改变执行路径条件。
@@ -2839,6 +2841,14 @@ obligation_dump_dir = "obligations"
         for limit in ["0", "-2", "true"] {
             assert!(merge_config(&format!("[execution_limits.path_merge]\nmax_fragments = {limit}")).is_err());
         }
+    }
+
+    #[test]
+    fn match_failure_filter_defaults_off_and_requires_a_boolean() {
+        assert!(!merge_config("[execution_limits]").unwrap().filter_match_failures);
+        assert!(!merge_config("[execution_limits]\nfilter_match_failures=false").unwrap().filter_match_failures);
+        assert!(merge_config("[execution_limits]\nfilter_match_failures=true").unwrap().filter_match_failures);
+        assert!(merge_config("[execution_limits]\nfilter_match_failures=1").is_err());
     }
 
     #[test]

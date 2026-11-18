@@ -415,6 +415,7 @@ fn isla_main() -> i32 {
         "过滤指定 Sail 异常构造子，可重复；整体覆盖 TOML 集合",
         "<constructor>",
     );
+    opts.optflag("", "filter-match-failures", "在 Sail match 失败出口丢弃路径，默认关闭");
     opts.optflag("", "memory-stats", "周期输出 Rust 内存估算、采样年龄及 RSS；默认关闭");
     opts.optopt("", "merge-diagnostics", "合并拒绝诊断，默认 off", "off|summary|detail");
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
@@ -655,6 +656,7 @@ fn isla_main() -> i32 {
 
     let had_limits = isa_config.execution_limits.is_some();
     let mut limits = isa_config.execution_limits.take().unwrap_or_default();
+    limits.filter_match_failures |= matches.opt_present("filter-match-failures");
     if let Err(error) = isarch::path_merge_options::apply_cli(&matches, &mut limits) {
         eprintln!("{error}");
         return 1;

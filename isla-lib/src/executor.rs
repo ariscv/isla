@@ -64,6 +64,7 @@ mod flat_region_merge;
 mod frame;
 mod merge_history;
 mod merge_record;
+pub mod model_exception;
 pub mod path_cache;
 mod path_timing;
 mod region_engine;
@@ -2391,6 +2392,19 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let value =
                     eval_exp(exp, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
                 assign(tid, loc, value, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
+                // Sail 的 throw 先写 current_exception，再把 have_exception 设为 true。
+                // 在异常状态生效时结束本路径，区域和普通执行都不执行后续传播。
+                if matches!(loc, Loc::Id(HAVE_EXCEPTION)) {
+                    if let Some(limits) =
+                        task_state.execution_limits.as_ref().filter(|l| !l.filter_model_exceptions.is_empty())
+                    {
+                        if let Some(result) =
+                            model_exception::discard_throw(frame, &limits.filter_model_exceptions, shared_state, *info)
+                        {
+                            return Ok(result);
+                        }
+                    }
+                }
                 frame.pc += 1;
             }
 
@@ -3218,6 +3232,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
 
             Instr::Exit(cause, info) => {
+                if matches!(cause, ExitCause::MatchFailure)
+                    && task_state.execution_limits.as_ref().is_some_and(|limits| limits.filter_match_failures)
+                {
+                    return Ok(model_exception::discard_path(
+                        frame,
+                        shared_state,
+                        *info,
+                        model_exception::FilteredPath::MatchFailure,
+                    ));
+                }
                 // 区域推演把断言失败交给臂事务处理；普通推演与其他终止仍须拒绝。
                 if !matches!(cause, ExitCause::AssertionFailure)
                     || frame.region_execution.is_none()
