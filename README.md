@@ -808,6 +808,8 @@ witness_eval = true
 
 具体值消费者的有限域枚举默认关闭。使用 `--finite-domain-enumeration=true`，或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = true`。候选数量由路径约束给出的集合决定，旧字段 `finite_domain_max` 会产生配置错误。执行器优先从可见路径约束确认候选，也用同一批约束剪去不可达的条件分支，并推导纯位向量运算产生的具体长度或索引。结构层无法确认时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。
 
+条件恒值折叠使用 `[execution_limits.path_merge] prune_constant_branches = true` 或 `--prune-constant-branches=true`，默认关闭。所有 Jump 在求值成功后只读本次符号条件的表达式；结构化简得到恒真／恒假时复用具体布尔的单臂执行，不能识别时沿用原处理。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
+
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
 
 区域嵌套和片段数均缺省不限，显式 `-1` 与省略等价。有限深度对照可用 `[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16`。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布与最大深度。保存点深度不限，调用深度另计。正整数 `max_fragments` 限制每次根区域尝试因局部汇合失败保留的片段，超限计为 `fragment_limit`，后续可走普通分叉。

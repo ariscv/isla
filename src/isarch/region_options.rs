@@ -6,6 +6,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("merge_poison_slots", "merge-poison-slots", "只合并已证明不可观察的未初始化槽位；默认关闭"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
+    ("prune_constant_branches", "prune-constant-branches", "分支入口识别结构化布尔恒值；默认关闭"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
     ("lazy_z3_scope", "region-lazy-z3-scope", "延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用"),
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
@@ -65,6 +66,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
                 "merge_poison_slots" => updated.path_merge.merge_poison_slots = value,
                 "defer_ctor_checks" => updated.path_merge.defer_ctor_checks = value,
                 "defer_range_proofs" => updated.path_merge.defer_range_proofs = value,
+                "prune_constant_branches" => updated.path_merge.prune_constant_branches = value,
                 "defer_exit_check" => updated.path_merge.defer_exit_check = value,
                 "finite_domain_enumeration" => updated.path_merge.finite_domain_enumeration = value,
                 "lazy_z3_scope" => updated.path_merge.lazy_z3_scope = value,
@@ -175,6 +177,7 @@ mod tests {
         assert_eq!(limits, ExecutionLimitsConfig::default());
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
+                "prune_constant_branches",
                 "merge_poison_slots",
                 "defer_ctor_checks",
                 "defer_range_proofs",

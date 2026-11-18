@@ -571,3 +571,9 @@ Sail IR 先设置 `current_exception`，再用 `have_exception = true` 生效。
 ## 2026-11-18：Sail match 失败在退出指令处丢弃
 
 Sail IR 的 `exit match` 由解析器标记为 `ExitCause::MatchFailure`。`filter_match_failures` 分派在普通错误／区域拒绝之前，沿用抛出模型异常的计数、诊断和 `Run::Dead`。终止调用的静态准入识别同一退出类型。普通 `exit` 和断言仍使用各自的类型。
+
+## 2026-11-18：共用 Jump 可以读取符号包装后的布尔恒值
+
+适用 fc7cc763 的 fold-const 候选。`Solver::structural_bool` 虽定义于 `smt/no_smt.rs`，本身不检查 no_smt 模式，也不调用 SMT check 或使用路径前提/模型；普通SMT、defer及无SMT均可用。Jump 对已求值 `Val::Symbolic` 在执行限制决策前读取此接口，Some转Bool即可复用既有单臂跳转和追踪；None保留原符号判定。不得重跑可能记录读取的IR表达式。五种独立进程模式的恒真/恒假/未知测试通过，具体Bool原路径无需修改。生产实现无模型名或位置特判，也无新增 no_smt/skip_* 分叉。无SMT仍使用Z3 AST构造/化简，局部结构证明不改变整路径未认证标记。
+
+性能不由局部剪枝数推出：五分钟LOAD已定位解包叶子归零，但正常终态685→128；待本轮全部结果收尾后以任务报告为准，当前不建议启用默认。

@@ -453,6 +453,7 @@ isarch [原 J1 探索参数] \
 
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
+| `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `false` | Jump 入口识别符号表达式的布尔恒值；不查询 SMT |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |

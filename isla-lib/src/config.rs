@@ -2519,6 +2519,29 @@ r0 = "0x0000000000000000"
     }
 
     #[test]
+    fn prune_constant_branches_config_scope_and_type() {
+        let defaults = merge_config("[execution_limits.path_merge]").unwrap();
+        assert!(!RegionOptions::from_config(&defaults).prune_constant_branches);
+        for enabled in [false, true] {
+            let config =
+                merge_config(&format!("[execution_limits.path_merge]\nprune_constant_branches={enabled}")).unwrap();
+            assert_eq!(RegionOptions::from_config(&config).prune_constant_branches, enabled);
+        }
+        for section in [
+            "execution_limits",
+            "execution_limits.region_options",
+            "execution_limits.solver",
+            "execution_limits.path_merge.diagnostics",
+        ] {
+            assert!(merge_config(&format!("[{section}]\nprune_constant_branches=true")).is_err());
+        }
+        assert!(merge_config("[execution_limits.path_merge]\nfold_constant_conditions=true").is_err());
+        for value in ["1", "'true'", "[]"] {
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nprune_constant_branches={value}")).is_err());
+        }
+    }
+
+    #[test]
     fn config_layout_new_sections_preserve_runtime_defaults_and_local_semantics() {
         use crate::executor::ExecutionLimits;
         let mut symtab = Symtab::new();
@@ -2777,6 +2800,7 @@ obligation_dump_dir = "obligations"
                 max_merge_depth: None,
                 defer_range_proofs: false,
                 defer_ctor_checks: false,
+                prune_constant_branches: false,
                 skip_branch_checks: true,
                 skip_bool_proofs: true,
                 no_smt: true,

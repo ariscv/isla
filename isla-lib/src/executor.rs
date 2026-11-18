@@ -2182,6 +2182,21 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 // 条件可能要求分叉重试；求值成功后再计入控制流和回跳预算。
                 let value =
                     eval_exp(exp, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
+                // 只读本次求值所得符号的表达式，不使用路径前提或模型，也不重复求值 IR。
+                let value = if crate::config::RegionOptions::current().prune_constant_branches {
+                    match value {
+                        Val::Symbolic(v) => match solver.structural_bool(&smtlib::Exp::Var(v)) {
+                            Some(value) => {
+                                shared_state.execution_stats.folded_condition(value);
+                                Val::Bool(value)
+                            }
+                            None => Val::Symbolic(v),
+                        },
+                        value => value,
+                    }
+                } else {
+                    value
+                };
                 frame.pending_retry_operand = None;
                 if !frame.local_state.expression_values.is_empty() {
                     cost::make_mut(&mut frame.local_state).expression_values.clear();

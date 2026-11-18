@@ -76,6 +76,8 @@ pub struct PathMergeConfig {
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,
+    /// 分支入口只用表达式结构识别布尔恒值；默认关闭。
+    pub prune_constant_branches: bool,
     /// 仅在延迟出口检查内生效。
     pub lazy_z3_scope: bool,
     pub finite_domain_enumeration: bool,

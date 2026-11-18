@@ -5785,3 +5785,6 @@ fn unify_characterization_region_exit_in_both_modes() {
         assert_eq!(solver.has_stashed_model(), !no_smt);
     }
 }
+
+#[path = "prune_constant_branch_tests.rs"]
+mod prune_constant_branch_tests;

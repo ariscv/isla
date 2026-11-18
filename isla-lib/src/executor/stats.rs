@@ -49,6 +49,8 @@ struct RuleStats {
 
 #[derive(Default, Serialize)]
 struct MergeStats {
+    folded_true_conditions: usize,
+    folded_false_conditions: usize,
     attempts: usize,
     successes: usize,
     failures: usize,
@@ -145,6 +147,16 @@ impl ExecutionStats {
             merge: Mutex::new(MergeStats::default()),
             forks: Mutex::new(HashMap::new()),
             rejections: Mutex::new(HashMap::new()),
+        }
+    }
+    pub(super) fn folded_condition(&self, value: bool) {
+        if self.enabled {
+            let mut merge = self.merge.lock().unwrap();
+            if value {
+                merge.folded_true_conditions += 1;
+            } else {
+                merge.folded_false_conditions += 1;
+            }
         }
     }
     pub fn enabled(&self) -> bool {
