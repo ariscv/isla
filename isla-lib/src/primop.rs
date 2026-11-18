@@ -296,22 +296,9 @@ pub(crate) fn optimistic_assert<B: BV>(
         Val::String(message) => Some(message),
         _ => None,
     };
-    if solver.no_smt() {
-        if let Val::Symbolic(v) = &x {
-            solver.no_smt_assertion(Exp::Var(*v), info);
+    if let Val::Symbolic(v) = &x {
+        if solver.defer_symbolic_assertion(Exp::Var(*v), info) {
             return Ok(Val::Unit);
-        }
-    }
-    if solver.region_queries_deferred() {
-        match &x {
-            Val::Symbolic(v) => {
-                solver.defer_assertion(Exp::Var(*v), info);
-                return Ok(Val::Unit);
-            }
-            Val::Bool(true) => return Ok(Val::Unit),
-            // 立即停止此臂；区域收尾复用死臂事务，撤销本臂并保留完整到达守卫。
-            Val::Bool(false) => return Err(ExecError::AssertionFailure(message, info)),
-            _ => (),
         }
     }
 
@@ -348,22 +335,9 @@ pub(crate) fn pessimistic_assert<B: BV>(
         Val::String(message) => Some(message),
         _ => None,
     };
-    if solver.no_smt() {
-        if let Val::Symbolic(v) = &x {
-            solver.no_smt_assertion(Exp::Var(*v), info);
+    if let Val::Symbolic(v) = &x {
+        if solver.defer_symbolic_assertion(Exp::Var(*v), info) {
             return Ok(Val::Unit);
-        }
-    }
-    if solver.region_queries_deferred() {
-        match &x {
-            Val::Symbolic(v) => {
-                solver.defer_assertion(Exp::Var(*v), info);
-                return Ok(Val::Unit);
-            }
-            Val::Bool(true) => return Ok(Val::Unit),
-            // 立即停止此臂；区域收尾复用死臂事务，撤销本臂并保留完整到达守卫。
-            Val::Bool(false) => return Err(ExecError::AssertionFailure(message, info)),
-            _ => (),
         }
     }
 
@@ -3143,15 +3117,23 @@ pub fn eq_anything<B: BV>(
                     Box::new(Exp::Eq(Box::new(Exp::Var(l_sym)), Box::new(id.to_smt()))),
                     Box::new(Exp::Eq(Box::new(Exp::Var(r_sym)), Box::new(id.to_smt()))),
                 );
-                if !solver.no_smt() && solver.check_sat_with(&both_tags, info).is_unsat()? {
+                if solver
+                    .check_candidate_sat_with(&both_tags, info)
+                    .map(|result| result.is_unsat())
+                    .transpose()?
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 common = true;
                 let payload = match eq_anything(left, right.clone(), solver, info) {
                     Ok(payload) => payload,
                     Err(ExecError::Type(..))
-                        if solver.no_smt()
-                            || !solver.check_sat_with(&Exp::Not(Box::new(both_tags)), info).is_unsat()? =>
+                        if solver
+                            .check_candidate_sat_with(&Exp::Not(Box::new(both_tags)), info)
+                            .map(|result| result.is_sat())
+                            .transpose()?
+                            .unwrap_or(true) =>
                     {
                         return Err(ExecError::SymbolicLength("eq_anything", info));
                     }
@@ -3185,14 +3167,22 @@ pub fn eq_anything<B: BV>(
         | (Val::Ctor(id, payload), Val::SymbolicCtor(sym, constructors)) => {
             let Some(value) = constructors.get(&id) else { return Ok(Val::Bool(false)) };
             let equal_tag = Exp::Eq(Box::new(Exp::Var(sym)), Box::new(id.to_smt()));
-            if !solver.no_smt() && solver.check_sat_with(&equal_tag, info).is_unsat()? {
+            if solver
+                .check_candidate_sat_with(&equal_tag, info)
+                .map(|result| result.is_unsat())
+                .transpose()?
+                .unwrap_or(false)
+            {
                 return Ok(Val::Bool(false));
             }
             let equal_payload = match eq_anything(value.clone(), *payload, solver, info) {
                 Ok(payload) => payload,
                 Err(ExecError::Type(..))
-                    if solver.no_smt()
-                        || !solver.check_sat_with(&Exp::Not(Box::new(equal_tag.clone())), info).is_unsat()? =>
+                    if solver
+                        .check_candidate_sat_with(&Exp::Not(Box::new(equal_tag.clone())), info)
+                        .map(|result| result.is_sat())
+                        .transpose()?
+                        .unwrap_or(true) =>
                 {
                     return Err(ExecError::SymbolicLength("eq_anything", info));
                 }

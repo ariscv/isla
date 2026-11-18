@@ -337,7 +337,11 @@ fn read_register_from_vector<'ir, B: BV>(
                         let limit = smtlib::bits64(regs.len() as u64, len);
                         let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
                         let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
-                        let in_bounds_sat = solver.no_smt() || !solver.check_sat_with(&in_bounds, info).is_unsat()?;
+                        let in_bounds_sat = solver
+                            .check_candidate_sat_with(&in_bounds, info)
+                            .map(|result| result.is_sat())
+                            .transpose()?
+                            .unwrap_or(true);
                         let out_of_bounds_sat = !solver.no_smt_safety(&in_bounds, info)
                             && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
                         if in_bounds_sat && out_of_bounds_sat {
@@ -511,7 +515,11 @@ fn write_register_from_vector<'ir, B: BV>(
                         let limit = smtlib::bits64(regs.len() as u64, len);
                         let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
                         let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
-                        let in_bounds_sat = solver.no_smt() || !solver.check_sat_with(&in_bounds, info).is_unsat()?;
+                        let in_bounds_sat = solver
+                            .check_candidate_sat_with(&in_bounds, info)
+                            .map(|result| result.is_sat())
+                            .transpose()?
+                            .unwrap_or(true);
                         let out_of_bounds_sat = !solver.no_smt_safety(&in_bounds, info)
                             && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
                         if in_bounds_sat && out_of_bounds_sat {
@@ -2185,19 +2193,23 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let test_false = Not(Box::new(Var(v)));
 
                         let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
-                        let can_be_true = if solver.branch_checks_skipped() {
-                            true
-                        } else if frame.region_execution.is_some() {
+                        let can_be_true = if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_true, *info)?
                         } else {
-                            solver.check_sat_with_for_branch(&test_true, *info, false).is_sat()?
+                            solver
+                                .check_sat_with_for_branch(&test_true, *info, false)
+                                .map(|result| result.is_sat())
+                                .transpose()?
+                                .unwrap_or(true)
                         };
-                        let can_be_false = if solver.branch_checks_skipped() {
-                            true
-                        } else if frame.region_execution.is_some() {
+                        let can_be_false = if frame.region_execution.is_some() {
                             region_merge::feasible(frame, solver, &test_false, *info)?
                         } else {
-                            solver.check_sat_with_for_branch(&test_false, *info, false).is_sat()?
+                            solver
+                                .check_sat_with_for_branch(&test_false, *info, false)
+                                .map(|result| result.is_sat())
+                                .transpose()?
+                                .unwrap_or(true)
                         };
 
                         stats::region_progress::branch_result(can_be_true, can_be_false);

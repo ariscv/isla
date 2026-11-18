@@ -156,17 +156,15 @@ pub(super) fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Si
             let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver)?;
             match result {
                 Run::Suspended => {
-                    if !solver.region_queries_deferred() {
-                        match solver.check_sat_for_arm(info) {
-                            SmtResult::Sat => (),
-                            SmtResult::Unsat => {
-                                return Err(region_merge::reject(&arm, SpeculativeRejectReason::FlatDeadArm))
-                            }
-                            SmtResult::Unknown => {
-                                return Err(region_merge::reject(&arm, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+                    match solver.check_sat_for_arm(info) {
+                        None | Some(SmtResult::Sat) => (),
+                        Some(SmtResult::Unsat) => {
+                            return Err(region_merge::reject(&arm, SpeculativeRejectReason::FlatDeadArm))
                         }
+                        Some(SmtResult::Unknown) => {
+                            return Err(region_merge::reject(&arm, SpeculativeRejectReason::SolverUnknown))
+                        }
+                        Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                     }
                     Ok(())
                 }

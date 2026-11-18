@@ -39,7 +39,7 @@ fn engine_close_preserves_earlier_obligation_after_later_exit() {
         let later = solver.start_transaction_with_guard(Some(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(guard)))));
         assert!(!region_engine::close_arm(Ok(Run::Dead), later, &frame, &shared, solver, info()).unwrap());
         solver.assert_region_exit(smtlib::Exp::Bool(false));
-        assert_eq!(solver.check_deferred_assertions(info()), SmtResult::Sat, "后序正常域不能抹去前序错误");
+        assert_eq!(solver.check_deferred_assertions(info()), Some(SmtResult::Sat), "后序正常域不能抹去前序错误");
     });
     solver.rollback_transaction(root);
 }

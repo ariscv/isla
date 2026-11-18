@@ -129,7 +129,7 @@ fn region_util_defer_ctor_obligation_checks_original_guard() {
                 solver.assert(smtlib::Exp::Bool(false));
                 assert_eq!(
                     solver.check_deferred_assertions(info()),
-                    if safe { SmtResult::Unsat } else { SmtResult::Sat }
+                    Some(if safe { SmtResult::Unsat } else { SmtResult::Sat })
                 );
             } else {
                 assert!(matches!(result, Err(ExecError::Z3Unknown)));

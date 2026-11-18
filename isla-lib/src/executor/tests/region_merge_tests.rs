@@ -5429,3 +5429,47 @@ fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
 
 #[path = "region_engine_tests.rs"]
 mod region_engine_tests;
+
+// 固定整改前的出口处理：相同IR在两种模式都合并，只有普通模式查询并取得认证。
+#[test]
+fn unify_characterization_region_exit_in_both_modes() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for no_smt in [false, true] {
+        let mut cfg = Config::new();
+        cfg.solver_options.no_smt = no_smt;
+        let context = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&context);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut frame = make_frame(vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+        let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+        let shared = empty_shared_state();
+        let queue = Worker::new_lifo();
+        crate::smt::reset_path_smt_stats();
+        assert!(matches!(
+            run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver
+            ),
+            Ok(Run::Finished(_))
+        ));
+        assert!(queue.is_empty());
+        assert!(!frame.region_merge_records().is_empty());
+        assert_eq!(crate::smt::path_smt_stats().calls == 0, no_smt);
+        assert_eq!(solver.has_stashed_model(), !no_smt);
+    }
+}

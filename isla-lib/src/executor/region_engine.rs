@@ -36,27 +36,23 @@ pub(super) fn close_arm<B: BV>(
     match result {
         Ok(Run::Suspended) => {
             let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-            let close_result = if solver.region_queries_deferred() || solver.no_smt() {
-                SmtResult::Sat
-            } else {
-                solver.check_sat_for_arm(info)
-            };
+            let close_result = solver.check_sat_for_arm(info);
             drop(close_scope);
             match close_result {
-                SmtResult::Sat => {
+                None | Some(SmtResult::Sat) => {
                     assert!(!solver.transaction_invalid(), "臂提交前保存点必须有效");
                     solver.commit_transaction();
                     Ok(true)
                 }
-                SmtResult::Unsat => {
+                Some(SmtResult::Unsat) => {
                     solver.commit_dead_transaction();
                     Ok(false)
                 }
-                SmtResult::Unknown => {
+                Some(SmtResult::Unknown) => {
                     solver.rollback_transaction(tx);
                     Err(reject(arm, SpeculativeRejectReason::SolverUnknown))
                 }
-                SmtResult::Error(error) => {
+                Some(SmtResult::Error(error)) => {
                     solver.rollback_transaction(tx);
                     Err(ExecError::Smt(error))
                 }
