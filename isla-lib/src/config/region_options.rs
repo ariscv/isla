@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegionOptions {
+    pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
     /// 范围证明转为出口待证义务；默认关闭。
@@ -68,6 +69,7 @@ impl RegionOptions {
         let merge = &limits.path_merge;
         let diagnostics = &merge.diagnostics;
         Self {
+            bv_rewrite: limits.solver.bv_rewrite,
             max_merge_depth: merge.max_merge_depth,
             defer_range_proofs: merge.defer_range_proofs,
             defer_ctor_checks: merge.defer_ctor_checks,

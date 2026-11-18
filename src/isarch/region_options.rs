@@ -26,6 +26,7 @@ const NO_SMT_OPTIONS: &[(&str, &str)] = &[
 ];
 
 pub fn add_cli(opts: &mut getopts::Options) {
+    opts.optflagopt("", "bv-rewrite", "通用等价改写；默认关闭；裸flag启用三条规则", "true|false|规则名列表");
     for (_, flag) in NO_SMT_OPTIONS {
         opts.optflagopt("", flag, "无 SMT 实验选项；裸 flag 等于 true，覆盖 TOML，默认 false", "true|false");
     }
@@ -42,6 +43,10 @@ pub fn add_cli(opts: &mut getopts::Options) {
 
 pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
     let mut updated = limits.clone();
+    if matches.opt_present("bv-rewrite") {
+        updated.solver.bv_rewrite =
+            isla_lib::smt::rewrite::BvRewrite::parse(&matches.opt_str("bv-rewrite").unwrap_or_else(|| "true".into()))?;
+    }
     for (field, flag, _) in BOOL_OPTIONS {
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
@@ -134,6 +139,20 @@ mod tests {
         let mut opts = getopts::Options::new();
         add_cli(&mut opts);
         apply_cli(&opts.parse(args).map_err(|e| e.to_string())?, config)
+    }
+
+    #[test]
+    fn bv_rewrite_cli_overrides_toml_and_rejects_unknown_rules() {
+        let mut config = ExecutionLimitsConfig::default();
+        cli(&mut config, &["--bv-rewrite"]).unwrap();
+        assert_eq!(config.solver.bv_rewrite, isla_lib::smt::rewrite::BvRewrite::parse("true").unwrap());
+        cli(&mut config, &["--bv-rewrite=false"]).unwrap();
+        assert!(!config.solver.bv_rewrite.enabled());
+        cli(&mut config, &["--bv-rewrite=mask-and,sign-bound"]).unwrap();
+        assert_eq!(isla_lib::config::RegionOptions::from_config(&config).bv_rewrite, config.solver.bv_rewrite);
+        let prior = config.clone();
+        assert!(cli(&mut config, &["--bv-rewrite=unknown"]).is_err());
+        assert_eq!(config, prior);
     }
 
     #[test]

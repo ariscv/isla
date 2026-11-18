@@ -820,3 +820,5 @@ witness_eval = true
 no_smt = true
 # 可选第三种：no_smt_keep_bool_proofs = true
 ```
+
+`--bv-rewrite` 启用三条通用等价改写，默认关闭。可用 `--bv-rewrite=mask-and,sign-bound` 单独选规则，或用 `--bv-rewrite=false` 覆盖 TOML。TOML 在 `[execution_limits.solver]` 下接受 `bv_rewrite = true`、`false` 或规则名列表；规则名为 `data-ite-eq`、`mask-and`、`sign-bound`。加 `--memory-stats` 可查看进程累计命中次数。
