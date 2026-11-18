@@ -43,7 +43,6 @@ fn probe<B: BV>(
                     result.assignment.push(value);
                 }
                 solver.add(Def::Assert(if value { positive } else { negative }));
-                assert!(result.weight.is_finite(), "Knuth权重超出数值范围");
             }
             if level == 0 {
                 result.classes = result.weight;
@@ -92,7 +91,6 @@ fn probe_reference<B: BV>(
                 result.assignment.push(value);
             }
             prefix = if value { positive } else { negative };
-            assert!(result.weight.is_finite(), "Knuth权重超出数值范围");
         }
         if level == 0 {
             result.classes = result.weight;
@@ -105,24 +103,33 @@ fn probe_reference<B: BV>(
     Ok(result)
 }
 
-fn summarize(values: &[f64]) -> Value {
-    assert!(values.len() >= 2 && values.iter().all(|value| value.is_finite() && *value >= 0.0));
+fn summarize(values: &[f64], exact_prefix: f64) -> Option<Value> {
+    assert!(values.len() >= 2);
     let n = values.len() as f64;
     let mean = values.iter().sum::<f64>() / n;
     let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let error = (variance / n).sqrt();
-    assert!(mean.is_finite() && error.is_finite());
-    json!({"n":values.len(),"mean":mean,"standard_error":error,
-        "confidence_95":[(mean-1.96*error).max(0.0),mean+1.96*error],
+    let upper = mean + 1.96 * error + exact_prefix;
+    upper.is_finite().then(|| {
+        json!({"n":values.len(),"mean":mean+exact_prefix,"standard_error":error,
+        "confidence_95":[(mean-1.96*error).max(0.0)+exact_prefix,upper],
         "interval_method":"normal_approximation_fixed_n"})
+    })
+}
+
+fn cap_count(count: BigUint, cap: Option<usize>) -> BigUint {
+    match cap {
+        Some(cap) => count.min(BigUint::from(cap)),
+        None => count,
+    }
 }
 
 /// 域查询只遍历一个经依赖证明的分量；达到验证额度时返回未完成证明，转估计层。
 pub(super) fn domain_count<B: BV>(
     solver: &mut Solver<B>,
     bits: &[Formula<Sym>],
-    cap: usize,
-) -> Result<Option<usize>, ExecError> {
+    cap: Option<usize>,
+) -> Result<Option<BigUint>, ExecError> {
     use Formula::*;
     let mut free = Vec::new();
     for bit in bits {
@@ -134,14 +141,15 @@ pub(super) fn domain_count<B: BV>(
         }
     }
     let mut pending = vec![(Bool(true), 0)];
-    let mut count = 0;
+    let mut count = BigUint::from(0u8);
+    let cap = cap.map(BigUint::from);
     while let Some((prefix, depth)) = pending.pop() {
         if !satisfiable(solver, &prefix)? {
             continue;
         }
         if depth == free.len() {
-            count += 1;
-            if count > cap {
+            count += 1u8;
+            if cap.as_ref().is_some_and(|cap| &count > cap) {
                 return Ok(None);
             }
         } else {
@@ -205,13 +213,15 @@ pub(super) fn run<B: BV>(
 ) -> Result<Value, ExecError> {
     use Formula::*;
     assert_eq!(guards.len(), record_ids.len());
-    assert!(config.predict_probes >= 200 && config.predict_domain_cap > 0);
+    let probes = config.predict_probes;
+    assert!(probes.is_none_or(|probes| probes >= 200));
+    assert!(config.predict_domain_cap.is_none_or(|cap| cap > 0 && probes.is_some()));
+    let domain_cap = probes.map(|_| config.predict_domain_cap.unwrap_or(256));
     let started = std::time::Instant::now();
-    let workers = config.enumeration_threads.min(config.predict_probes);
-    let budget = parallel::reserve_threads(workers, config.enumeration_threads);
+    let mut workers = 0;
     eprintln!(
         "[MERGE_PREDICT_SAMPLER_START] {}",
-        json!({"path_signature":path_signature,"probes":config.predict_probes,
+        json!({"path_signature":path_signature,"probes":probes,
         "guard_depth":guards.len(),"bit_depth":bits.len(),"threads":workers})
     );
     let context = crate::smt::Context::new(crate::smt::Config::new());
@@ -245,18 +255,19 @@ pub(super) fn run<B: BV>(
                 let mut components=Vec::new();
                 for group in &groups {
                     let projected:Vec<_>=group.iter().map(|index|bits[*index].clone()).collect();
-                    let Some(count)=domain_count(solver,&projected,config.predict_domain_cap)? else {return Ok(None);};
-                    assert!(count>0);product*=count;
-                    components.push(json!({"bit_indices":group,"domain_size":count}));
+                    let Some(count)=domain_count(solver,&projected,domain_cap)? else {return Ok(None);};
+                    assert!(count != BigUint::from(0u8));
+                    product *= &count;
+                    components.push(json!({"bit_indices":group,"domain_size":count.to_string()}));
                 }
                 Ok::<_,ExecError>(Some((product,components)))
             })();
             solver.rollback_transaction(class_tx);
             let Some((product,components))=counted? else {
                 incomplete=Some(json!({"reason":"component_domain_exceeds_verification_cap", "guard_values":assignment,
-                    "candidate_components":candidate.len(),"verified_components":groups.len(),"domain_cap":config.predict_domain_cap}));
-                let lower=config.predict_domain_cap.checked_add(1).unwrap();
-                bounded+=BigUint::from(config.class_cap.min(lower));
+                    "candidate_components":candidate.len(),"verified_components":groups.len(),"domain_cap":domain_cap}));
+                let lower = BigUint::from(domain_cap.expect("仅在显式近似模式下限制分量计数")) + 1u8;
+                bounded += cap_count(lower.clone(), config.class_cap);
                 classes.push(json!({"class_id":classes.len(),"guard_values":assignment,"guard_assignment":guard_assignment,
                     "method":"path_knuth_unobserved","distribution":null,"lower_bound":lower.to_string()}));
                 continue;
@@ -265,8 +276,10 @@ pub(super) fn run<B: BV>(
                 "method":"exact_component_domains","exact":product.to_string(),"components":components,
                 "independence_proof":"disjoint_free_atom_support_including_all_path_assertions_and_class_literals",
                 "candidate_components":candidate.len()}));
-            assert!(excluded.insert(assignment));
-            bounded+=product.clone().min(BigUint::from(config.class_cap));
+            if probes.is_some() {
+                assert!(excluded.insert(assignment));
+            }
+            bounded += cap_count(product.clone(), config.class_cap);
             sum+=product;
         }
         Ok::<_,ExecError>((classes,sum,bounded,excluded,incomplete))
@@ -275,15 +288,19 @@ pub(super) fn run<B: BV>(
     let (mut class_reports, exact_total, bounded_prefix, excluded, incomplete) = exact?;
     drop(solver);
     drop(context);
-    let exact_value = exact_total.to_f64().unwrap();
-    assert!(exact_value.is_finite());
+    let exact_value = exact_total.to_f64().filter(|value| value.is_finite());
     let (total, method, class_distribution_complete) = if incomplete.is_none() {
-        (
-            json!({"exact":exact_total.to_string(),"mean":exact_value,"standard_error":0.0,"confidence_95":[exact_value,exact_value]}),
-            "exact",
-            true,
-        )
+        let mut total = json!({"exact":exact_total.to_string()});
+        if let Some(value) = exact_value {
+            total["mean"] = json!(value);
+            total["standard_error"] = json!(0.0);
+            total["confidence_95"] = json!([value, value]);
+        }
+        (total, "exact", true)
     } else {
+        let probes = probes.expect("仅在显式近似模式下执行探测");
+        workers = config.enumeration_threads.min(probes);
+        let _budget = parallel::reserve_threads(workers, config.enumeration_threads);
         let completed = Mutex::new(Vec::new());
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
@@ -296,7 +313,7 @@ pub(super) fn run<B: BV>(
                     for event in events {solver.add_event(event.clone());}
                     let tx=solver.start_transaction();
                     let status=solver.with_incremental_checks(|solver| {
-                        for index in (worker..config.predict_probes).step_by(workers) {
+                        for index in (worker..probes).step_by(workers) {
                             let mix=crate::executor::execution_limits::splitmix64;
                             let mut state=mix(config.predict_seed).wrapping_add(mix(path_signature)).wrapping_add(mix(index as u64));
                             let sample=probe(solver,guards,bits,excluded,&mut || {
@@ -304,9 +321,9 @@ pub(super) fn run<B: BV>(
                             })?;
                             let mut completed=completed.lock().unwrap();
                             completed.push((index,sample));
-                            if completed.len()%32==0 || completed.len()==config.predict_probes {
+                            if completed.len()%32==0 || completed.len()==probes {
                                 eprintln!("[MERGE_PREDICT_PROGRESS] {}",json!({"path_signature":path_signature,
-                                    "completed_probes":completed.len(),"target_probes":config.predict_probes,"seconds":started.elapsed().as_secs_f64()}));
+                                    "completed_probes":completed.len(),"target_probes":probes,"seconds":started.elapsed().as_secs_f64()}));
                             }
                         }
                         Ok::<_,ExecError>(())
@@ -322,14 +339,10 @@ pub(super) fn run<B: BV>(
         })?;
         let mut samples = completed.into_inner().unwrap();
         samples.sort_by_key(|(index, _)| *index);
-        assert_eq!(samples.len(), config.predict_probes);
+        assert_eq!(samples.len(), probes);
         assert!(samples.iter().enumerate().all(|(expected, (index, _))| expected == *index));
         let weights: Vec<_> = samples.iter().map(|(_, sample)| sample.weight).collect();
-        let mut total = summarize(&weights);
-        total["mean"] = json!(total["mean"].as_f64().unwrap() + exact_value);
-        for index in 0..2 {
-            total["confidence_95"][index] = json!(total["confidence_95"][index].as_f64().unwrap() + exact_value);
-        }
+        let mut total = exact_value.and_then(|prefix| summarize(&weights, prefix)).unwrap_or_else(|| json!({}));
         total["exact_prefix"] = json!(exact_total.to_string());
         for report in class_reports.iter_mut().filter(|report| report["method"] == "path_knuth_unobserved") {
             let assignment: Vec<_> =
@@ -344,24 +357,20 @@ pub(super) fn run<B: BV>(
                 .collect();
             report["method"] = json!("path_knuth_contribution");
             report["observations"] = json!(observations);
-            report["distribution"] = summarize(&values);
+            report["distribution"] = json!(summarize(&values, 0.0));
         }
         let class_weights: Vec<_> = samples.iter().map(|(_, sample)| sample.classes).collect();
-        total["estimated_guard_classes"] = summarize(&class_weights);
+        total["estimated_guard_classes"] = json!(summarize(&class_weights, 0.0));
         (total, "knuth_after_incomplete_component_proof", false)
     };
-    drop(budget);
-    let bounded_exact = if incomplete.is_none() || bounded_prefix >= BigUint::from(config.path_cap) {
-        Some(bounded_prefix.clone().min(BigUint::from(config.path_cap)).to_string())
-    } else {
-        None
-    };
+    let bounded_exact = incomplete.is_none() || config.path_cap.is_some_and(|cap| bounded_prefix >= BigUint::from(cap));
+    let bounded_prefix = cap_count(bounded_prefix, config.path_cap).to_string();
     let output = json!({"schema_version":1,"mode":"predict","path_signature":path_signature,"method":method,
         "total":total,"guard_classes":class_reports,"guard_class_catalog_complete":true,
-        "bounded_output":{"class_cap":config.class_cap,"path_cap":config.path_cap,"exact":bounded_exact,
-            "lower_bound":bounded_prefix.min(BigUint::from(config.path_cap)).to_string(),"sample_stride":config.sample_stride},"class_distribution_complete":class_distribution_complete,
-        "unobserved_classes":"unknown_not_zero","exact_layer_incomplete":incomplete,"probes":if class_distribution_complete {0} else {config.predict_probes},
-        "probe_seed":config.predict_seed,"domain_cap":config.predict_domain_cap,"enumeration_threads":workers,
+        "bounded_output":{"class_cap":config.class_cap,"path_cap":config.path_cap,"exact":bounded_exact.then_some(&bounded_prefix),
+            "lower_bound":bounded_prefix,"sample_stride":config.sample_stride},"class_distribution_complete":class_distribution_complete,
+        "unobserved_classes":"unknown_not_zero","exact_layer_incomplete":incomplete,"probes":if class_distribution_complete {0} else {probes.unwrap()},
+        "probe_seed":config.predict_seed,"domain_cap":domain_cap,"enumeration_threads":workers,
         "guard_depth":guards.len(),"bit_depth":bits.len(),"seconds":started.elapsed().as_secs_f64()});
     Ok(output)
 }
@@ -389,8 +398,8 @@ mod tests {
         let guards = bits[..2].to_vec();
         let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
         let config = crate::config::MergeEnumerationConfig {
-            predict_probes: 256,
-            predict_domain_cap: 256,
+            predict_probes: Some(256),
+            predict_domain_cap: Some(256),
             enumeration_threads: 2,
             ..Default::default()
         };
@@ -405,12 +414,45 @@ mod tests {
             &[1, 2],
             &bits,
             catalog,
-            &crate::config::MergeEnumerationConfig { predict_domain_cap: 1, ..config },
+            &crate::config::MergeEnumerationConfig { predict_domain_cap: Some(1), ..config },
         )
         .unwrap();
         assert!(estimated["total"]["confidence_95"][0].as_f64().unwrap() <= 256.0);
         assert!(estimated["total"]["confidence_95"][1].as_f64().unwrap() >= 256.0);
         assert_eq!(solver.transaction_depth(), 0);
+    }
+
+    #[test]
+    fn predict_a1_缺省精确计算超过旧分量上限() {
+        use Formula::*;
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let input = solver.declare_bitvector(9, SourceLoc::unknown());
+        solver.assert(Neq(Box::new(Var(input)), Box::new(smtlib::bits64(511, 9))));
+        let bits: Vec<_> = (0..9)
+            .map(|bit| Eq(Box::new(Extract(bit, bit, Box::new(Var(input)))), Box::new(smtlib::bits64(1, 1))))
+            .collect();
+        let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
+        let report = run(7, &events, &[], &[], &bits, vec![vec![]], &Default::default()).unwrap();
+        assert_eq!(report["total"]["exact"], "511");
+        assert_eq!(report["guard_classes"][0]["components"].as_array().unwrap().len(), 1);
+        assert_eq!(report["probes"], 0);
+    }
+
+    #[test]
+    fn predict_a1_精确结果超出浮点范围仍返回字符串() {
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let bits: Vec<_> =
+            (0..1024).map(|_| Formula::Var(solver.declare_const(smtlib::Ty::Bool, SourceLoc::unknown()))).collect();
+        let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
+        let report = run(7, &events, &[], &[], &bits, vec![vec![]], &Default::default()).unwrap();
+        let exact = (BigUint::from(1u8) << 1024usize).to_string();
+        assert_eq!(report["total"]["exact"], exact);
+        assert_eq!(report["bounded_output"]["exact"], exact);
+        assert!(report["total"].get("mean").is_none());
+        assert_eq!(report["probes"], 0);
     }
 
     #[test]
@@ -424,8 +466,8 @@ mod tests {
             .assert(Eq(Box::new(vars[2].clone()), Box::new(Neq(Box::new(vars[0].clone()), Box::new(vars[1].clone())))));
         let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
         let config = crate::config::MergeEnumerationConfig {
-            predict_probes: 256,
-            predict_domain_cap: 256,
+            predict_probes: Some(256),
+            predict_domain_cap: Some(256),
             enumeration_threads: 1,
             ..Default::default()
         };
@@ -487,7 +529,7 @@ mod tests {
         });
         solver.rollback_transaction(tx);
         assert_eq!(values, [2.0, 4.0]);
-        let summary = summarize(&values);
+        let summary = json!(summarize(&values, 0.0));
         assert_eq!(summary["mean"], 3.0);
         assert_eq!(summary["standard_error"], 1.0);
     }

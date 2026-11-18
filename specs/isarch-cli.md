@@ -388,7 +388,7 @@ isarch list-instructions 实际输出
 
 与 `solve-state` 共用全部探索参数、指令与前态设置。每个进程针对一个场景，先用当前模型完整认证 corpus，再用常驻快档判定 mutant。
 
-`--path-cache-read <目录> --path-cache-encoding bin` 直接恢复完成路径，跳过符号探索。省略 `--fuzz-corpus` 时，沿用现场枚举器，以 `class_cap=1`、`sample_stride=1` 生成每个守卫类的一个代表，写入 `initial-corpus.jsonl`；完整枚举元数据写入 `initial-corpus-enumeration.json`。生成的 corpus 经完整 judge 认证后才进入 loop。提供 `--fuzz-corpus` 时跳过生成，认证并复用指定的 corpus。缓存读取也支持普通 `solve-state` 的样本导出和 `--check-samples`。
+`--path-cache-read <目录> --path-cache-encoding bin` 直接恢复完成路径，跳过符号探索。省略 `--fuzz-corpus` 时，沿用现场枚举器，显式使用 `class_cap=1`、`sample_stride=1`，为每个成功遍历的守卫类生成一个代表。路径上限缺省不限。初始 corpus 写入 `initial-corpus.jsonl`，完整枚举元数据写入 `initial-corpus-enumeration.json`。生成的 corpus 经完整 judge 认证后才进入 loop。提供 `--fuzz-corpus` 时跳过生成，认证并复用指定的 corpus。缓存读取也支持普通 `solve-state` 的样本导出和 `--check-samples`。
 
 路径缓存使用 schema 4，保存 64 位 fork ID、纯原语定义的符号区间 `pure_definitions` 和终态。JSON 和二进制均保存这些字段，可用 `--path-cache-crosscheck` 交叉核对。schema 3 的 JSON 可单独读取，须省略 `--path-cache-crosscheck`。schema 3 二进制及 schema 1/2 需要重新生成。初始 corpus 通过恢复路径的完整 judge 认证，检查其输入与后态，不重新执行当前 IR 的 clause。本轮保持 IR／配置不变；跨 IR／配置的语义兼容仍需独立复验。manifest 的来源哈希只作记录，不是准入门槛。partial 缓存只代表已完成路径，完整性和错误数量以 manifest 为准。
 
@@ -515,6 +515,18 @@ progress = true
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，缺省 60 秒。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
+## 投影枚举与样本输出
+
+在 `[execution_limits.path_merge.enumeration]` 设置 `enabled=true` 后开始枚举。每个守卫类的 `class_cap` 与每条完成路径的 `path_cap` 缺省均不限，可显式设置正整数。达到上限且仍有可行解时记录截断。`sample_stride` 缺省为 1，显式大于 1 时按步长选择输出，计数仍包含已枚举的解。
+
+`mode="samples"` 为每组可行的守卫赋值和被测位投影输出一份具体见证。关闭枚举时，样本后端为每条完成路径输出一个代表，旧 `gen` 为每个可编码分支输出一个代表。judge 依据原路径约束逐条检查输入。省略 `--check-samples-limit` 时读取到 EOF。
+
+单 binary 后端且 `sample_stride=1` 时使用二进制 schema 2 流式写出，字节数缺省不限。显式 `max_output_bytes` 至少为 1024，并要求这种输出配置。每 60 秒刷新并记录写入进度。创建与输出同名、扩展名为 `.stop` 的文件会在轮询后停止接收新样本。字节到限与文件停止在汇总中分别记为 `output_budget`、`stop_file`，收尾时保存截断统计和正常结束标记。
+
+`mode="count"` 只计数。`mode="predict"` 缺省精确计数并以十进制字符串输出。浮点表示超出范围时可省略浮点统计。显式设置 `predict_probes`（至少 200）启用近似预测，此时可用 `predict_domain_cap` 设置每个分量的精确验证额度，额度缺省为 256。超过额度后进行探测，保留精确前缀与下界。两种模式均不写见证。
+
+终值重解可在 `[execution_limits.solver]` 显式设置正整数 `model_timeout_ms`。查询取此限时、`--smt-timeout` 和路径剩余时间中的最小值。
+
 ## resident judge 分批恢复
 
 普通 `--judge-resident INPUT --judge-resident-out OUTPUT` 默认每批恢复 `-T` 条完成路径，每批对全部输入执行原 judge，再释放该批求解器和 Context。所有保存路径仍参与判定，跨批重复接纳仍报错，守卫和后态唯一性证明保持原行为。保存路径及其事件记录仍占内存，因此批大小只约束恢复出的 native solver 数，不保证整个进程的固定内存上限。
@@ -524,7 +536,7 @@ progress = true
 实验选项 `[execution_limits.path_merge] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
 ## 配置布局与迁移
 
-`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
+`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，省略类、路径及字节上限即不限。局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
 
 步数、嵌套深度及片段数缺省不限，显式 `-1` 与省略等价。正整数 `max_merge_depth` 可由 `--region-max-merge-depth` 覆盖。保存点深度不限，诊断记录实际区域深度分布和最大值，调用深度另计。正整数 `max_fragments` 允许每次根区域尝试额外保留至多 `max_fragments - 1` 个局部汇合失败片段，超限计 `fragment_limit` 并保留普通分叉。
 
