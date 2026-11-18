@@ -413,7 +413,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         self.local_state.region_fallbacks
     }
 
-    pub fn forks(&self) -> u32 {
+    pub fn forks(&self) -> u64 {
         self.execution_limit_state.total_forks()
     }
 
@@ -681,7 +681,7 @@ impl<'ir, B: BV> Frame<'ir, B> {
         self.execution_limit_state.has_sampled_branch()
     }
 
-    pub fn forks(&self) -> u32 {
+    pub fn forks(&self) -> u64 {
         self.execution_limit_state.total_forks()
     }
 }

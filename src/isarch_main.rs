@@ -446,7 +446,12 @@ fn isla_main() -> i32 {
     opts.optopt("", "slow-query-dump-dir", "返回慢查询的完整SMT及统计目录；默认关闭", "<path>");
     opts.optopt("", "slow-query-threshold", "返回慢查询的耗时阈值；默认20s", "<n[s|m|h]>");
     opts.optopt("", "slow-query-dump-limit", "慢查询最多导出份数；默认5", "<n>");
-    opts.optopt("", "smt-timeout", "单次 Z3 operation 的 soft interrupt 超时时间", "<n[s|m|h]>");
+    let smt_timeout_help = if cfg!(feature = "smt-thread-interrupt") {
+        "单次 Z3 调用的软中断限时，缺省 60 秒。终态专用限时独立生效"
+    } else {
+        "当前构建直接调用 Z3，此选项不生效"
+    };
+    opts.optopt("", "smt-timeout", smt_timeout_help, "<n[s|m|h]>");
     opts.optopt("", "timeout-smt-output", "timeout SMT2 输出目标，逗号分隔：file,stdout,itrace", "<destinations>");
     opts.optopt("", "timeout-smt-dir", "timeout SMT2 文件输出目录", "<path>");
     opts.optopt(
@@ -504,11 +509,7 @@ fn isla_main() -> i32 {
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
     opts.optflag("", "all", "执行所有clause");
-    opts.optflag(
-        "",
-        "path-merging",
-        "启用自适应区域路径合并；ISLA_MERGE_RECORDS=<路径> 输出 JSON Lines，ISLA_STATS=1 输出规则统计",
-    );
+    opts::add_path_merge_flags(&mut opts);
     opts.optopt("", "itrace", "把完整逐指令轨迹写入文件，可与 ftrace/btrace 组合", "<path>");
     opts.optflag("", "ftrace", "记录函数调用和返回");
     opts.optflag("", "btrace", "输出静态分支清单和实际条件分支轨迹");
@@ -663,10 +664,16 @@ fn isla_main() -> i32 {
         isa_config.execution_limits = Some(config);
     }
 
-    if matches.opt_present("path-merging") {
-        let mut limits = isa_config.execution_limits.take().unwrap_or_default();
-        limits.path_merge.enabled = Some(true);
-        isa_config.execution_limits = Some(limits);
+    match opts::path_merge_cli(&matches) {
+        Ok(Some(enabled)) => {
+            isa_config.execution_limits.get_or_insert_with(ExecutionLimitsConfig::default).path_merge.enabled =
+                Some(enabled);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
     }
 
     let had_limits = isa_config.execution_limits.is_some();
@@ -766,7 +773,11 @@ fn isla_main() -> i32 {
             eprintln!("{}", error);
             return 1;
         }
-        let limits = isla_lib::executor::ExecutionLimits::default().with_config(config, &shared_state.symtab);
+        let limits = if matches!(subcommand, Subcommand::SolveState { .. }) {
+            isla_lib::executor::ExecutionLimits::for_symbolic_dag(Some(config), &shared_state.symtab)
+        } else {
+            isla_lib::executor::ExecutionLimits::default().with_config(config, &shared_state.symtab)
+        };
         if let Err(error) = isla_lib::executor::validate_force_regions(shared_state, &limits) {
             eprintln!("{}", error);
             return isla_lib::executor::FORCE_MERGE_EXIT_CODE;
@@ -979,6 +990,16 @@ fn isla_main() -> i32 {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn path_merge_cli_supports_explicit_disable() {
+        let mut opts = getopts::Options::new();
+        opts::add_path_merge_flags(&mut opts);
+        assert_eq!(opts::path_merge_cli(&opts.parse(Vec::<String>::new()).unwrap()), Ok(None));
+        assert_eq!(opts::path_merge_cli(&opts.parse(["--path-merging"]).unwrap()), Ok(Some(true)));
+        assert_eq!(opts::path_merge_cli(&opts.parse(["--no-path-merging"]).unwrap()), Ok(Some(false)));
+        assert!(opts::path_merge_cli(&opts.parse(["--path-merging", "--no-path-merging"]).unwrap()).is_err());
+    }
 
     #[test]
     fn fuzz_inherits_solve_state_filters() {

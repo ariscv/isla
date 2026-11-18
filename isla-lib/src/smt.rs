@@ -386,7 +386,7 @@ impl DefAttrs {
 pub enum Event<B> {
     Smt(Def, DefAttrs, SourceLoc),
     /// Fork ID, assertion, branch number, source location
-    Fork(u32, Sym, u32, SourceLoc),
+    Fork(u64, Sym, u32, SourceLoc),
     /// Fork group ID, number of merged paths, source location
     Merge(u32, usize, SourceLoc),
     /// Used to delimit function calls and returns in the trace
@@ -1931,9 +1931,15 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.complete_model = b;
     }
 
-    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext) -> ExecError {
+    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext, limit: std::time::Duration) -> ExecError {
         let dump = timeout_dump_from_checkpoint(self.solver.checkpoint_snapshot(), timeout.dump_request.clone());
-        ExecError::Smt(z3_timeout_error(SmtOperation::ModelEval, SourceLoc::unknown(), timeout.started.elapsed(), dump))
+        ExecError::Smt(z3_timeout_error(
+            SmtOperation::ModelEval,
+            SourceLoc::unknown(),
+            timeout.started.elapsed(),
+            limit,
+            dump,
+        ))
     }
 
     fn eval_with_timeout(
@@ -1946,7 +1952,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         match timeout_Z3_model_eval(self.ctx.z3_ctx, self.z3_model, ast, model_completion, result, SourceLoc::unknown())
         {
             Ok(evaluated) => Ok(evaluated),
-            Err(Z3TimeoutError::Interrupted) => Err(self.model_eval_timeout_error(timeout_context)),
+            Err(Z3TimeoutError::Interrupted(limit)) => Err(self.model_eval_timeout_error(timeout_context, limit)),
         }
     }
 
@@ -3169,7 +3175,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             info,
         ) {
             Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
+            Err(Z3TimeoutError::Interrupted(limit)) => {
                 if let Some(profile) = budget_profile {
                     profile.finish(Z3_L_UNDEF);
                 }
@@ -3181,7 +3187,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.asserts_since_check = 0;
                 let dump =
                     timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(exp.clone()));
-                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
+                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), limit, dump));
             }
         };
         self.slow_query_finish(slow_query, query.z3_solver, Some(exp), info, z3_result);
@@ -3259,7 +3265,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
                 Ok(result) => result,
-                Err(Z3TimeoutError::Interrupted) => {
+                Err(Z3TimeoutError::Interrupted(limit)) => {
                     if let Some(shadow) = shadow {
                         shadow.finish(Z3_L_UNDEF);
                     }
@@ -3267,7 +3273,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.last_check_sat = false;
                     self.asserts_since_check = 0;
                     let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), limit, dump));
                 }
             };
         if let Some(shadow) = shadow {
@@ -3391,7 +3397,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             deadline,
         ) {
             Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
+            Err(Z3TimeoutError::Interrupted(limit)) => {
                 if let Some(shadow) = shadow {
                     shadow.finish(Z3_L_UNDEF);
                 }
@@ -3399,7 +3405,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.last_check_sat = false;
                 self.asserts_since_check = 0;
                 let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), limit, dump));
             }
         };
         if let Some(shadow) = shadow {
@@ -3461,7 +3467,7 @@ pub fn restore_path_smt_stats(stats: crate::timeout::SmtCallStats) {
     z3_timeout::restore_path_smt_stats(stats)
 }
 
-/// 已配置的单次 SMT operation deadline（`--smt-timeout`）。
+/// 单次 SMT 调用的实际限时。线程中断构建缺省 60 秒，直接调用构建无单次限时。
 pub fn configured_smt_operation_timeout() -> Option<std::time::Duration> {
     z3_timeout::configured_operation_timeout()
 }
