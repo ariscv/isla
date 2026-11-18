@@ -552,3 +552,12 @@ timeout --signal=TERM --kill-after=5s 590s \
 ## 2026-11-18：区域候选和诊断统一从显式配置读取
 
 适用a286b00c＋dbfc6e70工作目录整合＋未提交segdedup-flags迁移：16项新增功能／诊断使用config::RegionOptions，TOML在[execution_limits.region_options]，isarch CLI逐字段覆盖，initialize_architecture在创建共享状态前冻结配置；求解热路径只读该配置，不读环境变量。4项新增测试内部通信仍保留。区域111／去重义务14／查询32通过；PMP=2本机310秒未进入resident，不能继承历史后态PASS。[状态](segdedup_flags_20261117/status.md)。
+
+
+## 2026-11-18：路径检查点与native solver生命周期
+
+适用 fe2c9e08 及其按需求解独立候选。LocalFrame／冻结任务携带 Checkpoint，不携带native solver；Checkpoint通过Arc共享Trace执行记录，Solver::from_checkpoint重放定义和断言。resident基线已按批恢复，默认批大小T；不能把旧的“恢复后每路径一个solver”写成所有保存帧始终持有solver。
+
+新模式保持DefineConst AST即时翻译，主native为空；guard复用现有延迟AST表示，真实check装入已发布断言、缓冲断言、全部活动guard与目标。模型独立增引用，查询后释放临时solver。缓存键是同Context完整AST集合，排序去重并持有引用，最多16项；不能跨Context或不同Solver复用，也不证明语义等价公式必命中。
+
+本机T32／120s，原PMP64配置、defer和lazy开启：LOAD峰4.030→3.487GiB，STORE峰3.751→5.672GiB；正常终态率LOAD26.5→26.0、STORE23.5→19.0条／分钟，按需缓存命中25.1%／26.7%。查询耗时是线程墙钟之和，重复内部化的精确比例未拆分；不支持默认推广。完整DAG与真实resident两输入未签收，有限测试与风险见[议题摘要](on_demand_solve_20261118/status.md)。

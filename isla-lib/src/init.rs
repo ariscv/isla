@@ -225,6 +225,9 @@ pub fn initialize_architecture<'ir, B: BV>(
     if let Some(options) = isa_config.execution_limits.as_ref().and_then(|limits| limits.region_options.as_ref()) {
         options.configure();
     }
+    crate::smt::on_demand::SolverMode::configure(
+        isa_config.execution_limits.as_ref().and_then(|limits| limits.solver_mode).unwrap_or_default(),
+    );
     insert_monomorphize(arch);
     insert_primops(arch, &symtab, mode, isa_config);
 

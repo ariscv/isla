@@ -95,6 +95,7 @@ fn parse_subcommand(matches: &getopts::Matches) -> Result<Subcommand, String> {
 fn main() {
     let code = isla_main();
     unsafe { isla_lib::smt::finalize_solver() };
+    isla_lib::smt::on_demand::report();
     exit(code)
 }
 
@@ -499,6 +500,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "judge-resident", "", "<mutants.jsonl>");
     opts.optopt("", "judge-resident-out", "", "<judged.jsonl>");
     opts.optflag("", "judge-resident-fast", "");
+    opts.optopt("", "solver-mode", "求解器模式：incremental（默认）或 on_demand", "<mode>");
     opts.optopt("", "judge-resident-batch-size", "resident judge 每批恢复的路径数，默认等于 -T", "<number>");
     opts.optmulti("", "prestate", "定向固定完整顶层寄存器初态（需单一--clause）", "<reg>=<value>");
     opts.optopt("", "encoding-slices-config", "加载编码分片 TOML（[[encoding_slices]]，叠加到 -C 配置之上）", "<file>");
@@ -668,6 +670,15 @@ fn isla_main() -> i32 {
         isa_config.execution_limits = Some(limits);
     }
 
+    if let Some(value) = matches.opt_str("solver-mode") {
+        match value.parse() {
+            Ok(mode) => isa_config.execution_limits.get_or_insert_with(Default::default).solver_mode = Some(mode),
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        }
+    }
     let had_limits = isa_config.execution_limits.is_some();
     let mut limits = isa_config.execution_limits.take().unwrap_or_default();
     if let Err(error) = isarch::region_options::apply_cli(&matches, &mut limits) {

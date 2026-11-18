@@ -360,6 +360,8 @@ pub(super) fn timeout_Z3_solver_check(
     assumptions: &[Z3_ast],
     source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
+    let check_timer = super::on_demand::CheckTimer::new();
+    let _ = &check_timer;
     #[cfg(test)]
     LAST_SOLVER_QUERY.with(|last| {
         TEST_QUERY_COUNT.with(|count| count.set(count.get() + 1));
@@ -386,6 +388,8 @@ pub(super) fn timeout_Z3_solver_check_deadline(
     source_loc: SourceLoc,
     deadline: Duration,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
+    let check_timer = super::on_demand::CheckTimer::new();
+    let _ = &check_timer;
     #[cfg(test)]
     LAST_SOLVER_QUERY.with(|last| {
         TEST_QUERY_COUNT.with(|count| count.set(count.get() + 1));
@@ -429,6 +433,8 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
     assumptions: &[Z3_ast],
     source_loc: SourceLoc,
 ) -> Result<Z3_lbool, Z3TimeoutError> {
+    let check_timer = super::on_demand::CheckTimer::new();
+    let _ = &check_timer;
     #[cfg(test)]
     LAST_SOLVER_QUERY.with(|last| {
         TEST_QUERY_COUNT.with(|count| count.set(count.get() + 1));

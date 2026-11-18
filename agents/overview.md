@@ -1,3 +1,5 @@
+- 2026-11-18 [按需求解实验候选](on_demand_solve_20261118/status.md)：新增默认关闭的按需后端；短测结果与未验证范围见议题状态，不合并。
+
 # 议题入口
 
 - 2026-11-08 [fuzz 序列 S1](path_merge_call_support/fuzz-seq-s1.md)：移除旧机器码与 x1 特例；纯 clause 加路径合并实测导出 LOAD 976、STORE 1421 条样本，rs1/rd/rs2 均见证全部 32 个编号。Sv39 180 秒预算未收敛；Bare 存在排除内存区域错误；make 验收仍遇到译码 Poison。

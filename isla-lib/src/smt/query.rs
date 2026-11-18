@@ -79,7 +79,10 @@ pub(super) struct QuerySolver<'ctx> {
     independent: bool,
 }
 
-impl QuerySolver<'_> {
+impl<'ctx> QuerySolver<'ctx> {
+    pub(super) fn owned(ctx: &'ctx Context, z3_solver: Z3_solver) -> Self {
+        Self { ctx, z3_solver, independent: true }
+    }
     pub(super) fn assumptions<'a>(&self, conditions: &'a [Z3_ast]) -> &'a [Z3_ast] {
         if self.independent {
             &[]
@@ -152,7 +155,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 reusable.prefix.truncate(common);
                 for z3_ast in &complete[common..] {
-                    Z3_solver_push(self.ctx.z3_ctx, reusable.z3_solver);
+                    on_demand::native_push(self.ctx.z3_ctx, reusable.z3_solver);
                     Z3_solver_assert(self.ctx.z3_ctx, reusable.z3_solver, *z3_ast);
                     // 旧接口只返回裸AST；在下一次prefix比较之前必须保有其引用。
                     Z3_inc_ref(self.ctx.z3_ctx, *z3_ast);

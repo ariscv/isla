@@ -1557,6 +1557,7 @@ pub use region_options::RegionOptions;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionLimitsConfig {
+    pub solver_mode: Option<crate::smt::on_demand::SolverMode>,
     /// 区域候选与诊断选项；未配置时保持原默认行为。
     pub region_options: Option<RegionOptions>,
     /// resident judge 同时恢复的路径上限，默认使用线程数。
@@ -1892,6 +1893,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "case_quota",
             "region_options",
             "judge_resident_batch_size",
+            "solver_mode",
             "filter_model_exceptions",
         ],
     )?;
@@ -2210,7 +2212,12 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             Ok(size)
         })
         .transpose()?;
+    let solver_mode = table
+        .get("solver_mode")
+        .map(|v| v.as_str().ok_or_else(|| "solver_mode 必须是字符串".to_string()).and_then(str::parse))
+        .transpose()?;
     Ok(Some(ExecutionLimitsConfig {
+        solver_mode,
         region_options,
         judge_resident_batch_size,
         strict,
@@ -2585,6 +2592,21 @@ fn merge_config_values(base: &mut Value, overrides: Value) {
 mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
+
+    #[test]
+    fn solver_mode_config_default_and_validation() {
+        use crate::smt::on_demand::SolverMode;
+        assert_eq!(merge_config("[execution_limits]").unwrap().solver_mode, None);
+        for (value, expected) in [("incremental", SolverMode::Incremental), ("on_demand", SolverMode::OnDemand)] {
+            assert_eq!(
+                merge_config(&format!("[execution_limits]\nsolver_mode=\"{value}\"")).unwrap().solver_mode,
+                Some(expected)
+            );
+        }
+        for value in ["\"fresh\"", "1", "true"] {
+            assert!(merge_config(&format!("[execution_limits]\nsolver_mode={value}")).is_err());
+        }
+    }
 
     #[test]
     fn register_event_filter_is_explicit_and_validated() {

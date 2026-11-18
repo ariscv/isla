@@ -1,5 +1,19 @@
 # Isla
 
+`isarch --solver-mode on_demand` 启用实验性的按需求解；默认是 `incremental`。
+也可在配置中设置，CLI 优先：
+
+```toml
+[execution_limits]
+solver_mode = "on_demand"
+```
+
+新模式保留定义 AST、共享检查点与事务认证规则，只在真实查询时创建临时 Z3 solver，查询后释放。
+每个活动 Solver 最多缓存 16 个完整约束集的 Sat 模型或 Unsat 结果；不缓存 Unknown 或超时。
+它仍有 AST 和模型内存，并可能因重复内部化变慢；性能和完整 DAG 尚需实验签收。
+主 solver 文本转储不支持此模式，会明确拒绝；检查点超时转储仍可使用。
+
+
 `isarch fuzz` 支持路径引导 campaign、corpus 认证、只判定与历史变异记录回放，支持确定性并行生成与 `--executor difftest` 三方闭环，并导出路径 DAG。默认用类内字段桶和不一致签名驱动 corpus 增长与调度，`--fuzz-feedback none` 切回轮转基线；公式与评估见 [第 5 步](agents/path_merge_call_support/fuzz-step5.md)。第 4 步的接口、验收与复现见 [闭环记录](agents/path_merge_call_support/fuzz-step4.md)。用法见 [命令说明](specs/isarch-cli.md#fuzz)，回放见 [第 2 步](agents/path_merge_call_support/fuzz-step2.md)，路径引导实验见 [第 3 步](agents/path_merge_call_support/fuzz-step3.md)。
 
 `--path-cache-read` 跳过探索。省略 `--fuzz-corpus` 时，从缓存按 `class_cap=1` 生成初始 corpus 并完整认证后进入 fuzz loop；提供它时直接复用并认证已有 corpus。用法与缓存版本见 [命令说明](specs/isarch-cli.md#fuzz)。

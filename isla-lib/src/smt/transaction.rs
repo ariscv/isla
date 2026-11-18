@@ -69,7 +69,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
         }
         serde_json::json!({"savepoint_count":self.savepoints.len(),
-            "native_condition_scopes":unsafe { Z3_solver_get_num_scopes(self.ctx.z3_ctx, self.z3_solver) },
+            "native_condition_scopes":if self.on_demand.is_some() { 0 } else { unsafe { Z3_solver_get_num_scopes(self.ctx.z3_ctx, self.z3_solver) } },
             "saved_decl_entries":self.savepoints.iter().map(|s|s.decls.len()).sum::<usize>(),
             "saved_function_entries":self.savepoints.iter().map(|s|s.func_decls.len()).sum::<usize>(),
             "saved_assert_counters":self.savepoints.iter().map(|s|s.asserts_since_check).sum::<usize>(),
@@ -78,7 +78,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn lazy_condition_scopes(&self) -> bool {
-        self.deferred_region_queries && crate::config::RegionOptions::current().lazy_z3_scope
+        self.on_demand.is_some()
+            || (self.deferred_region_queries && crate::config::RegionOptions::current().lazy_z3_scope)
     }
 
     pub fn transaction_depth(&self) -> usize {
@@ -115,6 +116,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 现有构造接口不能临时切换后端，因此在此资源边界配对替换、恢复 solver。
     pub(crate) fn with_incremental_checks<T>(&mut self, query: impl FnOnce(&mut Self) -> T) -> T {
         assert!(self.transaction_depth() > 0, "增量查询必须位于保存点内");
+        if self.on_demand.is_some() {
+            return self.with_on_demand_checks(query);
+        }
         let original = self.z3_solver;
         let was_incremental = self.incremental_checks;
         self.incremental_checks = true;
@@ -247,7 +251,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     );
                     let _ = &native_scope;
 
-                    Z3_solver_push(self.ctx.z3_ctx, self.z3_solver);
+                    on_demand::native_push(self.ctx.z3_ctx, self.z3_solver);
                     crate::executor::stats::region_cost::count(
                         crate::executor::stats::region_cost::Category::ReplayAssert,
                         1,
@@ -360,7 +364,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     crate::executor::stats::region_cost::Category::NativeScope,
                 );
                 let _ = &native_scope;
-                Z3_solver_push(self.ctx.z3_ctx, self.z3_solver)
+                on_demand::native_push(self.ctx.z3_ctx, self.z3_solver)
             }
         }
         self.transaction_condition_scopes.push(deferred_ast);
