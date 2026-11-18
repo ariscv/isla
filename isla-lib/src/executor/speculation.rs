@@ -30,6 +30,7 @@ pub enum SpeculativeRejectReason {
     StackEscaped,
     StepBudget,
     NestingLimit,
+    FlatDeadArm,
     StateEffect,
     UnknownExtern,
     RecursiveEffect,

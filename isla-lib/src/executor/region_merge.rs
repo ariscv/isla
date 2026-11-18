@@ -11,7 +11,7 @@ use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, Re
 pub const DEFAULT_REGION_STEP_BUDGET: usize = 8192;
 /// 每层持有回滚层与当前臂两层保存点；16 层至多占 32 层，给 64 层上限留出一倍余量。
 pub const MAX_REGION_MERGE_DEPTH: usize = 16;
-static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
+pub(super) static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
 static LOGGED_ITERATION_FOLDS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_CALL_SCOPE: AtomicUsize = AtomicUsize::new(0);
 pub(super) fn fresh_call_scope() -> usize {
@@ -293,7 +293,7 @@ pub(super) fn preflight<B: BV>(
     Ok(())
 }
 
-fn region<'ir, B: BV>(
+pub(super) fn region<'ir, B: BV>(
     frame: &LocalFrame<'ir, B>,
     shared: &SharedState<'ir, B>,
     summaries: &HashMap<Name, FunctionEffect>,
@@ -397,12 +397,12 @@ fn publish_committed_records<B: BV>(
     }
 }
 
-struct RegionOutput<'ir, B> {
+pub(super) struct RegionOutput<'ir, B> {
     result: RegionResult,
     continuation: Option<(Sym, LocalFrame<'ir, B>)>,
 }
 impl<'ir, B> RegionOutput<'ir, B> {
-    fn complete(result: RegionResult) -> Self {
+    pub(super) fn complete(result: RegionResult) -> Self {
         Self { result, continuation: None }
     }
 }
@@ -436,6 +436,13 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     assert_ne!(mode, MergeMode::Off, "Off 不能进入区域合并");
     let nested = frame.region_execution.is_some();
+    let flat = state
+        .execution_limits
+        .as_ref()
+        .is_some_and(|limits| limits.merge_strategy == crate::config::MergeStrategy::Flat);
+    if flat && nested {
+        return super::flat_region_merge::suspend(condition, target, frame, state, shared, info);
+    }
     // 同一调用层、同一出口的有环分叉属于当前展开，不另开递归事务。
     // 不同出口的内层循环仍走正常嵌套；其后续轮次由内层自己的工作栈接续。
     if frame.region_execution.as_ref().is_some_and(|execution| {
@@ -557,6 +564,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let execute = |solver: &mut Solver<B>| {
                     log_phase("execute_start", None);
+                    let execute_region = if flat { super::flat_region_merge::execute_region } else { execute_region };
                     let output = execute_region(
                         condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame,
                         state, shared, solver, info,
@@ -878,7 +886,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_region<'ir, B: BV>(
+pub(super) fn finish_region<'ir, B: BV>(
     record_id: usize,
     condition: Sym,
     region: &Region,
@@ -1512,7 +1520,7 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
 }
 
 /// 循环轮次和平级臂都复用相同入口初值，防止另一臂重新创建自由变量。
-fn promote_initials<'ir, B: BV>(
+pub(super) fn promote_initials<'ir, B: BV>(
     base: &mut LocalFrame<'ir, B>,
     arm: &LocalFrame<'ir, B>,
     shared: &SharedState<'ir, B>,

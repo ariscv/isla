@@ -9,6 +9,7 @@ pub mod memory_builder;
 pub mod memory_model;
 mod model_exception;
 pub mod path_cache;
+pub mod path_merge_options;
 pub mod region_options;
 mod representation;
 pub mod samples;

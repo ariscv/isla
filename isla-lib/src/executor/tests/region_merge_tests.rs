@@ -5166,3 +5166,6 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
     solver.rollback_transaction(root);
     assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
 }
+
+#[path = "flat_region_merge_tests.rs"]
+mod flat_region_merge_tests;

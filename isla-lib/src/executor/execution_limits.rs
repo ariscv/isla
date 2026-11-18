@@ -118,6 +118,8 @@ pub struct ExecutionLimits {
     /// 受限分支具体化时使用的可复现抽样 seed。
     pub branch_sampling_seed: u64,
     pub path_merging: bool,
+    pub merge_strategy: crate::config::MergeStrategy,
+    pub ordered_events: bool,
     /// 普通区域共享，按轮折叠循环逐轮续配；None 表示关闭步数预算。
     pub region_step_budget: Option<usize>,
     /// 区域内按前态足迹合并全局状态；需要精确寄存器事件顺序的调用方保持关闭。
@@ -146,6 +148,8 @@ impl Default for ExecutionLimits {
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
+            merge_strategy: Default::default(),
+            ordered_events: false,
             region_step_budget: Some(super::region_merge::DEFAULT_REGION_STEP_BUDGET),
             region_global_state: false,
             region_loop_analysis: false,
@@ -272,6 +276,12 @@ impl ExecutionLimits {
         }
         if let Some(value) = config.region_step_budget {
             self.region_step_budget = crate::config::parse_region_step_budget(value).expect("区域预算配置必须已校验");
+        }
+        if let Some(value) = config.merge_strategy {
+            self.merge_strategy = value;
+        }
+        if let Some(value) = config.ordered_events {
+            self.ordered_events = value;
         }
         if let Some(value) = config.path_merging {
             self = self.with_path_merging(value);

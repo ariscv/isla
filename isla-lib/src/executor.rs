@@ -60,6 +60,7 @@ use crate::timeout::PathTimeoutDiagnostic;
 use crate::zencode;
 
 mod execution_limits;
+mod flat_region_merge;
 mod frame;
 mod merge_history;
 mod merge_record;

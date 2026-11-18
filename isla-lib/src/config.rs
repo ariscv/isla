@@ -1555,6 +1555,24 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
 pub mod region_options;
 pub use region_options::RegionOptions;
 
+/// 路径合并执行策略；递归是兼容默认值。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MergeStrategy {
+    #[default]
+    Recursive,
+    Flat,
+}
+impl std::str::FromStr for MergeStrategy {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "recursive" => Ok(Self::Recursive),
+            "flat" => Ok(Self::Flat),
+            _ => Err("merge_strategy 必须是 recursive 或 flat".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionLimitsConfig {
     /// 区域候选与诊断选项；未配置时保持原默认行为。
@@ -1573,6 +1591,9 @@ pub struct ExecutionLimitsConfig {
     pub call_context_depth: Option<usize>,
     pub branch_sampling_seed: Option<u64>,
     pub path_merging: Option<bool>,
+    pub merge_strategy: Option<MergeStrategy>,
+    /// flat 模式保留可兼容的事件偏序；默认 false。递归策略保留原行为。
+    pub ordered_events: Option<bool>,
     /// -1 关闭区域步数预算；其他合法值必须为正数。
     pub region_step_budget: Option<i64>,
     pub on_limit_reached: Option<LimitBehaviorConfig>,
@@ -1882,6 +1903,8 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             "call_context_depth",
             "branch_sampling_seed",
             "path_merging",
+            "merge_strategy",
+            "ordered_events",
             "region_step_budget",
             "on_limit_reached",
             "regions",
@@ -2226,6 +2249,11 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             .map(|value| usize::try_from(value).expect("usize 无法表示 execution_limits.call_context_depth")),
         branch_sampling_seed: optional_u64(table, "branch_sampling_seed", "execution_limits")?,
         path_merging: optional_bool(table, "path_merging", "execution_limits")?,
+        merge_strategy: table
+            .get("merge_strategy")
+            .map(|value| value.as_str().ok_or("execution_limits.merge_strategy 必须为字符串")?.parse::<MergeStrategy>())
+            .transpose()?,
+        ordered_events: optional_bool(table, "ordered_events", "execution_limits")?,
         region_step_budget: table
             .get("region_step_budget")
             .map(|value| {
@@ -2786,6 +2814,23 @@ r0 = "0x0000000000000000"
         );
         for value in ["true", "'Error_internal_error'", "[1]", "['']"] {
             assert!(merge_config(&format!("[execution_limits]\nfilter_model_exceptions={value}")).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_limits_flat_strategy_and_ordered_events() {
+        let config = merge_config("[execution_limits]\nmerge_strategy='flat'\nordered_events=true").unwrap();
+        assert_eq!(config.merge_strategy, Some(MergeStrategy::Flat));
+        assert_eq!(config.ordered_events, Some(true));
+        let defaults = merge_config("[execution_limits]").unwrap();
+        assert!(defaults.merge_strategy.is_none() && defaults.ordered_events.is_none());
+        for input in [
+            "[execution_limits]\nmerge_strategy='bad'",
+            "[execution_limits]\nordered_events=1",
+            "[execution_limits.region_options]\nmerge_strategy='flat'",
+            "[execution_limits.region_options]\nordered_events=false",
+        ] {
+            assert!(merge_config(input).is_err(), "{input}");
         }
     }
 
