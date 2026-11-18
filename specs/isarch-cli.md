@@ -16,6 +16,7 @@ isarch [全局选项] <子命令> [子命令参数]
 |------|------|
 | `-A/--arch <file>` | 架构 IR 文件路径（必需） |
 | `-C/--config <file>` | ISA 配置文件路径 |
+| `--execution-limits-config <file>` | 显式加载只有 `[execution_limits]` 的独立 TOML，整体替换 `-C` 的同名表。缺省使用主 ISA 配置。 |
 | `-T/--threads <n>` | 工作线程数 |
 | `-R/--register <name>=<value>` | 寄存器初始化 |
 | `-I/--initial <name>=<value>` | 初始状态寄存器 |
@@ -25,6 +26,8 @@ isarch [全局选项] <子命令> [子命令参数]
 | `--init-isa-with-config` | 使用配置默认值初始化 ISA |
 | `-g/--graphviz` | Graphviz 输出格式（tree 命令） |
 | `--timeout <n>` | 超时时间（秒） |
+
+isarch 使用实际 IR 检查区域规则。旧 TOML 的 `ir_sha256` 仍可解析，IR 来源可查生成清单或求解摘要。
 
 ## 过滤模型异常终态
 

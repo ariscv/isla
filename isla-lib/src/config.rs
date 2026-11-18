@@ -1804,7 +1804,7 @@ impl ExecutionLimitsConfig {
 
     /// 在 IR 加载后、执行前调用。`functions` 只能包含 IR 中实际定义的函数，
     /// `branch_locations` 由调用方提供实际分支位置，不能用全部指令位置代替。
-    /// strict 沿用全局 strict/ir_sha256；哈希仍由 validate_ir_sha256 单独核对。
+    /// strict 启用源码区域匹配检查。需要比较 IR 哈希的调用方可单独调用 validate_ir_sha256。
     /// force 的后支配点/回边校验留给后续静态区域分析。
     pub fn validate_merge_policy(
         &self,
