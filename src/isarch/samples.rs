@@ -140,12 +140,20 @@ impl SampleSession {
                 }
             })
             .transpose()?;
-        if enumeration.and_then(|config| config.max_output_bytes).is_some_and(|limit| limit < 1024) {
+        let limit = enumeration.and_then(|config| config.max_output_bytes);
+        if limit.is_some_and(|limit| limit < 1024) {
             return Err("max_output_bytes 至少为1024，必须容纳文件头和正常结束标记".into());
         }
-        let writer = (!configured.is_empty()).then(|| match enumeration.and_then(|config| config.max_output_bytes) {
-            Some(limit) => SampleOutputs::open_budget(&configured, limit),
-            None => SampleOutputs::open(&configured),
+        let streaming = configured.len() == 1 && enumeration.is_some_and(MergeEnumerationConfig::streams_binary);
+        if limit.is_some() && !counting && !streaming {
+            return Err("max_output_bytes 要求只启用一个 binary 后端且 sample_stride=1".into());
+        }
+        let writer = (!configured.is_empty()).then(|| {
+            if streaming {
+                SampleOutputs::open_streaming(&configured[0].path, limit)
+            } else {
+                SampleOutputs::open(&configured)
+            }
         });
         Ok(Self {
             filter_model_exceptions: options.filter_model_exceptions.clone(),
@@ -232,7 +240,8 @@ pub fn export_cached_path<B: BV>(
         if writer.grouped() { Some(&complete) } else { None },
         false,
     )?;
-    if enumeration.is_none() {
+    // 关闭枚举时只输出每条缓存路径的一个模型。judge 已使用上方的原路径约束。
+    if enumeration.is_none() && writer.stop_reason().is_none() {
         assert_eq!(
             solver.check_sat(isla_lib::source_loc::SourceLoc::unknown()),
             isla_lib::smt::SmtResult::Sat,
@@ -242,8 +251,8 @@ pub fn export_cached_path<B: BV>(
         model.set_complete_model(true);
         let mut sample = path.path.materialize(&mut model, shared, "merge", path.signature, None)?;
         sample.isa_state = isa_state(target, &sample, &mut model, shared)?;
-        writer.append(output_path, 0, &[], sample);
-        if writer.grouped() {
+        let accepted = writer.append(output_path, 0, &[], sample);
+        if writer.grouped() && accepted {
             writer.finish_class(
                 output_path,
                 None,
@@ -554,6 +563,28 @@ mod tests {
         let session = SampleSession::new(&SampleOptions::default(), Some(&config)).unwrap();
         assert!(session.writer.is_none());
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn samples_a1_单二进制无预算时仍使用流式文件() {
+        let root = std::env::temp_dir().join(format!("samples-a1-stream-{}", std::process::id()));
+        let path = root.join("samples.bin");
+        let config = MergeEnumerationConfig {
+            enabled: true,
+            outputs: vec![SampleOutputConfig { format: SampleOutputFormat::Binary, path: path.clone() }],
+            ..Default::default()
+        };
+        let options = SampleOptions::default();
+        let session = SampleSession::new(&options, Some(&config)).unwrap();
+        session.finish(&options, true);
+        let summary: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path.with_extension("summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["max_output_bytes"], serde_json::Value::Null);
+        assert_eq!(summary["truncated"], false);
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+        assert_eq!(&bytes[bytes.len() - 8..], &u64::MAX.to_le_bytes());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -80,26 +80,17 @@ pin_value = "0x0000000a00000000"
 通用符号探索直接指定 clause，不传固定机器码：
 
 ```sh
-isarch -A <ir> -C <config> --path-merging solve-state --clause=LOAD
-isarch -A <ir> -C <config> --path-merging solve-state --clause=STORE
+isarch -A <ir> -C <config> solve-state --clause=LOAD
+isarch -A <ir> -C <config> solve-state --clause=STORE
 ```
 
 `symbolic_args_from_types` 为指令全部字段建立自由符号变量，包括 rs1、rd/rs2、立即数和访问宽度；
 `setup_pre_state` 已为 x1–x31 建立独立初态符号，x0 遵循模型的常零语义。
 无需额外声明某个通用寄存器，也不传固定通用寄存器的 `--prestate` 或附加地址掩码。
 `--instruction-bits` 仍供用户明确要求固定机器码时使用，通用探索脚本不依赖它。
-探索优先启用路径合并，
-重复分叉使用 `path_merge.regions` 中 `kind="branch_limit"` 的预算；预算截断必须报告为探索不完整。
-当符号下标引起算子重试拆分时，默认沿用求解模型的候选顺序；该顺序不能用来跨进程标识路径。
-需要重复导出及 fuzz 第 0 步认证时，在导出和判定共用的执行配置中启用路径合并：
-
-```toml
-[execution_limits]
-strict = false
-
-[execution_limits.path_merge]
-enabled = true
-```
+完整 DAG 入口 `solve-state` 缺省尝试自适应区域合并，并启用循环区域分析。`isla-execute-function` 同样采用该缺省。可用 `[execution_limits.path_merge] enabled = false` 或 `--no-path-merging` 关闭。CLI 显式选项覆盖 TOML，局部 `off` 和 `force` 在启用合并时继续生效。fuzz 等通用库入口沿用各自的配置。
+通用探索省略分支、路径、回跳、比例及区域额度即不限。只有在有限预算的对照实验中才需要 `branch_limit` 或 `fork_limit`。加载 workaround 时，其中显式设置的额度仍可生效。有限额度触发时，省略 `on_limit_reached` 沿用截断，显式 `concretize` 会保留一个可行方向或当前模型。报告里应记录截断与具体化导致的覆盖收缩。
+当符号下标引起算子重试拆分时，默认沿用求解模型的候选顺序。跨进程由完整语义判定对齐。
 
 区域合并默认不设步数预算（-1）。配置正整数后，两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
 步数用尽只拒绝本次合并尝试，不截断普通执行路径。设置 `-1` 时，以上区域一律不扣步、不会因步数耗尽拒绝；路径限时仍有效。
@@ -397,9 +388,9 @@ isarch list-instructions 实际输出
 
 与 `solve-state` 共用全部探索参数、指令与前态设置。每个进程针对一个场景，先用当前模型完整认证 corpus，再用常驻快档判定 mutant。
 
-`--path-cache-read <目录> --path-cache-encoding bin` 直接恢复完成路径，跳过符号探索。省略 `--fuzz-corpus` 时，沿用现场枚举器，以 `class_cap=1`、`sample_stride=1` 生成每个守卫类的一个代表，写入 `initial-corpus.jsonl`；完整枚举元数据写入 `initial-corpus-enumeration.json`。生成的 corpus 经完整 judge 认证后才进入 loop。提供 `--fuzz-corpus` 时跳过生成，认证并复用指定的 corpus。缓存读取也支持普通 `solve-state` 的样本导出和 `--check-samples`。
+`--path-cache-read <目录> --path-cache-encoding bin` 直接恢复完成路径，跳过符号探索。省略 `--fuzz-corpus` 时，沿用现场枚举器，显式使用 `class_cap=1`、`sample_stride=1`，为每个成功遍历的守卫类生成一个代表。路径上限缺省不限。初始 corpus 写入 `initial-corpus.jsonl`，完整枚举元数据写入 `initial-corpus-enumeration.json`。生成的 corpus 经完整 judge 认证后才进入 loop。提供 `--fuzz-corpus` 时跳过生成，认证并复用指定的 corpus。缓存读取也支持普通 `solve-state` 的样本导出和 `--check-samples`。
 
-新缓存 schema 为 2，同时保存纯原语定义的符号区间 `pure_definitions`，以保持现场和恢复后的被测片段一致；schema 1 缺少该信息，必须重新生成。JSON 和二进制均保存该元数据，`--path-cache-crosscheck` 可交叉核对。初始 corpus 通过恢复路径的完整 judge 认证，检查其输入与后态，不重新执行当前 IR 的 clause。本轮保持 IR／配置不变；跨 IR／配置的语义兼容仍需独立复验。manifest 的来源哈希只作记录，不是准入门槛。partial 缓存只代表已完成路径，完整性和错误数量以 manifest 为准。
+路径缓存使用 schema 4，保存 64 位 fork ID、纯原语定义的符号区间 `pure_definitions` 和终态。JSON 和二进制均保存这些字段，可用 `--path-cache-crosscheck` 交叉核对。schema 3 的 JSON 可单独读取，须省略 `--path-cache-crosscheck`。schema 3 二进制及 schema 1/2 需要重新生成。初始 corpus 通过恢复路径的完整 judge 认证，检查其输入与后态，不重新执行当前 IR 的 clause。本轮保持 IR／配置不变；跨 IR／配置的语义兼容仍需独立复验。manifest 的来源哈希只作记录，不是准入门槛。partial 缓存只代表已完成路径，完整性和错误数量以 manifest 为准。
 
 ```sh
 isarch [原探索参数] \
@@ -522,19 +513,38 @@ progress = true
 全局无 SMT 模式只支持 `solve-state --path-cache-only --path-cache-write <新目录>`，不能同时认证样本或读回缓存。产物标 `uncertified`，探索保持 partial；候选计数不能作为已认证覆盖。`--memory-stats` 输出 `no_smt_summary`；全关应为零真实 check，第三种仍会运行可选布尔恒值证明。旧 `[execution_limits.path_merge]`（包括其中的 `no_smt`）报错；四个开关也不能放在 `path_merge` 或其 `diagnostics` 表中。
 
 
+使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，缺省 60 秒。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
+
+## 投影枚举与样本输出
+
+在 `[execution_limits.path_merge.enumeration]` 设置 `enabled=true` 后开始枚举。每个守卫类的 `class_cap` 与每条完成路径的 `path_cap` 缺省均不限，可显式设置正整数。达到上限且仍有可行解时记录截断。`sample_stride` 缺省为 1，显式大于 1 时按步长选择输出，计数仍包含已枚举的解。
+
+`mode="samples"` 为每组可行的守卫赋值和被测位投影输出一份具体见证。关闭枚举时，样本后端为每条完成路径输出一个代表，旧 `gen` 为每个可编码分支输出一个代表。judge 依据原路径约束逐条检查输入。省略 `--check-samples-limit` 时读取到 EOF。
+
+单 binary 后端且 `sample_stride=1` 时使用二进制 schema 2 流式写出，字节数缺省不限。显式 `max_output_bytes` 至少为 1024，并要求这种输出配置。每 60 秒刷新并记录写入进度。创建与输出同名、扩展名为 `.stop` 的文件会在轮询后停止接收新样本。字节到限与文件停止在汇总中分别记为 `output_budget`、`stop_file`，收尾时保存截断统计和正常结束标记。
+
+`mode="count"` 只计数。`mode="predict"` 缺省精确计数并以十进制字符串输出。浮点表示超出范围时可省略浮点统计。显式设置 `predict_probes`（至少 200）启用近似预测，此时可用 `predict_domain_cap` 设置每个分量的精确验证额度，额度缺省为 256。超过额度后进行探测，保留精确前缀与下界。两种模式均不写见证。
+
+终值重解可在 `[execution_limits.solver]` 显式设置正整数 `model_timeout_ms`。查询取此限时、`--smt-timeout` 和路径剩余时间中的最小值。
+
+### 通用 SMT 等价改写
+
+`[execution_limits.solver] bv_rewrite` 缺省为 `false`。`true` 启用全部规则；列表可选 `data-ite-eq`（数据 ITE 相等展开）、`mask-and`（位掩码恒等式）、`sign-bound`（符号扩展与常量比较）。空列表关闭。
+
+CLI `--bv-rewrite` 等价于 `--bv-rewrite=true`。`--bv-rewrite=false` 关闭，`--bv-rewrite=data-ite-eq,sign-bound` 独立选择规则；CLI 整体覆盖 TOML。没有开启新的 SMT 查询，同一改写也用于 `--no-smt`。`--memory-stats` 输出 `bv_rewrite_hits`，统计本进程各规则累计改写次数。
+
 ## resident judge 分批恢复
 
 普通 `--judge-resident INPUT --judge-resident-out OUTPUT` 默认每批恢复 `-T` 条完成路径，每批对全部输入执行原 judge，再释放该批求解器和 Context。所有保存路径仍参与判定，跨批重复接纳仍报错，守卫和后态唯一性证明保持原行为。保存路径及其事件记录仍占内存，因此批大小只约束恢复出的 native solver 数，不保证整个进程的固定内存上限。
 
 `--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。
 
-区域嵌套默认不限；TOML `[execution_limits.path_merge] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
-`[execution_limits.path_merge] max_fragments`：正整数或 `-1`，缺省不限。每次根区域尝试可累计额外保留 `max_fragments - 1` 个因汇合失败产生的片段；超限计 `fragment_limit`，不截断输入域。
-
 实验选项 `[execution_limits.path_merge] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
 ## 配置布局与迁移
 
-`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
+`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，省略类、路径及字节上限即不限。局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
+
+步数、嵌套深度及片段数缺省不限，显式 `-1` 与省略等价。正整数 `max_merge_depth` 可由 `--region-max-merge-depth` 覆盖。保存点深度不限，诊断记录实际区域深度分布和最大值，调用深度另计。正整数 `max_fragments` 允许每次根区域尝试额外保留至多 `max_fragments - 1` 个局部汇合失败片段，超限计 `fragment_limit` 并保留普通分叉。
 
 每条局部规则必须显式指定 `kind`，不得靠缺失字段猜类别：
 
@@ -548,19 +558,22 @@ progress = true
 源码坐标是 `file`、`start_line`、`start_column`、`end_line`、`end_column`。旧筛选范围会先清除预置的两类局部预算，然后应用同一配置里的局部覆盖；未知文件仍匹配不到位置。规则数组不能为空。
 
 ```toml
-[execution_limits]
-max_forks_per_branch = 7
 [execution_limits.solver]
 bool_proof_rlimit = 0
 [execution_limits.path_merge]
 enabled = true
-step_budget = 8192
 [execution_limits.path_merge.diagnostics]
 progress = false
-[[execution_limits.path_merge.regions]]
-kind = "merge_policy"
-mode = "adaptive"
-function = "example_function"
+```
+
+有限预算对照示例
+
+```toml
+[execution_limits]
+max_forks_per_branch = 7
+[execution_limits.path_merge]
+max_merge_depth = 16
+step_budget = 8192
 ```
 
 旧 `path_merging`、`region_step_budget`、`region_options`、`regions`、`branch_region_limits`、`region_fork_limits`、`merge_policy`、`merge_enumeration` 顶层字段已删除，出现即报错并提示新位置。没有兼容别名。历史归档配置仅适用于其原二进制；复用时先迁移配置，再按语义重新验证输入。

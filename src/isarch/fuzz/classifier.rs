@@ -92,7 +92,7 @@ pub fn run<B: BV>(
         let mut limits = execution_limits.clone();
         limits.merge_enumeration.enabled = true;
         limits.merge_enumeration.mode = isla_lib::config::MergeEnumerationMode::Samples;
-        limits.merge_enumeration.class_cap = 1;
+        limits.merge_enumeration.class_cap = Some(1);
         limits.merge_enumeration.sample_stride = 1;
         limits.merge_enumeration.enumeration_threads = limits.merge_enumeration.enumeration_threads.min(threads);
         limits.merge_enumeration.max_output_bytes = None;

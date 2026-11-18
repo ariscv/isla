@@ -80,14 +80,13 @@ fn isla_main() -> i32 {
 
     let function_id = shared_state.symtab.lookup(&property);
     let (args, ret_ty, instrs) = shared_state.functions.get(&function_id).unwrap();
-    let limits = match &isa_config.execution_limits {
-        Some(config) => ExecutionLimits::default().with_config(config, &shared_state.symtab),
-        None => ExecutionLimits::default()
-            .with_max_backjumps_per_loop(1000)
-            .with_max_path_depth(1_000_000)
-            .with_max_forks_per_branch(1024),
+    let task_state = TaskState::new();
+    let task_state = match &isa_config.execution_limits {
+        Some(config) => {
+            task_state.with_execution_limits(ExecutionLimits::default().with_config(config, &shared_state.symtab))
+        }
+        None => task_state,
     };
-    let task_state = TaskState::new().with_execution_limits(limits);
     let task = LocalFrame::new(function_id, args, ret_ty, None, instrs)
         .add_lets(&lets)
         .add_regs(&regs)
