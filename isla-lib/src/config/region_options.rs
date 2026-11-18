@@ -6,6 +6,12 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegionOptions {
+    /// 区域推演嵌套上限；缺省或-1不限。
+    pub max_merge_depth: Option<i64>,
+    /// 范围证明转为出口待证义务；默认关闭。
+    pub defer_range_proofs: bool,
+    /// 构造子解包标签转为出口待证义务；默认关闭。
+    pub defer_ctor_checks: bool,
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
     /// 延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用。
@@ -42,7 +48,20 @@ static OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 
 impl RegionOptions {
+    pub fn merge_depth_limit(&self) -> Option<usize> {
+        match self.max_merge_depth {
+            None => None,
+            Some(-1) => None,
+            Some(value) => Some(usize::try_from(value).expect("区域嵌套配置必须已校验")),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(value) = self.max_merge_depth {
+            if value != -1 && (value <= 0 || usize::try_from(value).is_err()) {
+                return Err("max_merge_depth 必须为正整数或 -1（不设区域上限）".into());
+            }
+        }
         if self.same_context_sites.len() > 2 {
             return Err("same_context_sites 最多选择两个位置".into());
         }
@@ -81,5 +100,24 @@ mod tests {
         assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
         assert_eq!(RegionOptions::current(), &RegionOptions::default());
         assert_eq!(RegionOptions::default().bool_proof_rlimit, 0);
+    }
+}
+
+#[cfg(test)]
+mod region_depth_tests {
+    use super::*;
+    #[test]
+    fn region_depth_default_finite_unlimited_and_invalid() {
+        assert_eq!(RegionOptions::default().merge_depth_limit(), None);
+        for (value, expected) in [(16, Some(16)), (32, Some(32)), (64, Some(64)), (-1, None)] {
+            let options: RegionOptions = toml::from_str(&format!("max_merge_depth={value}")).unwrap();
+            options.validate().unwrap();
+            assert_eq!(options.merge_depth_limit(), expected);
+        }
+        for value in ["0", "-2", "true", "\"32\""] {
+            assert!(toml::from_str::<RegionOptions>(&format!("max_merge_depth={value}"))
+                .and_then(|o| o.validate().map_err(serde::de::Error::custom))
+                .is_err());
+        }
     }
 }

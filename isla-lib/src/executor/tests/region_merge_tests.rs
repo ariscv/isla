@@ -5014,7 +5014,7 @@ fn region_merge_configurable_budget_long_region_equivalence() {
         };
         let limits = ExecutionLimits::default().with_config(&config, &shared.symtab);
         let merged = paths_with_state(code.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
-        let enough = matches!(budget, Some(-1 | 32768));
+        let enough = matches!(budget, None | Some(-1 | 32768));
         assert_eq!(merged.len(), if enough { 1 } else { 2 }, "budget={budget:?}");
         let report = shared.execution_stats.merge_json();
         assert_eq!(report["failure_reasons"]["step_budget"].as_u64().unwrap_or(0), if enough { 0 } else { 1 });
@@ -5165,4 +5165,74 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
     assert_eq!(solver.transaction_depth(), 1);
     solver.rollback_transaction(root);
     assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
+}
+
+#[test]
+fn region_util_default_step_budget_is_unlimited() {
+    assert_eq!(TaskState::<B64>::new().region_step_budget(), None);
+    assert_eq!(ExecutionLimits::default().region_step_budget, None);
+    let config = crate::config::ExecutionLimitsConfig { region_step_budget: Some(8192), ..Default::default() };
+    assert_eq!(ExecutionLimits::default().with_config(&config, &Symtab::new()).region_step_budget, Some(8192));
+}
+
+#[test]
+fn region_util_depth_above_sixteen_keeps_all_input_behavior() {
+    const CHILD: &str = "REGION_UTIL_DEPTH_TEST_CHILD";
+    let Ok(mode) = std::env::var(CHILD) else {
+        for mode in ["default", "16", "32", "64", "-1"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "executor::tests::region_merge_tests::region_util_depth_above_sixteen_keeps_all_input_behavior",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let mut options = crate::config::RegionOptions::default();
+    if mode != "default" {
+        options.max_merge_depth = Some(mode.parse().unwrap());
+    }
+    options.configure();
+    fn emit(level: u32, code: &mut Vec<Instr<Name, B64>>) {
+        let branch = code.len();
+        code.push(Instr::Jump(input(level), 0, info()));
+        if level < 39 {
+            emit(level + 1, code);
+        } else {
+            code.push(Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()));
+        }
+        let end = code.len();
+        code.push(Instr::Goto(0));
+        let taken = code.len();
+        code.push(Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()));
+        code[branch] = Instr::Jump(input(level), taken, info());
+        code[end] = Instr::Goto(code.len());
+    }
+    let mut code = Vec::new();
+    emit(0, &mut code);
+    code.push(Instr::End);
+    let shared = empty_shared_state();
+    let forked = paths(code.clone(), &shared, 40, false);
+    let merged = paths(code, &shared, 40, true);
+    equivalent_paths(&forked, &merged, 40, true);
+    assert_eq!(forked.len(), 41);
+    let depth = merged.iter().flat_map(|p| p.records.iter()).map(|r| r.depth).max().unwrap();
+    eprintln!("模式={mode} 普通路径={} 合并路径={} 最大深度={depth}", forked.len(), merged.len());
+    if mode == "16" || mode == "32" {
+        assert!(merged.len() > 1);
+        assert!(depth <= mode.parse::<usize>().unwrap());
+    } else {
+        assert_eq!(merged.len(), 1);
+        assert_eq!(depth, 40);
+    }
 }

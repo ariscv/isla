@@ -58,6 +58,7 @@ impl<B: BV> Solver<'_, B> {
     }
 
     pub(crate) fn note_deferred_mandatory_query(&mut self, purpose: &'static str, info: SourceLoc) {
+        crate::executor::stats::merge_diagnostics::record_deferred_query(purpose, info);
         let state = self.deferred_assertions.as_mut().expect("延迟查询必须属于活动区域");
         *state.blocked.entry(purpose).or_default() += 1;
         state.first_blocked.get_or_insert(info);

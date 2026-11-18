@@ -51,3 +51,91 @@ fn 符号构造子的直接与字段解包必须检查标签可满足性() {
         }
     }
 }
+
+#[test]
+fn region_util_defer_ctor_obligation_checks_original_guard() {
+    const CHILD: &str = "REGION_UTIL_CTOR_TEST_CHILD";
+    let Ok(mode) = std::env::var(CHILD) else {
+        for mode in ["false", "true"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "executor::tests::symbolic_ctor_unwrap_tests::region_util_defer_ctor_obligation_checks_original_guard", "--nocapture"])
+                .env(CHILD, mode).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let enabled = mode == "true";
+    let mut options = crate::config::RegionOptions::default();
+    options.defer_ctor_checks = enabled;
+    options.configure();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for safe in [false, true] {
+        let shared = empty_shared_state();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let tag = solver.declare_const(Name::smt_ty(), info());
+        let a = test_name(740);
+        let b = test_name(741);
+        let matches = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(a.to_smt()));
+        if safe {
+            solver.assert(matches.clone());
+        }
+        let root = solver.start_transaction();
+        let mut frame = make_frame(vec![Instr::End]);
+        let slot = test_name(742);
+        frame.vars_mut().insert(
+            slot,
+            UVal::Init(Val::SymbolicCtor(
+                tag,
+                HashMap::from_iter([(a, Val::Bits(B64::new(11, 8))), (b, Val::Bits(B64::new(22, 8)))]),
+            )),
+        );
+        // 设置推演访问日志；测试直接覆盖表达式解包和出口证明。
+        frame.local_state = Arc::new(LocalState {
+            speculative_access: Some(region_merge::AccessLog {
+                writes: WriteSet::default(),
+                reads: Vec::new(),
+                published_reads: Vec::new(),
+                read_guards: Vec::new(),
+                guard: Some(smtlib::Exp::Bool(true)),
+                initial_registers: HashMap::new(),
+                initial_variables: HashMap::new(),
+                initial_lets: HashMap::new(),
+                call_scope: 0,
+                function: frame.function_name,
+                pc: 0,
+                location: info(),
+                writes_allowed: true,
+                global_state: true,
+            }),
+            ..(*frame.local_state).clone()
+        });
+        solver.with_deferred_region_queries(|solver| {
+            let result = eval_exp(
+                &Exp::Unwrap(a, Box::new(Exp::Id(slot))),
+                Arc::make_mut(&mut frame.local_state),
+                &shared,
+                solver,
+                info(),
+            )
+            .map(Cow::into_owned);
+            if enabled {
+                assert_eq!(result.unwrap(), Val::Bits(B64::new(11, 8)));
+                solver.assert(smtlib::Exp::Bool(false));
+                assert_eq!(
+                    solver.check_deferred_assertions(info()),
+                    if safe { SmtResult::Unsat } else { SmtResult::Sat }
+                );
+            } else {
+                assert!(matches!(result, Err(ExecError::Z3Unknown)));
+            }
+        });
+        solver.rollback_transaction(root);
+        assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+    }
+}

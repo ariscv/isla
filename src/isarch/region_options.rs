@@ -2,6 +2,8 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
+    ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
+    ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
     ("lazy_z3_scope", "region-lazy-z3-scope", "延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用"),
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
@@ -20,6 +22,7 @@ pub fn add_cli(opts: &mut getopts::Options) {
     for (_, flag, help) in BOOL_OPTIONS {
         opts.optopt("", flag, help, "true|false");
     }
+    opts.optopt("", "region-max-merge-depth", "区域嵌套上限，默认不限；-1不限", "正整数|-1");
     opts.optopt("", "region-bool-proof-rlimit", "可选布尔证明资源上限，0 不限；默认 0", "u32");
     opts.optopt("", "query-dump-sites", "查询导出位置；逗号分隔，空串清空", "sites");
     opts.optopt("", "same-context-sites", "同 Context 配对位置，最多两个；空串清空", "sites");
@@ -34,6 +37,8 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
+                "defer_ctor_checks" => options.defer_ctor_checks = value,
+                "defer_range_proofs" => options.defer_range_proofs = value,
                 "defer_exit_check" => options.defer_exit_check = value,
                 "lazy_z3_scope" => options.lazy_z3_scope = value,
                 "witness_eval" => options.witness_eval = value,
@@ -50,6 +55,10 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
             }
             changed = true;
         }
+    }
+    if let Some(value) = matches.opt_str("region-max-merge-depth") {
+        options.max_merge_depth = Some(value.parse().map_err(|_| "--region-max-merge-depth 必须为整数")?);
+        changed = true;
     }
     if let Some(value) = matches.opt_str("region-bool-proof-rlimit") {
         options.bool_proof_rlimit = value.parse().map_err(|_| "--region-bool-proof-rlimit 必须是非负32位整数")?;
@@ -164,6 +173,26 @@ mod tests {
             "--same-context-sites=a,b,c",
         ] {
             assert!(cli(&mut ExecutionLimitsConfig::default(), &[value]).is_err(), "{value}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod region_depth_tests {
+    use super::*;
+    #[test]
+    fn region_depth_cli_overrides_toml_and_rejects_invalid() {
+        let mut opts = getopts::Options::new();
+        add_cli(&mut opts);
+        let mut limits = ExecutionLimitsConfig::default();
+        for (text, expected) in [("32", Some(32)), ("64", Some(64)), ("-1", None)] {
+            apply_cli(&opts.parse(&[format!("--region-max-merge-depth={text}")]).unwrap(), &mut limits).unwrap();
+            assert_eq!(limits.region_options.as_ref().unwrap().merge_depth_limit(), expected);
+        }
+        for text in ["0", "-2", "true", ""] {
+            assert!(
+                apply_cli(&opts.parse(&[format!("--region-max-merge-depth={text}")]).unwrap(), &mut limits).is_err()
+            );
         }
     }
 }

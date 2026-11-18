@@ -96,7 +96,7 @@ strict = false
 path_merging = true
 ```
 
-区域合并默认共享 8192 步；两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
+区域合并默认不设步数预算（-1）。配置正整数后，两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
 步数用尽只拒绝本次合并尝试，不截断普通执行路径。设置 `-1` 时，以上区域一律不扣步、不会因步数耗尽拒绝；路径限时仍有效。
 
 ```toml
@@ -490,3 +490,7 @@ isarch -A model.ir -C scenario.toml -T 32 --path-merging \
 普通 `--judge-resident INPUT --judge-resident-out OUTPUT` 默认每批恢复 `-T` 条完成路径，每批对全部输入执行原 judge，再释放该批求解器和 Context。所有保存路径仍参与判定，跨批重复接纳仍报错，守卫和后态唯一性证明保持原行为。保存路径及其事件记录仍占内存，因此批大小只约束恢复出的 native solver 数，不保证整个进程的固定内存上限。
 
 `--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。
+
+区域嵌套默认不限；TOML `[execution_limits.region_options] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
+
+实验选项 `[execution_limits.region_options] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。

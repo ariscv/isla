@@ -459,7 +459,7 @@ pin_value = "0x0000000a00000000"
 `setup_pre_state` 已将 x1–x31 的初值全量符号化，无需额外声明某个通用寄存器。
 探索配置优先启用
 `[execution_limits] path_merging = true`，重复分叉预算沿用区域分支限制。
-区域合并步数默认8192；可设置 `[execution_limits] region_step_budget = -1` 或 `--region-step-budget=-1` 关闭，CLI覆盖TOML。合法值为正整数或-1，详见 [CLI规范](specs/isarch-cli.md)。
+区域合并步数默认关闭（-1）；可设置 `[execution_limits] region_step_budget = -1` 或 `--region-step-budget=-1` 关闭，CLI覆盖TOML。合法值为正整数或-1，详见 [CLI规范](specs/isarch-cli.md)。
 慢 SMT 查询可用 `--slow-query-dump-dir queries --slow-query-threshold 20s --slow-query-dump-limit 5` 导出完整公式与统计，默认关闭；用法和边界见 [CLI规范](specs/isarch-cli.md#慢-smt-查询导出)。
 当符号下标引起算子重试拆分时，沿用求解器原生无偏的模型候选顺序，严禁强加任何确定性重试偏好；跨进程由判定阶段的标准语义识别。完整语法及边界见 [CLI 规范](specs/isarch-cli.md)。
 
@@ -798,3 +798,7 @@ witness_eval = true
 运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除。
 
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
+
+区域嵌套默认不限；`[execution_limits.region_options] max_merge_depth = 16` 或 `--region-max-merge-depth=16` 可设正整数上限，`-1` 关闭。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布和最大深度；保存点不再另设硬编码深度上限。
+
+`defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。

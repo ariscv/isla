@@ -8,9 +8,7 @@ use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, Re
 
 /// 普通区域的两臂与调用共享预算；可收敛的只读循环按完整轮核算，单轮仍受限。
 /// 这只限制一次合并尝试，不截断普通符号执行的路径；配置 -1 时不创建或续配计数器。
-pub const DEFAULT_REGION_STEP_BUDGET: usize = 8192;
-/// 每层持有回滚层与当前臂两层保存点；16 层至多占 32 层，给 64 层上限留出一倍余量。
-pub const MAX_REGION_MERGE_DEPTH: usize = 16;
+pub const DEFAULT_REGION_STEP_BUDGET: Option<usize> = None;
 static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
 static LOGGED_ITERATION_FOLDS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_CALL_SCOPE: AtomicUsize = AtomicUsize::new(0);
@@ -459,6 +457,10 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     }
     let mut diagnostics_attempt = diagnostics::enabled()
         .then(|| diagnostics::AttemptGuard::start(task_id.as_usize(), frame.function_name, frame.pc, &shared.symtab));
+    let depth = frame.region_execution.as_ref().map_or(1, |execution| execution.depth + 1);
+    if diagnostics::enabled() {
+        diagnostics::record_depth(depth, frame.backtrace.len(), solver.transaction_depth());
+    }
     shared.execution_stats.merge_attempt();
     let diagnostics_active = diagnostics_attempt.is_some();
     let rule = state
@@ -533,8 +535,14 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 cost::make_mut(&mut frame.local_state).loop_attempt_seen = true;
             }
             shared.execution_stats.merge_candidate();
-            let depth = frame.region_execution.as_ref().map_or(1, |execution| execution.depth + 1);
-            if depth > MAX_REGION_MERGE_DEPTH {
+            if crate::config::RegionOptions::current().merge_depth_limit().is_some_and(|limit| depth > limit) {
+                if diagnostics::enabled() {
+                    diagnostics::emit(serde_json::json!({"stage":"region_admission",
+                        "at":{"function":diagnostics::name_string(frame.function_name,&shared.symtab),
+                            "pc":frame.pc,"location":info,"region_depth":depth,
+                            "call_depth":frame.backtrace.len(),"transaction_depth":solver.transaction_depth()},
+                        "difference":"nesting_limit","reason":"nesting_limit"}));
+                }
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
                 let record_start = frame.region_merge_records.len();
@@ -1080,7 +1088,8 @@ fn diagnose_slot<B: BV>(
         failure.as_ref().map_or("unsupported_value", |failure| failure.difference)
     };
     diagnostics::emit(json!({"stage":"merge_states",
-        "at":{"function":diagnostics::name_string(base.function_name,&shared.symtab),"pc":base.pc},
+        "at":{"function":diagnostics::name_string(base.function_name,&shared.symtab),"pc":base.pc,
+            "location":base.instrs.get(base.pc).and_then(stats::instr_source_loc)},
         "slot":{"space":space,"name":diagnostics::name_string(name,&shared.symtab),
             "decl_type":ty.map(|ty|diagnostics::type_string(ty,&shared.symtab)),
             "base_present":if space=="registers" {shared.registers.contains_key(&name)} else {original.is_some()},
