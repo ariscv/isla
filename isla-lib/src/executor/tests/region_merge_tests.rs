@@ -910,15 +910,20 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
 fn policy_limits(shared: &SharedState<B64>, rules: Vec<(Name, crate::config::MergeMode)>) -> ExecutionLimits {
     use crate::config::{ExecutionLimitsConfig, MergePolicyConfig, MergePolicySelectorConfig};
     let config = ExecutionLimitsConfig {
-        merge_policy: Some(
-            rules
-                .into_iter()
-                .map(|(name, mode)| MergePolicyConfig {
-                    mode,
-                    selector: MergePolicySelectorConfig::Function(shared.symtab.to_str(name).to_owned()),
-                })
-                .collect(),
-        ),
+        path_merge: crate::config::PathMergeConfig {
+            regions: Some(
+                rules
+                    .into_iter()
+                    .map(|(name, mode)| {
+                        crate::config::PathMergeRegionConfig::MergePolicy(MergePolicyConfig {
+                            mode,
+                            selector: MergePolicySelectorConfig::Function(shared.symtab.to_str(name).to_owned()),
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
         ..ExecutionLimitsConfig::default()
     };
     ExecutionLimits::default().with_config(&config, &shared.symtab)
@@ -1968,7 +1973,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
     let path = std::env::temp_dir().join(format!("isla-i3-force-{}.toml", std::process::id()));
     std::fs::write(
         &path,
-        "[execution_limits]\n[[execution_limits.merge_policy]]\nmode = \"force\"\nfunction = \"force_rejected\"\n",
+        "[execution_limits]\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"force\"\nfunction = \"force_rejected\"\n",
     )
     .unwrap();
     let started = Instant::now();
@@ -5008,8 +5013,11 @@ fn region_merge_configurable_budget_long_region_equivalence() {
         let mut shared = empty_shared_state();
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let config = crate::config::ExecutionLimitsConfig {
-            path_merging: Some(true),
-            region_step_budget: budget,
+            path_merge: crate::config::PathMergeConfig {
+                enabled: Some(true),
+                step_budget: budget,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let limits = ExecutionLimits::default().with_config(&config, &shared.symtab);
@@ -5171,7 +5179,8 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
 fn region_util_default_step_budget_is_unlimited() {
     assert_eq!(TaskState::<B64>::new().region_step_budget(), None);
     assert_eq!(ExecutionLimits::default().region_step_budget, None);
-    let config = crate::config::ExecutionLimitsConfig { region_step_budget: Some(8192), ..Default::default() };
+    let mut config = crate::config::ExecutionLimitsConfig::default();
+    config.path_merge.step_budget = Some(8192);
     assert_eq!(ExecutionLimits::default().with_config(&config, &Symtab::new()).region_step_budget, Some(8192));
 }
 
@@ -5235,4 +5244,173 @@ fn region_util_depth_above_sixteen_keeps_all_input_behavior() {
         assert_eq!(merged.len(), 1);
         assert_eq!(depth, 40);
     }
+}
+
+#[test]
+fn no_smt_stage1_synthetic_jump_keeps_full_guards() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for skip in [false, true] {
+        let mut cfg = Config::new();
+        cfg.solver_options.skip_branch_checks = skip;
+        let context = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&context);
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        solver.assert(smtlib::Exp::Var(condition));
+        let mut frame = make_frame(vec![
+            Instr::Jump(input(0), 3, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]);
+        frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+        let state = TaskState::new();
+        let shared = empty_shared_state();
+        let queue = Worker::new_lifo();
+        assert!(matches!(
+            run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver
+            ),
+            Ok(Run::Finished(_))
+        ));
+        assert_eq!(queue.is_empty(), !skip);
+        if skip {
+            let child = queue.pop().unwrap();
+            let Some((Def::Assert(guard), _)) = child.fork_cond else { panic!("候选必须保留分叉守卫") };
+            let verification = Context::new(Config::new());
+            let mut replay = Solver::from_checkpoint(&verification, child.checkpoint);
+            replay.assert(guard);
+            assert_eq!(replay.check_sat(info()), SmtResult::Unsat);
+            // 子任务是未剪枝的不可行臂；完整前态和负守卫必须留下矛盾。
+            assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+        }
+    }
+}
+
+#[test]
+fn no_smt_candidate_merge_does_not_check_assertion_or_exit() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut cfg = Config::new();
+    cfg.solver_options.no_smt = true;
+    let context = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ]);
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let shared = empty_shared_state();
+    let queue = Worker::new_lifo();
+    assert!(matches!(
+        run_loop(
+            0,
+            TaskId::fresh(),
+            &mut Fraction::one(),
+            PathTimeout::unlimited(),
+            None,
+            &SingleForkSink { queue: &queue },
+            &mut frame,
+            &state,
+            &shared,
+            &mut solver
+        ),
+        Ok(Run::Finished(_))
+    ));
+    assert_eq!(crate::smt::path_smt_stats().calls, 0);
+    assert!(queue.is_empty());
+    assert!(!frame.region_merge_records().is_empty());
+    assert!(!solver.has_stashed_model());
+}
+
+#[test]
+fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
+    if !dead_arm_candidate_child("deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped") {
+        return;
+    }
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.skip_branch_checks = true;
+    config.solver_options.skip_bool_proofs = true;
+    let context = Context::new(config);
+    let mut solver = Solver::<B64>::new(&context);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    solver.assert(smtlib::Exp::Bool(false));
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ]);
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    let original_vars = frame.vars().clone();
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let queue = Worker::new_lifo();
+    let result = region_merge::try_region(
+        condition,
+        3,
+        0,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    );
+    assert!(matches!(result, Ok(region_merge::RegionResult::Rejected)), "必须拒绝推演");
+    assert_eq!(
+        shared.execution_stats.merge_json()["failure_reasons"]["solver_unknown"].as_u64(),
+        Some(1),
+        "必须在不可满足出口处拒绝：{}",
+        shared.execution_stats.merge_json()
+    );
+    assert_eq!(frame.pc, 0, "拒绝后必须恢复入口执行位置");
+    assert_eq!(frame.vars().len(), original_vars.len(), "拒绝后不能留下推演绑定");
+    for (name, value) in &original_vars {
+        if let UVal::Init(value) = value {
+            assert!(
+                matches!(frame.vars().get(name), Some(UVal::Init(actual)) if actual == value),
+                "拒绝后不能留下已回滚定义的新符号"
+            );
+        }
+    }
+    assert!(frame.region_merge_records().is_empty());
+    assert_eq!(solver.transaction_depth(), 0);
+    // 普通执行接续仍须保留原始输入声明，不能因推演污染而缺声明。
+    let resumed = run_loop(
+        0,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+    );
+    assert!(
+        matches!(resumed, Ok(Run::Finished(_)) | Err(ExecError::AssertionFailure(..))),
+        "普通执行只能正常结束或命中原断言"
+    );
 }

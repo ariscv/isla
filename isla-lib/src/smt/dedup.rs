@@ -43,8 +43,10 @@ impl<B: BV> Solver<'_, B> {
         speculative: bool,
     ) -> SmtResult {
         // 这里只回答可行性，不承诺交付模型。普通查询与最终取值仍用原接口。
-        if self.deferred_region_queries {
-            self.note_deferred_mandatory_query("branch_feasibility", info);
+        if self.deferred_region_queries || self.branch_checks_skipped() {
+            if self.deferred_region_queries {
+                self.note_deferred_mandatory_query("branch_feasibility", info);
+            }
             return Unknown;
         }
         if literal(exp).is_some_and(|(sym, _)| self.knowledge.both == Some((sym, self.knowledge.version))) {
@@ -61,7 +63,7 @@ impl<B: BV> Solver<'_, B> {
         self.knowledge.both = both.then_some((sym, self.knowledge.version));
     }
     pub(crate) fn note_jump_results(&mut self, sym: Sym, a: bool, b: bool) {
-        if !self.deferred_region_queries && a && b {
+        if !self.deferred_region_queries && !self.branch_checks_skipped() && a && b {
             self.knowledge.both = Some((sym, self.knowledge.version));
         }
     }

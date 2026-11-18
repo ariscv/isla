@@ -1231,7 +1231,7 @@ impl IRTypeInfo {
 impl<'ir, B: BV> SharedState<'ir, B> {
     /// 两个命令入口共用的加载期策略校验；源码区域只匹配真实 Jump。
     pub fn validate_merge_policy(&self, config: &crate::config::ExecutionLimitsConfig) -> Result<(), String> {
-        self.execution_stats.prepare_merge_rules(config.merge_policy.as_ref().map_or(0, Vec::len));
+        self.execution_stats.prepare_merge_rules(config.path_merge.policies().len());
         let functions = self.functions.keys().copied().collect();
         let locations: Vec<_> = self
             .functions

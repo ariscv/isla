@@ -122,7 +122,12 @@ pub fn reset_resident() {
     state.resident_count = 0;
     state.resident_bytes = 0;
 }
-pub fn retain<B: BV>(checkpoint: &Checkpoint<B>, path: &SamplePath<B>, records: &[RegionMergeRecord<B>], extra: usize) {
+pub fn retain<B: BV>(
+    checkpoint: &Checkpoint<B>,
+    path: &SamplePath<B>,
+    records: &super::super::MergeHistory<B>,
+    extra: usize,
+) {
     if !enabled() {
         return;
     }
@@ -165,6 +170,9 @@ pub fn print() {
     }
     EPOCH.fetch_add(1, Ordering::Relaxed);
     eprintln!("[MEMORY_STATS] {}", snapshot());
+    if crate::smt::no_smt::options().no_smt {
+        eprintln!("{}", crate::smt::no_smt::diagnostics());
+    }
 }
 
 /// HashMap 的 capacity 只估算可装载 payload，不冒充实际 bucket/control 分配。

@@ -199,6 +199,7 @@ mod tactic;
 pub use tactic::Tactic;
 mod dedup;
 mod deferred_assertions;
+pub mod no_smt;
 mod query;
 mod z3_timeout;
 pub use dump::configure_slow_query_dump;
@@ -658,15 +659,31 @@ impl<B: BV> Trace<B> {
     }
 }
 
-/// Config is a wrapper around the `Z3_config` type from the C
-/// API. `Z3_del_config` is called when it is dropped.
+/// 求解实验选项；默认保持现有认证流程。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SolverOptions {
+    pub skip_branch_checks: bool,
+    pub skip_bool_proofs: bool,
+    pub no_smt: bool,
+    pub keep_bool_proofs: bool,
+}
+
+static SOLVER_OPTIONS: OnceLock<SolverOptions> = OnceLock::new();
+
+/// CLI 在启动 worker 前设置；单测通过 Config 独立设置，避免全局交叉影响。
+pub fn configure_solver_options(options: SolverOptions) {
+    assert_eq!(*SOLVER_OPTIONS.get_or_init(|| options), options, "求解选项不能在运行中改变");
+}
+
+/// Z3 配置及执行选项；释放时清理 Z3 配置句柄。
 pub struct Config {
+    pub solver_options: SolverOptions,
     z3_cfg: Z3_config,
 }
 
 impl Config {
     pub fn new() -> Self {
-        unsafe { Config { z3_cfg: Z3_mk_config() } }
+        unsafe { Config { z3_cfg: Z3_mk_config(), solver_options: SOLVER_OPTIONS.get().copied().unwrap_or_default() } }
     }
 }
 
@@ -705,6 +722,7 @@ pub fn global_set_param_value(id: &str, value: &str) {
 
 /// Context is a wrapper around `Z3_context`.
 pub struct Context {
+    solver_options: SolverOptions,
     z3_ctx: Z3_context,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
@@ -726,7 +744,13 @@ impl Context {
             assert!(z3_version_supported((major, minor, build, revision)),
                 "运行时 Z3 版本 {major}.{minor}.{build}.{revision} 低于最低版本 {min_major}.{min_minor}.{min_build}.{min_revision}");
         });
-        unsafe { Context { z3_ctx: Z3_mk_context_rc(cfg.z3_cfg), enum_cache: RefCell::new(HashMap::new()) } }
+        unsafe {
+            Context {
+                solver_options: cfg.solver_options,
+                z3_ctx: Z3_mk_context_rc(cfg.z3_cfg),
+                enum_cache: RefCell::new(HashMap::new()),
+            }
+        }
     }
 
     fn error(&self) -> ExecError {
@@ -1759,6 +1783,7 @@ pub struct Solver<'ctx, B> {
     knowledge: dedup::Knowledge,
     /// 活动区域尚未在出口验证；内部查询只允许返回 Unknown。
     deferred_region_queries: bool,
+    boolean_proof_active: bool,
     deferred_assertions: Option<deferred_assertions::DeferredAssertions<B>>,
     /// 最近一次返回 Sat 的 check 所产生的模型（已 inc_ref）。断言集此后未变时
     /// 与当前状态一致，可直接取用而不必重解。注意 Z3 在后续 Unsat check 后会
@@ -2401,6 +2426,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 last_check_sat: false,
                 knowledge: dedup::Knowledge::default(),
                 deferred_region_queries: false,
+                boolean_proof_active: false,
                 deferred_assertions: None,
                 stashed_model: None,
                 shadow_witnesses: witness_shadow::Bank::new(ctx),
@@ -2995,6 +3021,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         solver
     }
 
+    pub fn branch_checks_skipped(&self) -> bool {
+        self.ctx.solver_options.skip_branch_checks || self.no_smt()
+    }
+
     pub fn check_sat_with(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
         self.check_sat_with_strategy(exp, info, query::QueryPurpose::General)
     }
@@ -3014,10 +3044,30 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 布尔恒值及推演可行性证明：复杂目标按成本选择完整快照，其余复用原查询。
     pub(crate) fn check_sat_with_for_bool(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
-        self.check_sat_with_strategy(exp, info, query::QueryPurpose::BooleanProof)
+        if self.ctx.solver_options.skip_bool_proofs || (self.no_smt() && !self.ctx.solver_options.keep_bool_proofs) {
+            return Unknown;
+        }
+        let previous = self.deferred_region_queries;
+        let active = self.boolean_proof_active;
+        if self.no_smt() {
+            self.deferred_region_queries = false;
+            self.boolean_proof_active = true;
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_sat_with_strategy(exp, info, query::QueryPurpose::BooleanProof)
+        }));
+        self.deferred_region_queries = previous;
+        self.boolean_proof_active = active;
+        match result {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(error),
+        }
     }
 
     fn check_sat_with_strategy(&mut self, exp: &Exp<Sym>, info: SourceLoc, purpose: query::QueryPurpose) -> SmtResult {
+        if self.no_smt() && !matches!(purpose, query::QueryPurpose::BooleanProof) {
+            return Error(self.no_smt_cannot_continue("mandatory_query", info));
+        }
         if self.deferred_region_queries {
             if !matches!(purpose, query::QueryPurpose::BooleanProof) {
                 self.note_deferred_mandatory_query(
@@ -3177,6 +3227,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn check_sat(&mut self, info: SourceLoc) -> SmtResult {
+        if self.no_smt() && !self.boolean_proof_active {
+            return Error(self.no_smt_cannot_continue("model_or_general_query", info));
+        }
         if self.deferred_region_queries {
             self.note_deferred_mandatory_query("model_or_general", info);
             return Unknown;
@@ -3309,6 +3362,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// feature 时无法中断 Z3，退化为普通 `check_sat`（deadline 不生效，
     /// 与 `--smt-timeout` 在该构建下的既有行为一致）。
     pub fn check_sat_deadline(&mut self, info: SourceLoc, deadline: Duration) -> SmtResult {
+        if self.no_smt() && !self.boolean_proof_active {
+            return Error(self.no_smt_cannot_continue("model_query_deadline", info));
+        }
         if self.deferred_region_queries {
             self.note_deferred_mandatory_query("model_or_general", info);
             return Unknown;

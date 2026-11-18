@@ -33,7 +33,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::config::{ExecutionLimitsConfig, LimitBehaviorConfig, MergeMode, MergePolicySelectorConfig};
+use crate::config::{
+    ExecutionLimitsConfig, LimitBehaviorConfig, MergeMode, MergePolicySelectorConfig, PathMergeRegionConfig,
+};
 use crate::ir::{Name, Symtab};
 use crate::source_loc::{SourceLoc, SourceRegion, SourceRegionSpec};
 
@@ -270,10 +272,10 @@ impl ExecutionLimits {
         if let Some(value) = config.branch_sampling_seed {
             self = self.with_branch_sampling_seed(value);
         }
-        if let Some(value) = config.region_step_budget {
+        if let Some(value) = config.path_merge.step_budget {
             self.region_step_budget = crate::config::parse_region_step_budget(value).expect("区域预算配置必须已校验");
         }
-        if let Some(value) = config.path_merging {
+        if let Some(value) = config.path_merge.enabled {
             self = self.with_path_merging(value);
         }
         if let Some(value) = config.on_limit_reached {
@@ -282,34 +284,57 @@ impl ExecutionLimits {
                 LimitBehaviorConfig::Concretize => LimitBehavior::Concretize,
             });
         }
-        if let Some(region_specs) = &config.regions {
-            self = self.with_region_specs(region_specs, symtab);
-            self.branch_region_limits.clear();
-            self.region_fork_limits.clear();
-        }
-        if let Some(region_limits) = &config.branch_region_limits {
-            self.branch_region_limits.clear();
-            self.branch_region_limits.extend(region_limits.iter().filter_map(|limit| {
-                limit.region.resolve(symtab.files()).map(|region| (region, limit.max_forks_per_branch))
-            }));
-        }
-        if let Some(region_limits) = &config.region_fork_limits {
-            self.region_fork_limits.clear();
-            self.region_fork_limits.extend(region_limits.iter().filter_map(|limit| {
-                limit.region.resolve(symtab.files()).map(|region| RegionForkLimit {
-                    region,
-                    max_forks_per_region: limit.max_forks_per_region,
-                    sample_bias: limit
-                        .sample_bias
-                        .map(|(denominator, direction)| SampleBias { denominator, direction }),
+        if let Some(rules) = &config.path_merge.regions {
+            let filters = rules
+                .iter()
+                .filter_map(|rule| match rule {
+                    PathMergeRegionConfig::LimitFilter(spec) => Some(spec.clone()),
+                    _ => None,
                 })
-            }));
+                .collect::<Vec<_>>();
+            if !filters.is_empty() {
+                self = self.with_region_specs(&filters, symtab);
+                self.branch_region_limits.clear();
+                self.region_fork_limits.clear();
+            }
+            let branch_limits = rules
+                .iter()
+                .filter_map(|rule| match rule {
+                    PathMergeRegionConfig::BranchLimit(limit) => Some(limit),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !branch_limits.is_empty() {
+                self.branch_region_limits.clear();
+                self.branch_region_limits.extend(branch_limits.into_iter().filter_map(|limit| {
+                    limit.region.resolve(symtab.files()).map(|region| (region, limit.max_forks_per_branch))
+                }));
+            }
+            let fork_limits = rules
+                .iter()
+                .filter_map(|rule| match rule {
+                    PathMergeRegionConfig::ForkLimit(limit) => Some(limit),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !fork_limits.is_empty() {
+                self.region_fork_limits.clear();
+                self.region_fork_limits.extend(fork_limits.into_iter().filter_map(|limit| {
+                    limit.region.resolve(symtab.files()).map(|region| RegionForkLimit {
+                        region,
+                        max_forks_per_region: limit.max_forks_per_region,
+                        sample_bias: limit
+                            .sample_bias
+                            .map(|(denominator, direction)| SampleBias { denominator, direction }),
+                    })
+                }));
+            }
         }
-
-        if let Some(config) = &config.merge_enumeration {
-            self.merge_enumeration = config.clone();
+        if let Some(enumeration) = &config.path_merge.enumeration {
+            self.merge_enumeration = enumeration.clone();
         }
-        if let Some(rules) = &config.merge_policy {
+        let rules = config.path_merge.policies();
+        if !rules.is_empty() {
             self.merge_policy = rules
                 .iter()
                 .enumerate()
@@ -945,17 +970,20 @@ mod tests {
     #[test]
     fn execution_limits_keeps_local_merge_policy_with_global_merging_off() {
         use crate::bitvector::b64::B64;
-        use crate::config::MergePolicyConfig;
+        use crate::config::{MergePolicyConfig, PathMergeConfig};
         use crate::executor::TaskState;
 
         let mut symtab = Symtab::new();
         let function = symtab.intern("zf");
         for mode in [MergeMode::Force, MergeMode::Adaptive, MergeMode::Off] {
             let config = ExecutionLimitsConfig {
-                merge_policy: Some(vec![MergePolicyConfig {
-                    mode,
-                    selector: MergePolicySelectorConfig::Function("zf".to_string()),
-                }]),
+                path_merge: PathMergeConfig {
+                    regions: Some(vec![PathMergeRegionConfig::MergePolicy(MergePolicyConfig {
+                        mode,
+                        selector: MergePolicySelectorConfig::Function("zf".to_string()),
+                    })]),
+                    ..Default::default()
+                },
                 ..ExecutionLimitsConfig::default()
             };
             let limits = ExecutionLimits::default().with_config(&config, &symtab);
@@ -968,20 +996,32 @@ mod tests {
 
     #[test]
     fn path_merging_rule_indices_keep_toml_order_after_unmatched_region() {
-        use crate::config::MergePolicyConfig;
+        use crate::config::{MergePolicyConfig, PathMergeConfig};
         let mut symtab = Symtab::new();
         let function = symtab.intern("zf");
         let config = ExecutionLimitsConfig {
-            merge_policy: Some(vec![
-                MergePolicyConfig {
-                    mode: MergeMode::Off,
-                    selector: MergePolicySelectorConfig::Region(SourceRegionSpec::new("missing.sail", (1, 0), (2, 0))),
-                },
-                MergePolicyConfig {
-                    mode: MergeMode::Force,
-                    selector: MergePolicySelectorConfig::Function("zf".into()),
-                },
-            ]),
+            path_merge: PathMergeConfig {
+                regions: Some(
+                    vec![
+                        MergePolicyConfig {
+                            mode: MergeMode::Off,
+                            selector: MergePolicySelectorConfig::Region(SourceRegionSpec::new(
+                                "missing.sail",
+                                (1, 0),
+                                (2, 0),
+                            )),
+                        },
+                        MergePolicyConfig {
+                            mode: MergeMode::Force,
+                            selector: MergePolicySelectorConfig::Function("zf".into()),
+                        },
+                    ]
+                    .into_iter()
+                    .map(PathMergeRegionConfig::MergePolicy)
+                    .collect(),
+                ),
+                ..Default::default()
+            },
             ..ExecutionLimitsConfig::default()
         };
         let limits = ExecutionLimits::default().with_config(&config, &symtab);
@@ -1062,7 +1102,14 @@ mod tests {
         let mut symtab = Symtab::new();
         symtab.set_files(vec!["configured.sail"]);
         let config = ExecutionLimitsConfig {
-            regions: Some(vec![SourceRegionSpec::new("configured.sail", (10, 0), (20, 0))]),
+            path_merge: crate::config::PathMergeConfig {
+                regions: Some(vec![PathMergeRegionConfig::LimitFilter(SourceRegionSpec::new(
+                    "configured.sail",
+                    (10, 0),
+                    (20, 0),
+                ))]),
+                ..Default::default()
+            },
             ..ExecutionLimitsConfig::default()
         };
         let limits = ExecutionLimits::default()

@@ -18,7 +18,17 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("probe_query_timings", "probe-query-timings", "有界逐查询计时；默认关闭"),
 ];
 
+const NO_SMT_OPTIONS: &[(&str, &str)] = &[
+    ("skip_branch_checks", "skip-branch-checks"),
+    ("skip_bool_proofs", "skip-bool-proofs"),
+    ("no_smt", "no-smt"),
+    ("no_smt_keep_bool_proofs", "no-smt-keep-bool-proofs"),
+];
+
 pub fn add_cli(opts: &mut getopts::Options) {
+    for (_, flag) in NO_SMT_OPTIONS {
+        opts.optflagopt("", flag, "无 SMT 实验选项；裸 flag 等于 true，覆盖 TOML，默认 false", "true|false");
+    }
     for (_, flag, help) in BOOL_OPTIONS {
         opts.optopt("", flag, help, "true|false");
     }
@@ -31,63 +41,86 @@ pub fn add_cli(opts: &mut getopts::Options) {
 }
 
 pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
-    let mut options = limits.region_options.clone().unwrap_or_default();
-    let mut changed = false;
+    let mut updated = limits.clone();
     for (field, flag, _) in BOOL_OPTIONS {
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
-                "defer_ctor_checks" => options.defer_ctor_checks = value,
-                "defer_range_proofs" => options.defer_range_proofs = value,
-                "defer_exit_check" => options.defer_exit_check = value,
-                "lazy_z3_scope" => options.lazy_z3_scope = value,
-                "witness_eval" => options.witness_eval = value,
-                "witness_shadow" => options.witness_shadow = value,
-                "witness_local_shadow" => options.witness_local_shadow = value,
-                "prefix_compact" => options.prefix_compact = value,
-                "bool_proof_profile" => options.bool_proof_profile = value,
-                "progress" => options.progress = value,
-                "native_snapshot" => options.native_snapshot = value,
-                "call_census" => options.call_census = value,
-                "probe_round_cost" => options.probe_round_cost = value,
-                "probe_query_timings" => options.probe_query_timings = value,
+                "defer_ctor_checks" => updated.path_merge.defer_ctor_checks = value,
+                "defer_range_proofs" => updated.path_merge.defer_range_proofs = value,
+                "defer_exit_check" => updated.path_merge.defer_exit_check = value,
+                "lazy_z3_scope" => updated.path_merge.lazy_z3_scope = value,
+                "witness_eval" => updated.path_merge.witness_eval = value,
+                "witness_shadow" => updated.path_merge.diagnostics.witness_shadow = value,
+                "witness_local_shadow" => updated.path_merge.diagnostics.witness_local_shadow = value,
+                "prefix_compact" => updated.path_merge.prefix_compact = value,
+                "bool_proof_profile" => updated.path_merge.diagnostics.bool_proof_profile = value,
+                "progress" => updated.path_merge.diagnostics.progress = value,
+                "native_snapshot" => updated.path_merge.diagnostics.native_snapshot = value,
+                "call_census" => updated.path_merge.diagnostics.call_census = value,
+                "probe_round_cost" => updated.path_merge.diagnostics.probe_round_cost = value,
+                "probe_query_timings" => updated.path_merge.diagnostics.probe_query_timings = value,
                 _ => unreachable!("区域 CLI 字段必须登记"),
             }
-            changed = true;
         }
     }
     if let Some(value) = matches.opt_str("region-max-merge-depth") {
-        options.max_merge_depth = Some(value.parse().map_err(|_| "--region-max-merge-depth 必须为整数")?);
-        changed = true;
+        updated.path_merge.max_merge_depth = Some(value.parse().map_err(|_| "--region-max-merge-depth 必须为整数")?);
     }
     if let Some(value) = matches.opt_str("region-bool-proof-rlimit") {
-        options.bool_proof_rlimit = value.parse().map_err(|_| "--region-bool-proof-rlimit 必须是非负32位整数")?;
-        changed = true;
+        updated.solver.bool_proof_rlimit =
+            value.parse().map_err(|_| "--region-bool-proof-rlimit 必须是非负32位整数")?;
     }
     for flag in ["query-dump-sites", "same-context-sites"] {
         if let Some(value) = matches.opt_str(flag) {
             let sites = if value.is_empty() { Vec::new() } else { value.split(',').map(str::to_owned).collect() };
             match flag {
-                "query-dump-sites" => options.query_dump_sites = sites,
-                "same-context-sites" => options.same_context_sites = sites,
+                "query-dump-sites" => updated.path_merge.diagnostics.query_dump_sites = sites,
+                "same-context-sites" => updated.path_merge.diagnostics.same_context_sites = sites,
                 _ => unreachable!(),
             }
-            changed = true;
         }
     }
     for flag in ["query-dump-dir", "obligation-dump-dir"] {
         if let Some(value) = matches.opt_str(flag) {
             match flag {
-                "query-dump-dir" => options.query_dump_dir = Some(value.into()),
-                "obligation-dump-dir" => options.obligation_dump_dir = Some(value.into()),
+                "query-dump-dir" => updated.path_merge.diagnostics.query_dump_dir = Some(value.into()),
+                "obligation-dump-dir" => updated.path_merge.diagnostics.obligation_dump_dir = Some(value.into()),
                 _ => unreachable!(),
             }
-            changed = true;
         }
     }
-    options.validate()?;
-    if changed {
-        limits.region_options = Some(options);
+    for (field, flag) in NO_SMT_OPTIONS {
+        if matches.opt_present(flag) {
+            let value = matches.opt_str(flag).unwrap_or_else(|| "true".into());
+            let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
+            match *field {
+                "skip_branch_checks" => updated.solver.skip_branch_checks = value,
+                "skip_bool_proofs" => updated.solver.skip_bool_proofs = value,
+                "no_smt" => updated.solver.no_smt = value,
+                "no_smt_keep_bool_proofs" => updated.solver.no_smt_keep_bool_proofs = value,
+                _ => unreachable!("无 SMT CLI 字段必须登记"),
+            }
+        }
+    }
+    isla_lib::config::RegionOptions::from_config(&updated).validate()?;
+    *limits = updated;
+    Ok(())
+}
+
+/// 全局无 SMT 只允许导出未认证候选，禁止生成样例、认证或普通缓存读回。
+pub fn validate_no_smt_mode(
+    matches: &getopts::Matches,
+    options: &isla_lib::config::RegionOptions,
+) -> Result<(), String> {
+    if options.no_smt
+        && (!matches.opt_present("path-cache-only")
+            || !matches.opt_present("path-cache-write")
+            || matches.opt_present("path-cache-read")
+            || matches.opt_present("check-samples")
+            || matches.free.first().map(String::as_str) != Some("solve-state"))
+    {
+        return Err("no_smt 只支持 solve-state --path-cache-only --path-cache-write，不支持样例认证或缓存读回".into());
     }
     Ok(())
 }
@@ -95,7 +128,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isla_lib::config::{ExecutionLimitsConfig, RegionOptions};
+    use isla_lib::config::RegionOptions;
 
     fn cli(config: &mut ExecutionLimitsConfig, args: &[&str]) -> Result<(), String> {
         let mut opts = getopts::Options::new();
@@ -107,35 +140,49 @@ mod tests {
     fn region_options_cli_defaults_and_boolean_overrides() {
         let mut limits = ExecutionLimitsConfig::default();
         cli(&mut limits, &[]).unwrap();
-        assert!(limits.region_options.is_none());
+        assert_eq!(limits, ExecutionLimitsConfig::default());
         for (field, flag, _) in BOOL_OPTIONS {
-            let toml: RegionOptions = toml::from_str(&format!("{field}=true")).unwrap();
-            let mut enabled = ExecutionLimitsConfig::default();
-            cli(&mut enabled, &[&format!("--{flag}=true")]).unwrap();
-            assert_eq!(enabled.region_options, Some(toml.clone()), "{flag}");
-            let mut limits = ExecutionLimitsConfig { region_options: Some(toml), ..Default::default() };
+            let section = if [
+                "defer_ctor_checks",
+                "defer_range_proofs",
+                "defer_exit_check",
+                "lazy_z3_scope",
+                "witness_eval",
+                "prefix_compact",
+            ]
+            .contains(field)
+            {
+                "execution_limits.path_merge"
+            } else {
+                "execution_limits.path_merge.diagnostics"
+            };
+            let text = format!("[{section}]\n{field}=true");
+            let table: toml::Value = text.parse().unwrap();
+            let expected: ExecutionLimitsConfig = table["execution_limits"].clone().try_into().unwrap();
+            let mut limits = ExecutionLimitsConfig::default();
+            cli(&mut limits, &[&format!("--{flag}=true")]).unwrap();
+            assert_eq!(limits, expected, "{flag}");
             cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
-            assert_eq!(limits.region_options, Some(RegionOptions::default()), "{flag}");
+            assert_eq!(limits, ExecutionLimitsConfig::default(), "{flag}");
         }
     }
 
     #[test]
     fn region_options_cli_lazy_scope_preserves_and_overrides_toml() {
-        let options: RegionOptions = toml::from_str("lazy_z3_scope=true\ndefer_exit_check=true").unwrap();
-        let mut limits = ExecutionLimitsConfig { region_options: Some(options), ..Default::default() };
+        let value: toml::Value =
+            "[execution_limits.path_merge]\nlazy_z3_scope=true\ndefer_exit_check=true".parse().unwrap();
+        let mut limits: ExecutionLimitsConfig = value["execution_limits"].clone().try_into().unwrap();
         cli(&mut limits, &[]).unwrap();
-        assert!(limits.region_options.as_ref().unwrap().lazy_z3_scope);
+        assert!(limits.path_merge.lazy_z3_scope);
         cli(&mut limits, &["--region-lazy-z3-scope=false"]).unwrap();
-        let options = limits.region_options.as_ref().unwrap();
-        assert!(!options.lazy_z3_scope);
-        assert!(options.defer_exit_check, "CLI 仅覆盖指定字段");
+        assert!(!limits.path_merge.lazy_z3_scope);
+        assert!(limits.path_merge.defer_exit_check, "CLI仅覆盖指定字段");
         let mut enabled = ExecutionLimitsConfig::default();
         cli(&mut enabled, &["--region-lazy-z3-scope=true"]).unwrap();
-        let options = enabled.region_options.unwrap();
-        assert!(options.lazy_z3_scope);
-        assert!(!options.defer_exit_check, "仅 lazy 开启时静默无效，不报配置错误");
+        assert!(enabled.path_merge.lazy_z3_scope);
+        assert!(!enabled.path_merge.defer_exit_check);
         for value in ["1", "0", "TRUE", "", "yes"] {
-            assert!(cli(&mut limits, &[&format!("--region-lazy-z3-scope={value}")]).is_err(), "{value}");
+            assert!(cli(&mut limits, &[&format!("--region-lazy-z3-scope={value}")]).is_err());
         }
     }
 
@@ -153,15 +200,15 @@ mod tests {
             ],
         )
         .unwrap();
-        let options = limits.region_options.as_ref().unwrap();
-        assert_eq!(options.bool_proof_rlimit, 17);
+        assert_eq!(limits.solver.bool_proof_rlimit, 17);
+        let options = RegionOptions::from_config(&limits);
         assert_eq!(options.query_dump_sites, ["f@1", "g@2"]);
         assert_eq!(options.same_context_sites, ["f@1"]);
         assert_eq!(options.query_dump_dir.as_deref(), Some(std::path::Path::new("queries")));
         assert_eq!(options.obligation_dump_dir.as_deref(), Some(std::path::Path::new("obligations")));
         cli(&mut limits, &["--region-bool-proof-rlimit=0", "--query-dump-sites=", "--same-context-sites="]).unwrap();
-        assert_eq!(limits.region_options.as_ref().unwrap().bool_proof_rlimit, 0);
-        assert!(limits.region_options.as_ref().unwrap().query_dump_sites.is_empty());
+        assert_eq!(limits.solver.bool_proof_rlimit, 0);
+        assert!(limits.path_merge.diagnostics.query_dump_sites.is_empty());
         for value in [
             "--region-defer-exit-check=1",
             "--region-bool-proof-rlimit=-1",
@@ -187,12 +234,83 @@ mod region_depth_tests {
         let mut limits = ExecutionLimitsConfig::default();
         for (text, expected) in [("32", Some(32)), ("64", Some(64)), ("-1", None)] {
             apply_cli(&opts.parse(&[format!("--region-max-merge-depth={text}")]).unwrap(), &mut limits).unwrap();
-            assert_eq!(limits.region_options.as_ref().unwrap().merge_depth_limit(), expected);
+            assert_eq!(isla_lib::config::RegionOptions::from_config(&limits).merge_depth_limit(), expected);
         }
         for text in ["0", "-2", "true", ""] {
             assert!(
                 apply_cli(&opts.parse(&[format!("--region-max-merge-depth={text}")]).unwrap(), &mut limits).is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod no_smt_port_tests {
+    use super::*;
+    use isla_lib::config::RegionOptions;
+
+    fn parse(args: &[&str]) -> getopts::Matches {
+        let mut opts = getopts::Options::new();
+        add_cli(&mut opts);
+        super::super::path_cache::Options::add_cli(&mut opts);
+        opts.optopt("", "check-samples", "", "path");
+        opts.parse(args).unwrap()
+    }
+
+    #[test]
+    fn no_smt_cli_preserves_toml_and_supports_bare_and_false() {
+        for (field, flag) in NO_SMT_OPTIONS {
+            let text = if *field == "no_smt_keep_bool_proofs" {
+                format!("no_smt=true\n{field}=true")
+            } else {
+                format!("{field}=true")
+            };
+            let value: toml::Value = format!("[execution_limits.solver]\n{text}").parse().unwrap();
+            let toml: ExecutionLimitsConfig = value["execution_limits"].clone().try_into().unwrap();
+            let mut limits = toml.clone();
+            apply_cli(&parse(&[]), &mut limits).unwrap();
+            assert_eq!(limits, toml);
+            apply_cli(&parse(&[&format!("--{flag}=false")]), &mut limits).unwrap();
+            let expected = if *field == "no_smt_keep_bool_proofs" {
+                RegionOptions { no_smt: true, ..Default::default() }
+            } else {
+                RegionOptions::default()
+            };
+            assert_eq!(RegionOptions::from_config(&limits), expected);
+            let args = if *field == "no_smt_keep_bool_proofs" {
+                vec!["--no-smt", "--no-smt-keep-bool-proofs"]
+            } else {
+                vec![*flag]
+            };
+            let args: Vec<String> = args
+                .into_iter()
+                .map(|arg| if arg.starts_with("--") { arg.into() } else { format!("--{arg}") })
+                .collect();
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            apply_cli(&parse(&args), &mut limits).unwrap();
+            assert_eq!(limits, toml, "裸 flag 应恢复 TOML 的开关");
+            assert!(apply_cli(&parse(&[&format!("--{flag}=1")]), &mut limits).is_err());
+        }
+    }
+
+    #[test]
+    fn no_smt_cli_rejects_conflicting_proofs_and_unsafe_modes() {
+        for args in
+            [vec!["--no-smt-keep-bool-proofs"], vec!["--no-smt", "--no-smt-keep-bool-proofs", "--skip-bool-proofs"]]
+        {
+            assert!(apply_cli(&parse(&args), &mut ExecutionLimitsConfig::default()).is_err());
+        }
+        let options = RegionOptions { no_smt: true, ..Default::default() };
+        for args in [
+            vec!["solve-state"],
+            vec!["solve-state", "--path-cache-only"],
+            vec!["fuzz", "--path-cache-only", "--path-cache-write=cache"],
+            vec!["solve-state", "--path-cache-only", "--path-cache-write=cache", "--path-cache-read=old"],
+            vec!["solve-state", "--path-cache-only", "--path-cache-write=cache", "--check-samples=x.jsonl"],
+        ] {
+            assert!(validate_no_smt_mode(&parse(&args), &options).is_err(), "{args:?}");
+        }
+        validate_no_smt_mode(&parse(&["solve-state", "--path-cache-only", "--path-cache-write=cache"]), &options)
+            .unwrap();
     }
 }

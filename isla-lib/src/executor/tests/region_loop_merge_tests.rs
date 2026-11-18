@@ -684,8 +684,11 @@ fn region_merge_unlimited_budget_applies_to_independent_loop_rounds() {
         let mut shared = empty_shared_state();
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let config = crate::config::ExecutionLimitsConfig {
-            path_merging: Some(true),
-            region_step_budget: budget,
+            path_merge: crate::config::PathMergeConfig {
+                enabled: Some(true),
+                step_budget: budget,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let limits = ExecutionLimits::default()

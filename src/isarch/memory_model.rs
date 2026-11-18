@@ -180,10 +180,11 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
                         }
                         Some(initial_byte)
                     } else if let Region::Constrained(range, generator) = region {
-                        if solver
-                            .check_sat_with(&selected, SourceLoc::unknown())
-                            .is_unsat()
-                            .expect("生成器初值的区域可达性检查必须成功")
+                        if !solver.no_smt()
+                            && solver
+                                .check_sat_with(&selected, SourceLoc::unknown())
+                                .is_unsat()
+                                .expect("生成器初值的区域可达性检查必须成功")
                         {
                             None
                         } else {

@@ -296,6 +296,12 @@ pub(crate) fn optimistic_assert<B: BV>(
         Val::String(message) => Some(message),
         _ => None,
     };
+    if solver.no_smt() {
+        if let Val::Symbolic(v) = &x {
+            solver.no_smt_assertion(Exp::Var(*v), info);
+            return Ok(Val::Unit);
+        }
+    }
     if solver.region_queries_deferred() {
         match &x {
             Val::Symbolic(v) => {
@@ -342,6 +348,12 @@ pub(crate) fn pessimistic_assert<B: BV>(
         Val::String(message) => Some(message),
         _ => None,
     };
+    if solver.no_smt() {
+        if let Val::Symbolic(v) = &x {
+            solver.no_smt_assertion(Exp::Var(*v), info);
+            return Ok(Val::Unit);
+        }
+    }
     if solver.region_queries_deferred() {
         match &x {
             Val::Symbolic(v) => {
@@ -446,7 +458,9 @@ fn check_integer_conversion<B: BV>(
     info: SourceLoc,
 ) -> Result<(), ExecError> {
     if let Some(in_range) = integer_conversion_in_range(f, value, solver, info)? {
-        if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_range.clone())), info).is_sat()? {
+        if !solver.no_smt_safety(&in_range, info)
+            && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_range.clone())), info).is_sat()?
+        {
             if !solver.check_sat_with_for_range(&in_range, info).is_sat()? {
                 return Err(ExecError::Overflow);
             }
@@ -1310,6 +1324,9 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     info: SourceLoc,
 ) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
+    if solver.no_smt() {
+        return Ok(solver.structural_i128(sym));
+    }
 
     // 取模型前必须先 check-sat；路径已经不可满足时没有模型可取，保持符号量交给调用方。
     match solver.check_sat(info) {
@@ -1713,7 +1730,9 @@ pub fn subrange_internal<B: BV>(
                 Box::new(Exp::Bvsgt(Box::new(low), Box::new(high))),
             )),
         );
-        if !solver.check_sat_with(&out_of_bounds, info).is_unsat()? {
+        if !solver.no_smt_safety(&Exp::Not(Box::new(out_of_bounds.clone())), info)
+            && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?
+        {
             if solver.check_sat_with(&Exp::Not(Box::new(out_of_bounds)), info).is_unsat()? {
                 return Err(ExecError::Type("vector_subrange bounds out of range".to_string(), info));
             }
@@ -2341,7 +2360,9 @@ pub(crate) fn vector_access<B: BV>(
                 } else {
                     Exp::Bvult(Box::new(Exp::Var(*index)), Box::new(smt_u64_width(u64::from(length), width)))
                 };
-                if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                if !solver.no_smt_safety(&in_bounds, info)
+                    && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
+                {
                     if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
                         return Err(ExecError::OutOfBounds("vector_access"));
                     }
@@ -2429,7 +2450,9 @@ pub(crate) fn vector_access<B: BV>(
             } else {
                 Exp::Bvult(Box::new(Exp::Var(n)), Box::new(smt_u64_width(len, width)))
             };
-            if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+            if !solver.no_smt_safety(&in_bounds, info)
+                && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
+            {
                 if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
                     return Err(ExecError::OutOfBounds("vector_access"));
                 }
@@ -2487,7 +2510,9 @@ fn check_slice_update_bounds<B: BV>(
     };
     assert!(matches!(width, 64 | 128), "更新索引必须是机器整数或整数");
     let in_bounds = Exp::Bvule(Box::new(index), Box::new(smt_u64_width(u64::from(max_index), width)));
-    if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+    if !solver.no_smt_safety(&in_bounds, info)
+        && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
+    {
         if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
             return Err(ExecError::OutOfBounds("vector_update"));
         }
@@ -2829,7 +2854,9 @@ pub fn vector_update<B: BV>(
                     Box::new(Exp::Var(n)),
                     Box::new(smt_u64_width(u64::try_from(vec.len()).unwrap(), width)),
                 );
-                if solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()? {
+                if !solver.no_smt_safety(&in_bounds, info)
+                    && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
+                {
                     if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
                         return Err(ExecError::OutOfBounds("vector_update"));
                     }
@@ -3116,14 +3143,15 @@ pub fn eq_anything<B: BV>(
                     Box::new(Exp::Eq(Box::new(Exp::Var(l_sym)), Box::new(id.to_smt()))),
                     Box::new(Exp::Eq(Box::new(Exp::Var(r_sym)), Box::new(id.to_smt()))),
                 );
-                if solver.check_sat_with(&both_tags, info).is_unsat()? {
+                if !solver.no_smt() && solver.check_sat_with(&both_tags, info).is_unsat()? {
                     continue;
                 }
                 common = true;
                 let payload = match eq_anything(left, right.clone(), solver, info) {
                     Ok(payload) => payload,
                     Err(ExecError::Type(..))
-                        if !solver.check_sat_with(&Exp::Not(Box::new(both_tags)), info).is_unsat()? =>
+                        if solver.no_smt()
+                            || !solver.check_sat_with(&Exp::Not(Box::new(both_tags)), info).is_unsat()? =>
                     {
                         return Err(ExecError::SymbolicLength("eq_anything", info));
                     }
@@ -3157,13 +3185,14 @@ pub fn eq_anything<B: BV>(
         | (Val::Ctor(id, payload), Val::SymbolicCtor(sym, constructors)) => {
             let Some(value) = constructors.get(&id) else { return Ok(Val::Bool(false)) };
             let equal_tag = Exp::Eq(Box::new(Exp::Var(sym)), Box::new(id.to_smt()));
-            if solver.check_sat_with(&equal_tag, info).is_unsat()? {
+            if !solver.no_smt() && solver.check_sat_with(&equal_tag, info).is_unsat()? {
                 return Ok(Val::Bool(false));
             }
             let equal_payload = match eq_anything(value.clone(), *payload, solver, info) {
                 Ok(payload) => payload,
                 Err(ExecError::Type(..))
-                    if !solver.check_sat_with(&Exp::Not(Box::new(equal_tag.clone())), info).is_unsat()? =>
+                    if solver.no_smt()
+                        || !solver.check_sat_with(&Exp::Not(Box::new(equal_tag.clone())), info).is_unsat()? =>
                 {
                     return Err(ExecError::SymbolicLength("eq_anything", info));
                 }
@@ -7973,3 +8002,30 @@ mod tests {
 #[cfg(test)]
 #[path = "primop/effects_tests.rs"]
 mod effects_tests;
+
+#[cfg(test)]
+mod no_smt_stage1_tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::{configure_tastic, path_smt_stats, reset_path_smt_stats, Config, Context, Tactic};
+
+    #[test]
+    fn no_smt_stage1_bool_skip_preserves_symbolic_expression() {
+        configure_tastic(Tactic::Qfaufbv);
+        let info = SourceLoc::unknown();
+        let mut cfg = Config::new();
+        cfg.solver_options.skip_bool_proofs = true;
+        let context = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&context);
+        let bit = solver.declare_const(smtlib::Ty::Bool, info);
+        solver.assert(Exp::Var(bit));
+        reset_path_smt_stats();
+        let value = try_concretize_bool_exp(Exp::Var(bit), &mut solver, info).unwrap();
+        assert!(matches!(value, Val::Symbolic(_)));
+        assert_eq!(path_smt_stats().calls, 0);
+        assert_eq!(
+            solver.check_sat_with(&Exp::Not(Box::new(smt_value(&value, info).unwrap())), info),
+            SmtResult::Unsat
+        );
+    }
+}

@@ -12,6 +12,14 @@ pub struct RegionOptions {
     pub defer_range_proofs: bool,
     /// 构造子解包标签转为出口待证义务；默认关闭。
     pub defer_ctor_checks: bool,
+    /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
+    pub skip_branch_checks: bool,
+    /// 跳过可选布尔恒值证明；默认关闭。
+    pub skip_bool_proofs: bool,
+    /// 不调用 SMT check，仅构造未认证候选；默认关闭。
+    pub no_smt: bool,
+    /// 无 SMT 模式下只恢复可选布尔恒值证明；默认关闭。
+    pub no_smt_keep_bool_proofs: bool,
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
     /// 延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用。
@@ -55,12 +63,46 @@ impl RegionOptions {
             Some(value) => Some(usize::try_from(value).expect("区域嵌套配置必须已校验")),
         }
     }
+    /// 只保留执行前冻结的运行时快照；外部配置不再有 region_options 表。
+    pub fn from_config(limits: &super::ExecutionLimitsConfig) -> Self {
+        let merge = &limits.path_merge;
+        let diagnostics = &merge.diagnostics;
+        Self {
+            max_merge_depth: merge.max_merge_depth,
+            defer_range_proofs: merge.defer_range_proofs,
+            defer_ctor_checks: merge.defer_ctor_checks,
+            skip_branch_checks: limits.solver.skip_branch_checks,
+            skip_bool_proofs: limits.solver.skip_bool_proofs,
+            no_smt: limits.solver.no_smt,
+            no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
+            defer_exit_check: merge.defer_exit_check,
+            lazy_z3_scope: merge.lazy_z3_scope,
+            witness_eval: merge.witness_eval,
+            prefix_compact: merge.prefix_compact,
+            bool_proof_rlimit: limits.solver.bool_proof_rlimit,
+            witness_shadow: diagnostics.witness_shadow,
+            witness_local_shadow: diagnostics.witness_local_shadow,
+            bool_proof_profile: diagnostics.bool_proof_profile,
+            progress: diagnostics.progress,
+            native_snapshot: diagnostics.native_snapshot,
+            call_census: diagnostics.call_census,
+            probe_round_cost: diagnostics.probe_round_cost,
+            probe_query_timings: diagnostics.probe_query_timings,
+            query_dump_sites: diagnostics.query_dump_sites.clone(),
+            same_context_sites: diagnostics.same_context_sites.clone(),
+            query_dump_dir: diagnostics.query_dump_dir.clone(),
+            obligation_dump_dir: diagnostics.obligation_dump_dir.clone(),
+        }
+    }
 
     pub fn validate(&self) -> Result<(), String> {
         if let Some(value) = self.max_merge_depth {
             if value != -1 && (value <= 0 || usize::try_from(value).is_err()) {
                 return Err("max_merge_depth 必须为正整数或 -1（不设区域上限）".into());
             }
+        }
+        if self.no_smt_keep_bool_proofs && (!self.no_smt || self.skip_bool_proofs) {
+            return Err("no_smt_keep_bool_proofs 需要 no_smt=true 且 skip_bool_proofs=false".into());
         }
         if self.same_context_sites.len() > 2 {
             return Err("same_context_sites 最多选择两个位置".into());
@@ -100,24 +142,5 @@ mod tests {
         assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
         assert_eq!(RegionOptions::current(), &RegionOptions::default());
         assert_eq!(RegionOptions::default().bool_proof_rlimit, 0);
-    }
-}
-
-#[cfg(test)]
-mod region_depth_tests {
-    use super::*;
-    #[test]
-    fn region_depth_default_finite_unlimited_and_invalid() {
-        assert_eq!(RegionOptions::default().merge_depth_limit(), None);
-        for (value, expected) in [(16, Some(16)), (32, Some(32)), (64, Some(64)), (-1, None)] {
-            let options: RegionOptions = toml::from_str(&format!("max_merge_depth={value}")).unwrap();
-            options.validate().unwrap();
-            assert_eq!(options.merge_depth_limit(), expected);
-        }
-        for value in ["0", "-2", "true", "\"32\""] {
-            assert!(toml::from_str::<RegionOptions>(&format!("max_merge_depth={value}"))
-                .and_then(|o| o.validate().map_err(serde::de::Error::custom))
-                .is_err());
-        }
     }
 }

@@ -2,6 +2,7 @@
 use super::*;
 use isla_lib::bitvector::b64::B64;
 use isla_lib::executor::samples::Sample;
+use isla_lib::executor::RegionMergeRecord;
 use isla_lib::ir::{Symtab, Val};
 use isla_lib::smt::{
     checkpoint,
@@ -98,7 +99,7 @@ fn fixture(duplicate: bool) -> (Vec<ResidentPath<B64>>, Vec<Sample>) {
         paths.push(ResidentPath {
             checkpoint: checkpoint(&mut solver),
             path,
-            records,
+            records: records.into(),
             signature,
             pure_definitions: Vec::new(),
         });

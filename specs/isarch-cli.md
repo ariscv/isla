@@ -86,14 +86,16 @@ isarch -A <ir> -C <config> --path-merging solve-state --clause=STORE
 无需额外声明某个通用寄存器，也不传固定通用寄存器的 `--prestate` 或附加地址掩码。
 `--instruction-bits` 仍供用户明确要求固定机器码时使用，通用探索脚本不依赖它。
 探索优先启用路径合并，
-重复分叉使用现有 `branch_region_limits` 预算；预算截断必须报告为探索不完整。
+重复分叉使用 `path_merge.regions` 中 `kind="branch_limit"` 的预算；预算截断必须报告为探索不完整。
 当符号下标引起算子重试拆分时，默认沿用求解模型的候选顺序；该顺序不能用来跨进程标识路径。
 需要重复导出及 fuzz 第 0 步认证时，在导出和判定共用的执行配置中启用路径合并：
 
 ```toml
 [execution_limits]
 strict = false
-path_merging = true
+
+[execution_limits.path_merge]
+enabled = true
 ```
 
 区域合并默认不设步数预算（-1）。配置正整数后，两臂、调用和普通嵌套区域共同扣步，可按轮折叠的循环独立逐轮续配。
@@ -101,11 +103,13 @@ path_merging = true
 
 ```toml
 [execution_limits]
-path_merging = true
-region_step_budget = -1
+
+[execution_limits.path_merge]
+enabled = true
+step_budget = -1
 ```
 
-也可使用 `--region-step-budget=-1`，它覆盖 TOML 中的同名字段。合法值为正整数或 `-1`；`0`、其他负数、非整数均报错。
+也可使用 `--region-step-budget=-1`，它覆盖 TOML 的 `execution_limits.path_merge.step_budget`。合法值为正整数或 `-1`；`0`、其他负数、非整数均报错。
 关闭预算时，`region_progress` 继续统计实际步数，预算耗尽位置 `exhausted` 为 `null`；循环日志中 `steps_since_budget_renewal` 为 `null`，`step_budget_unlimited=true`。
 
 ## 慢 SMT 查询导出
@@ -443,32 +447,33 @@ isarch [原 J1 探索参数] \
 
 ## 分段合并候选与诊断配置
 
-这些选项放在主配置或 `--execution-limits-config` 文件的 `[execution_limits.region_options]` 表中。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。所有选项默认保持原执行行为，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
+这些选项放在主配置或 `--execution-limits-config` 文件中：功能字段放 `[execution_limits.path_merge]`，只读诊断放 `[execution_limits.path_merge.diagnostics]`，`bool_proof_rlimit` 放 `[execution_limits.solver]`。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。所有选项默认保持原执行行为，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
 
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
-| `defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
-| `lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
-| `witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
-| `witness_shadow` | `--region-witness-shadow=true/false` | `false` | 见证影子诊断 |
-| `witness_local_shadow` | `--region-witness-local-shadow=true/false` | `false` | 局部见证补全影子诊断 |
-| `prefix_compact` | `--region-prefix-compact=true/false` | `false` | 迭代边界前缀固化 |
-| `bool_proof_profile` | `--region-bool-proof-profile=true/false` | `false` | 可选布尔证明资源统计 |
-| `progress` | `--region-progress=true/false` | `false` | 区域步数和查询进度诊断 |
-| `native_snapshot` | `--region-native-snapshot=true/false` | `false` | 原生查询快照 |
-| `call_census` | `--call-census=true/false` | `false` | 有界函数调用统计 |
-| `probe_round_cost` | `--probe-round-cost=true/false` | `false` | 逐轮成本分账 |
-| `probe_query_timings` | `--probe-query-timings=true/false` | `false` | 有界逐查询计时 |
-| `bool_proof_rlimit` | `--region-bool-proof-rlimit=<u32>` | `0` | 可选布尔证明资源上限；0 不限，路径可达性判定不受此上限影响 |
-| `query_dump_sites` | `--query-dump-sites=f@1,g@2` | `[]` | 按已有位置字符串选取有界查询导出点 |
-| `same_context_sites` | `--same-context-sites=f@1,g@2` | `[]` | 最多两个同 Context 配对位置 |
-| `query_dump_dir` | `--query-dump-dir=<path>` | 未配置 | 查询 SMT2 导出目录；配置 query_dump_sites 时必填 |
-| `obligation_dump_dir` | `--obligation-dump-dir=<path>` | 未配置 | 断言义务诊断目录 |
+| `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
+| `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
+| `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
+| `path_merge.diagnostics.witness_shadow` | `--region-witness-shadow=true/false` | `false` | 见证影子诊断 |
+| `path_merge.diagnostics.witness_local_shadow` | `--region-witness-local-shadow=true/false` | `false` | 局部见证补全影子诊断 |
+| `path_merge.prefix_compact` | `--region-prefix-compact=true/false` | `false` | 迭代边界前缀固化 |
+| `path_merge.diagnostics.bool_proof_profile` | `--region-bool-proof-profile=true/false` | `false` | 可选布尔证明资源统计 |
+| `path_merge.diagnostics.progress` | `--region-progress=true/false` | `false` | 区域步数和查询进度诊断 |
+| `path_merge.diagnostics.native_snapshot` | `--region-native-snapshot=true/false` | `false` | 原生查询快照 |
+| `path_merge.diagnostics.call_census` | `--call-census=true/false` | `false` | 有界函数调用统计 |
+| `path_merge.diagnostics.probe_round_cost` | `--probe-round-cost=true/false` | `false` | 逐轮成本分账 |
+| `path_merge.diagnostics.probe_query_timings` | `--probe-query-timings=true/false` | `false` | 有界逐查询计时 |
+| `solver.bool_proof_rlimit` | `--region-bool-proof-rlimit=<u32>` | `0` | 可选布尔证明资源上限；0 不限，路径可达性判定不受此上限影响 |
+| `path_merge.diagnostics.query_dump_sites` | `--query-dump-sites=f@1,g@2` | `[]` | 按已有位置字符串选取有界查询导出点 |
+| `path_merge.diagnostics.same_context_sites` | `--same-context-sites=f@1,g@2` | `[]` | 最多两个同 Context 配对位置 |
+| `path_merge.diagnostics.query_dump_dir` | `--query-dump-dir=<path>` | 未配置 | 查询 SMT2 导出目录；配置 query_dump_sites 时必填 |
+| `path_merge.diagnostics.obligation_dump_dir` | `--obligation-dump-dir=<path>` | 未配置 | 断言义务诊断目录 |
 
 ```toml
-[execution_limits.region_options]
+[execution_limits.path_merge]
 defer_exit_check = true
 witness_eval = true
+[execution_limits.path_merge.diagnostics]
 progress = false
 ```
 
@@ -485,12 +490,73 @@ isarch -A model.ir -C scenario.toml -T 32 --path-merging \
 开启可能增加内存占用。历史 STORE 两分钟探针峰值约 10.4 GiB，关闭侧约 8.9 GiB；PMP=2 的有限两输入 judge 峰值约 68.8 GiB，62 GiB 上限不足，须为该类验证选择更高的内存上限。这些测量仅针对特定输入与探索窗口，不代表任意规模的内存保证，也不签全域等价或完整 DAG。
 
 
+## 无 SMT 候选配置
+
+四个开关统一放在 `[execution_limits.solver]`，默认均为 `false`：
+
+| TOML 字段 | CLI（名称不变） | 行为 |
+| --- | --- | --- |
+| `skip_branch_checks` | `--skip-branch-checks` | 跳过分支可行性检查，保留两臂完整守卫 |
+| `skip_bool_proofs` | `--skip-bool-proofs` | 跳过可选布尔恒值证明 |
+| `no_smt` | `--no-smt` | 停止所有真实 check，仅构造未认证候选 |
+| `no_smt_keep_bool_proofs` | `--no-smt-keep-bool-proofs` | 全局无 SMT 模式下恢复可选布尔恒值证明，包括 defer 内的查询 |
+
+CLI 裸 flag 等于 `true`，显式 `=false` 可覆盖 TOML。`no_smt_keep_bool_proofs` 要求 `no_smt=true` 且 `skip_bool_proofs=false`。不读取这些选项的环境变量。
+
+```toml
+[execution_limits.solver]
+bool_proof_rlimit = 0
+no_smt = true
+# 可选第三种：no_smt_keep_bool_proofs = true
+[execution_limits.path_merge]
+defer_exit_check = true
+lazy_z3_scope = true
+witness_eval = true
+[execution_limits.path_merge.diagnostics]
+progress = true
+```
+
+全局无 SMT 模式只支持 `solve-state --path-cache-only --path-cache-write <新目录>`，不能同时认证样本或读回缓存。产物标 `uncertified`，探索保持 partial；候选计数不能作为已认证覆盖。`--memory-stats` 输出 `no_smt_summary`；全关应为零真实 check，第三种仍会运行可选布尔恒值证明。旧 `[execution_limits.path_merge]`（包括其中的 `no_smt`）报错；四个开关也不能放在 `path_merge` 或其 `diagnostics` 表中。
+
+
 ## resident judge 分批恢复
 
 普通 `--judge-resident INPUT --judge-resident-out OUTPUT` 默认每批恢复 `-T` 条完成路径，每批对全部输入执行原 judge，再释放该批求解器和 Context。所有保存路径仍参与判定，跨批重复接纳仍报错，守卫和后态唯一性证明保持原行为。保存路径及其事件记录仍占内存，因此批大小只约束恢复出的 native solver 数，不保证整个进程的固定内存上限。
 
 `--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。
 
-区域嵌套默认不限；TOML `[execution_limits.region_options] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
+区域嵌套默认不限；TOML `[execution_limits.path_merge] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
 
-实验选项 `[execution_limits.region_options] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
+实验选项 `[execution_limits.path_merge] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
+## 配置布局与迁移
+
+`execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
+
+每条局部规则必须显式指定 `kind`，不得靠缺失字段猜类别：
+
+| kind | 原规则含义 | 必需配置 |
+| --- | --- | --- |
+| `limit_filter` | 分支/循环执行限制只作用于指定源码范围；不限制路径级预算 | 源码坐标 |
+| `branch_limit` | 指定范围内每个分支点的独立预算 | 源码坐标、`max_forks_per_branch` |
+| `fork_limit` | 原区域 fork 预算及可选方向偏置 | 源码坐标、`max_forks_per_region`；偏置仍需同时指定 `sample_bias`、`sample_bias_direction` |
+| `merge_policy` | 函数或源码范围的合并策略，优先级保持不变 | `mode` 与 `function` 或源码坐标二选一 |
+
+源码坐标是 `file`、`start_line`、`start_column`、`end_line`、`end_column`。旧筛选范围会先清除预置的两类局部预算，然后应用同一配置里的局部覆盖；未知文件仍匹配不到位置。规则数组不能为空。
+
+```toml
+[execution_limits]
+max_forks_per_branch = 7
+[execution_limits.solver]
+bool_proof_rlimit = 0
+[execution_limits.path_merge]
+enabled = true
+step_budget = 8192
+[execution_limits.path_merge.diagnostics]
+progress = false
+[[execution_limits.path_merge.regions]]
+kind = "merge_policy"
+mode = "adaptive"
+function = "example_function"
+```
+
+旧 `path_merging`、`region_step_budget`、`region_options`、`regions`、`branch_region_limits`、`region_fork_limits`、`merge_policy`、`merge_enumeration` 顶层字段已删除，出现即报错并提示新位置。没有兼容别名。历史归档配置仅适用于其原二进制；复用时先迁移配置，再按语义重新验证输入。
