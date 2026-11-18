@@ -62,12 +62,12 @@ pub fn is_solver_failure(error: &ExecError) -> bool {
 
 /// 只在探索决定丢弃时调用。返回 true 表示应走当前候选的死路径出口。
 pub fn discard_solver_path<B: BV>(
-    policy: SolverOnUnknown,
+    policy: Option<SolverOnUnknown>,
     error: &ExecError,
     frame: &LocalFrame<'_, B>,
     shared: &SharedState<'_, B>,
-    classification: Option<&str>,
 ) -> bool {
+    let Some(policy) = policy else { return false };
     let (source, purpose, reason, wall, limit) = match error {
         ExecError::Smt(SmtError::Timeout(timeout)) => (
             timeout.source_loc,
@@ -86,7 +86,6 @@ pub fn discard_solver_path<B: BV>(
         stats.solver_failed.store(true, std::sync::atomic::Ordering::Relaxed);
         return false;
     }
-    let purpose = classification.unwrap_or(purpose);
     let source = if source.is_unknown() {
         frame.instrs[..(frame.pc() + 1).min(frame.instrs.len())]
             .iter()

@@ -1,7 +1,8 @@
 use super::is_mapping_rejection;
 use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
-use isla_lib::executor::{execute_ir_function_with_checkpoint, Run};
+use isla_lib::executor::stats::solver_failures::is_solver_failure;
+use isla_lib::executor::{execute_ir_function_with_checkpoint_and_limits, Run, TaskState};
 use isla_lib::ir::{Bindings, SharedState, UVal, Val};
 use isla_lib::log;
 use isla_lib::primop_util::length_bits;
@@ -28,7 +29,7 @@ fn mapping_paths<B: BV>(
     isolated: &Checkpoint<B>,
 ) -> Result<MappingPaths<B>, ExecError> {
     let paths = Mutex::new(MappingPaths { encoded: Vec::new(), rejected: Vec::new(), error: None });
-    execute_ir_function_with_checkpoint(
+    execute_ir_function_with_checkpoint_and_limits(
         function_name,
         &[instruction.clone()],
         shared_state,
@@ -36,6 +37,16 @@ fn mapping_paths<B: BV>(
         lets,
         &paths,
         &|_, _, result, shared_state, mut solver, paths| {
+            if let Err((error, frame)) = &result {
+                if is_solver_failure(error) || matches!(error, ExecError::Z3Unknown) {
+                    frame.configure_timeout_smt_dump(error, shared_state);
+                    let mut paths = paths.lock().expect("编码收集器锁中毒");
+                    if paths.error.is_none() {
+                        paths.error = Some(error.clone());
+                    }
+                    return;
+                }
+            }
             let frame = match &result {
                 Ok((_, frame)) | Err((_, frame)) => frame,
             };
@@ -102,6 +113,7 @@ fn mapping_paths<B: BV>(
         },
         start,
         None,
+        TaskState::new().for_validation(),
     );
     let mut paths = paths.into_inner().expect("编码收集器锁中毒");
     match paths.error.take() {

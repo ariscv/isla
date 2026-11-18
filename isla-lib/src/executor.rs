@@ -2044,7 +2044,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Err(error) => error,
         };
         if matches!(error, ExecError::SolverDroppedPath)
-            || stats::solver_failures::discard_solver_path(solver.on_unknown(), &error, frame, shared_state, None)
+            || stats::solver_failures::discard_solver_path(solver.exploration_on_unknown(), &error, frame, shared_state)
         {
             return Ok(Run::Dead);
         }
@@ -2073,11 +2073,10 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Ok(false) | Err(ExecError::SolverDroppedPath) => return Ok(Run::Dead),
             Err(error)
                 if stats::solver_failures::discard_solver_path(
-                    solver.on_unknown(),
+                    solver.exploration_on_unknown(),
                     &error,
                     frame,
                     shared_state,
-                    None,
                 ) =>
             {
                 return Ok(Run::Dead);
@@ -2104,7 +2103,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
-        if solver.on_unknown() == crate::config::SolverOnUnknown::Error && shared_state.execution_stats.solver_failed()
+        if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Error)
+            && shared_state.execution_stats.solver_failed()
         {
             return Ok(Run::Dead);
         }
@@ -3431,7 +3431,9 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     queue.push(task);
     while let Some(mut task) = queue.pop() {
         let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
-        let ctx = Context::new(Config::new());
+        let mut cfg = Config::new();
+        cfg.validation = task.state.validation;
+        let ctx = Context::new(cfg);
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
             solver.add_event(event);
@@ -3477,7 +3479,8 @@ fn do_work<'ir, 'task, B: BV, R>(
     collector: &Collector<'ir, B, R>,
 ) -> Fraction {
     let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
-    let cfg = Config::new();
+    let mut cfg = Config::new();
+    cfg.validation = task.state.validation;
     let ctx = Context::new(cfg);
     let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
     if let Some((def, event)) = task.fork_cond {
@@ -13111,6 +13114,28 @@ fn zcaller(za, zb) {
         let drops = shared.execution_stats.solver_path_drops_since(0);
         assert_eq!(drops.count, 1);
         assert_eq!(drops.first_locations[0].purpose, "assertion");
+    }
+
+    #[test]
+    fn solver_unknown_in_validation_reaches_the_collector() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let flag = test_name(100);
+        let frame =
+            make_frame(vec![Instr::Decl(flag, Ty::Bool, info()), Instr::Jump(Exp::Id(flag), 2, info()), Instr::End]);
+        let state = TaskState::new().for_validation();
+        let results = std::cell::RefCell::new(Vec::new());
+        crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            start_single(frame.task(TaskId::fresh(), &state), &shared, &results, &|_, _, result, _, _, results| {
+                results.borrow_mut().push(result.map(|(run, _)| run).map_err(|(error, _)| error));
+            });
+        });
+        assert!(matches!(
+            results.into_inner().as_slice(),
+            [Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))]
+        ));
+        assert!(!shared.execution_stats.solver_failed());
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
     }
 
     #[test]

@@ -682,12 +682,19 @@ pub fn configure_solver_options(options: SolverOptions) {
 /// Z3 配置及执行选项；释放时清理 Z3 配置句柄。
 pub struct Config {
     pub solver_options: SolverOptions,
+    pub(crate) validation: bool,
     z3_cfg: Z3_config,
 }
 
 impl Config {
     pub fn new() -> Self {
-        unsafe { Config { z3_cfg: Z3_mk_config(), solver_options: SOLVER_OPTIONS.get().copied().unwrap_or_default() } }
+        unsafe {
+            Config {
+                z3_cfg: Z3_mk_config(),
+                solver_options: SOLVER_OPTIONS.get().copied().unwrap_or_default(),
+                validation: false,
+            }
+        }
     }
 }
 
@@ -727,6 +734,7 @@ pub fn global_set_param_value(id: &str, value: &str) {
 /// Context is a wrapper around `Z3_context`.
 pub struct Context {
     solver_options: SolverOptions,
+    validation: bool,
     z3_ctx: Z3_context,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
@@ -751,6 +759,7 @@ impl Context {
         unsafe {
             Context {
                 solver_options: cfg.solver_options,
+                validation: cfg.validation,
                 z3_ctx: Z3_mk_context_rc(cfg.z3_cfg),
                 enum_cache: RefCell::new(HashMap::new()),
             }
@@ -3118,8 +3127,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         solver
     }
 
-    pub fn on_unknown(&self) -> crate::config::SolverOnUnknown {
-        self.ctx.solver_options.on_unknown
+    pub(crate) fn exploration_on_unknown(&self) -> Option<crate::config::SolverOnUnknown> {
+        (!self.ctx.validation).then_some(self.ctx.solver_options.on_unknown)
     }
 
     pub fn branch_checks_skipped(&self) -> bool {

@@ -11,8 +11,8 @@ use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
 use isla_lib::error::{ExecError, SmtError};
-use isla_lib::executor::stats::solver_failures::{discard_solver_path, is_solver_failure};
-use isla_lib::executor::{backtrace_string, execute_ir_function, LocalFrame, Run, ScopedCollector};
+use isla_lib::executor::stats::solver_failures::is_solver_failure;
+use isla_lib::executor::{backtrace_string, execute_ir_function_with_limits, LocalFrame, Run, ScopedCollector};
 use isla_lib::executor::{ExecutionLimits, TaskId, TaskState};
 use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::*;
@@ -113,7 +113,7 @@ pub(crate) fn concrete_function_result<'ir, B: BV + Send + Sync>(
     lets: &Bindings<'ir, B>,
 ) -> Result<Val<B>, String> {
     let outcomes: Mutex<Vec<Result<Val<B>, String>>> = Mutex::new(Vec::new());
-    execute_ir_function(
+    execute_ir_function_with_limits(
         function,
         &[arg],
         shared_state,
@@ -142,6 +142,7 @@ pub(crate) fn concrete_function_result<'ir, B: BV + Send + Sync>(
                 .expect("decode outcomes mutex poisoned")
                 .push(Err(format!("{} 执行失败: {}", function, error))),
         },
+        TaskState::new().for_validation(),
     );
     let outcomes = outcomes.into_inner().expect("decode outcomes mutex poisoned");
     if outcomes.is_empty() {
@@ -261,17 +262,22 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
     regs: &RegisterBindings<B>,
     lets: &Bindings<B>,
     execution_limits: &ExecutionLimits,
-) -> Result<bool, String> {
+) -> Result<bool, ExecError> {
     let bits_len = match encdec_bits {
         Val::Bits(bits) => bits.len(),
-        other => return Err(format!("zencdec_forwards 返回非位向量编码: {:?}", other)),
+        other => return Err(ExecError::Unreachable(format!("zencdec_forwards 返回非位向量编码: {:?}", other))),
     };
     let function = match bits_len {
         16 => "zext_decode_compressed",
         32 => "zext_decode",
-        other => return Err(format!("zencdec_forwards 产出 {} 位编码，只支持 16/32 位译码回环", other)),
+        other => {
+            return Err(ExecError::Unreachable(format!(
+                "zencdec_forwards 产出 {} 位编码，只支持 16/32 位译码回环",
+                other
+            )))
+        }
     };
-    let collected: Arc<Mutex<Vec<Result<Option<Val<B>>, String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let collected: Arc<Mutex<Vec<Result<Option<Val<B>>, ExecError>>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let sink = Arc::clone(&collected);
         let filter_match_failures = execution_limits.filter_match_failures;
@@ -292,45 +298,54 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
                 Ok((Run::Dead, _)) if filter_match_failures => {
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(Ok(None));
                 }
-                Err((error, _)) => {
-                    sink.lock().expect("回环译码收集器 mutex poisoned").push(Err(error.to_string()));
+                Err((error, frame)) => {
+                    frame.configure_timeout_smt_dump(&error, shared_state);
+                    sink.lock().expect("回环译码收集器 mutex poisoned").push(Err(error));
                 }
                 Ok((Run::Finished(Val::Poison), frame)) => {
-                    sink.lock().unwrap().push(Err(super::poison_diagnostic(&frame, shared_state)));
+                    sink.lock()
+                        .unwrap()
+                        .push(Err(ExecError::Unreachable(super::poison_diagnostic(&frame, shared_state))));
                 }
                 Ok((Run::Finished(ret), frame)) => {
                     let outcome = if frame.has_sampled_branch() {
-                        Err("译码回环经过分支采样".to_string())
+                        Err(ExecError::Unreachable("译码回环经过分支采样".to_string()))
                     } else {
                         match solver.check_sat(SourceLoc::unknown()) {
                             isla_lib::smt::SmtResult::Sat => Ok(Some(ret)),
                             isla_lib::smt::SmtResult::Unsat => Ok(None),
-                            other => Err(format!("译码回环 SMT 未得到 Sat/Unsat: {:?}", other)),
+                            isla_lib::smt::SmtResult::Unknown => Err(ExecError::Z3Unknown),
+                            isla_lib::smt::SmtResult::Error(error) => {
+                                let error = ExecError::Smt(error);
+                                frame.configure_timeout_smt_dump(&error, shared_state);
+                                Err(error)
+                            }
                         }
                     };
                     sink.lock().expect("回环译码收集器 mutex poisoned").push(outcome);
                 }
-                Ok((_, _)) => {
-                    sink.lock().expect("回环译码收集器 mutex poisoned").push(Err("译码回环未完成".to_string()))
-                }
+                Ok((_, _)) => sink
+                    .lock()
+                    .expect("回环译码收集器 mutex poisoned")
+                    .push(Err(ExecError::Unreachable("译码回环未完成".to_string()))),
             },
-            TaskState::new().with_execution_limits(execution_limits.clone()),
+            TaskState::new().with_execution_limits(execution_limits.clone()).for_validation(),
         );
     }
     let mut decoded = None;
     for outcome in collected.lock().expect("回环译码收集器 mutex poisoned").drain(..) {
-        let Some(value) = outcome.map_err(|error| format!("{} 译码回环失败: {}", function, error))? else {
+        let Some(value) = outcome? else {
             continue;
         };
         if !fixed_value_is_concrete(&value) {
-            return Err(format!("{} 译码回环返回非具体值: {:?}", function, value));
+            return Err(ExecError::Unreachable(format!("{} 译码回环返回非具体值: {:?}", function, value)));
         }
         let Val::Ctor(ctor, _) = value else {
-            return Err(format!("{} 译码结果不是指令构造子: {:?}", function, value));
+            return Err(ExecError::Unreachable(format!("{} 译码结果不是指令构造子: {:?}", function, value)));
         };
         if let Some(previous) = decoded {
             if previous != ctor {
-                return Err(format!("{} 译码回环存在不同构造子", function));
+                return Err(ExecError::Unreachable(format!("{} 译码回环存在不同构造子", function)));
             }
         }
         decoded = Some(ctor);
@@ -945,7 +960,7 @@ impl ErrorRecorder<'_> {
             Ok(sat) => sat,
             Err(error) => {
                 // 超时或 Unknown 只拒绝当前路径；沿用错误摘要与迹诊断，不能签成完整结果。
-                let diagnostics = self.record_terminal_error_diagnostic(&error, frame, shared_state);
+                let diagnostics = self.record_error_diagnostic(&error, frame, shared_state);
                 eprintln!(
                     "[TERMINAL_QUERY_REJECT] {}",
                     serde_json::json!({"path-signature": frame.path_signature(), "error": error.to_string()}),
@@ -976,24 +991,6 @@ impl ErrorRecorder<'_> {
             "error": error.to_string(),
         }));
         self.record_configured_error_diagnostic(error)
-    }
-
-    fn record_terminal_error_diagnostic<'ir, B: BV>(
-        &self,
-        error: &ExecError,
-        frame: &LocalFrame<'ir, B>,
-        shared_state: &SharedState<'ir, B>,
-    ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
-        if discard_solver_path(
-            isla_lib::smt::no_smt::options().on_unknown,
-            error,
-            frame,
-            shared_state,
-            Some("terminal_value"),
-        ) {
-            return Vec::new();
-        }
-        self.record_error_diagnostic(error, frame, shared_state)
     }
 
     fn record_configured_error_diagnostic(
@@ -2295,8 +2292,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     isla_lib::smt::SmtResult::Error(error) => ExecError::Smt(error),
                                     _ => unreachable!(),
                                 };
-                                trace_diagnostics =
-                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
@@ -2310,8 +2306,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         ) {
                             Ok(paths) => paths,
                             Err(error) => {
-                                trace_diagnostics =
-                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                 log!(log::PATH_RESULT, &format!("clause{} 符号编码失败: {}", instruction_name, error));
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
@@ -2322,8 +2317,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             zencode::decode(shared_state.symtab.to_str_demangled(*ctor)) == "Illegal_Instruction")
                         {
                             let error = ExecError::Unreachable("当前执行路径不存在合法机器编码".to_string());
-                            trace_diagnostics =
-                                error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
+                            trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
                             log!(log::PATH_RESULT, &format!("clause{} {}", instruction_name, error));
                             submit_trace(frame, &mut trace_diagnostics);
                             return;
@@ -2350,11 +2344,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 let mstatus_exp = match isla_lib::primop_util::smt_value(bits, SourceLoc::unknown()) {
                                     Ok(value) => value,
                                     Err(error) => {
-                                        trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                            &error,
-                                            frame,
-                                            shared_state,
-                                        );
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                         submit_trace(frame, &mut trace_diagnostics);
                                         return;
                                     }
@@ -2373,11 +2364,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
                                     isla_lib::smt::SmtResult::Error(error) => {
                                         let error = ExecError::Smt(error);
-                                        trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                            &error,
-                                            frame,
-                                            shared_state,
-                                        );
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                         submit_trace(frame, &mut trace_diagnostics);
                                         return;
                                     }
@@ -2407,11 +2395,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 ) {
                                     Ok(()) => (),
                                     Err(error @ (ExecError::Timeout | ExecError::Smt(_))) => {
-                                        trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                            &error,
-                                            frame,
-                                            shared_state,
-                                        );
+                                        trace_diagnostics =
+                                            error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                         log!(
                                             log::SYM_EXEC,
                                             &format!("finite-domain diversification failed: {}", error)
@@ -2459,8 +2444,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         .expect("solve collector mutex poisoned")
                                         .record_model_query_timeout();
                                 }
-                                trace_diagnostics =
-                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                 log!(log::SYM_EXEC, &format!("collector final SMT query failed: {}", error));
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
@@ -2474,8 +2458,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     isla_lib::smt::SmtResult::Unknown => ExecError::Z3Unknown,
                                     _ => unreachable!(),
                                 };
-                                trace_diagnostics =
-                                    error_recorder.record_terminal_error_diagnostic(&error, frame, shared_state);
+                                trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
@@ -2490,11 +2473,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     match target.solve_pre_state(&mut model, shared_state) {
                                         Ok(state) => isa_state.extend(state),
                                         Err(error) => {
-                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                &error,
-                                                frame,
-                                                shared_state,
-                                            );
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                             log!(
                                                 log::PATH_RESULT,
                                                 &format!(
@@ -2518,11 +2498,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                     "指令字段含未具体化或 Poison 值".to_string(),
                                                     SourceLoc::unknown(),
                                                 );
-                                                trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                    &error,
-                                                    frame,
-                                                    shared_state,
-                                                );
+                                                trace_diagnostics =
+                                                    error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                                 submit_trace(frame, &mut trace_diagnostics);
                                                 return;
                                             }
@@ -2533,12 +2510,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 let concrete = match model.get_val(value) {
                                                     Ok(value) => value,
                                                     Err(error) => {
-                                                        trace_diagnostics = error_recorder
-                                                            .record_terminal_error_diagnostic(
-                                                                &error,
-                                                                frame,
-                                                                shared_state,
-                                                            );
+                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                            &error,
+                                                            frame,
+                                                            shared_state,
+                                                        );
                                                         submit_trace(frame, &mut trace_diagnostics);
                                                         return;
                                                     }
@@ -2553,8 +2529,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                             ) {
                                                 Ok(assembly) => assembly,
                                                 Err(error) => {
-                                                    trace_diagnostics = error_recorder
-                                                        .record_terminal_error_diagnostic(&error, frame, shared_state);
+                                                    trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                        &error,
+                                                        frame,
+                                                        shared_state,
+                                                    );
                                                     log!(
                                                         log::PATH_RESULT,
                                                         &format!(
@@ -2604,10 +2583,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                                             .record_encdec_guard_reject();
                                                                         continue;
                                                                     }
-                                                                    Err(message) => {
-                                                                        let error = ExecError::Unreachable(message);
+                                                                    Err(error) => {
                                                                         trace_diagnostics = error_recorder
-                                                                            .record_terminal_error_diagnostic(
+                                                                            .record_error_diagnostic(
                                                                                 &error,
                                                                                 frame,
                                                                                 shared_state,
@@ -2621,7 +2599,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                                 Ok(fmt_val) => Some(fmt_val.to_str(shared_state)),
                                                                 Err(err) => {
                                                                     trace_diagnostics = error_recorder
-                                                                        .record_terminal_error_diagnostic(
+                                                                        .record_error_diagnostic(
                                                                             &err,
                                                                             frame,
                                                                             shared_state,
@@ -2641,8 +2619,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    trace_diagnostics = error_recorder
-                                                        .record_terminal_error_diagnostic(&error, frame, shared_state);
+                                                    trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                        &error,
+                                                        frame,
+                                                        shared_state,
+                                                    );
                                                     log!(
                                                         log::PATH_RESULT,
                                                         &format!(
@@ -2658,12 +2639,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 match FmtVal::from_val(&symbolic_encoding, &mut model) {
                                                     Ok(value) => value.to_str(shared_state),
                                                     Err(error) => {
-                                                        trace_diagnostics = error_recorder
-                                                            .record_terminal_error_diagnostic(
-                                                                &error,
-                                                                frame,
-                                                                shared_state,
-                                                            );
+                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                            &error,
+                                                            frame,
+                                                            shared_state,
+                                                        );
                                                         submit_trace(frame, &mut trace_diagnostics);
                                                         return;
                                                     }
@@ -2686,12 +2666,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                         let error = ExecError::Unreachable(
                                                             "成功执行路径没有合法机器编码".to_string(),
                                                         );
-                                                        trace_diagnostics = error_recorder
-                                                            .record_terminal_error_diagnostic(
-                                                                &error,
-                                                                frame,
-                                                                shared_state,
-                                                            );
+                                                        trace_diagnostics = error_recorder.record_error_diagnostic(
+                                                            &error,
+                                                            frame,
+                                                            shared_state,
+                                                        );
                                                         submit_trace(frame, &mut trace_diagnostics);
                                                     }
                                                     return;
@@ -2699,11 +2678,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                             }
                                         }
                                         Err(e) => {
-                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                &e,
-                                                frame,
-                                                shared_state,
-                                            );
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&e, frame, shared_state);
                                             log!(
                                                 log::PATH_RESULT,
                                                 &format!("警告: clause{} model.get_val失败 {:?}", instruction_name, e)
@@ -2789,11 +2765,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     {
                                         Ok(value) => value,
                                         Err(error) => {
-                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                &error,
-                                                frame,
-                                                shared_state,
-                                            );
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
@@ -2802,11 +2775,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                         match target.solve_post_state(frame.regs(), &mut model, shared_state) {
                                             Ok(value) => value,
                                             Err(error) => {
-                                                trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                    &error,
-                                                    frame,
-                                                    shared_state,
-                                                );
+                                                trace_diagnostics =
+                                                    error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                                 submit_trace(frame, &mut trace_diagnostics);
                                                 return;
                                             }
@@ -2818,20 +2788,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                                 format!("返回值含未具体化或 Poison 分量: {:?}", value),
                                                 SourceLoc::unknown(),
                                             );
-                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                &error,
-                                                frame,
-                                                shared_state,
-                                            );
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
                                         Err(error) => {
-                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                &error,
-                                                frame,
-                                                shared_state,
-                                            );
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
@@ -2840,11 +2804,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     (memory_events, pre_memory, post_memory) = match witness {
                                         Ok(witness) => witness,
                                         Err(error) => {
-                                            trace_diagnostics = error_recorder.record_terminal_error_diagnostic(
-                                                &error,
-                                                frame,
-                                                shared_state,
-                                            );
+                                            trace_diagnostics =
+                                                error_recorder.record_error_diagnostic(&error, frame, shared_state);
                                             submit_trace(frame, &mut trace_diagnostics);
                                             return;
                                         }
@@ -3635,7 +3596,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_query_failure_discards_path_and_records_partial() {
+    fn terminal_query_solver_failures_record_errors_without_invalidating_exploration() {
         let function_text = zencode::encode("test_function");
         let mut symtab = Symtab::new();
         let function_name = symtab.intern(&function_text);
@@ -3650,29 +3611,36 @@ mod tests {
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
         });
-        for (result, expected_drops) in
-            [(isla_lib::smt::SmtResult::Unknown, 0), (isla_lib::smt::SmtResult::Error(SmtError::Timeout(timeout)), 1)]
-        {
+        for error in [
+            SmtError::Unknown {
+                source_loc: SourceLoc::unknown(),
+                purpose: "terminal_value",
+                wall: Duration::from_millis(1),
+                limit: Some(Duration::from_secs(1)),
+            },
+            SmtError::Timeout(timeout),
+        ] {
+            let is_timeout = matches!(error, SmtError::Timeout(_));
             let collected = Mutex::new(SolveCollectorState::new());
             let reporter = TimeoutReporter::new(TimeoutReportConfig {
                 output: TimeoutSmtOutput::new(false, true, false),
                 directory: PathBuf::new(),
             });
             let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
-            assert!(!recorder.terminal_path_is_sat(result, &frame, &shared_state));
-            // 拒绝发生在样本与常驻路径入库之前，不能伪装成完整结果。
+            assert!(!recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Error(error), &frame, &shared_state));
             let mut state = collected.into_inner().unwrap();
             let drops = shared_state.execution_stats.solver_path_drops_since(0);
-            assert_eq!(drops.count, expected_drops);
+            assert_eq!(drops.count, 0);
+            assert!(!shared_state.execution_stats.solver_failed());
             state.summary.solver_path_drops = drops;
             assert!(state.cases.is_empty());
-            assert_eq!(state.summary.errors, usize::from(expected_drops == 0));
-            assert_eq!(state.summary.smt_timeouts, 0);
+            assert_eq!(state.summary.errors, 1);
+            assert_eq!(state.summary.smt_timeouts, usize::from(is_timeout));
+            assert!(matches!(state.first_error, Some(ExecError::Smt(_))));
             assert_eq!(state.summary.status(), "partial");
-            assert_eq!(state.diagnostics.len(), usize::from(expected_drops == 0));
-            if expected_drops == 1 {
-                assert_eq!(state.summary.json()["valid"], false);
-            }
+            assert_eq!(state.diagnostics.len(), 1);
+            assert!(state.summary.json().get("valid").is_none());
+            assert_eq!(exploration_exit_code(1, &shared_state), 1);
         }
     }
 
@@ -5653,7 +5621,7 @@ mod tests {
         let bits = Val::Bits(B129::new(0x0000b103, 32));
         for merge in [false, true] {
             let limits = ExecutionLimits::default().with_path_merging(merge);
-            assert_eq!(encdec_guard_roundtrip_ok(load, &bits, &shared, &decode_regs, &lets, &limits), Ok(true));
+            assert!(encdec_guard_roundtrip_ok(load, &bits, &shared, &decode_regs, &lets, &limits).unwrap());
         }
         // 用真实构造子及最小译码体单独检验策略传递；未初始化 Bool 是
         // 新 solver 自己声明的值，不携带主 solver 的符号。
@@ -5680,7 +5648,7 @@ mod tests {
         for merge in [false, true] {
             shared.execution_stats.reset();
             let limits = ExecutionLimits::default().with_path_merging(merge);
-            assert_eq!(encdec_guard_roundtrip_ok(illegal, &bits, &shared, &gate_regs, &lets, &limits), Ok(true));
+            assert!(encdec_guard_roundtrip_ok(illegal, &bits, &shared, &gate_regs, &lets, &limits).unwrap());
             assert_eq!(shared.execution_stats.fork_json(&shared.symtab)["total"], usize::from(!merge));
             assert_eq!(shared.execution_stats.merge_json()["successes"], usize::from(merge));
         }
@@ -5695,9 +5663,9 @@ mod tests {
         let load_ctor = shared_state.symtab.lookup("zLOAD");
         // 32'h7e8e_7003：imm=0x7e8, rs1=x28, funct3=111, rd=x0, opcode=0000011
         let ldu_bits = Val::Bits(B129::new(0x7e8e_7003, 32));
-        assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &ldu_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(false),
+        assert!(
+            !encdec_guard_roundtrip_ok(load_ctor, &ldu_bits, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "ldu 编码（funct3=111）应被 encdec 守卫回环拒绝"
         );
     }
@@ -5710,16 +5678,16 @@ mod tests {
         let amo_ctor = shared_state.symtab.lookup("zAMO");
         // 32'h0900_402f：funct5=amoswap, funct3=100（16 字节 q），实跑产物形态
         let swap_q = Val::Bits(B129::new(0x0900_402f, 32));
-        assert_eq!(
-            encdec_guard_roundtrip_ok(amo_ctor, &swap_q, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(false),
+        assert!(
+            !encdec_guard_roundtrip_ok(amo_ctor, &swap_q, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "amoswap.q 编码（无 16 字节 swap）应被回环拒绝"
         );
         // amoswap.h（Zabha）译回 zAMO，放行
         let swap_h = Val::Bits(B129::new(0x09ff_902f, 32));
-        assert_eq!(
-            encdec_guard_roundtrip_ok(amo_ctor, &swap_h, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(true),
+        assert!(
+            encdec_guard_roundtrip_ok(amo_ctor, &swap_h, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "Zabha amoswap.h 编码应译回 zAMO 并通过回环"
         );
     }
@@ -5733,15 +5701,15 @@ mod tests {
         let (shared_state, regs, lets) = real_ir_env();
         let vsseg_ctor = shared_state.symtab.lookup("zVSSEGTYPE");
         let vse8 = Val::Bits(B129::new(0x0000_0027, 32));
-        assert_eq!(
-            encdec_guard_roundtrip_ok(vsseg_ctor, &vse8, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(true),
+        assert!(
+            encdec_guard_roundtrip_ok(vsseg_ctor, &vse8, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "vse8.v 编码应译回 zVSSEGTYPE 并通过回环"
         );
         let load_ctor = shared_state.symtab.lookup("zLOAD");
-        assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &vse8, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(false),
+        assert!(
+            !encdec_guard_roundtrip_ok(load_ctor, &vse8, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "向量 store 编码对 zLOAD 构造子应拒绝"
         );
     }
@@ -5753,9 +5721,9 @@ mod tests {
         let load_ctor = shared_state.symtab.lookup("zLOAD");
         // 32'h4000_0003：imm=0x400, rs1=x0, funct3=000, rd=x0, opcode=0000011（lb）
         let lb_bits = Val::Bits(B129::new(0x4000_0003, 32));
-        assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &lb_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(true),
+        assert!(
+            encdec_guard_roundtrip_ok(load_ctor, &lb_bits, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "合法 lb 编码应通过 encdec 守卫回环"
         );
     }
@@ -5767,15 +5735,15 @@ mod tests {
         let (shared_state, regs, lets) = real_ir_env();
         let nop_bits = Val::Bits(B129::new(0x0001, 16));
         let c_nop_ctor = shared_state.symtab.lookup("zC_NOP");
-        assert_eq!(
-            encdec_guard_roundtrip_ok(c_nop_ctor, &nop_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(true),
+        assert!(
+            encdec_guard_roundtrip_ok(c_nop_ctor, &nop_bits, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "c.nop 编码应译回 zC_NOP 并通过回环"
         );
         let load_ctor = shared_state.symtab.lookup("zLOAD");
-        assert_eq!(
-            encdec_guard_roundtrip_ok(load_ctor, &nop_bits, &shared_state, &regs, &lets, &ExecutionLimits::default()),
-            Ok(false),
+        assert!(
+            !encdec_guard_roundtrip_ok(load_ctor, &nop_bits, &shared_state, &regs, &lets, &ExecutionLimits::default())
+                .unwrap(),
             "编码译回的构造子与原指令不一致时应拒绝"
         );
     }
@@ -5794,7 +5762,7 @@ mod tests {
             &ExecutionLimits::default(),
         )
         .expect_err("非位向量编码必须报错");
-        assert!(err.contains("非位向量"), "实际: {}", err);
+        assert!(err.to_string().contains("非位向量"), "实际: {}", err);
     }
 
     /// P3：保留编码开关默认关（过滤启用），"1" 开，"0" 关，非法值硬失败。

@@ -158,7 +158,12 @@ pub(super) fn path_is_feasible<B: BV>(
 ) -> Result<bool, ExecError> {
     match result.is_sat() {
         Err(error)
-            if super::stats::solver_failures::discard_solver_path(solver.on_unknown(), &error, frame, shared, None) =>
+            if super::stats::solver_failures::discard_solver_path(
+                solver.exploration_on_unknown(),
+                &error,
+                frame,
+                shared,
+            ) =>
         {
             Ok(false)
         }
@@ -598,7 +603,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                 return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
                             }
                             Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-                                if solver.on_unknown() == crate::config::SolverOnUnknown::Dead =>
+                                if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Dead) =>
                             {
                                 return Err(reject(frame, SpeculativeRejectReason::SolverUnknown));
                             }
@@ -624,7 +629,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
                         Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
                         Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-                            if solver.on_unknown() == crate::config::SolverOnUnknown::Dead =>
+                            if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Dead) =>
                         {
                             Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
                         }
@@ -754,7 +759,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             state.speculation_stats.record_reject(reason);
             shared.execution_stats.rule_finished(rule, Some(reason));
             shared.execution_stats.merge_finished(false);
-            if solver.on_unknown() == crate::config::SolverOnUnknown::Error
+            if solver.exploration_on_unknown() != Some(crate::config::SolverOnUnknown::Dead)
                 && stats::solver_failures::is_solver_failure(&error)
             {
                 return Err(error);
