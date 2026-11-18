@@ -3472,7 +3472,7 @@ mod tests {
 
     /// 构造一个内联的 `ExecutionLimitsConfig`，用来测 `solve_execution_limits` 这个函数本身的
     /// 行为（region 解析、文件名匹配、偏置/预算传递）。不读任何真实配置文件 / IR / Sail 源码，
-    /// 避免测试随 workaround TOML 漂移。
+    /// 测试使用固定的执行限制配置。
     fn inline_config(max_forks_per_branch: u32, region_limits: Vec<RegionForkLimitConfig>) -> ExecutionLimitsConfig {
         ExecutionLimitsConfig {
             max_forks_per_branch: Some(max_forks_per_branch),
