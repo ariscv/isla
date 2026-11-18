@@ -284,6 +284,59 @@ fn obligation_domain_excludes_even_earlier_normal_exit_and_keeps_outer_guard() {
 }
 
 #[test]
+fn region_util_defer_range_obligation_preserves_error_domain() {
+    const CHILD: &str = "REGION_UTIL_RANGE_TEST_CHILD";
+    let Ok(mode) = std::env::var(CHILD) else {
+        for mode in ["false", "true"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "smt::dedup::tests::region_util_defer_range_obligation_preserves_error_domain",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let enabled = mode == "true";
+    let mut options = crate::config::RegionOptions::default();
+    options.defer_range_proofs = enabled;
+    options.configure();
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let info = SourceLoc::unknown();
+    for safe in [false, true] {
+        let mut s = Solver::<B64>::new(&ctx);
+        let x = s.declare_const(Ty::Bool, info);
+        if safe {
+            s.assert(Var(x));
+        }
+        let root = s.start_transaction();
+        s.with_deferred_region_queries(|s| {
+            reset_path_smt_stats();
+            assert_eq!(s.check_sat_with_for_range(&Not(Box::new(Var(x))), info), if enabled { Unsat } else { Unknown });
+            assert_eq!(path_smt_stats().calls, 0, "出口前不查SMT");
+            s.assert(Bool(false));
+            assert_eq!(
+                s.check_deferred_assertions(info),
+                if enabled && !safe { Sat } else { Unsat },
+                "后续假断言不得掩盖不安全输入"
+            );
+        });
+        s.rollback_transaction(root);
+        assert_eq!(s.check_sat(info), Sat);
+    }
+}
+
+#[test]
 fn no_smt_stage1_switches_are_independent_and_never_certify_branches() {
     configure_tastic(Tactic::Qfaufbv);
     let info = SourceLoc::unknown();

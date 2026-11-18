@@ -100,6 +100,11 @@ fn merge_diagnostics_snapshot_child() {
     let stats = std::sync::Arc::new(super::ExecutionStats::new(false));
     let reporter = SnapshotReporter::start(stats, std::time::Duration::from_millis(20));
     emit(json!({"stage":"merge_states","difference":"missing_arm","reason":"incompatible_state"}));
+    if enabled() {
+        record_depth(23, 7, 44);
+        record_depth(23, 9, 48);
+        record_deferred_query("range_proof", SourceLoc::unknown());
+    }
     if std::env::var_os("MERGE_DIAG_SIGNAL_CHILD").is_some() {
         println!("ready");
         use std::io::Write;
@@ -130,6 +135,15 @@ fn merge_diagnostics_periodic_output_and_off() {
             assert!(text.is_empty(), "关闭时不得输出诊断：{text}");
         } else {
             assert!(!summaries.is_empty(), "周期快照未输出：{text}");
+            let rows: Vec<serde_json::Value> =
+                text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+            let depth = rows.iter().find(|row| row["kind"] == "region_depth_summary").unwrap();
+            assert_eq!(depth["depths"]["23"], 2);
+            assert_eq!(depth["max_depth"], 23);
+            assert_eq!(depth["max_call_depth"], 9);
+            assert_eq!(depth["max_transaction_depth"], 48);
+            let blocked = rows.iter().find(|row| row["kind"] == "region_deferred_query_summary").unwrap();
+            assert_eq!(blocked["queries"][0]["count"], 1);
             assert!(text
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())

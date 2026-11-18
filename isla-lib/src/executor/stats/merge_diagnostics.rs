@@ -521,6 +521,23 @@ pub(crate) fn emit(mut record: Value) {
         eprintln!("{line}");
     }
 }
+/// 每次真实区域尝试都记一票；关闭合并诊断时调用方不加锁。
+pub(crate) fn record_depth(depth: usize, call_depth: usize, transaction_depth: usize) {
+    let mut counts = COUNTS.get().unwrap().lock().unwrap();
+    *counts.depths.entry(depth).or_default() += 1;
+    counts.max_call_depth = counts.max_call_depth.max(call_depth);
+    counts.max_transaction_depth = counts.max_transaction_depth.max(transaction_depth);
+}
+
+pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::SourceLoc) {
+    if !enabled() {
+        return;
+    }
+    let mut counts = COUNTS.get().unwrap().lock().unwrap();
+    let key = json!({"purpose":purpose,"location":info}).to_string();
+    *counts.blocked_queries.entry(key).or_default() += 1;
+}
+
 pub(crate) fn unattributed_error(function: Name, pc: usize, error: &ExecError, symtab: &Symtab) {
     let recorded = ATTEMPTS.with(|stack| stack.borrow().last().is_some_and(|attempt| attempt.root.is_some()));
     if !recorded {
@@ -569,6 +586,10 @@ pub(crate) fn execute_arm_error(function: Name, pc: usize, error: &ExecError, sy
 }
 
 pub(super) struct DiagnosticCounts {
+    blocked_queries: BTreeMap<String, u64>,
+    depths: BTreeMap<usize, u64>,
+    max_call_depth: usize,
+    max_transaction_depth: usize,
     mode: Mode,
     keys: BTreeMap<String, (u64, u8)>,
     differences: BTreeMap<String, u64>,
@@ -582,6 +603,10 @@ pub(super) struct DiagnosticCounts {
 impl DiagnosticCounts {
     pub fn new(mode: Mode) -> Self {
         Self {
+            blocked_queries: BTreeMap::new(),
+            depths: BTreeMap::new(),
+            max_call_depth: 0,
+            max_transaction_depth: 0,
             mode,
             keys: BTreeMap::new(),
             differences: BTreeMap::new(),
@@ -600,7 +625,7 @@ impl DiagnosticCounts {
         self.total += 1;
         *self.differences.entry(record["difference"].as_str().unwrap().to_string()).or_default() += 1;
         let key = json!({"stage":record["stage"],"origin":record["origin"],"at":record["at"],
-            "reason":record["reason"],"slot":record["slot"],"path":record["path"],"left_shape":record["left"]["shape"],
+            "error":record["error"],"reason":record["reason"],"slot":record["slot"],"path":record["path"],"left_shape":record["left"]["shape"],
             "right_shape":record["right"]["shape"],"left_sort":record["left"]["sort"],
             "right_sort":record["right"]["sort"],"left_raw":record["left"]["raw"],"right_raw":record["right"]["raw"],"difference":record["difference"]})
         .to_string();
@@ -671,6 +696,22 @@ fn print_with_trigger(trigger: &str) {
         )
         .unwrap();
     }
+    writeln!(
+        out,
+        "{}",
+        json!({"kind":"region_depth_summary","snapshot":snapshot,
+        "depths":counts.depths,"max_depth":counts.depths.keys().next_back(),
+        "max_call_depth":counts.max_call_depth,"max_transaction_depth":counts.max_transaction_depth})
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "{}",
+        json!({"kind":"region_deferred_query_summary","snapshot":snapshot,
+        "queries":counts.blocked_queries.iter().map(|(key,count)|
+            json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count})).collect::<Vec<_>>()})
+    )
+    .unwrap();
     super::merge_timing::write_snapshot(&mut out, snapshot, trigger);
     let mut totals = counts.totals();
     totals["snapshot"] = json!(snapshot);

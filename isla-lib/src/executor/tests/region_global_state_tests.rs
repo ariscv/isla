@@ -121,7 +121,7 @@ fn region_m2_retained_unread_initial_is_published_without_read_event() {
 
 #[test]
 fn region_m2_long_finite_callee_preserves_masked_state_in_one_path() {
-    for (steps, expected_paths) in [(4200, 1), (9000, 2)] {
+    for (steps, expected_paths) in [(4200, 1), (9000, 1)] {
         let mut shared = empty_shared_state();
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
         let reg = shared.symtab.intern("zstate");

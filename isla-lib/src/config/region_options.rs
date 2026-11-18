@@ -6,6 +6,12 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegionOptions {
+    /// 区域推演嵌套上限；缺省或-1不限。
+    pub max_merge_depth: Option<i64>,
+    /// 范围证明转为出口待证义务；默认关闭。
+    pub defer_range_proofs: bool,
+    /// 构造子解包标签转为出口待证义务；默认关闭。
+    pub defer_ctor_checks: bool,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
     pub skip_branch_checks: bool,
     /// 跳过可选布尔恒值证明；默认关闭。
@@ -50,11 +56,21 @@ static OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 
 impl RegionOptions {
+    pub fn merge_depth_limit(&self) -> Option<usize> {
+        match self.max_merge_depth {
+            None => None,
+            Some(-1) => None,
+            Some(value) => Some(usize::try_from(value).expect("区域嵌套配置必须已校验")),
+        }
+    }
     /// 只保留执行前冻结的运行时快照；外部配置不再有 region_options 表。
     pub fn from_config(limits: &super::ExecutionLimitsConfig) -> Self {
         let merge = &limits.path_merge;
         let diagnostics = &merge.diagnostics;
         Self {
+            max_merge_depth: merge.max_merge_depth,
+            defer_range_proofs: merge.defer_range_proofs,
+            defer_ctor_checks: merge.defer_ctor_checks,
             skip_branch_checks: limits.solver.skip_branch_checks,
             skip_bool_proofs: limits.solver.skip_bool_proofs,
             no_smt: limits.solver.no_smt,
@@ -80,6 +96,11 @@ impl RegionOptions {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(value) = self.max_merge_depth {
+            if value != -1 && (value <= 0 || usize::try_from(value).is_err()) {
+                return Err("max_merge_depth 必须为正整数或 -1（不设区域上限）".into());
+            }
+        }
         if self.no_smt_keep_bool_proofs && (!self.no_smt || self.skip_bool_proofs) {
             return Err("no_smt_keep_bool_proofs 需要 no_smt=true 且 skip_bool_proofs=false".into());
         }

@@ -721,6 +721,16 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Val::SymbolicCtor(tag, mut possibilities) => match possibilities.remove(ctor_a) {
                     Some(v) => {
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
+                        if speculative
+                            && solver.region_queries_deferred()
+                            && crate::config::RegionOptions::current().defer_ctor_checks
+                        {
+                            // 解包只借用已有候选载荷；标签在完整到达域下必须获证，
+                            // 不能用后续成功断言把标签不符的输入掩掉。
+                            solver.note_deferred_mandatory_query("ctor_obligation", info);
+                            solver.defer_assertion(matches_tag, info);
+                            return Ok(Owned(v));
+                        }
                         let mismatch = smtlib::Exp::Not(Box::new(matches_tag.clone()));
                         if !solver.no_smt_safety(&matches_tag, info) {
                             if speculative && !solver.check_sat_with(&mismatch, info).is_unsat()? {

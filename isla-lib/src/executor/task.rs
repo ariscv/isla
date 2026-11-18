@@ -114,7 +114,7 @@ impl<B> TaskState<B> {
         self.region_step_budget.map(Some).unwrap_or_else(|| {
             self.execution_limits
                 .as_ref()
-                .map_or(Some(super::region_merge::DEFAULT_REGION_STEP_BUDGET), |limits| limits.region_step_budget)
+                .map_or(super::region_merge::DEFAULT_REGION_STEP_BUDGET, |limits| limits.region_step_budget)
         })
     }
 

@@ -2500,7 +2500,7 @@ r0 = "0x0000000000000000"
         assert_eq!(defaults, ExecutionLimitsConfig::default());
         let limits = ExecutionLimits::default().with_config(&defaults, &symtab);
         assert!(!limits.path_merging);
-        assert_eq!(limits.region_step_budget, Some(8192));
+        assert_eq!(limits.region_step_budget, None);
         let config = merge_config(
             r#"
 [execution_limits.path_merge]
@@ -2620,6 +2620,28 @@ end_column = 0
     }
 
     #[test]
+    fn region_newbase_path_merge_fields_and_defaults() {
+        let limits = merge_config("[execution_limits.path_merge]\nmax_merge_depth=32\ndefer_range_proofs=true\ndefer_ctor_checks=true\nstep_budget=-1\n[execution_limits.solver]\nno_smt=true").unwrap();
+        let options = RegionOptions::from_config(&limits);
+        assert_eq!(options.merge_depth_limit(), Some(32));
+        assert!(options.defer_range_proofs && options.defer_ctor_checks && options.no_smt);
+        assert_eq!(crate::executor::ExecutionLimits::default().region_step_budget, None);
+        for field in [
+            "max_merge_depth=0",
+            "max_merge_depth=-2",
+            "max_merge_depth=true",
+            "defer_range_proofs=1",
+            "defer_ctor_checks=1",
+        ] {
+            assert!(merge_config(&format!("[execution_limits.path_merge]\n{field}")).is_err(), "{field}");
+        }
+        for field in ["max_merge_depth=32", "defer_range_proofs=true", "defer_ctor_checks=true"] {
+            assert!(merge_config(&format!("[execution_limits]\n{field}")).is_err());
+            assert!(merge_config(&format!("[execution_limits.region_options]\n{field}")).is_err());
+        }
+    }
+
+    #[test]
     fn region_options_toml_accepts_switches_and_limits() {
         assert!(merge_config(
             "[execution_limits.path_merge]\ndefer_exit_check=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
@@ -2693,6 +2715,9 @@ obligation_dump_dir = "obligations"
         assert_eq!(
             options,
             RegionOptions {
+                max_merge_depth: None,
+                defer_range_proofs: false,
+                defer_ctor_checks: false,
                 skip_branch_checks: true,
                 skip_bool_proofs: true,
                 no_smt: true,

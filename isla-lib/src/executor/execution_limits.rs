@@ -148,7 +148,7 @@ impl Default for ExecutionLimits {
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
-            region_step_budget: Some(super::region_merge::DEFAULT_REGION_STEP_BUDGET),
+            region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
             region_global_state: false,
             region_loop_analysis: false,
             merge_enumeration: Default::default(),
