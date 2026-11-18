@@ -527,6 +527,12 @@ progress = true
 
 终值重解可在 `[execution_limits.solver]` 显式设置正整数 `model_timeout_ms`。查询取此限时、`--smt-timeout` 和路径剩余时间中的最小值。
 
+### 通用 SMT 等价改写
+
+`[execution_limits.solver] bv_rewrite` 缺省为 `false`。`true` 启用全部规则；列表可选 `data-ite-eq`（数据 ITE 相等展开）、`mask-and`（位掩码恒等式）、`sign-bound`（符号扩展与常量比较）。空列表关闭。
+
+CLI `--bv-rewrite` 等价于 `--bv-rewrite=true`。`--bv-rewrite=false` 关闭，`--bv-rewrite=data-ite-eq,sign-bound` 独立选择规则；CLI 整体覆盖 TOML。没有开启新的 SMT 查询，同一改写也用于 `--no-smt`。`--memory-stats` 输出 `bv_rewrite_hits`，统计本进程各规则累计改写次数。
+
 ## resident judge 分批恢复
 
 普通 `--judge-resident INPUT --judge-resident-out OUTPUT` 默认每批恢复 `-T` 条完成路径，每批对全部输入执行原 judge，再释放该批求解器和 Context。所有保存路径仍参与判定，跨批重复接纳仍报错，守卫和后态唯一性证明保持原行为。保存路径及其事件记录仍占内存，因此批大小只约束恢复出的 native solver 数，不保证整个进程的固定内存上限。

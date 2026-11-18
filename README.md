@@ -832,3 +832,5 @@ no_smt = true
 `ordered_events` 缺省为 `false`，CLI 使用 `--ordered-events=true|false`。无序时，区域臂读取本臂最新的寄存器和变量值，前态读足迹按寄存器与字段合并。若需要保留寄存器访问偏序，可显式设为 `true`。两种策略都使用此配置。
 
 区域步数、嵌套深度与片段数缺省不限。循环的可配置步数预算及切段规则由两个组织者共用。旧 `[execution_limits]` 下的策略字段和旧 `region_options` 配置位置报错。
+
+`--bv-rewrite` 启用三条通用等价改写，默认关闭。可用 `--bv-rewrite=mask-and,sign-bound` 单独选规则，或用 `--bv-rewrite=false` 覆盖 TOML。TOML 在 `[execution_limits.solver]` 下接受 `bv_rewrite = true`、`false` 或规则名列表；规则名为 `data-ite-eq`、`mask-and`、`sign-bound`。加 `--memory-stats` 可查看进程累计命中次数。
