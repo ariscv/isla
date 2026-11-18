@@ -582,20 +582,6 @@ pub struct SourceRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ExplorationSummary {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub valid: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[serde(rename = "invalid_reasons")]
-    pub invalid_reasons: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "solver_timeout_dropped_paths")]
-    pub solver_timeout_dropped_paths: Option<usize>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[serde(rename = "solver_timeout_drop_locations")]
-    pub solver_timeout_drop_locations: Vec<isla_lib::executor::stats::solver_failures::SolverPathDrop>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "invalid_message")]
-    pub invalid_message: Option<String>,
     #[serde(default)]
     pub uncertified: bool,
     pub sampled_paths: u64,
@@ -1036,7 +1022,9 @@ pub fn save<B: BV>(
         ["valid", "invalid_reasons", "solver_timeout_dropped_paths", "solver_timeout_drop_locations", "invalid_message"]
     {
         if let Some(value) = summary.get(key) {
+            // 作废标记属于 JSON manifest，保持有类型的缓存摘要可按原布局二进制往返。
             manifest_value[key] = value.clone();
+            manifest_value["errors"][key] = value.clone();
         }
     }
     manifest_value["certification"] = json!(if manifest.errors.uncertified { "uncertified" } else { "checked" });
