@@ -21,6 +21,8 @@ use crate::bitvector::BV;
 use crate::primop;
 
 mod constants;
+mod poison_slots;
+pub(crate) use poison_slots::SlotProjection;
 
 #[cfg(test)]
 mod constant_liveness_tests;
@@ -500,6 +502,38 @@ pub struct FunctionRegions<B> {
     regions: HashMap<usize, Result<Arc<Region>, RegionRejection>>,
 }
 
+/// 显式表达式、目的槽和隐式读取，供槽位与当前内容的分析共用。
+fn instruction_operands<B>(instr: &Instr<Name, B>) -> (Vec<&Exp<Name>>, Option<&Loc<Name>>, Option<Name>) {
+    let mut expressions = Vec::new();
+    let mut destination = None;
+    let mut implicit_read = None;
+    match instr {
+        Instr::Decl(..) => (),
+        Instr::Init(_, _, exp, _) | Instr::Jump(exp, _, _) => expressions.push(exp),
+        Instr::Copy(loc, exp, _) | Instr::PrimopUnary(loc, _, exp, _) => {
+            destination = Some(loc);
+            expressions.push(exp);
+        }
+        Instr::Call(loc, _, _, args, _) | Instr::PrimopVariadic(loc, _, args, _) => {
+            destination = Some(loc);
+            expressions.extend(args);
+        }
+        Instr::PrimopBinary(loc, _, lhs, rhs, _) => {
+            destination = Some(loc);
+            expressions.extend([lhs, rhs]);
+        }
+        Instr::PrimopReset(loc, _, _, _) => destination = Some(loc),
+        Instr::Monomorphize(name, _, _) => {
+            implicit_read = Some(*name);
+        }
+        Instr::End => {
+            implicit_read = Some(RETURN);
+        }
+        Instr::Goto(_) | Instr::Exit(..) | Instr::Arbitrary => (),
+    }
+    (expressions, destination, implicit_read)
+}
+
 impl<B: BV> FunctionRegions<B> {
     pub fn new(instrs: &[Instr<Name, B>], have_exception: Name) -> Self {
         Self::with_options(
@@ -576,32 +610,8 @@ impl<B: BV> FunctionRegions<B> {
             let mut reads = vec![HashSet::new(); self.instrs.len() + 1];
             let mut address_taken = HashSet::new();
             for (pc, instr) in self.instrs.iter().enumerate() {
-                let mut expressions = Vec::new();
-                let mut destination = None;
-                match instr {
-                    Instr::Decl(..) => (),
-                    Instr::Init(_, _, exp, _) | Instr::Jump(exp, _, _) => expressions.push(exp),
-                    Instr::Copy(loc, exp, _) | Instr::PrimopUnary(loc, _, exp, _) => {
-                        destination = Some(loc);
-                        expressions.push(exp);
-                    }
-                    Instr::Call(loc, _, _, args, _) | Instr::PrimopVariadic(loc, _, args, _) => {
-                        destination = Some(loc);
-                        expressions.extend(args);
-                    }
-                    Instr::PrimopBinary(loc, _, lhs, rhs, _) => {
-                        destination = Some(loc);
-                        expressions.extend([lhs, rhs]);
-                    }
-                    Instr::PrimopReset(loc, _, _, _) => destination = Some(loc),
-                    Instr::Monomorphize(name, _, _) => {
-                        reads[pc].insert(*name);
-                    }
-                    Instr::End => {
-                        reads[pc].insert(RETURN);
-                    }
-                    Instr::Goto(_) | Instr::Exit(..) | Instr::Arbitrary => (),
-                }
+                let (expressions, destination, implicit_read) = instruction_operands(instr);
+                reads[pc].extend(implicit_read);
                 if let Some(loc) = destination {
                     // 普通赋值、字段及间接写入都要求已有槽位，否则可能被解释为寄存器写。
                     if self.recreated_slot_liveness || matches!(loc, Loc::Field(..) | Loc::Addr(_)) {

@@ -122,6 +122,7 @@ pub struct ExecutionLimits {
     pub path_merging: bool,
     /// 普通区域共享，按轮折叠循环逐轮续配；None 表示关闭步数预算。
     pub region_step_budget: Option<usize>,
+    pub merge_poison_slots: bool,
     /// 区域内按前态足迹合并全局状态；需要精确寄存器事件顺序的调用方保持关闭。
     pub region_global_state: bool,
     /// 启用断言死端过滤、重新声明槽位活跃性和预算内含回边区域推演。
@@ -149,6 +150,7 @@ impl Default for ExecutionLimits {
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
+            merge_poison_slots: false,
             region_global_state: false,
             region_loop_analysis: false,
             merge_enumeration: Default::default(),
@@ -275,6 +277,7 @@ impl ExecutionLimits {
         if let Some(value) = config.path_merge.step_budget {
             self.region_step_budget = crate::config::parse_region_step_budget(value).expect("区域预算配置必须已校验");
         }
+        self.merge_poison_slots = config.path_merge.merge_poison_slots;
         if let Some(value) = config.path_merge.enabled {
             self = self.with_path_merging(value);
         }

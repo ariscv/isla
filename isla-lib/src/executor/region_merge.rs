@@ -6,6 +6,8 @@ use crate::config::MergeMode;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
+mod poison_slots;
+
 /// 普通区域的两臂与调用共享预算；可收敛的只读循环按完整轮核算，单轮仍受限。
 /// 这只限制一次合并尝试，不截断普通符号执行的路径；配置 -1 时不创建或续配计数器。
 pub const DEFAULT_REGION_STEP_BUDGET: Option<usize> = None;
@@ -1164,6 +1166,7 @@ fn merge_states<'ir, B: BV>(
         } else {
             right.execution_limit_state.clone()
         };
+    let poison_limits = state.execution_limits.as_ref().filter(|limits| limits.merge_poison_slots);
     // 活跃的区域局部槽位必须两臂存在；静态证明离开区域不再读取的槽位直接删除。
     for lets in [false, true] {
         let a = if lets { left.lets() } else { left.vars() };
@@ -1201,6 +1204,21 @@ fn merge_states<'ir, B: BV>(
                     }
                 }
                 continue;
+            }
+            if let Some(limits) = poison_limits.filter(|_| !lets) {
+                let dead_uninit = poison_slots::prepare_local(&mut va, &mut vb, condition, solver, |payload| {
+                    let cache = shared.function_regions.lock().unwrap();
+                    cache[&(base.function_name, limits.region_loop_analysis)].slot_reads_guarded(
+                        region.join,
+                        name,
+                        payload,
+                    )
+                });
+                if let Some(ty) = dead_uninit {
+                    // 普通赋值需要原槽位，保留其类型和存在性，只跳过旧内容的合并。
+                    merged.vars_mut().insert(name, UVal::Uninit(ty));
+                    continue;
+                }
             }
             let ty = match (original.get(&name), &va, &vb) {
                 (Some(UVal::Uninit(ty)), _, _) => Some(*ty),

@@ -14,6 +14,9 @@ mod loop_round_review_tests;
 #[path = "region_global_state_tests.rs"]
 mod global_state_tests;
 
+#[path = "region_poison_slots_tests.rs"]
+mod poison_slots_tests;
+
 type Formula = smtlib::Exp<Sym>;
 
 // 任意测试的 SMT 查询都可能写入进程级诊断。在只运行本用例的进程内启用诊断。
@@ -68,6 +71,18 @@ pub(super) fn paths_with_state(
     memory: crate::memory::Memory<B64>,
     configure: impl FnOnce(&mut LocalFrame<'static, B64>),
 ) -> Vec<Path> {
+    paths_with_solver_state(instrs, shared, inputs, limits, memory, |frame, _| configure(frame), false).0
+}
+
+fn paths_with_solver_state(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>, &mut Solver<B64>),
+    collect_type_errors: bool,
+) -> (Vec<Path>, usize) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
@@ -81,16 +96,16 @@ pub(super) fn paths_with_state(
         let symbol = solver.declare_const(smtlib::Ty::Bool, info());
         frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
     }
-    configure(&mut frame);
+    configure(&mut frame, &mut solver);
     let state = TaskState::new().with_execution_limits(limits);
-    let output = Mutex::new(Vec::new());
+    let output = Mutex::new((Vec::new(), 0));
     start_single(
         frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
         shared,
         &output,
-        &|_, _, result, _, mut solver, output| match result {
+        &move |_, _, result, _, mut solver, output| match result {
             Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
-                SmtResult::Sat => output.lock().unwrap().push(Path {
+                SmtResult::Sat => output.lock().unwrap().0.push(Path {
                     records: frame.region_merge_records().to_vec(),
                     value,
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
@@ -104,6 +119,10 @@ pub(super) fn paths_with_state(
             },
             Ok((Run::Dead, _)) | Err((ExecError::AssertionFailure(..), _)) => (),
             Err((ExecError::Type(..), _)) if solver.check_sat(info()).is_unsat().unwrap() => (),
+            Err((ExecError::Type(..), _)) if collect_type_errors => {
+                output.lock().unwrap().1 += 1;
+            }
+
             Err((error, _)) => panic!("差分执行失败：{error:?}"),
             _ => panic!("差分执行未正常返回"),
         },

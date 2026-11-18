@@ -802,6 +802,8 @@ witness_eval = true
 区域嵌套默认不限；`[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16` 可设正整数上限，`-1` 关闭。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布和最大深度；保存点不再另设硬编码深度上限。
 
 `defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。
+
+`[execution_limits.path_merge]` 的 `merge_poison_slots` 默认关闭，可用 `--merge-poison-slots=true/false` 覆盖。开启后，已证明不活动且后续通过标签检查读取的联合载荷可保留另一臂的有效值。普通局部槽仅在原内容于读取前必被覆盖、重建或随帧结束时跳过合并。
 ### 无 SMT 候选 DAG 实验
 
 以下开关默认关闭，供定位求解成本使用。它们不修改 Sail 模型或区域步数预算。
