@@ -69,7 +69,7 @@ impl Context {
 impl<'ctx, B: BV> Solver<'ctx, B> {
     fn from_checkpoint_for_smtlib2_dump(
         ctx: &'ctx Context,
-        Checkpoint { num, next_var, trace }: Checkpoint<B>,
+        Checkpoint { num, next_var, trace, .. }: Checkpoint<B>,
         names: SmtDumpNames,
     ) -> Self {
         let mut solver = Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Smtlib2(names), None);
@@ -87,7 +87,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             super::Event::Smt(super::Def::Assert(condition), super::DefAttrs::default(), super::SourceLoc::unknown())
         }));
         let trace = Arc::new(Some(Trace { checkpoints: self.trace.checkpoints, head, tail: self.trace.tail.clone() }));
-        Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace }
+        Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace, cycles: self.cycles }
     }
 }
 
