@@ -122,6 +122,7 @@ pub struct ExecutionLimits {
     pub path_merging: bool,
     pub merge_strategy: crate::config::MergeStrategy,
     pub ordered_events: bool,
+    pub max_region_fragments: Option<usize>,
     /// 普通区域共享，按轮折叠循环逐轮续配；None 表示关闭步数预算。
     pub region_step_budget: Option<usize>,
     /// 区域内按前态足迹合并全局状态；需要精确寄存器事件顺序的调用方保持关闭。
@@ -152,6 +153,7 @@ impl Default for ExecutionLimits {
             path_merging: false,
             merge_strategy: Default::default(),
             ordered_events: false,
+            max_region_fragments: None,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
             region_global_state: false,
             region_loop_analysis: false,
@@ -279,6 +281,7 @@ impl ExecutionLimits {
         if let Some(value) = config.path_merge.step_budget {
             self.region_step_budget = crate::config::parse_region_step_budget(value).expect("区域预算配置必须已校验");
         }
+        self.max_region_fragments = config.path_merge.fragment_limit().expect("区域片段上限必须已校验");
         if let Some(value) = config.path_merge.strategy {
             self.merge_strategy = value;
         }

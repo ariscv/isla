@@ -1,5 +1,5 @@
 //! 区域引擎的执行、状态合并与记录边界，不决定待办的调度顺序。
-use super::region_merge::{reject, AccessLog, RegionResult};
+use super::region_merge::{fold_exit_frontiers, reject, AccessLog, RegionResult};
 use super::stats::merge_diagnostics as diagnostics;
 use super::*;
 use crate::executor::stats::region_cost as cost;
@@ -24,7 +24,49 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
     let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
-    close_arm(result, tx, arm, shared, solver, info)
+    if arm.region_arrivals.is_empty() {
+        return close_arm(result, tx, arm, shared, solver, info);
+    }
+    assert!(matches!(result, Ok(Run::Suspended)), "只有区域挂起点可以交付未合并片段");
+    // 本臂已经分成互斥片段；分别关闭，不把任何一个临时条件留在主求解器上。
+    let mut pending = std::mem::take(&mut arm.region_arrivals);
+    pending.reverse();
+    let mut reached = Vec::new();
+    while let Some(mut fragment) = pending.pop() {
+        let owner = fragment.region_arm.expect("独立片段必须拥有逻辑臂");
+        let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
+        let part_tx = solver.start_transaction_with_guard(Some(guard));
+        let outcome = solver.with_logical_arm(owner, |solver| {
+            let result = run_loop(tid, task_id, fraction, timeout, stop, sink, &mut fragment, state, shared, solver);
+            if fragment.region_arrivals.is_empty() {
+                close_arm(result, part_tx, &fragment, shared, solver, info).map(Some)
+            } else {
+                assert!(matches!(result, Ok(Run::Suspended)));
+                solver.commit_transaction();
+                Ok(None)
+            }
+        });
+        match outcome {
+            Ok(Some(true)) => reached.push(fragment),
+            Ok(Some(false)) => solver.discard_logical_arm_effects(owner),
+            Ok(None) => pending.extend(fragment.region_arrivals.into_iter().rev()),
+            Err(error) => {
+                solver.rollback_transaction(tx);
+                return Err(error);
+            }
+        }
+    }
+    if reached.is_empty() {
+        solver.commit_dead_transaction();
+        return Ok(false);
+    }
+    solver.commit_transaction();
+    if reached.len() == 1 {
+        *arm = reached.pop().unwrap();
+    } else {
+        arm.region_arrivals = reached;
+    }
+    Ok(true)
 }
 
 /// true 表示可作为到达前沿或待展开片段保留；延迟模式的保留不代表已认证。
@@ -137,6 +179,141 @@ pub(super) fn publish_committed_records<B: BV>(
     }
 }
 
+/// 同一循环的退出前沿可能有多个兼容组。一次折叠失败只留下原两个前沿。
+pub(super) fn append_loop_exit<'ir, B: BV>(
+    exits: &mut Vec<LocalFrame<'ir, B>>,
+    next: LocalFrame<'ir, B>,
+    solver: &mut Solver<B>,
+    fold: impl FnOnce(LocalFrame<'ir, B>, LocalFrame<'ir, B>, &mut Solver<B>) -> Result<LocalFrame<'ir, B>, ExecError>,
+) -> Result<(), ExecError> {
+    let Some(previous) = exits.pop() else {
+        exits.push(next);
+        return Ok(());
+    };
+    let tx = solver.start_transaction();
+    match fold(previous.clone(), next.clone(), solver) {
+        Ok(frame) => {
+            solver.commit_transaction();
+            exits.push(frame);
+            Ok(())
+        }
+        Err(error) => {
+            solver.rollback_transaction(tx);
+            if !matches!(&error, ExecError::SpeculativeReject { reason, .. } if is_join_rejection(*reason) || matches!(reason, SpeculativeRejectReason::FlatLoopShape | SpeculativeRejectReason::StateEffect))
+            {
+                return Err(error);
+            }
+            if let ExecError::SpeculativeReject { reason, function, pc, location } = &error {
+                diagnostics::emit(serde_json::json!({"stage":"loop_fold_rejected","difference":"loop_fold_rejected",
+                    "reason":reason,"at":{"function_id":function.as_u32(),"pc":pc,"location":location}}));
+            }
+            charge_fragment_growth(&next, 1)?;
+            exits.extend([previous, next]);
+            Ok(())
+        }
+    }
+}
+
+pub(super) fn loop_exit_guard<B: BV>(exits: &[LocalFrame<B>]) -> smtlib::Exp<Sym> {
+    let mut guards = exits.iter().map(|frame| {
+        frame.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出片段必须保存原守卫")
+    });
+    let first = guards.next().expect("退出合集不能为空");
+    guards.fold(first, |left, right| smtlib::Exp::Or(Box::new(left), Box::new(right)))
+}
+
+fn is_join_rejection(reason: SpeculativeRejectReason) -> bool {
+    matches!(
+        reason,
+        SpeculativeRejectReason::IncompatibleState
+            | SpeculativeRejectReason::UnionPayload
+            | SpeculativeRejectReason::RegisterSequence
+            | SpeculativeRejectReason::RelaxedRegister
+            | SpeculativeRejectReason::LoopHistoryMismatch
+    )
+}
+
+fn charge_fragment_growth<B: BV>(frame: &LocalFrame<B>, additional: usize) -> Result<(), ExecError> {
+    if let Some(remaining) =
+        frame.region_execution.as_ref().and_then(|execution| execution.additional_fragments.as_ref())
+    {
+        if remaining.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(additional)).is_err() {
+            return Err(reject(frame, SpeculativeRejectReason::FragmentLimit));
+        }
+    }
+    Ok(())
+}
+
+/// 汇合动作在自己的保存点内；失败时保留已执行两臂的帧与完整守卫。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_arrivals<'ir, B: BV>(
+    record_id: usize,
+    condition: Sym,
+    region: &Region,
+    base: &LocalFrame<'ir, B>,
+    mut arms: [Vec<LocalFrame<'ir, B>>; 2],
+    frame: &mut LocalFrame<'ir, B>,
+    state: &TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    prepare: impl FnOnce(&mut [Vec<LocalFrame<'ir, B>>; 2]),
+) -> Result<RegionResult, ExecError> {
+    let keep_separate =
+        frame.region_execution.as_ref().is_some_and(|execution| execution.mode == crate::config::MergeMode::Adaptive)
+            && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
+    let saved = keep_separate.then(|| arms.clone());
+    prepare(&mut arms);
+    let tx = keep_separate.then(|| solver.start_transaction());
+    let finish = |solver: &mut Solver<B>| {
+        let mut sides = Vec::with_capacity(2);
+        for side in arms {
+            let mut combined = None;
+            for fragment in side {
+                combined = Some(match combined {
+                    None => fragment,
+                    Some(previous) => {
+                        fold_exit_frontiers(previous, fragment, base, region, state, shared, solver, info)?
+                    }
+                });
+            }
+            sides.push(combined);
+        }
+        finish_region(record_id, condition, region, base, sides, frame, state, shared, solver, info)
+    };
+    match (finish(solver), tx) {
+        (Ok(result), tx) => {
+            if tx.is_some() {
+                solver.commit_transaction();
+            }
+            Ok(result)
+        }
+        (Err(error), tx) => {
+            if let Some(tx) = tx {
+                solver.rollback_transaction(tx);
+            }
+            let ExecError::SpeculativeReject { reason, function, pc, location } = error else { return Err(error) };
+            if !is_join_rejection(reason) || !keep_separate {
+                return Err(error);
+            }
+            diagnostics::emit(
+                serde_json::json!({"stage":"local_join_rejected","difference":"local_join_rejected","reason":reason,
+                "at":{"function":diagnostics::name_string(function,&shared.symtab),"pc":pc,"location":location}}),
+            );
+            let mut separate: Vec<_> = saved.unwrap().into_iter().flatten().collect();
+            assert!(separate.len() >= 2, "局部汇合拒绝必须保留两条以上片段");
+            charge_fragment_growth(frame, separate.len() - 1)?;
+            for fragment in &mut separate {
+                fragment.region_execution = frame.region_execution.clone();
+                fragment.speculation_mode = frame.speculation_mode;
+            }
+            assert!(frame.region_arrivals.is_empty());
+            frame.region_arrivals = separate;
+            Ok(RegionResult::Separate(reason))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_region<'ir, B: BV>(
     record_id: usize,
@@ -246,6 +423,7 @@ pub(super) fn finish_region<'ir, B: BV>(
     cost::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard =
         frame.local_state.speculative_access.as_ref().and_then(|access| access.guard.clone());
     merged.region_execution = frame.region_execution.clone();
+    merged.region_arm = frame.region_arm;
     merged.speculation_mode = frame.speculation_mode;
     if merged.region_execution.is_none() {
         // 仅前置状态/访问足迹可信，需要逐条精确读写顺序时不可信。

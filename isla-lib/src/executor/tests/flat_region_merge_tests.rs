@@ -77,8 +77,8 @@ fn flat_single_if() {
 }
 
 #[test]
-fn flat_nested_beyond_recursive_depth() {
-    if !flat_child("flat_nested_beyond_recursive_depth") {
+fn flat_deep_nesting_records_logical_depth() {
+    if !flat_child("flat_deep_nesting_records_logical_depth") {
         return;
     }
     let mut shared = empty_shared_state();
@@ -98,7 +98,7 @@ fn flat_nested_beyond_recursive_depth() {
     let merged = paths(program, &shared, count, true);
     assert_eq!(equivalent_paths(&forked, &merged, count, true), (25, 1));
     assert_eq!(merged[0].records.len(), count);
-    assert!(merged[0].records.iter().all(|record| record.depth == 1));
+    assert_eq!(merged[0].records.iter().map(|record| record.depth).max(), Some(count));
     assert!(shared.execution_stats.merge_json()["failure_reasons"].get("nesting_limit").is_none());
 }
 
@@ -166,8 +166,8 @@ fn flat_symbolic_assert_before_later_assume() {
 }
 
 #[test]
-fn flat_dead_arm_rejects_and_replays() {
-    if !flat_child("flat_dead_arm_rejects_and_replays") {
+fn flat_dead_arm_keeps_live_sibling() {
+    if !flat_child("flat_dead_arm_keeps_live_sibling") {
         return;
     }
     let mut shared = empty_shared_state();
@@ -189,8 +189,8 @@ fn flat_dead_arm_rejects_and_replays() {
     let forked = paths(program.clone(), &shared, 2, false);
     let merged = paths(program, &shared, 2, true);
     assert_eq!(equivalent_paths(&forked, &merged, 2, false), (1, 1));
-    assert!(merged[0].records.is_empty());
-    assert!(shared.execution_stats.merge_json()["failures"].as_u64().unwrap() > 0);
+    assert!(!merged[0].records.is_empty());
+    assert_eq!(shared.execution_stats.merge_json()["failures"], 0);
 }
 
 #[test]
@@ -479,4 +479,11 @@ fn flat_loop_unbounded_rejects_and_restores_root() {
     assert_eq!(frame.pc, 0);
     assert!(frame.region_merge_records().is_empty());
     assert!(queue.is_empty());
+}
+
+#[test]
+fn flat_four_way_top_merge_survives_incompatible_inner_joins() {
+    if flat_child("flat_four_way_top_merge_survives_incompatible_inner_joins") {
+        super::region_engine_tests::check_symmetric_top_merge(limits(true));
+    }
 }

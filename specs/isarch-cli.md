@@ -526,6 +526,7 @@ progress = true
 `--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。
 
 区域嵌套默认不限；TOML `[execution_limits.path_merge] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
+`[execution_limits.path_merge] max_fragments`：正整数或 `-1`，缺省不限。每次根区域尝试可累计额外保留 `max_fragments - 1` 个因汇合失败产生的片段；超限计 `fragment_limit`，不截断输入域。
 
 实验选项 `[execution_limits.path_merge] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
 ## 配置布局与迁移

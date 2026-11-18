@@ -176,6 +176,8 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         region_execution: frame.region_execution.clone(),
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
+        region_arrivals: Vec::new(),
+        region_arm: None,
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::clone(&frame.execution_limit_state),
         local_state: Arc::clone(&frame.local_state),
@@ -204,6 +206,9 @@ pub struct LocalFrame<'ir, B> {
     // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
+    /// 未能汇合的已到达片段，仅在活动区域的挂起边界上传递。
+    pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
+    pub(super) region_arm: Option<crate::smt::LogicalArm>,
     pub(super) region_merge_records: super::MergeHistory<B>,
     // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
@@ -237,6 +242,7 @@ pub struct LocalFrame<'ir, B> {
 // 内存读取可能通过内部可变性更新路径状态，不能直接派生共享 Arc 的 Clone。
 impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
     fn clone(&self) -> Self {
+        assert!(self.region_arrivals.is_empty(), "挂起片段必须移动，不能复制");
         let cost_scope = cost::Scope::enter(cost::Category::FrameClone);
         let _ = &cost_scope;
         if cost::enabled() {
@@ -255,6 +261,8 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
             speculation_mode: self.speculation_mode,
             region_replay: self.region_replay,
             region_execution: self.region_execution.clone(),
+            region_arrivals: Vec::new(),
+            region_arm: self.region_arm,
             region_merge_records: self.region_merge_records.clone(),
             pending_retry_operand: self.pending_retry_operand.clone(),
             execution_limit_state: self.execution_limit_state.clone(),
@@ -274,6 +282,7 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
 }
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
+    assert!(frame.region_arrivals.is_empty(), "区域内片段不能向普通任务池发布");
     Frame {
         path_time_totals: frame.path_timing.fork_snapshot(),
         path_smt_stats: frame.path_smt_stats.clone(),
@@ -530,6 +539,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc: 0,
             speculation_mode: SpeculationMode::Off,
             region_execution: None,
+            region_arrivals: Vec::new(),
+            region_arm: None,
             region_replay: None,
             region_merge_records: super::MergeHistory::default(),
             pending_retry_operand: None,
@@ -601,6 +612,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
         new_frame.speculation_mode = self.speculation_mode;
         new_frame.region_execution = self.region_execution.clone();
+        new_frame.region_arm = self.region_arm;
         new_frame.region_replay = self.region_replay;
         new_frame.region_merge_records = self.region_merge_records.clone();
         cost::make_mut(&mut new_frame.local_state).speculative_access = self.local_state.speculative_access.clone();

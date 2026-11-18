@@ -2804,6 +2804,20 @@ obligation_dump_dir = "obligations"
     }
 
     #[test]
+    fn execution_limits_region_fragment_limit_values() {
+        for (limit, expected) in [("", None), ("max_fragments = -1", None), ("max_fragments = 8", Some(8))] {
+            let config = merge_config(&format!("[execution_limits.path_merge]\n{limit}")).unwrap();
+            assert_eq!(
+                crate::executor::ExecutionLimits::default().with_config(&config, &Symtab::new()).max_region_fragments,
+                expected
+            );
+        }
+        for limit in ["0", "-2", "true"] {
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nmax_fragments = {limit}")).is_err());
+        }
+    }
+
+    #[test]
     fn execution_limits_region_step_budget_values() {
         for value in ["8192", "1", "32768", "-1"] {
             assert!(

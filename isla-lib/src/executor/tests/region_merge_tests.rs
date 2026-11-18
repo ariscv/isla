@@ -1416,6 +1416,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         depth: 1,
         remaining: Some(Arc::new(AtomicUsize::new(10))),
         iteration_budget: None,
+        additional_fragments: None,
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
         pending_branch: None,
@@ -4649,7 +4650,9 @@ fn merge_diagnostics_execution_is_observational() {
         },
     );
     assert_eq!(result.len(), 3);
-    assert!(diag::summary_for_test()["propagated"].as_u64().unwrap() > 0, "嵌套失败必须区分根因和向外传播");
+    let diagnostics = diag::summary_for_test();
+    assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);

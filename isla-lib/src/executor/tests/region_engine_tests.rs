@@ -83,3 +83,95 @@ fn loop_dependencies_keep_both_children_and_outer_completion() {
     assert_eq!(graph.complete(else_arm), ("继续轮次", Some((root, 1))));
     assert_eq!(graph.complete(root), ("入口", None));
 }
+
+/// 四路顶层只有返回常量不同；各路内有一个必然不能合并的字符串汇合。
+#[test]
+fn region_four_way_top_merge_survives_incompatible_inner_joins() {
+    check_symmetric_top_merge(ExecutionLimits::default().with_path_merging(true));
+}
+
+#[test]
+fn region_four_way_top_merge_survives_incompatible_inner_joins_deferred() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::region_four_way_top_merge_survives_incompatible_inner_joins_deferred"
+    )) {
+        return;
+    }
+    crate::config::RegionOptions { defer_exit_check: true, lazy_z3_scope: true, ..Default::default() }.configure();
+    check_symmetric_top_merge(ExecutionLimits::default().with_path_merging(true));
+}
+
+#[test]
+fn region_four_way_top_merge_honors_explicit_fragment_limit() {
+    let mut limits = ExecutionLimits::default().with_path_merging(true);
+    limits.max_region_fragments = Some(1);
+    check_symmetric_top_merge(limits);
+}
+
+pub(super) fn check_symmetric_top_merge(limits: ExecutionLimits) {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let text = test_name(1900);
+    let observed = test_name(1901);
+    let mut program = vec![
+        Instr::Init(text, Ty::String, Exp::String("初态".into()), info()),
+        Instr::Init(observed, Ty::String, Exp::String("初态".into()), info()),
+    ];
+    let top = program.len();
+    let mut inner_pcs = Vec::new();
+    let mut exits = Vec::new();
+    fn emit(
+        program: &mut Vec<Instr<Name, B64>>,
+        text: Name,
+        observed: Name,
+        level: usize,
+        value: u64,
+        inner_pcs: &mut Vec<usize>,
+        exits: &mut Vec<usize>,
+    ) {
+        let branch = program.len();
+        let condition = input(level as u32);
+        program.push(Instr::Jump(condition.clone(), 0, info()));
+        if level == 2 {
+            inner_pcs.push(branch);
+            program.push(Instr::Copy(Loc::Id(text), Exp::String("左".into()), info()));
+            let skip = program.len();
+            program.push(Instr::Goto(0));
+            let right = program.len();
+            program[branch] = Instr::Jump(condition, right, info());
+            program.push(Instr::Copy(Loc::Id(text), Exp::String("右".into()), info()));
+            program[skip] = Instr::Goto(program.len());
+            program.push(Instr::Copy(Loc::Id(observed), Exp::Id(text), info()));
+            program.push(Instr::Copy(Loc::Id(text), Exp::String("清理".into()), info()));
+            program.push(Instr::Copy(Loc::Id(observed), Exp::String("清理".into()), info()));
+            program.push(Instr::Copy(Loc::Id(RETURN), Exp::I128(i128::from(value)), info()));
+            exits.push(program.len());
+            program.push(Instr::Goto(0));
+        } else {
+            emit(program, text, observed, level + 1, value, inner_pcs, exits);
+            program[branch] = Instr::Jump(condition, program.len(), info());
+            emit(program, text, observed, level + 1, value | (1 << level), inner_pcs, exits);
+        }
+    }
+    emit(&mut program, text, observed, 0, 0, &mut inner_pcs, &mut exits);
+    let exit = program.len();
+    for pc in exits {
+        program[pc] = Instr::Goto(exit);
+    }
+    program.push(Instr::End);
+    let plain = paths(program.clone(), &shared, 3, false);
+    let limited = limits.max_region_fragments == Some(1);
+    let merged = paths_with_state(program, &shared, 3, limits, crate::memory::Memory::new(), |_| ());
+    super::loop_segment_tests::equivalent_scalar_paths(&plain, &merged, 3);
+    assert_eq!(plain.len(), 8, "四路中的字符串分支都须可达");
+    if limited {
+        assert!(shared.execution_stats.merge_json()["failure_reasons"]["fragment_limit"].as_u64().unwrap_or(0) > 0);
+        assert!(merged.len() > 1, "超限不能截断或无视普通分叉");
+        return;
+    }
+    assert_eq!(merged.len(), 1, "顶层应在自己的出口合并八个片段：{}", shared.execution_stats.merge_json());
+    let records = &merged[0].records;
+    assert!(records.iter().any(|r| r.branch_pc == top && !r.dead), "顶层必须实际完成合并");
+    assert!(!records.iter().any(|r| inner_pcs.contains(&r.branch_pc)), "内层失败不能生成成功记录");
+}
