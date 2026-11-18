@@ -17,6 +17,12 @@ mod global_state_tests;
 #[path = "region_poison_slots_tests.rs"]
 mod poison_slots_tests;
 
+// 调试构建的真实执行循环需要大于 libtest 默认线程栈。只扩大已复现的深夹具，
+// 不改变整个测试进程或产品的栈设置。
+fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(test).unwrap().join().unwrap();
+}
+
 type Formula = smtlib::Exp<Sym>;
 
 // 任意测试的 SMT 查询都可能写入进程级诊断。在只运行本用例的进程内启用诊断。
@@ -104,8 +110,8 @@ fn paths_with_solver_state(
         shared,
         &output,
         &move |_, _, result, _, mut solver, output| match result {
-            Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
-                SmtResult::Sat => output.lock().unwrap().0.push(Path {
+            Ok((Run::Finished(value), frame)) => match solver.check_candidate_sat(info()) {
+                Some(SmtResult::Sat) => output.lock().unwrap().0.push(Path {
                     records: frame.region_merge_records().to_vec(),
                     value,
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
@@ -114,11 +120,11 @@ fn paths_with_solver_state(
                     lets: frame.lets().clone(),
                     checkpoint: checkpoint(&mut solver),
                 }),
-                SmtResult::Unsat => (),
+                Some(SmtResult::Unsat) => (),
                 result => panic!("完成路径的可满足性查询失败：{result:?}"),
             },
             Ok((Run::Dead, _)) | Err((ExecError::AssertionFailure(..), _)) => (),
-            Err((ExecError::Type(..), _)) if solver.check_sat(info()).is_unsat().unwrap() => (),
+            Err((ExecError::Type(..), _)) if matches!(solver.check_candidate_sat(info()), Some(SmtResult::Unsat)) => (),
             Err((ExecError::Type(..), _)) if collect_type_errors => {
                 output.lock().unwrap().1 += 1;
             }
@@ -1429,6 +1435,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         depth: 1,
         remaining: Some(Arc::new(AtomicUsize::new(10))),
         iteration_budget: None,
+        additional_fragments: None,
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
         pending_branch: None,
@@ -4662,7 +4669,9 @@ fn merge_diagnostics_execution_is_observational() {
         },
     );
     assert_eq!(result.len(), 3);
-    assert!(diag::summary_for_test()["propagated"].as_u64().unwrap() > 0, "嵌套失败必须区分根因和向外传播");
+    let diagnostics = diag::summary_for_test();
+    assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);
@@ -5217,6 +5226,8 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
     assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
 }
 
+#[path = "flat_region_merge_tests.rs"]
+mod flat_region_merge_tests;
 #[test]
 fn region_util_default_step_budget_is_unlimited() {
     assert_eq!(TaskState::<B64>::new().region_step_budget(), None);
@@ -5249,6 +5260,10 @@ fn region_util_depth_above_sixteen_keeps_all_input_behavior() {
         }
         return;
     };
+    run_deep_region_test(move || check_region_util_depth(mode));
+}
+
+fn check_region_util_depth(mode: String) {
     let mut options = crate::config::RegionOptions::default();
     if mode != "default" {
         options.max_merge_depth = Some(mode.parse().unwrap());
@@ -5456,6 +5471,9 @@ fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
         "普通执行只能正常结束或命中原断言"
     );
 }
+
+#[path = "region_engine_tests.rs"]
+mod region_engine_tests;
 
 // 固定整改前的出口处理：相同IR在两种模式都合并，只有普通模式查询并取得认证。
 #[test]

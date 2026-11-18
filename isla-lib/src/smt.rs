@@ -188,9 +188,11 @@ impl fmt::Debug for EnumMember {
     }
 }
 mod dump;
+mod logical_arm;
 mod proof_budget;
 mod transaction;
 mod witness_shadow;
+pub(crate) use logical_arm::LogicalArm;
 use transaction::SolverSavepoint;
 pub use transaction::SolverTransaction;
 mod dependencies;
@@ -1792,6 +1794,7 @@ pub struct Solver<'ctx, B> {
     shadow_witnesses: witness_shadow::Bank<'ctx>,
     savepoints: Vec<SolverSavepoint<'ctx>>,
     transaction_events: Vec<Event<B>>,
+    logical_arms: logical_arm::LogicalArms,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
     transaction_event_guards: Vec<Option<Exp<Sym>>>,
     committed_transaction_events: Vec<(Option<Exp<Sym>>, Event<B>)>,
@@ -2432,6 +2435,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 shadow_witnesses: witness_shadow::Bank::new(ctx),
                 savepoints: Vec::new(),
                 transaction_events: Vec::new(),
+                logical_arms: logical_arm::LogicalArms::default(),
                 transaction_event_guards: Vec::new(),
                 committed_transaction_events: Vec::new(),
                 last_committed_transaction: None,
@@ -2881,7 +2885,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn cycle_count(&mut self) {
         self.cycles += 1;
-        self.add_event(Event::Cycle)
+        self.add_event(Event::Cycle);
+        self.logical_arms.mark_cycle();
     }
 
     pub fn get_cycle_count(&self) -> i128 {
@@ -2909,6 +2914,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         {
             self.transaction_events.push(event);
             self.transaction_event_guards.push(None);
+            self.logical_arms.record_event();
         }
     }
 

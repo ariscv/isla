@@ -1,4 +1,5 @@
 //! 联合载荷与局部槽的汇合验证，涵盖返回关系、覆盖和活跃 Poison 错误。
+use super::super::nested_merge_failure_tests::{strategies, Strategy};
 use super::*;
 
 #[test]
@@ -18,15 +19,18 @@ fn region_merge_poison_slots_local_overwrite_and_default() {
         Instr::End,
     ];
     let reference = paths(program.clone(), &shared, 1, false);
-    let default = paths(program.clone(), &shared, 1, true);
-    assert_eq!(equivalent_paths(&reference, &default, 1, true), (2, 2));
-    assert!(default.iter().all(|path| path.records.is_empty()));
+    for strategy in strategies() {
+        let run = |limits| paths_with_state(program.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
+        let mut limits = strategy.limits();
+        let default = run(limits.clone());
+        assert_eq!(equivalent_paths(&reference, &default, 1, true), (2, 2), "{strategy:?}");
+        assert!(default.iter().all(|path| path.records.is_empty()), "{strategy:?}");
 
-    let mut limits = ExecutionLimits::default().with_path_merging(true);
-    limits.merge_poison_slots = true;
-    let enabled = paths_with_state(program, &shared, 1, limits, crate::memory::Memory::new(), |_| ());
-    assert_eq!(equivalent_paths(&reference, &enabled, 1, true), (2, 1));
-    assert!(enabled[0].records.iter().any(|record| record.join == crate::ir::regions::RegionPoint::Instruction(5)));
+        limits.merge_poison_slots = true;
+        let enabled = run(limits);
+        assert_eq!(equivalent_paths(&reference, &enabled, 1, true), (2, 1), "{strategy:?}");
+        assert!(enabled[0].records.iter().any(|record| record.branch_pc == 1), "{strategy:?}");
+    }
 }
 
 #[test]
@@ -43,16 +47,24 @@ fn region_merge_poison_slots_live_local_rejects() {
         Instr::Copy(Loc::Id(RETURN), Exp::Id(slot), info()),
         Instr::End,
     ];
-    let mut limits = ExecutionLimits::default().with_path_merging(true);
-    limits.merge_poison_slots = true;
-    let results = paths_with_state(program, &shared, 1, limits, crate::memory::Memory::new(), |_| ());
-    assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|path| path.records.is_empty()));
-    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["incompatible_state"], 1);
-    assert!(results.iter().any(|path| path.value == Val::Poison));
+    for strategy in strategies() {
+        shared.execution_stats.reset();
+        let mut limits = strategy.limits();
+        limits.merge_poison_slots = true;
+        let results = paths_with_state(program.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
+        assert_eq!(results.len(), 2, "{strategy:?}");
+        assert!(results.iter().all(|path| path.records.is_empty()), "{strategy:?}");
+        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["incompatible_state"], 1, "{strategy:?}");
+        assert!(results.iter().any(|path| path.value == Val::Poison), "{strategy:?}");
+    }
 }
 
-fn union_case(nested: bool, checked: bool, enabled: bool) -> (Vec<Path>, Vec<Path>, usize, usize, u64) {
+fn union_case(
+    strategy: Strategy,
+    nested: bool,
+    checked: bool,
+    enabled: bool,
+) -> (Vec<Path>, Vec<Path>, usize, usize, u64) {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let selected = shared.symtab.intern("zpoison_selected");
@@ -91,9 +103,7 @@ fn union_case(nested: bool, checked: bool, enabled: bool) -> (Vec<Path>, Vec<Pat
     }
     program.push(Instr::End);
 
-    let run = |merge| {
-        let mut limits = ExecutionLimits::default().with_path_merging(merge);
-        limits.merge_poison_slots = enabled;
+    let run = |limits| {
         paths_with_solver_state(
             program.clone(),
             &shared,
@@ -113,8 +123,10 @@ fn union_case(nested: bool, checked: bool, enabled: bool) -> (Vec<Path>, Vec<Pat
             true,
         )
     };
-    let (reference, reference_errors) = run(false);
-    let (merged, merged_errors) = run(true);
+    let (reference, reference_errors) = run(ExecutionLimits::default());
+    let mut limits = strategy.limits();
+    limits.merge_poison_slots = enabled;
+    let (merged, merged_errors) = run(limits);
     (
         reference,
         merged,
@@ -126,20 +138,24 @@ fn union_case(nested: bool, checked: bool, enabled: bool) -> (Vec<Path>, Vec<Pat
 
 #[test]
 fn region_merge_poison_slots_guarded_union_and_nested_union() {
-    for nested in [false, true] {
-        let (reference, merged, errors_before, errors_after, rejections) = union_case(nested, true, true);
-        assert_eq!((errors_before, errors_after, rejections), (0, 0, 0), "nested={nested}");
-        assert_eq!(equivalent_paths(&reference, &merged, 1, true), (2, 1));
-        assert!(merged[0].records.iter().any(|record| record.join == crate::ir::regions::RegionPoint::Instruction(4)));
+    for strategy in strategies() {
+        for nested in [false, true] {
+            let (reference, merged, errors_before, errors_after, rejections) = union_case(strategy, nested, true, true);
+            assert_eq!((errors_before, errors_after, rejections), (0, 0, 0), "{strategy:?}, nested={nested}");
+            assert_eq!(equivalent_paths(&reference, &merged, 1, true), (2, 1), "{strategy:?}, nested={nested}");
+            assert!(merged[0].records.iter().any(|record| record.branch_pc == 0), "{strategy:?}, nested={nested}");
+        }
     }
 }
 
 #[test]
 fn region_merge_poison_slots_unguarded_unwrap_and_default_reject() {
-    for (checked, enabled, errors) in [(false, true, 1), (true, false, 0)] {
-        let (reference, merged, before, after, rejections) = union_case(false, checked, enabled);
-        assert_eq!((before, after, rejections), (errors, errors, 1));
-        assert!(merged.iter().all(|path| path.records.is_empty()));
-        assert_eq!(equivalent_paths(&reference, &merged, 1, checked), (2 - errors, 2 - errors));
+    for strategy in strategies() {
+        for (checked, enabled, errors) in [(false, true, 1), (true, false, 0)] {
+            let (reference, merged, before, after, rejections) = union_case(strategy, false, checked, enabled);
+            assert_eq!((before, after, rejections), (errors, errors, 1), "{strategy:?}, checked={checked}");
+            assert!(merged.iter().all(|path| path.records.is_empty()), "{strategy:?}, checked={checked}");
+            assert_eq!(equivalent_paths(&reference, &merged, 1, checked), (2 - errors, 2 - errors), "{strategy:?}");
+        }
     }
 }

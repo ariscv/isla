@@ -2100,10 +2100,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 // 不生成代表值，也不枚举守卫组合；恢复入口保留原公式及全部守卫。
                                 // 普通终态在上方检查SAT；无SMT候选明确未认证，错误仍计入摘要。
                                 eprintln!(
-                                    "[PATH_CACHE_TERMINAL] paths={} terminal={} certification={}",
+                                    "[PATH_CACHE_TERMINAL] paths={} terminal={} certification={} merged_records={} fork_count={} region_fallbacks={}",
                                     resident_paths.lock().unwrap().len(),
                                     if sail_exception { "sail_exception" } else { "normal" },
-                                    if solver.no_smt() { "uncertified" } else { "checked" }
+                                    if solver.no_smt() { "uncertified" } else { "checked" },
+                                    frame.region_merge_records().len(), frame.forks(), frame.region_fallbacks()
                                 );
                                 if let Some((started, smt_before)) = path_profile {
                                     eprintln!(

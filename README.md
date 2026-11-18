@@ -800,6 +800,7 @@ witness_eval = true
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
 
 区域嵌套默认不限；`[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16` 可设正整数上限，`-1` 关闭。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布和最大深度；保存点不再另设硬编码深度上限。
+`[execution_limits.path_merge] max_fragments` 缺省或 `-1` 不限；正整数限制每次根区域尝试因局部汇合失败保留的片段预算，超限计为 `fragment_limit`，保留普通分叉。
 
 `defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。
 
@@ -822,3 +823,10 @@ witness_eval = true
 no_smt = true
 # 可选第三种：no_smt_keep_bool_proofs = true
 ```
+
+
+### 平铺合并实验策略
+
+`[execution_limits.path_merge]` 接受 `strategy = "recursive" | "flat"` 和 `ordered_events = false | true`；默认 recursive / false。CLI `--merge-strategy`、`--ordered-events` 只覆盖显式字段。旧 `[execution_limits] merge_strategy/ordered_events` 和旧 region_options 位置报错，不保留兼容。
+
+flat 在单个根事务内调度片段，循环按调用实例、PC、轮次折叠退出前沿。两事件模式分别保持访问偏序或规范访问足迹；实际 SMT 定义和访存事件顺序仍需保留。不能收敛的循环形状以 flat_loop_shape 拒绝；区域步数耗尽以 step_budget 拒绝，不静默截断输入域。实验候选不改变 recursive 默认值，有限验证不代表完整模型等价。

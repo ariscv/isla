@@ -526,6 +526,7 @@ progress = true
 `--judge-resident-batch-size N` 可覆盖 `[execution_limits].judge_resident_batch_size=N`，要求正整数。此选项只用于普通 resident judge，不能与 `--judge-resident-fast` 或 fuzz 同用。新选项不读取环境变量。逐批 `JUDGE_RESIDENT_BATCH_RESTORED` / `JUDGE_RESIDENT_BATCH_MEASUREMENTS` 记录恢复和判定；最终 `JUDGE_RESIDENT_MEASUREMENTS` 汇总批数、累计恢复/判定墙钟和峰值在驻 solver 数，`JUDGE_RESIDENT_REPORT` 保持原报告字段。多输入的接纳行按批完成顺序写出，使用方按 sample_id/path_signature 对齐。
 
 区域嵌套默认不限；TOML `[execution_limits.path_merge] max_merge_depth` 与 CLI `--region-max-merge-depth` 可设正整数或-1，CLI优先。保存点不再另设硬编码深度上限。合并诊断输出实际区域深度分布与最大值；调用深度另计。
+`[execution_limits.path_merge] max_fragments`：正整数或 `-1`，缺省不限。每次根区域尝试可累计额外保留 `max_fragments - 1` 个因汇合失败产生的片段；超限计 `fragment_limit`，不截断输入域。
 
 实验选项 `[execution_limits.path_merge] defer_range_proofs` 与 `defer_ctor_checks` 均默认 false；CLI `--region-defer-range-proofs=true|false`、`--region-defer-ctor-checks=true|false` 分别覆盖。它们只延后可表达的范围／标签证明；出口须在完整原到达域下验证反例为空，否则原子回滚。
 ## 配置布局与迁移
@@ -560,3 +561,10 @@ function = "example_function"
 ```
 
 旧 `path_merging`、`region_step_budget`、`region_options`、`regions`、`branch_region_limits`、`region_fork_limits`、`merge_policy`、`merge_enumeration` 顶层字段已删除，出现即报错并提示新位置。没有兼容别名。历史归档配置仅适用于其原二进制；复用时先迁移配置，再按语义重新验证输入。
+
+
+### 平铺合并实验策略
+
+`[execution_limits.path_merge]` 接受 `strategy = "recursive" | "flat"` 和 `ordered_events = false | true`；默认 recursive / false。CLI `--merge-strategy`、`--ordered-events` 只覆盖显式字段。旧 `[execution_limits] merge_strategy/ordered_events` 和旧 region_options 位置报错，不保留兼容。
+
+flat 在单个根事务内调度片段，循环按调用实例、PC、轮次折叠退出前沿。两事件模式分别保持访问偏序或规范访问足迹；实际 SMT 定义和访存事件顺序仍需保留。不能收敛的循环形状以 flat_loop_shape 拒绝；区域步数耗尽以 step_budget 拒绝，不静默截断输入域。实验候选不改变 recursive 默认值，有限验证不代表完整模型等价。

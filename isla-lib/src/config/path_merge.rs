@@ -45,9 +45,14 @@ pub struct PathMergeDiagnostics {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PathMergeConfig {
+    pub strategy: Option<super::MergeStrategy>,
+    /// flat 模式保留兼容的访问偏序；默认 false。
+    pub ordered_events: Option<bool>,
     pub enabled: Option<bool>,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
+    /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
+    pub max_fragments: Option<i64>,
     /// 范围证明转为出口待证义务；默认关闭。
     pub defer_range_proofs: bool,
     /// 构造子解包标签转为出口待证义务；默认关闭。
@@ -79,7 +84,18 @@ impl PathMergeConfig {
             .collect()
     }
 
+    pub fn fragment_limit(&self) -> Result<Option<usize>, String> {
+        match self.max_fragments {
+            None | Some(-1) => Ok(None),
+            Some(value) if value > 0 => usize::try_from(value)
+                .map(Some)
+                .map_err(|_| "execution_limits.path_merge.max_fragments 超出 usize 范围".into()),
+            _ => Err("execution_limits.path_merge.max_fragments 必须为正整数或 -1（不限）".into()),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        self.fragment_limit()?;
         if let Some(value) = self.step_budget {
             parse_region_step_budget(value)?;
         }

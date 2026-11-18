@@ -1,6 +1,4 @@
-//! 共享区域核心的验收测试。当前忽略的用例是 LOAD 形状、三层嵌套、被调函数、
-//! 两类拒绝原因、汇合点边界及两种出口检查模式。实现局部拒绝和祖先多路合并后，
-//! 由 flat-merge3 取消 ignore；同形对照与单独的汇合点边界用例默认运行。
+//! 两个组织者必须保留失败汇合点的片段，并允许祖先继续合并。
 
 use super::region_merge_tests::{equivalent_paths, input, paths_with_state};
 use super::*;
@@ -10,20 +8,23 @@ use serde_json::Value;
 type Program = Vec<Instr<Name, B64>>;
 
 #[derive(Clone, Copy, Debug)]
-enum Strategy {
+pub(super) enum Strategy {
     Recursive,
+    Flat { ordered_events: bool },
 }
 
-fn strategies() -> impl IntoIterator<Item = Strategy> {
-    // 平铺策略合入后在此添加 Flat 并接入真实配置。有序、无序事件由平铺任务另测。
-    [Strategy::Recursive]
+pub(super) fn strategies() -> impl IntoIterator<Item = Strategy> {
+    [Strategy::Recursive, Strategy::Flat { ordered_events: false }, Strategy::Flat { ordered_events: true }]
 }
 
 impl Strategy {
-    fn limits(self) -> ExecutionLimits {
-        match self {
-            Self::Recursive => ExecutionLimits::default().with_path_merging(true),
+    pub(super) fn limits(self) -> ExecutionLimits {
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        if let Self::Flat { ordered_events } = self {
+            limits.merge_strategy = crate::config::MergeStrategy::Flat;
+            limits.ordered_events = ordered_events;
         }
+        limits
     }
 }
 
@@ -195,7 +196,6 @@ fn check_load_shape(different: bool) {
 }
 
 #[test]
-#[ignore = "待共享区域核心：内层合并失败不得使外层失败（flat-merge3）"]
 fn nested_inner_merge_failure_outer_merges_load_shape() {
     check_load_shape(true);
 }
@@ -236,7 +236,6 @@ fn check_three_levels(different: bool) {
 }
 
 #[test]
-#[ignore = "待共享区域核心：内层合并失败不得使外层失败（flat-merge3）"]
 fn nested_three_levels_innermost_fails() {
     check_three_levels(true);
 }
@@ -267,7 +266,6 @@ fn check_callee(different: bool) {
 }
 
 #[test]
-#[ignore = "待共享区域核心：内层合并失败不得使外层失败（flat-merge3）"]
 fn nested_callee_region_fails_caller_merges() {
     check_callee(true);
 }
@@ -338,7 +336,6 @@ fn check_failure_reasons(different: bool) {
 }
 
 #[test]
-#[ignore = "待共享区域核心：内层合并失败不得使外层失败（flat-merge3）"]
 fn nested_inner_failure_reasons() {
     check_failure_reasons(true);
 }
@@ -394,7 +391,6 @@ fn nested_failure_is_local_to_its_join_without_ancestor() {
 }
 
 #[test]
-#[ignore = "待共享区域核心：内层合并失败不得使外层失败（flat-merge3）"]
 fn nested_failure_is_local_to_its_join() {
     for strategy in strategies() {
         let observed = observe_boundary(strategy, true, true);
@@ -427,11 +423,11 @@ fn check_both_exit_modes(test_name: &str, different: bool) {
         return;
     }
 
-    // 区域配置在进程内冻结，两种模式分别运行。精确选择也适用于标为 ignore 的验收用例。
+    // 区域配置在进程内冻结，两种模式分别运行。
     let (_, test_name) = test_name.split_once("::").unwrap();
     let outputs = ["immediate", "deferred"].map(|mode| {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test_name, "--include-ignored", "--test-threads=1"])
+            .args(["--exact", test_name, "--test-threads=1"])
             .env(CHILD, mode)
             .output()
             .unwrap();
@@ -445,7 +441,6 @@ fn check_both_exit_modes(test_name: &str, different: bool) {
 }
 
 #[test]
-#[ignore = "待共享区域核心：内层合并失败不得使外层失败（flat-merge3）"]
 fn nested_failure_defer_and_immediate() {
     check_both_exit_modes(concat!(module_path!(), "::nested_failure_defer_and_immediate"), true);
 }

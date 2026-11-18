@@ -120,6 +120,9 @@ pub struct ExecutionLimits {
     /// 受限分支具体化时使用的可复现抽样 seed。
     pub branch_sampling_seed: u64,
     pub path_merging: bool,
+    pub merge_strategy: crate::config::MergeStrategy,
+    pub ordered_events: bool,
+    pub max_region_fragments: Option<usize>,
     /// 普通区域共享，按轮折叠循环逐轮续配；None 表示关闭步数预算。
     pub region_step_budget: Option<usize>,
     pub merge_poison_slots: bool,
@@ -149,6 +152,9 @@ impl Default for ExecutionLimits {
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
+            merge_strategy: Default::default(),
+            ordered_events: false,
+            max_region_fragments: None,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
             merge_poison_slots: false,
             region_global_state: false,
@@ -278,6 +284,13 @@ impl ExecutionLimits {
             self.region_step_budget = crate::config::parse_region_step_budget(value).expect("区域预算配置必须已校验");
         }
         self.merge_poison_slots = config.path_merge.merge_poison_slots;
+        self.max_region_fragments = config.path_merge.fragment_limit().expect("区域片段上限必须已校验");
+        if let Some(value) = config.path_merge.strategy {
+            self.merge_strategy = value;
+        }
+        if let Some(value) = config.path_merge.ordered_events {
+            self.ordered_events = value;
+        }
         if let Some(value) = config.path_merge.enabled {
             self = self.with_path_merging(value);
         }

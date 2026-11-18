@@ -1558,6 +1558,25 @@ pub use region_options::RegionOptions;
 pub mod path_merge;
 pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig};
 
+/// 路径合并执行策略；递归是兼容默认值。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeStrategy {
+    #[default]
+    Recursive,
+    Flat,
+}
+impl std::str::FromStr for MergeStrategy {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "recursive" => Ok(Self::Recursive),
+            "flat" => Ok(Self::Flat),
+            _ => Err("strategy 必须是 recursive 或 flat".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionLimitsConfig {
@@ -2762,6 +2781,39 @@ obligation_dump_dir = "obligations"
         );
         for value in ["true", "'Error_internal_error'", "[1]", "['']"] {
             assert!(merge_config(&format!("[execution_limits]\nfilter_model_exceptions={value}")).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_limits_flat_strategy_and_ordered_events() {
+        let config = merge_config("[execution_limits.path_merge]\nstrategy='flat'\nordered_events=true").unwrap();
+        assert_eq!(config.path_merge.strategy, Some(MergeStrategy::Flat));
+        assert_eq!(config.path_merge.ordered_events, Some(true));
+        let defaults = merge_config("[execution_limits]").unwrap();
+        assert!(defaults.path_merge.strategy.is_none() && defaults.path_merge.ordered_events.is_none());
+        for body in [
+            "[execution_limits]\nmerge_strategy='flat'",
+            "[execution_limits]\nordered_events=true",
+            "[execution_limits.path_merge]\nmerge_strategy='flat'",
+            "[execution_limits.path_merge]\nstrategy='bad'",
+            "[execution_limits.path_merge]\nordered_events=1",
+            "[execution_limits.region_options]\nmerge_strategy='flat'",
+        ] {
+            assert!(merge_config(body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn execution_limits_region_fragment_limit_values() {
+        for (limit, expected) in [("", None), ("max_fragments = -1", None), ("max_fragments = 8", Some(8))] {
+            let config = merge_config(&format!("[execution_limits.path_merge]\n{limit}")).unwrap();
+            assert_eq!(
+                crate::executor::ExecutionLimits::default().with_config(&config, &Symtab::new()).max_region_fragments,
+                expected
+            );
+        }
+        for limit in ["0", "-2", "true"] {
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nmax_fragments = {limit}")).is_err());
         }
     }
 

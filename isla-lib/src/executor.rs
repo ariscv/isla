@@ -60,11 +60,13 @@ use crate::timeout::PathTimeoutDiagnostic;
 use crate::zencode;
 
 mod execution_limits;
+mod flat_region_merge;
 mod frame;
 mod merge_history;
 mod merge_record;
 pub mod path_cache;
 mod path_timing;
+mod region_engine;
 mod region_merge;
 mod region_summary;
 pub mod samples;
@@ -2240,7 +2242,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 )? {
                                     region_merge::RegionResult::Merged => continue 'main_loop,
                                     region_merge::RegionResult::Dead => return Ok(Run::Dead),
-                                    region_merge::RegionResult::Suspended => return Ok(Run::Suspended),
+                                    region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate(_) => {
+                                        return Ok(Run::Suspended)
+                                    }
                                     region_merge::RegionResult::Rejected => (),
                                 }
                             }
@@ -12842,7 +12846,9 @@ fn zcaller(za, zb) {
         Ok(match result {
             region_merge::RegionResult::Merged => Some(frame.pc),
             region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
-            region_merge::RegionResult::Suspended => panic!("最外层不能挂起循环分叉"),
+            region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate(_) => {
+                panic!("最外层不能挂起区域片段")
+            }
         })
     }
 

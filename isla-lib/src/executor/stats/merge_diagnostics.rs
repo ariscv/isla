@@ -483,6 +483,12 @@ impl AttemptGuard {
         });
         Self { timing }
     }
+    pub fn finish_local_rejection(&mut self, reason: super::SpeculativeRejectReason) {
+        self.finish(Some(reason));
+        // 当前汇合的候选已撤销，保留下来的片段继续。这个诊断不能作为祖先的传播原因。
+        ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().root = None);
+    }
+
     pub fn finish_segmented(&mut self) {
         self.timing.finish("segmented".into());
     }
