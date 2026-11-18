@@ -62,7 +62,7 @@ fn isla_main() -> i32 {
         Ok(options) => options,
         Err(error) => {
             eprintln!("{error}");
-            return 2;
+            return 3;
         }
     };
     if matches.opt_present("path-merging") {

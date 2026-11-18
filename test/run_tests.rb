@@ -69,7 +69,7 @@ class Dir
   end
 end
 
-def step(str, *extra, timeout: nil, show_output: false, expected_line: nil)
+def step(str, *extra, timeout: nil, show_output: false, expected_line: nil, assertion_exit: nil)
   expected = extra.fetch(0, 0)
   if timeout then
     # Insert timeout after leading env-var assignments (e.g. LD_LIBRARY_PATH=...)
@@ -86,7 +86,9 @@ def step(str, *extra, timeout: nil, show_output: false, expected_line: nil)
 OUTPUT
     exit 1
   end
-  if status.exitstatus != expected || (expected_line && !stdout.lines.map(&:strip).include?(expected_line)) then
+  mismatch = assertion_exit && status.exitstatus == assertion_exit
+  line_matches = !expected_line || stdout.lines.map(&:strip).include?(expected_line)
+  unless (status.exitstatus == expected || mismatch) && line_matches
     puts <<OUTPUT
 #{"Failed".red} (expected #{expected}, got: #{status}): #{str}
 #{"stdout".cyan}: #{stdout}
@@ -94,7 +96,9 @@ OUTPUT
 OUTPUT
     exit 1
   end
-  print stdout if show_output
+  print stdout if show_output || mismatch
+  warn stderr if mismatch && !stderr.empty?
+  !mismatch
 end
 
 # For .timeout tests: pass if timeout (124/137), fail if completed normally
@@ -139,28 +143,25 @@ def run_property_variant(binary, basename, args, shape)
   test_timeout = $options[:timeout] || 60
   if File.extname(basename) == ".timeout"
     step_timeout(shell + Shellwords.join(command), $options[:timeout] || 1)
-    return
+    return true
   end
   expected = File.extname(basename) == ".unsat" ? 0 : 1
+  flags = args.map { |arg| arg.split("=", 2).first }
+  count_exit = 2 if flags.include?("--expect-paths")
+  expected_line = expected.zero? ? "ok" : "fail"
   unless shape
-    diagnostics = args.any? { |arg| %w[--expect-paths --print-paths --dump-paths].include?(arg) }
-    step(shell + Shellwords.join(command), expected, timeout: test_timeout, show_output: diagnostics,
-         expected_line: diagnostics ? (expected.zero? ? "ok" : "fail") : nil)
-    return
+    diagnostics = (flags & %w[--expect-paths --print-paths --dump-paths]).any?
+    return step(shell + Shellwords.join(command), expected, timeout: test_timeout, show_output: diagnostics,
+                expected_line: diagnostics ? expected_line : nil, assertion_exit: count_exit)
   end
   Dir.mktmpdir("isla-property-") do |dir|
     dump = File.join(dir, "paths.json")
-    count_passed = true
-    begin
-      step(shell + Shellwords.join(command + ["--dump-paths", dump]), expected, timeout: test_timeout,
-           show_output: true, expected_line: expected.zero? ? "ok" : "fail")
-    rescue SystemExit
-      count_passed = false
-    end
-    exit 1 unless File.file?(dump)
+    count_passed = step(shell + Shellwords.join(command + ["--dump-paths", dump]), expected, timeout: test_timeout,
+                        show_output: true, expected_line: expected_line, assertion_exit: count_exit)
     checker = File.join($TEST_DIR, "property/include/check_paths.rb")
-    step(Shellwords.join(["ruby", checker, dump, shape]), timeout: test_timeout, show_output: true)
-    exit 1 unless count_passed
+    shape_passed = step(Shellwords.join(["ruby", checker, dump, shape]), timeout: test_timeout,
+                        show_output: true, assertion_exit: 2)
+    count_passed && shape_passed
   end
 end
 
@@ -210,15 +211,23 @@ def run_tests()
         variant = options_file.delete_suffix(".opts")
         args = File.file?(options_file) ? Shellwords.split(File.read(options_file)) : []
         shape = ["#{variant}.shape", "#{basename}.shape"].uniq.find { |path| File.file?(path) }
+        marker = "#{variant}.xfail"
+        xfail = File.file?(marker) ? File.read(marker).strip : nil
+        abort "#{marker} 必须说明预期失败原因" if xfail&.empty?
         label = file + variant.delete_prefix(basename)
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        pid = fork { run_property_variant(isla_property, basename, args, shape) }
+        pid = fork { exit(run_property_variant(isla_property, basename, args, shape) ? 0 : 2) }
         _, status = Process.wait2(pid)
         ending = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         build_ms = ((built - building) * 1000).to_i
         run_ms = ((ending - start) * 1000).to_i
         timing = "(#{build_ms}ms/#{run_ms}ms)"
-        if status.success?
+        if xfail && status.exitstatus == 2
+          puts "#{label.ljust(48)}#{"XFAIL".yellow} #{timing} #{xfail}"
+        elsif xfail && status.success?
+          puts "#{label.ljust(48)}#{"XPASS".red} #{timing} 请删除 #{marker}"
+          variants_passed = false
+        elsif status.success?
           puts "#{label.ljust(48)}#{"ok".green} #{timing} #{Shellwords.join(args)}"
         else
           puts "#{label.ljust(48)}#{"Failed".red} #{timing} (#{status})"

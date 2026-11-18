@@ -35,6 +35,9 @@ actual = JSON.parse(File.read(dump_file)).map do |path|
   expressions = inputs.keys.map { |name| registers.fetch(name) }
   covered_inputs(path.fetch("guard_smtlib"), expressions, inputs.values, tuples)
 end.sort
-abort "形状不符（#{inputs.keys.join(', ')}）\n期望 #{wanted.inspect}\n实际 #{actual.inspect}" unless wanted == actual
+unless wanted == actual
+  warn "形状不符（#{inputs.keys.join(', ')}）\n期望 #{wanted.inspect}\n实际 #{actual.inspect}"
+  exit 2
+end
 
 puts "形状通过（#{inputs.keys.join(', ')}） #{actual.inspect}"

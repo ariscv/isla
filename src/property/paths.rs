@@ -41,10 +41,10 @@ impl PathOptions {
     }
 
     pub fn run<'ir, B: BV>(&self, threads: usize, task: Task<'ir, '_, B>, shared: &SharedState<'ir, B>) -> i32 {
-        let (passed, paths_passed) = if self.expected.is_none() && !self.print && self.dump.is_none() {
+        let (passed, path_status) = if self.expected.is_none() && !self.print && self.dump.is_none() {
             let result = Arc::new(AtomicBool::new(true));
             executor::start_multi(threads, None, vec![task], shared, result.clone(), &executor::all_unsat_collector);
-            (result.load(Ordering::Acquire), true)
+            (result.load(Ordering::Acquire), 0)
         } else {
             let collected = Arc::new(PathResults {
                 passed: AtomicBool::new(true),
@@ -55,14 +55,14 @@ impl PathOptions {
             (collected.passed.load(Ordering::Acquire), self.report(&collected))
         };
         println!("{}", if passed { "ok" } else { "fail" });
-        if paths_passed {
+        if path_status == 0 {
             i32::from(!passed)
         } else {
-            2
+            path_status
         }
     }
 
-    fn report(&self, collected: &PathResults) -> bool {
+    fn report(&self, collected: &PathResults) -> i32 {
         let mut paths = collected.paths.lock().unwrap();
         paths.sort_by(|a, b| (&a.guard_smtlib, &a.return_value).cmp(&(&b.guard_smtlib, &b.return_value)));
         let wrong_count = self.expected.is_some_and(|n| n != paths.len());
@@ -91,10 +91,16 @@ impl PathOptions {
                 .and_then(|file| serde_json::to_writer_pretty(file, &*paths));
             if let Err(error) = result {
                 eprintln!("无法写入路径 JSON {}：{error}", file.display());
-                return false;
+                return 3;
             }
         }
-        !(wrong_count || incomplete)
+        if incomplete {
+            3
+        } else if wrong_count {
+            2
+        } else {
+            0
+        }
     }
 }
 
