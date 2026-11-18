@@ -12,6 +12,12 @@ pub struct SolverTransaction {
     pub(super) head_len: usize,
 }
 
+/// 同一最外层汇合组的已提交条件事件和周期。
+pub(crate) struct RegionGroupEffects<B> {
+    events: Vec<(Option<Exp<Sym>>, Event<B>)>,
+    cycles: i128,
+}
+
 // 独立持有保存点的模型引用，提交、回滚以及带活动保存点销毁 Solver 都会正确释放。
 struct SavedModel<'ctx> {
     model: Option<Z3_model>,
@@ -80,31 +86,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn transaction_depth(&self) -> usize {
         self.savepoints.len()
-    }
-
-    /// 标记当前逻辑臂的事件起点；不创建求解器保存点或臂条件。
-    pub(crate) fn transaction_effect_mark(&self) -> usize {
-        assert!(!self.savepoints.is_empty(), "逻辑臂标记必须位于事务中");
-        self.transaction_events.len()
-    }
-
-    /// 整条逻辑臂已证明死亡后撤去其事件足迹。定义与死亡约束仍保留，
-    /// 因为外层求解和其他已保留约束可能引用这些符号；最外层回滚仍会全部撤销。
-    pub(crate) fn discard_transaction_effects_since(&mut self, start: usize) {
-        assert!(!self.savepoints.is_empty(), "丢弃死臂足迹必须位于事务中");
-        assert!(self.savepoints.iter().all(|point| start >= point.events_len), "死臂后缀不能越过活动保存点");
-        assert!(start <= self.transaction_events.len(), "死臂事件起点越界");
-        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len(), "事件条件必须对齐");
-        let retained: Vec<_> = self
-            .transaction_events
-            .drain(start..)
-            .zip(self.transaction_event_guards.drain(start..))
-            .filter(|(event, _)| matches!(event, Event::Smt(..)))
-            .collect();
-        for (event, guard) in retained {
-            self.transaction_events.push(event);
-            self.transaction_event_guards.push(guard);
-        }
     }
 
     /// 在保存点内用同一 Context、同一断言集做只读增量查询。
@@ -310,16 +291,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             .zip(self.transaction_event_guards.drain(savepoint.events_len..))
             .filter(|(event, _)| matches!(event, Event::Smt(Def::DefineEnum(..), ..)))
             .collect();
+        self.logical_arms.truncate(savepoint.events_len);
         for (event, _) in enums {
             self.transaction_events.push(event);
             // 枚举 sort 是 Context 全局状态，不属于已回滚的分支臂。
             self.transaction_event_guards.push(None);
+            self.logical_arms.record_global_event();
         }
         if self.savepoints.is_empty() {
             // 查询前缀只供活动区域复用；回滚后不能让辅助solver继续持有废弃AST。
             self.region_query = None;
             self.trace.head.append(&mut self.transaction_events);
             self.transaction_event_guards.clear();
+            self.logical_arms.clear();
         }
     }
 
@@ -465,8 +449,52 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.transaction_event_guards.drain(..).zip(self.transaction_events.iter().cloned()).collect();
             self.trace.head.append(&mut self.transaction_events);
             self.last_committed_transaction = Some((savepoint.token, self.trace.head.len()));
+            self.logical_arms.clear();
         }
         // 内层提交保留定义、带条件事件与统计；父层回滚仍可完整撤销。
+    }
+
+    pub(crate) fn commit_region_groups(&mut self, arms: &[LogicalArm]) -> Vec<RegionGroupEffects<B>> {
+        let [root] = self.savepoints.as_slice() else { panic!("只能从最外层事务交付多个汇合组") };
+        assert!(!root.order_register_reads);
+        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
+        let prefix = root.token.head_len;
+        let groups = arms
+            .iter()
+            .map(|arm| {
+                let mut cycles = root.cycles;
+                let events = self
+                    .transaction_events
+                    .iter()
+                    .zip(&self.transaction_event_guards)
+                    .zip(self.logical_arms.group_events(*arm))
+                    .filter_map(|((event, guard), (selected, cycle))| {
+                        cycles += i128::from(selected && cycle);
+                        // 未进入本组的定义仍可能被守卫或条件断言引用。
+                        (selected || matches!(event, Event::Smt(..))).then(|| (guard.clone(), event.clone()))
+                    })
+                    .collect();
+                RegionGroupEffects { events, cycles }
+            })
+            .collect();
+        self.commit_transaction();
+        self.trace.head.truncate(prefix);
+        self.trace.checkpoint(self.next_var);
+        self.last_committed_transaction = None;
+        groups
+    }
+
+    /// 各组共用事务前的迹和已提交 SMT 约束，分别发布组内非 SMT 事件。
+    pub(crate) fn select_region_group(&mut self, effects: RegionGroupEffects<B>) {
+        self.trace.head = effects.events.iter().map(|(_, event)| event.clone()).collect();
+        self.committed_transaction_events = effects.events;
+        self.cycles = effects.cycles;
+    }
+
+    pub(crate) fn region_group_checkpoint(&self) -> Checkpoint<B> {
+        let mut point = self.trace.clone().checkpoint(self.next_var);
+        point.cycles = self.cycles;
+        point
     }
 
     /// 提交已判死的臂：撤销本层全部状态，仅向父层加入 g→false。
@@ -649,6 +677,7 @@ impl<B: BV> Solver<'_, B> {
         }
         bytes += self.transaction_events.capacity() * size_of::<Event<B>>()
             + self.transaction_events.iter().map(event_heap_bytes).sum::<usize>()
+            + self.logical_arms.heap_bytes()
             + self.transaction_event_guards.capacity() * size_of::<Option<Exp<Sym>>>()
             + self.transaction_event_guards.iter().flatten().map(exp_heap_bytes).sum::<usize>()
             + self.committed_transaction_events.capacity() * size_of::<(Option<Exp<Sym>>, Event<B>)>()

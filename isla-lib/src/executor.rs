@@ -63,8 +63,10 @@ mod execution_limits;
 mod frame;
 mod merge_history;
 mod merge_record;
+pub mod model_exception;
 pub mod path_cache;
 mod path_timing;
+mod region_engine;
 mod region_merge;
 mod region_summary;
 pub mod samples;
@@ -135,6 +137,22 @@ fn get_and_initialize<'state, 'ir, B: BV>(
     })
 }
 
+/// 正常执行和有序区域保留模型规定的寄存器读，无序区域读当前臂的最新赋值。
+fn read_register<'a, 'ir, B: BV>(
+    regs: &'a mut RegisterBindings<'ir, B>,
+    access: Option<&region_merge::AccessLog<B>>,
+    id: Name,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Option<&'a Val<B>>, ExecError> {
+    if access.is_some_and(|log| !log.ordered_events) {
+        regs.get_latest(id, shared, solver, info)
+    } else {
+        regs.get(id, shared, solver, info)
+    }
+}
+
 fn get_id_and_initialize<'state, 'ir, B: BV>(
     id: Name,
     local_state: &'state mut LocalState<'ir, B>,
@@ -157,7 +175,14 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
             info,
         )? {
             Some(value) => Borrowed(value),
-            None => match local_state.regs.get(id, shared_state, solver, info)? {
+            None => match read_register(
+                &mut local_state.regs,
+                local_state.speculative_access.as_ref(),
+                id,
+                shared_state,
+                solver,
+                info,
+            )? {
                 Some(value) => {
                     if let Some(access) = &mut local_state.speculative_access {
                         if !access.writes.modified_regs.contains(&id) {
@@ -365,7 +390,16 @@ fn read_register_from_vector<'ir, B: BV>(
     match index {
         ConcreteIndex(i) => {
             // This unwrap should be same as all register references must point to value registers
-            let value = local_state.regs.get(regs[i], shared_state, solver, info)?.unwrap().clone();
+            let value = read_register(
+                &mut local_state.regs,
+                local_state.speculative_access.as_ref(),
+                regs[i],
+                shared_state,
+                solver,
+                info,
+            )?
+            .unwrap()
+            .clone();
             stats::call_census::read(local_state.call_instance, regs[i], &value, &shared_state.symtab);
             let publish = region_merge::record_read(local_state, regs[i], Vec::new(), value.clone())?;
             if publish {
@@ -375,7 +409,16 @@ fn read_register_from_vector<'ir, B: BV>(
         }
         SymbolicIndex(i) => {
             // See above case for unwrap safety
-            let mut chain = local_state.regs.get(regs[0], shared_state, solver, info)?.unwrap().clone();
+            let mut chain = read_register(
+                &mut local_state.regs,
+                local_state.speculative_access.as_ref(),
+                regs[0],
+                shared_state,
+                solver,
+                info,
+            )?
+            .unwrap()
+            .clone();
             stats::call_census::read(local_state.call_instance, regs[0], &chain, &shared_state.symtab);
             if local_state.speculative_access.is_some()
                 && region_merge::record_read(local_state, regs[0], Vec::new(), chain.clone())?
@@ -387,7 +430,16 @@ fn read_register_from_vector<'ir, B: BV>(
                 let choice = solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
                     solver.define_const(Eq(Box::new(Var(i)), Box::new(Bits64(B64::new((j + 1) as u64, rib)))), info)
                 });
-                let value = local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone();
+                let value = read_register(
+                    &mut local_state.regs,
+                    local_state.speculative_access.as_ref(),
+                    *reg,
+                    shared_state,
+                    solver,
+                    info,
+                )?
+                .unwrap()
+                .clone();
                 stats::call_census::read(local_state.call_instance, *reg, &value, &shared_state.symtab);
                 if local_state.speculative_access.is_some()
                     && region_merge::record_read(local_state, *reg, Vec::new(), value.clone())?
@@ -576,7 +628,16 @@ fn write_register_from_vector<'ir, B: BV>(
                 });
                 let current_value = match updates.get(reg) {
                     Some(value) => value.clone(),
-                    None => local_state.regs.get(*reg, shared_state, solver, info)?.unwrap().clone(),
+                    None => read_register(
+                        &mut local_state.regs,
+                        local_state.speculative_access.as_ref(),
+                        *reg,
+                        shared_state,
+                        solver,
+                        info,
+                    )?
+                    .unwrap()
+                    .clone(),
                 };
                 if let Some(access) = &mut local_state.speculative_access {
                     access.initial_registers.entry(*reg).or_insert_with(|| current_value.clone());
@@ -1511,11 +1572,11 @@ fn run_special_primop<'ir, B: BV>(
         if let Val::Ref(reg) =
             eval_exp(&args[0], cost::make_mut(&mut frame.local_state), shared_state, solver, info)?.into_owned()
         {
-            let value = frame
-                .regs_mut()
-                .get(reg, shared_state, solver, info)?
-                .cloned()
-                .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
+            let local = cost::make_mut(&mut frame.local_state);
+            let value =
+                read_register(&mut local.regs, local.speculative_access.as_ref(), reg, shared_state, solver, info)?
+                    .cloned()
+                    .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
             stats::call_census::read(frame.local_state.call_instance, reg, &value, &shared_state.symtab);
             let publish =
                 region_merge::record_read(cost::make_mut(&mut frame.local_state), reg, Vec::new(), value.clone())?;
@@ -1982,6 +2043,11 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Ok(result) => return Ok(result),
             Err(error) => error,
         };
+        if matches!(error, ExecError::SolverDroppedPath)
+            || stats::solver_failures::discard_solver_path(solver.exploration_on_unknown(), &error, frame, shared_state)
+        {
+            return Ok(Run::Dead);
+        }
         let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
         if matches!(
             &error,
@@ -1991,7 +2057,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 branch_decision(frame, task_state, SpeculativeRejectReason::ExpressionRetry)?;
             }
         }
-        if !symbolic_length::retry_symbolic_length(
+        match symbolic_length::retry_symbolic_length(
             error,
             &operands,
             task_id,
@@ -2001,8 +2067,21 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             frame,
             task_state,
             solver,
-        )? {
-            return Ok(Run::Dead);
+            shared_state,
+        ) {
+            Ok(true) => (),
+            Ok(false) | Err(ExecError::SolverDroppedPath) => return Ok(Run::Dead),
+            Err(error)
+                if stats::solver_failures::discard_solver_path(
+                    solver.exploration_on_unknown(),
+                    &error,
+                    frame,
+                    shared_state,
+                ) =>
+            {
+                return Ok(Run::Dead);
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -2024,6 +2103,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Error)
+            && shared_state.execution_stats.solver_failed()
+        {
+            return Ok(Run::Dead);
+        }
         stats::memory_stats::poll(frame, solver);
         let region_step = region_merge::step(frame);
         if matches!(&region_step, Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::StepBudget, .. }))
@@ -2191,24 +2275,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let test_false = Not(Box::new(Var(v)));
 
                         let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
-                        let can_be_true = if frame.region_execution.is_some() {
-                            region_merge::feasible(frame, solver, &test_true, *info)?
-                        } else {
-                            solver
-                                .check_sat_with_for_branch(&test_true, *info, false)
-                                .map(|result| result.is_sat())
-                                .transpose()?
-                                .unwrap_or(true)
-                        };
-                        let can_be_false = if frame.region_execution.is_some() {
-                            region_merge::feasible(frame, solver, &test_false, *info)?
-                        } else {
-                            solver
-                                .check_sat_with_for_branch(&test_false, *info, false)
-                                .map(|result| result.is_sat())
-                                .transpose()?
-                                .unwrap_or(true)
-                        };
+                        let can_be_true = region_merge::feasible(frame, solver, &test_true, *info, shared_state)?;
+                        let can_be_false = region_merge::feasible(frame, solver, &test_false, *info, shared_state)?;
 
                         stats::region_progress::branch_result(can_be_true, can_be_false);
                         drop(branch_queries);
@@ -2240,7 +2308,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 )? {
                                     region_merge::RegionResult::Merged => continue 'main_loop,
                                     region_merge::RegionResult::Dead => return Ok(Run::Dead),
-                                    region_merge::RegionResult::Suspended => return Ok(Run::Suspended),
+                                    region_merge::RegionResult::Suspended
+                                    | region_merge::RegionResult::Separate { .. } => return Ok(Run::Suspended),
                                     region_merge::RegionResult::Rejected => (),
                                 }
                             }
@@ -2387,6 +2456,19 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let value =
                     eval_exp(exp, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
                 assign(tid, loc, value, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
+                // Sail 的 throw 先写 current_exception，再把 have_exception 设为 true。
+                // 在异常状态生效时结束本路径，区域和普通执行都不执行后续传播。
+                if matches!(loc, Loc::Id(HAVE_EXCEPTION)) {
+                    if let Some(limits) =
+                        task_state.execution_limits.as_ref().filter(|l| !l.filter_model_exceptions.is_empty())
+                    {
+                        if let Some(result) =
+                            model_exception::discard_throw(frame, &limits.filter_model_exceptions, shared_state, *info)
+                        {
+                            return Ok(result);
+                        }
+                    }
+                }
                 frame.pc += 1;
             }
 
@@ -2431,6 +2513,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame,
                             task_state,
                             solver,
+                            shared_state,
                         )? {
                             continue 'main_loop;
                         }
@@ -2479,9 +2562,13 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if frame.region_execution.is_some() && matches!(&error, ExecError::AssertionFailure(..)) {
                             let false_for_arm = match &arg1 {
                                 Val::Bool(value) => !value,
-                                Val::Symbolic(symbol) => {
-                                    !region_merge::feasible(frame, solver, &smtlib::Exp::Var(*symbol), *info)?
-                                }
+                                Val::Symbolic(symbol) => !region_merge::feasible(
+                                    frame,
+                                    solver,
+                                    &smtlib::Exp::Var(*symbol),
+                                    *info,
+                                    shared_state,
+                                )?,
                                 _ => false,
                             };
                             if !false_for_arm {
@@ -2508,6 +2595,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame,
                             task_state,
                             solver,
+                            shared_state,
                         )? {
                             continue 'main_loop;
                         }
@@ -2549,6 +2637,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             frame,
                             task_state,
                             solver,
+                            shared_state,
                         )? {
                             continue 'main_loop;
                         }
@@ -2633,6 +2722,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         frame,
                                         task_state,
                                         solver,
+                                        shared_state,
                                     )? {
                                         symbolic_length::ValueRetry::Forked => continue 'main_loop,
                                         symbolic_length::ValueRetry::Dead => return Ok(Run::Dead),
@@ -2667,7 +2757,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     {
                                         branch_decision(frame, task_state, SpeculativeRejectReason::Interrupt)?;
                                         let cond = solver.define_const(equal, *info);
-                                        symbolic_length::fork_retry_operand(
+                                        if !symbolic_length::fork_retry_operand(
                                             cond,
                                             smtlib::Exp::Var(cond),
                                             smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
@@ -2680,7 +2770,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                             frame,
                                             task_state,
                                             solver,
-                                        )?;
+                                            shared_state,
+                                        )? {
+                                            return Ok(Run::Dead);
+                                        }
                                         continue 'main_loop;
                                     }
                                     break;
@@ -2701,7 +2794,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 {
                                     branch_decision(frame, task_state, SpeculativeRejectReason::ZeroInstruction)?;
                                     let cond = solver.define_const(zero, *info);
-                                    symbolic_length::fork_retry_operand(
+                                    if !symbolic_length::fork_retry_operand(
                                         cond,
                                         smtlib::Exp::Var(cond),
                                         smtlib::Exp::Not(Box::new(smtlib::Exp::Var(cond))),
@@ -2714,7 +2807,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                         frame,
                                         task_state,
                                         solver,
-                                    )?;
+                                        shared_state,
+                                    )? {
+                                        return Ok(Run::Dead);
+                                    }
                                 }
                             }
                         }
@@ -2758,6 +2854,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     frame,
                                     task_state,
                                     solver,
+                                    shared_state,
                                 )? {
                                     continue 'main_loop;
                                 }
@@ -3013,6 +3110,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                     use smtlib::bits64;
                     use smtlib::Def::*;
+                    let _scope = stats::region_progress::QueryScope::enter("concretization");
                     use smtlib::Exp::*;
 
                     if frame.region_execution.is_none() {
@@ -3107,11 +3205,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     };
 
                     let remainder = Neq(Box::new(Var(v)), Box::new(result_exp.clone()));
-                    let has_remainder = if frame.region_execution.is_some() {
-                        region_merge::feasible(frame, solver, &remainder, *info)?
-                    } else {
-                        solver.check_sat_with(&remainder, *info).is_sat()?
-                    };
+                    let has_remainder = region_merge::feasible(frame, solver, &remainder, *info, shared_state)?;
                     if has_remainder {
                         branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
                         let decision = match limit_handler.as_ref() {
@@ -3212,6 +3306,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
 
             Instr::Exit(cause, info) => {
+                if matches!(cause, ExitCause::MatchFailure)
+                    && task_state.execution_limits.as_ref().is_some_and(|limits| limits.filter_match_failures)
+                {
+                    return Ok(model_exception::discard_path(
+                        frame,
+                        shared_state,
+                        *info,
+                        model_exception::FilteredPath::MatchFailure,
+                    ));
+                }
                 // 区域推演把断言失败交给臂事务处理；普通推演与其他终止仍须拒绝。
                 if !matches!(cause, ExitCause::AssertionFailure)
                     || frame.region_execution.is_none()
@@ -3328,7 +3432,9 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     queue.push(task);
     while let Some(mut task) = queue.pop() {
         let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
-        let ctx = Context::new(Config::new());
+        let mut cfg = Config::new();
+        cfg.validation = task.state.validation;
+        let ctx = Context::new(cfg);
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
             solver.add_event(event);
@@ -3374,7 +3480,8 @@ fn do_work<'ir, 'task, B: BV, R>(
     collector: &Collector<'ir, B, R>,
 ) -> Fraction {
     let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
-    let cfg = Config::new();
+    let mut cfg = Config::new();
+    cfg.validation = task.state.validation;
     let ctx = Context::new(cfg);
     let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
     if let Some((def, event)) = task.fork_cond {
@@ -4049,6 +4156,7 @@ mod tests {
     mod cow_tests;
     mod merge_history_tests;
     mod nested_enum_tests;
+    mod nested_merge_failure_tests;
     mod region_measurement_tests;
     mod region_merge_tests;
     mod review27_tests;
@@ -4346,6 +4454,7 @@ mod tests {
                     &mut frame,
                     &state,
                     &mut solver,
+                    &empty_shared_state(),
                 )
                 .unwrap());
                 let child = queue.pop().expect("未固定长度必须拆为当前候选与剩余候选");
@@ -4390,6 +4499,7 @@ mod tests {
                 &mut frame,
                 &state,
                 &mut solver,
+                &empty_shared_state(),
             )
             .unwrap();
         }
@@ -4591,6 +4701,7 @@ mod tests {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     )
                     .unwrap());
                     let child = queue.pop().expect("合法与排除子域必须一次拆开");
@@ -4646,6 +4757,7 @@ mod tests {
                     &mut frame,
                     &state,
                     &mut solver,
+                    &empty_shared_state(),
                 )
                 .unwrap());
                 let child = queue.pop().expect("地址零必须留在区域外路径");
@@ -4875,6 +4987,7 @@ mod tests {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     )
                     .unwrap());
                     let child = queue.pop().unwrap();
@@ -4938,6 +5051,7 @@ mod tests {
                 &mut frame,
                 &state,
                 &mut solver,
+                &empty_shared_state(),
             );
             assert!(matches!(result, Err(ExecError::SymbolicLength("read_mem_address", _))));
             assert!(queue.is_empty(), "不支持的符号区域内部访问不得启动单点枚举");
@@ -9136,24 +9250,30 @@ mod tests {
                 } else {
                     Exp::Id(data)
                 };
-                let results = run_all_with_bindings(
-                    vec![
-                        Instr::Decl(data, Ty::Bits(1), info()),
-                        Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bool)), info()),
-                        Instr::Call(Loc::Id(vector), false, op, vec![arg], info()),
-                        Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
-                        Instr::End,
-                    ],
-                    ExecutionLimits::default().with_max_path_depth(1),
-                    empty_shared_state(),
-                    RegisterBindings::new(),
-                    HashMap::default(),
+                let frame = make_frame(vec![
+                    Instr::Decl(data, Ty::Bits(1), info()),
+                    Instr::Decl(vector, Ty::Vector(Box::new(Ty::Bool)), info()),
+                    Instr::Call(Loc::Id(vector), false, op, vec![arg], info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                    Instr::End,
+                ]);
+                let state = TaskState::new()
+                    .with_execution_limits(ExecutionLimits::default().with_max_path_depth(1))
+                    .with_zero_announce_exit(op == INSTR_ANNOUNCE);
+                let count = AtomicUsize::new(0);
+                start_single(
+                    frame.task(TaskId::fresh(), &state),
+                    &empty_shared_state(),
+                    &count,
+                    &|_, _, result, _, _, count| {
+                        assert!(
+                            matches!(result, Ok((Run::Finished(_) | Run::Exit, _))),
+                            "内部重试不能重复计入 Call 深度"
+                        );
+                        count.fetch_add(1, Ordering::Relaxed);
+                    },
                 );
-                assert_eq!(results.len(), 2);
-                assert!(
-                    results.iter().all(|r| matches!(r, Ok(Run::Finished(_) | Run::Exit))),
-                    "内部重试不能重复计入 Call 深度"
-                );
+                assert_eq!(count.load(Ordering::Relaxed), 2);
             }
         }
 
@@ -9329,11 +9449,11 @@ mod tests {
 
         #[test]
         fn zero_instruction_announce() {
-            for enabled in [false, true] {
-                let branch = test_name(310);
-                let data = test_name(311);
-                let results = run_all_with_bindings(
-                    vec![
+            for merge in [false, true] {
+                for sentinel in [None, Some(true)] {
+                    let branch = test_name(310);
+                    let data = test_name(311);
+                    let frame = make_frame(vec![
                         Instr::Decl(branch, Ty::Bool, info()),
                         Instr::Decl(data, Ty::Bits(8), info()),
                         Instr::Jump(Exp::Id(branch), 5, info()),
@@ -9342,17 +9462,32 @@ mod tests {
                         Instr::Copy(Loc::Id(data), Exp::Bits(B64::new(1, 8)), info()),
                         Instr::Call(Loc::Id(RETURN), false, INSTR_ANNOUNCE, vec![Exp::Id(data)], info()),
                         Instr::End,
-                    ],
-                    ExecutionLimits::default().with_path_merging(enabled),
-                    empty_shared_state(),
-                    RegisterBindings::new(),
-                    HashMap::default(),
-                );
-                let exits = results.iter().filter(|r| matches!(r, Ok(Run::Exit))).count();
-                let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
-                eprintln!("合并={enabled}，Exit={exits}，Finished={finished}");
-                assert_eq!(exits, 1, "必须保留零指令的停止路径");
-                assert_eq!(finished, 1, "必须保留非零指令的继续路径");
+                    ]);
+                    let mut state =
+                        TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(merge));
+                    if let Some(sentinel) = sentinel {
+                        state = state.with_zero_announce_exit(sentinel);
+                    }
+                    let (mut exits, mut finished) = (0, 0);
+                    let results = std::sync::Mutex::new(Vec::new());
+                    start_single(
+                        frame.task(TaskId::fresh(), &state),
+                        &empty_shared_state(),
+                        &results,
+                        &|_, _, result, _, _, results| {
+                            results.lock().unwrap().push(result.map(|(run, _)| run).map_err(|(error, _)| error));
+                        },
+                    );
+                    for result in results.into_inner().unwrap() {
+                        match result {
+                            Ok(Run::Exit) => exits += 1,
+                            Ok(Run::Finished(_)) => finished += 1,
+                            _ => panic!("指令公告结果异常"),
+                        }
+                    }
+                    assert_eq!(exits, usize::from(sentinel == Some(true)));
+                    assert_eq!(finished, if sentinel == Some(true) || merge { 1 } else { 2 });
+                }
             }
         }
 
@@ -12816,8 +12951,12 @@ fn zcaller(za, zb) {
         limited_pc: Option<Name>,
     ) -> Result<Option<usize>, ExecError> {
         shared.function_regions.lock().unwrap().clear();
-        let limits =
+        let mut limits =
             handler.map_or_else(ExecutionLimits::default, |handler| handler.config.clone()).with_path_merging(true);
+        // 旧菱形兼容夹具的拒绝和事件断言以严格次序为判据。
+        if handler.is_none() {
+            limits.ordered_events = true;
+        }
         let mut state = TaskState::new().with_execution_limits(limits);
         state.pc_limit = limited_pc.map(|pc| (pc, usize::MAX));
         let queue = Worker::new_lifo();
@@ -12844,7 +12983,9 @@ fn zcaller(za, zb) {
         Ok(match result {
             region_merge::RegionResult::Merged => Some(frame.pc),
             region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
-            region_merge::RegionResult::Suspended => panic!("最外层不能挂起循环分叉"),
+            region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate { .. } => {
+                panic!("最外层不能挂起区域片段")
+            }
         })
     }
 
@@ -12864,6 +13005,16 @@ fn zcaller(za, zb) {
         instrs: Vec<Instr<Name, B64>>,
         limits: ExecutionLimits,
         shared_state: SharedState<'ir, B64>,
+        regs: RegisterBindings<'ir, B64>,
+        lets: Bindings<'ir, B64>,
+    ) -> Vec<Result<Run<B64>, ExecError>> {
+        run_all_with_shared_bindings(instrs, limits, &shared_state, regs, lets)
+    }
+
+    fn run_all_with_shared_bindings<'ir>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: &SharedState<'ir, B64>,
         regs: RegisterBindings<'ir, B64>,
         lets: Bindings<'ir, B64>,
     ) -> Vec<Result<Run<B64>, ExecError>> {
@@ -12893,12 +13044,175 @@ fn zcaller(za, zb) {
                 &SingleForkSink { queue: &queue },
                 &mut task_frame,
                 task.state,
-                &shared_state,
+                shared_state,
                 &mut solver,
             ));
         }
 
         results
+    }
+
+    #[test]
+    fn solver_unknown_jump_drops_only_the_indeterminate_side() {
+        let mut shared = empty_shared_state();
+        shared.symtab.set_files(vec!["branch.sail"]);
+        let source = SourceLoc::new(0, 7, 3, 7, 9);
+        let flag = test_name(100);
+        let program = vec![
+            Instr::Decl(flag, Ty::Bool, info()),
+            Instr::Jump(Exp::Id(flag), 4, source),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::End,
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        let run = |results| {
+            crate::smt::test_queries::with_results(results, || {
+                run_all_with_shared_bindings(
+                    program.clone(),
+                    ExecutionLimits::default(),
+                    &shared,
+                    RegisterBindings::new(),
+                    Bindings::default(),
+                )
+            })
+        };
+        let paths = run(vec![Some(z3_sys::Z3_L_UNDEF)]);
+        assert!(matches!(paths.as_slice(), [Ok(Run::Finished(Val::Bool(false)))]));
+        let drops = shared.execution_stats.solver_path_drops_since(0);
+        assert_eq!(drops.count, 1);
+        assert_eq!(drops.first_locations[0].sail_location, "branch.sail:7");
+        assert_eq!(drops.first_locations[0].purpose, "branch_feasibility");
+        let paths = run(vec![Some(z3_sys::Z3_L_UNDEF), Some(z3_sys::Z3_L_UNDEF)]);
+        assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
+        assert_eq!(shared.execution_stats.solver_path_drops_since(1).count, 2);
+    }
+
+    #[test]
+    fn solver_unknown_assertion_drops_the_path() {
+        let shared = empty_shared_state();
+        let flag = test_name(100);
+        let program = vec![
+            Instr::Decl(flag, Ty::Bool, info()),
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::optimistic_assert::<B64>,
+                Exp::Id(flag),
+                Exp::String("assertion".into()),
+                info(),
+            ),
+            Instr::End,
+        ];
+        let paths = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            run_all_with_shared_bindings(
+                program,
+                ExecutionLimits::default(),
+                &shared,
+                RegisterBindings::new(),
+                Bindings::default(),
+            )
+        });
+        assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
+        let drops = shared.execution_stats.solver_path_drops_since(0);
+        assert_eq!(drops.count, 1);
+        assert_eq!(drops.first_locations[0].purpose, "assertion");
+    }
+
+    #[test]
+    fn solver_unknown_in_validation_reaches_the_collector() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let flag = test_name(100);
+        let frame =
+            make_frame(vec![Instr::Decl(flag, Ty::Bool, info()), Instr::Jump(Exp::Id(flag), 2, info()), Instr::End]);
+        let state = TaskState::new().for_validation();
+        let results = std::cell::RefCell::new(Vec::new());
+        crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            start_single(frame.task(TaskId::fresh(), &state), &shared, &results, &|_, _, result, _, _, results| {
+                results.borrow_mut().push(result.map(|(run, _)| run).map_err(|(error, _)| error));
+            });
+        });
+        assert!(matches!(
+            results.into_inner().as_slice(),
+            [Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))]
+        ));
+        assert!(!shared.execution_stats.solver_failed());
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
+    }
+
+    #[test]
+    fn solver_unknown_error_mode_stops_exploration() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let mut config = Config::new();
+        config.solver_options.on_unknown = crate::config::SolverOnUnknown::Error;
+        let context = Context::new(config);
+        let mut solver = Solver::new(&context);
+        let flag = test_name(100);
+        let mut frame =
+            make_frame(vec![Instr::Decl(flag, Ty::Bool, info()), Instr::Jump(Exp::Id(flag), 2, info()), Instr::End]);
+        let state = TaskState::new();
+        let queue = Worker::new_lifo();
+        let result = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            run_loop(
+                0,
+                TaskId::fresh(),
+                &mut Fraction::one(),
+                PathTimeout::unlimited(),
+                None,
+                &SingleForkSink { queue: &queue },
+                &mut frame,
+                &state,
+                &shared,
+                &mut solver,
+            )
+        });
+        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))));
+        assert!(shared.execution_stats.solver_failed());
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn solver_unknown_length_candidate_retains_the_remainder() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let shared = empty_shared_state();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::new(&context);
+        let symbol = solver.declare_const(smtlib::Ty::BitVec(1), info());
+        assert!(solver.check_sat(info()).is_sat().unwrap());
+        let original = {
+            let mut model = Model::new(&solver);
+            model.set_complete_model(true);
+            model.get_var(symbol).unwrap().unwrap_exp()
+        };
+        let mut frame = make_frame(vec![Instr::End]);
+        let state = TaskState::new();
+        let queue = Worker::new_lifo();
+        crate::smt::test_queries::with_unknown_purposes(&["concretization"], || {
+            assert!(matches!(
+                symbolic_length::fork_symbolic_value(
+                    symbol,
+                    &[Val::Symbolic(symbol)],
+                    info(),
+                    TaskId::fresh(),
+                    &mut Fraction::one(),
+                    None,
+                    &SingleForkSink { queue: &queue },
+                    &mut frame,
+                    &state,
+                    &mut solver,
+                    &shared,
+                )
+                .unwrap(),
+                symbolic_length::ValueRetry::Forked
+            ));
+        });
+        let eq = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(symbol)), Box::new(original));
+        assert_eq!(solver.check_sat_with(&eq, info()), SmtResult::Unsat);
+        assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+        assert!(queue.is_empty());
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 1);
     }
 
     #[test]
@@ -13326,13 +13640,16 @@ fn zcaller(za, zb) {
                 if reason == AnnouncePc {
                     state = state.with_pc_limit(reg, 1);
                 }
+                if reason == ZeroInstruction {
+                    state = state.with_zero_announce_exit(true);
+                }
                 if reason == Interrupt {
                     state.add_interrupt(TaskInterrupt::new(1, reg, B64::new(1, 2), HashMap::new()));
                 }
                 if matches!(reason, LimitSampling | LimitTruncation) {
                     let mut limits = ExecutionLimits::default().with_max_path_depth(0);
                     limits.on_limit_reached =
-                        if reason == LimitSampling { LimitBehavior::Concretize } else { LimitBehavior::Truncate };
+                        Some(if reason == LimitSampling { LimitBehavior::Concretize } else { LimitBehavior::Truncate });
                     state = state.with_execution_limits(limits);
                 }
                 state.speculation_stats = SpeculationStats::new(true);
@@ -13392,6 +13709,7 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     ),
                     SymbolicValueEnumeration => symbolic_length::fork_symbolic_value(
                         sym,
@@ -13404,8 +13722,9 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
+                        &empty_shared_state(),
                     )
-                    .map(|retry| retry != symbolic_length::ValueRetry::Dead),
+                    .map(|retry| retry == symbolic_length::ValueRetry::Forked),
                     RetryOperand => symbolic_length::fork_retry_operand(
                         sym,
                         condition.clone(),
@@ -13419,8 +13738,8 @@ fn zcaller(za, zb) {
                         &mut frame,
                         &state,
                         &mut solver,
-                    )
-                    .map(|()| true),
+                        &empty_shared_state(),
+                    ),
                     _ => panic!("测试位置未覆盖"),
                 };
                 assert_rejected(
@@ -13484,7 +13803,7 @@ fn zcaller(za, zb) {
                 } else {
                     ExecutionLimits::default().with_max_backjumps_per_loop(0)
                 };
-                limits.on_limit_reached = LimitBehavior::Concretize;
+                limits.on_limit_reached = Some(LimitBehavior::Concretize);
                 let state = TaskState::new().with_execution_limits(limits);
                 let instr = if call {
                     Instr::Call(Loc::Id(RETURN), false, INTERNAL_VECTOR_INIT, vec![Exp::I64(1)], info())
@@ -13849,7 +14168,7 @@ fn zcaller(za, zb) {
     }
 
     struct ForkCountCaptureSink<'a> {
-        child_fork_counts: &'a std::sync::Mutex<Vec<u32>>,
+        child_fork_counts: &'a std::sync::Mutex<Vec<u64>>,
     }
 
     impl<'a, 'ir, 'task> ForkSink<'ir, 'task, B64> for ForkCountCaptureSink<'a> {
@@ -15022,7 +15341,7 @@ fn zmemreadfork(zu) {
         instrs
     }
 
-    fn run_worker_invariant_limit_program(num_threads: usize) -> Vec<(String, u32)> {
+    fn run_worker_invariant_limit_program(num_threads: usize) -> Vec<(String, u64)> {
         let shared_state = empty_shared_state();
         let instrs: &'static [Instr<Name, B64>] = Box::leak(worker_invariant_limit_program().into_boxed_slice());
         let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::Bool));
@@ -15031,7 +15350,7 @@ fn zmemreadfork(zu) {
             ExecutionLimits::default().with_max_forks_per_branch(1).with_limit_behavior(LimitBehavior::Truncate),
         );
         let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
-        let collected: Arc<std::sync::Mutex<Vec<(String, u32)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected: Arc<std::sync::Mutex<Vec<(String, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         start_multi(
             num_threads,
@@ -15079,7 +15398,7 @@ fn zmemreadfork(zu) {
         instrs
     }
 
-    fn run_worker_invariant_sampling_program(num_threads: usize) -> Vec<(i64, u32)> {
+    fn run_worker_invariant_sampling_program(num_threads: usize) -> Vec<(i64, u64)> {
         let shared_state = empty_shared_state();
         let instrs: &'static [Instr<Name, B64>] = Box::leak(worker_invariant_sampling_program().into_boxed_slice());
         let ret_ty: &'static Ty<Name> = Box::leak(Box::new(Ty::I64));
@@ -15088,7 +15407,7 @@ fn zmemreadfork(zu) {
             ExecutionLimits::default().with_max_forks_per_path(1).with_limit_behavior(LimitBehavior::Concretize),
         );
         let task = frame.task_with_checkpoint(TaskId::from_usize(0), &task_state, Checkpoint::new());
-        let collected: Arc<std::sync::Mutex<Vec<(i64, u32)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected: Arc<std::sync::Mutex<Vec<(i64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         start_multi(
             num_threads,

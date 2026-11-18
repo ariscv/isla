@@ -133,6 +133,7 @@ mod tests {
         ExecError::Smt(SmtError::Timeout(Arc::new(SmtTimeout {
             source_loc: SourceLoc::unknown(),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_secs(1),
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),

@@ -14,6 +14,21 @@ mod loop_round_review_tests;
 #[path = "region_global_state_tests.rs"]
 mod global_state_tests;
 
+#[path = "region_poison_slots_tests.rs"]
+mod poison_slots_tests;
+
+#[path = "region_filtered_match_tests.rs"]
+mod filtered_match_tests;
+
+#[path = "region_filtered_exception_tests.rs"]
+mod filtered_exception_tests;
+
+// 调试构建的真实执行循环需要大于 libtest 默认线程栈。只扩大已复现的深夹具，
+// 不改变整个测试进程或产品的栈设置。
+fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(test).unwrap().join().unwrap();
+}
+
 type Formula = smtlib::Exp<Sym>;
 
 // 任意测试的 SMT 查询都可能写入进程级诊断。在只运行本用例的进程内启用诊断。
@@ -36,9 +51,10 @@ fn run_in_diagnostics_process(test_path: &str) -> bool {
     false
 }
 
-struct Path {
-    records: Vec<RegionMergeRecord<B64>>,
-    value: Val<B64>,
+pub(super) struct Path {
+    pub(super) records: Vec<RegionMergeRecord<B64>>,
+    pub(super) value: Val<B64>,
+    exception: Option<Val<B64>>,
     events: Vec<Event<B64>>,
     variables: Bindings<'static, B64>,
     registers: RegisterBindings<'static, B64>,
@@ -60,7 +76,7 @@ fn paths_with_memory(
     paths_with_state(instrs, shared, inputs, ExecutionLimits::default().with_path_merging(merge), memory, |_| ())
 }
 
-fn paths_with_state(
+pub(super) fn paths_with_state(
     instrs: Vec<Instr<Name, B64>>,
     shared: &SharedState<'static, B64>,
     inputs: usize,
@@ -68,6 +84,18 @@ fn paths_with_state(
     memory: crate::memory::Memory<B64>,
     configure: impl FnOnce(&mut LocalFrame<'static, B64>),
 ) -> Vec<Path> {
+    paths_with_solver_state(instrs, shared, inputs, limits, memory, |frame, _| configure(frame), false).0
+}
+
+fn paths_with_solver_state(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>, &mut Solver<B64>),
+    collect_type_errors: bool,
+) -> (Vec<Path>, usize, serde_json::Value) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
@@ -81,34 +109,41 @@ fn paths_with_state(
         let symbol = solver.declare_const(smtlib::Ty::Bool, info());
         frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
     }
-    configure(&mut frame);
-    let state = TaskState::new().with_execution_limits(limits);
-    let output = Mutex::new(Vec::new());
+    configure(&mut frame, &mut solver);
+    let mut state = TaskState::new().with_execution_limits(limits);
+    state.speculation_stats = speculation::SpeculationStats::new(true);
+    let output = Mutex::new((Vec::new(), 0));
     start_single(
         frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
         shared,
         &output,
-        &|_, _, result, _, mut solver, output| match result {
-            Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
-                SmtResult::Sat => output.lock().unwrap().push(Path {
+        &move |_, _, result, _, mut solver, output| match result {
+            Ok((Run::Finished(value), frame)) => match solver.check_candidate_sat(info()) {
+                Some(SmtResult::Sat) => output.lock().unwrap().0.push(Path {
                     records: frame.region_merge_records().to_vec(),
                     value,
+                    exception: frame.get_exception().map(|(value, _)| value.clone()),
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
                     variables: frame.vars().clone(),
                     registers: frame.regs().clone(),
                     lets: frame.lets().clone(),
                     checkpoint: checkpoint(&mut solver),
                 }),
-                SmtResult::Unsat => (),
+                Some(SmtResult::Unsat) => (),
                 result => panic!("完成路径的可满足性查询失败：{result:?}"),
             },
             Ok((Run::Dead, _)) | Err((ExecError::AssertionFailure(..), _)) => (),
-            Err((ExecError::Type(..), _)) if solver.check_sat(info()).is_unsat().unwrap() => (),
+            Err((ExecError::Type(..), _)) if matches!(solver.check_candidate_sat(info()), Some(SmtResult::Unsat)) => (),
+            Err((ExecError::Type(..), _)) if collect_type_errors => {
+                output.lock().unwrap().1 += 1;
+            }
+
             Err((error, _)) => panic!("差分执行失败：{error:?}"),
             _ => panic!("差分执行未正常返回"),
         },
     );
-    output.into_inner().unwrap()
+    let (paths, type_errors) = output.into_inner().unwrap();
+    (paths, type_errors, state.speculation_stats().reject_json()["reason_counts"].clone())
 }
 
 fn import(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>) -> (Formula, Formula) {
@@ -197,16 +232,104 @@ fn differential(
     inputs: usize,
     complete: bool,
 ) -> (usize, usize) {
-    let forked = paths(instrs.clone(), shared, inputs, false);
-    let merged = paths(instrs, shared, inputs, true);
-    if merged.len() == 1 {
-        assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并，不能仅普通剪枝");
-    }
-    equivalent_paths(&forked, &merged, inputs, complete)
+    differential_organizers(instrs, shared, inputs, complete, ExecutionLimits::default())
+}
+
+fn differential_organizers(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    complete: bool,
+    limits: ExecutionLimits,
+) -> (usize, usize) {
+    let memory = crate::memory::Memory::new();
+    let forked = paths_with_state(
+        instrs.clone(),
+        shared,
+        inputs,
+        limits.clone().with_path_merging(false),
+        memory.clone(),
+        |_| (),
+    );
+    let [recursive, _] = check_organizers(
+        instrs,
+        shared,
+        inputs,
+        limits,
+        |_| (),
+        |merged| {
+            equivalent_paths(&forked, merged, inputs, complete);
+            if merged.len() == 1 {
+                assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并");
+            }
+        },
+    );
+    (forked.len(), recursive.len())
+}
+
+fn check_organizers(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    configure: impl Fn(&mut LocalFrame<'static, B64>),
+    check: impl Fn(&[Path]),
+) -> [Vec<Path>; 2] {
+    use crate::config::MergeStrategy::{Flat, Recursive};
+    let [(stack, stack_rejections), (queue, queue_rejections)] = [Recursive, Flat].map(|strategy| {
+        let mut limits = limits.clone().with_path_merging(true);
+        limits.merge_strategy = strategy;
+        let (paths, _, rejections) = paths_with_solver_state(
+            instrs.clone(),
+            shared,
+            inputs,
+            limits,
+            crate::memory::Memory::new(),
+            |frame, _| configure(frame),
+            false,
+        );
+        check(&paths);
+        (paths, rejections)
+    });
+    let counts = |paths: &[Path]| {
+        let mut records: Vec<_> = paths.iter().map(|path| path.records.len()).collect();
+        records.sort_unstable();
+        records
+    };
+    assert_eq!(counts(&stack), counts(&queue), "两个组织者的完成路径数和每条路径的记录数必须一致");
+    assert_eq!(stack_rejections, queue_rejections, "两个组织者的拒绝类别与次数必须一致");
+    [stack, queue]
+}
+
+#[test]
+fn unordered_register_reads_observe_same_arm_writes() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zunordered_local_value");
+    shared.registers.insert(reg, Ty::Bool);
+    // 两条臂先读入口值，再各写两次。最后一次写入必须是后续读取的值。
+    let local = test_name(1389);
+    let program = vec![
+        Instr::Decl(local, Ty::Bool, info()),
+        Instr::Copy(Loc::Id(local), Exp::Id(reg), info()),
+        Instr::Jump(input(0), 7, info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+        Instr::Goto(10),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+        Instr::End,
+    ];
+    let mut limits = ExecutionLimits::default();
+    assert!(!limits.ordered_events);
+    assert_eq!(differential_organizers(program.clone(), &shared, 1, true, limits.clone()), (2, 1));
+    limits.ordered_events = true;
+    assert_eq!(differential_organizers(program, &shared, 1, true, limits), (2, 2));
 }
 
 /// 也供预期拒绝合并的用例复用等价判据，拒绝行为由用例另外检查。
-fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: bool) -> (usize, usize) {
+pub(super) fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: bool) -> (usize, usize) {
     use smtlib::Exp::*;
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -244,8 +367,96 @@ fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: b
     (forked.len(), merged.len())
 }
 
-fn input(index: u32) -> Exp<Name> {
+pub(super) fn input(index: u32) -> Exp<Name> {
     Exp::Id(test_name(900 + index))
+}
+
+#[test]
+fn region_merge_grouped_arrivals_keep_guards_and_register_traces() {
+    let mut shared = empty_shared_state();
+    let slot = shared.symtab.intern("zgrouped_string");
+    let register_a = shared.symtab.intern("zgrouped_reg_a");
+    let register_b = shared.symtab.intern("zgrouped_reg_b");
+    shared.registers.insert(register_a, Ty::Bool);
+    shared.registers.insert(register_b, Ty::Bool);
+    let store = |value: Exp<Name>| Instr::Copy(Loc::Id(slot), value, info());
+    let write = |reg, value| Instr::Copy(Loc::Id(reg), Exp::Bool(value), info());
+    let strings = |names: [&str; 4]| names.map(|name| Exp::String(name.into()));
+    for (values, ty, expected) in [
+        (strings(["a", "b", "a", "b"]), Ty::String, 2),
+        (strings(["a", "a", "a", "a"]), Ty::String, 1),
+        (strings(["a", "b", "c", "d"]), Ty::String, 4),
+        // 具体机器整数不在字符串分桶键中，需实际试合并并回滚不兼容组。
+        ([Exp::I64(1), Exp::I64(2), Exp::I64(1), Exp::I64(2)], Ty::I64, 2),
+    ] {
+        let compare = if ty == Ty::String {
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["eq_string"],
+                Exp::Id(slot),
+                Exp::String("a".into()),
+                info(),
+            )
+        } else {
+            Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(slot), Exp::I64(1)]), info())
+        };
+        let [a, b, c, d] = values;
+        let program = vec![
+            Instr::Decl(slot, ty, info()),
+            Instr::Jump(input(0), 9, info()),
+            Instr::Jump(input(1), 6, info()),
+            store(a),
+            write(register_a, false),
+            Instr::Goto(8),
+            store(b),
+            write(register_b, false),
+            Instr::Goto(16),
+            Instr::Jump(input(1), 13, info()),
+            store(c),
+            write(register_a, true),
+            Instr::Goto(15),
+            store(d),
+            write(register_b, true),
+            Instr::Goto(16),
+            compare,
+            Instr::End,
+        ];
+        let run = |limits| {
+            paths_with_state(program.clone(), &shared, 2, limits, crate::memory::Memory::new(), |frame| {
+                for register in [register_a, register_b] {
+                    frame.regs_mut().insert(register, false, UVal::Init(Val::Bool(false)));
+                }
+            })
+        };
+        let ordinary = run(ExecutionLimits::default().with_path_merging(false));
+        for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+            let mut limits = ExecutionLimits::default().with_path_merging(true);
+            limits.merge_strategy = strategy;
+            let grouped = run(limits);
+            assert_eq!(equivalent_paths(&ordinary, &grouped, 2, true), (4, expected), "{strategy:?}");
+            equivalent_register_paths(&ordinary, &grouped, 2);
+            if expected == 2 {
+                let mut footprints: Vec<_> = grouped
+                    .iter()
+                    .map(|path| {
+                        let writes: Vec<_> = path
+                            .events
+                            .iter()
+                            .filter_map(|event| match event {
+                                Event::WriteReg(reg, _, _) => Some(*reg),
+                                _ => None,
+                            })
+                            .collect();
+                        assert!(!path.records.is_empty());
+                        assert_eq!(writes.len(), 1, "每组只发布自身的寄存器写入");
+                        writes[0]
+                    })
+                    .collect();
+                footprints.sort_unstable();
+                assert_eq!(footprints, [register_a, register_b]);
+            }
+        }
+    }
 }
 
 /// 每条分叉路径都与覆盖它的合并路径比较完整最终寄存器映射，结构字段递归展开。
@@ -862,7 +1073,8 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
         }
         // 寄存器由入口初始化；外层的写后读只能在内层已提交之后触发拒绝。
         // 此处先用真实执行直接检查拒绝不会泄漏到调度边界。
-        let limits = ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true);
+        let mut limits = ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true);
+        limits.ordered_events = true;
         let forked = paths(program.clone(), &shared, 3, false);
         let merged =
             paths_with_state(program.clone(), &shared, 3, limits.clone(), crate::memory::Memory::new(), |_| ());
@@ -1392,6 +1604,60 @@ fn region_merge_unique_monomorphize_and_retry_in_real_arms() {
 }
 
 #[test]
+fn default_symbolic_dag_merges_a_diamond_and_honors_explicit_disable() {
+    let shared = empty_shared_state();
+    let program = vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::End,
+    ];
+    let disabled = crate::config::ExecutionLimitsConfig {
+        path_merge: crate::config::PathMergeConfig { enabled: Some(false), ..Default::default() },
+        ..Default::default()
+    };
+    for (config, expected_paths) in [(None, 1), (Some(&disabled), 2)] {
+        let results = paths_with_state(
+            program.clone(),
+            &shared,
+            1,
+            ExecutionLimits::for_symbolic_dag(config, &shared.symtab),
+            crate::memory::Memory::new(),
+            |_| {},
+        );
+        assert_eq!(results.len(), expected_paths);
+        assert_eq!(results.iter().map(|path| path.records.len()).sum::<usize>(), usize::from(config.is_none()));
+    }
+}
+
+#[test]
+fn region_merge_retry_rejection_preserves_all_candidates() {
+    let shared = empty_shared_state();
+    let length = test_name(990);
+    let result = test_name(991);
+    let program = vec![
+        Instr::Decl(length, Ty::I128, info()),
+        Instr::Decl(result, Ty::I128, info()),
+        Instr::Jump(input(0), 7, info()),
+        Instr::PrimopUnary(Loc::Id(length), primop::unary_primops()["isla_bool_to_bit"], input(1), info()),
+        Instr::PrimopUnary(Loc::Id(length), primop::unary_primops()["sail_unsigned"], Exp::Id(length), info()),
+        Instr::PrimopBinary(
+            Loc::Id(result),
+            primop::binary_primops()["pow_int"],
+            Exp::I128(3),
+            Exp::Id(length),
+            info(),
+        ),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(result), Exp::I128(3), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(result), Exp::I128(3)]), info()),
+        Instr::End,
+    ];
+    assert_eq!(differential(program, &shared, 2, true), (3, 3));
+}
+
+#[test]
 fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
     let shared = empty_shared_state();
     let mut frame = make_frame(vec![Instr::Jump(input(0), 1, info()), Instr::End]);
@@ -1410,6 +1676,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         depth: 1,
         remaining: Some(Arc::new(AtomicUsize::new(10))),
         iteration_budget: None,
+        additional_fragments: None,
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
         pending_branch: None,
@@ -1435,6 +1702,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         &mut frame,
         &state,
         &mut solver,
+        &empty_shared_state(),
     )
     .unwrap();
     assert!(queue.is_empty());
@@ -1993,7 +2261,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
     let path = std::env::temp_dir().join(format!("isla-i3-force-{}.toml", std::process::id()));
     std::fs::write(
         &path,
-        "[execution_limits]\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"force\"\nfunction = \"force_rejected\"\n",
+        "[execution_limits.path_merge]\nordered_events = true\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"force\"\nfunction = \"force_rejected\"\n",
     )
     .unwrap();
     let started = Instant::now();
@@ -2372,19 +2640,7 @@ fn f2_error(case: &str) -> ExecError {
     if case == "assertion" {
         return ExecError::AssertionFailure(None, info());
     }
-    struct Dump;
-    impl crate::timeout::SmtDumpSource for Dump {
-        fn materialize(&self) -> Result<String, String> {
-            Ok("(check-sat)".into())
-        }
-    }
-    ExecError::Smt(crate::error::SmtError::Timeout(Arc::new(crate::timeout::SmtTimeout {
-        source_loc: info(),
-        operation: crate::timeout::SmtOperation::CheckSat,
-        limit: Duration::from_millis(1),
-        operation_wall: Duration::from_millis(1),
-        dump: Arc::new(crate::timeout::TimeoutSmtDump::new(Arc::new(Dump))),
-    })))
+    ExecError::Smt(crate::error::SmtError::NoSmt { reason: "test", source_loc: info() })
 }
 
 #[test]
@@ -2569,8 +2825,8 @@ fn assert_merge_enumeration_reference(
         }
     }
     let mut limits = state.execution_limits.as_ref().unwrap().clone();
-    limits.merge_enumeration.class_cap = usize::MAX;
-    limits.merge_enumeration.path_cap = usize::MAX;
+    limits.merge_enumeration.class_cap = None;
+    limits.merge_enumeration.path_cap = None;
     let reference_state = TaskState::new().with_execution_limits(limits);
     let reference = frame.enumerate_merges_blocking(solver, &reference_state, shared, result).unwrap().unwrap();
     let mut count_limits = reference_state.execution_limits.as_ref().unwrap().clone();
@@ -2664,7 +2920,7 @@ fn assert_merge_enumeration_reference(
     let config = &state.execution_limits.as_ref().unwrap().merge_enumeration;
     let remaining = actual.len() < expected.len()
         || output["guard_classes"].as_array().unwrap().iter().any(|c| c["truncated"] == true);
-    assert_eq!(output["path_truncated"], total == config.path_cap && remaining);
+    assert_eq!(output["path_truncated"], Some(total) == config.path_cap && remaining);
     if !remaining {
         assert_eq!(actual, expected);
     }
@@ -2720,19 +2976,19 @@ fn merge_enumeration_nested_context_and_fork_inheritance() {
     assert_eq!(output["enumerated_total"], 3);
     assert_eq!(output["path_truncated"], false);
     assert_eq!(before, solver.trace().to_vec().len(), "枚举不得污染路径求解器");
-    for path_cap in 1..=4 {
+    for path_cap in [None, Some(1), Some(2), Some(3), Some(4)] {
         let mut count_limits = state.execution_limits.as_ref().unwrap().clone();
         count_limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
-        count_limits.merge_enumeration.class_cap = 1;
+        count_limits.merge_enumeration.class_cap = Some(1);
         count_limits.merge_enumeration.path_cap = path_cap;
         let counted = first
             .enumerate_merges(&mut solver, &TaskState::new().with_execution_limits(count_limits), &shared, &path.value)
             .unwrap()
             .unwrap();
-        assert_eq!(counted["counted_classes"], path_cap.min(3));
-        assert_eq!(counted["counted_paths"], path_cap.min(3));
+        assert_eq!(counted["counted_classes"], path_cap.map_or(3, |cap| cap.min(3)));
+        assert_eq!(counted["counted_paths"], path_cap.map_or(3, |cap| cap.min(3)));
         assert_eq!(counted["truncated_classes"], 0);
-        assert_eq!(counted["path_truncated"], path_cap < 3);
+        assert_eq!(counted["path_truncated"], path_cap.is_some_and(|cap| cap < 3));
     }
     // 在已完成的合并历史之后真正 fork：两条任务都继承历史，但各自使用自己的约束。
     let mut fork = make_frame(vec![
@@ -2811,7 +3067,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
     assert_eq!(solver.transaction_depth(), 0);
     assert_eq!(solver.trace().to_vec().len(), before);
     for (class_cap, path_cap, count, truncated) in
-        [(10, 10, 3, false), (2, 10, 2, true), (10, 1, 1, true), (3, 3, 3, false)]
+        [(None, None, 3, false), (Some(2), None, 2, true), (None, Some(1), 1, true), (Some(3), Some(3), 3, false)]
     {
         let mut limits = ExecutionLimits::default();
         limits.merge_enumeration =
@@ -2823,7 +3079,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         assert_merge_enumeration_reference(&frame, &mut solver, &state, &shared, &failure, &output);
         assert_eq!(output["enumerated_total"], count);
         assert_eq!(output["guard_classes"][0]["truncated"], truncated);
-        assert_eq!(output["path_truncated"], path_cap == 1);
+        assert_eq!(output["path_truncated"], path_cap == Some(1));
         let mut count_limits = state.execution_limits.as_ref().unwrap().clone();
         count_limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
         let counted = frame
@@ -2833,7 +3089,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         assert_eq!(counted["counted_classes"], 1);
         assert_eq!(counted["counted_paths"], count);
         assert_eq!(counted["truncated_classes"], usize::from(truncated));
-        assert_eq!(counted["path_truncated"], path_cap == 1);
+        assert_eq!(counted["path_truncated"], path_cap == Some(1));
         let class = &output["guard_classes"][0];
         assert_eq!(output["tested_slices"].as_array().unwrap().len(), 2, "未被测试的高两位不参与展开");
         let mut found = HashSet::new();
@@ -2922,7 +3178,7 @@ fn merge_enumeration_extract_of_derived_symbol() {
     assert_eq!(output["enumerated_total"], 4, "必须阻断派生表达式的真实两位取值");
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration.enabled = true;
-    limits.merge_enumeration.class_cap = 2;
+    limits.merge_enumeration.class_cap = Some(2);
     let limited = TaskState::new().with_execution_limits(limits);
     let output = frame.enumerate_merges(&mut solver, &limited, &shared, &Val::Unit).unwrap().unwrap();
     assert_eq!(output["enumerated_total"], 3);
@@ -2964,8 +3220,12 @@ fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
         });
     }
     let mut limits = ExecutionLimits::default();
-    limits.merge_enumeration =
-        crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 2, ..Default::default() };
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+        enabled: true,
+        class_cap: Some(1),
+        path_cap: Some(2),
+        ..Default::default()
+    };
     let state = TaskState::new().with_execution_limits(limits);
     let before = solver.trace().to_vec().len();
     let output = frame.enumerate_merges(&mut solver, &state, &shared, &Val::Unit).unwrap().unwrap();
@@ -3011,8 +3271,12 @@ fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
         });
     }
     let mut limits = ExecutionLimits::default();
-    limits.merge_enumeration =
-        crate::config::MergeEnumerationConfig { enabled: true, class_cap: 1, path_cap: 16384, ..Default::default() };
+    limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+        enabled: true,
+        class_cap: Some(1),
+        path_cap: Some(16384),
+        ..Default::default()
+    };
     let state = TaskState::new().with_execution_limits(limits);
     let before = solver.trace().to_vec().len();
     let mut calls = 0;
@@ -3074,8 +3338,8 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
             let mut limits = ExecutionLimits::default();
             limits.merge_enumeration = crate::config::MergeEnumerationConfig {
                 enabled: true,
-                class_cap: 1,
-                path_cap: cap,
+                class_cap: Some(1),
+                path_cap: Some(cap),
                 enumeration_threads: threads,
                 ..Default::default()
             };
@@ -3146,8 +3410,7 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration = crate::config::MergeEnumerationConfig {
         enabled: true,
-        class_cap: usize::MAX,
-        path_cap: 1,
+        path_cap: Some(1),
         enumeration_threads: 4,
         ..Default::default()
     };
@@ -3202,8 +3465,12 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
         [(false, 1024, 65536), (true, 1024, 65536), (true, usize::MAX, usize::MAX), (true, 2, 5)]
     {
         let mut limits = ExecutionLimits::default().with_path_merging(merge);
-        limits.merge_enumeration =
-            crate::config::MergeEnumerationConfig { enabled: merge, class_cap, path_cap, ..Default::default() };
+        limits.merge_enumeration = crate::config::MergeEnumerationConfig {
+            enabled: merge,
+            class_cap: Some(class_cap),
+            path_cap: Some(path_cap),
+            ..Default::default()
+        };
         let state = TaskState::new().with_execution_limits(limits);
         let mut frame = LocalFrame::new(function, args, ret_ty, None, body);
         frame.add_regs(&initialized.regs).add_lets(&initialized.lets);
@@ -3271,8 +3538,8 @@ fn merge_enumeration_real_ir_pte_is_invalid() {
                             prediction_limits.merge_enumeration = crate::config::MergeEnumerationConfig {
                                 enabled: true,
                                 mode: crate::config::MergeEnumerationMode::Predict,
-                                predict_probes: 256,
-                                predict_domain_cap: domain_cap,
+                                predict_probes: Some(256),
+                                predict_domain_cap: Some(domain_cap),
                                 enumeration_threads: 4,
                                 ..Default::default()
                             };
@@ -3334,7 +3601,7 @@ fn sample_run<'ir>(
     use crate::executor::samples::{SampleChecker, SamplePath};
     let mut limits = ExecutionLimits::default().with_path_merging(merge);
     limits.merge_enumeration.enabled = merge;
-    limits.merge_enumeration.path_cap = 10;
+    limits.merge_enumeration.path_cap = Some(10);
     let state = std::sync::Arc::new(TaskState::new().with_execution_limits(limits));
     let collector_state = state.clone();
     let checker = std::sync::Arc::new(SampleChecker::new(samples.to_vec()));
@@ -4091,8 +4358,8 @@ fn merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规�
         let mut limits = ExecutionLimits::default();
         limits.merge_enumeration = crate::config::MergeEnumerationConfig {
             enabled: true,
-            class_cap: 1,
-            path_cap: 100,
+            class_cap: Some(1),
+            path_cap: Some(100),
             enumeration_threads: threads,
             ..Default::default()
         };
@@ -4182,8 +4449,8 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
         limits.merge_enumeration = crate::config::MergeEnumerationConfig {
             enabled: true,
             sample_stride: stride,
-            class_cap,
-            path_cap,
+            class_cap: Some(class_cap),
+            path_cap: Some(path_cap),
             enumeration_threads,
             ..Default::default()
         };
@@ -4311,8 +4578,10 @@ fn merge_enumeration_budget_边枚举边回调并正常截断回滚() {
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration = crate::config::MergeEnumerationConfig {
         enabled: true,
-        class_cap: usize::MAX,
-        path_cap: usize::MAX,
+        outputs: vec![crate::config::SampleOutputConfig {
+            format: crate::config::SampleOutputFormat::Binary,
+            path: "samples.bin".into(),
+        }],
         max_output_bytes: Some(25_000_000_000),
         ..Default::default()
     };
@@ -4364,14 +4633,19 @@ fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
         memory_reads: vec![].into(),
     });
     let mut reference = None;
-    for threads in [1, 4] {
+    for (threads, stream) in [(1, false), (4, false), (1, true), (4, true)] {
+        let outputs = stream
+            .then(|| crate::config::SampleOutputConfig {
+                format: crate::config::SampleOutputFormat::Binary,
+                path: "samples.bin".into(),
+            })
+            .into_iter()
+            .collect();
         let mut limits = ExecutionLimits::default();
         limits.merge_enumeration = crate::config::MergeEnumerationConfig {
             enabled: true,
-            class_cap: usize::MAX,
-            path_cap: usize::MAX,
             enumeration_threads: threads,
-            max_output_bytes: Some(25_000_000_000),
+            outputs,
             ..Default::default()
         };
         let values = Mutex::new(BTreeMap::new());
@@ -4390,6 +4664,8 @@ fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
             )
             .unwrap()
             .unwrap();
+        assert!(output["class_cap"].is_null());
+        assert!(output["path_cap"].is_null());
         assert_eq!(output["counted_paths"], 256);
         assert_eq!(output["path_truncated"], false);
         assert_eq!(
@@ -4441,9 +4717,12 @@ fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截�
     let mut limits = ExecutionLimits::default();
     limits.merge_enumeration = crate::config::MergeEnumerationConfig {
         enabled: true,
-        class_cap: usize::MAX,
-        path_cap: 256,
+        path_cap: Some(256),
         enumeration_threads: 1,
+        outputs: vec![crate::config::SampleOutputConfig {
+            format: crate::config::SampleOutputFormat::Binary,
+            path: "samples.bin".into(),
+        }],
         max_output_bytes: Some(25_000_000_000),
         ..Default::default()
     };
@@ -4486,6 +4765,7 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
     }
     crate::smt::configure_tastic(crate::smt::Tactic::Default);
     let frame = make_frame(vec![]);
+    let shared = SharedState::<B64>::empty(Symtab::new());
     for limited in [false, true] {
         let mut config = Config::new();
         if limited {
@@ -4503,18 +4783,25 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
         let condition = Formula::Eq(Box::new(Formula::Var(value)), Box::new(crate::primop_util::smt_i128(17)));
         let tx = solver.start_transaction_with_guard(Some(condition.clone()));
         if limited {
-            assert!(matches!(
-                region_merge::feasible(&frame, &mut solver, &condition, info()),
-                Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. })
-            ));
+            let result = solver.check_sat_with_for_branch(&condition, info(), true).unwrap();
+            assert!(result.is_unknown());
+            assert!(!region_merge::path_is_feasible(result, &frame, &solver, &shared).unwrap());
+            assert_eq!(shared.execution_stats.solver_path_drop_count(), 1);
         } else {
-            assert!(region_merge::feasible(&frame, &mut solver, &condition, info()).unwrap());
-            assert!(!region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition.clone())), info())
-                .unwrap());
+            assert!(region_merge::feasible(&frame, &mut solver, &condition, info(), &shared).unwrap());
+            assert!(!region_merge::feasible(
+                &frame,
+                &mut solver,
+                &Formula::Not(Box::new(condition.clone())),
+                info(),
+                &shared
+            )
+            .unwrap());
         }
         solver.rollback_transaction(tx);
         if !limited {
-            assert!(region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition)), info()).unwrap());
+            assert!(region_merge::feasible(&frame, &mut solver, &Formula::Not(Box::new(condition)), info(), &shared)
+                .unwrap());
         }
     }
 }
@@ -4631,19 +4918,27 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::End,
     ];
-    let result = paths_with_state(
-        nested,
-        &shared,
-        2,
-        ExecutionLimits::default().with_path_merging(true),
-        crate::memory::Memory::new(),
-        |frame| {
-            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
-            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
-        },
-    );
-    assert_eq!(result.len(), 3);
-    assert!(diag::summary_for_test()["propagated"].as_u64().unwrap() > 0, "嵌套失败必须区分根因和向外传播");
+    let run_nested = || {
+        paths_with_state(
+            nested.clone(),
+            &shared,
+            2,
+            ExecutionLimits::default().with_path_merging(true),
+            crate::memory::Memory::new(),
+            |frame| {
+                frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+                frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+            },
+        )
+    };
+    diag::configure("off").unwrap();
+    let without_diagnostics = run_nested();
+    diag::configure("detail").unwrap();
+    let result = run_nested();
+    let diagnostics = diag::summary_for_test();
+    assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
+    assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (2, 2));
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);
@@ -5198,6 +5493,8 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
     assert_eq!(solver.check_sat_with(&Formula::Not(Box::new(Formula::Var(a))), info()), crate::smt::SmtResult::Sat);
 }
 
+#[path = "flat_region_merge_tests.rs"]
+mod flat_region_merge_tests;
 #[test]
 fn region_util_default_step_budget_is_unlimited() {
     assert_eq!(TaskState::<B64>::new().region_step_budget(), None);
@@ -5230,6 +5527,10 @@ fn region_util_depth_above_sixteen_keeps_all_input_behavior() {
         }
         return;
     };
+    run_deep_region_test(move || check_region_util_depth(mode));
+}
+
+fn check_region_util_depth(mode: String) {
     let mut options = crate::config::RegionOptions::default();
     if mode != "default" {
         options.max_merge_depth = Some(mode.parse().unwrap());
@@ -5437,6 +5738,9 @@ fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
         "普通执行只能正常结束或命中原断言"
     );
 }
+
+#[path = "region_engine_tests.rs"]
+mod region_engine_tests;
 
 // 固定整改前的出口处理：相同IR在两种模式都合并，只有普通模式查询并取得认证。
 #[test]

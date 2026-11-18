@@ -323,6 +323,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                 retain_solutions,
                 None,
                 None,
+                false,
             );
         }
         parallel::enumerate(self, solver, state, shared, result, consume, complete, retain_solutions, false).map(Some)
@@ -339,6 +340,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
         retain_solutions: bool,
         partition: Option<&parallel::Partition>,
         plans: Option<&HashMap<Vec<bool>, parallel::ClassPlan>>,
+        catalog_only: bool,
     ) -> Result<Option<Value>, ExecError> {
         use Formula::*;
         let Some(config) = state.execution_limits.as_ref().map(|limits| &limits.merge_enumeration) else {
@@ -348,7 +350,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
             return Ok(None);
         }
         assert!(
-            config.class_cap > 0 && config.path_cap > 0 && config.sample_stride > 0,
+            config.class_cap != Some(0) && config.path_cap != Some(0) && config.sample_stride > 0,
             "枚举上限和采样步长必须大于零"
         );
         assert_eq!(solver.transaction_depth(), 0, "仅在路径结束后枚举");
@@ -425,8 +427,8 @@ impl<B: BV> MergeEnumeration<'_, B> {
             let events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
             let mut limits = state.execution_limits.as_ref().unwrap().clone();
             limits.merge_enumeration.mode = crate::config::MergeEnumerationMode::Count;
-            limits.merge_enumeration.class_cap = 1;
-            limits.merge_enumeration.path_cap = usize::MAX;
+            limits.merge_enumeration.class_cap = None;
+            limits.merge_enumeration.path_cap = None;
             limits.merge_enumeration.max_output_bytes = None;
             let guard_state = TaskState::<B>::new().with_execution_limits(limits);
             // 只取并行一级DFS的类目录，保留既有活动父链剪枝和规范类号。
@@ -444,7 +446,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
             let classes: Vec<Vec<bool>> = serde_json::from_value(catalog["guard_assignments"].clone()).unwrap();
             assert!(classes.windows(2).all(|pair| pair[0] != pair[1]));
             if let Some(directory) = glue_directory {
-                assert_eq!(config.class_cap, 1, "粘合诊断只取完整守卫类目录");
+                assert_eq!(config.class_cap, Some(1), "粘合诊断只取完整守卫类目录");
                 assert_eq!(catalog["path_truncated"], false, "粘合诊断不得截断守卫类目录");
                 components::PredictionGraph::diagnose(
                     &directory,
@@ -480,16 +482,12 @@ impl<B: BV> MergeEnumeration<'_, B> {
             eprintln!("[MERGE_PREDICT_RESULT] {}", serde_json::to_string(&prediction).unwrap());
             return Ok(Some(prediction));
         }
-        let streaming =
-            config.max_output_bytes.is_some() && config.mode == crate::config::MergeEnumerationMode::Samples;
+        let streaming = config.streams_binary() && config.mode == crate::config::MergeEnumerationMode::Samples;
         let probing = partition.is_some() && plans.is_none();
-        let partition_cap = if streaming {
-            config.path_cap
-        } else {
-            plans.map_or(config.path_cap, |plans| {
-                plans.values().filter(|plan| plan.partition == partition.unwrap().id).map(|plan| plan.count).sum()
-            })
-        };
+        let partition_cap = plans.filter(|_| !streaming).map(|plans| {
+            plans.values().filter(|plan| plan.partition == partition.unwrap().id).map(|plan| plan.count).sum()
+        });
+        let path_cap = if !catalog_only && (partition.is_none() || probing) { config.path_cap } else { None };
         let counting = probing || config.mode == crate::config::MergeEnumerationMode::Count;
         let measuring = probing
             && config.mode == crate::config::MergeEnumerationMode::Count
@@ -513,7 +511,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
         // 复用现有事件重放接口隔离 DFS 与逐解物化，避免 stride 改变样本内容。
         let replay_events: Vec<_> = solver.trace().to_vec().into_iter().rev().cloned().collect();
         // 同一路径的全部代表复用固定变量序；只收集可观察的有限域自由度。
-        let canonical_symbols = if !counting && config.class_cap == 1 {
+        let canonical_symbols = if !counting && config.class_cap == Some(1) {
             let mut types = HashMap::new();
             let mut functions = HashMap::new();
             let mut opaque = HashSet::new();
@@ -605,7 +603,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                 vec![(Bool(true), 0)]
             };
             while let Some((class_prefix, guard_depth)) = pending.pop() {
-                if !streaming && plans.is_some() && total == partition_cap {
+                if Some(total) == partition_cap {
                     break;
                 }
                 let queried = std::time::Instant::now();
@@ -615,7 +613,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                 if !feasible {
                     continue;
                 }
-                if (partition.is_none() || probing) && total == config.path_cap {
+                if Some(total) == path_cap {
                     path_truncated = true;
                     break;
                 }
@@ -680,6 +678,11 @@ impl<B: BV> MergeEnumeration<'_, B> {
                             }
                         }
                     }
+                    if catalog_only {
+                        solution_count = 1;
+                        total += 1;
+                        break;
+                    }
                     let plan = plans.map(|plans| plans.get(&assignment));
                     if matches!(plan, Some(None)) {
                         break;
@@ -687,7 +690,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                     let plan = plan.flatten();
                     let class_id = plan.map_or(class_count, |plan| plan.class_id);
                     let ordinal = plan.map_or(total, |plan| plan.ordinal.checked_add(solution_count).unwrap());
-                    let class_cap = plan.map_or(config.class_cap.min(config.path_cap), |plan| plan.count);
+                    let class_cap = plan.filter(|_| !streaming).map(|plan| plan.count).or(config.class_cap);
                     let export = !counting && ordinal % config.sample_stride == 0;
                     let selected: Vec<_> = {
                         let raw = if let Some(packed) = &packed_bits {
@@ -722,7 +725,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                         for event in &replay_events {
                             representative_solver.add_event(event.clone());
                         }
-                        let condition = if config.class_cap == 1 {
+                        let condition = if config.class_cap == Some(1) {
                             // 代表只由活动守卫赋值决定，不钉选投影求解器任意发现的首个叶子。
                             order.iter().zip(&assignment).fold(Bool(true), |condition, (index, value)| {
                                 let record = &records[*index];
@@ -736,7 +739,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                                 .fold(prefix.clone(), |condition, bit| And(Box::new(condition), Box::new(bit.clone())))
                         };
                         assert!(satisfiable(&mut representative_solver, &condition)?, "DFS 见证必须可重放");
-                        if config.class_cap == 1 {
+                        if config.class_cap == Some(1) {
                             let mut condition = condition;
                             let transaction = representative_solver.start_transaction();
                             let canonical = representative_solver.with_incremental_checks(|solver| {
@@ -798,7 +801,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                         measure("progress", class_count, total);
                     }
                     // 模型见证直接选择后续位分支；前沿仍通过 SAT 检查剪枝。
-                    if solution_count == class_cap || ((partition.is_none() || probing) && total == config.path_cap) {
+                    if Some(solution_count) == class_cap || Some(total) == path_cap {
                         let leaf =
                             selected.iter().fold(Bool(true), |leaf, bit| And(Box::new(leaf), Box::new(bit.clone())));
                         let rest = And(Box::new(prefix), Box::new(Not(Box::new(leaf))));
@@ -809,7 +812,7 @@ impl<B: BV> MergeEnumeration<'_, B> {
                         truncated = satisfiable(solver, &rest)?;
                         sat_time += queried.elapsed();
                         sat_checks += 1;
-                        path_truncated |= (partition.is_none() || probing) && truncated && total == config.path_cap;
+                        path_truncated |= truncated && Some(total) == path_cap;
                         break;
                     }
                     // 下一次从最深未访问分支开始；所选分支由当前模型直接剪枝。

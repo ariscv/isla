@@ -112,6 +112,7 @@ fn region_util_defer_ctor_obligation_checks_original_guard() {
                 location: info(),
                 writes_allowed: true,
                 global_state: true,
+                ordered_events: false,
             }),
             ..(*frame.local_state).clone()
         });

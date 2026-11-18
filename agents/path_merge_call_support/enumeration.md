@@ -456,6 +456,8 @@ Sv48 STORE 最终 samples 对照（两次均 `-T 32`）：enumeration_threads=1 
 
 ## F11：直接生成全部位组合与磁盘预算
 
+> 本节记录 F11 历史版本的缺省上限与实验配方。当前配置见 [投影枚举与样本输出](../../specs/isarch-cli.md#投影枚举与样本输出)。
+
 本轮取代被中断的 F10，不做 Knuth 估计前置、不设20分钟或十亿组合停止线。F10未提交估计器已归档到工作树 output/f11/f10-unfinished.patch 与 merge_estimate.rs.saved，再仅撤回这些未提交修改；F9提交2b9913a的逻辑仍保留。未做git写操作。
 
 ### 实现与相关验收
@@ -480,6 +482,8 @@ Sv48 STORE 最终 samples 对照（两次均 `-T 32`）：enumeration_threads=1 
 
 
 ## F12：分量域精确层与 Knuth 预测层（2026-11-06）
+
+> 本节的有限探测与分量验证额度属于 F12 历史配置。当前配置见 [投影枚举与样本输出](../../specs/isarch-cli.md#投影枚举与样本输出)。
 
 ### 预测值与真值对照
 

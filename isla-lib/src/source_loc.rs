@@ -317,6 +317,10 @@ impl SourceLoc {
         }
     }
 
+    pub fn file_line(self, files: &[&str]) -> Option<String> {
+        usize::try_from(self.file).ok().and_then(|index| files.get(index)).map(|file| format!("{file}:{}", self.line1))
+    }
+
     pub fn location_string(self, files: &[&str]) -> String {
         if let Some(file) = TryInto::<usize>::try_into(self.file).ok().and_then(|i| files.get(i)) {
             format!("{} {}:{} - {}:{}", file, self.line1, self.char1, self.line2, self.char2)

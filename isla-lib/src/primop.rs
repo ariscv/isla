@@ -292,6 +292,7 @@ pub(crate) fn optimistic_assert<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    let _scope = crate::executor::stats::region_progress::QueryScope::enter("assertion");
     let message = match message {
         Val::String(message) => Some(message),
         _ => None,
@@ -331,6 +332,7 @@ pub(crate) fn pessimistic_assert<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    let _scope = crate::executor::stats::region_progress::QueryScope::enter("assertion");
     let message = match message {
         Val::String(message) => Some(message),
         _ => None,

@@ -7,8 +7,8 @@ pub mod exec;
 pub mod fuzz;
 pub mod memory_builder;
 pub mod memory_model;
-mod model_exception;
 pub mod path_cache;
+pub mod path_merge_options;
 pub mod region_options;
 mod representation;
 pub mod samples;
@@ -21,7 +21,7 @@ use crate::isarch::args::{ArgStruct, InstructionMap};
 use isla_lib::bitvector::BV;
 use isla_lib::dprint::colors;
 use isla_lib::error::{ExecError, IslaError};
-use isla_lib::executor::{backtrace_string, execute_ir_function, LocalFrame, Run};
+use isla_lib::executor::{backtrace_string, execute_ir_function_with_limits, LocalFrame, Run, TaskState};
 use isla_lib::ir::UVal;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{checkpoint, Config, Context, Model};
@@ -167,7 +167,7 @@ fn run_mapping<B: BV>(
     lets: &Bindings<B>,
 ) -> Result<Option<Val<B>>, ExecError> {
     let collected = Arc::new(Mutex::new(MappingCollector { values: Vec::new(), first_error: None, rejected: 0 }));
-    execute_ir_function(
+    execute_ir_function_with_limits(
         function_name,
         &[arg],
         shared_state,
@@ -227,6 +227,7 @@ fn run_mapping<B: BV>(
                 Err(error) => collected.record_error(error),
             }
         },
+        TaskState::new().for_validation(),
     );
     let mut state = Arc::try_unwrap(collected)
         .unwrap_or_else(|_| panic!("mapping collector 仍被共享"))
@@ -1195,6 +1196,7 @@ mod tests {
         let timeout = Arc::new(SmtTimeout {
             source_loc: SourceLoc::unknown(),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_secs(1),
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesTimeoutDump))),

@@ -188,9 +188,11 @@ impl fmt::Debug for EnumMember {
     }
 }
 mod dump;
+mod logical_arm;
 mod proof_budget;
 mod transaction;
 mod witness_shadow;
+pub(crate) use logical_arm::LogicalArm;
 use transaction::SolverSavepoint;
 pub use transaction::SolverTransaction;
 mod dependencies;
@@ -219,11 +221,12 @@ pub struct Checkpoint<B> {
     num: usize,
     next_var: u32,
     trace: Arc<Option<Trace<B>>>,
+    cycles: i128,
 }
 
 impl<B> Checkpoint<B> {
     pub fn new() -> Self {
-        Checkpoint { num: 0, next_var: 0, trace: Arc::new(None) }
+        Checkpoint { num: 0, next_var: 0, trace: Arc::new(None), cycles: 0 }
     }
 
     pub fn trace(&self) -> &Option<Trace<B>> {
@@ -275,6 +278,7 @@ impl<B: BV> Checkpoint<B> {
             num: 1,
             next_var: self.next_var,
             trace: Arc::new(Some(Trace { checkpoints: 0, head: events, tail: Arc::new(None) })),
+            cycles: 0,
         }
     }
 
@@ -297,7 +301,7 @@ impl<B: BV> Checkpoint<B> {
             trace = Arc::new(Some(Trace { checkpoints: num, head, tail: trace }));
             num += 1;
         }
-        Checkpoint { num, next_var: candidate.next_var, trace }
+        Checkpoint { num, next_var: candidate.next_var, trace, cycles: candidate.cycles }
     }
 }
 
@@ -386,7 +390,7 @@ impl DefAttrs {
 pub enum Event<B> {
     Smt(Def, DefAttrs, SourceLoc),
     /// Fork ID, assertion, branch number, source location
-    Fork(u32, Sym, u32, SourceLoc),
+    Fork(u64, Sym, u32, SourceLoc),
     /// Fork group ID, number of merged paths, source location
     Merge(u32, usize, SourceLoc),
     /// Used to delimit function calls and returns in the trace
@@ -638,7 +642,7 @@ impl<B: BV> Trace<B> {
         let tail = Arc::new(Some(Trace { checkpoints: self.checkpoints, head, tail: self.tail.clone() }));
         self.checkpoints += 1;
         self.tail = tail.clone();
-        Checkpoint { num: self.checkpoints, trace: tail, next_var }
+        Checkpoint { num: self.checkpoints, trace: tail, next_var, cycles: 0 }
     }
 
     fn events_rev(&self) -> impl Iterator<Item = &Event<B>> {
@@ -654,11 +658,13 @@ impl<B: BV> Trace<B> {
 /// 求解实验选项；默认保持现有认证流程。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SolverOptions {
+    pub on_unknown: crate::config::SolverOnUnknown,
     pub skip_branch_checks: bool,
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
     pub keep_bool_proofs: bool,
     pub finite_domain_max: Option<usize>,
+    pub bv_rewrite: rewrite::BvRewrite,
 }
 
 static SOLVER_OPTIONS: OnceLock<SolverOptions> = OnceLock::new();
@@ -671,12 +677,19 @@ pub fn configure_solver_options(options: SolverOptions) {
 /// Z3 配置及执行选项；释放时清理 Z3 配置句柄。
 pub struct Config {
     pub solver_options: SolverOptions,
+    pub(crate) validation: bool,
     z3_cfg: Z3_config,
 }
 
 impl Config {
     pub fn new() -> Self {
-        unsafe { Config { z3_cfg: Z3_mk_config(), solver_options: SOLVER_OPTIONS.get().copied().unwrap_or_default() } }
+        unsafe {
+            Config {
+                z3_cfg: Z3_mk_config(),
+                solver_options: SOLVER_OPTIONS.get().copied().unwrap_or_default(),
+                validation: false,
+            }
+        }
     }
 }
 
@@ -716,6 +729,7 @@ pub fn global_set_param_value(id: &str, value: &str) {
 /// Context is a wrapper around `Z3_context`.
 pub struct Context {
     solver_options: SolverOptions,
+    validation: bool,
     z3_ctx: Z3_context,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
@@ -740,6 +754,7 @@ impl Context {
         unsafe {
             Context {
                 solver_options: cfg.solver_options,
+                validation: cfg.validation,
                 z3_ctx: Z3_mk_context_rc(cfg.z3_cfg),
                 enum_cache: RefCell::new(HashMap::new()),
             }
@@ -1033,6 +1048,9 @@ macro_rules! z3_float_binary_op {
 }
 
 mod arithmetic;
+pub mod rewrite;
+#[cfg(test)]
+mod rewrite_tests;
 
 static PUSH_ITE_BV: &[u8] = b"push_ite_bv\0";
 static BV_LE_EXTRA: &[u8] = b"bv_le_extra\0";
@@ -1785,6 +1803,7 @@ pub struct Solver<'ctx, B> {
     shadow_witnesses: witness_shadow::Bank<'ctx>,
     savepoints: Vec<SolverSavepoint<'ctx>>,
     transaction_events: Vec<Event<B>>,
+    logical_arms: logical_arm::LogicalArms,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
     transaction_event_guards: Vec<Option<Exp<Sym>>>,
     committed_transaction_events: Vec<(Option<Exp<Sym>>, Event<B>)>,
@@ -1921,9 +1940,15 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.complete_model = b;
     }
 
-    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext) -> ExecError {
+    fn model_eval_timeout_error(&self, timeout: &ModelEvalTimeoutContext, limit: std::time::Duration) -> ExecError {
         let dump = timeout_dump_from_checkpoint(self.solver.checkpoint_snapshot(), timeout.dump_request.clone());
-        ExecError::Smt(z3_timeout_error(SmtOperation::ModelEval, SourceLoc::unknown(), timeout.started.elapsed(), dump))
+        ExecError::Smt(z3_timeout_error(
+            SmtOperation::ModelEval,
+            SourceLoc::unknown(),
+            timeout.started.elapsed(),
+            limit,
+            dump,
+        ))
     }
 
     fn eval_with_timeout(
@@ -1936,7 +1961,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         match timeout_Z3_model_eval(self.ctx.z3_ctx, self.z3_model, ast, model_completion, result, SourceLoc::unknown())
         {
             Ok(evaluated) => Ok(evaluated),
-            Err(Z3TimeoutError::Interrupted) => Err(self.model_eval_timeout_error(timeout_context)),
+            Err(Z3TimeoutError::Interrupted(limit)) => Err(self.model_eval_timeout_error(timeout_context, limit)),
         }
     }
 
@@ -2279,6 +2304,82 @@ pub enum SmtResult {
 
 use SmtResult::*;
 
+fn unknown_result(info: SourceLoc, wall: Duration, deadline: Option<Duration>) -> SmtResult {
+    #[cfg(feature = "smt-thread-interrupt")]
+    let limit = deadline.or_else(z3_timeout::configured_operation_timeout);
+    #[cfg(not(feature = "smt-thread-interrupt"))]
+    let limit = {
+        let _ = deadline;
+        None
+    };
+    Error(SmtError::Unknown {
+        source_loc: info,
+        wall,
+        limit,
+        purpose: crate::executor::stats::region_progress::query_label(),
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod test_queries {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    thread_local! {
+        static RESULTS: RefCell<VecDeque<Option<z3_sys::Z3_lbool>>> = const { RefCell::new(VecDeque::new()) };
+        static PURPOSES: RefCell<VecDeque<&'static str>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    pub(crate) fn with_results<T>(
+        results: impl IntoIterator<Item = Option<z3_sys::Z3_lbool>>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        RESULTS.with(|slot| {
+            assert!(slot.borrow().is_empty());
+            slot.borrow_mut().extend(results);
+        });
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RESULTS.with(|slot| slot.borrow_mut().clear());
+            }
+        }
+        let _reset = Reset;
+        let result = run();
+        RESULTS.with(|slot| assert!(slot.borrow().is_empty(), "部分注入查询未被消费"));
+        result
+    }
+
+    pub(crate) fn with_unknown_purposes<T>(purposes: &[&'static str], run: impl FnOnce() -> T) -> T {
+        PURPOSES.with(|slot| {
+            assert!(slot.borrow().is_empty());
+            slot.borrow_mut().extend(purposes);
+        });
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                PURPOSES.with(|slot| slot.borrow_mut().clear());
+            }
+        }
+        let _reset = Reset;
+        let result = run();
+        PURPOSES.with(|slot| assert!(slot.borrow().is_empty(), "部分注入查询未被消费：{:?}", slot.borrow()));
+        result
+    }
+
+    pub(super) fn take_unknown_purpose() -> bool {
+        let label = crate::executor::stats::region_progress::query_label();
+        PURPOSES.with(|slot| {
+            let mut list = slot.borrow_mut();
+            list.front().is_some_and(|purpose| *purpose == label) && list.pop_front().is_some()
+        })
+    }
+
+    pub(super) fn next() -> Option<z3_sys::Z3_lbool> {
+        RESULTS.with(|slot| slot.borrow_mut().pop_front().flatten())
+    }
+}
+
 impl SmtResult {
     pub fn is_sat(&self) -> Result<bool, ExecError> {
         match self {
@@ -2299,7 +2400,7 @@ impl SmtResult {
     }
 
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Unknown)
+        matches!(self, Unknown | Error(SmtError::Unknown { .. }))
     }
 }
 
@@ -2425,6 +2526,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 shadow_witnesses: witness_shadow::Bank::new(ctx),
                 savepoints: Vec::new(),
                 transaction_events: Vec::new(),
+                logical_arms: logical_arm::LogicalArms::default(),
                 transaction_event_guards: Vec::new(),
                 committed_transaction_events: Vec::new(),
                 last_committed_transaction: None,
@@ -2462,7 +2564,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         ) {
             self.floating_point_seen.set(true);
         }
-        match exp {
+        let ast = match exp {
             Var(v) => match self.decls.get(v) {
                 None => panic!("Could not get Z3 func_decl {}", *v),
                 Some(ast) => ast.clone(),
@@ -2473,7 +2575,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Bool(b) => Ast::mk_bool(self.ctx, *b),
             Not(exp) => Ast::mk_not(&self.translate_exp(exp)),
             Eq(lhs, rhs) => Ast::mk_eq(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Neq(lhs, rhs) => Ast::mk_not(&Ast::mk_eq(&self.translate_exp(lhs), &self.translate_exp(rhs))),
+            Neq(lhs, rhs) => {
+                let equality = self.translate_exp(lhs).mk_eq(&self.translate_exp(rhs));
+                rewrite::apply(equality, self.ctx.solver_options.bv_rewrite).mk_not()
+            }
             And(lhs, rhs) => Ast::mk_and(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Or(lhs, rhs) => Ast::mk_or(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Bvnot(exp) => Ast::mk_bvnot(&self.translate_exp(exp)),
@@ -2603,7 +2708,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 &self.translate_exp(y),
                 &self.translate_exp(z),
             ),
-        }
+        };
+        rewrite::apply(ast, self.ctx.solver_options.bv_rewrite)
     }
 
     fn z3_assert(&mut self, exp: &Exp<Sym>) {
@@ -2874,7 +2980,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn cycle_count(&mut self) {
         self.cycles += 1;
-        self.add_event(Event::Cycle)
+        self.add_event(Event::Cycle);
+        self.logical_arms.mark_cycle();
     }
 
     pub fn get_cycle_count(&self) -> i128 {
@@ -2902,6 +3009,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         {
             self.transaction_events.push(event);
             self.transaction_event_guards.push(None);
+            self.logical_arms.record_event();
         }
     }
 
@@ -3007,11 +3115,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.trace.tail = trace
     }
 
-    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace }: Checkpoint<B>) -> Self {
+    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace, cycles }: Checkpoint<B>) -> Self {
         let mut solver = Solver::new(ctx);
         solver.replay(num, trace);
         solver.next_var = next_var;
+        solver.cycles = cycles;
         solver
+    }
+
+    pub(crate) fn exploration_on_unknown(&self) -> Option<crate::config::SolverOnUnknown> {
+        (!self.ctx.validation).then_some(self.ctx.solver_options.on_unknown)
     }
 
     pub fn branch_checks_skipped(&self) -> bool {
@@ -3080,6 +3193,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             query::QueryPurpose::BranchFeasibility => "branch_feasibility",
         };
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
+        #[cfg(test)]
+        if test_queries::take_unknown_purpose() {
+            return unknown_result(info, Duration::ZERO, None);
+        }
+
         let proof_limit = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
             proof_budget::limit()
         } else {
@@ -3149,6 +3267,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         };
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let slow_query = self.slow_query_begin(query.z3_solver);
+        let check_started = Instant::now();
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3156,7 +3275,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             info,
         ) {
             Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
+            Err(Z3TimeoutError::Interrupted(limit)) => {
                 if let Some(profile) = budget_profile {
                     profile.finish(Z3_L_UNDEF);
                 }
@@ -3168,9 +3287,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.asserts_since_check = 0;
                 let dump =
                     timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSatWith(exp.clone()));
-                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), dump));
+                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), limit, dump));
             }
         };
+        let check_elapsed = check_started.elapsed();
         self.slow_query_finish(slow_query, query.z3_solver, Some(exp), info, z3_result);
         if let Some(profile) = budget_profile {
             profile.finish(z3_result);
@@ -3202,8 +3322,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Sat
         } else if z3_result == Z3_L_FALSE {
             Unsat
-        } else {
+        } else if proof_limit.is_some() {
+            // 显式限额只约束可选折叠，耗尽时保留原布尔表达式。
             Unknown
+        } else {
+            unknown_result(info, check_elapsed, None)
         };
 
         self.record_check_result(&result, query.z3_solver);
@@ -3243,10 +3366,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let slow_query = self.slow_query_begin(query.z3_solver);
+        let check_started = Instant::now();
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
                 Ok(result) => result,
-                Err(Z3TimeoutError::Interrupted) => {
+                Err(Z3TimeoutError::Interrupted(limit)) => {
                     if let Some(shadow) = shadow {
                         shadow.finish(Z3_L_UNDEF);
                     }
@@ -3254,7 +3378,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.last_check_sat = false;
                     self.asserts_since_check = 0;
                     let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                    return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), limit, dump));
                 }
             };
         if let Some(shadow) = shadow {
@@ -3265,7 +3389,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            Unknown
+            unknown_result(info, check_started.elapsed(), None)
         };
         self.slow_query_finish(slow_query, query.z3_solver, None, info, z3_result);
         self.record_check_result(&result, query.z3_solver);
@@ -3370,6 +3494,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
+        let _query_scope = crate::executor::stats::region_progress::QueryScope::fallback("terminal_model");
+        let check_started = Instant::now();
         let z3_result = match timeout_Z3_solver_check_deadline(
             self.ctx.z3_ctx,
             query.z3_solver,
@@ -3378,7 +3504,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             deadline,
         ) {
             Ok(result) => result,
-            Err(Z3TimeoutError::Interrupted) => {
+            Err(Z3TimeoutError::Interrupted(limit)) => {
                 if let Some(shadow) = shadow {
                     shadow.finish(Z3_L_UNDEF);
                 }
@@ -3386,7 +3512,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.last_check_sat = false;
                 self.asserts_since_check = 0;
                 let dump = timeout_dump_from_checkpoint(self.checkpoint_snapshot(), SmtDumpRequest::CheckSat);
-                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), dump));
+                return Error(z3_timeout_error(SmtOperation::CheckSat, info, started.elapsed(), limit, dump));
             }
         };
         if let Some(shadow) = shadow {
@@ -3397,19 +3523,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            Unknown
+            unknown_result(info, check_started.elapsed(), Some(deadline))
         };
         self.record_check_result(&result, query.z3_solver);
         result
     }
 
-    pub fn dump_solver(&mut self, filename: &str) {
-        let mut file = std::fs::File::create(filename).expect("Failed to open solver dump file");
+    /// 输出当前求解器的声明与断言，供外部工具重放。
+    pub fn write_smtlib(&self, mut output: impl Write) -> std::io::Result<()> {
         unsafe {
-            let s = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
-            let cs = CStr::from_ptr(s);
-            file.write_all(cs.to_bytes()).expect("Failed to write solver dump");
+            let text = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
+            output.write_all(CStr::from_ptr(text).to_bytes())
         }
+    }
+
+    pub fn dump_solver(&mut self, filename: &str) {
+        let file = std::fs::File::create(filename).expect("Failed to open solver dump file");
+        self.write_smtlib(file).expect("Failed to write solver dump");
     }
 
     pub fn dump_solver_with(&mut self, filename: &str, exp: &Exp<Sym>) {
@@ -3448,7 +3578,7 @@ pub fn restore_path_smt_stats(stats: crate::timeout::SmtCallStats) {
     z3_timeout::restore_path_smt_stats(stats)
 }
 
-/// 已配置的单次 SMT operation deadline（`--smt-timeout`）。
+/// 单次 SMT 调用的实际限时。线程中断构建缺省 60 秒，直接调用构建无单次限时。
 pub fn configured_smt_operation_timeout() -> Option<std::time::Duration> {
     z3_timeout::configured_operation_timeout()
 }
@@ -4026,6 +4156,7 @@ mod tests {
         Arc::new(SmtTimeout {
             source_loc: SourceLoc::new(0, 1, 0, 1, 1),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_secs(10),
             operation_wall: Duration::from_secs(11),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
@@ -4759,7 +4890,7 @@ impl<B> Checkpoint<B> {
         (self.num, self.next_var, &self.trace)
     }
     pub(crate) fn from_path_cache_parts(num: usize, next_var: u32, trace: Arc<Option<Trace<B>>>) -> Self {
-        Self { num, next_var, trace }
+        Self { num, next_var, trace, cycles: 0 }
     }
 }
 impl<B> Trace<B> {

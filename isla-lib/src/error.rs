@@ -56,15 +56,24 @@ impl IslaError for VoidError {
 
 #[derive(Clone, Debug)]
 pub enum SmtError {
-    NoSmt { reason: &'static str, source_loc: SourceLoc },
+    NoSmt {
+        reason: &'static str,
+        source_loc: SourceLoc,
+    },
     Timeout(Arc<SmtTimeout>),
+    Unknown {
+        source_loc: SourceLoc,
+        purpose: &'static str,
+        wall: std::time::Duration,
+        limit: Option<std::time::Duration>,
+    },
 }
 
 impl SmtError {
     pub fn source_loc(&self) -> SourceLoc {
         match self {
             SmtError::Timeout(timeout) => timeout.source_loc(),
-            SmtError::NoSmt { source_loc, .. } => *source_loc,
+            SmtError::NoSmt { source_loc, .. } | SmtError::Unknown { source_loc, .. } => *source_loc,
         }
     }
 }
@@ -76,6 +85,10 @@ impl PartialEq for SmtError {
             (SmtError::NoSmt { reason: a, source_loc: x }, SmtError::NoSmt { reason: b, source_loc: y }) => {
                 a == b && x == y
             }
+            (
+                SmtError::Unknown { source_loc: a, purpose: p, wall: x, limit: l },
+                SmtError::Unknown { source_loc: b, purpose: q, wall: y, limit: m },
+            ) => a == b && p == q && x == y && l == m,
             _ => false,
         }
     }
@@ -87,6 +100,9 @@ impl fmt::Display for SmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SmtError::NoSmt { reason, source_loc } => write!(f, "无 SMT 无法继续：{reason}，位置{source_loc:?}"),
+            SmtError::Unknown { source_loc, purpose, wall, .. } => {
+                write!(f, "Z3 Unknown during {purpose} at {source_loc:?} (operation wall {wall:?})")
+            }
             SmtError::Timeout(timeout) => write!(
                 f,
                 "SMT timeout during {:?} at {:?} after {:?} (operation wall {:?})",
@@ -141,6 +157,8 @@ pub enum ExecError {
     NoModel,
     Z3Error(String),
     Z3Unknown,
+    /// 候选与剩余约束均不可继续，由探索循环转为 Run::Dead。
+    SolverDroppedPath,
     /// Execution stopped because this function is in the stop_functions set
     Stopped(String),
     /// 样本输出会话的正常停止，由枚举器收尾，不是执行失败。
@@ -183,6 +201,7 @@ impl IslaError for ExecError {
             | NoModel
             | Z3Error(_)
             | Z3Unknown
+            | SolverDroppedPath
             | SampleOutputStopped(_)
             | Stopped(_)
             | PCLimitReached(_)
@@ -233,6 +252,7 @@ impl fmt::Display for ExecError {
             NoModel => write!(f, "No SMT model found"),
             Z3Error(msg) => write!(f, "SMT solver error: {}", msg),
             Z3Unknown => write!(f, "SMT solver returned unknown"),
+            SolverDroppedPath => write!(f, "求解器未判定，路径已丢弃"),
             SampleOutputStopped(reason) => write!(f, "样本输出会话正常停止：{reason}"),
             Stopped(func) => write!(f, "Execution stopped at {}", func),
             PCLimitReached(pc_value) => write!(f, "Executed instruction at {} more than specified limit", pc_value),

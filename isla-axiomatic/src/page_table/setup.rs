@@ -1433,6 +1433,7 @@ mod tests {
         let timeout = Arc::new(SmtTimeout {
             source_loc: SourceLoc::unknown(),
             operation: SmtOperation::CheckSat,
+            query_purpose: "unclassified",
             limit: Duration::from_millis(5),
             operation_wall: Duration::from_millis(5),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(TestDump))),

@@ -33,6 +33,7 @@ fn segment_paths(
         &|_, _, result, _, mut solver, output| match result {
             Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
                 SmtResult::Sat => output.lock().unwrap().push(Path {
+                    exception: frame.get_exception().map(|(value, _)| value.clone()),
                     records: frame.region_merge_records().to_vec(),
                     value,
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
@@ -53,7 +54,13 @@ fn segment_paths(
     output.into_inner().unwrap()
 }
 
-fn scan_program(counter: Name, choices: Name, choice: Name, n: usize, reg: Option<Name>) -> Vec<Instr<Name, B64>> {
+pub(super) fn scan_program(
+    counter: Name,
+    choices: Name,
+    choice: Name,
+    n: usize,
+    reg: Option<Name>,
+) -> Vec<Instr<Name, B64>> {
     let mut code = vec![
         Instr::Init(counter, Ty::I128, Exp::I128(0), info()),
         Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::I128(n as i128)]), 9, info()),
@@ -99,6 +106,16 @@ fn scan_paths(
     merge: bool,
     reg: Option<Name>,
 ) -> Vec<Path> {
+    scan_paths_with_limits(shared, n, budget, reg, ExecutionLimits::default().with_path_merging(merge))
+}
+
+fn scan_paths_with_limits(
+    shared: &SharedState<'static, B64>,
+    n: usize,
+    budget: usize,
+    reg: Option<Name>,
+    limits: ExecutionLimits,
+) -> Vec<Path> {
     let counter = test_name(1800);
     let choices = test_name(1801);
     let choice = test_name(1802);
@@ -106,10 +123,7 @@ fn scan_paths(
         scan_program(counter, choices, choice, n, reg),
         shared,
         n,
-        ExecutionLimits::default()
-            .with_path_merging(merge)
-            .with_region_loop_analysis(true)
-            .with_region_global_state(true),
+        limits.with_region_loop_analysis(true).with_region_global_state(true),
         budget,
         crate::memory::Memory::new(),
         |frame| {
@@ -127,7 +141,7 @@ fn scan_paths(
         },
     )
 }
-fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
+pub(super) fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
     use smtlib::Exp::*;
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
@@ -166,6 +180,10 @@ fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths() {
     )) {
         return;
     }
+    run_deep_region_test(loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths_body);
+}
+
+fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths_body() {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let off = scan_paths(&shared, 64, 128, false, None);
@@ -181,6 +199,10 @@ fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths() {
 }
 #[test]
 fn loop_segment_multiple_real_ends_use_virtual_exit() {
+    run_deep_region_test(loop_segment_multiple_real_ends_use_virtual_exit_body);
+}
+
+fn loop_segment_multiple_real_ends_use_virtual_exit_body() {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let n = 64;
@@ -226,9 +248,17 @@ fn loop_segment_register_state_and_continue_guard_are_exact() {
     let reg = shared.symtab.intern("ziteration_state");
     shared.registers.insert(reg, Ty::I128);
     let off = scan_paths(&shared, 8, 40, false, Some(reg));
-    let on = scan_paths(&shared, 8, 40, true, Some(reg));
-    equivalent_scalar_paths(&off, &on, 8);
-    equivalent_register_paths(&off, &on, 8);
+    let counts = [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat].map(|strategy| {
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        limits.merge_strategy = strategy;
+        let on = scan_paths_with_limits(&shared, 8, 40, Some(reg), limits);
+        equivalent_scalar_paths(&off, &on, 8);
+        equivalent_register_paths(&off, &on, 8);
+        let mut counts: Vec<_> = on.iter().map(|path| path.records.len()).collect();
+        counts.sort_unstable();
+        counts
+    });
+    assert_eq!(counts[0], counts[1], "有限预算下，两组织者必须留下相同数量的前沿和记录");
 }
 #[test]
 fn loop_segment_zero_budget_keeps_ordinary_fallback() {
@@ -368,6 +398,10 @@ fn loop_segment_failed_exit_merge_does_not_submit_a_continuation() {
 
 #[test]
 fn loop_segment_discards_dead_preexisting_locals_at_function_exit() {
+    run_deep_region_test(loop_segment_discards_dead_preexisting_locals_at_function_exit_body);
+}
+
+fn loop_segment_discards_dead_preexisting_locals_at_function_exit_body() {
     let shared = empty_shared_state();
     let n = 64;
     let counter = test_name(1800);
@@ -427,6 +461,10 @@ fn loop_segment_discards_dead_preexisting_locals_at_function_exit() {
 
 #[test]
 fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region() {
+    run_deep_region_test(loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body);
+}
+
+fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body() {
     let shared = empty_shared_state();
     let off = scan_paths(&shared, 64, 128, false, None);
     let on = scan_paths(&shared, 64, 128, true, None);
@@ -440,6 +478,10 @@ fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region() {
 
 #[test]
 fn loop_iteration_frontiers_nested_call_preserves_complete_relation() {
+    run_deep_region_test(loop_iteration_frontiers_nested_call_preserves_complete_relation_body);
+}
+
+fn loop_iteration_frontiers_nested_call_preserves_complete_relation_body() {
     let mut shared = empty_shared_state();
     let function = shared.symtab.intern("zfinite_scan");
     let counter = test_name(1800);

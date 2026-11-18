@@ -82,6 +82,20 @@ pub fn print_version() -> ! {
     exit(0)
 }
 
+pub fn add_path_merge_flags(opts: &mut Options) {
+    opts.optflag("", "path-merging", "启用自适应区域路径合并");
+    opts.optflag("", "no-path-merging", "关闭区域路径合并");
+}
+
+pub fn path_merge_cli(matches: &getopts::Matches) -> Result<Option<bool>, &'static str> {
+    match (matches.opt_present("path-merging"), matches.opt_present("no-path-merging")) {
+        (true, true) => Err("--path-merging 与 --no-path-merging 不能同时使用"),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
 pub fn common_opts() -> Options {
     let mut opts = Options::new();
     opts.optopt("T", "threads", "use this many worker threads", "<n>");

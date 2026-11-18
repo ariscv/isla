@@ -10,9 +10,20 @@ use super::{
 };
 use crate::source_loc::SourceRegionSpec;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SolverOnUnknown {
+    #[default]
+    Dead,
+    Error,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SolverConfig {
+    pub on_unknown: SolverOnUnknown,
+    /// 通用等价改写；默认关闭，可按规则名独立启用。
+    pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
     pub skip_branch_checks: bool,
     /// 跳过可选布尔恒值证明；默认关闭。
@@ -23,6 +34,8 @@ pub struct SolverConfig {
     pub no_smt_keep_bool_proofs: bool,
     /// 0 表示不限，不限制路径判定。
     pub bool_proof_rlimit: u32,
+    /// isarch 终值重解的单次时限（毫秒）。省略时沿用已有时限。
+    pub model_timeout_ms: Option<std::num::NonZeroU64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -45,13 +58,21 @@ pub struct PathMergeDiagnostics {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PathMergeConfig {
+    pub strategy: Option<super::MergeStrategy>,
+    /// 两种组织者共用。true 要求访问偏序，缺省 false。
+    pub ordered_events: Option<bool>,
+    /// 省略时沿用入口缺省值。完整符号 DAG 缺省开启。
     pub enabled: Option<bool>,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
+    /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
+    pub max_fragments: Option<i64>,
     /// 范围证明转为出口待证义务；默认关闭。
     pub defer_range_proofs: bool,
     /// 构造子解包标签转为出口待证义务；默认关闭。
     pub defer_ctor_checks: bool,
+    /// 只消除已证明不可观察的未初始化槽位；默认关闭。
+    pub merge_poison_slots: bool,
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,
@@ -79,7 +100,18 @@ impl PathMergeConfig {
             .collect()
     }
 
+    pub fn fragment_limit(&self) -> Result<Option<usize>, String> {
+        match self.max_fragments {
+            None | Some(-1) => Ok(None),
+            Some(value) if value > 0 => usize::try_from(value)
+                .map(Some)
+                .map_err(|_| "execution_limits.path_merge.max_fragments 超出 usize 范围".into()),
+            _ => Err("execution_limits.path_merge.max_fragments 必须为正整数或 -1（不限）".into()),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        self.fragment_limit()?;
         if let Some(value) = self.step_budget {
             parse_region_step_budget(value)?;
         }

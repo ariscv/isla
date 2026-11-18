@@ -125,7 +125,7 @@ pub struct PathTimeoutDiagnostic {
     pub smt_operation_limit: Option<Duration>,
     /// 这条路径累计执行的控制流步数（jump/goto/call）。死循环会让它无上界地增长，
     /// 而 Sail 里 trip count 具体的 `foreach` 只会给出与 num_elem 成比例的数量级。
-    pub control_flow_steps: u32,
+    pub control_flow_steps: u64,
     /// 撞上预算时停在哪条 IR 指令上，形如 `execute:1234`。
     pub position: String,
 }
@@ -354,6 +354,7 @@ impl fmt::Debug for TimeoutSmtDump {
 pub struct SmtTimeout {
     pub source_loc: SourceLoc,
     pub operation: SmtOperation,
+    pub query_purpose: &'static str,
     pub limit: Duration,
     pub operation_wall: Duration,
     pub dump: Arc<TimeoutSmtDump>,

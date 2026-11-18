@@ -81,8 +81,10 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     solver: &mut Solver<B>,
+    shared: &SharedState<'ir, B>,
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
+    let _scope = super::stats::region_progress::QueryScope::enter("concretization");
 
     match &error {
         ExecError::IntegerConversion(..) => {
@@ -99,7 +101,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     }
     if let ExecError::IntegerConversion(in_range, info) | ExecError::RetryCondition(in_range, info) = error {
         let cond = solver.define_const(in_range, info);
-        fork_retry_operand(
+        return fork_retry_operand(
             cond,
             Var(cond),
             Not(Box::new(Var(cond))),
@@ -112,8 +114,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             frame,
             task_state,
             solver,
-        )?;
-        return Ok(true);
+            shared,
+        );
     }
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
     let finite_enabled = solver.finite_domain_enabled();
@@ -256,6 +258,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                                     frame,
                                     task_state,
                                     solver,
+                                    shared,
                                 )? {
                                     ValueRetry::Forked => Ok(true),
                                     ValueRetry::Dead => Ok(false),
@@ -280,7 +283,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         if solver.check_sat_with(&allowed, info).is_sat()?
                             && solver.check_sat_with(&excluded, info).is_sat()?
                         {
-                            fork_retry_operand(
+                            return fork_retry_operand(
                                 sym,
                                 allowed,
                                 excluded,
@@ -293,8 +296,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                                 frame,
                                 task_state,
                                 solver,
-                            )?;
-                            return Ok(true);
+                                shared,
+                            );
                         }
                     }
                     let width = solver.length(sym).expect("内存地址必须是位向量");
@@ -320,7 +323,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         if solver.check_sat_with(&in_region, info).is_sat()?
                             && solver.check_sat_with(&outside_region, info).is_sat()?
                         {
-                            fork_retry_operand(
+                            return fork_retry_operand(
                                 sym,
                                 in_region,
                                 outside_region,
@@ -333,8 +336,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                                 frame,
                                 task_state,
                                 solver,
-                            )?;
-                            return Ok(true);
+                                shared,
+                            );
                         }
                     }
                     // 同一区域中的有限合并地址沿原 ITE 条件拆分，不选择地址模型值。
@@ -356,7 +359,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         if solver.check_sat_with(&condition, info).is_sat()?
                             && solver.check_sat_with(&opposite, info).is_sat()?
                         {
-                            fork_retry_operand(
+                            return fork_retry_operand(
                                 sym,
                                 condition,
                                 opposite,
@@ -369,8 +372,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                                 frame,
                                 task_state,
                                 solver,
-                            )?;
-                            return Ok(true);
+                                shared,
+                            );
                         }
                     }
                     // 无法继续按区域拆分时保留原错误，禁止退回地址单点枚举。
@@ -383,7 +386,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     && solver.check_sat_with(&remainder, info).is_sat()?
                 {
                     // 先完整分离两类候选，再由消费者拒绝非法索引或处理默认符号内存。
-                    fork_retry_operand(
+                    return fork_retry_operand(
                         sym,
                         selected,
                         remainder,
@@ -396,8 +399,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         frame,
                         task_state,
                         solver,
-                    )?;
-                    return Ok(true);
+                        shared,
+                    );
                 }
                 // 不可满足的探测会使当前模型失效，单值枚举前须重新建立前缀模型。
                 assert!(solver.check_sat(info).is_sat()?, "边界探测不得改变路径可满足性");
@@ -413,6 +416,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 frame,
                 task_state,
                 solver,
+                shared,
             )? {
                 ValueRetry::Forked => return Ok(true),
                 ValueRetry::Dead => return Ok(false),
@@ -443,6 +447,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     solver: &mut Solver<B>,
+    shared: &SharedState<'ir, B>,
 ) -> Result<ValueRetry, ExecError> {
     use smtlib::Exp::*;
     let diagnostics = crate::config::RegionOptions::current().progress;
@@ -466,21 +471,27 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         if diagnostics {
             STRUCTURAL_CANDIDATES.fetch_add(1, Relaxed);
         }
-        fork_retry_operand(
-            sym,
-            Eq(Box::new(Var(sym)), Box::new(candidate.clone())),
-            Neq(Box::new(Var(sym)), Box::new(candidate.clone())),
-            operands,
-            info,
-            task_id,
-            task_fraction,
-            stop_conditions,
-            fork_sink,
-            frame,
-            task_state,
-            solver,
-        )?;
-        return Ok(ValueRetry::Forked);
+        return Ok(
+            if fork_retry_operand(
+                sym,
+                Eq(Box::new(Var(sym)), Box::new(candidate.clone())),
+                Neq(Box::new(Var(sym)), Box::new(candidate.clone())),
+                operands,
+                info,
+                task_id,
+                task_fraction,
+                stop_conditions,
+                fork_sink,
+                frame,
+                task_state,
+                solver,
+                shared,
+            )? {
+                ValueRetry::Forked
+            } else {
+                ValueRetry::Dead
+            },
+        );
     }
     if solver.finite_domain_enabled() {
         let result = solver
@@ -503,18 +514,42 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     }
     let equal = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
     let remainder = Neq(Box::new(Var(sym)), Box::new(candidate));
-    assert!(solver.check_sat_with(&equal, info).is_sat()?, "模型中的长度候选必须可满足");
-    let has_remainder = if frame.region_execution.is_some() {
-        super::region_merge::feasible(frame, solver, &remainder, info)?
+    let _scope = super::stats::region_progress::QueryScope::enter("concretization");
+    let selected = solver.check_sat_with(&equal, info);
+    assert_ne!(selected, crate::smt::SmtResult::Unsat, "模型中的长度候选必须可满足");
+    let selected = super::region_merge::path_is_feasible(selected, frame, solver, shared)?;
+    let remainder_result = if frame.region_execution.is_some() {
+        solver.check_sat_with_for_branch(&remainder, info, true)
     } else {
-        solver.check_sat_with(&remainder, info).is_sat()?
+        Some(solver.check_sat_with(&remainder, info))
     };
+    let remainder_failed = matches!(&remainder_result, Some(crate::smt::SmtResult::Error(_)));
+    let has_remainder = match remainder_result {
+        Some(result) => super::region_merge::path_is_feasible(result, frame, solver, shared)?,
+        None => true,
+    };
+    if !selected {
+        if !has_remainder {
+            return Err(ExecError::SolverDroppedPath);
+        }
+        cache_retry_operand(frame, operands);
+        solver.assert(remainder.clone());
+        btrace_push_branch_condition!(frame, remainder);
+        return Ok(ValueRetry::Forked);
+    }
     if !has_remainder {
+        if remainder_failed {
+            // 唯一幸存候选必须实际约束到该值，不能继续使用原来的较宽输入域。
+            cache_retry_operand(frame, operands);
+            solver.assert(equal.clone());
+            btrace_push_branch_condition!(frame, equal);
+            return Ok(ValueRetry::Forked);
+        }
         assert!(solver.check_sat(info).is_sat()?, "探测不应改变路径可满足性");
         return Ok(ValueRetry::Unique);
     }
 
-    fork_retry_operand(
+    if !fork_retry_operand(
         sym,
         equal,
         remainder,
@@ -527,11 +562,22 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         frame,
         task_state,
         solver,
-    )?;
+        shared,
+    )? {
+        return Err(ExecError::SolverDroppedPath);
+    }
     Ok(ValueRetry::Forked)
 }
 
-/// 两种重试都必须保存操作数，并沿用同一套执行限制和检查点语义。
+fn cache_retry_operand<B: BV>(frame: &mut LocalFrame<'_, B>, operands: &[Val<B>]) {
+    let cached =
+        if frame.local_state.expression_retry_operands.is_some() { Val::Unit } else { Val::Vector(operands.to_vec()) };
+    frame.pending_retry_operand = Some((frame.pc, cached));
+}
+
+/// 两种重试都保存操作数，并沿用同一套执行限制和检查点语义。
+/// 区域中两个守卫皆可达时拒绝本次推演，由普通执行用原前缀提交互补的两臂。
+/// 两个守卫皆不可达时直接报告路径死亡。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
@@ -546,26 +592,21 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     solver: &mut Solver<B>,
-) -> Result<(), ExecError> {
+    shared: &SharedState<'ir, B>,
+) -> Result<bool, ExecError> {
     use smtlib::Def::Assert;
     if frame.region_execution.is_some() {
-        let selected = super::region_merge::feasible(frame, solver, &equal, info)?;
-        let other = super::region_merge::feasible(frame, solver, &remainder, info)?;
+        let selected = super::region_merge::feasible(frame, solver, &equal, info, shared)?;
+        let other = super::region_merge::feasible(frame, solver, &remainder, info, shared)?;
         if selected && other {
             return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
         }
         if !selected && !other {
-            solver.assert(smtlib::Exp::Bool(false));
-            return Ok(());
+            return Ok(false);
         }
-        let cached = if frame.local_state.expression_retry_operands.is_some() {
-            Val::Unit
-        } else {
-            Val::Vector(operands.to_vec())
-        };
-        frame.pending_retry_operand = Some((frame.pc, cached));
+        cache_retry_operand(frame, operands);
         solver.assert(if selected { equal } else { remainder });
-        return Ok(());
+        return Ok(true);
     }
     branch_decision(frame, task_state, SpeculativeRejectReason::RetryOperand)?;
     let decision = match task_state.execution_limits.as_ref() {
@@ -595,9 +636,7 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
     };
 
     // 在冻结子帧前保存；当前路径与剩余候选路径必须使用同一次求值的操作数。
-    let cached =
-        if frame.local_state.expression_retry_operands.is_some() { Val::Unit } else { Val::Vector(operands.to_vec()) };
-    frame.pending_retry_operand = Some((frame.pc, cached));
+    cache_retry_operand(frame, operands);
     if let Some(fork_id) = fork_id {
         let point = checkpoint(solver);
         frame.capture_path_smt_stats();
@@ -629,9 +668,9 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
         };
         solver.add(Assert(selected.clone()));
         btrace_push_branch_condition!(frame, selected);
-        return Ok(());
+        return Ok(true);
     }
     solver.add(Assert(equal.clone()));
     btrace_push_branch_condition!(frame, equal);
-    Ok(())
+    Ok(true)
 }

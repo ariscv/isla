@@ -784,3 +784,63 @@ fn probe_transaction_snapshot_counts_guarded_assertions_without_solver_work() {
     assert_eq!(solver.transaction_depth(), 1, "诊断不得创建或丢弃保存点");
     solver.rollback_transaction(outer);
 }
+
+#[test]
+fn logical_arm_interleaved_death_keeps_sibling_effects_and_frozen_obligations() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let info = SourceLoc::unknown();
+    let a_reg = Name::from_u32(1);
+    let b_reg = Name::from_u32(2);
+    let child_reg = Name::from_u32(3);
+    for commit in [false, true] {
+        let mut solver = Solver::<B64>::new(&ctx);
+        let guard = solver.declare_const(Ty::Bool, info);
+        let root = solver.start_transaction();
+        solver.with_deferred_region_queries(|solver| {
+            let a = solver.new_logical_arm(None);
+            let b = solver.new_logical_arm(None);
+            let a_child = solver.new_logical_arm(Some(a));
+            solver.with_logical_arm(a, |solver| {
+                solver.with_transaction_condition(&Var(guard), |solver| {
+                    solver.cycle_count();
+                    solver.add_event(Event::WriteReg(a_reg, vec![], Val::Bool(true)));
+                    let required = solver.declare_const(Ty::Bool, info);
+                    solver.defer_assertion(Var(required), info);
+                });
+            });
+            solver.with_logical_arm(b, |solver| {
+                solver.with_transaction_condition(&Not(Box::new(Var(guard))), |solver| {
+                    solver.cycle_count();
+                    solver.add_event(Event::ReadReg(b_reg, vec![], Val::Bool(false)));
+                    // 原样发布 Cycle 事件不能被当成一次周期计数。
+                    solver.add_event(Event::Cycle);
+                });
+            });
+            solver.with_logical_arm(a_child, |solver| {
+                solver.with_transaction_condition(&Var(guard), |solver| {
+                    solver.cycle_count();
+                    solver.add_event(Event::WriteReg(child_reg, vec![], Val::Bool(true)));
+                });
+            });
+            solver.discard_logical_arm_effects(a);
+            solver.assert_region_exit(Not(Box::new(Var(guard))));
+            assert_eq!(solver.get_cycle_count(), 1);
+            assert_eq!(solver.check_deferred_assertions(info), Some(Sat), "后序死亡不能掩盖前序义务");
+        });
+        if commit {
+            solver.commit_transaction();
+            let events = solver.committed_transaction_events();
+            assert_eq!(events.iter().filter(|(_, e)| matches!(e, Event::Cycle)).count(), 2);
+            assert!(events.iter().any(|(g, e)| matches!(e, Event::ReadReg(r, ..) if *r==b_reg)
+                && g.as_ref() == Some(&Not(Box::new(Var(guard))))));
+            assert!(!events.iter().any(|(_, e)| matches!(e, Event::WriteReg(..))));
+            let point = checkpoint(&mut solver);
+            assert_eq!(Solver::from_checkpoint(&ctx, point).check_sat_with(&Var(guard), info), Unsat);
+        } else {
+            solver.rollback_transaction(root);
+            assert_eq!(solver.get_cycle_count(), 0);
+            assert_eq!(solver.check_sat_with(&Var(guard), info), Sat);
+        }
+    }
+}

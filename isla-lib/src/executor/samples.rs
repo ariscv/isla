@@ -763,35 +763,35 @@ impl SampleChecker {
     }
     fn load_mode(path: &std::path::Path, limit: Option<usize>, judge_only: bool) -> Result<Self, String> {
         let file = std::fs::File::open(path).map_err(|error| format!("读取样本失败：{error}"))?;
-        let samples = std::io::BufReader::new(file)
-            .lines()
-            .take(limit.unwrap_or(usize::MAX))
-            .enumerate()
-            .map(|(line, text)| {
-                let text = text.map_err(|error| error.to_string())?;
-                let sample: Sample = if judge_only {
-                    let mut input: Value =
-                        serde_json::from_str(&text).map_err(|error| format!("样本第{}行：{error}", line + 1))?;
-                    let fields = input.as_object_mut().ok_or("输入必须是 JSON 对象")?;
-                    for (name, value) in [
-                        ("post_registers", json!({})),
-                        ("post_memory", json!([])),
-                        ("result", Value::Null),
-                        ("ret_val", json!("")),
-                    ] {
-                        fields.insert(name.into(), value);
-                    }
-                    serde_json::from_value(input)
-                } else {
-                    serde_json::from_str(&text)
+        let lines = std::io::BufReader::new(file).lines();
+        let parse = |(line, text): (usize, std::io::Result<String>)| {
+            let text = text.map_err(|error| error.to_string())?;
+            let sample: Sample = if judge_only {
+                let mut input: Value =
+                    serde_json::from_str(&text).map_err(|error| format!("样本第{}行：{error}", line + 1))?;
+                let fields = input.as_object_mut().ok_or("输入必须是 JSON 对象")?;
+                for (name, value) in [
+                    ("post_registers", json!({})),
+                    ("post_memory", json!([])),
+                    ("result", Value::Null),
+                    ("ret_val", json!("")),
+                ] {
+                    fields.insert(name.into(), value);
                 }
-                .map_err(|error| format!("样本第{}行：{error}", line + 1))?;
-                if sample.schema_version != 1 {
-                    return Err("不支持的样本版本".into());
-                }
-                Ok(sample)
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+                serde_json::from_value(input)
+            } else {
+                serde_json::from_str(&text)
+            }
+            .map_err(|error| format!("样本第{}行：{error}", line + 1))?;
+            if sample.schema_version != 1 {
+                return Err("不支持的样本版本".into());
+            }
+            Ok(sample)
+        };
+        let samples = match limit {
+            Some(limit) => lines.take(limit).enumerate().map(parse).collect::<Result<Vec<_>, String>>()?,
+            None => lines.enumerate().map(parse).collect::<Result<Vec<_>, String>>()?,
+        };
         let mut ids = std::collections::HashSet::new();
         for sample in &samples {
             if !ids.insert(sample.sample_id) {
@@ -920,6 +920,15 @@ impl SampleChecker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn solver_unknown_acceptance_is_an_error() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = crate::smt::Context::new(crate::smt::Config::new());
+        let mut solver = Solver::<crate::bitvector::b64::B64>::new(&context);
+        let result = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || super::sat(&mut solver));
+        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))));
+    }
+
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::smt::{Config, Context};

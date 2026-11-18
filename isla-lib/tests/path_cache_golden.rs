@@ -16,8 +16,9 @@ use isla_lib::{
 };
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     io::{self, Write},
+    sync::Arc,
 };
 
 struct Path {
@@ -122,8 +123,8 @@ fn fixture() -> (SharedState<'static, B64>, Vec<Path>) {
             source_loc: loc,
             depth: usize::from(parent.is_some()),
             dead: arm == "else",
-            value_symbols: [result].into_iter().collect(),
-            input_symbols: [input, condition].into_iter().collect(),
+            value_symbols: Arc::new(HashSet::from([result])),
+            input_symbols: Arc::new(HashSet::from([input, condition])),
             single_arm_reads: if parent.is_none() {
                 vec![GuardedRegisterRead {
                     register,
@@ -131,10 +132,15 @@ fn fixture() -> (SharedState<'static, B64>, Vec<Path>) {
                     value: Val::Symbolic(input),
                     guard: Exp::Var(condition),
                 }]
+                .into()
             } else {
-                vec![]
+                Arc::default()
             },
-            memory_reads: if parent.is_none() { vec![(0, Exp::Var(condition), read.clone())] } else { vec![] },
+            memory_reads: if parent.is_none() {
+                vec![(0, Exp::Var(condition), read.clone())].into()
+            } else {
+                Arc::default()
+            },
         })
         .collect();
     let small = SamplePath {
@@ -408,14 +414,14 @@ fn 反向预期文件重建核心字段及_dag_一致() {
             );
             assert_eq!((&x.value_symbols, &x.input_symbols), (&y.value_symbols, &y.input_symbols));
             assert_eq!(x.single_arm_reads.len(), y.single_arm_reads.len());
-            for (u, v) in x.single_arm_reads.iter().zip(&y.single_arm_reads) {
+            for (u, v) in x.single_arm_reads.iter().zip(y.single_arm_reads.iter()) {
                 assert_eq!(
                     (&u.register, &u.accessor, &u.value, &u.guard),
                     (&v.register, &v.accessor, &v.value, &v.guard)
                 );
             }
             assert_eq!(x.memory_reads.len(), y.memory_reads.len());
-            for ((i, g, e), (j, h, f)) in x.memory_reads.iter().zip(&y.memory_reads) {
+            for ((i, g, e), (j, h, f)) in x.memory_reads.iter().zip(y.memory_reads.iter()) {
                 assert_eq!((i, g), (j, h));
                 assert_event(e, f);
             }

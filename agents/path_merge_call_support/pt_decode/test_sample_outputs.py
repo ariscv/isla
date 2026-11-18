@@ -77,6 +77,10 @@ class BudgetOutputTests(unittest.TestCase):
         summary=struct.pack('<'+'Q'*12,1,1,1,1,3,7,1,1,3,0,1,1)
         data+=struct.pack('<QQQQQ',0,0,0,len(summary),2)+summary+struct.pack('<QQQQQ',0,0,0,offset,(1<<64)-1)
         self.assertEqual(binary_summary(io.BytesIO(data))['combinations'],1)
+        for code, reason in [(1, 'output_budget'), (2, 'no_progress'), (3, 'stop_file')]:
+            updated=data[:offset+40]+struct.pack('<Q',code)+data[offset+48:]
+            self.assertEqual(binary_summary(io.BytesIO(updated))['reason'],reason)
+            self.assertEqual(list(binary_samples(io.BytesIO(updated))),[dict(skeleton,truncated=True)])
         rows=list(binary_samples(io.BytesIO(data)))
         self.assertEqual(rows,[dict(skeleton,truncated=True)])
         with self.assertRaises((AssertionError,EOFError)):

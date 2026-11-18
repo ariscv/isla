@@ -161,67 +161,86 @@ unsafe fn numeral(ctx: &Context, ast: Z3_ast) -> Option<u128> {
     text.parse().ok()
 }
 
-unsafe fn unsigned_upper(ctx: &Context, ast: Z3_ast, budget: &mut usize) -> Option<u128> {
-    if *budget == 0 {
-        return None;
-    }
-    *budget -= 1;
-    if let Some(value) = numeral(ctx, ast) {
-        return Some(value);
-    }
-    let sort = Z3_get_sort(ctx.z3_ctx, ast);
-    if Z3_get_sort_kind(ctx.z3_ctx, sort) != SortKind::BV {
-        return None;
-    }
-    let width = Z3_get_bv_sort_size(ctx.z3_ctx, sort);
-    if width > 128 {
-        return None;
-    }
-    let full = if width == 128 { u128::MAX } else { (1u128 << width) - 1 };
-    if Z3_get_ast_kind(ctx.z3_ctx, ast) != AstKind::App {
-        return Some(full);
-    }
-    let app = Z3_to_app(ctx.z3_ctx, ast);
-    let decl = Z3_get_app_decl(ctx.z3_ctx, app);
-    let arg = |i| Z3_get_app_arg(ctx.z3_ctx, app, i);
-    match Z3_get_decl_kind(ctx.z3_ctx, decl) {
-        DeclKind::ITE => Some(unsigned_upper(ctx, arg(1), budget)?.max(unsigned_upper(ctx, arg(2), budget)?)),
-        DeclKind::ZERO_EXT => unsigned_upper(ctx, arg(0), budget),
-        DeclKind::EXTRACT => {
-            let low = u32::try_from(Z3_get_decl_int_parameter(ctx.z3_ctx, decl, 1)).ok()?;
-            Some((unsigned_upper(ctx, arg(0), budget)? >> low).min(full))
+unsafe fn unsigned_upper(ctx: &Context, root: Z3_ast) -> Option<u128> {
+    let z3 = ctx.z3_ctx;
+    let mut bounds = HashMap::new();
+    let mut pending = vec![(root, false)];
+    // Z3 在本次查询持有整棵 AST；共享子式可直接用 AST 指针为键。
+    while let Some((ast, children_ready)) = pending.pop() {
+        if bounds.contains_key(&ast) {
+            continue;
         }
-        DeclKind::BAND => Some(unsigned_upper(ctx, arg(0), budget)?.min(unsigned_upper(ctx, arg(1), budget)?)),
-        DeclKind::CONCAT => {
-            let mut bound = 0u128;
-            for i in 0..Z3_get_app_num_args(ctx.z3_ctx, app) {
-                let part = arg(i);
-                let part_width = Z3_get_bv_sort_size(ctx.z3_ctx, Z3_get_sort(ctx.z3_ctx, part));
-                let next = unsigned_upper(ctx, part, budget)?;
-                if part_width == 128 {
-                    if bound != 0 {
-                        return None;
-                    }
-                    bound = next;
-                } else {
-                    bound = bound.checked_shl(part_width)? | next;
+        let sort = Z3_get_sort(z3, ast);
+        if Z3_get_sort_kind(z3, sort) != SortKind::BV || Z3_get_bv_sort_size(z3, sort) > 128 {
+            bounds.insert(ast, None);
+            continue;
+        }
+        if let Some(value) = numeral(ctx, ast) {
+            bounds.insert(ast, Some(value));
+            continue;
+        }
+        let width = Z3_get_bv_sort_size(z3, sort);
+        let full = u128::MAX >> (128 - width);
+        if Z3_get_ast_kind(z3, ast) != AstKind::App {
+            bounds.insert(ast, Some(full));
+            continue;
+        }
+
+        let app = Z3_to_app(z3, ast);
+        let decl = Z3_get_app_decl(z3, app);
+        let kind = Z3_get_decl_kind(z3, decl);
+        let arg = |index| Z3_get_app_arg(z3, app, index);
+        let args = match kind {
+            DeclKind::ITE => 1..3,
+            DeclKind::ZERO_EXT | DeclKind::EXTRACT => 0..1,
+            DeclKind::BAND | DeclKind::CONCAT | DeclKind::BADD => 0..Z3_get_app_num_args(z3, app),
+            _ => {
+                bounds.insert(ast, Some(full));
+                continue;
+            }
+        };
+        if !children_ready {
+            pending.push((ast, true));
+            pending.extend(args.rev().map(|index| (arg(index), false)));
+            continue;
+        }
+
+        let upper = |index| bounds[&arg(index)];
+        let bound = (|| {
+            match kind {
+                DeclKind::ITE => Some(upper(1)?.max(upper(2)?)),
+                DeclKind::ZERO_EXT => upper(0),
+                DeclKind::EXTRACT => {
+                    let low = u32::try_from(Z3_get_decl_int_parameter(z3, decl, 1)).ok()?;
+                    Some((upper(0)? >> low).min(full))
                 }
+                DeclKind::BAND => args.map(upper).try_fold(full, |bound, next| Some(bound.min(next?))),
+                DeclKind::CONCAT => {
+                    let mut bound = 0u128;
+                    for index in args {
+                        let part_width = Z3_get_bv_sort_size(z3, Z3_get_sort(z3, arg(index)));
+                        let next = upper(index)?;
+                        // 合法的拼接结果不超过 128 位；128 位参数前没有其他位。
+                        bound = if part_width == 128 { next } else { (bound << part_width) | next };
+                    }
+                    Some(bound)
+                }
+                DeclKind::BADD => {
+                    let mut bound = 0u128;
+                    for index in args {
+                        let Some(sum) = bound.checked_add(upper(index)?).filter(|sum| *sum <= full) else {
+                            return Some(full);
+                        };
+                        bound = sum;
+                    }
+                    Some(bound)
+                }
+                _ => unreachable!("上界递推只访问已识别的运算"),
             }
-            Some(bound.min(full))
-        }
-        DeclKind::BADD => {
-            let mut bound = 0u128;
-            for i in 0..Z3_get_app_num_args(ctx.z3_ctx, app) {
-                let next = unsigned_upper(ctx, arg(i), budget)?;
-                let Some(sum) = bound.checked_add(next).filter(|sum| *sum <= full) else {
-                    return Some(full);
-                };
-                bound = sum;
-            }
-            Some(bound)
-        }
-        _ => Some(full),
+        })();
+        bounds.insert(ast, bound);
     }
+    bounds[&root]
 }
 
 unsafe fn structural_comparison(ctx: &Context, ast: Z3_ast) -> Option<bool> {
@@ -239,12 +258,47 @@ unsafe fn structural_comparison(ctx: &Context, ast: Z3_ast) -> Option<bool> {
     }
     let left = Z3_get_app_arg(ctx.z3_ctx, app, 0);
     let right = Z3_get_app_arg(ctx.z3_ctx, app, 1);
-    let mut budget = 256;
-    let bound = unsigned_upper(ctx, left, &mut budget)?;
     let limit = numeral(ctx, right)?;
+    let bound = unsigned_upper(ctx, left)?;
     match kind {
         DeclKind::ULT if bound < limit => Some(true),
         DeclKind::ULEQ if bound <= limit => Some(true),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+
+    #[test]
+    fn deep_shared_bounds_and_wrapping_arithmetic() {
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let condition = solver.declare_const(Ty::Bool, info);
+        let mut value = solver.define_const(
+            Exp::Ite(Box::new(Exp::Var(condition)), Box::new(bits64(1, 16)), Box::new(bits64(2, 16))),
+            info,
+        );
+        for _ in 0..512 {
+            value = solver.define_const(Exp::Bvadd(Box::new(Exp::Var(value)), Box::new(bits64(1, 16))), info);
+        }
+        for _ in 0..64 {
+            let masked = Exp::Bvand(Box::new(Exp::Var(value)), Box::new(bits64(0xfffe, 16)));
+            value = solver.define_const(
+                Exp::Ite(Box::new(Exp::Var(condition)), Box::new(Exp::Var(value)), Box::new(masked)),
+                info,
+            );
+        }
+        let compare = |value, limit| Exp::Bvult(Box::new(Exp::Var(value)), Box::new(bits64(limit, 16)));
+        let ast = solver.translate_exp(&compare(value, 515));
+        assert_eq!(unsafe { structural_comparison(&context, ast.z3_ast) }, Some(true));
+
+        let wrapped = solver.define_const(Exp::Bvadd(Box::new(Exp::Var(value)), Box::new(bits64(65022, 16))), info);
+        let ast = solver.translate_exp(&compare(wrapped, 515));
+        assert_eq!(unsafe { structural_comparison(&context, ast.z3_ast) }, None);
     }
 }

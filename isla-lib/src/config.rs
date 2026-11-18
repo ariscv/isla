@@ -1556,7 +1556,26 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
 pub mod region_options;
 pub use region_options::RegionOptions;
 pub mod path_merge;
-pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig};
+pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig, SolverOnUnknown};
+
+/// 路径合并执行策略；递归是兼容默认值。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeStrategy {
+    #[default]
+    Recursive,
+    Flat,
+}
+impl std::str::FromStr for MergeStrategy {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "recursive" => Ok(Self::Recursive),
+            "flat" => Ok(Self::Flat),
+            _ => Err("strategy 必须是 recursive 或 flat".into()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1579,8 +1598,10 @@ pub struct ExecutionLimitsConfig {
     pub on_limit_reached: Option<LimitBehaviorConfig>,
     /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
     pub case_quota: Option<BTreeMap<String, u32>>,
-    /// isarch 在收集完成终态时过滤的 Sail 异常构造子；空集合保持默认行为。
+    /// 抛出时丢弃的 Sail 异常构造子，终态收集也使用此列表。
     pub filter_model_exceptions: Vec<String>,
+    /// 在 Sail IR 的 match 失败出口处丢弃路径。
+    pub filter_match_failures: bool,
 }
 
 /// 合并路径结束后的两级投影枚举；上限只限制输出，不改变执行路径条件。
@@ -1588,16 +1609,24 @@ pub struct ExecutionLimitsConfig {
 pub struct MergeEnumerationConfig {
     pub enabled: bool,
     pub mode: MergeEnumerationMode,
-    pub class_cap: usize,
-    pub path_cap: usize,
+    pub class_cap: Option<usize>,
+    pub path_cap: Option<usize>,
     pub sample_stride: usize,
     pub enumeration_threads: usize,
     pub outputs: Vec<SampleOutputConfig>,
-    /// 有界二进制会话采用直接流式枚举；None 保持既有后端语义。
+    /// None 表示流式二进制输出不限字节。
     pub max_output_bytes: Option<u64>,
-    pub predict_probes: usize,
+    /// 显式设置探测次数才允许近似预测。
+    pub predict_probes: Option<usize>,
     pub predict_seed: u64,
-    pub predict_domain_cap: usize,
+    pub predict_domain_cap: Option<usize>,
+}
+
+impl MergeEnumerationConfig {
+    pub fn streams_binary(&self) -> bool {
+        self.sample_stride == 1
+            && matches!(self.outputs.as_slice(), [SampleOutputConfig { format: SampleOutputFormat::Binary, .. }])
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1618,15 +1647,15 @@ impl Default for MergeEnumerationConfig {
         Self {
             enabled: false,
             mode: MergeEnumerationMode::Samples,
-            class_cap: 1024,
-            path_cap: 65536,
+            class_cap: None,
+            path_cap: None,
             sample_stride: 1,
             enumeration_threads: std::thread::available_parallelism().unwrap().get().min(16),
             outputs: Vec::new(),
             max_output_bytes: None,
-            predict_probes: 256,
+            predict_probes: None,
             predict_seed: 0,
-            predict_domain_cap: 256,
+            predict_domain_cap: None,
         }
     }
 }
@@ -1785,7 +1814,7 @@ impl ExecutionLimitsConfig {
 
     /// 在 IR 加载后、执行前调用。`functions` 只能包含 IR 中实际定义的函数，
     /// `branch_locations` 由调用方提供实际分支位置，不能用全部指令位置代替。
-    /// strict 沿用全局 strict/ir_sha256；哈希仍由 validate_ir_sha256 单独核对。
+    /// strict 启用源码区域匹配检查。需要比较 IR 哈希的调用方可单独调用 validate_ir_sha256。
     /// force 的后支配点/回边校验留给后续静态区域分析。
     pub fn validate_merge_policy(
         &self,
@@ -1974,18 +2003,20 @@ fn parse_merge_enumeration(table: &toml::value::Table) -> Result<Option<MergeEnu
             }
             if let Some(value) = optional_u64(sub, "predict_probes", root)? {
                 if value < 200 {
-                    return Err(format!("{root}.predict_probes 必须至少为200"));
+                    return Err(format!("{root}.predict_probes 必须至少为 200"));
                 }
-                config.predict_probes = usize::try_from(value).unwrap();
+                config.predict_probes =
+                    Some(usize::try_from(value).map_err(|error| format!("{root}.predict_probes: {error}"))?);
             }
             if let Some(value) = optional_u64(sub, "predict_seed", root)? {
                 config.predict_seed = value;
             }
             if let Some(value) = optional_u64(sub, "predict_domain_cap", root)? {
-                if value == 0 {
-                    return Err(format!("{root}.predict_domain_cap 必须大于零"));
+                if value == 0 || config.predict_probes.is_none() {
+                    return Err(format!("{root}.predict_domain_cap 必须为正数且同时设置 predict_probes"));
                 }
-                config.predict_domain_cap = usize::try_from(value).unwrap();
+                config.predict_domain_cap =
+                    Some(usize::try_from(value).map_err(|error| format!("{root}.predict_domain_cap: {error}"))?);
             }
             if let Some(value) = optional_u64(sub, "max_output_bytes", root)? {
                 if value == 0 {
@@ -1996,24 +2027,23 @@ fn parse_merge_enumeration(table: &toml::value::Table) -> Result<Option<MergeEnu
                 }
                 config.max_output_bytes = Some(value);
             }
-            for (name, cap) in [
-                ("class_cap", &mut config.class_cap),
-                ("path_cap", &mut config.path_cap),
-                ("sample_stride", &mut config.sample_stride),
-                ("enumeration_threads", &mut config.enumeration_threads),
-            ] {
-                if let Some(value) = optional_u64(sub, name, root)? {
-                    if value == 0 {
-                        return Err(format!("{root}.{name} 必须大于零"));
-                    }
-                    *cap = usize::try_from(value).map_err(|error| format!("{root}.{name}: {error}"))?;
-                }
+            let positive_usize = |name| {
+                optional_u64(sub, name, root)?
+                    .map(|value| {
+                        if value == 0 {
+                            return Err(format!("{root}.{name} 必须大于零"));
+                        }
+                        usize::try_from(value).map_err(|error| format!("{root}.{name}: {error}"))
+                    })
+                    .transpose()
+            };
+            config.class_cap = positive_usize("class_cap")?;
+            config.path_cap = positive_usize("path_cap")?;
+            if let Some(stride) = positive_usize("sample_stride")? {
+                config.sample_stride = stride;
             }
-            if config.max_output_bytes.is_none()
-                && config.outputs.len() == 1
-                && config.outputs[0].format == SampleOutputFormat::Binary
-            {
-                config.max_output_bytes = Some(25_000_000_000);
+            if let Some(threads) = positive_usize("enumeration_threads")? {
+                config.enumeration_threads = threads;
             }
             if config.max_output_bytes.is_some() && config.sample_stride != 1 {
                 return Err(format!("{root}.max_output_bytes 流式会话要求 sample_stride=1"));
@@ -2697,6 +2727,20 @@ end_column = 0
     }
 
     #[test]
+    fn bv_rewrite_config_bool_lists_and_strict_location() {
+        for value in ["true", "false", "[]", "[\"mask-and\"]", "[\"data-ite-eq\",\"sign-bound\"]"] {
+            let config = merge_config(&format!("[execution_limits.solver]\nbv_rewrite={value}")).unwrap();
+            assert_eq!(RegionOptions::from_config(&config).bv_rewrite, config.solver.bv_rewrite);
+        }
+        assert!(!SolverConfig::default().bv_rewrite.enabled());
+        for text in
+            ["[execution_limits.solver]\nbv_rewrite=[\"oops\"]", "[execution_limits.path_merge]\nbv_rewrite=true"]
+        {
+            assert!(merge_config(text).is_err());
+        }
+    }
+
+    #[test]
     fn config_layout_freeze_snapshot_preserves_all_twenty_options() {
         let config = merge_config(
             r#"
@@ -2731,6 +2775,7 @@ obligation_dump_dir = "obligations"
         assert_eq!(
             options,
             RegionOptions {
+                bv_rewrite: Default::default(),
                 max_merge_depth: None,
                 defer_range_proofs: false,
                 defer_ctor_checks: false,
@@ -2779,6 +2824,47 @@ obligation_dump_dir = "obligations"
         for value in ["true", "'Error_internal_error'", "[1]", "['']"] {
             assert!(merge_config(&format!("[execution_limits]\nfilter_model_exceptions={value}")).is_err());
         }
+    }
+
+    #[test]
+    fn execution_limits_flat_strategy_and_ordered_events() {
+        let config = merge_config("[execution_limits.path_merge]\nstrategy='flat'\nordered_events=true").unwrap();
+        assert_eq!(config.path_merge.strategy, Some(MergeStrategy::Flat));
+        assert_eq!(config.path_merge.ordered_events, Some(true));
+        let defaults = merge_config("[execution_limits]").unwrap();
+        assert!(defaults.path_merge.strategy.is_none() && defaults.path_merge.ordered_events.is_none());
+        for body in [
+            "[execution_limits]\nmerge_strategy='flat'",
+            "[execution_limits]\nordered_events=true",
+            "[execution_limits.path_merge]\nmerge_strategy='flat'",
+            "[execution_limits.path_merge]\nstrategy='bad'",
+            "[execution_limits.path_merge]\nordered_events=1",
+            "[execution_limits.region_options]\nmerge_strategy='flat'",
+        ] {
+            assert!(merge_config(body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn execution_limits_region_fragment_limit_values() {
+        for (limit, expected) in [("", None), ("max_fragments = -1", None), ("max_fragments = 8", Some(8))] {
+            let config = merge_config(&format!("[execution_limits.path_merge]\n{limit}")).unwrap();
+            assert_eq!(
+                crate::executor::ExecutionLimits::default().with_config(&config, &Symtab::new()).max_region_fragments,
+                expected
+            );
+        }
+        for limit in ["0", "-2", "true"] {
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nmax_fragments = {limit}")).is_err());
+        }
+    }
+
+    #[test]
+    fn match_failure_filter_defaults_off_and_requires_a_boolean() {
+        assert!(!merge_config("[execution_limits]").unwrap().filter_match_failures);
+        assert!(!merge_config("[execution_limits]\nfilter_match_failures=false").unwrap().filter_match_failures);
+        assert!(merge_config("[execution_limits]\nfilter_match_failures=true").unwrap().filter_match_failures);
+        assert!(merge_config("[execution_limits]\nfilter_match_failures=1").is_err());
     }
 
     #[test]
@@ -2831,10 +2917,33 @@ obligation_dump_dir = "obligations"
         let text="[execution_limits.path_merge.enumeration]\nenabled=true\nmode='predict'\npredict_probes=256\npredict_seed=7\npredict_domain_cap=256";
         let config = merge_config(text).unwrap().path_merge.enumeration.unwrap();
         assert_eq!(config.mode, MergeEnumerationMode::Predict);
-        assert_eq!(config.predict_probes, 256);
+        assert_eq!(config.predict_probes, Some(256));
+        assert_eq!(config.predict_domain_cap, Some(256));
+        assert!(merge_config(&text.replace("predict_probes=256", "")).is_err());
         for probes in ["0", "199", "-1"] {
             assert!(merge_config(&text.replace("predict_probes=256", &format!("predict_probes={probes}"))).is_err());
         }
+    }
+
+    #[test]
+    fn execution_limits_a1_终值查询仅在显式配置时有独立时限() {
+        let table = "[execution_limits.solver]";
+        assert_eq!(merge_config(table).unwrap().solver.model_timeout_ms, None);
+        let explicit = merge_config(&format!("{table}\nmodel_timeout_ms=5000")).unwrap();
+        assert_eq!(explicit.solver.model_timeout_ms.unwrap().get(), 5000);
+        for invalid in ["0", "-1", "1.5", "true"] {
+            assert!(merge_config(&format!("{table}\nmodel_timeout_ms={invalid}")).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_limits_a1_单二进制省略配置时无枚举和字节上限() {
+        let text = "[execution_limits.path_merge.enumeration]\nenabled=true\n[[execution_limits.path_merge.enumeration.outputs]]\nformat='binary'\npath='samples.bin'";
+        let config = merge_config(text).unwrap().path_merge.enumeration.unwrap();
+        assert_eq!(config.max_output_bytes, None);
+        assert_eq!(config.class_cap, None);
+        assert_eq!(config.path_cap, None);
+        assert_eq!(config.sample_stride, 1);
     }
 
     #[test]
@@ -2892,7 +3001,7 @@ obligation_dump_dir = "obligations"
                 .unwrap();
         assert_eq!(
             config.path_merge.enumeration.unwrap(),
-            MergeEnumerationConfig { enabled: true, class_cap: 7, path_cap: 11, ..Default::default() }
+            MergeEnumerationConfig { enabled: true, class_cap: Some(7), path_cap: Some(11), ..Default::default() }
         );
         assert_eq!(
             merge_config("[execution_limits.path_merge.enumeration]").unwrap().path_merge.enumeration.unwrap(),

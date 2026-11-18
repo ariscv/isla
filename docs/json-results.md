@@ -28,7 +28,7 @@ memory的`configs/riscv64_memory_coverage.toml`在原PMA配置基础上将`match
 python3 scripts/regenerate_ir.py --model ../sail-riscv --sail SAIL --plugin PLUGIN --config ir/provenance/rv64d.json --output NEW_OUTPUT
 ```
 
-按`manifest.json`的哈希与配置分别生成RV32、RV64/V128/V256/V512。默认`rv64d.ir`与`ir/rv64d_v128_e64.ir`内容相同。生成脚本保留必要F/V寄存器接口、转换helper及压缩编码接口，不手工修改生成IR。源码位置预算由模型仓`configs/isla/workarounds/`统一维护；代码变化时迁移坐标，IR哈希变化本身不要求改源码坐标。
+按`manifest.json`的哈希与配置分别生成RV32、RV64/V128/V256/V512。默认`rv64d.ir`与`ir/rv64d_v128_e64.ir`内容相同。生成脚本保留必要F/V寄存器接口、转换helper及压缩编码接口，不手工修改生成IR。生成清单中的 IR 哈希用于记录来源。
 
 ## NaN-boxing控制流（2026-10-31）
 
