@@ -320,6 +320,61 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         }
     }
 
+    /// 无序区域只读取已写入的最新值。普通执行仍调用 get。
+    pub(crate) fn get_latest<'a>(
+        &'a mut self,
+        id: Name,
+        shared_state: &SharedState<'ir, B>,
+        solver: &mut Solver<B>,
+        info: SourceLoc,
+    ) -> Result<Option<&'a Val<B>>, ExecError> {
+        self.map.get_mut(&id).map(|reg| reg.value.read_last(shared_state, solver, info)).transpose()
+    }
+
+    /// 外层可能继续用普通的 relaxed 读。历史逐项带合并守卫，缺项重复同臂的最新值。
+    pub(crate) fn merge_relaxed(
+        &mut self,
+        id: Name,
+        condition: Sym,
+        left: &Self,
+        right: &Self,
+        solver: &mut Solver<B>,
+        info: SourceLoc,
+    ) -> Result<(), ExecError> {
+        use crate::primop_util::merge_val;
+        let entry = self.map.get(&id).expect("区域基帧必须有寄存器");
+        assert!(entry.relaxed && left.map[&id].relaxed && right.map[&id].relaxed);
+        let [left, right] = [&left.map[&id].value, &right.map[&id].value].map(|value| match value {
+            RelaxedVal::Uninit(_) => &entry.value,
+            _ => value,
+        });
+        let RelaxedVal::Init { last_write: a, last_read: ra, old_writes: ha } = left else {
+            panic!("汇合前必须补齐惰性入口值")
+        };
+        let RelaxedVal::Init { last_write: b, last_read: rb, old_writes: hb } = right else {
+            panic!("汇合前必须补齐惰性入口值")
+        };
+        let last_write = merge_val(condition, a, b, solver, info)?;
+        let last_read = if ra.is_some() || rb.is_some() {
+            let ra = match ra {
+                Some(read) => read.clone(),
+                None => ite_choice(a, ha, solver, info)?,
+            };
+            let rb = match rb {
+                Some(read) => read.clone(),
+                None => ite_choice(b, hb, solver, info)?,
+            };
+            Some(merge_val(condition, &ra, &rb, solver, info)?)
+        } else {
+            None
+        };
+        let old_writes = (0..ha.len().max(hb.len()))
+            .map(|index| merge_val(condition, ha.get(index).unwrap_or(a), hb.get(index).unwrap_or(b), solver, info))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.map.get_mut(&id).unwrap().value = RelaxedVal::Init { last_write, last_read, old_writes };
+        Ok(())
+    }
+
     /// 复用 SMT 配置表达式的寄存器与字段引用，在当前寄存器符号上施加约束。
     pub fn apply_constraints(
         &mut self,

@@ -7,7 +7,7 @@ fn limits(merge: bool) -> ExecutionLimits {
         .with_region_global_state(true)
         .with_region_loop_analysis(true);
     limits.merge_strategy = crate::config::MergeStrategy::Flat;
-    limits.ordered_events = std::env::var("ISLA_FLAT_ORDER_TEST").unwrap() == "true";
+    limits.ordered_events = std::env::args().any(|arg| arg == "--test-threads=2");
     limits
 }
 
@@ -21,37 +21,26 @@ fn differential(
     inputs: usize,
     complete: bool,
 ) -> (usize, usize) {
-    let forked = paths(instrs.clone(), shared, inputs, false);
-    let merged = paths(instrs, shared, inputs, true);
-    equivalent_paths(&forked, &merged, inputs, complete)
+    differential_organizers(instrs, shared, inputs, complete, limits(true))
 }
 
 fn flat_child(test: &str) -> bool {
-    const CHILD: &str = "ISLA_FLAT_TEST_CHILD";
-    if let Ok(mode) = std::env::var(CHILD) {
-        crate::config::RegionOptions {
-            defer_exit_check: mode == "defer",
-            lazy_z3_scope: mode == "defer",
-            ..Default::default()
-        }
-        .configure();
+    let name = format!("executor::tests::region_merge_tests::flat_region_merge_tests::{test}");
+    let actual: Vec<_> = std::env::args().skip(1).collect();
+    if actual.len() == 4 && actual[0] == "--exact" && actual[1] == name {
+        let defer = actual[2] == "--show-output";
+        crate::config::RegionOptions { defer_exit_check: defer, lazy_z3_scope: defer, ..Default::default() }
+            .configure();
         return true;
     }
-    for mode in ["eager", "defer"] {
-        for ordered in ["false", "true"] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    &format!("executor::tests::region_merge_tests::flat_region_merge_tests::{test}"),
-                    "--nocapture",
-                ])
-                .env(CHILD, mode)
-                .env("ISLA_FLAT_ORDER_TEST", ordered)
-                .output()
-                .unwrap();
+    for output_mode in ["--nocapture", "--show-output"] {
+        for threads in ["--test-threads=1", "--test-threads=2"] {
+            let args = ["--exact", &name, output_mode, threads];
+            let defer = output_mode == "--show-output";
+            let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
             assert!(
                 output.status.success(),
-                "{mode}: {}{}",
+                "defer={defer}, {threads}: {}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -81,25 +70,35 @@ fn flat_deep_nesting_records_logical_depth() {
     if !flat_child("flat_deep_nesting_records_logical_depth") {
         return;
     }
-    let mut shared = empty_shared_state();
-    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
-    let count = 24;
-    let end = count * 3 + 1;
-    let mut program = Vec::new();
-    for index in 0..count {
-        program.extend([
-            Instr::Jump(input(index as u32), index * 3 + 3, info()),
-            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
-            Instr::Goto(end),
-        ]);
-    }
-    program.extend([Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()), Instr::End]);
-    let forked = paths(program.clone(), &shared, count, false);
-    let merged = paths(program, &shared, count, true);
-    assert_eq!(equivalent_paths(&forked, &merged, count, true), (25, 1));
-    assert_eq!(merged[0].records.len(), count);
-    assert_eq!(merged[0].records.iter().map(|record| record.depth).max(), Some(count));
-    assert!(shared.execution_stats.merge_json()["failure_reasons"].get("nesting_limit").is_none());
+    run_deep_region_test(|| {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let count = 24;
+        let end = count * 3 + 1;
+        let mut program = Vec::new();
+        for index in 0..count {
+            program.extend([
+                Instr::Jump(input(index as u32), index * 3 + 3, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                Instr::Goto(end),
+            ]);
+        }
+        program.extend([Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()), Instr::End]);
+        let forked = paths(program.clone(), &shared, count, false);
+        check_organizers(
+            program,
+            &shared,
+            count,
+            limits(true),
+            |_| (),
+            |merged| {
+                assert_eq!(equivalent_paths(&forked, merged, count, true), (25, 1));
+                assert_eq!(merged[0].records.len(), count);
+                assert_eq!(merged[0].records.iter().map(|record| record.depth).max(), Some(count));
+            },
+        );
+        assert!(shared.execution_stats.merge_json()["failure_reasons"].get("nesting_limit").is_none());
+    });
 }
 
 #[test]
@@ -194,8 +193,8 @@ fn flat_dead_arm_keeps_live_sibling() {
 }
 
 #[test]
-fn flat_drops_dead_entry_local_before_interior_join() {
-    if !flat_child("flat_drops_dead_entry_local_before_interior_join") {
+fn flat_keeps_entry_local_at_interior_join() {
+    if !flat_child("flat_keeps_entry_local_at_interior_join") {
         return;
     }
     let shared = empty_shared_state();
@@ -210,10 +209,17 @@ fn flat_drops_dead_entry_local_before_interior_join() {
         Instr::End,
     ];
     let forked = paths(program.clone(), &shared, 2, false);
-    let merged = paths(program, &shared, 2, true);
-    assert_eq!(equivalent_paths(&forked, &merged, 2, true), (2, 1));
-    assert!(!merged[0].variables.contains_key(&dead));
-    assert_eq!(merged[0].records.len(), 1);
+    check_organizers(
+        program,
+        &shared,
+        2,
+        limits(true),
+        |_| (),
+        |merged| {
+            assert_eq!(equivalent_paths(&forked, merged, 2, true), (2, 2));
+            assert!(merged.iter().all(|path| path.variables.contains_key(&dead) && path.records.is_empty()));
+        },
+    );
 }
 
 #[test]
@@ -290,8 +296,8 @@ fn flat_preserves_slot_assigned_after_join() {
 }
 
 #[test]
-fn flat_distinct_return_pcs_reject_without_panic() {
-    if !flat_child("flat_distinct_return_pcs_reject_without_panic") {
+fn flat_distinct_return_pcs_use_virtual_exit() {
+    if !flat_child("flat_distinct_return_pcs_use_virtual_exit") {
         return;
     }
     let shared = empty_shared_state();
@@ -303,9 +309,17 @@ fn flat_distinct_return_pcs_reject_without_panic() {
         Instr::End,
     ];
     let forked = paths(program.clone(), &shared, 1, false);
-    let merged = paths(program, &shared, 1, true);
-    assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 2));
-    assert!(merged.iter().all(|path| path.records.is_empty()));
+    check_organizers(
+        program,
+        &shared,
+        1,
+        limits(true),
+        |_| (),
+        |merged| {
+            assert_eq!(equivalent_paths(&forked, merged, 1, true), (2, 1));
+            assert_eq!(merged[0].records.len(), 1);
+        },
+    );
 }
 
 fn loop_fixture(early: bool, nested: bool) -> Vec<Instr<Name, B64>> {

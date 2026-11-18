@@ -497,7 +497,6 @@ pub struct FunctionRegions<B> {
     terminal_calls: Vec<Name>,
     constant_returns: Option<HashMap<Name, bool>>,
     analysis: OnceLock<FunctionAnalysis>,
-    continuation_reads: OnceLock<Vec<HashSet<Name>>>,
     regions: HashMap<usize, Result<Arc<Region>, RegionRejection>>,
 }
 
@@ -525,7 +524,6 @@ impl<B: BV> FunctionRegions<B> {
             terminal_calls: options.terminal_calls.to_vec(),
             constant_returns: None,
             analysis: OnceLock::new(),
-            continuation_reads: OnceLock::new(),
             regions: HashMap::new(),
         }
     }
@@ -543,34 +541,6 @@ impl<B: BV> FunctionRegions<B> {
     pub fn cached_regions(&self) -> usize {
         self.regions.len()
     }
-    /// 继续执行仍需保留的槽位；地址逃逸的局部值必须一并保留。
-    pub(crate) fn continuation_locals(&self, pc: usize) -> HashSet<Name> {
-        let analysis = self.analysis();
-        let reads = if self.recreated_slot_liveness {
-            &analysis.future_reads
-        } else {
-            // 删除局部值后，未来赋值仍需要槽位以区别寄存器；不能沿用旧的仅读集合。
-            self.continuation_reads.get_or_init(|| {
-                let mut strict = Self::with_options(
-                    &self.instrs,
-                    RegionOptions {
-                        recreated_slot_liveness: true,
-                        bounded_loops: self.bounded_loops,
-                        filter_assertion_failures: self.filter_assertion_failures,
-                        have_exception: self.have_exception,
-                        terminal_calls: &self.terminal_calls,
-                    },
-                );
-                strict.constant_returns = self.constant_returns.clone();
-                strict.analysis().future_reads.clone()
-            })
-        };
-        let mut live = reads[pc].clone();
-        live.extend(&analysis.address_taken);
-        live.insert(RETURN);
-        live
-    }
-
     pub fn cfg(&self) -> &RegionCfg {
         &self.analysis().cfg
     }

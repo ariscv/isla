@@ -74,6 +74,17 @@ pub(super) fn paths_with_state(
     memory: crate::memory::Memory<B64>,
     configure: impl FnOnce(&mut LocalFrame<'static, B64>),
 ) -> Vec<Path> {
+    paths_with_state_and_rejections(instrs, shared, inputs, limits, memory, configure).0
+}
+
+fn paths_with_state_and_rejections(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>),
+) -> (Vec<Path>, serde_json::Value) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
@@ -88,7 +99,8 @@ pub(super) fn paths_with_state(
         frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
     }
     configure(&mut frame);
-    let state = TaskState::new().with_execution_limits(limits);
+    let mut state = TaskState::new().with_execution_limits(limits);
+    state.speculation_stats = speculation::SpeculationStats::new(true);
     let output = Mutex::new(Vec::new());
     start_single(
         frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
@@ -114,7 +126,7 @@ pub(super) fn paths_with_state(
             _ => panic!("差分执行未正常返回"),
         },
     );
-    output.into_inner().unwrap()
+    (output.into_inner().unwrap(), state.speculation_stats().reject_json()["reason_counts"].clone())
 }
 
 fn import(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>) -> (Formula, Formula) {
@@ -203,12 +215,99 @@ fn differential(
     inputs: usize,
     complete: bool,
 ) -> (usize, usize) {
-    let forked = paths(instrs.clone(), shared, inputs, false);
-    let merged = paths(instrs, shared, inputs, true);
-    if merged.len() == 1 {
-        assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并，不能仅普通剪枝");
-    }
-    equivalent_paths(&forked, &merged, inputs, complete)
+    differential_organizers(instrs, shared, inputs, complete, ExecutionLimits::default())
+}
+
+fn differential_organizers(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    complete: bool,
+    limits: ExecutionLimits,
+) -> (usize, usize) {
+    let memory = crate::memory::Memory::new();
+    let forked = paths_with_state(
+        instrs.clone(),
+        shared,
+        inputs,
+        limits.clone().with_path_merging(false),
+        memory.clone(),
+        |_| (),
+    );
+    let [recursive, _] = check_organizers(
+        instrs,
+        shared,
+        inputs,
+        limits,
+        |_| (),
+        |merged| {
+            equivalent_paths(&forked, merged, inputs, complete);
+            if merged.len() == 1 {
+                assert!(!merged[0].records.is_empty(), "单路径用例必须实际完成区域合并");
+            }
+        },
+    );
+    (forked.len(), recursive.len())
+}
+
+fn check_organizers(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    configure: impl Fn(&mut LocalFrame<'static, B64>),
+    check: impl Fn(&[Path]),
+) -> [Vec<Path>; 2] {
+    use crate::config::MergeStrategy::{Flat, Recursive};
+    let [(stack, stack_rejections), (queue, queue_rejections)] = [Recursive, Flat].map(|strategy| {
+        let mut limits = limits.clone().with_path_merging(true);
+        limits.merge_strategy = strategy;
+        let (paths, rejections) = paths_with_state_and_rejections(
+            instrs.clone(),
+            shared,
+            inputs,
+            limits,
+            crate::memory::Memory::new(),
+            &configure,
+        );
+        check(&paths);
+        (paths, rejections)
+    });
+    let counts = |paths: &[Path]| {
+        let mut records: Vec<_> = paths.iter().map(|path| path.records.len()).collect();
+        records.sort_unstable();
+        records
+    };
+    assert_eq!(counts(&stack), counts(&queue), "两个组织者的完成路径数和每条路径的记录数必须一致");
+    assert_eq!(stack_rejections, queue_rejections, "两个组织者的拒绝类别与次数必须一致");
+    [stack, queue]
+}
+
+#[test]
+fn unordered_register_reads_observe_same_arm_writes() {
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zunordered_local_value");
+    shared.registers.insert(reg, Ty::Bool);
+    // 两条臂先读入口值，再各写两次。最后一次写入必须是后续读取的值。
+    let local = test_name(1389);
+    let program = vec![
+        Instr::Decl(local, Ty::Bool, info()),
+        Instr::Copy(Loc::Id(local), Exp::Id(reg), info()),
+        Instr::Jump(input(0), 7, info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+        Instr::Goto(10),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(reg), Exp::Bool(true), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+        Instr::End,
+    ];
+    let mut limits = ExecutionLimits::default();
+    assert!(!limits.ordered_events);
+    assert_eq!(differential_organizers(program.clone(), &shared, 1, true, limits.clone()), (2, 1));
+    limits.ordered_events = true;
+    assert_eq!(differential_organizers(program, &shared, 1, true, limits), (2, 2));
 }
 
 /// 也供预期拒绝合并的用例复用等价判据，拒绝行为由用例另外检查。
@@ -868,7 +967,8 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
         }
         // 寄存器由入口初始化；外层的写后读只能在内层已提交之后触发拒绝。
         // 此处先用真实执行直接检查拒绝不会泄漏到调度边界。
-        let limits = ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true);
+        let mut limits = ExecutionLimits::default().with_path_merging(true).with_region_loop_analysis(true);
+        limits.ordered_events = true;
         let forked = paths(program.clone(), &shared, 3, false);
         let merged =
             paths_with_state(program.clone(), &shared, 3, limits.clone(), crate::memory::Memory::new(), |_| ());
@@ -2000,7 +2100,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
     let path = std::env::temp_dir().join(format!("isla-i3-force-{}.toml", std::process::id()));
     std::fs::write(
         &path,
-        "[execution_limits]\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"force\"\nfunction = \"force_rejected\"\n",
+        "[execution_limits.path_merge]\nordered_events = true\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = \"force\"\nfunction = \"force_rejected\"\n",
     )
     .unwrap();
     let started = Instant::now();
