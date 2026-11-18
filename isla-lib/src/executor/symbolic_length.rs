@@ -497,8 +497,14 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         let result = solver
             .check_candidate_sat(info)
             .ok_or_else(|| ExecError::Smt(solver.no_smt_cannot_continue("symbolic_value_enumeration", info)))?;
-        if result.is_unsat()? {
+        if result == crate::smt::SmtResult::Unsat {
             return Ok(ValueRetry::Dead);
+        }
+        if frame.region_execution.is_some() && result.is_unknown() {
+            return Err(super::region_merge::reject(frame, SpeculativeRejectReason::SolverUnknown));
+        }
+        if !super::region_merge::path_is_feasible(result, frame, solver, shared)? {
+            return Err(ExecError::SolverDroppedPath);
         }
     }
     let candidate = {

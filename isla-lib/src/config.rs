@@ -2653,16 +2653,14 @@ end_column = 0
     fn region_merge_finite_domain_config() {
         let defaults = merge_config("[execution_limits.path_merge]").unwrap().path_merge;
         assert!(!defaults.finite_domain_enumeration);
-        assert_eq!(defaults.finite_domain_max, None);
-        let config = merge_config("[execution_limits.path_merge]\nfinite_domain_enumeration=true\nfinite_domain_max=4")
-            .unwrap()
-            .path_merge;
-        assert!(config.finite_domain_enumeration);
-        assert_eq!(config.finite_domain_max.unwrap().get(), 4);
-        for value in ["0", "-1", "true", "'4'", "1.5"] {
-            assert!(merge_config(&format!("[execution_limits.path_merge]\nfinite_domain_max={value}")).is_err());
+        let config = merge_config("[execution_limits.path_merge]\nfinite_domain_enumeration=true").unwrap();
+        assert!(config.path_merge.finite_domain_enumeration);
+        for section in ["execution_limits", "execution_limits.path_merge", "execution_limits.solver"] {
+            assert!(merge_config(&format!("[{section}]\nfinite_domain_max=64")).is_err());
         }
-        assert!(merge_config("[execution_limits]\nfinite_domain_enumeration=true").is_err());
+        for section in ["execution_limits", "execution_limits.solver"] {
+            assert!(merge_config(&format!("[{section}]\nfinite_domain_enumeration=true")).is_err());
+        }
     }
 
     #[test]

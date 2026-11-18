@@ -7,13 +7,13 @@ fn equal(symbol: Sym, value: u64) -> Formula<Sym> {
 
 fn lengths(
     no_smt: bool,
-    max: Option<usize>,
+    enabled: bool,
     assertions: impl FnOnce(&mut Solver<B64>, Sym),
 ) -> (Vec<Result<(u32, Vec<u64>), ExecError>>, usize) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut cfg = Config::new();
     cfg.solver_options.no_smt = no_smt;
-    cfg.solver_options.finite_domain_max = max;
+    cfg.solver_options.finite_domain_enumeration = enabled;
     let context = Context::new(cfg);
     let verification = Context::new(Config::new());
     let mut solver = Solver::new(&context);
@@ -80,7 +80,7 @@ fn four_lengths(solver: &mut Solver<B64>, symbol: Sym) {
 
 #[test]
 fn symbolic_finite_domain_enumerates_length_without_smt() {
-    let (results, queries) = lengths(true, Some(64), four_lengths);
+    let (results, queries) = lengths(true, true, four_lengths);
     let mut concrete: Vec<_> = results.into_iter().collect::<Result<_, _>>().unwrap();
     concrete.sort();
     assert_eq!(concrete, [(1, vec![1]), (2, vec![2]), (4, vec![4]), (8, vec![8])]);
@@ -88,20 +88,41 @@ fn symbolic_finite_domain_enumerates_length_without_smt() {
 }
 
 #[test]
-fn symbolic_finite_domain_matches_default_and_over_cap_smt_enumeration() {
+fn symbolic_finite_domain_keeps_every_explicit_candidate_above_the_old_limit() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut cfg = Config::new();
+    cfg.solver_options.no_smt = true;
+    cfg.solver_options.finite_domain_enumeration = true;
+    let context = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&context);
+    let symbol = solver.declare_bitvector(64, info());
+    let start = crate::smt::test_query_count();
+    assert!(matches!(solver.finite_domain(symbol), crate::smt::FiniteDomain::Unknown));
+    let domain =
+        (0..65).map(|value| equal(symbol, value)).reduce(|lhs, rhs| Formula::Or(Box::new(lhs), Box::new(rhs))).unwrap();
+    solver.assert(domain);
+    let crate::smt::FiniteDomain::Known(values) = solver.finite_domain(symbol) else {
+        panic!("结构上已知的 65 个具体值必须全部保留");
+    };
+    assert_eq!(values, (0..65).map(|value| smtlib::bits64(value, 64)).collect::<Vec<_>>());
+    assert_eq!(crate::smt::test_query_count() - start, 0);
+}
+
+#[test]
+fn symbolic_finite_domain_matches_smt_enumeration() {
     let expected = vec![(1, vec![1]), (2, vec![2]), (4, vec![4]), (8, vec![8])];
-    for max in [None, Some(2), Some(64)] {
-        let (results, queries) = lengths(false, max, four_lengths);
+    for enabled in [false, true] {
+        let (results, queries) = lengths(false, enabled, four_lengths);
         let mut concrete: Vec<_> = results.into_iter().collect::<Result<_, _>>().unwrap();
         concrete.sort();
         assert_eq!(concrete, expected);
-        assert_eq!(queries == 0, max == Some(64), "{max:?}: {queries}");
+        assert_eq!(queries == 0, enabled, "启用状态 {enabled}，查询次数 {queries}");
     }
 }
 
 #[test]
 fn symbolic_finite_domain_handles_ite_intersection_and_exclusions() {
-    let (results, queries) = lengths(true, Some(64), |solver, symbol| {
+    let (results, queries) = lengths(true, true, |solver, symbol| {
         four_lengths(solver, symbol);
         let selector = solver.declare_const(smtlib::Ty::Bool, info());
         let ite = Formula::Ite(
@@ -119,8 +140,8 @@ fn symbolic_finite_domain_handles_ite_intersection_and_exclusions() {
 
 #[test]
 fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
-    for (max, constrained) in [(None, true), (Some(2), true), (Some(64), false)] {
-        let (results, queries) = lengths(true, max, |solver, symbol| {
+    for (enabled, constrained) in [(false, true), (true, false)] {
+        let (results, queries) = lengths(true, enabled, |solver, symbol| {
             if constrained {
                 four_lengths(solver, symbol);
             }
@@ -129,7 +150,7 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
         assert_eq!(queries, 0);
     }
 
-    let (results, queries) = lengths(true, Some(64), |solver, symbol| {
+    let (results, queries) = lengths(true, true, |solver, symbol| {
         four_lengths(solver, symbol);
         let dependent = solver.declare_bitvector(64, info());
         let expr = Formula::Bvadd(Box::new(Formula::Var(symbol)), Box::new(Formula::Var(dependent)));
@@ -145,7 +166,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
     use symbolic_length::ValueRetry;
     let mut cfg = Config::new();
     cfg.solver_options.no_smt = true;
-    cfg.solver_options.finite_domain_max = Some(64);
+    cfg.solver_options.finite_domain_enumeration = true;
     let context = Context::new(cfg);
     let mut solver = Solver::<B64>::new(&context);
     let symbol = solver.declare_bitvector(64, info());
@@ -217,7 +238,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
 fn symbolic_finite_domain_does_not_reinterpret_published_assertions_after_rebinding() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut cfg = Config::new();
-    cfg.solver_options.finite_domain_max = Some(64);
+    cfg.solver_options.finite_domain_enumeration = true;
     let context = Context::new(cfg);
     let mut solver = Solver::<B64>::new(&context);
     let symbol = solver.declare_bitvector(64, info());
@@ -239,7 +260,7 @@ fn symbolic_finite_domain_prunes_exhaustive_match_default_with_active_guards() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut cfg = Config::new();
     cfg.solver_options.no_smt = true;
-    cfg.solver_options.finite_domain_max = Some(64);
+    cfg.solver_options.finite_domain_enumeration = true;
     let context = Context::new(cfg);
     let mut solver = Solver::<B64>::new(&context);
     let state = solver.declare_bitvector(64, info());
@@ -279,7 +300,7 @@ fn symbolic_finite_domain_concretizes_scaled_length_and_range() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut cfg = Config::new();
     cfg.solver_options.no_smt = true;
-    cfg.solver_options.finite_domain_max = Some(64);
+    cfg.solver_options.finite_domain_enumeration = true;
     let context = Context::new(cfg);
     let mut solver = Solver::<B64>::new(&context);
     let width = solver.declare_bitvector(64, info());

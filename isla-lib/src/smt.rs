@@ -663,7 +663,7 @@ pub struct SolverOptions {
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
     pub keep_bool_proofs: bool,
-    pub finite_domain_max: Option<usize>,
+    pub finite_domain_enumeration: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 

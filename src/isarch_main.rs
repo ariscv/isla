@@ -676,10 +676,7 @@ fn isla_main() -> i32 {
         skip_bool_proofs: solver_region_options.skip_bool_proofs,
         no_smt: solver_region_options.no_smt,
         keep_bool_proofs: solver_region_options.no_smt_keep_bool_proofs,
-        finite_domain_max: limits
-            .path_merge
-            .finite_domain_enumeration
-            .then(|| limits.path_merge.finite_domain_max.map_or(64, std::num::NonZeroUsize::get)),
+        finite_domain_enumeration: limits.path_merge.finite_domain_enumeration,
         bv_rewrite: solver_region_options.bv_rewrite,
     });
     if solver_region_options.no_smt {

@@ -95,17 +95,17 @@ struct PathConditions<'a> {
     definitions: Definitions<'a>,
     assertions: Vec<&'a Exp<Sym>>,
     bool_symbols: Vec<Sym>,
-    max: usize,
 }
 
 impl<'a> PathConditions<'a> {
+    // 只从公式显式给出的有限集合取值。自由位向量的位宽不能作为枚举依据。
     fn bounds(&self, subject: &Exp<Sym>) -> Bound {
         let subject = resolve(subject, &self.definitions);
         let mut candidates = value_bound(subject, &self.definitions);
         for assertion in &self.assertions {
             candidates = intersect(candidates, bound(assertion, subject, &self.definitions, false));
         }
-        candidates.filter(|values| values.len() <= self.max)
+        candidates
     }
 
     fn comparison_subjects(&self, exp: &'a Exp<Sym>, subjects: &mut Vec<&'a Exp<Sym>>) {
@@ -166,15 +166,17 @@ impl<'ctx> Ast<'ctx> {
 
 impl<B: BV> Solver<'_, B> {
     pub(crate) fn finite_domain_enabled(&self) -> bool {
-        self.ctx.solver_options.finite_domain_max.is_some()
+        self.ctx.solver_options.finite_domain_enumeration
     }
 
     fn finite_domain_prefix(&self) -> Option<PathConditions<'_>> {
-        let max = self.ctx.solver_options.finite_domain_max?;
+        if !self.finite_domain_enabled() {
+            return None;
+        }
         // 提交的带守卫断言已改写为蕴含，活动守卫单独加入。回滚不留下缓存。
         let mut symbols = HashSet::new();
         let mut conditions =
-            PathConditions { definitions: HashMap::new(), bool_symbols: Vec::new(), assertions: Vec::new(), max };
+            PathConditions { definitions: HashMap::new(), bool_symbols: Vec::new(), assertions: Vec::new() };
         for event in self.transaction_events.iter().rev().chain(self.trace.events_rev()) {
             let defined = match event {
                 Event::Smt(Def::DefineConst(sym, exp), ..) => {

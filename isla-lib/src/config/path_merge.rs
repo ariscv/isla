@@ -79,7 +79,6 @@ pub struct PathMergeConfig {
     /// 仅在延迟出口检查内生效。
     pub lazy_z3_scope: bool,
     pub finite_domain_enumeration: bool,
-    pub finite_domain_max: Option<std::num::NonZeroUsize>,
     pub witness_eval: bool,
     pub prefix_compact: bool,
     pub diagnostics: PathMergeDiagnostics,
