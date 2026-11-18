@@ -2,7 +2,7 @@
 use super::target::Target;
 use isla_lib::bitvector::BV;
 use isla_lib::executor::samples::{profile, SampleChecker, SamplePath};
-use isla_lib::executor::RegionMergeRecord;
+use isla_lib::executor::MergeHistory;
 use isla_lib::ir::SharedState;
 use isla_lib::smt::{Checkpoint, Config, Context, Solver};
 use isla_lib::timing::thread_cpu_time;
@@ -20,7 +20,7 @@ mod fast;
 pub struct ResidentPath<B: BV> {
     pub checkpoint: Checkpoint<B>,
     pub path: SamplePath<B>,
-    pub records: Vec<RegionMergeRecord<B>>,
+    pub records: MergeHistory<B>,
     pub signature: u64,
     pub pure_definitions: Vec<(u32, u32)>,
 }

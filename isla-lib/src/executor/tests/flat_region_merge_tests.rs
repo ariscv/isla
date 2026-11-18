@@ -2,7 +2,10 @@
 use super::*;
 
 fn limits(merge: bool) -> ExecutionLimits {
-    let mut limits = ExecutionLimits::default().with_path_merging(merge).with_region_global_state(true);
+    let mut limits = ExecutionLimits::default()
+        .with_path_merging(merge)
+        .with_region_global_state(true)
+        .with_region_loop_analysis(true);
     limits.merge_strategy = crate::config::MergeStrategy::Flat;
     limits.ordered_events = std::env::var("ISLA_FLAT_ORDER_TEST").unwrap() == "true";
     limits
@@ -303,4 +306,177 @@ fn flat_distinct_return_pcs_reject_without_panic() {
     let merged = paths(program, &shared, 1, true);
     assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, 2));
     assert!(merged.iter().all(|path| path.records.is_empty()));
+}
+
+fn loop_fixture(early: bool, nested: bool) -> Vec<Instr<Name, B64>> {
+    let i = test_name(1900);
+    let j = test_name(1901);
+    let mut program = vec![
+        Instr::Init(i, Ty::I64, Exp::I64(0), info()),
+        Instr::Init(j, Ty::I64, Exp::I64(0), info()),
+        Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(i), Exp::I64(3)]), 15, info()),
+        Instr::Jump(
+            if early {
+                Exp::Call(Op::And, vec![Exp::Call(Op::Eq, vec![Exp::Id(i), Exp::I64(1)]), input(0)])
+            } else {
+                Exp::Bool(false)
+            },
+            15,
+            info(),
+        ),
+        Instr::Jump(input(1), 7, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(j), Exp::I64(if nested { 2 } else { 0 })]), 12, info()),
+        Instr::Copy(Loc::Id(j), Exp::Call(Op::Add, vec![Exp::Id(j), Exp::I64(1)]), info()),
+        Instr::Jump(input(0), 8, info()),
+        Instr::Goto(8),
+        Instr::Copy(Loc::Id(j), Exp::I64(0), info()),
+        Instr::Copy(Loc::Id(i), Exp::Call(Op::Add, vec![Exp::Id(i), Exp::I64(1)]), info()),
+        Instr::Goto(2),
+        Instr::End,
+    ];
+    program.insert(0, Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()));
+    for instr in &mut program[1..] {
+        match instr {
+            Instr::Jump(_, target, _) | Instr::Goto(target) => *target += 1,
+            _ => (),
+        }
+    }
+    program
+}
+
+fn assert_loop(early: bool, nested: bool) {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let off = paths(loop_fixture(early, nested), &shared, 2, false);
+    let on = paths(loop_fixture(early, nested), &shared, 2, true);
+    equivalent_paths(&off, &on, 2, true);
+    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["has_back_edge"].as_u64().unwrap_or(0), 0);
+    assert_eq!(on.len(), 1, "循环必须实际合并为一条路径");
+    assert!(on.iter().any(|p| !p.records.is_empty()), "循环必须实际合并");
+}
+#[test]
+fn flat_loop_fixed_count() {
+    if flat_child("flat_loop_fixed_count") {
+        assert_loop(false, false);
+    }
+}
+#[test]
+fn flat_loop_symbolic_early_exit() {
+    if flat_child("flat_loop_symbolic_early_exit") {
+        assert_loop(true, false);
+    }
+}
+#[test]
+fn flat_loop_body_if() {
+    if flat_child("flat_loop_body_if") {
+        assert_loop(false, false);
+    }
+}
+#[test]
+fn flat_loop_nested() {
+    if flat_child("flat_loop_nested") {
+        assert_loop(false, true);
+    }
+}
+
+#[test]
+fn flat_loop_four_independent_exits_fold_per_round() {
+    if !flat_child("flat_loop_four_independent_exits_fold_per_round") {
+        return;
+    }
+    assert_independent_scan(false);
+}
+
+#[test]
+fn flat_loop_inside_if_preserves_sibling_domain() {
+    if flat_child("flat_loop_inside_if_preserves_sibling_domain") {
+        assert_independent_scan(true);
+    }
+}
+
+fn assert_independent_scan(wrapped: bool) {
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let counter = test_name(1950);
+    let choices = test_name(1951);
+    let choice = test_name(1952);
+    let mut program = super::loop_segment_tests::scan_program(counter, choices, choice, 4, None);
+    if wrapped {
+        for instr in &mut program {
+            match instr {
+                Instr::Jump(_, target, _) | Instr::Goto(target) => *target += 1,
+                _ => (),
+            }
+        }
+        program.insert(0, Instr::Jump(input(4), 13, info()));
+        program.extend([Instr::Copy(Loc::Id(RETURN), Exp::I128(-1), info()), Instr::Goto(12)]);
+    }
+    let inputs = if wrapped { 5 } else { 4 };
+    let run = |merge| {
+        paths_with_state(program.clone(), &shared, inputs, limits(merge), crate::memory::Memory::new(), |frame| {
+            let values = (0..4)
+                .map(|i| match frame.vars()[&test_name(900 + i)].clone() {
+                    UVal::Init(v) => v,
+                    _ => unreachable!(),
+                })
+                .collect();
+            frame.vars_mut().insert(choices, UVal::Init(Val::Vector(values)));
+            frame.vars_mut().insert(choice, UVal::Uninit(&Ty::Bool));
+        })
+    };
+    let off = run(false);
+    let on = run(true);
+    super::loop_segment_tests::equivalent_scalar_paths(&off, &on, inputs);
+    assert_eq!(off.len(), if wrapped { 6 } else { 5 });
+    assert_eq!(on.len(), 1, "{}", shared.execution_stats.merge_json());
+    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["has_back_edge"].as_u64().unwrap_or(0), 0);
+    assert!(on[0].records.len() >= 4);
+}
+
+#[test]
+fn flat_loop_unbounded_rejects_and_restores_root() {
+    if !flat_child("flat_loop_unbounded_rejects_and_restores_root") {
+        return;
+    }
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Goto(0),
+        Instr::End,
+    ]);
+    let condition = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    let state = TaskState::new().with_execution_limits(limits(true)).with_region_step_budget(12);
+    let queue = Worker::new_lifo();
+    let result = region_merge::try_region(
+        condition,
+        3,
+        0,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::unlimited(),
+        None,
+        &SingleForkSink { queue: &queue },
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    )
+    .unwrap();
+    assert!(matches!(result, region_merge::RegionResult::Rejected));
+    assert_eq!(shared.execution_stats.merge_json()["failures"], 1);
+    assert_eq!(solver.transaction_depth(), 0);
+    assert_eq!(frame.pc, 0);
+    assert!(frame.region_merge_records().is_empty());
+    assert!(queue.is_empty());
 }

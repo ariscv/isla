@@ -30,6 +30,7 @@
 //! This module loads a TOML file containing configuration for a specific instruction set
 //! architecture.
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -1554,9 +1555,12 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
 
 pub mod region_options;
 pub use region_options::RegionOptions;
+pub mod path_merge;
+pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig};
 
 /// 路径合并执行策略；递归是兼容默认值。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MergeStrategy {
     #[default]
     Recursive,
@@ -1568,15 +1572,16 @@ impl std::str::FromStr for MergeStrategy {
         match value {
             "recursive" => Ok(Self::Recursive),
             "flat" => Ok(Self::Flat),
-            _ => Err("merge_strategy 必须是 recursive 或 flat".into()),
+            _ => Err("strategy 必须是 recursive 或 flat".into()),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExecutionLimitsConfig {
-    /// 区域候选与诊断选项；未配置时保持原默认行为。
-    pub region_options: Option<RegionOptions>,
+    pub solver: SolverConfig,
+    pub path_merge: PathMergeConfig,
     /// resident judge 同时恢复的路径上限，默认使用线程数。
     pub judge_resident_batch_size: Option<usize>,
     pub strict: bool,
@@ -1590,18 +1595,7 @@ pub struct ExecutionLimitsConfig {
     pub max_fork_pct_check_delay: Option<u32>,
     pub call_context_depth: Option<usize>,
     pub branch_sampling_seed: Option<u64>,
-    pub path_merging: Option<bool>,
-    pub merge_strategy: Option<MergeStrategy>,
-    /// flat 模式保留可兼容的事件偏序；默认 false。递归策略保留原行为。
-    pub ordered_events: Option<bool>,
-    /// -1 关闭区域步数预算；其他合法值必须为正数。
-    pub region_step_budget: Option<i64>,
     pub on_limit_reached: Option<LimitBehaviorConfig>,
-    pub regions: Option<Vec<SourceRegionSpec>>,
-    pub branch_region_limits: Option<Vec<BranchRegionLimitConfig>>,
-    pub region_fork_limits: Option<Vec<RegionForkLimitConfig>>,
-    pub merge_policy: Option<Vec<MergePolicyConfig>>,
-    pub merge_enumeration: Option<MergeEnumerationConfig>,
     /// 输出层按 `ret_val` 构造子分类的用例配额，由 isarch 收尾阶段消费。
     pub case_quota: Option<BTreeMap<String, u32>>,
     /// isarch 在收集完成终态时过滤的 Sail 异常构造子；空集合保持默认行为。
@@ -1705,7 +1699,8 @@ pub struct RegionForkLimitConfig {
     pub region: SourceRegionSpec,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LimitBehaviorConfig {
     Truncate,
     Concretize,
@@ -1817,14 +1812,17 @@ impl ExecutionLimitsConfig {
         functions: &HashSet<Name>,
         branch_locations: &[crate::source_loc::SourceLoc],
     ) -> Result<(), String> {
-        let Some(rules) = &self.merge_policy else { return Ok(()) };
-        validate_merge_policy_conflicts(rules)?;
+        let rules = self.path_merge.policies();
+        if rules.is_empty() {
+            return Ok(());
+        };
+        validate_merge_policy_conflicts(&rules)?;
         for (index, rule) in rules.iter().enumerate() {
             match &rule.selector {
                 MergePolicySelectorConfig::Function(function) => {
                     if !symtab.get(function).map_or(false, |name| functions.contains(&name)) {
                         return Err(format!(
-                            "execution_limits.merge_policy[{}] 的函数 {} 不存在于 IR 函数集合中",
+                            "execution_limits.path_merge.regions[{}] 的函数 {} 不存在于 IR 函数集合中",
                             index,
                             zencode::decode(function)
                         ));
@@ -1838,7 +1836,7 @@ impl ExecutionLimitsConfig {
                         })
                     {
                         return Err(format!(
-                            "execution_limits.merge_policy[{}] 的源码区域 {:?} 未匹配任何 IR 分支（strict=true）",
+                            "execution_limits.path_merge.regions[{}] 的源码区域 {:?} 未匹配任何 IR 分支（strict=true）",
                             index, spec
                         ));
                     }
@@ -1866,7 +1864,7 @@ fn validate_merge_policy_conflicts(rules: &[MergePolicyConfig]) -> Result<(), St
         for (previous_index, previous) in rules[..index].iter().enumerate() {
             if previous.selector == rule.selector && previous.mode != rule.mode {
                 return Err(format!(
-                    "execution_limits.merge_policy[{}] 与 [{}] 的同一选择器 {:?} 存在 mode 冲突：{:?} / {:?}",
+                    "execution_limits.path_merge.regions[{}] 与 [{}] 的同一选择器 {:?} 存在 mode 冲突：{:?} / {:?}",
                     previous_index, index, rule.selector, previous.mode, rule.mode
                 ));
             }
@@ -1879,222 +1877,66 @@ fn validate_merge_policy_conflicts(rules: &[MergePolicyConfig]) -> Result<(), St
 pub fn parse_region_step_budget(value: i64) -> Result<Option<usize>, String> {
     match value {
         -1 => Ok(None),
-        1.. => usize::try_from(value).map(Some).map_err(|_| "region_step_budget 超出 usize 范围".to_string()),
-        _ => Err("region_step_budget 必须为正整数或 -1（关闭预算）".to_string()),
+        1.. => usize::try_from(value)
+            .map(Some)
+            .map_err(|_| "execution_limits.path_merge.step_budget 超出 usize 范围".to_string()),
+        _ => Err("execution_limits.path_merge.step_budget 必须为正整数或 -1（关闭预算）".to_string()),
     }
 }
 
 fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsConfig>, String> {
     let Some(value) = config.get("execution_limits") else { return Ok(None) };
     let Some(table) = value.as_table() else { return Err("[execution_limits] 必须是 TOML table".to_string()) };
-    allowed_table_keys(
-        table,
-        "[execution_limits]",
-        &[
-            "strict",
-            "ir_sha256",
-            "enabled",
-            "max_forks_per_branch",
-            "max_forks_per_path",
-            "max_backjumps_per_loop",
-            "max_path_depth",
-            "max_fork_pct_per_branch",
-            "max_fork_pct_check_delay",
-            "call_context_depth",
-            "branch_sampling_seed",
-            "path_merging",
-            "merge_strategy",
-            "ordered_events",
-            "region_step_budget",
-            "on_limit_reached",
-            "regions",
-            "branch_region_limits",
-            "region_fork_limits",
-            "merge_policy",
-            "merge_enumeration",
-            "case_quota",
+    // 只给迁移指引，不读取旧值，也不建立兼容别名。
+    for (old, new) in [
+        ("path_merging", "execution_limits.path_merge.enabled"),
+        ("region_step_budget", "execution_limits.path_merge.step_budget"),
+        (
             "region_options",
-            "judge_resident_batch_size",
-            "filter_model_exceptions",
-        ],
-    )?;
-
-    let enabled = optional_bool(table, "enabled", "execution_limits")?;
-    if enabled == Some(false) && table.len() != 1 {
-        return Err("execution_limits.enabled=false 时不能再配置其他 execution limit 字段".to_string());
+            "execution_limits.path_merge / execution_limits.path_merge.diagnostics / execution_limits.solver",
+        ),
+        ("regions", "execution_limits.path_merge.regions (kind=limit_filter)"),
+        ("branch_region_limits", "execution_limits.path_merge.regions (kind=branch_limit)"),
+        ("region_fork_limits", "execution_limits.path_merge.regions (kind=fork_limit)"),
+        ("merge_policy", "execution_limits.path_merge.regions (kind=merge_policy)"),
+        ("merge_enumeration", "execution_limits.path_merge.enumeration"),
+    ] {
+        if table.contains_key(old) {
+            return Err(format!("execution_limits.{old} 已删除；请迁移到 {new}"));
+        }
     }
-
-    let strict = optional_bool(table, "strict", "execution_limits")?.unwrap_or(false);
-    let ir_sha256 = optional_sha256(table, "ir_sha256", "execution_limits")?;
-    if strict && ir_sha256.is_none() {
-        return Err("execution_limits.strict=true 时必须配置 execution_limits.ir_sha256".to_string());
+    let mut config: ExecutionLimitsConfig = value.clone().try_into().map_err(|e| format!("execution_limits: {e}"))?;
+    if config.enabled == Some(false) && table.len() != 1 {
+        return Err("execution_limits.enabled=false 时不能再配置其他 execution limit 字段".into());
     }
+    config.ir_sha256 = optional_sha256(table, "ir_sha256", "execution_limits")?;
+    if config.strict && config.ir_sha256.is_none() {
+        return Err("execution_limits.strict=true 时必须配置 execution_limits.ir_sha256".into());
+    }
+    if let Some(value) = config.max_fork_pct_per_branch {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err("execution_limits.max_fork_pct_per_branch 必须是 0.0..=1.0 的数值".into());
+        }
+    }
+    if config.judge_resident_batch_size == Some(0) {
+        return Err("judge_resident_batch_size 必须大于零".into());
+    }
+    config.case_quota = case_quota_table(table)?;
+    for name in &config.filter_model_exceptions {
+        if name.trim().is_empty() || name != name.trim() {
+            return Err("execution_limits.filter_model_exceptions 必须包含非空构造子名称，且不得有首尾空格".into());
+        }
+    }
+    config.path_merge.validate()?;
+    RegionOptions::from_config(&config).validate()?;
+    Ok(Some(config))
+}
 
-    let max_fork_pct_per_branch = table
-        .get("max_fork_pct_per_branch")
+fn parse_merge_enumeration(table: &toml::value::Table) -> Result<Option<MergeEnumerationConfig>, String> {
+    table
+        .get("enumeration")
         .map(|value| {
-            let value = value
-                .as_float()
-                .or_else(|| value.as_integer().map(|value| value as f64))
-                .ok_or_else(|| "execution_limits.max_fork_pct_per_branch 必须是 0.0..=1.0 的数值".to_string())?;
-            if value.is_finite() && (0.0..=1.0).contains(&value) {
-                Ok(value)
-            } else {
-                Err("execution_limits.max_fork_pct_per_branch 必须是 0.0..=1.0 的数值".to_string())
-            }
-        })
-        .transpose()?;
-
-    let on_limit_reached = table
-        .get("on_limit_reached")
-        .map(|value| match value.as_str() {
-            Some("concretize") => Ok(LimitBehaviorConfig::Concretize),
-            Some("truncate") => Ok(LimitBehaviorConfig::Truncate),
-            _ => Err("execution_limits.on_limit_reached 必须是 concretize 或 truncate".to_string()),
-        })
-        .transpose()?;
-
-    let regions = table
-        .get("regions")
-        .map(|value| {
-            let regions = value.as_array().ok_or_else(|| "execution_limits.regions 必须是数组".to_string())?;
-            if regions.is_empty() {
-                return Err("execution_limits.regions 不能为空；如需关闭执行限制请设置 enabled=false".to_string());
-            }
-            regions
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let root = format!("execution_limits.regions[{}]", index);
-                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
-                    allowed_table_keys(
-                        table,
-                        &root,
-                        &["file", "start_line", "start_column", "end_line", "end_column"],
-                    )?;
-                    source_region_spec(table, &root)
-                })
-                .collect()
-        })
-        .transpose()?;
-
-    let branch_region_limits = table
-        .get("branch_region_limits")
-        .map(|value| {
-            let limits =
-                value.as_array().ok_or_else(|| "execution_limits.branch_region_limits 必须是数组".to_string())?;
-            if limits.is_empty() {
-                return Err("execution_limits.branch_region_limits 不能为空".to_string());
-            }
-            limits
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let root = format!("execution_limits.branch_region_limits[{}]", index);
-                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
-                    allowed_table_keys(
-                        table,
-                        &root,
-                        &["max_forks_per_branch", "file", "start_line", "start_column", "end_line", "end_column"],
-                    )?;
-                    Ok(BranchRegionLimitConfig {
-                        max_forks_per_branch: required_u32(table, "max_forks_per_branch", &root)?,
-                        region: source_region_spec(table, &root)?,
-                    })
-                })
-                .collect()
-        })
-        .transpose()?;
-
-    let region_fork_limits = table
-        .get("region_fork_limits")
-        .map(|value| {
-            let limits =
-                value.as_array().ok_or_else(|| "execution_limits.region_fork_limits 必须是数组".to_string())?;
-            if limits.is_empty() {
-                return Err("execution_limits.region_fork_limits 不能为空".to_string());
-            }
-            limits
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let root = format!("execution_limits.region_fork_limits[{}]", index);
-                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
-                    allowed_table_keys(
-                        table,
-                        &root,
-                        &[
-                            "max_forks_per_region",
-                            "sample_bias",
-                            "sample_bias_direction",
-                            "file",
-                            "start_line",
-                            "start_column",
-                            "end_line",
-                            "end_column",
-                        ],
-                    )?;
-                    Ok(RegionForkLimitConfig {
-                        max_forks_per_region: required_u32(table, "max_forks_per_region", &root)?,
-                        sample_bias: sample_bias(table, &root)?,
-                        region: source_region_spec(table, &root)?,
-                    })
-                })
-                .collect()
-        })
-        .transpose()?;
-
-    let merge_policy = table
-        .get("merge_policy")
-        .map(|value| {
-            let rules = value.as_array().ok_or_else(|| "execution_limits.merge_policy 必须是数组".to_string())?;
-            if rules.is_empty() {
-                return Err("execution_limits.merge_policy 不能为空".to_string());
-            }
-            let rules = rules
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let root = format!("execution_limits.merge_policy[{}]", index);
-                    let table = value.as_table().ok_or_else(|| format!("{} 必须是 TOML table", root))?;
-                    allowed_table_keys(
-                        table,
-                        &root,
-                        &["mode", "function", "file", "start_line", "start_column", "end_line", "end_column"],
-                    )?;
-                    let mode = match table.get("mode").and_then(Value::as_str) {
-                        Some("force") => MergeMode::Force,
-                        Some("adaptive") => MergeMode::Adaptive,
-                        Some("off") => MergeMode::Off,
-                        _ => return Err(format!("{}.mode 必须是 force、adaptive 或 off", root)),
-                    };
-                    let selector = if let Some(function) = table.get("function") {
-                        if ["file", "start_line", "start_column", "end_line", "end_column"]
-                            .iter()
-                            .any(|key| table.contains_key(*key))
-                        {
-                            return Err(format!("{} 的 function 与源码区域必须二选一", root));
-                        }
-                        let function = function
-                            .as_str()
-                            .filter(|name| !name.is_empty())
-                            .ok_or_else(|| format!("{}.function 必须是非空字符串", root))?;
-                        MergePolicySelectorConfig::Function(zencode::encode(function))
-                    } else {
-                        MergePolicySelectorConfig::Region(source_region_spec(table, &root)?)
-                    };
-                    Ok(MergePolicyConfig { mode, selector })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            validate_merge_policy_conflicts(&rules)?;
-            Ok(rules)
-        })
-        .transpose()?;
-
-    let merge_enumeration = table
-        .get("merge_enumeration")
-        .map(|value| {
-            let root = "execution_limits.merge_enumeration";
+            let root = "execution_limits.path_merge.enumeration";
             let sub = value.as_table().ok_or_else(|| format!("{root} 必须是 TOML table"))?;
             allowed_table_keys(
                 sub,
@@ -2197,81 +2039,7 @@ fn get_execution_limits_config(config: &Value) -> Result<Option<ExecutionLimitsC
             }
             Ok(config)
         })
-        .transpose()?;
-
-    let filter_model_exceptions = match table.get("filter_model_exceptions") {
-        None => Vec::new(),
-        Some(value) => value
-            .as_array()
-            .ok_or_else(|| "execution_limits.filter_model_exceptions 必须是构造子名称数组".to_string())?
-            .iter()
-            .map(|name| match name.as_str() {
-                Some(name) if !name.trim().is_empty() && name == name.trim() => Ok(name.to_string()),
-                _ => {
-                    Err("execution_limits.filter_model_exceptions 必须包含非空构造子名称，且不得有首尾空格".to_string())
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-
-    let region_options = table
-        .get("region_options")
-        .map(|value| {
-            let options: RegionOptions =
-                value.clone().try_into().map_err(|e| format!("execution_limits.region_options: {e}"))?;
-            options.validate()?;
-            Ok::<_, String>(options)
-        })
-        .transpose()?;
-
-    let judge_resident_batch_size = optional_u64(table, "judge_resident_batch_size", "execution_limits")?
-        .map(|value| {
-            let size = usize::try_from(value).map_err(|_| "judge_resident_batch_size 超出 usize 范围")?;
-            if size == 0 {
-                return Err("judge_resident_batch_size 必须大于零");
-            }
-            Ok(size)
-        })
-        .transpose()?;
-    Ok(Some(ExecutionLimitsConfig {
-        region_options,
-        judge_resident_batch_size,
-        strict,
-        ir_sha256,
-        enabled,
-        max_forks_per_branch: optional_u32(table, "max_forks_per_branch", "execution_limits")?,
-        max_forks_per_path: optional_u32(table, "max_forks_per_path", "execution_limits")?,
-        max_backjumps_per_loop: optional_u32(table, "max_backjumps_per_loop", "execution_limits")?,
-        max_path_depth: optional_u64(table, "max_path_depth", "execution_limits")?,
-        max_fork_pct_per_branch,
-        max_fork_pct_check_delay: optional_u32(table, "max_fork_pct_check_delay", "execution_limits")?,
-        call_context_depth: optional_u64(table, "call_context_depth", "execution_limits")?
-            .map(|value| usize::try_from(value).expect("usize 无法表示 execution_limits.call_context_depth")),
-        branch_sampling_seed: optional_u64(table, "branch_sampling_seed", "execution_limits")?,
-        path_merging: optional_bool(table, "path_merging", "execution_limits")?,
-        merge_strategy: table
-            .get("merge_strategy")
-            .map(|value| value.as_str().ok_or("execution_limits.merge_strategy 必须为字符串")?.parse::<MergeStrategy>())
-            .transpose()?,
-        ordered_events: optional_bool(table, "ordered_events", "execution_limits")?,
-        region_step_budget: table
-            .get("region_step_budget")
-            .map(|value| {
-                let value =
-                    value.as_integer().ok_or_else(|| "execution_limits.region_step_budget 必须为整数".to_string())?;
-                parse_region_step_budget(value)?;
-                Ok::<_, String>(value)
-            })
-            .transpose()?,
-        on_limit_reached,
-        regions,
-        branch_region_limits,
-        region_fork_limits,
-        merge_policy,
-        merge_enumeration,
-        case_quota: case_quota_table(table)?,
-        filter_model_exceptions,
-    }))
+        .transpose()
 }
 
 fn case_quota_table(table: &toml::value::Table) -> Result<Option<BTreeMap<String, u32>>, String> {
@@ -2740,6 +2508,121 @@ r0 = "0x0000000000000000"
     }
 
     #[test]
+    fn config_layout_new_sections_preserve_runtime_defaults_and_local_semantics() {
+        use crate::executor::ExecutionLimits;
+        let mut symtab = Symtab::new();
+        symtab.set_files(vec!["model.sail"]);
+        let defaults = merge_config(
+            "[execution_limits.path_merge]\n[execution_limits.solver]\n[execution_limits.path_merge.diagnostics]",
+        )
+        .unwrap();
+        assert_eq!(defaults, ExecutionLimitsConfig::default());
+        let limits = ExecutionLimits::default().with_config(&defaults, &symtab);
+        assert!(!limits.path_merging);
+        assert_eq!(limits.region_step_budget, Some(8192));
+        let config = merge_config(
+            r#"
+[execution_limits.path_merge]
+enabled = true
+step_budget = -1
+defer_exit_check = true
+[execution_limits.solver]
+bool_proof_rlimit = 7
+[execution_limits.path_merge.diagnostics]
+progress = true
+[[execution_limits.path_merge.regions]]
+kind = "limit_filter"
+file = "model.sail"
+start_line = 1
+start_column = 0
+end_line = 9
+end_column = 0
+[[execution_limits.path_merge.regions]]
+kind = "branch_limit"
+max_forks_per_branch = 3
+file = "model.sail"
+start_line = 2
+start_column = 0
+end_line = 4
+end_column = 0
+"#,
+        )
+        .unwrap();
+        let limits = ExecutionLimits::default().with_config(&config, &symtab);
+        assert!(limits.path_merging);
+        assert_eq!(limits.region_step_budget, None);
+        assert_eq!(limits.regions.as_ref().unwrap().len(), 1);
+        assert_eq!(limits.branch_region_limits[0].1, 3);
+    }
+
+    #[test]
+    fn config_layout_removed_fields_report_new_locations() {
+        for (old, new) in [
+            ("path_merging=true", "execution_limits.path_merge.enabled"),
+            ("region_step_budget=1", "execution_limits.path_merge.step_budget"),
+            ("region_options={}", "execution_limits.path_merge"),
+            ("regions=[]", "execution_limits.path_merge.regions"),
+            ("branch_region_limits=[]", "execution_limits.path_merge.regions"),
+            ("region_fork_limits=[]", "execution_limits.path_merge.regions"),
+            ("merge_policy=[]", "execution_limits.path_merge.regions"),
+            ("merge_enumeration={}", "execution_limits.path_merge.enumeration"),
+        ] {
+            let error = merge_config(&format!("[execution_limits]\n{old}")).unwrap_err();
+            assert!(error.contains(new), "{old}: {error}");
+        }
+        for section in ["solver", "path_merge", "path_merge.diagnostics"] {
+            assert!(merge_config(&format!("[execution_limits.{section}]\nunknown=true")).is_err());
+        }
+    }
+
+    #[test]
+    fn no_smt_solver_config_defaults_switches_and_runtime_snapshot() {
+        let defaults = merge_config("[execution_limits.solver]").unwrap();
+        assert_eq!(RegionOptions::from_config(&defaults), RegionOptions::default());
+        for field in ["skip_branch_checks", "skip_bool_proofs", "no_smt", "no_smt_keep_bool_proofs"] {
+            let prefix = if field == "no_smt_keep_bool_proofs" { "no_smt=true\n" } else { "" };
+            let config = merge_config(&format!("[execution_limits.solver]\n{prefix}{field}=true")).unwrap();
+            let expected: RegionOptions = toml::from_str(&format!("{prefix}{field}=true")).unwrap();
+            assert_eq!(RegionOptions::from_config(&config), expected, "{field}");
+            assert_eq!(
+                merge_config(&format!("[execution_limits.solver]\n{field}=false")).unwrap(),
+                defaults,
+                "{field}"
+            );
+            for value in ["1", "'true'", "[]"] {
+                assert!(merge_config(&format!("[execution_limits.solver]\n{field}={value}")).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn no_smt_solver_config_rejects_old_and_misplaced_fields() {
+        for field in ["skip_branch_checks", "skip_bool_proofs", "no_smt", "no_smt_keep_bool_proofs"] {
+            for section in [
+                "execution_limits.region_options",
+                "execution_limits",
+                "execution_limits.path_merge",
+                "execution_limits.path_merge.diagnostics",
+            ] {
+                let error = merge_config(&format!("[{section}]\n{field}=true")).unwrap_err();
+                assert!(
+                    error.contains(if section.ends_with("region_options") { "execution_limits.solver" } else { field }),
+                    "{section}.{field}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_smt_solver_config_proof_dependency() {
+        for text in ["no_smt_keep_bool_proofs=true", "no_smt=true\nno_smt_keep_bool_proofs=true\nskip_bool_proofs=true"]
+        {
+            assert!(merge_config(&format!("[execution_limits.solver]\n{text}")).is_err());
+        }
+        merge_config("[execution_limits.solver]\nno_smt=true\nno_smt_keep_bool_proofs=true").unwrap();
+    }
+
+    #[test]
     fn resident_batch_size_toml_requires_positive_integer() {
         assert_eq!(merge_config("[execution_limits]").unwrap().judge_resident_batch_size, None);
         for size in [1, 2, 32] {
@@ -2758,41 +2641,100 @@ r0 = "0x0000000000000000"
     #[test]
     fn region_options_toml_accepts_switches_and_limits() {
         assert!(merge_config(
-            "[execution_limits.region_options]\ndefer_exit_check=true\nwitness_eval=true\nbool_proof_rlimit=1"
+            "[execution_limits.path_merge]\ndefer_exit_check=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
         )
         .is_ok());
-        assert!(merge_config("[execution_limits.region_options]\nquery_dump_sites=['f@1']\nquery_dump_dir='queries'\nsame_context_sites=['f@1']").is_ok());
+        assert!(merge_config("[execution_limits.path_merge.diagnostics]\nquery_dump_sites=['f@1']\nquery_dump_dir='queries'\nsame_context_sites=['f@1']").is_ok());
     }
 
     #[test]
     fn region_options_lazy_scope_toml_defaults_and_dependency() {
-        let defaults = merge_config("[execution_limits.region_options]").unwrap().region_options.unwrap();
+        let defaults = merge_config("[execution_limits.path_merge]\n").unwrap().path_merge;
         assert!(!defaults.lazy_z3_scope);
-        let enabled =
-            merge_config("[execution_limits.region_options]\nlazy_z3_scope=true").unwrap().region_options.unwrap();
+        let enabled = merge_config("[execution_limits.path_merge]\nlazy_z3_scope=true").unwrap().path_merge;
         assert!(enabled.lazy_z3_scope);
         assert!(!enabled.defer_exit_check, "不依赖 defer 的配置校验；作用域创建时才决定是否生效");
-        let disabled =
-            merge_config("[execution_limits.region_options]\nlazy_z3_scope=false").unwrap().region_options.unwrap();
+        let disabled = merge_config("[execution_limits.path_merge]\nlazy_z3_scope=false").unwrap().path_merge;
         assert_eq!(disabled, defaults);
         for value in ["1", "'true'", "[]"] {
-            assert!(merge_config(&format!("[execution_limits.region_options]\nlazy_z3_scope={value}")).is_err());
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nlazy_z3_scope={value}")).is_err());
         }
     }
 
     #[test]
     fn region_options_toml_rejects_invalid_values() {
-        for field in [
-            "defer_exit_check=1",
-            "bool_proof_rlimit=-1",
-            "bool_proof_rlimit=4294967296",
-            "query_dump_sites='f@1'",
-            "unknown=true",
-            "same_context_sites=['a','b','c']",
-            "query_dump_sites=['f@1']",
+        for (section, fields) in [
+            ("path_merge", "defer_exit_check=1"),
+            ("solver", "bool_proof_rlimit=-1"),
+            ("solver", "bool_proof_rlimit=4294967296"),
+            ("path_merge.diagnostics", "query_dump_sites='f@1'"),
+            ("path_merge", "unknown=true"),
+            ("path_merge.diagnostics", "same_context_sites=['a','b','c']"),
+            ("path_merge.diagnostics", "query_dump_sites=['f@1']"),
+            ("path_merge.regions", "mode='off'"),
         ] {
-            assert!(merge_config(&format!("[execution_limits.region_options]\n{field}")).is_err(), "{field}");
+            assert!(merge_config(&format!("[execution_limits.{section}]\n{fields}")).is_err(), "{section}: {fields}");
         }
+    }
+
+    #[test]
+    fn config_layout_freeze_snapshot_preserves_all_twenty_options() {
+        let config = merge_config(
+            r#"
+[execution_limits.solver]
+bool_proof_rlimit = 17
+skip_branch_checks = true
+skip_bool_proofs = true
+no_smt = true
+no_smt_keep_bool_proofs = false
+[execution_limits.path_merge]
+defer_exit_check = true
+lazy_z3_scope = true
+witness_eval = true
+prefix_compact = true
+[execution_limits.path_merge.diagnostics]
+witness_shadow = true
+witness_local_shadow = true
+bool_proof_profile = true
+progress = true
+native_snapshot = true
+call_census = true
+probe_round_cost = true
+probe_query_timings = true
+query_dump_sites = ["f@1"]
+same_context_sites = ["g@2"]
+query_dump_dir = "queries"
+obligation_dump_dir = "obligations"
+"#,
+        )
+        .unwrap();
+        let options = RegionOptions::from_config(&config);
+        assert_eq!(
+            options,
+            RegionOptions {
+                skip_branch_checks: true,
+                skip_bool_proofs: true,
+                no_smt: true,
+                no_smt_keep_bool_proofs: false,
+                defer_exit_check: true,
+                lazy_z3_scope: true,
+                witness_eval: true,
+                prefix_compact: true,
+                witness_shadow: true,
+                witness_local_shadow: true,
+                bool_proof_profile: true,
+                progress: true,
+                native_snapshot: true,
+                call_census: true,
+                probe_round_cost: true,
+                probe_query_timings: true,
+                bool_proof_rlimit: 17,
+                query_dump_sites: vec!["f@1".into()],
+                same_context_sites: vec!["g@2".into()],
+                query_dump_dir: Some("queries".into()),
+                obligation_dump_dir: Some("obligations".into()),
+            }
+        );
     }
 
     #[test]
@@ -2819,50 +2761,61 @@ r0 = "0x0000000000000000"
 
     #[test]
     fn execution_limits_flat_strategy_and_ordered_events() {
-        let config = merge_config("[execution_limits]\nmerge_strategy='flat'\nordered_events=true").unwrap();
-        assert_eq!(config.merge_strategy, Some(MergeStrategy::Flat));
-        assert_eq!(config.ordered_events, Some(true));
+        let config = merge_config("[execution_limits.path_merge]\nstrategy='flat'\nordered_events=true").unwrap();
+        assert_eq!(config.path_merge.strategy, Some(MergeStrategy::Flat));
+        assert_eq!(config.path_merge.ordered_events, Some(true));
         let defaults = merge_config("[execution_limits]").unwrap();
-        assert!(defaults.merge_strategy.is_none() && defaults.ordered_events.is_none());
-        for input in [
-            "[execution_limits]\nmerge_strategy='bad'",
-            "[execution_limits]\nordered_events=1",
+        assert!(defaults.path_merge.strategy.is_none() && defaults.path_merge.ordered_events.is_none());
+        for body in [
+            "[execution_limits]\nmerge_strategy='flat'",
+            "[execution_limits]\nordered_events=true",
+            "[execution_limits.path_merge]\nmerge_strategy='flat'",
+            "[execution_limits.path_merge]\nstrategy='bad'",
+            "[execution_limits.path_merge]\nordered_events=1",
             "[execution_limits.region_options]\nmerge_strategy='flat'",
-            "[execution_limits.region_options]\nordered_events=false",
         ] {
-            assert!(merge_config(input).is_err(), "{input}");
+            assert!(merge_config(body).is_err(), "{body}");
         }
     }
 
     #[test]
     fn execution_limits_region_step_budget_values() {
         for value in ["8192", "1", "32768", "-1"] {
-            assert!(merge_config(&format!("[execution_limits]\nregion_step_budget = {value}")).is_ok(), "{value}");
+            assert!(
+                merge_config(&format!("[execution_limits]\n\n[execution_limits.path_merge]\nstep_budget = {value}"))
+                    .is_ok(),
+                "{value}"
+            );
         }
         for value in ["0", "-2", "-9223372036854775808", "true", "1.5", "\"8192\""] {
-            assert!(merge_config(&format!("[execution_limits]\nregion_step_budget = {value}")).is_err(), "{value}");
+            assert!(
+                merge_config(&format!("[execution_limits]\n\n[execution_limits.path_merge]\nstep_budget = {value}"))
+                    .is_err(),
+                "{value}"
+            );
         }
     }
 
     #[test]
     fn execution_limits_merge_enumeration_sample_stride() {
-        let config = merge_config("[execution_limits.merge_enumeration]\nsample_stride = 7");
+        let config = merge_config("[execution_limits.path_merge.enumeration]\nsample_stride = 7");
         assert!(config.is_ok(), "正整数 stride 必须可解析：{config:?}");
-        assert_eq!(config.unwrap().merge_enumeration.unwrap().sample_stride, 7);
+        assert_eq!(config.unwrap().path_merge.enumeration.unwrap().sample_stride, 7);
         assert_eq!(MergeEnumerationConfig::default().sample_stride, 1);
         for value in ["0", "-1", "true", "1.5", "\"7\""] {
-            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nsample_stride = {value}")).is_err());
+            assert!(
+                merge_config(&format!("[execution_limits.path_merge.enumeration]\nsample_stride = {value}")).is_err()
+            );
         }
     }
 
     #[test]
     fn execution_limits_merge_enumeration_threads() {
-        let config = merge_config("[execution_limits.merge_enumeration]\nenumeration_threads = 3").unwrap();
-        assert_eq!(config.merge_enumeration.unwrap().enumeration_threads, 3);
+        let config = merge_config("[execution_limits.path_merge.enumeration]\nenumeration_threads = 3").unwrap();
+        assert_eq!(config.path_merge.enumeration.unwrap().enumeration_threads, 3);
         for value in ["0", "-1", "true", "\"4\""] {
-            assert!(
-                merge_config(&format!("[execution_limits.merge_enumeration]\nenumeration_threads = {value}")).is_err()
-            );
+            assert!(merge_config(&format!("[execution_limits.path_merge.enumeration]\nenumeration_threads = {value}"))
+                .is_err());
         }
         assert_eq!(
             MergeEnumerationConfig::default().enumeration_threads,
@@ -2872,8 +2825,8 @@ r0 = "0x0000000000000000"
 
     #[test]
     fn execution_limits_predict_不生成样本且至少200次独立探测() {
-        let text="[execution_limits.merge_enumeration]\nenabled=true\nmode='predict'\npredict_probes=256\npredict_seed=7\npredict_domain_cap=256";
-        let config = merge_config(text).unwrap().merge_enumeration.unwrap();
+        let text="[execution_limits.path_merge.enumeration]\nenabled=true\nmode='predict'\npredict_probes=256\npredict_seed=7\npredict_domain_cap=256";
+        let config = merge_config(text).unwrap().path_merge.enumeration.unwrap();
         assert_eq!(config.mode, MergeEnumerationMode::Predict);
         assert_eq!(config.predict_probes, 256);
         for probes in ["0", "199", "-1"] {
@@ -2883,8 +2836,8 @@ r0 = "0x0000000000000000"
 
     #[test]
     fn execution_limits_output_budget_必须为正且只用二进制() {
-        let text = "[execution_limits.merge_enumeration]\nenabled=true\nmax_output_bytes=25000000000\n[[execution_limits.merge_enumeration.outputs]]\nformat='binary'\npath='samples.bin'";
-        assert_eq!(merge_config(text).unwrap().merge_enumeration.unwrap().max_output_bytes, Some(25_000_000_000));
+        let text = "[execution_limits.path_merge.enumeration]\nenabled=true\nmax_output_bytes=25000000000\n[[execution_limits.path_merge.enumeration.outputs]]\nformat='binary'\npath='samples.bin'";
+        assert_eq!(merge_config(text).unwrap().path_merge.enumeration.unwrap().max_output_bytes, Some(25_000_000_000));
         assert!(merge_config(&text.replace("25000000000", "0")).is_err());
         assert!(merge_config(&text.replace("'binary'", "'v1_jsonl'")).is_err());
     }
@@ -2893,55 +2846,58 @@ r0 = "0x0000000000000000"
     fn execution_limits_merge_enumeration_output_backends() {
         let config = merge_config(
             r#"
-            [[execution_limits.merge_enumeration.outputs]]
+            [[execution_limits.path_merge.enumeration.outputs]]
             format = "v1_jsonl"
             path = "samples.jsonl"
-            [[execution_limits.merge_enumeration.outputs]]
+            [[execution_limits.path_merge.enumeration.outputs]]
             format = "compact_jsonl"
             path = "compact.jsonl"
-            [[execution_limits.merge_enumeration.outputs]]
+            [[execution_limits.path_merge.enumeration.outputs]]
             format = "binary"
             path = "samples.bin"
         "#,
         )
         .unwrap();
-        assert_eq!(config.merge_enumeration.unwrap().outputs.len(), 3);
+        assert_eq!(config.path_merge.enumeration.unwrap().outputs.len(), 3);
         for fields in [
             "format='unknown'\npath='a'",
             "format='binary'",
             "format='binary'\npath=''",
             "format='binary'\npath='a'\nextra=1",
         ] {
-            assert!(merge_config(&format!("[[execution_limits.merge_enumeration.outputs]]\n{fields}")).is_err());
+            assert!(merge_config(&format!("[[execution_limits.path_merge.enumeration.outputs]]\n{fields}")).is_err());
         }
     }
 
     #[test]
     fn execution_limits_merge_enumeration_count_mode() {
         for mode in ["count", "samples"] {
-            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nmode = \"{mode}\"\nenabled = true"))
-                .is_ok());
+            assert!(merge_config(&format!(
+                "[execution_limits.path_merge.enumeration]\nmode = \"{mode}\"\nenabled = true"
+            ))
+            .is_ok());
         }
         for mode in ["\"unknown\"", "1", "true"] {
-            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\nmode = {mode}")).is_err());
+            assert!(merge_config(&format!("[execution_limits.path_merge.enumeration]\nmode = {mode}")).is_err());
         }
     }
 
     #[test]
     fn execution_limits_merge_enumeration_table() {
         let config =
-            merge_config("[execution_limits.merge_enumeration]\nenabled = true\nclass_cap = 7\npath_cap = 11").unwrap();
+            merge_config("[execution_limits.path_merge.enumeration]\nenabled = true\nclass_cap = 7\npath_cap = 11")
+                .unwrap();
         assert_eq!(
-            config.merge_enumeration.unwrap(),
+            config.path_merge.enumeration.unwrap(),
             MergeEnumerationConfig { enabled: true, class_cap: 7, path_cap: 11, ..Default::default() }
         );
         assert_eq!(
-            merge_config("[execution_limits.merge_enumeration]").unwrap().merge_enumeration.unwrap(),
+            merge_config("[execution_limits.path_merge.enumeration]").unwrap().path_merge.enumeration.unwrap(),
             MergeEnumerationConfig::default()
         );
-        assert!(merge_config("[execution_limits]").unwrap().merge_enumeration.is_none());
+        assert!(merge_config("[execution_limits]").unwrap().path_merge.enumeration.is_none());
         for fields in ["enabled = 1", "class_cap = 0", "path_cap = -1", "unknown = true"] {
-            assert!(merge_config(&format!("[execution_limits.merge_enumeration]\n{fields}")).is_err());
+            assert!(merge_config(&format!("[execution_limits.path_merge.enumeration]\n{fields}")).is_err());
         }
     }
 
@@ -2950,10 +2906,12 @@ r0 = "0x0000000000000000"
         for (text, mode) in [("force", MergeMode::Force), ("adaptive", MergeMode::Adaptive), ("off", MergeMode::Off)] {
             let config = merge_config(&format!(
                 r#"
-                [[execution_limits.merge_policy]]
+                [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
                 function = "pte_is_invalid"
                 mode = "{text}"
-                [[execution_limits.merge_policy]]
+                [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
                 mode = "{text}"
                 file = "model.sail"
                 start_line = 10
@@ -2963,7 +2921,7 @@ r0 = "0x0000000000000000"
             "#
             ))
             .unwrap();
-            let rules = config.merge_policy.unwrap();
+            let rules = config.path_merge.policies();
             assert_eq!(rules[0].mode, mode);
             assert_eq!(rules[0].selector, MergePolicySelectorConfig::Function(zencode::encode("pte_is_invalid")));
             assert_eq!(
@@ -2987,17 +2945,21 @@ r0 = "0x0000000000000000"
             "mode = 'off'\nfile = 'model.sail'\nstart_line = 0\nstart_column = 0\nend_line = 2\nend_column = 0",
             "mode = 'off'\nfile = 'model.sail'\nstart_line = 3\nstart_column = 0\nend_line = 2\nend_column = 0",
         ] {
-            assert!(merge_config(&format!("[[execution_limits.merge_policy]]\n{fields}")).is_err(), "{fields}");
+            assert!(
+                merge_config(&format!("[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\n{fields}"))
+                    .is_err(),
+                "{fields}"
+            );
         }
         for value in ["[]", "true", "['off']"] {
-            assert!(merge_config(&format!("[execution_limits]\nmerge_policy = {value}")).is_err());
+            assert!(merge_config(&format!("[execution_limits.path_merge]\nregions = {value}")).is_err());
         }
         for selector in
             ["function = 'f'", "file = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0"]
         {
-            let text = format!("[[execution_limits.merge_policy]]\nmode = 'force'\n{selector}\n[[execution_limits.merge_policy]]\nmode = 'off'\n{selector}");
+            let text = format!("[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = 'force'\n{selector}\n[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = 'off'\n{selector}");
             let error = merge_config(&text).unwrap_err();
-            assert!(error.contains("冲突") && error.contains("merge_policy"), "{error}");
+            assert!(error.contains("冲突") && error.contains("path_merge.regions"), "{error}");
             assert!(merge_config(&text.replace("mode = 'off'", "mode = 'force'")).is_ok());
         }
     }
@@ -3018,18 +2980,23 @@ r0 = "0x0000000000000000"
         let config = merge_config(
             r#"
             [execution_limits]
-            path_merging = true
-            [[execution_limits.merge_policy]]
+
+[execution_limits.path_merge]
+            enabled = true
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "off"
             function = "f"
-            [[execution_limits.merge_policy]]
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "force"
             file = "model.sail"
             start_line = 10
             start_column = 0
             end_line = 30
             end_column = 0
-            [[execution_limits.merge_policy]]
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "adaptive"
             file = "model.sail"
             start_line = 15
@@ -3047,11 +3014,13 @@ r0 = "0x0000000000000000"
         assert_eq!(limits.merge_mode(f, SourceLoc::new(0, 12, 0, 12, 1), Some(MergeMode::Off)), MergeMode::Force);
         assert_eq!(limits.merge_mode(f, SourceLoc::new(0, 15, 3, 15, 4), Some(MergeMode::Force)), MergeMode::Adaptive);
         let mut reversed = config.clone();
-        reversed.merge_policy.as_mut().unwrap().reverse();
+        reversed.path_merge.regions.as_mut().unwrap().reverse();
         let reversed = ExecutionLimits::default().with_config(&reversed, &symtab);
         assert_eq!(reversed.merge_mode(f, SourceLoc::new(0, 15, 3, 15, 4), None), MergeMode::Adaptive);
         for enabled in [true, false] {
-            let config = merge_config(&format!("[execution_limits]\npath_merging = {enabled}")).unwrap();
+            let config =
+                merge_config(&format!("[execution_limits]\n\n[execution_limits.path_merge]\nenabled = {enabled}"))
+                    .unwrap();
             let limits = ExecutionLimits::default().with_path_merging(!enabled).with_config(&config, &symtab);
             assert_eq!(limits.path_merging, enabled);
             assert_eq!(limits.merge_mode(g, unknown, None), if enabled { MergeMode::Adaptive } else { MergeMode::Off });
@@ -3067,28 +3036,32 @@ r0 = "0x0000000000000000"
         let function = symtab.intern("zf");
         let config = merge_config(
             r#"
-            [[execution_limits.merge_policy]]
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "force"
             file = "model.sail"
             start_line = 10
             start_column = 0
             end_line = 10
             end_column = 40
-            [[execution_limits.merge_policy]]
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "off"
             file = "model.sail"
             start_line = 10
             start_column = 10
             end_line = 10
             end_column = 20
-            [[execution_limits.merge_policy]]
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "adaptive"
             file = "model.sail"
             start_line = 10
             start_column = 15
             end_line = 10
             end_column = 25
-            [[execution_limits.merge_policy]]
+            [[execution_limits.path_merge.regions]]
+kind = "merge_policy"
             mode = "off"
             file = "missing.sail"
             start_line = 1
@@ -3105,7 +3078,7 @@ r0 = "0x0000000000000000"
         assert_eq!(limits.merge_mode(function, SourceLoc::new(0, 10, 20, 10, 21), None), MergeMode::Adaptive);
         assert_eq!(limits.merge_mode(function, SourceLoc::new(0, 10, 40, 10, 41), None), MergeMode::Off);
         let mut reversed = config.clone();
-        reversed.merge_policy.as_mut().unwrap().reverse();
+        reversed.path_merge.regions.as_mut().unwrap().reverse();
         let reversed = ExecutionLimits::default().with_config(&reversed, &symtab);
         let overlap = SourceLoc::new(0, 10, 17, 10, 18);
         assert_eq!(limits.merge_mode(function, overlap, None), reversed.merge_mode(function, overlap, None));
@@ -3117,14 +3090,20 @@ r0 = "0x0000000000000000"
         let mut symtab = Symtab::new();
         symtab.set_files(vec!["model.sail"]);
         let f = symtab.intern("zf");
-        let config = merge_config("[[execution_limits.merge_policy]]\nmode = 'force'\nfunction = 'f'").unwrap();
+        let config = merge_config(
+            "[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = 'force'\nfunction = 'f'",
+        )
+        .unwrap();
         let functions = HashSet::from([f]);
         assert!(config.validate_merge_policy(&symtab, &functions, &[]).is_ok());
         let error = config.validate_merge_policy(&symtab, &HashSet::new(), &[]).unwrap_err();
         assert!(error.contains("函数") && error.contains("f"), "{error}");
-        let missing = merge_config("[[execution_limits.merge_policy]]\nmode = 'off'\nfunction = 'missing'").unwrap();
+        let missing = merge_config(
+            "[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = 'off'\nfunction = 'missing'",
+        )
+        .unwrap();
         assert!(missing.validate_merge_policy(&symtab, &functions, &[]).unwrap_err().contains("missing"));
-        let region = "[[execution_limits.merge_policy]]\nmode = 'off'\nfile = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0";
+        let region = "[[execution_limits.path_merge.regions]]\nkind = \"merge_policy\"\nmode = 'off'\nfile = 'model.sail'\nstart_line = 10\nstart_column = 0\nend_line = 20\nend_column = 0";
         let config = merge_config(region).unwrap();
         assert!(config.validate_merge_policy(&symtab, &functions, &[]).is_ok());
         let strict =
@@ -3158,7 +3137,8 @@ r0 = "0x0000000000000000"
             branch_sampling_seed = 99
             on_limit_reached = "truncate"
 
-            [[execution_limits.regions]]
+            [[execution_limits.path_merge.regions]]
+kind = "limit_filter"
             file = "extensions/V/vext_arith_insts.sail"
             start_line = 186
             start_column = 6
@@ -3176,7 +3156,10 @@ r0 = "0x0000000000000000"
         assert_eq!(config.branch_sampling_seed, Some(99));
         assert_eq!(config.on_limit_reached, Some(LimitBehaviorConfig::Truncate));
         assert_eq!(
-            config.regions.unwrap()[0],
+            match &config.path_merge.regions.as_ref().unwrap()[0] {
+                PathMergeRegionConfig::LimitFilter(spec) => spec.clone(),
+                _ => panic!("必须是范围筛选"),
+            },
             SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7))
         );
     }
@@ -3189,14 +3172,16 @@ r0 = "0x0000000000000000"
             max_backjumps_per_loop = 16
             on_limit_reached = "concretize"
 
-            [[execution_limits.regions]]
+            [[execution_limits.path_merge.regions]]
+kind = "limit_filter"
             file = "extensions/V/vext_arith_insts.sail"
             start_line = 186
             start_column = 6
             end_line = 192
             end_column = 7
 
-            [[execution_limits.regions]]
+            [[execution_limits.path_merge.regions]]
+kind = "limit_filter"
             file = "sys/vmem_utils.sail"
             start_line = 146
             start_column = 2
@@ -3211,7 +3196,13 @@ r0 = "0x0000000000000000"
         assert_eq!(config.max_backjumps_per_loop, Some(16));
         assert_eq!(config.on_limit_reached, Some(LimitBehaviorConfig::Concretize));
         assert_eq!(
-            config.regions,
+            config.path_merge.regions.as_ref().map(|rules| rules
+                .iter()
+                .filter_map(|rule| match rule {
+                    PathMergeRegionConfig::LimitFilter(spec) => Some(spec.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()),
             Some(vec![
                 SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7)),
                 SourceRegionSpec::new("sys/vmem_utils.sail", (146, 2), (171, 0)),
@@ -3226,7 +3217,8 @@ r0 = "0x0000000000000000"
             max_forks_per_branch = 2
             on_limit_reached = "concretize"
 
-            [[execution_limits.branch_region_limits]]
+            [[execution_limits.path_merge.regions]]
+kind = "branch_limit"
             max_forks_per_branch = 1
             file = "extensions/V/vext_control.sail"
             start_line = 29
@@ -3234,7 +3226,8 @@ r0 = "0x0000000000000000"
             end_line = 35
             end_column = 3
 
-            [[execution_limits.branch_region_limits]]
+            [[execution_limits.path_merge.regions]]
+kind = "branch_limit"
             max_forks_per_branch = 1
             file = "extensions/V/vext_utils_insts.sail"
             start_line = 729
@@ -3247,7 +3240,13 @@ r0 = "0x0000000000000000"
         let config = get_execution_limits_config(&value).unwrap().unwrap();
 
         assert_eq!(
-            config.branch_region_limits,
+            config.path_merge.regions.as_ref().map(|rules| rules
+                .iter()
+                .filter_map(|rule| match rule {
+                    PathMergeRegionConfig::BranchLimit(limit) => Some(limit.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()),
             Some(vec![
                 BranchRegionLimitConfig {
                     max_forks_per_branch: 1,
@@ -3268,7 +3267,8 @@ r0 = "0x0000000000000000"
             max_forks_per_branch = 1
             on_limit_reached = "concretize"
 
-            [[execution_limits.region_fork_limits]]
+            [[execution_limits.path_merge.regions]]
+kind = "fork_limit"
             max_forks_per_region = 1
             file = "extensions/V/vext_control.sail"
             start_line = 29
@@ -3281,7 +3281,13 @@ r0 = "0x0000000000000000"
         let config = get_execution_limits_config(&value).unwrap().unwrap();
 
         assert_eq!(
-            config.region_fork_limits,
+            config.path_merge.regions.as_ref().map(|rules| rules
+                .iter()
+                .filter_map(|rule| match rule {
+                    PathMergeRegionConfig::ForkLimit(limit) => Some(limit.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()),
             Some(vec![RegionForkLimitConfig {
                 max_forks_per_region: 1,
                 sample_bias: None,
@@ -3292,9 +3298,9 @@ r0 = "0x0000000000000000"
 
     #[test]
     fn execution_limits_config_rejects_empty_region_fork_limits() {
-        let value = "[execution_limits]\nregion_fork_limits = []".parse::<Value>().unwrap();
+        let value = "[execution_limits.path_merge]\nregions = []".parse::<Value>().unwrap();
         let error = get_execution_limits_config(&value).unwrap_err();
-        assert!(error.contains("execution_limits.region_fork_limits 不能为空"), "{}", error);
+        assert!(error.contains("execution_limits.path_merge.regions 不能为空"), "{}", error);
     }
 
     #[test]
@@ -3377,7 +3383,7 @@ r0 = "0x0000000000000000"
 
     #[test]
     fn execution_limits_config_rejects_empty_region_override() {
-        let value = "[execution_limits]\nregions = []".parse::<Value>().unwrap();
+        let value = "[execution_limits.path_merge]\nregions = []".parse::<Value>().unwrap();
         let error = get_execution_limits_config(&value).unwrap_err();
 
         assert!(error.contains("regions 不能为空"));

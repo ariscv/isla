@@ -885,7 +885,7 @@ impl SolveCollectorState {
 
     fn with_case_quota(case_quota: Option<CaseQuota>) -> Self {
         SolveCollectorState {
-            summary: SolveSummary::default(),
+            summary: SolveSummary { uncertified: isla_lib::smt::no_smt::options().no_smt, ..Default::default() },
             first_error: None,
             diagnostics: Vec::new(),
             cases: Vec::new(),
@@ -984,6 +984,12 @@ impl ErrorRecorder<'_> {
         shared_state: &SharedState<'ir, B>,
     ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
         frame.configure_timeout_smt_dump(error, shared_state);
+        if let ExecError::Smt(SmtError::NoSmt { reason, source_loc }) = error {
+            eprintln!(
+                "{}",
+                serde_json::json!({"kind":"no_smt_terminated_path", "reason":reason,"source":source_loc,"signature":frame.path_signature(),"certification":"uncertified"})
+            );
+        }
         self.collected.lock().expect("solve collector mutex poisoned").diagnostics.push(serde_json::json!({
             "status": "incomplete",
             "reason": "path-error",
@@ -1334,7 +1340,7 @@ pub fn solve_state_main<'ir, B: BV>(
 ) -> bool {
     let samples = match super::samples::SampleSession::new(
         sample_options,
-        execution_limits_config.and_then(|limits| limits.merge_enumeration.as_ref()),
+        execution_limits_config.and_then(|limits| limits.path_merge.enumeration.as_ref()),
     ) {
         Ok(samples) => samples,
         Err(error) => {
@@ -1831,13 +1837,15 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     } */
 
     // 先区分互相矛盾的前态与真正的空编码域，求解不确定仍作为错误传播。
-    match solver.check_sat(SourceLoc::unknown()) {
-        isla_lib::smt::SmtResult::Sat => (),
-        isla_lib::smt::SmtResult::Unsat => {
-            return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
+    if !solver.no_smt() {
+        match solver.check_sat(SourceLoc::unknown()) {
+            isla_lib::smt::SmtResult::Sat => (),
+            isla_lib::smt::SmtResult::Unsat => {
+                return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
+            }
+            isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+            isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
         }
-        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
-        isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
 
     let instruction = if let Some(fixed) = fixed_inputs.instruction {
@@ -2030,7 +2038,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 .enumerate_merges(&mut solver, &task_state, shared_state, ret_val)
                                 .expect("完成路径的合并计数失败")
                         } else if samples.enabled() {
-                            if !solver.has_stashed_model() {
+                            if !solver.no_smt() && !solver.has_stashed_model() {
                                 if !error_recorder.terminal_path_is_sat(
                                     solver.check_sat(SourceLoc::unknown()),
                                     frame,
@@ -2040,6 +2048,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 }
                             }
                             collected.lock().unwrap().summary.model_exception_paths += usize::from(sail_exception);
+                            let copy_profile = isla_lib::config::RegionOptions::current().probe_round_cost;
+                            let path_cpu = copy_profile.then(isla_lib::timing::thread_cpu_time);
                             let sample_path = super::samples::path(
                                 target,
                                 &symbolic_regs,
@@ -2053,10 +2063,28 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 || samples.fuzz.is_some()
                                 || samples.path_cache.write.is_some()
                             {
+                                let path_cpu_seconds = path_cpu.map(|start| {
+                                    isla_lib::timing::thread_cpu_time().saturating_sub(start).as_secs_f64()
+                                });
+                                let records_cpu = copy_profile.then(isla_lib::timing::thread_cpu_time);
+                                let records = frame.region_merge_records().clone();
+                                if let Some(start) = records_cpu {
+                                    eprintln!(
+                                        "[PATH_STATE_COPY_COST] {}",
+                                        serde_json::json!({
+                                            "signature":frame.path_signature(), "records":records.len(),
+                                            "record_bytes":records.len() * std::mem::size_of::<isla_lib::executor::RegionMergeRecord<B>>(),
+                                            "copied_record_bytes":0,
+                                            "handle_bytes":std::mem::size_of_val(&records),
+                                            "records_cpu_seconds":isla_lib::timing::thread_cpu_time().saturating_sub(start).as_secs_f64(),
+                                            "sample_path_cpu_seconds":path_cpu_seconds
+                                        })
+                                    );
+                                }
                                 let resident = super::resident::ResidentPath {
                                     checkpoint: checkpoint(&mut solver),
                                     path: sample_path.clone(),
-                                    records: frame.region_merge_records().to_vec(),
+                                    records,
                                     signature: frame.path_signature(),
                                     pure_definitions: frame.pure_definitions().to_vec(),
                                 };
@@ -2074,11 +2102,13 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             }
                             if samples.path_cache.dag_only {
                                 // 不生成代表值，也不枚举守卫组合；恢复入口保留原公式及全部守卫。
-                                // 终态 SAT 已在上方验证，错误路径仍由原 ErrorRecorder 计入摘要。
+                                // 普通终态在上方检查SAT；无SMT候选明确未认证，错误仍计入摘要。
                                 eprintln!(
-                                    "[PATH_CACHE_TERMINAL] paths={} terminal={}",
+                                    "[PATH_CACHE_TERMINAL] paths={} terminal={} certification={} merged_records={} fork_count={} region_fallbacks={}",
                                     resident_paths.lock().unwrap().len(),
-                                    if sail_exception { "sail_exception" } else { "normal" }
+                                    if sail_exception { "sail_exception" } else { "normal" },
+                                    if solver.no_smt() { "uncertified" } else { "checked" },
+                                    frame.region_merge_records().len(), frame.forks(), frame.region_fallbacks()
                                 );
                                 if let Some((started, smt_before)) = path_profile {
                                     eprintln!(
@@ -3163,7 +3193,7 @@ mod tests {
             signature: 42,
             checkpoint: checkpoint(&mut solver),
             path,
-            records,
+            records: records.into(),
             pure_definitions: ranges.clone(),
         }];
         let cache_dir = root.join("cache");
@@ -3451,7 +3481,14 @@ mod tests {
         ExecutionLimitsConfig {
             max_forks_per_branch: Some(max_forks_per_branch),
             on_limit_reached: Some(LimitBehaviorConfig::Concretize),
-            region_fork_limits: Some(region_limits),
+            path_merge: isla_lib::config::PathMergeConfig {
+                regions: if region_limits.is_empty() {
+                    None
+                } else {
+                    Some(region_limits.into_iter().map(isla_lib::config::PathMergeRegionConfig::ForkLimit).collect())
+                },
+                ..Default::default()
+            },
             ..ExecutionLimitsConfig::default()
         }
     }
@@ -4801,7 +4838,10 @@ mod tests {
         assert!(!ExecutionLimits::default().with_path_merging(true).region_loop_analysis);
         assert!(!solve_execution_limits(&symtab, None).region_loop_analysis);
         for enabled in [false, true] {
-            let config = ExecutionLimitsConfig { path_merging: Some(enabled), ..ExecutionLimitsConfig::default() };
+            let config = ExecutionLimitsConfig {
+                path_merge: isla_lib::config::PathMergeConfig { enabled: Some(enabled), ..Default::default() },
+                ..ExecutionLimitsConfig::default()
+            };
             let limits = solve_execution_limits(&symtab, Some(&config));
             assert_eq!(limits.region_global_state, enabled);
             assert_eq!(limits.region_loop_analysis, enabled);
@@ -4975,7 +5015,14 @@ mod tests {
         let config = ExecutionLimitsConfig {
             max_forks_per_branch: Some(7),
             max_forks_per_path: Some(11),
-            regions: Some(vec![SourceRegionSpec::new("extensions/V/vext_arith_insts.sail", (186, 6), (192, 7))]),
+            path_merge: isla_lib::config::PathMergeConfig {
+                regions: Some(vec![isla_lib::config::PathMergeRegionConfig::LimitFilter(SourceRegionSpec::new(
+                    "extensions/V/vext_arith_insts.sail",
+                    (186, 6),
+                    (192, 7),
+                ))]),
+                ..Default::default()
+            },
             ..ExecutionLimitsConfig::default()
         };
 

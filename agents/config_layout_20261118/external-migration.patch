@@ -1,0 +1,1521 @@
+--- a/scheduler/native/inputs.py
++++ b/scheduler/native/inputs.py
+@@ -148,7 +148,7 @@
+         if Path(source).suffix == '.toml':
+             with open(source, 'rb') as stream:
+                 config = tomllib.load(stream)
+-            entries = config.get('execution_limits', {}).get('merge_enumeration', {}).get('outputs', [])
++            entries = config.get('execution_limits', {}).get('path_merge', {}).get('enumeration', {}).get('outputs', [])
+             for entry in entries:
+                 value = entry['path']
+                 if Path(value).is_absolute() or '..' in Path(value).parts:
+--- a/scheduler/tests/test_inputs_sniff.py
++++ b/scheduler/tests/test_inputs_sniff.py
+@@ -92,7 +92,7 @@
+ 
+     def test_unused_mirrored_toml_does_not_change_task_output_roles(self):
+         (self.cwd / 'configs/unused.toml').write_text(
+-            '[[execution_limits.merge_enumeration.outputs]]\npath="/unused/absolute.json"\n')
++            '[[execution_limits.path_merge.enumeration.outputs]]\npath="/unused/absolute.json"\n')
+         result = sniff(self.argv, self.cwd, self.root)
+         self.assertNotIn('/unused/absolute.json', result['outputs'])
+ 
+--- a/scheduler/MAKE_INTEGRATION_PLAN.md
++++ b/scheduler/MAKE_INTEGRATION_PLAN.md
+@@ -77,7 +77,7 @@
+ | `output/<arch>_<clause>.json` | 实际生成结果，见 [exec.rs](../isla/src/isarch/exec.rs) 的 `solve_state_main` | 留在节点；回传路径、大小、完成状态 |
+ | `output/timeout-smt/` 或显式 `--timeout-smt-dir` | 可选 SMT dump | 留在节点，摘要列明位置 |
+ | `outputs/` | recipe 会创建；不代表全部结果都写这里 | 同样登记实际产物，不能只收这个目录 |
+-| TOML 内声明的样本输出路径 | 取决于 `[execution_limits.merge_enumeration]` 等配置 | 作为输出处理，不能误当输入上传 |
++| TOML 内声明的样本输出路径 | 取决于 `[execution_limits.path_merge.enumeration]` 等配置 | 作为输出处理，不能误当输入上传 |
+ 
+ 本轮看到 `output/log`、`output/trace`、`output/process` 均已有文件。新入口不能清空这些目录或把历史状态行计入本轮完成数。
+ 
+@@ -252,7 +252,7 @@
+ 
+ 通用镜像覆盖 `isla/configs/` 和模型的 `configs/isla/workarounds/`，合计只有约 246 KiB TOML。因而切换现有配置通常只改变任务清单，不增加大文件传输。
+ 
+-配置解析使用标准 TOML 库，并按真实加载器语义识别已核实的路径字段。例如 `execution_limits.merge_enumeration.outputs[].path` 是输出；workaround 的 `file = "extensions/...sail"` 用于匹配 IR 源位置，不因此上传整套 Sail 源码。不能把 TOML 中每个叫 `file` 的字符串都递归当作输入。
++配置解析使用标准 TOML 库，并按真实加载器语义识别已核实的路径字段。例如 `execution_limits.path_merge.enumeration.outputs[].path` 是输出；workaround 的 `file = "extensions/...sail"` 用于匹配 IR 源位置，不因此上传整套 Sail 源码。不能把 TOML 中每个叫 `file` 的字符串都递归当作输入。
+ 
+ 如果后续增加 include 或数据文件字段，适配器按其实际相对路径基准递归解析，并检测循环。当前源码不能支持的 include 语义，不由调度器凭空发明。`[[toolchain]]` 中的 assembler/objdump 等命令属于运行环境依赖，按实际使用路径在节点预检，不作为普通数据文件猜测上传。
+ 
+--- a/TRANSLATOR.md
++++ b/TRANSLATOR.md
+@@ -27,3 +27,12 @@
+ ```text
+ fix(solve): 使用最终求解模型具体化返回值
+ ```
++
++## 执行配置
++
++| 英文 | 中文 | 适用含义 |
++| --- | --- | --- |
++| path merge | 路径合并 | 全局参数位于 `execution_limits.path_merge`。 |
++| solver configuration | 求解配置 | 位于 `execution_limits.solver`。 |
++| local override | 局部覆盖 | `path_merge.regions` 中带显式 `kind` 的函数或源码范围规则。 |
++| read-only diagnostics | 只读诊断 | 位于 `path_merge.diagnostics`，不改变执行结果。 |
+--- a/sail-riscv/configs/isla/workarounds/masktypei.toml
++++ b/sail-riscv/configs/isla/workarounds/masktypei.toml
+@@ -20,7 +20,8 @@
+ # Region 是半开区间 [start, end)：
+ # Sail start 1361:        if i < start_element then {
+ # Sail end   1371:        }
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1361
+--- a/sail-riscv/configs/isla/workarounds/masktypev.toml
++++ b/sail-riscv/configs/isla/workarounds/masktypev.toml
+@@ -14,7 +14,8 @@
+ # Sail start 418:    foreach (i from 0 to (num_elem - 1)) {
+ # ...
+ # Sail end   430:    };
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 419
+--- a/sail-riscv/configs/isla/workarounds/masktypex.toml
++++ b/sail-riscv/configs/isla/workarounds/masktypex.toml
+@@ -11,7 +11,8 @@
+ # Region 是半开区间 [start, end)：
+ # Sail start 922:    foreach (i from 0 to (num_elem - 1)) {
+ # Sail end   934:    };
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 923
+--- a/sail-riscv/configs/isla/workarounds/mvvtype.toml
++++ b/sail-riscv/configs/isla/workarounds/mvvtype.toml
+@@ -16,7 +16,8 @@
+ # Region 为半开区间 [start, end)：
+ # Sail start 1563:    foreach (i from 0 to (num_elem - 1)) {
+ # Sail end   1620:    };
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1563
+@@ -28,7 +29,8 @@
+ # 返回 ISA 规定的除零结果，fallthrough 侧进入昂贵的符号 quot/rem。偏置压制
+ # fallthrough，使大部分路径优先走合法的除零边界，同时按路径签名保留少量非零除数
+ # 样本；没有把寄存器值或运行态固定成单值。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "fallthrough"
+@@ -38,7 +40,8 @@
+ end_line = 1592
+ end_column = 103
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "fallthrough"
+@@ -48,7 +51,8 @@
+ end_line = 1600
+ end_column = 103
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "fallthrough"
+@@ -58,7 +62,8 @@
+ end_line = 1608
+ end_column = 108
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "fallthrough"
+@@ -70,7 +75,8 @@
+ 
+ # 有符号除法的 q > elem_max 在 IR 中 jump 侧为溢出结果 elem_min。该边界仍保留，
+ # 但只让少量路径采到 jump 侧，避免在同一条昂贵除法结果上继续放大分支。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "jump"
+@@ -85,7 +91,8 @@
+ # 其中 746:26-746:63 被调用 48 次。match 的第一条 IR 分支是
+ # `jump @not(rounding_mode == 0b00)`：jump 方向只采样 1/65536 后，当前规模的大部分路径选择直接返回
+ # rounding_bit 的 0b00 arm，少量路径继续覆盖其余 vxrm arm。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 65536
+ sample_bias_direction = "jump"
+--- a/sail-riscv/configs/isla/workarounds/mvxmatype.toml
++++ b/sail-riscv/configs/isla/workarounds/mvxmatype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # 四种标量乘加共用的逐 lane foreach，半开区间为 [2394:2, 2402:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 2275
+--- a/sail-riscv/configs/isla/workarounds/mvxtype.toml
++++ b/sail-riscv/configs/isla/workarounds/mvxtype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # fixed-point rounding helper 的多路 match。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -16,7 +17,8 @@
+ end_column = 1
+ 
+ # MVXTYPE 的逐 lane foreach 循环，半开区间为 [2261:2, 2328:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 2142
+--- a/sail-riscv/configs/isla/workarounds/nistype.toml
++++ b/sail-riscv/configs/isla/workarounds/nistype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # NISTYPE 的逐 lane foreach 循环，半开区间为 [1198:2, 1212:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1158
+--- a/sail-riscv/configs/isla/workarounds/nitype.toml
++++ b/sail-riscv/configs/isla/workarounds/nitype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # fixed-point rounding helper 的多路 match。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -16,7 +17,8 @@
+ end_column = 1
+ 
+ # NITYPE 的逐 lane foreach 循环，半开区间为 [1273:2, 1289:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1233
+--- a/sail-riscv/configs/isla/workarounds/nvtype.toml
++++ b/sail-riscv/configs/isla/workarounds/nvtype.toml
+@@ -5,7 +5,8 @@
+ max_forks_per_branch = 1
+ on_limit_reached = "concretize"
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 354
+@@ -13,7 +14,8 @@
+ end_line = 370
+ end_column = 4
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -21,7 +23,8 @@
+ end_line = 642
+ end_column = 1
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 65536
+ sample_bias_direction = "jump"
+--- a/sail-riscv/configs/isla/workarounds/nxstype.toml
++++ b/sail-riscv/configs/isla/workarounds/nxstype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # NXSTYPE 的逐 lane foreach 循环，半开区间为 [737:2, 751:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 700
+--- a/sail-riscv/configs/isla/workarounds/nxtype.toml
++++ b/sail-riscv/configs/isla/workarounds/nxtype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # NXTYPE 的逐 lane foreach 循环，半开区间为 [812:4, 826:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 775
+@@ -17,7 +18,8 @@
+ 
+ # 每个活跃 lane 都会调用 get_fixed_rounding_incr。限制 foreach 后的中间验收在一分钟内
+ # 只新增 4 条路径，日志持续停在该 helper 的 728:2-748:3 和 746:26-746:63。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -28,7 +30,8 @@
+ # rounding_mode match 的第一条 IR 分支是 `jump @not(rounding_mode == 0b00)`。
+ # 高偏置令大部分路径直接覆盖 0b00 arm，只保留少量样本进入其余 vxrm arm；
+ # 不固定 vcsr、输入寄存器或任何向量运行态。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 65536
+ sample_bias_direction = "jump"
+--- a/sail-riscv/configs/isla/workarounds/rivvtype.toml
++++ b/sail-riscv/configs/isla/workarounds/rivvtype.toml
+@@ -11,7 +11,8 @@
+ # 559:2-559:80 fork；同类 RMVVTYPE 的短诊断也确认这是 reduction 的最后 helper 热点。
+ # IR 为 `jump (vm == 1)`：16:1 偏置 fallthrough 方向，仅少量路径采样
+ # fallthrough 的 masked reduction，其余路径走无需读取 v0 的快速 jump 侧。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "fallthrough"
+@@ -22,7 +23,8 @@
+ end_column = 1
+ 
+ # init_masked_source 的逐 lane foreach。基线日志在 452:11-464:5 持续因 vl/vr0 fork。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 434
+@@ -31,7 +33,8 @@
+ end_column = 4
+ 
+ # execute RIVVTYPE 的 widening reduction foreach。基线日志持续命中 59:8-59:21。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_red_insts.sail"
+ start_line = 57
+--- a/sail-riscv/configs/isla/workarounds/rmvvtype.toml
++++ b/sail-riscv/configs/isla/workarounds/rmvvtype.toml
+@@ -9,7 +9,8 @@
+ 
+ # read_vmask 根据 vm 选择全 1 或 v0。前两处逐 lane region 受限后的 60 秒 ITRACE
+ # 诊断完成 73 条路径，该 helper 仍在 559:2-559:80 fork 18 次，是最后的 execute 热点。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_control.sail"
+ start_line = 512
+@@ -19,7 +20,8 @@
+ 
+ # init_masked_source 的逐 lane foreach。基线 162 条完成路径时，
+ # 452:11-464:5 与其内层 458:11-464:5 已累计 fork 58 次。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 434
+@@ -29,7 +31,8 @@
+ 
+ # execute RMVVTYPE 的 single-width reduction foreach。八个 funct6 arm 在基线中
+ # 各 fork 43 次；区间不包含循环外 encdec/funct6 分派。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_red_insts.sail"
+ start_line = 124
+--- a/sail-riscv/configs/isla/workarounds/vabs_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vabs_v.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线从 29 增至 147 条完成路径时，该循环内分支从 174 增至 532 次 fork；
+ # 同期其余 execute/helper 热点最高仅 42 次。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/Zvabd/zvabd_insts.sail"
+ start_line = 45
+--- a/sail-riscv/configs/isla/workarounds/vaesdf.toml
++++ b/sail-riscv/configs/isla/workarounds/vaesdf.toml
+@@ -10,7 +10,8 @@
+ # 热点为 42:2-55:3 的 element-group foreach；21:38-22:49 是循环外
+ # encdec/funct6 合法性条件，不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+ # Region 使用半开区间 [42:2,55:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvkned_insts.sail"
+ start_line = 42
+--- a/sail-riscv/configs/isla/workarounds/vaesdm.toml
++++ b/sail-riscv/configs/isla/workarounds/vaesdm.toml
+@@ -13,7 +13,8 @@
+ # aes_mixcolumns_inv，并在无源码位置的 bool_bit_forwards 首次 fork 上形成分钟级 SMT。
+ # 使用 256:1 fallthrough 偏置，仅抽样极少量进入循环的路径，其余从 jump 方向退出。
+ # Region 使用半开区间 [100:2,114:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+--- a/sail-riscv/configs/isla/workarounds/vaesef.toml
++++ b/sail-riscv/configs/isla/workarounds/vaesef.toml
+@@ -10,7 +10,8 @@
+ # 热点为 159:2-172:3 的 element-group foreach；138:38-139:49 是循环外
+ # encdec/funct6 合法性条件，不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+ # Region 使用半开区间 [159:2,172:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvkned_insts.sail"
+ start_line = 159
+--- a/sail-riscv/configs/isla/workarounds/vaesem.toml
++++ b/sail-riscv/configs/isla/workarounds/vaesem.toml
+@@ -13,7 +13,8 @@
+ # 使用 256:1 fallthrough 偏置，仅抽样极少量进入循环的路径。
+ # 196:38-197:49 是循环外 encdec/funct6 合法性条件，不限制，也不固定
+ # vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [217:2,231:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+--- a/sail-riscv/configs/isla/workarounds/vaeskf1_vi.toml
++++ b/sail-riscv/configs/isla/workarounds/vaeskf1_vi.toml
+@@ -10,7 +10,8 @@
+ # 热点为 279:2-291:3 的 element-group foreach；250:38-250:80 是循环外
+ # encdec 合法性条件，不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+ # Region 使用半开区间 [279:2,291:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvkned_insts.sail"
+ start_line = 279
+--- a/sail-riscv/configs/isla/workarounds/vaeskf2_vi.toml
++++ b/sail-riscv/configs/isla/workarounds/vaeskf2_vi.toml
+@@ -11,7 +11,8 @@
+ # 324:2-325:39 表达立即数归一化，均不单独限制。
+ # 305:38-305:80 是循环外 encdec 合法性条件，不限制，也不固定
+ # vl/vstart/vtype/rnd/寄存器。Region 使用半开区间 [332:2,347:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvkned_insts.sail"
+ start_line = 332
+--- a/sail-riscv/configs/isla/workarounds/vandn_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vandn_vv.toml
+@@ -9,7 +9,8 @@
+ # 60 秒基线已产生 121 条路径，日志持续在 47:4-48:44 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # Region 为 execute VANDN_VV 的 foreach 半开区间 [46:2,49:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 46
+--- a/sail-riscv/configs/isla/workarounds/vandn_vx.toml
++++ b/sail-riscv/configs/isla/workarounds/vandn_vx.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线已产生 117 条路径，日志持续在 89:4-90:41 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # Region 为 execute VANDN_VX 的 foreach 半开区间 [88:2,91:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 88
+--- a/sail-riscv/configs/isla/workarounds/vbrev8_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vbrev8_v.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线已产生 117 条路径，日志持续在 175:4-177:5 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # brev8 helper 的按字节循环由已分派 SEW 确定，没有数据相关 fork，不纳入限制。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 171
+--- a/sail-riscv/configs/isla/workarounds/vbrev_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vbrev_v.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线已产生 92 条路径，日志持续在 130:4-135:5 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # Region 覆盖外层 foreach 及其中确定性的逐 bit 内循环，半开区间 [129:2,136:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 129
+--- a/sail-riscv/configs/isla/workarounds/vclmul_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vclmul_vv.toml
+@@ -11,7 +11,8 @@
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork；活跃 lane 随后调用
+ # 昂贵的 carryless_mul。Region 为 execute VCLMUL_VV 的 foreach 半开区间
+ # [44:2,49:4)，循环外合法性检查及 encdec 保持完整符号执行。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbc_insts.sail"
+ start_line = 44
+--- a/sail-riscv/configs/isla/workarounds/vclmul_vx.toml
++++ b/sail-riscv/configs/isla/workarounds/vclmul_vx.toml
+@@ -11,7 +11,8 @@
+ # 88:4-91:5 由 vl/vstart/vtype/vr0 驱动逐 lane fork，活跃 lane 随后调用
+ # 昂贵的 carryless_mul。Region 为 execute VCLMUL_VX 的 foreach 半开区间
+ # [87:2,92:4)，循环外合法性检查及 encdec 保持完整符号执行。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbc_insts.sail"
+ start_line = 87
+--- a/sail-riscv/configs/isla/workarounds/vclmulh_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vclmulh_vv.toml
+@@ -11,7 +11,8 @@
+ # 132:4-135:5 由 vl/vstart/vtype/vr0 驱动逐 lane fork，活跃 lane 随后调用
+ # 昂贵的 carryless_mul。Region 为 execute VCLMULH_VV 的 foreach 半开区间
+ # [131:2,136:4)，循环外合法性检查及 encdec 保持完整符号执行。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbc_insts.sail"
+ start_line = 131
+--- a/sail-riscv/configs/isla/workarounds/vclmulh_vx.toml
++++ b/sail-riscv/configs/isla/workarounds/vclmulh_vx.toml
+@@ -11,7 +11,8 @@
+ # 175:4-178:5 由 vl/vstart/vtype/vr0 驱动逐 lane fork，活跃 lane 随后调用
+ # 昂贵的 carryless_mul。Region 为 execute VCLMULH_VX 的 foreach 半开区间
+ # [174:2,179:4)，循环外合法性检查及 encdec 保持完整符号执行。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbc_insts.sail"
+ start_line = 174
+--- a/sail-riscv/configs/isla/workarounds/vclz_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vclz_v.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线已产生 109 条路径，日志持续在 259:4-262:5 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # count_leading_zeros 未出现数据相关 fork；半开区间覆盖外层 foreach [258:2,263:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 255
+--- a/sail-riscv/configs/isla/workarounds/vcpop_m.toml
++++ b/sail-riscv/configs/isla/workarounds/vcpop_m.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线仅完成 2 条路径；线程在 113:4-113:56 的符号 bit 判定上
+ # 反复 fork，并因 count 累加形成昂贵 SMT。半开区间精确覆盖逐 bit foreach。
+ # 该 if 的 fallthrough 是条件为真、执行 count + 1，使用 256:1 抑制该方向。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+--- a/sail-riscv/configs/isla/workarounds/vcpop_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vcpop_v.toml
+@@ -11,7 +11,8 @@
+ # 初次限制后的 ITRACE 诊断显示单条成功路径 active_wall 可达约 20-28 秒：
+ # 50/50 具体化会让大量符号位走加一侧，形成稠密累加约束。内层分支单独采用
+ # 256:1 fallthrough 抑制；该分支的 fallthrough 即条件为真、执行 result[i] + 1。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+@@ -23,7 +24,8 @@
+ 
+ # 半开区间 [344:2,351:4) 覆盖完整双层循环，压制外层 mask 与内层分支爆炸；
+ # 内层方向偏置由上面更精确的 region 提供，外层 mask 保持无偏采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 341
+--- a/sail-riscv/configs/isla/workarounds/vctz_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vctz_v.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线已产生 116 条路径，日志持续在 302:4-305:5 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # count_trailing_zeros 未出现数据相关 fork；半开区间覆盖外层 foreach [301:2,306:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 298
+--- a/sail-riscv/configs/isla/workarounds/vexttype.toml
++++ b/sail-riscv/configs/isla/workarounds/vexttype.toml
+@@ -8,7 +8,8 @@
+ on_limit_reached = "concretize"
+ 
+ # valid_rd_mask：中间验证累计 fork 132 次。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 46
+@@ -17,7 +18,8 @@
+ end_column = 25
+ 
+ # illegal_variable_width：中间验证累计 fork 112 次。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 201
+@@ -26,7 +28,8 @@
+ end_column = 1
+ 
+ # valid_reg_overlap：中间验证在 77–82 行累计 fork 99 次。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 77
+@@ -35,7 +38,8 @@
+ end_column = 14
+ 
+ # get_start_element已改为直接读取vstart，无旧陷阱分支需要限制。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1986
+--- a/sail-riscv/configs/isla/workarounds/vfirst_m.toml
++++ b/sail-riscv/configs/isla/workarounds/vfirst_m.toml
+@@ -8,7 +8,8 @@
+ 
+ # 独立 60 秒基线已产生 255 条路径，仍在 153:6-153:50 对符号 mask/source bit
+ # 持续 fork，展开不同 first-index。半开区间精确覆盖 foreach，保持无偏采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_mask_insts.sail"
+ start_line = 148
+--- a/sail-riscv/configs/isla/workarounds/vfmerge.toml
++++ b/sail-riscv/configs/isla/workarounds/vfmerge.toml
+@@ -10,7 +10,8 @@
+ # 无 workaround 的 60 秒 ITRACE 完成 239 条路径后 timeout；逐 lane merge 循环
+ # 1363:4-1373:5 fork 330 次，是本 clause 的明确热点。Region 使用半开区间
+ # [1362:2,1374:3)，不包含 1327:1-1331:55 的循环外 encdec/SEW 分派。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_fp_insts.sail"
+ start_line = 1359
+--- a/sail-riscv/configs/isla/workarounds/vfmv.toml
++++ b/sail-riscv/configs/isla/workarounds/vfmv.toml
+@@ -9,7 +9,8 @@
+ 
+ # 无 workaround 的 60 秒 ITRACE 在 200 条完成路径内记录到 363 次 1419 行分叉。
+ # Region 是 foreach 的半开区间 [1418:2,1420:3)，仅覆盖 mask[i] 控制的逐 lane move。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_fp_insts.sail"
+ start_line = 1415
+--- a/sail-riscv/configs/isla/workarounds/vghsh_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vghsh_vv.toml
+@@ -14,7 +14,8 @@
+ # if 的 jump 同样跳过异或更新。使用 256:1 fallthrough 偏置降低进入循环及累积
+ # 符号异或的比例。16:36-16:78 是循环外 encdec，不限制，也不固定
+ # vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [38:2,57:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+--- a/sail-riscv/configs/isla/workarounds/vgmul_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vgmul_vv.toml
+@@ -12,7 +12,8 @@
+ # 71:36-71:78 是循环外 encdec，不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+ # 与同文件 VGHSH_VV 沿用一致的 256:1 fallthrough 偏置；Region 使用半开区间
+ # [91:2,107:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+--- a/sail-riscv/configs/isla/workarounds/vicmptype.toml
++++ b/sail-riscv/configs/isla/workarounds/vicmptype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # 六种立即数比较共用的逐 lane foreach，半开区间为 [766:2, 779:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 766
+--- a/sail-riscv/configs/isla/workarounds/vimctype.toml
++++ b/sail-riscv/configs/isla/workarounds/vimctype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线相邻观察点的完成路径从 110 增至 165，该循环体分支却从 293 增至 620。
+ # 区域为 foreach 内的 if、无 carry-in 加法与 result 写入，半开区间 [640:4, 645:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 640
+--- a/sail-riscv/configs/isla/workarounds/vimstype.toml
++++ b/sail-riscv/configs/isla/workarounds/vimstype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # VIMS_VADC 的逐 lane foreach，半开区间为 [704:2, 711:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 704
+--- a/sail-riscv/configs/isla/workarounds/vimtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vimtype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线在完成路径从 211 增至 219 时，该区域的分支已从约 500 增至 636。
+ # 区域为 foreach 内的 if、进位加法与 result 写入，半开区间 [581:4, 586:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 581
+--- a/sail-riscv/configs/isla/workarounds/viota_m.toml
++++ b/sail-riscv/configs/isla/workarounds/viota_m.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线完成 174 条路径后超时；内层源 bit 判断在日志中 fork 214 次。
+ # fallthrough 对应源 bit 为 1、递增 sum，使用 256:1 抑制该方向以避免稠密约束。
+ # 原语方案：该判断已移入纯前缀运算，区域锚定替代调用；调用不分叉，旧偏置不作用于外层mask。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+@@ -21,7 +22,8 @@
+ 
+ # 超时路径的主要 SMT 调用点是完整循环与外层 mask 判断；半开区间
+ # 原始[337:2,342:3)随步骤0–2移动；本次为[334:2,336:3)，仍只覆盖foreach，外层mask保持无偏采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_mask_insts.sail"
+ start_line = 334
+--- a/sail-riscv/configs/isla/workarounds/visg.toml
++++ b/sail-riscv/configs/isla/workarounds/visg.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线到 488 paths 时，循环内 vslidedown 边界已 fork 104 次，vslideup 28 次、
+ # vrgather 19 次；循环外 overlap/funct6 分派不在本区域内。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1312
+--- a/sail-riscv/configs/isla/workarounds/vitype.toml
++++ b/sail-riscv/configs/isla/workarounds/vitype.toml
+@@ -8,7 +8,8 @@
+ on_limit_reached = "concretize"
+ 
+ # VI_VSSRL / VI_VSSRA 逐 lane 调用的定点舍入 helper。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -17,7 +18,8 @@
+ end_column = 1
+ 
+ # 下列区间只覆盖各 funct6 arm 的 foreach，不包含 1077 行的 funct6 分派。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1038
+@@ -25,7 +27,8 @@
+ end_line = 1040
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1041
+@@ -33,7 +36,8 @@
+ end_line = 1043
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1044
+@@ -41,7 +45,8 @@
+ end_line = 1046
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1047
+@@ -49,7 +54,8 @@
+ end_line = 1049
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1050
+@@ -57,7 +63,8 @@
+ end_line = 1052
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1053
+@@ -65,7 +72,8 @@
+ end_line = 1056
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1057
+@@ -73,7 +81,8 @@
+ end_line = 1060
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1061
+@@ -81,7 +90,8 @@
+ end_line = 1064
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1065
+@@ -89,7 +99,8 @@
+ end_line = 1068
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1069
+@@ -97,7 +108,8 @@
+ end_line = 1073
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1074
+@@ -105,7 +117,8 @@
+ end_line = 1079
+ end_column = 6
+ 
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1080
+--- a/sail-riscv/configs/isla/workarounds/vmsbf_m.toml
++++ b/sail-riscv/configs/isla/workarounds/vmsbf_m.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线仅完成 9 条路径；超时路径的 392 次 SMT 中，最热点是
+ # 196 行 mask 判断与 197 行符号源 bit 判断。内层 if 的 fallthrough 是
+ # vs2 bit 为 1、设置 found_elem，使用 256:1 抑制该方向以避免稠密约束。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+@@ -20,7 +21,8 @@
+ end_column = 49
+ 
+ # 半开区间 [195:2,200:4) 精确覆盖逐 bit foreach；外层 mask 保持无偏采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_mask_insts.sail"
+ start_line = 192
+--- a/sail-riscv/configs/isla/workarounds/vmsif_m.toml
++++ b/sail-riscv/configs/isla/workarounds/vmsif_m.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线仅完成 9 条路径；超时路径的 SMT 调用约 533--542 次，
+ # 最热点是 241 行 mask 判断与 243 行符号源 bit 判断。内层 if 的
+ # fallthrough 是 vs2 bit 为 1、设置 found_elem，使用 256:1 抑制该方向。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+@@ -20,7 +21,8 @@
+ end_column = 49
+ 
+ # 半开区间 [240:2,245:4) 精确覆盖逐 bit foreach；外层 mask 保持无偏采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_mask_insts.sail"
+ start_line = 237
+--- a/sail-riscv/configs/isla/workarounds/vmsof_m.toml
++++ b/sail-riscv/configs/isla/workarounds/vmsof_m.toml
+@@ -10,7 +10,8 @@
+ # 最热点是 286 行 mask 判断与 287 行符号源 bit / found_elem 判断。
+ # 内层 if 的 fallthrough 是首次命中源 bit、设置 found_elem，使用 256:1
+ # 抑制该方向以避免稠密约束。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 256
+ sample_bias_direction = "fallthrough"
+@@ -21,7 +22,8 @@
+ end_column = 6
+ 
+ # 半开区间 [285:2,294:4) 精确覆盖逐 bit foreach；外层 mask 保持无偏采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_mask_insts.sail"
+ start_line = 282
+--- a/sail-riscv/configs/isla/workarounds/vmtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vmtype.toml
+@@ -10,7 +10,8 @@
+ # PMP 检查均走 count=0 早退，唯一 clause 私有热点为 661:2-682:3 的 foreach。
+ # 649-651 是循环外 encdec，不限制；Region 使用半开区间 [661:2,682:3)。
+ # 当前模型补齐全寄存器访存早退清零后，process_vm 循环迁移到 [658:2,679:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_mem_insts.sail"
+ start_line = 658
+--- a/sail-riscv/configs/isla/workarounds/vmvrtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vmvrtype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # 基线完成 136 条路径时，此逐 lane 选择已 fork 446 次，是 execute 内唯一持续增长的热点。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 1496
+--- a/sail-riscv/configs/isla/workarounds/vrev8_v.toml
++++ b/sail-riscv/configs/isla/workarounds/vrev8_v.toml
+@@ -9,7 +9,8 @@
+ # 独立 60 秒基线已产生 201 条路径，日志持续在 217:4-219:5 因
+ # mask（由 vl/vstart/vtype/vr0 共同决定）逐 lane fork。
+ # rev8 helper 的逐字节重排循环由已分派 SEW 确定，无数据相关 fork。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 213
+--- a/sail-riscv/configs/isla/workarounds/vrol_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vrol_vv.toml
+@@ -11,7 +11,8 @@
+ # 日志持续在 394:4-395:61 由 vl/vstart/vtype/vr0 驱动逐 lane fork。
+ # 363:37-363:103 是循环外 encdec 扩展条件，特意保持完整符号执行。
+ # Region 仅为 execute VROL_VV 的 foreach 半开区间 [393:2,396:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 390
+--- a/sail-riscv/configs/isla/workarounds/vrol_vx.toml
++++ b/sail-riscv/configs/isla/workarounds/vrol_vx.toml
+@@ -11,7 +11,8 @@
+ # 日志持续在 437:4-438:58 由 vl/vstart/vtype/vr0 驱动逐 lane fork。
+ # 407:37-407:103 是循环外 encdec 扩展条件，特意保持完整符号执行。
+ # Region 仅为 execute VROL_VX 的 foreach 半开区间 [436:2,439:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 433
+--- a/sail-riscv/configs/isla/workarounds/vror_vi.toml
++++ b/sail-riscv/configs/isla/workarounds/vror_vi.toml
+@@ -11,7 +11,8 @@
+ # 日志持续在 567:4-568:59 由 vl/vstart/vtype/vr0 驱动逐 lane fork。
+ # 537:37-537:103 是循环外 encdec 扩展条件，特意保持完整符号执行。
+ # Region 仅为 execute VROR_VI 的 foreach 半开区间 [566:2,569:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 563
+--- a/sail-riscv/configs/isla/workarounds/vror_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vror_vv.toml
+@@ -11,7 +11,8 @@
+ # 日志持续在 481:4-482:61 由 vl/vstart/vtype/vr0 驱动逐 lane fork。
+ # 450:37-450:103 是循环外 encdec 扩展条件，特意保持完整符号执行。
+ # Region 仅为 execute VROR_VV 的 foreach 半开区间 [480:2,483:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 477
+--- a/sail-riscv/configs/isla/workarounds/vror_vx.toml
++++ b/sail-riscv/configs/isla/workarounds/vror_vx.toml
+@@ -11,7 +11,8 @@
+ # 日志持续在 524:4-525:58 由 vl/vstart/vtype/vr0 驱动逐 lane fork。
+ # 494:37-494:103 是循环外 encdec 扩展条件，特意保持完整符号执行。
+ # Region 仅为 execute VROR_VX 的 foreach 半开区间 [523:2,526:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 520
+--- a/sail-riscv/configs/isla/workarounds/vsha2ms_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vsha2ms_vv.toml
+@@ -11,7 +11,8 @@
+ # 不额外限制，以保留 SEW=32/64 覆盖。
+ # 第 17 行是循环外扩展选择、SEW 与寄存器重叠合法性条件，不限制，也不固定
+ # vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [44:2,70:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvknhab_insts.sail"
+ start_line = 44
+--- a/sail-riscv/configs/isla/workarounds/vsm3c_vi.toml
++++ b/sail-riscv/configs/isla/workarounds/vsm3c_vi.toml
+@@ -10,7 +10,8 @@
+ # 本 clause 热点为 88:2-102:3 的 element-group foreach；SM3 helper 仅少量分派。
+ # 64:36-66:128 是循环外 encdec，不限制，也不固定运行态、立即数或寄存器。
+ # Region 使用半开区间 [88:2,102:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvksh_insts.sail"
+ start_line = 88
+--- a/sail-riscv/configs/isla/workarounds/vsm3me_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vsm3me_vv.toml
+@@ -12,7 +12,8 @@
+ # 16:38-16:129 是循环外 SEW、element-group 对齐与寄存器重叠合法性条件，
+ # 不限制，也不固定 vl/vstart/vtype/vm/寄存器。
+ # Region 使用半开区间 [39:2,52:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvksh_insts.sail"
+ start_line = 39
+--- a/sail-riscv/configs/isla/workarounds/vsm4k_vi.toml
++++ b/sail-riscv/configs/isla/workarounds/vsm4k_vi.toml
+@@ -10,7 +10,8 @@
+ # 热点为 37:2-61:3 的 element-group foreach，未观察到独立 SM4 helper fork 热点。
+ # 14:38-16:80 是循环外 encdec，不限制，也不固定运行态/立即数/寄存器。
+ # Region 使用半开区间 [37:2,61:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvksed_insts.sail"
+ start_line = 37
+--- a/sail-riscv/configs/isla/workarounds/vvcmptype.toml
++++ b/sail-riscv/configs/isla/workarounds/vvcmptype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # 六种向量比较共用的逐 lane foreach，半开区间为 [247:2, 260:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 247
+--- a/sail-riscv/configs/isla/workarounds/vvmctype.toml
++++ b/sail-riscv/configs/isla/workarounds/vvmctype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线最近 30 秒只增加 26 条完成路径，该循环体却增加 114 次分支。
+ # 区域为 foreach 内的 mask 判断、funct6 计算与 result 写入，半开区间 [117:4, 123:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 117
+--- a/sail-riscv/configs/isla/workarounds/vvmstype.toml
++++ b/sail-riscv/configs/isla/workarounds/vvmstype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线到 677 条完成路径时，该循环体已累计 868 次分支，两个算术 arm 均重复增长。
+ # 区域为 foreach 内的 mask 判断、funct6 加减与 result 写入，半开区间 [184:4, 189:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 184
+--- a/sail-riscv/configs/isla/workarounds/vvmtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vvmtype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线路径 51→83→119 时，循环体分支 79→164→231，两个算术 arm 均重复增长。
+ # 区域为 foreach 内的 mask 判断、funct6 加减与 result 写入，半开区间 [55:4, 61:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 55
+--- a/sail-riscv/configs/isla/workarounds/vvtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vvtype.toml
+@@ -6,14 +6,14 @@
+ # 目标：**每条具体汇编指令**（vadd.vv、vrgather.vv……）最终生成的 path 不超过 100 条，
+ # 超出的部分靠局部限制做抽样采样，而不是把某个字段钉死成单一取值。两种预算配合使用：
+ #
+-# - `max_forks_per_branch = 1`（不配 `regions`，因此**全局生效**）：per-scope 预算，
++# - `max_forks_per_branch = 1`（不配 `path_merge.regions` 中 kind="limit_filter"，因此**全局生效**）：per-scope 预算，
+ #   一条路径在同一个分支点只允许 fork 一次。一次性到达的分支点（合法性前导、funct6
+ #   dispatch）每条路径只经过一次，不受影响；同一条路径**重复到达**的分支点（逐 lane
+ #   循环体）由此从 2^n 压回 2。
+-#   这里刻意不配 `regions`：路径规模最大的分支点是 `bool_bit_forwards`（prelude.sail 的
++#   这里刻意不配 `path_merge.regions` 中 kind="limit_filter"：路径规模最大的分支点是 `bool_bit_forwards`（prelude.sail 的
+ #   `bool_bit` mapping，被 `bool_to_bit` 逐 lane 调用），它在 IR 里的 jump **没有 Sail 源码
+ #   位置**（标注是 `1042 这类 IR 内部编号），任何源码 region 都选不中它。
+-# - `region_fork_limits`：region 级预算，整段区间内所有分支点共享一条路径的 fork 次数。
++# - `path_merge.regions` 中 kind="fork_limit"：region 级预算，整段区间内所有分支点共享一条路径的 fork 次数。
+ #   Sail 的 `match` 在 IR 里是一串位于不同 pc 的 jump，每个 arm 判定都是独立分支点，
+ #   per-scope 预算对它无效，只有 region 预算能把 SEW/LMUL 的多路展开抽样成 N+1 个取值。
+ #
+@@ -42,7 +42,8 @@
+ # Sail start 181:            if mask[i] == 0b1 then {
+ # ...
+ # Sail end   187:            }
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 181
+@@ -54,7 +55,8 @@
+ # Sail start 190:            if mask[i] == 0b1 then {
+ # ...
+ # Sail end   196:            }
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 190
+@@ -69,7 +71,8 @@
+ # ...
+ # Sail end   640:    }
+ # 配置终点使用紧随函数后的空行 634:1。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -83,7 +86,8 @@
+ # Sail start 71:function valid_reg_overlap(rs : vregidx, rd : vregidx, EMUL_pow_rs : int, EMUL_pow_rd : int) -> bool = {
+ # ...
+ # Sail end   85:    } else true;
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 71
+@@ -101,7 +105,8 @@
+ # 由下面 gather 逐 lane 循环体上的局部 limit 控制不爆炸（>1000），最终条数由档 A 兜底。
+ # Sail start 65:                                                              then vs1 == vd | vs2 == vd
+ # Sail end   65:                                                              then vs1 == vd | vs2 == vd
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ sample_bias = 16
+ sample_bias_direction = "jump"
+@@ -120,7 +125,8 @@
+ # Sail start 121:            if mask[i] == 0b1 then {
+ # ...
+ # Sail end   124:            }
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 121
+@@ -133,7 +139,8 @@
+ # Sail start 131:            if mask[i] == 0b1 then {
+ # ...
+ # Sail end   136:            }
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 0
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 131
+--- a/sail-riscv/configs/isla/workarounds/vwsll_vi.toml
++++ b/sail-riscv/configs/isla/workarounds/vwsll_vi.toml
+@@ -9,7 +9,8 @@
+ # 无 workaround 基线运行约 39 分钟并完成约 4340 条路径后手动终止。
+ # 持续热点为 726:4-729:5；686:37-686:104 是循环外 encdec，不限制。
+ # Region 仅覆盖 foreach 半开区间 [725:2,730:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 722
+--- a/sail-riscv/configs/isla/workarounds/vwsll_vv.toml
++++ b/sail-riscv/configs/isla/workarounds/vwsll_vv.toml
+@@ -9,7 +9,8 @@
+ # 90 秒 ITRACE 基线完成 91 条路径后 timeout。
+ # 热点 619:4-623:5 位于 execute foreach；580:37-580:103 是循环外 encdec，不限制。
+ # Region 仅覆盖 foreach 半开区间 [618:2,624:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 615
+--- a/sail-riscv/configs/isla/workarounds/vwsll_vx.toml
++++ b/sail-riscv/configs/isla/workarounds/vwsll_vx.toml
+@@ -9,7 +9,8 @@
+ # 90 秒 ITRACE 基线完成 153 条路径后 timeout。
+ # 热点为 673:4-676:5；635:37-635:103 是循环外 encdec，不限制。
+ # Region 仅覆盖 foreach 半开区间 [672:2,677:4)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvbb_insts.sail"
+ start_line = 669
+--- a/sail-riscv/configs/isla/workarounds/vxcmptype.toml
++++ b/sail-riscv/configs/isla/workarounds/vxcmptype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # 八种标量比较共用的逐 lane foreach，半开区间为 [506:2, 521:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 506
+--- a/sail-riscv/configs/isla/workarounds/vxmctype.toml
++++ b/sail-riscv/configs/isla/workarounds/vxmctype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线最近 30 秒只增加 19 条完成路径，该循环体却增加 121 次分支。
+ # 区域为 foreach 内的 mask 判断、funct6 计算与 result 写入，半开区间 [377:4, 383:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 377
+--- a/sail-riscv/configs/isla/workarounds/vxmstype.toml
++++ b/sail-riscv/configs/isla/workarounds/vxmstype.toml
+@@ -8,7 +8,8 @@
+ 
+ # 基线最近 30 秒仅增加 35 条完成路径，该循环体却增加 101 次分支。
+ # 区域为 foreach 内的 mask 判断、funct6 加减与 result 写入，半开区间 [443:4, 448:5)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 443
+--- a/sail-riscv/configs/isla/workarounds/vxmtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vxmtype.toml
+@@ -7,7 +7,8 @@
+ on_limit_reached = "concretize"
+ 
+ # VMADC/VMSBC 共用的逐 lane foreach，半开区间为 [316:2, 325:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_vm_insts.sail"
+ start_line = 316
+--- a/sail-riscv/configs/isla/workarounds/vxsg.toml
++++ b/sail-riscv/configs/isla/workarounds/vxsg.toml
+@@ -8,7 +8,8 @@
+ 
+ # 公共非法前导：jump 方向进入 Illegal_Instruction，仅让 1/16 的具体化样本走非法侧。
+ # 逐 lane 循环已有独立预算，因此继续合法执行不会重新引发循环爆炸。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 16
+ sample_bias_direction = "jump"
+@@ -22,7 +23,8 @@
+ Illegal_Instruction = 2
+ 
+ # slide/gather 三种指令共用的逐 lane foreach，半开区间为 [891:2, 910:1)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 854
+--- a/sail-riscv/configs/isla/workarounds/vxtype.toml
++++ b/sail-riscv/configs/isla/workarounds/vxtype.toml
+@@ -10,7 +10,8 @@
+ # init_masked_result 调用的 vstart 合法上界检查。带现有逐 lane 限制的
+ # 60 秒 ITRACE 中，该比较仍累计 33 次 fork；最慢的多条已完成路径均在这里
+ # 花费 23-30 秒后走 Err/Illegal。只限制这个比较，不固定 vstart 的具体值。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 554
+@@ -19,7 +20,8 @@
+ end_column = 5
+ 
+ # VX_VSADD 逐 lane mask/saturation 分支；60 秒基线累计 31 次 fork。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 558
+@@ -29,7 +31,8 @@
+ 
+ # VX_VSSUBU 完整 arm 的逐 lane mask 与 unsigned 比较；基线分别累计 26/25 次 fork，
+ # 正式运行还在 arm 入口 598:17-603:5 出现单次 SMT timeout。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 561
+@@ -38,7 +41,8 @@
+ end_column = 5
+ 
+ # VX_VSSUB 逐 lane mask/saturation 分支；60 秒基线累计 26 次 fork。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 568
+@@ -47,7 +51,8 @@
+ end_column = 5
+ 
+ # VX_VSMUL 逐 lane mask/舍入/饱和分支；60 秒基线累计 17 次 fork。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_arith_insts.sail"
+ start_line = 572
+@@ -57,7 +62,8 @@
+ 
+ # VX_VSMUL/VX_VSSRL/VX_VSSRA 逐 lane 调用的定点舍入 helper；
+ # 基线在 728:2-748:3、742:4-747:5 与 746:26-746:63 持续 fork。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/V/vext_utils_insts.sail"
+ start_line = 620
+@@ -70,7 +76,8 @@
+ # `jump @not(discarded_nonzero)`，target 为直接返回 0 的便宜侧，fallthrough
+ # 才是 discarded_nonzero=true 的昂贵侧。只让 1/4294967295 的路径采到 fallthrough，
+ # 同时保留上方无偏置 match 对四种 vxrm 的跨路径采样。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 4294967295
+ sample_bias_direction = "fallthrough"
+@@ -83,7 +90,8 @@
+ # sticky_below_rounding 的 IR 在 vxrm=01 arm 中以 `jump sticky_below_rounding`
+ # 短路 OR；jump 即昂贵的 nonzero=true 侧。正式运行已在 740:11-740:59
+ # 多次记录单次 SMT timeout，因此以最大 u32 分母压制该侧。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 4294967295
+ sample_bias_direction = "jump"
+@@ -97,7 +105,8 @@
+ # sticky_below_rounding/shifted[0]，jump 为昂贵侧。正式运行在 1208 条路径后
+ # 于该表达式单次 SMT 超时；只让 1/4294967295 的路径进入 jump，仍保留 vxrm=01
+ # 以及少量完整右侧条件样本。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ sample_bias = 4294967295
+ sample_bias_direction = "jump"
+--- a/sail-riscv/configs/isla/workarounds/zvabdtype.toml
++++ b/sail-riscv/configs/isla/workarounds/zvabdtype.toml
+@@ -10,7 +10,8 @@
+ # mask/funct6 计算区域 fork 555 次，是明确热点。funct6 已由循环外编码分派确定，
+ # region 只压重复到达的 lane 计算，不固定 funct6、vm、vl、vstart、vtype 或寄存器。
+ # 66:1-68:70 的循环外 encdec 不限制。Region 使用半开区间 [91:2,98:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/Zvabd/zvabd_insts.sail"
+ start_line = 91
+--- a/sail-riscv/configs/isla/workarounds/zvksha2type.toml
++++ b/sail-riscv/configs/isla/workarounds/zvksha2type.toml
+@@ -11,7 +11,8 @@
+ # 只做定宽位运算，不额外限制。
+ # 第 86 行是循环外扩展选择、SEW、funct6 编码与寄存器合法性条件，不限制，
+ # 也不固定 vl/vstart/vtype/vm/寄存器。Region 使用半开区间 [188:2,233:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvknhab_insts.sail"
+ start_line = 188
+--- a/sail-riscv/configs/isla/workarounds/zvksm4rtype.toml
++++ b/sail-riscv/configs/isla/workarounds/zvksm4rtype.toml
+@@ -11,7 +11,8 @@
+ # region 或方向偏置，以保留 VV/VS 的活跃执行覆盖。
+ # 73:38-75:80 与 78:38-80:129 是两种形式的循环外 encdec 合法性条件，
+ # 不限制，也不固定 vl/vstart/vtype/vm/寄存器。Region 为 [100:2,128:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/vector_crypto/zvksed_insts.sail"
+ start_line = 100
+--- a/sail-riscv/configs/isla/workarounds/zvwabdatatype.toml
++++ b/sail-riscv/configs/isla/workarounds/zvwabdatatype.toml
+@@ -12,7 +12,8 @@
+ # 是本 clause 的明确热点。funct6 已由循环外编码分派确定；region 只压重复到达的
+ # element 计算，不固定 funct6、vm、vl、vstart、vtype 或寄存器。
+ # 121:1-123:70 的循环外 encdec 不限制。Region 使用半开区间 [155:2,170:3)。
+-[[execution_limits.region_fork_limits]]
++[[execution_limits.path_merge.regions]]
++kind = "fork_limit"
+ max_forks_per_region = 1
+ file = "extensions/Zvabd/zvabd_insts.sail"
+ start_line = 155

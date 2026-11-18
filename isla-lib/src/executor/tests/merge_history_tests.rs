@@ -129,3 +129,22 @@ fn shared_history_sparse_updates_keep_linear_metadata_capacity() {
         history.retained_record_slots()
     );
 }
+
+#[test]
+fn shared_history_terminal_snapshots_do_not_flatten_or_copy_records() {
+    let mut frame = make_frame(vec![Instr::End]);
+    let mut saved = Vec::new();
+    for id in 0..128 {
+        frame.region_merge_records.push(record(id));
+        saved.push(frame.region_merge_records().clone());
+    }
+    for (index, history) in saved.iter().enumerate() {
+        assert_eq!(history.len(), index + 1);
+        assert_eq!(history.iter().last().unwrap().record_id, index);
+        assert!(
+            std::ptr::eq(history.iter().next().unwrap(), saved.last().unwrap().iter().next().unwrap()),
+            "终态必须保留同一历史段"
+        );
+    }
+    assert!(saved.last().unwrap().retained_record_slots() <= 128 * 4, "终态保留不得隐式建立逐路径连续副本");
+}

@@ -136,7 +136,7 @@ pub(super) fn feasible<B: BV>(
     exp: &smtlib::Exp<Sym>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
-    if solver.region_queries_deferred() {
+    if solver.region_queries_deferred() || solver.branch_checks_skipped() {
         // 两臂只是候选；调用处不得把此结果登记为可满足性证明。
         return Ok(true);
     }
@@ -545,9 +545,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
                 let record_start = frame.region_merge_records.len();
+                let mut candidate_frame = if solver.no_smt() { None } else { Some(frame.clone()) };
                 let tx = solver.start_transaction();
-                let defer =
-                    solver.region_queries_deferred() || crate::config::RegionOptions::current().defer_exit_check;
+                let defer = solver.no_smt()
+                    || solver.region_queries_deferred()
+                    || crate::config::RegionOptions::current().defer_exit_check;
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
                     serde_json::json!({
                     "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),
@@ -566,11 +568,28 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     log_phase("execute_start", None);
                     let execute_region = if flat { super::flat_region_merge::execute_region } else { execute_region };
                     let output = execute_region(
-                        condition, target, region, depth, mode, tid, task_id, fraction, timeout, stop, sink, frame,
-                        state, shared, solver, info,
+                        condition,
+                        target,
+                        region,
+                        depth,
+                        mode,
+                        tid,
+                        task_id,
+                        fraction,
+                        timeout,
+                        stop,
+                        sink,
+                        match &mut candidate_frame {
+                            Some(candidate) => candidate,
+                            None => &mut *frame,
+                        },
+                        state,
+                        shared,
+                        solver,
+                        info,
                     );
                     log_phase("execute_end", None);
-                    if defer && !nested && output.is_ok() {
+                    if defer && !nested && output.is_ok() && !solver.no_smt() {
                         log_phase("obligation_start", None);
                         let checked = solver.check_deferred_assertions(info);
                         log_phase("obligation_end", Some(&checked));
@@ -585,7 +604,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result = if defer && !nested && result.is_ok() {
+                let result = if defer && !nested && result.is_ok() && !solver.no_smt() {
                     log_phase("exit_check_start", None);
                     let checked = solver.check_sat(info);
                     log_phase("exit_check_end", Some(&checked));
@@ -611,6 +630,10 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         log_phase("commit_start", None);
                         solver.commit_transaction();
                         log_phase("commit_end", None);
+                        // 出口义务或可行性验证拒绝时，调用者帧仍停留在入口。
+                        if let Some(candidate_frame) = candidate_frame {
+                            *frame = candidate_frame;
+                        }
                         if !nested {
                             crate::smt::probe_query_event(
                                 || serde_json::json!({"type":"region_commit", "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1, "call_instance":frame.local_state.call_instance,"region":probe_context}),
@@ -714,6 +737,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             if nested {
                 Err(error)
             } else {
+                let local = cost::make_mut(&mut frame.local_state);
+                local.region_fallbacks = local.region_fallbacks.checked_add(1).expect("区域拒绝计数溢出");
                 if reason == SpeculativeRejectReason::SymbolicAssertion {
                     // 重新合并内层返回值会再次触发悲观断言的存在性失败。
                     // 本次区域按普通分叉回放，到汇合点恢复其后的合并。
@@ -823,8 +848,11 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result =
-                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(info) };
+                let close_result = if solver.region_queries_deferred() || solver.no_smt() {
+                    SmtResult::Sat
+                } else {
+                    solver.check_sat_for_arm(info)
+                };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Unsat => {
@@ -1574,7 +1602,7 @@ struct LoopWork<'ir, B> {
 #[allow(clippy::too_many_arguments)]
 fn fold_loop_exit<'ir, B: BV>(
     previous: LocalFrame<'ir, B>,
-    mut next: LocalFrame<'ir, B>,
+    next: LocalFrame<'ir, B>,
     base: &LocalFrame<'ir, B>,
     region: &Region,
     state: &TaskState<B>,
@@ -1584,7 +1612,6 @@ fn fold_loop_exit<'ir, B: BV>(
 ) -> Result<LocalFrame<'ir, B>, ExecError> {
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
-    use smtlib::Exp::{Or, Var};
     for exit in [&previous, &next] {
         if !matches!(exit.instrs.get(exit.pc), Some(Instr::End))
             || !exit.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty()
@@ -1593,6 +1620,22 @@ fn fold_loop_exit<'ir, B: BV>(
             return Err(reject(exit, SpeculativeRejectReason::StateEffect));
         }
     }
+    fold_exit_frontiers(previous, next, base, region, state, shared, solver, info)
+}
+
+/// 已到同一出口的前沿共享记录重编号和状态合并；调用方校验各策略的适用形状。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fold_exit_frontiers<'ir, B: BV>(
+    previous: LocalFrame<'ir, B>,
+    mut next: LocalFrame<'ir, B>,
+    base: &LocalFrame<'ir, B>,
+    region: &Region,
+    state: &TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<LocalFrame<'ir, B>, ExecError> {
+    use smtlib::Exp::{Or, Var};
     // 两前沿可能共享先前轮次的记录，但在本次不同臂条件下各有一份出现。
     // 只给尚未发布的重复后缀换新ID，保留符号与父子关系；已发布前缀不动。
     let prefix = base.region_merge_records.len();
@@ -1814,8 +1857,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         match result {
             Ok(Run::Suspended) => {
                 let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
-                let close_result =
-                    if solver.region_queries_deferred() { SmtResult::Sat } else { solver.check_sat_for_arm(work.info) };
+                let close_result = if solver.region_queries_deferred() || solver.no_smt() {
+                    SmtResult::Sat
+                } else {
+                    solver.check_sat_for_arm(work.info)
+                };
                 drop(close_scope);
                 match close_result {
                     SmtResult::Sat => (),

@@ -25,3 +25,12 @@
 ```text
 fix(solve): 使用最终求解模型具体化返回值
 ```
+
+## 执行配置
+
+| 英文 | 中文 | 适用含义 |
+| --- | --- | --- |
+| path merge | 路径合并 | 全局参数位于 `execution_limits.path_merge`。 |
+| solver configuration | 求解配置 | 位于 `execution_limits.solver`。 |
+| local override | 局部覆盖 | `path_merge.regions` 中带显式 `kind` 的函数或源码范围规则。 |
+| read-only diagnostics | 只读诊断 | 位于 `path_merge.diagnostics`，不改变执行结果。 |

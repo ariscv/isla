@@ -60,6 +60,8 @@ pub struct LocalDebugProbes {
 pub struct LocalState<'ir, B> {
     pub(super) call_instance: usize,
     pub(super) loop_attempt_seen: bool,
+    /// 当前路径继承的根区域拒绝次数；仅用于终态来源诊断。
+    pub(super) region_fallbacks: usize,
     pub(super) vars: Bindings<'ir, B>,
     pub(super) regs: RegisterBindings<'ir, B>,
     pub(super) lets: Bindings<'ir, B>,
@@ -298,7 +300,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
-    pub fn region_merge_records(&self) -> &[super::RegionMergeRecord<B>] {
+    pub fn region_merge_records(&self) -> &super::MergeHistory<B> {
         &self.region_merge_records
     }
 
@@ -396,6 +398,10 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn has_sampled_branch(&self) -> bool {
         self.execution_limit_state.has_sampled_branch()
+    }
+
+    pub fn region_fallbacks(&self) -> usize {
+        self.local_state.region_fallbacks
     }
 
     pub fn forks(&self) -> u32 {
@@ -535,6 +541,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                     0
                 },
                 loop_attempt_seen: false,
+                region_fallbacks: 0,
                 vars,
                 regs,
                 lets,

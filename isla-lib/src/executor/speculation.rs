@@ -31,6 +31,8 @@ pub enum SpeculativeRejectReason {
     StepBudget,
     NestingLimit,
     FlatDeadArm,
+    /// 平铺循环的继续/退出前沿不能在同一边界收敛。
+    FlatLoopShape,
     StateEffect,
     UnknownExtern,
     RecursiveEffect,

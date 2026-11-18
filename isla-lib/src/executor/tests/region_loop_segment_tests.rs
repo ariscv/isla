@@ -53,7 +53,13 @@ fn segment_paths(
     output.into_inner().unwrap()
 }
 
-fn scan_program(counter: Name, choices: Name, choice: Name, n: usize, reg: Option<Name>) -> Vec<Instr<Name, B64>> {
+pub(super) fn scan_program(
+    counter: Name,
+    choices: Name,
+    choice: Name,
+    n: usize,
+    reg: Option<Name>,
+) -> Vec<Instr<Name, B64>> {
     let mut code = vec![
         Instr::Init(counter, Ty::I128, Exp::I128(0), info()),
         Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::I128(n as i128)]), 9, info()),
@@ -127,7 +133,7 @@ fn scan_paths(
         },
     )
 }
-fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
+pub(super) fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
     use smtlib::Exp::*;
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
