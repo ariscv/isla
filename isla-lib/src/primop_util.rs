@@ -842,7 +842,8 @@ fn concrete_kind<B>(value: &Val<B>) -> Option<bool> {
         Val::I64(_) => Some(false),
         Val::Guarded(_, values) => {
             let kind = concrete_kind(&values.0)?;
-            assert_eq!(Some(kind), concrete_kind(&values.1), "候选具体值必须同类型");
+            let other_kind = concrete_kind(&values.1)?;
+            assert_eq!(kind, other_kind, "候选具体值必须同类型");
             Some(kind)
         }
         _ => None,

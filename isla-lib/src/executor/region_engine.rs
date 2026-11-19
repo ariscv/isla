@@ -812,10 +812,9 @@ fn merge_states<'ir, B: BV>(
             // 机器整数、寄存器及复合载荷仍走严格合并，保持长度／位宽与载荷边界。
             let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
             let value = match (a, b) {
-                (Val::Poison, _) | (_, Val::Poison)
-                    if lets
-                        && name == THROW_LOCATION
-                        && base.region_execution.as_ref().unwrap().catch_return.is_some() =>
+                _ if lets
+                    && name == THROW_LOCATION
+                    && base.region_execution.as_ref().unwrap().catch_return.is_some() =>
                 {
                     // 捕获后位置不活跃，但仍保留普通臂尚未初始化的位置。
                     Ok(Val::Guarded(condition, Box::new((a.clone(), b.clone()))))
