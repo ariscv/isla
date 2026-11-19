@@ -312,12 +312,37 @@ fn check_vector_update_error_rollback(symbolic_index: bool) {
         info(),
     )
     .unwrap();
-    assert!(matches!(outcome, region_merge::RegionResult::Rejected));
     let report = shared.execution_stats.merge_json();
-    assert_eq!(report["candidate_attempts"], 1, "必须通过静态预检并在运行时拒绝");
-    let reason = if symbolic_index { "retry_operand" } else { "incompatible_state" };
-    assert_eq!(report["failure_reasons"][reason], 1);
+    assert_eq!(report["candidate_attempts"], 1, "必须通过静态预检");
     assert_eq!(solver.transaction_depth(), 0);
+    if !symbolic_index {
+        assert!(matches!(outcome, region_merge::RegionResult::Merged));
+        assert_eq!(frame.regs().get_last_if_initialized(reg), Some(&Val::Bool(false)));
+        assert!(solver.check_sat_with(&smtlib::Exp::Var(condition), info()).is_unsat().unwrap());
+        let leaf = queue.pop().expect("必须交付独立的越界错误");
+        let failed = unfreeze_frame(&leaf.frame);
+        assert!(matches!(failed.arm_error(), Some(ExecError::OutOfBounds("vector_update"))));
+        assert!(failed.arm_error_certified());
+        assert_eq!(failed.regs().get_last_if_initialized(reg), Some(&Val::Bool(true)));
+        let mut replay = Solver::from_checkpoint(&context, leaf.checkpoint);
+        let (constraint, _) = leaf.fork_cond.unwrap();
+        replay.add(constraint);
+        assert!(replay.check_sat(info()).is_sat().unwrap());
+        assert!(replay
+            .check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition))), info())
+            .is_unsat()
+            .unwrap());
+        assert!(replay
+            .trace()
+            .to_vec()
+            .iter()
+            .any(|event| matches!(event, Event::WriteReg(name, _, Val::Bool(true)) if *name == reg)));
+        assert!(queue.is_empty());
+        return;
+    }
+    assert!(matches!(outcome, region_merge::RegionResult::Rejected));
+    assert_eq!(report["failure_reasons"]["retry_operand"], 1);
+
     assert_eq!(solver.trace().to_vec().len(), before, "回滚不得泄漏定义和寄存器事件");
     assert_eq!(frame.pc, 0);
     assert_eq!(frame.regs().get_last_if_initialized(reg), Some(&Val::Bool(false)));
@@ -353,7 +378,7 @@ fn region_m2_vector_update_symbolic_length_rollback() {
 }
 
 #[test]
-fn region_m2_vector_update_out_of_bounds_rollback() {
+fn region_m2_vector_update_out_of_bounds_keeps_error_leaf() {
     check_vector_update_error_rollback(false);
 }
 
