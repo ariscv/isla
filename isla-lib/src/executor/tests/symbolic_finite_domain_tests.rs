@@ -404,3 +404,40 @@ fn symbolic_finite_domain_zero_extend_with_bounded_width() {
         }
     }
 }
+
+#[test]
+fn symbolic_finite_domain_projects_through_integer_conversions() {
+    let (results, queries) = run_length_consumer(true, true, |solver, bytes, variable| {
+        let wide = solver.define_const(Formula::SignExtend(64, Box::new(Formula::Var(bytes))), info());
+        let four_or_eight = [4, 8]
+            .into_iter()
+            .map(|x| Formula::Eq(Box::new(Formula::Var(wide)), Box::new(smtlib::bits64(x, 128))))
+            .reduce(|a, b| Formula::Or(Box::new(a), Box::new(b)))
+            .unwrap();
+        solver.assert(four_or_eight);
+        let low = solver.define_const(Formula::Extract(63, 0, Box::new(Formula::Var(wide))), info());
+        let width = solver.define_const(
+            Formula::Bvmul(
+                Box::new(smtlib::bits64(8, 128)),
+                Box::new(Formula::SignExtend(64, Box::new(Formula::Var(low)))),
+            ),
+            info(),
+        );
+        let low = solver.define_const(Formula::Extract(63, 0, Box::new(Formula::Var(width))), info());
+        let width = solver.define_const(Formula::SignExtend(64, Box::new(Formula::Var(low))), info());
+        (
+            width,
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["zero_extend"],
+                Exp::Bits(B64::new(1, 1)),
+                Exp::Id(variable),
+                info(),
+            ),
+        )
+    });
+    let mut concrete: Vec<_> = results.into_iter().collect::<Result<_, _>>().unwrap();
+    concrete.sort();
+    assert_eq!(concrete, [(32, vec![4]), (64, vec![8])]);
+    assert_eq!(queries, 0);
+}

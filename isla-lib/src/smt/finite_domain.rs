@@ -248,8 +248,6 @@ impl<B: BV> Solver<'_, B> {
 
     pub(crate) fn finite_domain(&self, sym: Sym) -> FiniteDomain {
         let Some(prefix) = self.finite_domain_prefix() else { return FiniteDomain::Unknown };
-        let value = Exp::Var(sym);
-        let target = self.translate_exp(&value);
         let mut pending = vec![sym];
         let mut seen = HashSet::new();
         let mut best = FiniteDomain::Unknown;
@@ -264,7 +262,7 @@ impl<B: BV> Solver<'_, B> {
                 pending.extend(dependencies);
             }
             let Some(candidates) = prefix.bounds(&source) else { continue };
-            match self.project_finite_values(&prefix, &target, &source, candidates) {
+            match self.project_finite_values(&prefix, sym, subject, candidates) {
                 known @ FiniteDomain::Known(_) => return known,
                 bounded @ FiniteDomain::Bounded(_) if matches!(best, FiniteDomain::Unknown) => best = bounded,
                 FiniteDomain::Bounded(values) => {
@@ -278,16 +276,53 @@ impl<B: BV> Solver<'_, B> {
         best
     }
 
+    /// 原生化简可能把锚点改写到不再是目标的子表达式。沿原定义逐层代入已知值。
+    fn project_finite_definition(
+        &self,
+        sym: Sym,
+        definitions: &Definitions<'_>,
+        projected: &mut HashMap<Sym, Option<Exp<Sym>>>,
+    ) -> Option<Exp<Sym>> {
+        if let Some(value) = projected.get(&sym) {
+            return value.clone();
+        }
+        let value = definitions.get(&sym).and_then(|definition| {
+            let mut changed = false;
+            let expression = definition
+                .map_var(&mut |input| {
+                    Ok::<_, std::convert::Infallible>(
+                        match self.project_finite_definition(*input, definitions, projected) {
+                            Some(value) => {
+                                changed = true;
+                                value
+                            }
+                            None => Exp::Var(*input),
+                        },
+                    )
+                })
+                .unwrap();
+            if !changed {
+                return None;
+            }
+            let mut ast = self.translate_exp(&expression);
+            ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+        });
+        projected.insert(sym, value.clone());
+        value
+    }
+
     fn project_finite_values(
         &self,
         prefix: &PathConditions<'_>,
-        target: &Ast<'_>,
-        source: &Exp<Sym>,
+        target: Sym,
+        source: Sym,
         candidates: Vec<Exp<Sym>>,
     ) -> FiniteDomain {
         // 对派生锚点代入时保留原等式，防止把它错误地当成独立自由变量。
-        let free = matches!(resolve(source, &prefix.definitions), Exp::Var(_));
-        let anchor = self.translate_exp(source);
+        let source_var = Exp::Var(source);
+        let free = matches!(resolve(&source_var, &prefix.definitions), Exp::Var(_));
+        let anchor = self.translate_exp(&source_var);
+        let target_ast = self.translate_exp(&Exp::Var(target));
         let assertions: Vec<_> = prefix.assertions.iter().map(|exp| self.translate_exp(exp)).collect();
         let mut bool_atoms = Vec::new();
         let mut bool_literals = HashMap::new();
@@ -325,8 +360,35 @@ impl<B: BV> Solver<'_, B> {
                     }
                 }
             }
-            let Some(value) = target.substitute(&anchor, &value).finite_bits() else {
-                return FiniteDomain::Unknown;
+            let value = match target_ast.substitute(&anchor, &value).finite_bits() {
+                Some(value) => value,
+                None if !free => {
+                    let mut projected = HashMap::from([(source, Some(candidate))]);
+                    let Some(value) = self.project_finite_definition(target, &prefix.definitions, &mut projected)
+                    else {
+                        return FiniteDomain::Unknown;
+                    };
+                    // 重试的排除式可能引用遭化简的目标。先在原表达式中代入，再判是否必假。
+                    for assertion in &prefix.assertions {
+                        let mut changed = false;
+                        let substituted = assertion
+                            .map_var(&mut |sym| {
+                                Ok::<_, std::convert::Infallible>(match projected.get(sym) {
+                                    Some(Some(value)) => {
+                                        changed = true;
+                                        value.clone()
+                                    }
+                                    _ => Exp::Var(*sym),
+                                })
+                            })
+                            .unwrap();
+                        if changed && self.translate_exp(&substituted).structural_bool() == Some(false) {
+                            continue 'candidate;
+                        }
+                    }
+                    value
+                }
+                None => return FiniteDomain::Unknown,
             };
             exact &= satisfiable_by_literals || can_reuse_witness;
             if !admissible.contains(&value) {
