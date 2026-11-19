@@ -76,9 +76,11 @@
 
 use ahash;
 use std::collections::{hash_map, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::bitvector::BV;
 use crate::error::ExecError;
+use crate::executor::stats::region_cost as cost;
 use crate::ir::*;
 use crate::primop_util::{ite_choice, symbolic};
 use crate::smt::{Solver, Sym};
@@ -271,7 +273,8 @@ impl<'ir, B: BV> Register<'ir, B> {
 
 #[derive(Clone)]
 pub struct RegisterBindings<'ir, B> {
-    map: HashMap<Name, Register<'ir, B>, ahash::RandomState>,
+    // 帧只改局部变量时，各臂继续共享只读寄存器表。
+    map: Arc<HashMap<Name, Register<'ir, B>, ahash::RandomState>>,
 }
 
 /// An iterator over registers in a [RegisterBindings]
@@ -281,16 +284,16 @@ pub struct Iter<'a, 'ir, B> {
 
 impl<'ir, B: BV> RegisterBindings<'ir, B> {
     pub fn new() -> Self {
-        RegisterBindings { map: HashMap::default() }
+        RegisterBindings { map: Arc::default() }
     }
 
     pub fn insert(&mut self, id: Name, relaxed: bool, v: UVal<'ir, B>) {
         match v {
             UVal::Uninit(ty) => {
-                self.map.insert(id, Register { relaxed, value: RelaxedVal::Uninit(ty) });
+                cost::make_mut(&mut self.map).insert(id, Register { relaxed, value: RelaxedVal::Uninit(ty) });
             }
             UVal::Init(value) => {
-                self.map.insert(
+                cost::make_mut(&mut self.map).insert(
                     id,
                     Register {
                         relaxed,
@@ -302,7 +305,7 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
     }
 
     pub fn insert_register(&mut self, id: Name, v: Register<'ir, B>) {
-        self.map.insert(id, v);
+        cost::make_mut(&mut self.map).insert(id, v);
     }
 
     pub fn get<'a>(
@@ -312,12 +315,12 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         solver: &mut Solver<B>,
         info: SourceLoc,
     ) -> Result<Option<&'a Val<B>>, ExecError> {
-        if let Some(reg) = self.map.get_mut(&id) {
-            let val = reg.read(shared_state, solver, info)?;
-            Ok(Some(val))
-        } else {
-            Ok(None)
+        let Some(register) = self.map.get(&id) else { return Ok(None) };
+        if !register.relaxed && register.read_last_if_initialized().is_some() {
+            return Ok(self.get_last_if_initialized(id));
         }
+        let register = cost::make_mut(&mut self.map).get_mut(&id).unwrap();
+        register.read(shared_state, solver, info).map(Some)
     }
 
     /// 无序区域只读取已写入的最新值。普通执行仍调用 get。
@@ -328,7 +331,12 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         solver: &mut Solver<B>,
         info: SourceLoc,
     ) -> Result<Option<&'a Val<B>>, ExecError> {
-        self.map.get_mut(&id).map(|reg| reg.value.read_last(shared_state, solver, info)).transpose()
+        let Some(register) = self.map.get(&id) else { return Ok(None) };
+        if register.read_last_if_initialized().is_some() {
+            return Ok(self.get_last_if_initialized(id));
+        }
+        let register = cost::make_mut(&mut self.map).get_mut(&id).unwrap();
+        register.value.read_last(shared_state, solver, info).map(Some)
     }
 
     /// 外层可能继续用普通的 relaxed 读。历史逐项带合并守卫，缺项重复同臂的最新值。
@@ -371,7 +379,8 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         let old_writes = (0..ha.len().max(hb.len()))
             .map(|index| merge_val(condition, ha.get(index).unwrap_or(a), hb.get(index).unwrap_or(b), solver, info))
             .collect::<Result<Vec<_>, _>>()?;
-        self.map.get_mut(&id).unwrap().value = RelaxedVal::Init { last_write, last_read, old_writes };
+        cost::make_mut(&mut self.map).get_mut(&id).unwrap().value =
+            RelaxedVal::Init { last_write, last_read, old_writes };
         Ok(())
     }
 
@@ -427,19 +436,19 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
     }
 
     pub fn forget_last_reads(&mut self) {
-        for reg in self.map.values_mut() {
+        for reg in cost::make_mut(&mut self.map).values_mut() {
             reg.forget_last_read()
         }
     }
 
     pub fn synchronize(&mut self) {
-        for reg in self.map.values_mut() {
+        for reg in cost::make_mut(&mut self.map).values_mut() {
             reg.synchronize()
         }
     }
 
     pub fn synchronize_register(&mut self, id: Name) {
-        if let Some(reg) = self.map.get_mut(&id) {
+        if let Some(reg) = cost::make_mut(&mut self.map).get_mut(&id) {
             reg.synchronize()
         }
     }
@@ -457,7 +466,7 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
     }
 
     pub fn assign(&mut self, id: Name, v: Val<B>, shared_state: &SharedState<'ir, B>) {
-        if let Some(reg) = self.map.get_mut(&id) {
+        if let Some(reg) = cost::make_mut(&mut self.map).get_mut(&id) {
             reg.write(v)
         } else {
             let symbol = zencode::decode(shared_state.symtab.to_str(id));
@@ -494,8 +503,11 @@ impl<'a, 'ir, B: BV> IntoIterator for &'a RegisterBindings<'ir, B> {
 }
 
 impl<B: BV> RegisterBindings<'_, B> {
-    pub(crate) fn estimated_bytes(&self) -> usize {
+    pub(crate) fn estimated_bytes(&self, seen: &mut HashSet<usize>) -> usize {
         use crate::executor::stats::memory_stats::{map_bytes, value_heap_bytes};
+        if !seen.insert(Arc::as_ptr(&self.map) as usize) {
+            return 0;
+        }
         map_bytes::<Name, Register<B>>(self.map.capacity())
             + self
                 .map

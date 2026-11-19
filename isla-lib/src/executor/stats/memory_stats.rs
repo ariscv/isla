@@ -356,11 +356,11 @@ fn bindings_bytes<B: BV>(bindings: &crate::ir::Bindings<B>) -> usize {
             })
             .sum::<usize>()
 }
-fn state_bytes<B: BV>(state: &LocalState<B>) -> usize {
+fn state_bytes<B: BV>(state: &LocalState<B>, seen: &mut HashSet<usize>) -> usize {
     size_of_val(state)
         + bindings_bytes(&state.vars)
         + bindings_bytes(&state.lets)
-        + state.regs.estimated_bytes()
+        + state.regs.estimated_bytes(seen)
         + state.pure_definitions.capacity() * size_of::<(u32, u32)>()
         + map_bytes::<usize, Val<B>>(state.expression_values.capacity())
         + state.expression_values.values().map(value_heap_bytes).sum::<usize>()
@@ -373,7 +373,7 @@ fn shared_bytes<B: BV>(
 ) -> usize {
     let mut bytes = 0;
     if seen.insert(std::sync::Arc::as_ptr(state) as usize) {
-        bytes += state_bytes(state);
+        bytes += state_bytes(state, seen);
     }
     if seen.insert(std::sync::Arc::as_ptr(stack) as usize) {
         bytes += size_of_val(stack.as_ref())

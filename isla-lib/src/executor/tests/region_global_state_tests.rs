@@ -967,7 +967,8 @@ fn region_m2_sequential_joins_keep_read_footprint_linear() {
     let function = shared.symtab.intern("zsequential_joins");
     let parameter = test_name(993);
     shared.registers.insert(reg, Ty::Bool);
-    let mut body = vec![Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info())];
+    let read = Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info());
+    let mut body = vec![read.clone(), read];
     // 一个外层推演内有连续的小菱形；没有新增读取，也没有新增输入。
     // 原实现每次汇合都把继承的同一读取条件复制两遍。
     for _ in 0..8 {
@@ -991,10 +992,13 @@ fn region_m2_sequential_joins_keep_read_footprint_linear() {
     assert_eq!(equivalent_paths(&forked, &merged, 2, true), (3, 1));
     let root = merged[0].records.iter().find(|record| record.parent_record.is_none()).unwrap();
     let read = root.single_arm_reads.iter().find(|read| read.register == reg).unwrap();
-    let mut guard = read.guard.clone();
-    let mut nodes = 0;
-    guard.modify(&mut |_| nodes += 1);
-    assert!(nodes <= 32, "8次汇合没有新读取，条件却膨胀为{nodes}个节点");
+    assert_eq!(read.guard, smtlib::Exp::Var(root.condition), "同臂重复读取与继承的相同守卫应复用原条件");
+    assert!(
+        !merged[0].events.iter().any(|event| matches!(
+            event, Event::Smt(smtlib::Def::DefineConst(_, smtlib::Exp::Or(a, b)), ..) if a == b
+        )),
+        "没有新的可达读取时不应为相同守卫创建定义"
+    );
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let inputs: Vec<_> = (0..2).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
@@ -1009,4 +1013,42 @@ fn region_m2_sequential_joins_keep_read_footprint_linear() {
             .unwrap(),
         "共享条件必须精确保留外层读取守卫"
     );
+}
+
+#[test]
+fn region_m2_register_bindings_share_read_only_clones() {
+    let mut shared = empty_shared_state();
+    let strict = shared.symtab.intern("zstrict");
+    let relaxed = shared.symtab.intern("zrelaxed");
+    let unset = shared.symtab.intern("zunset");
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let mut original = RegisterBindings::new();
+    original.insert(strict, false, UVal::Init(Val::Bool(false)));
+    original.insert(relaxed, true, UVal::Init(Val::Bool(false)));
+    original.insert(unset, false, UVal::Uninit(&Ty::Bool));
+    let mut arm = original.clone();
+    assert!(std::ptr::eq(
+        original.get_last_if_initialized(strict).unwrap(),
+        arm.get(strict, &shared, &mut solver, info()).unwrap().unwrap(),
+    ));
+    assert!(std::ptr::eq(
+        original.get_last_if_initialized(relaxed).unwrap(),
+        arm.get_latest(relaxed, &shared, &mut solver, info()).unwrap().unwrap(),
+    ));
+
+    assert!(matches!(arm.get_latest(unset, &shared, &mut solver, info()).unwrap(), Some(Val::Symbolic(_))));
+    assert!(original.get_last_if_initialized(unset).is_none());
+    arm.assign(strict, Val::Bool(true), &shared);
+    assert_eq!(original.get_last_if_initialized(strict), Some(&Val::Bool(false)));
+    assert_eq!(arm.get_last_if_initialized(strict), Some(&Val::Bool(true)));
+
+    // 普通松弛读仍保存所选的值，且写入历史与父帧隔离。
+    assert_eq!(
+        original.iter().find(|(name, _)| **name == relaxed).unwrap().1.read_old_if_initialized().unwrap().len(),
+        0
+    );
+    arm.assign(relaxed, Val::Bool(true), &shared);
+    assert_eq!(arm.get(relaxed, &shared, &mut solver, info()).unwrap(), Some(&Val::Bool(true)));
+    assert_eq!(original.get(relaxed, &shared, &mut solver, info()).unwrap(), Some(&Val::Bool(false)));
 }
