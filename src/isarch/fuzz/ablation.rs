@@ -63,6 +63,7 @@ pub fn case_main() {
     let mut candidates = fs::File::create(output.join("candidates.jsonl")).unwrap();
     let mut rejected = fs::File::create(output.join("rejected.jsonl")).unwrap();
     let mut observations = Vec::new();
+    let mut construction = Vec::new();
     for line in std::io::BufReader::new(fs::File::open(&args[2]).unwrap()).lines() {
         let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let sample: Sample =
@@ -96,17 +97,22 @@ pub fn case_main() {
             let case = output.join(format!("case-{}", sample.sample_id));
             let result = emu::run(&runtime, &platform, sample, generated.unwrap(), &case, true, &selected);
             observations.push(json!({"fixed":result.fixed,"baseline":result.baseline}));
+        } else if let Some(generated) = generated {
+            construction.push(json!({
+                "sample_id":sample.sample_id,"cause":generated.expected.cause,"record":generated.construction
+            }));
         }
     }
-    io::write_json(
-        &output.join("summary.json"),
-        &json!({
-            "mode":args[1],"total":total,"precheck_kept":precheck_kept,"kept":kept,"rejected":total-kept,
-            "reasons":counts,"primary_reasons":primary,"all_reason_counts_overlap":true,
-            "reason_fractions":counts.iter().map(|(reason,count)|(reason,*count as f64 /total.max(1) as f64)).collect::<BTreeMap<_,_>>(),
-            "observations":observations,"is_model_certification":false
-        }),
-    );
+    let mut summary = json!({
+        "mode":args[1],"total":total,"precheck_kept":precheck_kept,"kept":kept,"rejected":total-kept,
+        "reasons":counts,"primary_reasons":primary,"all_reason_counts_overlap":true,
+        "reason_fractions":counts.iter().map(|(reason,count)|(reason,*count as f64 /total.max(1) as f64)).collect::<BTreeMap<_,_>>(),
+        "observations":observations,"is_model_certification":false
+    });
+    if args[1] == "filter" {
+        summary["construction"] = Value::Array(construction);
+    }
+    io::write_json(&output.join("summary.json"), &summary);
 }
 
 /// 在指定路径上核对既有父输入并抽查随机取点的硬件接纳率；不计入正式消融。

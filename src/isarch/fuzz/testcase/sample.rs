@@ -1,4 +1,4 @@
-//! 只恢复实际访存路径上的 PTE 地址；期望结果直接取样本，不重做模型裁决。
+//! 恢复实际访存路径上的页表项并记录字节来源。期望结果直接取样本。
 use super::*;
 use crate::isarch::target::RiscvPte;
 use isla_lib::executor::samples::MemoryCell;
@@ -187,7 +187,34 @@ fn instruction(sample: &Sample) -> Result<Instruction, String> {
     })
 }
 
-pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> Result<Generated, String> {
+#[derive(Debug)]
+pub(super) struct PreparationError {
+    detail: String,
+    construction: Option<Box<Construction>>,
+}
+
+impl PreparationError {
+    pub(super) fn into_detail(self) -> String {
+        if let Some(construction) = self.construction {
+            debug_assert!(matches!(construction.stop, StopReason::MissingBytes { .. }));
+        }
+        self.detail
+    }
+}
+
+impl From<String> for PreparationError {
+    fn from(detail: String) -> Self {
+        Self { detail, construction: None }
+    }
+}
+
+impl From<&str> for PreparationError {
+    fn from(detail: &str) -> Self {
+        detail.to_owned().into()
+    }
+}
+
+pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> Result<Generated, PreparationError> {
     if sample.schema_version != 1 || sample.truncated {
         return Err("要求完整的 samples v1 样本".into());
     }
@@ -300,7 +327,7 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
                 .collect::<Result<Vec<_>, _>>()?
                 .contains(&value)
             {
-                return Err(format!("{key} 不满足场景约束"));
+                return Err(format!("{key} 不满足场景约束").into());
             }
         }
     }
@@ -363,20 +390,43 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
         .collect::<BTreeMap<_, _>>();
     let mut expected_memory = post;
     let mut pte_addresses = Vec::new();
+    let mut construction = Construction {
+        walk: Vec::new(),
+        stop: StopReason::NoTranslation,
+        data: None,
+        bytes: Vec::new(),
+        undetermined: Vec::new(),
+    };
     let va_bits = 12 + 9 * levels;
     let canonical = (((va << (64 - va_bits)) as i64) >> (64 - va_bits)) as u64;
     let root = (satp & ((1 << 44) - 1)) << 12;
-    if va == canonical && va & (instruction.width - 1) == 0 {
+    let mut ordinary_leaf = false;
+    if va != canonical {
+        construction.stop = StopReason::NonCanonical;
+    } else if va & (instruction.width - 1) == 0 {
         let mut table = root;
         for level in (0..levels).rev() {
             let address = table + ((va >> (12 + 9 * level)) & 511) * 8;
+            let mut slot =
+                WalkSlot { level, slot_pa: address, pte_value: None, source: SlotSource::Missing, next: None };
             if (0..8).all(|i| !memory.contains_key(&(address + i)))
                 && platform.contains("hole", address)
                 && matches!(cause, 5 | 7)
             {
+                construction.walk.push(slot);
+                construction.stop = StopReason::HoleExpectedFault;
                 break;
             }
-            let pte = RiscvPte { bits: read_word(&memory, address)? };
+            let pte = match read_word(&memory, address) {
+                Ok(bits) => RiscvPte { bits },
+                Err(detail) => {
+                    construction.walk.push(slot);
+                    construction.stop = StopReason::MissingBytes { level, slot_pa: address };
+                    return Err(PreparationError { detail, construction: Some(Box::new(construction)) });
+                }
+            };
+            slot.pte_value = Some(pte.bits);
+            slot.source = SlotSource::Solved;
             pte_addresses.push(address);
             let decoy = (address & !0xfff) | ((address + 8) & 0xfff);
             if platform.ram(decoy) && (0..8).all(|i| !memory.contains_key(&(decoy + i))) {
@@ -403,19 +453,40 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
             if !platform.isa.standard_paging && pte.is_valid() && pte.ppn() >= 1 << 36 && matches!(cause, 13 | 15) {
                 return Err("旧平台高 PPN 与页异常优先级尚未签收".into());
             }
-            if invalid || !nonleaf || level == 0 {
+            if invalid || (nonleaf && level == 0) {
+                construction.walk.push(slot);
+                construction.stop = StopReason::Invalid { level };
+                break;
+            }
+            if !nonleaf {
+                let offset_mask = (1u64 << (12 + 9 * level + if n { 4 } else { 0 })) - 1;
+                let page_base = pte.ppn() << 12;
+                construction.walk.push(slot);
+                construction.stop = StopReason::Leaf { level, pa: (page_base & !offset_mask) | (va & offset_mask) };
+                ordinary_leaf = !n && page_base & offset_mask == 0;
                 break;
             }
             table = pte.ppn() << 12;
+            slot.next = Some(table);
+            construction.walk.push(slot);
         }
     }
     let addresses = filled.keys().map(|address| address & !7).collect::<BTreeSet<_>>();
     // 模型未读取的同字节槽以零初始化并检查保持；已记录的字节不改变。
     for address in &addresses {
+        let mut origin = ByteOrigin { address: *address, ..ByteOrigin::default() };
         for offset in 0..8 {
-            filled.entry(address + offset).or_insert(Some(0));
-            expected_memory.entry(address + offset).or_insert(Some(0));
+            let byte = address + offset;
+            match memory.get(&byte) {
+                Some(Some(_)) => origin.solved += 1,
+                Some(None) => origin.unknown_old_filled += 1,
+                None if filled.contains_key(&byte) => origin.decoy += 1,
+                None => origin.zero_padded += 1,
+            }
+            filled.entry(byte).or_insert(Some(0));
+            expected_memory.entry(byte).or_insert(Some(0));
         }
+        construction.bytes.push(origin);
     }
     let mut writes = addresses
         .into_iter()
@@ -427,6 +498,27 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    if let StopReason::Leaf { pa, .. } = construction.stop {
+        if expected.cause != 0 {
+            construction.undetermined.push("模型预期异常，未核对数据访问".into());
+        } else if !ordinary_leaf {
+            construction.undetermined.push("数据核对仅覆盖普通对齐叶项".into());
+        } else {
+            let register = match instruction.access {
+                Access::Load if instruction.register != 0 => expected.rd,
+                Access::Load => None,
+                Access::Store => register_value(pre, instruction.register).ok(),
+            };
+            let expected_bytes_match = match check_data(pa, &instruction, register, &pte_addresses, &memory, &writes) {
+                Ok(matches) => Some(matches),
+                Err(reason) => {
+                    construction.undetermined.push(reason.into());
+                    None
+                }
+            };
+            construction.data = Some(DataCheck { va, leaf_pa: pa, width: instruction.width, expected_bytes_match });
+        }
+    }
     if mode == EntryMode::S {
         // 取指 VA=0x80000000。Sv48 复用样本的高层指针；绝不覆盖样本或诱饵。
         let mut table = root;
@@ -441,6 +533,7 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
                     return Err("S 态取指页表不在 DRAM".into());
                 }
                 writes.push(Word { address, value, expected_value: value });
+                construction.bytes.push(ByteOrigin { address, instruction_fetch: Some(8), ..ByteOrigin::default() });
             } else if let Some(word) = writes.iter().find(|word| word.address == address) {
                 let pte = RiscvPte { bits: word.value };
                 if !pte.is_valid() || pte.bits & (0xde | (0x3ff << 54)) != 0 {
@@ -457,10 +550,12 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
                     return Err("S 态取指页表不在 DRAM".into());
                 }
                 writes.push(Word { address, value, expected_value: value });
+                construction.bytes.push(ByteOrigin { address, instruction_fetch: Some(8), ..ByteOrigin::default() });
                 table = page;
             }
         }
         writes.sort_by_key(|word| word.address);
+        construction.bytes.sort_by_key(|origin| origin.address);
     }
     // 原输入是非虚拟U/S态；桥接设置MPRV或通过MRET进入时，不能激活原先不活动的MPV。
     let status = (status & !((3 << 11) | (1 << 3) | (1 << 17) | (1u64 << 39)))
@@ -476,7 +571,67 @@ pub(super) fn prepare(sample: &Sample, platform: &Platform, mode: EntryMode) -> 
         pte_addresses,
         assembly: String::new(),
         linker: String::new(),
+        construction,
     })
+}
+
+fn check_data(
+    leaf_pa: u64,
+    instruction: &Instruction,
+    register: Option<u64>,
+    pte_addresses: &[u64],
+    memory: &BTreeMap<u64, Option<u8>>,
+    writes: &[Word],
+) -> Result<bool, &'static str> {
+    // 样本把访存合并成稀疏字节。只有页表槽之外的一段连续字节能独立核对首址和宽度。
+    let mut data = memory.iter().filter(|(address, _)| !pte_addresses.contains(&(**address & !7)));
+    let (&start, _) = data.next().ok_or("无可独立识别的数据事件，数据也可能与页表槽重叠")?;
+    let mut width = 1;
+    for (&address, _) in data {
+        if start.checked_add(width) != Some(address) {
+            return Err("样本的稀疏字节无法确定单次数据访问的范围");
+        }
+        width += 1;
+    }
+    if start != leaf_pa || width != instruction.width {
+        return Ok(false);
+    }
+    let slot = leaf_pa & !7;
+    let word = &writes[writes.binary_search_by_key(&slot, |word| word.address).expect("数据槽必须已初始化")];
+    let initial = word.value.to_le_bytes();
+    let post = word.expected_value.to_le_bytes();
+    let mut loaded = [0; 8];
+    for (offset, byte) in loaded.iter_mut().enumerate().take(width as usize) {
+        let address = start + offset as u64;
+        let index = (address - slot) as usize;
+        match instruction.access {
+            Access::Load => {
+                *byte = memory[&address].ok_or("样本未记录读取的字节值")?;
+                if initial[index] != *byte || post[index] != *byte {
+                    return Ok(false);
+                }
+            }
+            Access::Store => {
+                if initial[index] != memory[&address].unwrap_or(post[index] ^ 0xff) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    match instruction.access {
+        Access::Load => {
+            let register = register.ok_or("目的寄存器无写回可核对")?;
+            let shift = 64 - 8 * width;
+            let value = u64::from_le_bytes(loaded);
+            let value = if instruction.unsigned { value } else { (((value << shift) as i64) >> shift) as u64 };
+            Ok(value == register)
+        }
+        Access::Store => {
+            let register = register.ok_or("样本未记录源寄存器")?;
+            let offset = (start - slot) as usize;
+            Ok(post[offset..offset + width as usize] == register.to_le_bytes()[..width as usize])
+        }
+    }
 }
 
 #[cfg(test)]
@@ -560,5 +715,211 @@ mod bridge_tests {
         assert_eq!(sample.pre_registers["mstatus"]["struct"]["bits"], bits(status));
         sample.pre_registers.insert("mstatus".into(), json!({"struct":{"bits":bits(1u64<<42)}}));
         assert!(prepare(&sample, &platform, EntryMode::Mprv).is_err(), "M陷阱观察器不能接纳MDT双重陷阱前态");
+    }
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+    use serde_json::json;
+
+    const ROOT: u64 = 0x91e3a000;
+
+    fn fixture(access: Access, width: u64, levels: usize, va: u64, register: u8) -> (Sample, Platform) {
+        let mut sample = crate::isarch::fuzz::tests::example_sample();
+        let bits = |value: u64, width: usize| json!({"bits":format!("{value:0width$b}")});
+        let (ctor, prefix, operands) = match access {
+            Access::Load => (
+                "LOAD",
+                "tuple#%bv12_%bv5_%bv5_%bool_%i64",
+                vec![bits(0, 12), bits(1, 5), bits(register.into(), 5), json!({"bool":false}), bits(width, 64)],
+            ),
+            Access::Store => (
+                "STORE",
+                "tuple#%bv12_%bv5_%bv5_%i64",
+                vec![bits(0, 12), bits(register.into(), 5), bits(1, 5), bits(width, 64)],
+            ),
+        };
+        let fields: BTreeMap<_, _> =
+            operands.into_iter().enumerate().map(|(index, field)| (format!("{prefix}{index}"), field)).collect();
+        sample.pre_registers = [
+            ("$instruction".into(), json!({"ctor":ctor,"value":{"struct":fields}})),
+            ("cur_privilege".into(), json!({"enum":"Supervisor"})),
+            ("satp".into(), bits((((levels + 5) as u64) << 60) | (ROOT >> 12), 64)),
+            ("mstatus".into(), json!({"struct":{"bits":bits(0, 64)}})),
+            ("menvcfg".into(), json!({"struct":{"bits":bits(0, 64)}})),
+            ("tlb".into(), json!({"vector":[]})),
+            ("x1".into(), bits(va, 64)),
+        ]
+        .into_iter()
+        .collect();
+        if register != 0 {
+            sample.post_registers.insert(format!("x{register}"), bits(0, 64));
+        }
+        sample.result = json!({"ctor":"Retire_Success","value":{"unit":true}});
+        sample.pre_memory.clear();
+        sample.post_memory.clear();
+        let platform = serde_json::from_value(json!({
+            "regions":[{"base":0x80100000u64,"size":0x1_00000000u64,"kind":"ram"}],
+            "harness":{"reserved":[0x80000000u64,0x80100000u64]},
+            "isa":{"svrsw60t59b":false,"standard_paging":true},
+            "isla":{"scenario":{}}
+        }))
+        .unwrap();
+        (sample, platform)
+    }
+
+    fn word(sample: &mut Sample, address: u64, value: u64) {
+        for (offset, byte) in value.to_le_bytes().into_iter().enumerate() {
+            let cell = MemoryCell { address: address + offset as u64, value: Some(byte), bytes: 1 };
+            sample.pre_memory.push(cell.clone());
+            sample.post_memory.push(cell);
+        }
+    }
+
+    fn fault(sample: &mut Sample, va: u64, ctor: &str) {
+        sample.result = json!({"ctor":"Memory_Exception","value":{"struct":{
+            "tuple#%bv64_%union zExceptionType0":{"bits":format!("{va:064b}")},
+            "tuple#%bv64_%union zExceptionType1":{"ctor":ctor,"value":{"unit":true}}
+        }}});
+    }
+
+    #[test]
+    fn three_levels_keep_addresses_and_initial_memory_bytes() {
+        let (mut sample, platform) = fixture(Access::Store, 4, 3, 0x64c, 0);
+        word(&mut sample, ROOT, 0x3b820701);
+        word(&mut sample, 0xee081000, 0x39660201);
+        word(&mut sample, 0xe5980000, 0x2ad3e1ff);
+        for address in 0xab4f864c..0xab4f8650 {
+            sample.pre_memory.push(MemoryCell { address, value: None, bytes: 1 });
+            sample.post_memory.push(MemoryCell { address, value: Some(0), bytes: 1 });
+        }
+        let generated = generate(&sample, &platform, EntryMode::Mprv).unwrap();
+        let record = &generated.construction;
+        assert_eq!(record.stop, StopReason::Leaf { level: 0, pa: 0xab4f864c });
+        assert_eq!(
+            record.walk.iter().map(|s| (s.level, s.slot_pa, s.pte_value, s.source, s.next)).collect::<Vec<_>>(),
+            [
+                (2, ROOT, Some(0x3b820701), SlotSource::Solved, Some(0xee081000)),
+                (1, 0xee081000, Some(0x39660201), SlotSource::Solved, Some(0xe5980000)),
+                (0, 0xe5980000, Some(0x2ad3e1ff), SlotSource::Solved, None),
+            ]
+        );
+        let data = record.data.as_ref().unwrap();
+        assert_eq!((data.va, data.leaf_pa, data.width, data.expected_bytes_match), (0x64c, 0xab4f864c, 4, Some(true)));
+        assert!(record.undetermined.is_empty());
+        assert_eq!(record.bytes.len(), generated.writes.len());
+        assert_eq!(
+            record
+                .bytes
+                .iter()
+                .map(|b| (b.address, b.solved, b.unknown_old_filled, b.zero_padded, b.decoy))
+                .collect::<Vec<_>>(),
+            [
+                (ROOT, 8, 0, 0, 0),
+                (ROOT + 8, 0, 0, 0, 8),
+                (0xab4f8648, 0, 4, 4, 0),
+                (0xe5980000, 8, 0, 0, 0),
+                (0xe5980008, 0, 0, 0, 8),
+                (0xee081000, 8, 0, 0, 0),
+                (0xee081008, 0, 0, 0, 8),
+            ]
+        );
+        let initial = generated
+            .assembly
+            .split_once("\ninitial_memory:\n")
+            .unwrap()
+            .1
+            .split_once("initial_memory_end:\n")
+            .unwrap()
+            .0;
+        assert_eq!(
+            initial,
+            concat!(
+                "    .dword 0x91e3a000\n    .dword 0x3b820701\n",
+                "    .dword 0x91e3a008\n    .dword 0xa55aa55aa55aa55a\n",
+                "    .dword 0xab4f8648\n    .dword 0xffffffff00000000\n",
+                "    .dword 0xe5980000\n    .dword 0x2ad3e1ff\n",
+                "    .dword 0xe5980008\n    .dword 0xa55aa55aa55aa55a\n",
+                "    .dword 0xee081000\n    .dword 0x39660201\n",
+                "    .dword 0xee081008\n    .dword 0xa55aa55aa55aa55a\n",
+            )
+        );
+        assert_eq!(generated.writes[2].expected_value, 0);
+        sample.post_memory.last_mut().unwrap().value = Some(1);
+        let generated = prepare(&sample, &platform, EntryMode::Mprv).unwrap();
+        assert_eq!(generated.construction.data.unwrap().expected_bytes_match, Some(false));
+    }
+
+    #[test]
+    fn large_leaf_uses_lower_virtual_page_bits_and_checks_data() {
+        for va in [0x348, 0x120348] {
+            let (mut sample, platform) = fixture(Access::Load, 1, 4, va, 2);
+            word(&mut sample, ROOT, 0x34f71e01);
+            word(&mut sample, 0xd3dc7000, 0x300000fb);
+            let pa = 0xc0000000 + va;
+            let byte = MemoryCell { address: pa, value: Some(0x96), bytes: 1 };
+            sample.pre_memory.push(byte.clone());
+            sample.post_memory.push(byte);
+            sample.post_registers.insert("x2".into(), json!({"bits":format!("{:064b}",0xffffffffffffff96u64)}));
+            let generated = prepare(&sample, &platform, EntryMode::Mprv).unwrap();
+            let record = generated.construction;
+            assert_eq!(record.stop, StopReason::Leaf { level: 2, pa });
+            assert_eq!(record.walk.iter().map(|s| s.level).collect::<Vec<_>>(), [3, 2]);
+            assert_eq!(record.data.unwrap().expected_bytes_match, Some(true));
+            sample.post_memory.last_mut().unwrap().value = Some(0);
+            let generated = prepare(&sample, &platform, EntryMode::Mprv).unwrap();
+            assert_eq!(generated.construction.data.unwrap().expected_bytes_match, Some(false));
+            for (address, width, check) in [(pa + 8, 1, Some(false)), (pa, 2, Some(false)), (pa, 0, None)] {
+                sample.pre_memory.truncate(16);
+                sample.post_memory.truncate(16);
+                for offset in 0..width {
+                    let byte = MemoryCell { address: address + offset, value: Some(0x96), bytes: 1 };
+                    sample.pre_memory.push(byte.clone());
+                    sample.post_memory.push(byte);
+                }
+                let generated = prepare(&sample, &platform, EntryMode::Mprv).unwrap();
+                assert_eq!(generated.construction.data.unwrap().expected_bytes_match, check);
+                assert!(!generated.construction.undetermined.is_empty() || check == Some(false));
+            }
+        }
+    }
+
+    #[test]
+    fn faulting_leaf_and_noncanonical_address_keep_judge_expectations() {
+        let (mut sample, platform) = fixture(Access::Load, 2, 3, 0, 2);
+        word(&mut sample, ROOT, 0x400003fb);
+        fault(&mut sample, 0, "E_Load_Access_Fault");
+        let generated = prepare(&sample, &platform, EntryMode::Mprv).unwrap();
+        assert_eq!(generated.expected.cause, 5);
+        assert_eq!(generated.construction.stop, StopReason::Leaf { level: 2, pa: 0x100000000 });
+        assert!(generated.construction.data.is_none());
+        assert!(!generated.construction.undetermined.is_empty());
+
+        let va = 0x1080000000092;
+        let (mut sample, platform) = fixture(Access::Store, 2, 4, va, 0);
+        fault(&mut sample, va, "E_SAMO_Page_Fault");
+        let generated = prepare(&sample, &platform, EntryMode::Mprv).unwrap();
+        assert_eq!(generated.expected.cause, 15);
+        assert_eq!(generated.construction.stop, StopReason::NonCanonical);
+        assert!(generated.construction.walk.is_empty());
+        assert!(generated.construction.bytes.is_empty());
+        assert!(generated.writes.is_empty());
+    }
+
+    #[test]
+    fn missing_slot_reports_level_and_address_and_remains_rejected() {
+        let (mut sample, platform) = fixture(Access::Load, 1, 4, 0x348, 0);
+        word(&mut sample, ROOT, 0x34f71e01);
+        word(&mut sample, 0xd3dc7000, 0x300000fb);
+        sample.pre_memory.pop();
+        sample.post_memory.pop();
+        let error = prepare(&sample, &platform, EntryMode::Mprv).unwrap_err();
+        assert_eq!(error.detail, "缺少已知的内存字节：0xd3dc7007");
+        let record = error.construction.unwrap();
+        assert_eq!(record.stop, StopReason::MissingBytes { level: 2, slot_pa: 0xd3dc7000 });
+        assert_eq!(record.walk[1].pte_value, None);
+        assert_eq!(record.walk[1].source, SlotSource::Missing);
+        assert_eq!(generate(&sample, &platform, EntryMode::Mprv).unwrap_err(), error.detail);
     }
 }
