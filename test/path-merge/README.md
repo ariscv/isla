@@ -41,6 +41,7 @@ python3 -m unittest discover -s test/path-merge
 | `title`、`intent` | 审阅标题和一句话能力要求。默认使用编号和通用说明，新增用例宜写具体要求。 |
 | `inputs` | 观测寄存器名到正位宽的表。默认 `{}`，即没有外部输入。 |
 | `observe`、`registers` | 候选返回值寄存器默认 `out_value`。其他后态寄存器默认空列表。 |
+| `assertion_inputs` | 失败断言应覆盖的完整输入取值列表。每个取值按 `inputs` 的顺序填写。省略时沿用普通性质判定。 |
 | `expect_paths_unmerged`、`expect_paths_merged` | 关闭合并和开启合并的可满足完成路径数。默认 2 和 1。 |
 | `must_merge`、`must_not_merge` | 应该合并或分开保留的语义原因。都默认留空，部分分组可同时填两项。 |
 | `modes` | 默认 `["off", "recursive", "flat"]`，三种都运行。 |
@@ -59,6 +60,8 @@ python3 -m unittest discover -s test/path-merge
 - `memory_event_guards[i]` 是 `memory_events[i]` 的生效条件，两数组等长，均按执行迹顺序记录。既有 `memory_events` 对象的字段保持原样。
 - `register_reads` 按执行迹顺序列出主迹的 `ReadReg`，每项有 `register`、`accessors`、`data` 和 `guard_smtlib`。寄存器读反映执行器发布的访问事件，默认合并策略可折叠重复访问。
 - 守卫为 `true` 时，该事件在这条路径的全部可达输入上生效。其余条件可以是由外层 SMT-LIB 声明并约束的布尔别名。条件访存并集中，每一笔读都有自己对应的条件。
+
+设置 `assertion_inputs` 的场景另用 `--dump-assertions` 导出失败断言。Z3 验证失败叶各自可达、守卫互斥，且正常出口与失败域分开。B11 的普通出口只覆盖 `x=1`，一条独立失败叶覆盖 `x=0`。 [B11](scenarios/B11-assert-leaf.sail)
 
 ## 读结果
 
