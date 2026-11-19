@@ -1,0 +1,3005 @@
+{
+  "LOAD": {
+    "run_log": {
+      "enum": {
+        "kind": "symbolic_value_enumeration_summary",
+        "trigger": "signal",
+        "calls": 42,
+        "completed": 42,
+        "solver_checks": 18446744073709551534,
+        "structural_candidates": 40,
+        "model_candidates": 2
+      },
+      "slow_checks": [
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 408.662779924,
+          "timed_out": false,
+          "line_in_log": 238646,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 391.165669937,
+          "timed_out": false,
+          "line_in_log": 236864,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 67,
+            "line1": 181,
+            "char1": 5,
+            "line2": 181,
+            "char2": 11
+          },
+          "wall_seconds": 375.788504116,
+          "timed_out": false,
+          "line_in_log": 261490,
+          "location": "sys/mem.sail:181:5"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 67,
+            "line1": 181,
+            "char1": 13,
+            "line2": 181,
+            "char2": 19
+          },
+          "wall_seconds": 366.730148325,
+          "timed_out": false,
+          "line_in_log": 124924,
+          "location": "sys/mem.sail:181:13"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 351.105675489,
+          "timed_out": false,
+          "line_in_log": 233456,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 317.286972127,
+          "timed_out": false,
+          "line_in_log": 230786,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 312.719704377,
+          "timed_out": false,
+          "line_in_log": 250045,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 309.903741046,
+          "timed_out": false,
+          "line_in_log": 233571,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 303.721589657,
+          "timed_out": false,
+          "line_in_log": 236875,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 67,
+            "line1": 181,
+            "char1": 5,
+            "line2": 181,
+            "char2": 11
+          },
+          "wall_seconds": 303.135418826,
+          "timed_out": false,
+          "line_in_log": 123450,
+          "location": "sys/mem.sail:181:5"
+        }
+      ],
+      "solver_drops": [],
+      "error_samples": [
+        [
+          122329,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          122977,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          122997,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          123462,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          123693,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          123716,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          125140,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          125304,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          125316,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          125438,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          126779,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          156236,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          156967,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          164588,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          169695,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ]
+      ],
+      "smt_reject_causes": {},
+      "deferred_queries": [
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 1068,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 56
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 1296,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 144
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 1320,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 144
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 5693,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 12748
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 5700,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 12936
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 5707,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 12936
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 14,
+              "line1": 173,
+              "char1": 53,
+              "line2": 173,
+              "char2": 63
+            }
+          },
+          "count": 14
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 25,
+              "line1": 22,
+              "char1": 2,
+              "line2": 22,
+              "char2": 60
+            }
+          },
+          "count": 368
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 25,
+              "line1": 22,
+              "char1": 23,
+              "line2": 22,
+              "char2": 60
+            }
+          },
+          "count": 400
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 30,
+              "line1": 373,
+              "char1": 2,
+              "line2": 380,
+              "char2": 3
+            }
+          },
+          "count": 316
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 38,
+              "line1": 135,
+              "char1": 64,
+              "line2": 135,
+              "char2": 108
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 45,
+              "line1": 75,
+              "char1": 2,
+              "line2": 89,
+              "char2": 3
+            }
+          },
+          "count": 51156
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 123,
+              "char1": 6,
+              "line2": 123,
+              "char2": 17
+            }
+          },
+          "count": 12748
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 124,
+              "char1": 6,
+              "line2": 124,
+              "char2": 22
+            }
+          },
+          "count": 12934
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 126,
+              "char1": 11,
+              "line2": 126,
+              "char2": 77
+            }
+          },
+          "count": 12934
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 126,
+              "char1": 39,
+              "line2": 126,
+              "char2": 76
+            }
+          },
+          "count": 6150
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 126,
+              "char1": 8,
+              "line2": 128,
+              "char2": 52
+            }
+          },
+          "count": 12934
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 132,
+              "char1": 2,
+              "line2": 132,
+              "char2": 77
+            }
+          },
+          "count": 94
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 50,
+              "char1": 10,
+              "line2": 50,
+              "char2": 50
+            }
+          },
+          "count": 25872
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 50,
+              "char1": 2,
+              "line2": 54,
+              "char2": 26
+            }
+          },
+          "count": 25872
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 52,
+              "char1": 10,
+              "line2": 52,
+              "char2": 50
+            }
+          },
+          "count": 25872
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 52,
+              "char1": 7,
+              "line2": 54,
+              "char2": 26
+            }
+          },
+          "count": 25872
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 66,
+              "char1": 4,
+              "line2": 66,
+              "char2": 7
+            }
+          },
+          "count": 12748
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 67,
+              "char1": 4,
+              "line2": 67,
+              "char2": 7
+            }
+          },
+          "count": 12936
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 71,
+              "char1": 6,
+              "line2": 73,
+              "char2": 88
+            }
+          },
+          "count": 12936
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 75,
+              "char1": 4,
+              "line2": 75,
+              "char2": 7
+            }
+          },
+          "count": 12936
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 64,
+              "line1": 442,
+              "char1": 2,
+              "line2": 442,
+              "char2": 7
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 103,
+              "char1": 10,
+              "line2": 103,
+              "char2": 40
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 109,
+              "char1": 10,
+              "line2": 109,
+              "char2": 40
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 109,
+              "char1": 7,
+              "line2": 125,
+              "char2": 3
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 30,
+              "char1": 4,
+              "line2": 31,
+              "char2": 64
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 344,
+              "char1": 2,
+              "line2": 348,
+              "char2": 45
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 76,
+              "char1": 2,
+              "line2": 125,
+              "char2": 3
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 76,
+              "char1": 5,
+              "line2": 76,
+              "char2": 44
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 82,
+              "char1": 10,
+              "line2": 82,
+              "char2": 43
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 89,
+              "char1": 10,
+              "line2": 89,
+              "char2": 43
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 65,
+              "line1": 89,
+              "char1": 7,
+              "line2": 125,
+              "char2": 3
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 66,
+              "line1": 112,
+              "char1": 6,
+              "line2": 114,
+              "char2": 52
+            }
+          },
+          "count": 368
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 147,
+              "char1": 10,
+              "line2": 147,
+              "char2": 79
+            }
+          },
+          "count": 28
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 182,
+              "char1": 5,
+              "line2": 182,
+              "char2": 12
+            }
+          },
+          "count": 54
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 183,
+              "char1": 5,
+              "line2": 183,
+              "char2": 11
+            }
+          },
+          "count": 68
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 205,
+              "char1": 4,
+              "line2": 205,
+              "char2": 15
+            }
+          },
+          "count": 2
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 83,
+              "char1": 4,
+              "line2": 83,
+              "char2": 10
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 100,
+              "char1": 4,
+              "line2": 103,
+              "char2": 25
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 100,
+              "char1": 5,
+              "line2": 101,
+              "char2": 92
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 102,
+              "char1": 4,
+              "line2": 103,
+              "char2": 25
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 102,
+              "char1": 5,
+              "line2": 102,
+              "char2": 61
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 143,
+              "char1": 2,
+              "line2": 143,
+              "char2": 25
+            }
+          },
+          "count": 14
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 147,
+              "char1": 4,
+              "line2": 147,
+              "char2": 8
+            }
+          },
+          "count": 14
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 150,
+              "char1": 18,
+              "line2": 150,
+              "char2": 63
+            }
+          },
+          "count": 24
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 150,
+              "char1": 32,
+              "line2": 150,
+              "char2": 62
+            }
+          },
+          "count": 24
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 150,
+              "char1": 4,
+              "line2": 150,
+              "char2": 14
+            }
+          },
+          "count": 24
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 151,
+              "char1": 4,
+              "line2": 151,
+              "char2": 11
+            }
+          },
+          "count": 24
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 152,
+              "char1": 4,
+              "line2": 152,
+              "char2": 15
+            }
+          },
+          "count": 24
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 155,
+              "char1": 2,
+              "line2": 155,
+              "char2": 72
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 162,
+              "char1": 14,
+              "line2": 162,
+              "char2": 35
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 162,
+              "char1": 23,
+              "line2": 162,
+              "char2": 34
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 188,
+              "char1": 2,
+              "line2": 188,
+              "char2": 74
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 70,
+              "char1": 4,
+              "line2": 72,
+              "char2": 23
+            }
+          },
+          "count": 32
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 71,
+              "char1": 4,
+              "line2": 72,
+              "char2": 23
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 84,
+              "char1": 4,
+              "line2": 91,
+              "char2": 32
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 84,
+              "char1": 5,
+              "line2": 84,
+              "char2": 46
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 88,
+              "char1": 4,
+              "line2": 91,
+              "char2": 32
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 88,
+              "char1": 5,
+              "line2": 88,
+              "char2": 59
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 89,
+              "char1": 33,
+              "line2": 89,
+              "char2": 90
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 89,
+              "char1": 4,
+              "line2": 91,
+              "char2": 32
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 89,
+              "char1": 5,
+              "line2": 89,
+              "char2": 91
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 90,
+              "char1": 4,
+              "line2": 91,
+              "char2": 32
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 68,
+              "line1": 90,
+              "char1": 5,
+              "line2": 90,
+              "char2": 76
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 116,
+              "char1": 46,
+              "line2": 116,
+              "char2": 103
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 124,
+              "char1": 8,
+              "line2": 168,
+              "char2": 9
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 126,
+              "char1": 10,
+              "line2": 133,
+              "char2": 13
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 126,
+              "char1": 13,
+              "line2": 126,
+              "char2": 22
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 128,
+              "char1": 67,
+              "line2": 128,
+              "char2": 76
+            }
+          },
+          "count": 16
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 148,
+              "char1": 12,
+              "line2": 148,
+              "char2": 51
+            }
+          },
+          "count": 14
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 212,
+              "char1": 6,
+              "line2": 212,
+              "char2": 13
+            }
+          },
+          "count": 46
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 294,
+              "char1": 75,
+              "line2": 294,
+              "char2": 77
+            }
+          },
+          "count": 152
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 337,
+              "char1": 2,
+              "line2": 337,
+              "char2": 6
+            }
+          },
+          "count": 42
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 338,
+              "char1": 2,
+              "line2": 338,
+              "char2": 6
+            }
+          },
+          "count": 80
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 339,
+              "char1": 2,
+              "line2": 339,
+              "char2": 6
+            }
+          },
+          "count": 80
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 370,
+              "char1": 9,
+              "line2": 370,
+              "char2": 11
+            }
+          },
+          "count": 168
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 394,
+              "char1": 2,
+              "line2": 435,
+              "char2": 3
+            }
+          },
+          "count": 84
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 416,
+              "char1": 31,
+              "line2": 416,
+              "char2": 43
+            }
+          },
+          "count": 44
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 74,
+              "line1": 74,
+              "char1": 2,
+              "line2": 74,
+              "char2": 43
+            }
+          },
+          "count": 20
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 64,
+              "line1": 443,
+              "char1": 6,
+              "line2": 443,
+              "char2": 7
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 67,
+              "line1": 184,
+              "char1": 10,
+              "line2": 184,
+              "char2": 12
+            }
+          },
+          "count": 34
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 67,
+              "line1": 86,
+              "char1": 18,
+              "line2": 86,
+              "char2": 28
+            }
+          },
+          "count": 20
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 72,
+              "line1": 152,
+              "char1": 30,
+              "line2": 152,
+              "char2": 37
+            }
+          },
+          "count": 12
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 72,
+              "line1": 212,
+              "char1": 11,
+              "line2": 212,
+              "char2": 12
+            }
+          },
+          "count": 45
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 74,
+              "line1": 138,
+              "char1": 15,
+              "line2": 138,
+              "char2": 16
+            }
+          },
+          "count": 1
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": -1,
+              "line1": 11028,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 5
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 35,
+              "line1": 280,
+              "char1": 24,
+              "line2": 280,
+              "char2": 29
+            }
+          },
+          "count": 7
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 35,
+              "line1": 294,
+              "char1": 28,
+              "line2": 294,
+              "char2": 33
+            }
+          },
+          "count": 4
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 128,
+              "char1": 67,
+              "line2": 128,
+              "char2": 76
+            }
+          },
+          "count": 8
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 294,
+              "char1": 75,
+              "line2": 294,
+              "char2": 77
+            }
+          },
+          "count": 19
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 370,
+              "char1": 9,
+              "line2": 370,
+              "char2": 11
+            }
+          },
+          "count": 21
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 416,
+              "char1": 31,
+              "line2": 416,
+              "char2": 43
+            }
+          },
+          "count": 11
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 74,
+              "line1": 87,
+              "char1": 31,
+              "line2": 87,
+              "char2": 63
+            }
+          },
+          "count": 10
+        }
+      ],
+      "root_concretization": {
+        "regions": 0,
+        "checks": 0,
+        "seconds": 0
+      },
+      "probe_exit_checks": {
+        "Sat": 460
+      },
+      "first_deferred_query": {
+        "line_in_log": 407,
+        "kind": "region_deferred_exit",
+        "obligations": 0,
+        "blocked_queries": {
+          "range_proof": 1
+        },
+        "first_blocked_source": {
+          "file": 35,
+          "line1": 280,
+          "char1": 24,
+          "line2": 280,
+          "char2": 29
+        },
+        "verification_seconds": 0.0,
+        "verification_result": null
+      },
+      "probe_caps": {
+        "2": 314440
+      },
+      "first_invalid_enum_count": {
+        "line_in_log": 3695,
+        "kind": "symbolic_value_enumeration_summary",
+        "trigger": "periodic",
+        "calls": 7,
+        "completed": 6,
+        "solver_checks": 18446744073709551604,
+        "structural_candidates": 7,
+        "model_candidates": 0
+      },
+      "concrete_candidates": {
+        "created": 214,
+        "forks": 0,
+        "consumer_regions": 1466,
+        "rejected_consumers": 1
+      },
+      "path_timeout_sites": {
+        "pmpCheck:130": 53,
+        "phys_access_check:9": 6,
+        "matching_pma_bits_range:25": 2,
+        "phys_access_check:6": 2,
+        "pmaCheck:31": 2,
+        "pmaCheck:8": 2,
+        "pmpCheck:83": 2,
+        "phys_access_check:15": 1,
+        "matching_pma_bits_range:23": 1,
+        "phys_access_check:13": 1,
+        "phys_access_check:7": 1,
+        "phys_access_check:16": 1,
+        "pmaCheck:20": 1,
+        "pmaCheck:4": 1,
+        "bool_bit_backwards:9": 1,
+        "pmpCheck:81": 1,
+        "pt_walk:389": 1,
+        "translate_TLB_miss:131": 1
+      },
+      "path_timeout_first_lines": {
+        "phys_access_check:15": 122325,
+        "matching_pma_bits_range:25": 122960,
+        "matching_pma_bits_range:23": 122993,
+        "phys_access_check:13": 123458,
+        "phys_access_check:9": 123680,
+        "phys_access_check:6": 123712,
+        "pmpCheck:130": 125136,
+        "phys_access_check:7": 125312,
+        "phys_access_check:16": 126775,
+        "pmaCheck:31": 248562,
+        "pmaCheck:20": 248601,
+        "pmaCheck:8": 313358,
+        "pmaCheck:4": 313834,
+        "bool_bit_backwards:9": 320010,
+        "pmpCheck:83": 326731,
+        "pmpCheck:81": 326753,
+        "pt_walk:389": 326966,
+        "translate_TLB_miss:131": 327146
+      },
+      "execution_errors": {
+        "Timeout(Timeout)[0:0 - 0:0]": 73
+      },
+      "error_terminals": {
+        "certification=checked source=pmp/pmp_control.sail 77:6 - 77:80 error=Assertion failure": {
+          "first_line": 1946,
+          "count": 5024
+        }
+      },
+      "oom_lines": [],
+      "cache_stage_lines": [],
+      "slow_check_thresholds": {
+        "60": 1295,
+        "300": 10,
+        "600": 0,
+        "900": 0
+      }
+    },
+    "nosmt_long3_enum": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 7348,
+      "completed": 7321,
+      "solver_checks": 0,
+      "structural_candidates": 4478,
+      "model_candidates": 0
+    },
+    "z3_positions": [
+      {
+        "location": "pmp/pmp_control.sail:77:6",
+        "file": 46,
+        "line": 77,
+        "column": 6,
+        "count": 5107,
+        "seconds": 190275.85395224259,
+        "max_seconds": 408.662779924
+      },
+      {
+        "location": "sys/mem.sail:181:5",
+        "file": 67,
+        "line": 181,
+        "column": 5,
+        "count": 40,
+        "seconds": 2352.9883459309995,
+        "max_seconds": 375.788504116
+      },
+      {
+        "location": "sys/mem.sail:182:5",
+        "file": 67,
+        "line": 182,
+        "column": 5,
+        "count": 72,
+        "seconds": 1424.1257781140002,
+        "max_seconds": 228.402041233
+      },
+      {
+        "location": "sys/mem.sail:181:13",
+        "file": 67,
+        "line": 181,
+        "column": 13,
+        "count": 14,
+        "seconds": 1423.544543706,
+        "max_seconds": 366.730148325
+      },
+      {
+        "location": "sys/pma.sail:112:6",
+        "file": 66,
+        "line": 112,
+        "column": 6,
+        "count": 24,
+        "seconds": 1326.82593708,
+        "max_seconds": 294.013134652
+      },
+      {
+        "location": "core/range_util.sail:22:2",
+        "file": 25,
+        "line": 22,
+        "column": 2,
+        "count": 18,
+        "seconds": 1110.4441058199998,
+        "max_seconds": 105.816438822
+      },
+      {
+        "location": "sys/mem.sail:182:10",
+        "file": 67,
+        "line": 182,
+        "column": 10,
+        "count": 22,
+        "seconds": 1055.072252463,
+        "max_seconds": 286.658764479
+      },
+      {
+        "location": "sys/vmem.sail:123:31",
+        "file": 72,
+        "line": 123,
+        "column": 31,
+        "count": 16,
+        "seconds": 764.6530272,
+        "max_seconds": 191.170879151
+      },
+      {
+        "location": "sys/vmem_pte.sail:83:4",
+        "file": 68,
+        "line": 83,
+        "column": 4,
+        "count": 16,
+        "seconds": 676.9618924519999,
+        "max_seconds": 217.646389536
+      },
+      {
+        "location": "IR file -1:0:0",
+        "file": -1,
+        "line": 0,
+        "column": 0,
+        "count": 76,
+        "seconds": 670.9549421520003,
+        "max_seconds": 235.041777935
+      },
+      {
+        "location": "sys/platform.sail:30:4",
+        "file": 65,
+        "line": 30,
+        "column": 4,
+        "count": 20,
+        "seconds": 653.173111889,
+        "max_seconds": 95.468880783
+      },
+      {
+        "location": "sys/mem.sail:83:4",
+        "file": 67,
+        "line": 83,
+        "column": 4,
+        "count": 24,
+        "seconds": 497.38476626,
+        "max_seconds": 113.497281998
+      },
+      {
+        "location": "IR file -1:1067:0",
+        "file": -1,
+        "line": 1067,
+        "column": 0,
+        "count": 27,
+        "seconds": 493.17404389300003,
+        "max_seconds": 213.399785027
+      },
+      {
+        "location": "sys/vmem.sail:140:17",
+        "file": 72,
+        "line": 140,
+        "column": 17,
+        "count": 22,
+        "seconds": 467.0011609769999,
+        "max_seconds": 122.368179172
+      },
+      {
+        "location": "sys/vmem.sail:148:30",
+        "file": 72,
+        "line": 148,
+        "column": 30,
+        "count": 10,
+        "seconds": 366.045781429,
+        "max_seconds": 121.379563914
+      },
+      {
+        "location": "sys/sys_control.sail:442:5",
+        "file": 64,
+        "line": 442,
+        "column": 5,
+        "count": 8,
+        "seconds": 290.141526899,
+        "max_seconds": 112.847422649
+      },
+      {
+        "location": "sys/vmem.sail:309:10",
+        "file": 72,
+        "line": 309,
+        "column": 10,
+        "count": 5,
+        "seconds": 241.36271512300004,
+        "max_seconds": 98.655820352
+      },
+      {
+        "location": "sys/vmem_utils.sail:89:11",
+        "file": 74,
+        "line": 89,
+        "column": 11,
+        "count": 5,
+        "seconds": 200.02588924,
+        "max_seconds": 64.347207923
+      },
+      {
+        "location": "sys/mem.sail:183:5",
+        "file": 67,
+        "line": 183,
+        "column": 5,
+        "count": 62,
+        "seconds": 198.96303439999997,
+        "max_seconds": 56.82472402
+      },
+      {
+        "location": "pmp/pmp_control.sail:123:6",
+        "file": 46,
+        "line": 123,
+        "column": 6,
+        "count": 188,
+        "seconds": 190.09459326000007,
+        "max_seconds": 17.775067818
+      }
+    ],
+    "exit_progress": {
+      "time": "2026-11-20T03:47:26+0800",
+      "clause": "LOAD",
+      "event": "exit_last_live_rss",
+      "elapsed_s": "7207.09",
+      "rss_kib": "30590988",
+      "root_success": "608",
+      "regions_in_flight": "26",
+      "regions_finished": "147313",
+      "terminal_candidates": "5112",
+      "queued": "10",
+      "active": "32",
+      "region_snapshot_age_s": "6.01",
+      "region_snapshot_trigger": "signal",
+      "uncertified_terminals": "0",
+      "resident_paths": "5112",
+      "root_rejections": "{\"solver_unknown\":205,\"timeout\":7}",
+      "all_rejections": "{\"solver_unknown\":324,\"timeout\":7}",
+      "isla_head": "f61bd2dc",
+      "load1": "83.70",
+      "host_available_kib": "193468996",
+      "checked_terminals": "5112",
+      "normal_terminals": "88",
+      "rejection_top10_by_label": "{\"solver_unknown\":[{\"count\":45,\"site\":{\"origin\":{\"function\":\"translationMode\",\"function_id\":4779,\"pc\":56},\"outcome\":\"solver_unknown\"}},{\"count\":34,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":15},\"outcome\":\"solver_unknown\"}},{\"count\":27,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":9},\"outcome\":\"solver_unknown\"}},{\"count\":23,\"site\":{\"origin\":{\"function\":\"translationMode\",\"function_id\":4779,\"pc\":2},\"outcome\":\"solver_unknown\"}},{\"count\":21,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":5},\"outcome\":\"solver_unknown\"}},{\"count\":21,\"site\":{\"origin\":{\"function\":\"translateAddrWithPBMT\",\"function_id\":4789,\"pc\":13},\"outcome\":\"solver_unknown\"}},{\"count\":20,\"site\":{\"origin\":{\"function\":\"pmaCheck\",\"function_id\":4586,\"pc\":3},\"outcome\":\"solver_unknown\"}},{\"count\":19,\"site\":{\"origin\":{\"function\":\"translate_TLB_miss\",\"function_id\":4783,\"pc\":34},\"outcome\":\"solver_unknown\"}},{\"count\":16,\"site\":{\"origin\":{\"function\":\"pt_walk\",\"function_id\":4704,\"pc\":236},\"outcome\":\"solver_unknown\"}},{\"count\":12,\"site\":{\"origin\":{\"function\":\"pt_walk\",\"function_id\":4704,\"pc\":386},\"outcome\":\"solver_unknown\"}}],\"timeout\":[{\"count\":2,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":5},\"outcome\":\"timeout\"}},{\"count\":1,\"site\":{\"origin\":{\"function\":\"matching_pma_bits_range\",\"function_id\":4565,\"pc\":22},\"outcome\":\"timeout\"}},{\"count\":1,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":6},\"outcome\":\"timeout\"}},{\"count\":1,\"site\":{\"origin\":{\"function\":\"pmaCheck\",\"function_id\":4586,\"pc\":19},\"outcome\":\"timeout\"}},{\"count\":1,\"site\":{\"origin\":{\"function\":\"pmaCheck\",\"function_id\":4586,\"pc\":3},\"outcome\":\"timeout\"}},{\"count\":1,\"site\":{\"origin\":{\"function\":\"pmpCheck\",\"function_id\":3905,\"pc\":80},\"outcome\":\"timeout\"}}]}",
+      "z3_checks": "8991",
+      "z3_seconds": "207498.303074613",
+      "z3_p50_seconds": "2.397655828",
+      "z3_p95_seconds": "117.720364087",
+      "z3_max_seconds": "408.662779924",
+      "z3_sample_count": "8991",
+      "z3_check_timeouts_observed": "0",
+      "z3_model_eval_timeouts_observed": "0",
+      "z3_trace_capped": "False",
+      "model_eval_calls": "3822",
+      "enum_calls": "42",
+      "enum_completed": "42",
+      "enum_z3_checks": "18446744073709551534",
+      "enum_structural_candidates": "40",
+      "enum_model_candidates": "2",
+      "enum_z3_seconds": "NA",
+      "smt_error_causes": "{}",
+      "solver_active_samples": "32",
+      "solver_container_bytes": "189734748",
+      "z3_live_contexts": "33",
+      "z3_estimated_alloc_bytes": "8116539676",
+      "queue_snapshot_age_s": "16.31",
+      "z3_native_snapshot_age_s": "7.800547162",
+      "z3_native_pending_checks": "31",
+      "z3_native_checks": "8991",
+      "z3_stack_depth_limit_checks": "0",
+      "enum_z3_checks_observed": "62",
+      "enum_z3_seconds_observed": "12.081935891",
+      "candidate_z3_checks_observed": "502",
+      "candidate_z3_seconds_observed": "567.355719246",
+      "enum_candidate_overlap_checks": "19",
+      "enum_candidate_overlap_seconds": "2.980609529",
+      "solver_path_drops": "{}",
+      "path_timeout_log_lines": "80",
+      "execution_error_log_lines": "73",
+      "panic_log_lines": "0",
+      "execution_error_terminals": "5024",
+      "sail_exception_terminals": "0"
+    },
+    "nosmt_long3_exit": {
+      "time": "2026-11-19T19:48:08+0800",
+      "clause": "LOAD",
+      "event": "exit_last_live_rss",
+      "elapsed_s": "7203.01",
+      "rss_kib": "11141848",
+      "root_success": "5288",
+      "regions_in_flight": "99",
+      "regions_finished": "401914",
+      "terminal_candidates": "518",
+      "queued": "765",
+      "active": "32",
+      "region_snapshot_age_s": "2.01",
+      "region_snapshot_trigger": "signal",
+      "uncertified_terminals": "518",
+      "resident_paths": "518",
+      "root_rejections": "{\"incompatible_state\":133,\"smt_error\":1021,\"union_payload\":170}",
+      "all_rejections": "{\"incompatible_state\":702,\"smt_error\":2063,\"union_payload\":3830}",
+      "isla_head": "4e0ad168"
+    }
+  },
+  "STORE": {
+    "run_log": {
+      "enum": {
+        "kind": "symbolic_value_enumeration_summary",
+        "trigger": "signal",
+        "calls": 56,
+        "completed": 56,
+        "solver_checks": 18446744073709551504,
+        "structural_candidates": 56,
+        "model_candidates": 0
+      },
+      "slow_checks": [
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 234.159965356,
+          "timed_out": false,
+          "line_in_log": 124675,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 228.012905112,
+          "timed_out": false,
+          "line_in_log": 124671,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 203.538896843,
+          "timed_out": false,
+          "line_in_log": 124573,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 187.428544099,
+          "timed_out": false,
+          "line_in_log": 124041,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 180.400643834,
+          "timed_out": false,
+          "line_in_log": 310073,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 180.246929981,
+          "timed_out": false,
+          "line_in_log": 122765,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 179.957937035,
+          "timed_out": false,
+          "line_in_log": 319402,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 178.892553697,
+          "timed_out": false,
+          "line_in_log": 124037,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 177.582363587,
+          "timed_out": false,
+          "line_in_log": 249474,
+          "location": "pmp/pmp_control.sail:77:6"
+        },
+        {
+          "operation": "CheckSatAssuming",
+          "source_loc": {
+            "file": 46,
+            "line1": 77,
+            "char1": 6,
+            "line2": 77,
+            "char2": 80
+          },
+          "wall_seconds": 176.560106073,
+          "timed_out": false,
+          "line_in_log": 168812,
+          "location": "pmp/pmp_control.sail:77:6"
+        }
+      ],
+      "solver_drops": [],
+      "error_samples": [
+        [
+          127989,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          128118,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          128493,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          128530,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          128678,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          128815,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          128843,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          129017,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          129740,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          129876,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          130101,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          130317,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          130358,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          130408,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ],
+        [
+          130444,
+          "[SYM_EXEC]: 执行错误: Timeout(Timeout)[0:0 - 0:0]"
+        ]
+      ],
+      "smt_reject_causes": {},
+      "deferred_queries": [
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 1296,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 168
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 1320,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 168
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 5693,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 14112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 5700,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": -1,
+              "line1": 5707,
+              "char1": 0,
+              "line2": 0,
+              "char2": 0
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 25,
+              "line1": 22,
+              "char1": 2,
+              "line2": 22,
+              "char2": 60
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 25,
+              "line1": 22,
+              "char1": 23,
+              "line2": 22,
+              "char2": 60
+            }
+          },
+          "count": 56
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 30,
+              "line1": 373,
+              "char1": 2,
+              "line2": 380,
+              "char2": 3
+            }
+          },
+          "count": 392
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 45,
+              "line1": 75,
+              "char1": 2,
+              "line2": 89,
+              "char2": 3
+            }
+          },
+          "count": 56672
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 123,
+              "char1": 6,
+              "line2": 123,
+              "char2": 17
+            }
+          },
+          "count": 14112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 124,
+              "char1": 6,
+              "line2": 124,
+              "char2": 22
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 126,
+              "char1": 11,
+              "line2": 126,
+              "char2": 77
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 126,
+              "char1": 39,
+              "line2": 126,
+              "char2": 76
+            }
+          },
+          "count": 7168
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 126,
+              "char1": 8,
+              "line2": 128,
+              "char2": 52
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 132,
+              "char1": 2,
+              "line2": 132,
+              "char2": 77
+            }
+          },
+          "count": 112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 50,
+              "char1": 10,
+              "line2": 50,
+              "char2": 50
+            }
+          },
+          "count": 28672
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 50,
+              "char1": 2,
+              "line2": 54,
+              "char2": 26
+            }
+          },
+          "count": 28672
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 52,
+              "char1": 10,
+              "line2": 52,
+              "char2": 50
+            }
+          },
+          "count": 28672
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 52,
+              "char1": 7,
+              "line2": 54,
+              "char2": 26
+            }
+          },
+          "count": 28672
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 66,
+              "char1": 4,
+              "line2": 66,
+              "char2": 7
+            }
+          },
+          "count": 14112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 67,
+              "char1": 4,
+              "line2": 67,
+              "char2": 7
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 71,
+              "char1": 6,
+              "line2": 73,
+              "char2": 88
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 46,
+              "line1": 75,
+              "char1": 4,
+              "line2": 75,
+              "char2": 7
+            }
+          },
+          "count": 14336
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 66,
+              "line1": 112,
+              "char1": 6,
+              "line2": 114,
+              "char2": 52
+            }
+          },
+          "count": 48
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 182,
+              "char1": 5,
+              "line2": 182,
+              "char2": 12
+            }
+          },
+          "count": 4
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 67,
+              "line1": 183,
+              "char1": 5,
+              "line2": 183,
+              "char2": 11
+            }
+          },
+          "count": 4
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 212,
+              "char1": 6,
+              "line2": 212,
+              "char2": 13
+            }
+          },
+          "count": 56
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 294,
+              "char1": 75,
+              "line2": 294,
+              "char2": 77
+            }
+          },
+          "count": 224
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 337,
+              "char1": 2,
+              "line2": 337,
+              "char2": 6
+            }
+          },
+          "count": 56
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 338,
+              "char1": 2,
+              "line2": 338,
+              "char2": 6
+            }
+          },
+          "count": 112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 339,
+              "char1": 2,
+              "line2": 339,
+              "char2": 6
+            }
+          },
+          "count": 112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 370,
+              "char1": 9,
+              "line2": 370,
+              "char2": 11
+            }
+          },
+          "count": 224
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 394,
+              "char1": 2,
+              "line2": 435,
+              "char2": 3
+            }
+          },
+          "count": 112
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 72,
+              "line1": 416,
+              "char1": 31,
+              "line2": 416,
+              "char2": 43
+            }
+          },
+          "count": 56
+        },
+        {
+          "key": {
+            "purpose": "branch_feasibility",
+            "location": {
+              "file": 74,
+              "line1": 74,
+              "char1": 2,
+              "line2": 74,
+              "char2": 43
+            }
+          },
+          "count": 24
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 67,
+              "line1": 184,
+              "char1": 10,
+              "line2": 184,
+              "char2": 12
+            }
+          },
+          "count": 2
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 67,
+              "line1": 86,
+              "char1": 18,
+              "line2": 86,
+              "char2": 28
+            }
+          },
+          "count": 3
+        },
+        {
+          "key": {
+            "purpose": "general",
+            "location": {
+              "file": 72,
+              "line1": 212,
+              "char1": 11,
+              "line2": 212,
+              "char2": 12
+            }
+          },
+          "count": 56
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 35,
+              "line1": 280,
+              "char1": 24,
+              "line2": 280,
+              "char2": 29
+            }
+          },
+          "count": 12
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 294,
+              "char1": 75,
+              "line2": 294,
+              "char2": 77
+            }
+          },
+          "count": 28
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 370,
+              "char1": 9,
+              "line2": 370,
+              "char2": 11
+            }
+          },
+          "count": 28
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 72,
+              "line1": 416,
+              "char1": 31,
+              "line2": 416,
+              "char2": 43
+            }
+          },
+          "count": 14
+        },
+        {
+          "key": {
+            "purpose": "range_proof",
+            "location": {
+              "file": 74,
+              "line1": 87,
+              "char1": 31,
+              "line2": 87,
+              "char2": 63
+            }
+          },
+          "count": 12
+        }
+      ],
+      "root_concretization": {
+        "regions": 0,
+        "checks": 0,
+        "seconds": 0
+      },
+      "probe_exit_checks": {
+        "Sat": 458
+      },
+      "first_deferred_query": {
+        "line_in_log": 341,
+        "kind": "region_deferred_exit",
+        "obligations": 0,
+        "blocked_queries": {
+          "range_proof": 1
+        },
+        "first_blocked_source": {
+          "file": 35,
+          "line1": 280,
+          "char1": 24,
+          "line2": 280,
+          "char2": 29
+        },
+        "verification_seconds": 0.0,
+        "verification_result": null
+      },
+      "probe_caps": {
+        "2": 301437
+      },
+      "first_invalid_enum_count": {
+        "line_in_log": 11356,
+        "kind": "symbolic_value_enumeration_summary",
+        "trigger": "periodic",
+        "calls": 4,
+        "completed": 4,
+        "solver_checks": 18446744073709551608,
+        "structural_candidates": 4,
+        "model_candidates": 0
+      },
+      "concrete_candidates": {
+        "created": 308,
+        "forks": 0,
+        "consumer_regions": 2016,
+        "rejected_consumers": 0
+      },
+      "path_timeout_sites": {
+        "pmpCheck:130": 92,
+        "phys_access_check:9": 8,
+        "phys_access_check:6": 4,
+        "within_clint:16": 2,
+        "matching_pma_bits_range:25": 2,
+        "phys_access_check:10": 1,
+        "matching_pma_bits_range:23": 1
+      },
+      "path_timeout_first_lines": {
+        "pmpCheck:130": 127985,
+        "phys_access_check:10": 248510,
+        "within_clint:16": 249195,
+        "matching_pma_bits_range:25": 251255,
+        "matching_pma_bits_range:23": 251328,
+        "phys_access_check:9": 267857,
+        "phys_access_check:6": 267918
+      },
+      "execution_errors": {
+        "Timeout(Timeout)[0:0 - 0:0]": 105
+      },
+      "error_terminals": {
+        "certification=checked source=pmp/pmp_control.sail 77:6 - 77:80 error=Assertion failure": {
+          "first_line": 6733,
+          "count": 7102
+        }
+      },
+      "oom_lines": [],
+      "cache_stage_lines": [],
+      "slow_check_thresholds": {
+        "60": 1114,
+        "300": 0,
+        "600": 0,
+        "900": 0
+      }
+    },
+    "nosmt_long3_enum": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "final",
+      "calls": 1192,
+      "completed": 1192,
+      "solver_checks": 0,
+      "structural_candidates": 648,
+      "model_candidates": 0
+    },
+    "z3_positions": [
+      {
+        "location": "pmp/pmp_control.sail:77:6",
+        "file": 46,
+        "line": 77,
+        "column": 6,
+        "count": 7102,
+        "seconds": 194870.90601410784,
+        "max_seconds": 234.159965356
+      },
+      {
+        "location": "sys/mem.sail:181:5",
+        "file": 67,
+        "line": 181,
+        "column": 5,
+        "count": 12,
+        "seconds": 308.2431855159999,
+        "max_seconds": 106.18502344
+      },
+      {
+        "location": "core/range_util.sail:22:2",
+        "file": 25,
+        "line": 22,
+        "column": 2,
+        "count": 4,
+        "seconds": 292.180158712,
+        "max_seconds": 170.587171568
+      },
+      {
+        "location": "sys/pma.sail:112:6",
+        "file": 66,
+        "line": 112,
+        "column": 6,
+        "count": 6,
+        "seconds": 276.95127053399995,
+        "max_seconds": 81.062933827
+      },
+      {
+        "location": "sys/vmem_utils.sail:226:21",
+        "file": 74,
+        "line": 226,
+        "column": 21,
+        "count": 16,
+        "seconds": 206.378531337,
+        "max_seconds": 39.630608608
+      },
+      {
+        "location": "sys/vmem_utils.sail:228:28",
+        "file": 74,
+        "line": 228,
+        "column": 28,
+        "count": 12,
+        "seconds": 179.496229132,
+        "max_seconds": 26.941572423
+      },
+      {
+        "location": "sys/vmem_utils.sail:89:11",
+        "file": 74,
+        "line": 89,
+        "column": 11,
+        "count": 8,
+        "seconds": 169.218058092,
+        "max_seconds": 39.236368193
+      },
+      {
+        "location": "pmp/pmp_control.sail:123:6",
+        "file": 46,
+        "line": 123,
+        "column": 6,
+        "count": 224,
+        "seconds": 117.80939047900004,
+        "max_seconds": 11.939305421
+      },
+      {
+        "location": "sys/platform.sail:30:4",
+        "file": 65,
+        "line": 30,
+        "column": 4,
+        "count": 4,
+        "seconds": 112.790529402,
+        "max_seconds": 66.878772685
+      },
+      {
+        "location": "sys/mem.sail:45:2",
+        "file": 67,
+        "line": 45,
+        "column": 2,
+        "count": 56,
+        "seconds": 104.72320194699999,
+        "max_seconds": 15.70396559
+      },
+      {
+        "location": "sys/vmem_utils.sail:87:27",
+        "file": 74,
+        "line": 87,
+        "column": 27,
+        "count": 24,
+        "seconds": 89.699520567,
+        "max_seconds": 18.361326934
+      },
+      {
+        "location": "sys/vmem_utils.sail:262:36",
+        "file": 74,
+        "line": 262,
+        "column": 36,
+        "count": 32,
+        "seconds": 58.640646772000004,
+        "max_seconds": 8.409543179
+      },
+      {
+        "location": "sys/vmem.sail:403:5",
+        "file": 72,
+        "line": 403,
+        "column": 5,
+        "count": 28,
+        "seconds": 53.31830122599998,
+        "max_seconds": 15.709839067
+      },
+      {
+        "location": "sys/vmem_utils.sail:262:35",
+        "file": 74,
+        "line": 262,
+        "column": 35,
+        "count": 32,
+        "seconds": 52.37840799299999,
+        "max_seconds": 9.195810589
+      },
+      {
+        "location": "sys/mem.sail:83:4",
+        "file": 67,
+        "line": 83,
+        "column": 4,
+        "count": 6,
+        "seconds": 51.677018081,
+        "max_seconds": 15.175398553
+      },
+      {
+        "location": "sys/vmem.sail:402:30",
+        "file": 72,
+        "line": 402,
+        "column": 30,
+        "count": 28,
+        "seconds": 51.03504596000001,
+        "max_seconds": 10.921086733
+      },
+      {
+        "location": "sys/vmem.sail:294:75",
+        "file": 72,
+        "line": 294,
+        "column": 75,
+        "count": 168,
+        "seconds": 41.08170206099995,
+        "max_seconds": 2.646406711
+      },
+      {
+        "location": "sys/vmem.sail:416:31",
+        "file": 72,
+        "line": 416,
+        "column": 31,
+        "count": 83,
+        "seconds": 39.35338196199998,
+        "max_seconds": 7.153145667
+      },
+      {
+        "location": "sys/vmem.sail:337:2",
+        "file": 72,
+        "line": 337,
+        "column": 2,
+        "count": 56,
+        "seconds": 31.131166443,
+        "max_seconds": 7.976973732
+      },
+      {
+        "location": "sys/vmem.sail:370:9",
+        "file": 72,
+        "line": 370,
+        "column": 9,
+        "count": 56,
+        "seconds": 26.691028642000006,
+        "max_seconds": 6.075161737
+      }
+    ],
+    "exit_progress": {
+      "time": "2026-11-20T03:47:24+0800",
+      "clause": "STORE",
+      "event": "exit_last_live_rss",
+      "elapsed_s": "7205.06",
+      "rss_kib": "29117772",
+      "root_success": "619",
+      "regions_in_flight": "16",
+      "regions_finished": "162179",
+      "terminal_candidates": "7117",
+      "queued": "0",
+      "active": "16",
+      "region_snapshot_age_s": "4.00",
+      "region_snapshot_trigger": "signal",
+      "uncertified_terminals": "0",
+      "resident_paths": "7117",
+      "root_rejections": "{\"solver_unknown\":155,\"timeout\":5}",
+      "all_rejections": "{\"solver_unknown\":187,\"timeout\":5}",
+      "isla_head": "f61bd2dc",
+      "load1": "87.33",
+      "host_available_kib": "186176648",
+      "checked_terminals": "7117",
+      "normal_terminals": "15",
+      "rejection_top10_by_label": "{\"solver_unknown\":[{\"count\":56,\"site\":{\"origin\":{\"function\":\"translationMode\",\"function_id\":4779,\"pc\":56},\"outcome\":\"solver_unknown\"}},{\"count\":28,\"site\":{\"origin\":{\"function\":\"translateAddrWithPBMT\",\"function_id\":4789,\"pc\":13},\"outcome\":\"solver_unknown\"}},{\"count\":28,\"site\":{\"origin\":{\"function\":\"translate_TLB_miss\",\"function_id\":4783,\"pc\":34},\"outcome\":\"solver_unknown\"}},{\"count\":28,\"site\":{\"origin\":{\"function\":\"translationMode\",\"function_id\":4779,\"pc\":2},\"outcome\":\"solver_unknown\"}},{\"count\":14,\"site\":{\"origin\":{\"function\":\"translateAddrWithPBMT\",\"function_id\":4789,\"pc\":104},\"outcome\":\"solver_unknown\"}},{\"count\":12,\"site\":{\"origin\":{\"function\":\"get_X\",\"function_id\":3370,\"pc\":16},\"outcome\":\"solver_unknown\"}},{\"count\":12,\"site\":{\"origin\":{\"function\":\"split_misaligned\",\"function_id\":4819,\"pc\":11},\"outcome\":\"solver_unknown\"}},{\"count\":3,\"site\":{\"origin\":{\"function\":\"pmaCheck\",\"function_id\":4586,\"pc\":3},\"outcome\":\"solver_unknown\"}},{\"count\":2,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":15},\"outcome\":\"solver_unknown\"}},{\"count\":2,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":5},\"outcome\":\"solver_unknown\"}}],\"timeout\":[{\"count\":4,\"site\":{\"origin\":{\"function\":\"phys_access_check\",\"function_id\":4591,\"pc\":5},\"outcome\":\"timeout\"}},{\"count\":1,\"site\":{\"origin\":{\"function\":\"matching_pma_bits_range\",\"function_id\":4565,\"pc\":22},\"outcome\":\"timeout\"}}]}",
+      "z3_checks": "11066",
+      "z3_seconds": "197567.372531781",
+      "z3_p50_seconds": "2.5045707865",
+      "z3_p95_seconds": "82.49328231",
+      "z3_max_seconds": "234.159965356",
+      "z3_sample_count": "11066",
+      "z3_check_timeouts_observed": "0",
+      "z3_model_eval_timeouts_observed": "0",
+      "z3_trace_capped": "False",
+      "model_eval_calls": "4138",
+      "enum_calls": "56",
+      "enum_completed": "56",
+      "enum_z3_checks": "18446744073709551504",
+      "enum_structural_candidates": "56",
+      "enum_model_candidates": "0",
+      "enum_z3_seconds": "NA",
+      "smt_error_causes": "{}",
+      "solver_active_samples": "16",
+      "solver_container_bytes": "122630624",
+      "z3_live_contexts": "17",
+      "z3_estimated_alloc_bytes": "2137203920",
+      "queue_snapshot_age_s": "10.11",
+      "z3_native_snapshot_age_s": "5.821472611",
+      "z3_native_pending_checks": "16",
+      "z3_native_checks": "11066",
+      "z3_stack_depth_limit_checks": "0",
+      "enum_z3_checks_observed": "81",
+      "enum_z3_seconds_observed": "9.638450396",
+      "candidate_z3_checks_observed": "671",
+      "candidate_z3_seconds_observed": "54.56499013",
+      "enum_candidate_overlap_checks": "28",
+      "enum_candidate_overlap_seconds": "2.878512627",
+      "solver_path_drops": "{}",
+      "path_timeout_log_lines": "110",
+      "execution_error_log_lines": "105",
+      "panic_log_lines": "0",
+      "execution_error_terminals": "7102",
+      "sail_exception_terminals": "0"
+    },
+    "nosmt_long3_exit": {
+      "time": "2026-11-19T17:49:51+0800",
+      "clause": "STORE",
+      "event": "exit_last_live_rss",
+      "elapsed_s": "105.42",
+      "rss_kib": "2068804",
+      "root_success": "1072",
+      "regions_in_flight": "0",
+      "regions_finished": "10588",
+      "terminal_candidates": "140",
+      "queued": "0",
+      "active": "0",
+      "region_snapshot_age_s": "0.00",
+      "region_snapshot_trigger": "final",
+      "uncertified_terminals": "140",
+      "resident_paths": "0",
+      "root_rejections": "{\"incompatible_state\":48,\"smt_error\":124,\"state_effect\":8}",
+      "all_rejections": "{\"incompatible_state\":76,\"smt_error\":176,\"state_effect\":12}",
+      "isla_head": "4e0ad168"
+    }
+  }
+}

@@ -1,0 +1,233 @@
+# T1 全符号前态基础配置：香山 MinimalConfig，VLEN=128、ELEN=64。
+# 扩展相关字段保持符号；单条 clause 可通过 includes 加载本文件后覆盖。
+# PMP/PMA 参数使用当前 IR 的真实入口名，详见 fullsym-base-config.md。
+pc = "PC"
+zero_announce_exit = true
+default_sizeof = 4
+in_program_order = ["sail_barrier"]
+# 仅取消 Isla 的默认 CLINT 零内存区；Sail CLINT 由 plat_clint_* 保留。
+clint_enabled = false
+
+[[toolchain]]
+name = "default"
+assembler = "riscv64-linux-gnu-as -march=rv64imafdcv"
+objdump = "riscv64-linux-gnu-objdump"
+linker = "riscv64-linux-gnu-ld"
+nm = "riscv64-linux-gnu-nm"
+
+[mmu]
+page_table_base = "0x300000"
+page_size = "4096"
+s2_page_table_base = "0x300000"
+s2_page_size = "4096"
+
+[threads]
+base = "0x80100000"
+top = "0x80300000"
+stride = "0x10000"
+
+[symbolic_addrs]
+base = "0x80310000"
+top = "0x80410000"
+stride = "0x10"
+
+[registers.defaults]
+__isla_vector_gpr = true
+__isla_vector_vpr = true
+__isla_vector_fpr = true
+__isla_use_extra_ops = true
+# 平台身份与复位参数；PC、x1 及其他架构输入不固定。
+mvendorid = "0x0000086f"
+marchid = "0x0000000000000019"
+mimpid = "0x0000000000000000"
+mhartid = "0x0000000000000000"
+mconfigptr = "0x0000000000000000"
+pc_reset_address = "0x0000000010000000"
+
+[const_primops]
+sys_enable_writable_misa = false
+sys_enable_writable_fiom = false
+# config.json 的 memory.pmp.{count,usable_count,grain} 在当前 IR 中是这些 let。
+sys_pmp_count = "64 : %i64"
+sys_pmp_usable_count = "32 : %i64"
+sys_pmp_grain = "10 : %i64"
+# 当前 IR 没有这个旧原语；启用 PMP 的有效入口是上面非零 count。
+plat_enable_pmp = true
+plat_enable_dirty_update = false
+plat_enable_misaligned_access = true
+plat_clint_base = "0x0000000038000000"
+plat_clint_size = "0x0000000000010000"
+# 外部 reservation 判断也保持符号，避免固定成功。
+match_reservation = "undefined : %bool"
+cancel_reservation = "()"
+load_reservation = "()"
+
+# PMP 数组无模型初始化、无默认值，读取时自然创建符号值。
+# 不依赖当前被注释的 apply_symbolic_pmp_to_registers 钩子。
+[symbolic_registers]
+satp = "symbolic"
+mcountinhibit = "symbolic"
+mcyclecfg = "symbolic"
+minstretcfg = "symbolic"
+mtimecmp = "symbolic"
+stimecmp = "symbolic"
+# 覆盖 IR 中的具体初始化；不能只删 defaults 后仍继承模型的零初态。
+mseccfg = "symbolic"
+menvcfg = "symbolic"
+senvcfg = "symbolic"
+mstateen0 = "symbolic"
+mstateen1 = "symbolic"
+mstateen2 = "symbolic"
+mstateen3 = "symbolic"
+hstateen0 = "symbolic"
+hstateen1 = "symbolic"
+hstateen2 = "symbolic"
+hstateen3 = "symbolic"
+sstateen0 = "symbolic"
+sstateen1 = "symbolic"
+sstateen2 = "symbolic"
+sstateen3 = "symbolic"
+
+[symbolic_registers.misa]
+# [25:0] 扩展位不在 pin_mask 内；MXL=RV64，非扩展保留位清零。
+pin_mask = "0xfffffffffc000000"
+pin_value = "0x8000000000000000"
+
+[symbolic_registers.mstatus]
+# SXL[35:34]=10、UXL[33:32]=10；FS/VS、大小端等其余位不固定。
+pin_mask = "0x0000000f00000000"
+pin_value = "0x0000000a00000000"
+
+[symbolic_registers.cur_privilege]
+# 当前 Sail 不实现 H，禁止虚拟特权级；H 位也在下方明确关闭。
+allowed = ["Machine", "Supervisor", "User"]
+
+[constraints]
+initial = [
+    # 香山可用的单字母扩展中，Sail 不支持 H；其他未实现位保持关闭。
+    "= (bvand misa.bits #x0000000003cbeed0) #x0000000000000000",
+    # RV64I 的基础 I 位；其余受支持的扩展位允许启用或禁用。
+    "= ((_ extract 8 8) misa.bits) #b1",
+    # Sail：model/core/sys_regs.sail:159-166,237,259-266；MPP 为 U/S/M，保留 reset 的 0。
+    "or (= ((_ extract 12 11) mstatus.bits) #b00) (= ((_ extract 12 11) mstatus.bits) #b01) (= ((_ extract 12 11) mstatus.bits) #b11)",
+    # Sail：model/extensions/V/vext_regs.sail:317-334；vext_vset_insts.sail:95-133。
+    # 普通域：VLEN=128、ELEN=64，SEW<=LMUL*64，vl<=LMUL*128/SEW；vta/vma 保持自由。
+    # vill 域：vext_vset_insts.sail:52-62，仅 vill=1 且 vl=0，与普通域取并集。
+    """or
+      (and (bvule vtype.bits #x00000000000000ff) (or
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000000) (bvule vl #x0000000000000010))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000001) (bvule vl #x0000000000000020))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000002) (bvule vl #x0000000000000040))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000003) (bvule vl #x0000000000000080))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000005) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000006) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000007) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000008) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000009) (bvule vl #x0000000000000010))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000a) (bvule vl #x0000000000000020))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000b) (bvule vl #x0000000000000040))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000e) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000000f) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000010) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000011) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000012) (bvule vl #x0000000000000010))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000013) (bvule vl #x0000000000000020))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000017) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000018) (bvule vl #x0000000000000002))
+        (and (= (bvand vtype.bits #x000000000000003f) #x0000000000000019) (bvule vl #x0000000000000004))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000001a) (bvule vl #x0000000000000008))
+        (and (= (bvand vtype.bits #x000000000000003f) #x000000000000001b) (bvule vl #x0000000000000010))))
+      (and (= vtype.bits #x8000000000000000) (= vl #x0000000000000000))""",
+    # Sail：extensions/V/vext_regs.sail:410–413、422；sys/sys_control.sail:424。
+    # VLEN=128、vlen_exp=7，set_vstart 仅保留低7位；保留0..127全部可写值，允许vstart>=vl。
+    "bvule vstart #x000000000000007f",
+
+]
+
+# 香山 PMA 九段地图，全部为左闭右开。Sail 无独立 atomic 属性。
+# misaligned：香山可缓存 DRAM 的普通非对齐访问由硬件完成（no_fault）；PMA 不可缓存的设备区非对齐报
+# access fault（5/7），故这些段用 access_fault；空洞靠 R/W/X=false 报权限错误，保持 no_fault 以免 4/6 抢先。
+# 需要具有拆分前区域检查与 PBMT 传播的新 Sail IR；旧 IR 先拆分再检查，不能保证此策略生效。
+
+[[pma_regions]]
+name = "xiangshan_0"
+base = "0x0000000000000000"
+size = "0x0000000010000000"
+attr = "mmio"
+executable = false
+misaligned = "access_fault"
+
+[[pma_regions]]
+name = "xiangshan_1"
+base = "0x0000000010000000"
+size = "0x0000000010000000"
+attr = "mmio"
+executable = true
+misaligned = "access_fault"
+
+[[pma_regions]]
+name = "xiangshan_2"
+base = "0x0000000020000000"
+size = "0x0000000018020000"
+attr = "mmio"
+executable = false
+misaligned = "access_fault"
+
+[[pma_regions]]
+name = "xiangshan_3"
+base = "0x0000000038020000"
+size = "0x0000000000001000"
+attr = "mmio"
+executable = true
+misaligned = "access_fault"
+
+[[pma_regions]]
+name = "xiangshan_4"
+base = "0x0000000038021000"
+size = "0x0000000000fe1000"
+attr = "mmio"
+executable = false
+misaligned = "access_fault"
+
+[[pma_regions]]
+name = "xiangshan_5"
+base = "0x0000000039002000"
+size = "0x0000000000ffe000"
+attr = "hole"
+
+[[pma_regions]]
+name = "xiangshan_6"
+base = "0x000000003a000000"
+size = "0x0000000046000000"
+attr = "mmio"
+executable = false
+misaligned = "access_fault"
+
+[[pma_regions]]
+name = "xiangshan_7"
+base = "0x0000000080000000"
+size = "0x000007ff80000000"
+attr = "ram"
+misaligned = "no_fault"
+
+[[pma_regions]]
+name = "xiangshan_8"
+base = "0x0000080000000000"
+size = "0x0000f80000000000"
+attr = "hole"
+
+[execution_limits]
+filter_model_exceptions = ['Error_internal_error', 'Error_reserved_behavior']
+filter_match_failures = true
+
+[execution_limits.path_merge]
+step_budget = -1
+max_merge_depth = -1
+arm_error_leaf = true
+defer_exit_check = true
+lazy_z3_scope = true
+witness_eval = true
+[execution_limits.path_merge.diagnostics]
+progress = true
+probe_round_cost = false
+probe_query_timings = true

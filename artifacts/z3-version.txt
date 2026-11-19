@@ -1,0 +1,1 @@
+Z3 version 5.4.0 - 64 bit - build hashcode d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f
