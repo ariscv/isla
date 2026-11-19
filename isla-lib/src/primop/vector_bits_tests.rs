@@ -143,19 +143,22 @@ fn vector_bits_prefix_symbolic_old_integer_invariant_and_mask() -> Result<(), Ex
             for i in 0..n {
                 let expected =
                     if width == 128 { Exp::Var(sum) } else { Exp::Extract(width - 1, 0, Box::new(Exp::Var(sum))) };
+                let actual = smt_value(&result[i as usize], info)?;
+                // 逐位置证明前缀及其上界。已证明的前缀作为下一位置的归纳前提。
+                let invariant = Exp::And(
+                    Box::new(Exp::Eq(Box::new(actual.clone()), Box::new(expected.clone()))),
+                    Box::new(Exp::Bvule(Box::new(Exp::Var(sum)), Box::new(smt_u64_width(i.into(), 128)))),
+                );
                 let cond =
                     Exp::Eq(Box::new(Exp::Extract(i, i, Box::new(Exp::Var(mask)))), Box::new(smt_u64_width(1, 1)));
-                let actual = Exp::Ite(
-                    Box::new(cond.clone()),
-                    Box::new(smt_value(&result[i as usize], info)?),
-                    Box::new(Exp::Var(old)),
-                );
+                let actual = Exp::Ite(Box::new(cond.clone()), Box::new(actual), Box::new(Exp::Var(old)));
                 let expected = Exp::Ite(Box::new(cond.clone()), Box::new(expected), Box::new(Exp::Var(old)));
-                assert_eq!(
-                    solver.check_sat_with(&Exp::Neq(Box::new(actual), Box::new(expected)), info),
-                    SmtResult::Unsat,
-                    "N={n},M={width},i={i}"
+                let counterexample = Exp::Or(
+                    Box::new(Exp::Not(Box::new(invariant.clone()))),
+                    Box::new(Exp::Neq(Box::new(actual), Box::new(expected))),
                 );
+                assert_eq!(solver.check_sat_with(&counterexample, info), SmtResult::Unsat, "N={n},M={width},i={i}");
+                solver.assert(invariant);
                 // 原Sail在活动位置、源位为1时才增加128位整数sum。
                 let bit = Exp::Bvand(
                     Box::new(Exp::Extract(i, i, Box::new(Exp::Var(source)))),
