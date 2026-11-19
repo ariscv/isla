@@ -328,8 +328,8 @@ impl<B: BV> Solver<'_, B> {
         let mut bool_atoms = Vec::new();
         let mut bool_literals = HashMap::new();
         for sym in prefix.bool_symbols() {
-            let atom = &self.decls[&sym];
-            let negative = Ast::mk_not(atom);
+            let atom = self.decls[&sym].ast();
+            let negative = Ast::mk_not(&atom);
             bool_literals.insert(atom.z3_ast, (sym, true));
             bool_literals.insert(negative.z3_ast, (sym, false));
             bool_atoms.push(negative);

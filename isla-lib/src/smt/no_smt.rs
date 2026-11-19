@@ -273,6 +273,50 @@ mod tests {
     use crate::bitvector::b64::B64;
 
     #[test]
+    fn define_const_simplifies_only_when_value_is_read() {
+        configure_tastic(Tactic::Qfaufbv);
+        let info = SourceLoc::unknown();
+        for no_smt in [true, false] {
+            let mut config = Config::new();
+            config.solver_options.no_smt = no_smt;
+            let context = Context::new(config);
+            let mut solver = Solver::<B64>::new(&context);
+            let input = solver.define_const(bits64(2, 8), info);
+            let add = |amount| Exp::Bvadd(Box::new(Exp::Var(input)), Box::new(bits64(amount, 8)));
+
+            // 参照原路径，在定义时解析绑定并立即化简。
+            let mut expected: Vec<_> = (0..16).map(|amount| solver.translate_exp(&add(amount))).collect();
+            for value in &mut expected {
+                value.simplify();
+            }
+
+            let before = AST_SIMPLIFY_CALLS.get();
+            let derived: Vec<_> = (0..16).map(|amount| solver.define_const(add(amount), info)).collect();
+            for &symbol in &derived {
+                assert_eq!(solver.length(symbol), Some(8));
+                assert_eq!(solver.scalar_sort(symbol), Some(Ty::BitVec(8)));
+                assert!(solver.is_bitvector(symbol));
+                assert!(!solver.is_bool(symbol));
+            }
+            assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "未读值的定义和类型查询无需 Z3 化简");
+
+            let tx = solver.start_transaction();
+            solver.add(Def::DefineConst(input, bits64(100, 8)));
+            for (index, &symbol) in derived.iter().enumerate() {
+                let before = AST_SIMPLIFY_CALLS.get();
+                let value = solver.translate_exp(&Exp::Var(symbol));
+                assert_eq!(value.z3_ast, expected[index].z3_ast, "延迟化简必须保留定义时的绑定");
+                assert_eq!(value.get_numeral_u64().unwrap(), index as u64 + 2);
+                assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1);
+                assert_eq!(solver.translate_exp(&Exp::Var(symbol)).z3_ast, value.z3_ast);
+                assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1, "重复读值须复用已化简表达式");
+            }
+            solver.rollback_transaction(tx);
+            assert_eq!(solver.translate_exp(&Exp::Var(input)).get_numeral_u64().unwrap(), 2);
+        }
+    }
+
+    #[test]
     fn deep_shared_bounds_and_wrapping_arithmetic() {
         configure_tastic(Tactic::Qfaufbv);
         let context = Context::new(Config::new());

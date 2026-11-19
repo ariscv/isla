@@ -125,7 +125,7 @@ fn shared_context_replay_preserves_independent_constraints_and_values() {
     original.assert_eq(Exp::Var(input), Exp::Bits64(B64::new(0x42, 8)));
     let cp = checkpoint(&mut original);
     let mut replay = Solver::from_checkpoint(original.context(), cp);
-    assert_eq!(original.decls.get(&value).unwrap().z3_ast, replay.decls.get(&value).unwrap().z3_ast);
+    assert_eq!(original.decls[&value].ast().z3_ast, replay.decls[&value].ast().z3_ast);
     replay.assert_eq(Exp::Var(input), Exp::Bits64(B64::new(0x43, 8)));
     assert_eq!(replay.check_sat(loc), SmtResult::Unsat);
     assert_eq!(original.check_sat(loc), SmtResult::Sat);
