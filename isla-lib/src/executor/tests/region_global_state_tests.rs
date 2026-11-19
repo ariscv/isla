@@ -1014,3 +1014,41 @@ fn region_m2_sequential_joins_keep_read_footprint_linear() {
         "共享条件必须精确保留外层读取守卫"
     );
 }
+
+#[test]
+fn region_m2_register_bindings_share_read_only_clones() {
+    let mut shared = empty_shared_state();
+    let strict = shared.symtab.intern("zstrict");
+    let relaxed = shared.symtab.intern("zrelaxed");
+    let unset = shared.symtab.intern("zunset");
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let mut original = RegisterBindings::new();
+    original.insert(strict, false, UVal::Init(Val::Bool(false)));
+    original.insert(relaxed, true, UVal::Init(Val::Bool(false)));
+    original.insert(unset, false, UVal::Uninit(&Ty::Bool));
+    let mut arm = original.clone();
+    assert!(std::ptr::eq(
+        original.get_last_if_initialized(strict).unwrap(),
+        arm.get(strict, &shared, &mut solver, info()).unwrap().unwrap(),
+    ));
+    assert!(std::ptr::eq(
+        original.get_last_if_initialized(relaxed).unwrap(),
+        arm.get_latest(relaxed, &shared, &mut solver, info()).unwrap().unwrap(),
+    ));
+
+    assert!(matches!(arm.get_latest(unset, &shared, &mut solver, info()).unwrap(), Some(Val::Symbolic(_))));
+    assert!(original.get_last_if_initialized(unset).is_none());
+    arm.assign(strict, Val::Bool(true), &shared);
+    assert_eq!(original.get_last_if_initialized(strict), Some(&Val::Bool(false)));
+    assert_eq!(arm.get_last_if_initialized(strict), Some(&Val::Bool(true)));
+
+    // 普通松弛读仍保存所选的值，且写入历史与父帧隔离。
+    assert_eq!(
+        original.iter().find(|(name, _)| **name == relaxed).unwrap().1.read_old_if_initialized().unwrap().len(),
+        0
+    );
+    arm.assign(relaxed, Val::Bool(true), &shared);
+    assert_eq!(arm.get(relaxed, &shared, &mut solver, info()).unwrap(), Some(&Val::Bool(true)));
+    assert_eq!(original.get(relaxed, &shared, &mut solver, info()).unwrap(), Some(&Val::Bool(false)));
+}

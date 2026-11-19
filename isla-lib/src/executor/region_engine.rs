@@ -848,7 +848,14 @@ fn merge_states<'ir, B: BV>(
             )?;
             continue;
         }
-        let value = if registers.contains(reg) {
+        if !registers.contains(reg) {
+            let value = a.or(b).expect("已读取寄存器必须初始化");
+            if base.regs().get_last_if_initialized(*reg) != Some(value) {
+                merged.regs_mut().assign(*reg, value.clone(), shared);
+            }
+            continue;
+        }
+        let value = {
             let initial = if a.is_none() || b.is_none() {
                 let value = merged.regs_mut().get(*reg, shared, solver, info)?.expect("写入寄存器必须存在").clone();
                 // 未写臂保留的初值也是后态依赖；发布初态元数据，不伪造架构读取。
@@ -895,8 +902,6 @@ fn merge_states<'ir, B: BV>(
                     _ => incompatible(),
                 }
             })?
-        } else {
-            a.or(b).expect("已读取寄存器必须初始化").clone()
         };
         merged.regs_mut().assign(*reg, value, shared);
     }
