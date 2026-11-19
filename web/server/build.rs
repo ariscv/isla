@@ -28,8 +28,9 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 fn main() {
-    // We can't rely on the system having a reasonably up-to-date z3
-    // on all linux distros, so we can add a libz3.so in the project
-    // root and link using it if needed running with LD_LIBRARY_PATH
-    println!("cargo:rustc-link-search=../..");
+    if let Some(lib_dir) = std::env::var_os("DEP_ISLA_Z3_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.to_str().unwrap());
+    } else {
+        println!("cargo:rustc-link-search=../..");
+    }
 }

@@ -150,7 +150,7 @@ impl<'a, B: BV> MemoryBuilder<'a, B> {
         self
     }
 
-    pub fn build(mut self) -> Result<Memory<B>, String> {
+    pub fn build(self) -> Result<Memory<B>, String> {
         let mut ranges: Vec<(&str, Range<u64>)> = Vec::new();
 
         for region in &self.regions {

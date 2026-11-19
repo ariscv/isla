@@ -316,6 +316,9 @@ fn 极端菱形回边与连续寄存器事件必须逐输入一致() {
                 let mut shared = empty_shared_state();
                 let encoded = zencode::encode(special_name);
                 let source = shared.symtab.intern(&encoded);
+                if special_name == "_TLB" {
+                    shared.untraced_registers.insert(source);
+                }
                 let dest = shared.symtab.intern("zreview32_dest");
                 let condition = test_name(786);
                 let counter = test_name(787);
@@ -367,8 +370,10 @@ fn 极端菱形回边与连续寄存器事件必须逐输入一致() {
                 let mut frame = make_frame(instrs);
                 frame.regs_mut().insert(source, false, UVal::Init(Val::Bits(B64::zeros(8))));
                 frame.regs_mut().insert(dest, false, UVal::Init(Val::Bits(B64::zeros(8))));
-                let state =
-                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                // 此用例检查指令级读写顺序，显式选择严格次序。
+                let mut limits = ExecutionLimits::default().with_path_merging(enabled);
+                limits.ordered_events = true;
+                let state = TaskState::new().with_execution_limits(limits);
                 let out = Mutex::new(BTreeSet::new());
                 start_single(
                     frame.task(TaskId::fresh(), &state),

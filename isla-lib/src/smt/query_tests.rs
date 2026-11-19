@@ -280,7 +280,7 @@ fn default_integer_range_proof_preserves_incremental_scope_and_limits() {
         let mut solver = Solver::<B64>::new(&limited);
         let wide = solver.declare_bitvector(128, info);
         assert!(
-            matches!(narrow(Val::Symbolic(wide), &mut solver, info), Err(crate::error::ExecError::Z3Unknown)),
+            matches!(narrow(Val::Symbolic(wide), &mut solver, info), Err(ExecError::Smt(SmtError::Unknown { .. }))),
             "显式资源限制返回Unknown，不能被当作无溢出"
         );
     });
@@ -501,7 +501,7 @@ fn default_vector_bounds_keep_errors_limits_and_incremental_scope() {
         let index = solver.declare_bitvector(128, info);
         assert!(matches!(
             crate::primop::vector_access(values, Val::Symbolic(index), &mut solver, info),
-            Err(ExecError::Z3Unknown)
+            Err(ExecError::Smt(SmtError::Unknown { .. }))
         ));
     });
 }
@@ -660,8 +660,11 @@ fn default_boolean_proofs_keep_small_incremental_and_unknown_behavior() {
         let mut solver = Solver::<B64>::new(&limited);
         let complex = boolean_proof_counter(&mut solver);
         assert!(
-            matches!(lt(Val::Symbolic(complex), Val::I128(64), &mut solver, info).unwrap(), Val::Symbolic(_)),
-            "Unknown必须保留符号布尔值"
+            matches!(
+                lt(Val::Symbolic(complex), Val::I128(64), &mut solver, info),
+                Err(ExecError::Smt(SmtError::Unknown { purpose: "boolean_proof", .. }))
+            ),
+            "真实查询未判定必须作为带来源的求解错误返回"
         );
     });
 }

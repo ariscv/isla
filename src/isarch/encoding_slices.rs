@@ -13,6 +13,7 @@ use isla_lib::config::EncodingSliceConfig;
 use isla_lib::ir::*;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::{EnumId, EnumMember};
+#[cfg(test)]
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 use std::collections::{BTreeMap, HashMap};

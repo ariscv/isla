@@ -54,7 +54,7 @@
       "supports_cbo_zero": false,
       "executable": false,
       "misaligned_fault": {
-        "enum": 0
+        "enum": 1
       },
       "writable": true,
       "write_idempotent": false,
@@ -99,7 +99,7 @@
       "supports_cbo_zero": false,
       "read_idempotent": false,
       "misaligned_fault": {
-        "enum": 0
+        "enum": 1
       },
       "writable": true
     }
@@ -110,7 +110,7 @@
       "readable": true,
       "cacheable": false,
       "misaligned_fault": {
-        "enum": 0
+        "enum": 1
       },
       "supports_cbo_zero": false,
       "writable": true,
@@ -130,7 +130,7 @@
     "base": 536870912,
     "attributes": {
       "misaligned_fault": {
-        "enum": 0
+        "enum": 1
       },
       "coherent": true,
       "executable": false,
@@ -153,7 +153,7 @@
       "supports_cbo_zero": false,
       "cacheable": false,
       "misaligned_fault": {
-        "enum": 0
+        "enum": 1
       },
       "read_idempotent": false,
       "readable": true,
@@ -179,7 +179,7 @@
       "read_idempotent": false,
       "readable": true,
       "misaligned_fault": {
-        "enum": 0
+        "enum": 1
       },
       "coherent": true,
       "cacheable": false,

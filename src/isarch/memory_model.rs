@@ -393,6 +393,7 @@ mod tests {
     /// NOT(与判死区域重叠) 约束后与钉死断言联立 Unsat，`read_symbolic` 的
     /// W7 立即检查直接 BadRead 判死，不发出 ReadMem 事件。
     #[test]
+    #[allow(non_snake_case)] // 保留测试的中文语义名称。
     fn 判死区域内符号读立即BadRead无事件且Unsat() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -422,6 +423,7 @@ mod tests {
     /// W9 判死区域（RED A 写侧）：与读侧一视同仁——符号写地址解进判死区域
     /// → BadWrite 判死、无事件、断言集 Unsat。
     #[test]
+    #[allow(non_snake_case)] // 保留测试的中文语义名称。
     fn 判死区域内符号写立即BadWrite无事件且Unsat() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -458,6 +460,7 @@ mod tests {
     /// 可见；模型地址只被排除出判死区域（NOT 链），其余全域自由——包括
     /// 边界精确性：恰好在判死区域外完成的八字节读可满足，跨入一字节即死。
     #[test]
+    #[allow(non_snake_case)] // 保留测试的中文语义名称。
     fn 判死区域外符号读Sat事件可见且边界精确() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -1138,6 +1141,7 @@ mod tests {
     /// 路径的取舍交给模型 PMA 分叉，内存层不抹掉任何一侧。symbolic 声明
     /// 不产生任何约束（W9 纯声明语义）。
     #[test]
+    #[allow(non_snake_case)] // 保留测试的中文语义名称。
     fn 默认分层下与PMA断言矛盾的读写不被判死() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         // 读侧：ROM 钉死断言 + sym_ram 纯声明区域，零判死区域应正常返回符号值

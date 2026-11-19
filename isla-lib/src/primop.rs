@@ -5268,16 +5268,26 @@ fn isla_count_ones<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
     match bits {
         Val::Bits(bits) => Ok(Val::I128(bits.to_vec().iter().filter(|bit| **bit).count() as i128)),
         bits @ (Val::Symbolic(_) | Val::MixedBits(_)) => {
+            fn sum_bits(input: &Exp<Sym>, start: u32, end: u32, width: u32) -> Exp<Sym> {
+                match end - start {
+                    0 => smt_zeros(i128::from(width)),
+                    1 => Exp::ZeroExtend(width - 1, Box::new(Exp::Extract(start, start, Box::new(input.clone())))),
+                    _ => {
+                        let mid = start + (end - start) / 2;
+                        Exp::Bvadd(
+                            Box::new(sum_bits(input, start, mid, width)),
+                            Box::new(sum_bits(input, mid, end, width)),
+                        )
+                    }
+                }
+            }
+
             let bits_exp = smt_value(&bits, info)?;
             // 计数和任意前缀和均在 0..=len 内，按此范围累加不会溢出。
             // 先扩成 128 位再相加会让含枚举状态的求解器证明大量不可达进位。
             let count_width = (u32::BITS - len.leading_zeros()).max(1);
-            let mut count = smt_zeros(i128::from(count_width));
-            for bit in 0..len {
-                let bit_value =
-                    Exp::ZeroExtend(count_width - 1, Box::new(Exp::Extract(bit, bit, Box::new(bits_exp.clone()))));
-                count = Exp::Bvadd(Box::new(count), Box::new(bit_value));
-            }
+            // 平衡加法树给递归翻译和化简保留对数深度。
+            let count = sum_bits(&bits_exp, 0, len, count_width);
             solver.define_const(Exp::ZeroExtend(128 - count_width, Box::new(count)), info).into()
         }
         value => Err(ExecError::Type(format!("isla_count_ones {:?}", value), info)),

@@ -64,13 +64,13 @@ fn finite_domain_prefix_tracks_guarded_commit_rebinding_and_rollback() {
     values(&solver, x, &[1, 2]);
 
     let root = solver.start_transaction();
-    let inner = solver.start_transaction_with_guard(Some(Exp::Var(g)));
+    solver.start_transaction_with_guard(Some(Exp::Var(g)));
     solver.assert(equal(x, 2));
     values(&solver, x, &[2]);
     solver.commit_transaction();
     values(&solver, x, &[1, 2]);
 
-    let rebind = solver.start_transaction();
+    solver.start_transaction();
     solver.add(Def::DefineConst(x, bits64(3, 8)));
     assert!(matches!(solver.finite_domain(x), FiniteDomain::Unknown));
     assert_eq!(solver.finite_domain_bool(&equal(x, 3)), None);
@@ -79,7 +79,7 @@ fn finite_domain_prefix_tracks_guarded_commit_rebinding_and_rollback() {
     solver.rollback_transaction(root);
     values(&solver, x, &[1, 2]);
 
-    let publish = solver.start_transaction();
+    solver.start_transaction();
     solver.with_transaction_condition(&Exp::Var(g), |solver| {
         solver.assert(equal(x, 2));
         assert_eq!(solver.finite_domain_bool(&equal(x, 1)), Some(false));

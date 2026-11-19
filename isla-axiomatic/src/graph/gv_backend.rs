@@ -457,7 +457,7 @@ impl<'g> GraphLayout<'g> {
         }
     }
 
-    fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&GVGridChild<'a>> {
+    fn iter_nodes<'a>(&'a self, only_visible: bool, only_real: bool) -> Vec<&'a GVGridChild<'a>> {
         let mut nodes: Vec<&GVGridChild<'a>> = Vec::new();
 
         for c in self.children.values() {

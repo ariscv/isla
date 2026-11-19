@@ -122,13 +122,16 @@ fn vector_bits_prefix_exhaustive_and_truncation() -> Result<(), ExecError> {
 fn vector_bits_prefix_symbolic_old_integer_invariant_and_mask() -> Result<(), ExecError> {
     let ctx = context();
     let info = SourceLoc::unknown();
-    for n in [1, 2, 4, 8, 16, 32, 64, 128] {
+    for n in [1u32, 2, 4, 8, 16, 32, 64, 128] {
+        // 单步窄计数与原 128 位加法的等价由 primitive_popcount_prefix_invariant_and_encoding 证明。
+        // 此处用能容纳最大计数的位宽重建原循环，再逐位置检查输出截断与掩码。
+        let count_width = u32::BITS - n.leading_zeros();
         for width in [1, 4, 8, 16, 32, 64, 128] {
             let mut solver = Solver::<B64>::new(&ctx);
             let source = solver.declare_bitvector(n, info);
             let mask = solver.declare_bitvector(n, info);
-            let active =
-                solver.define_bitvector(Exp::Bvand(Box::new(Exp::Var(source)), Box::new(Exp::Var(mask))), info);
+            let active_bits = Exp::Bvand(Box::new(Exp::Var(source)), Box::new(Exp::Var(mask)));
+            let active = solver.define_bitvector(active_bits.clone(), info);
             let Val::Vector(result) = binary_primops::<B64>()["prefix_popcount"](
                 Val::Symbolic(active),
                 Val::I128(width.into()),
@@ -138,11 +141,14 @@ fn vector_bits_prefix_symbolic_old_integer_invariant_and_mask() -> Result<(), Ex
             else {
                 panic!("前缀结果必须是vector")
             };
-            let mut sum = solver.define_bitvector(smt_zeros(128), info);
+            let mut sum = solver.define_bitvector(smt_zeros(count_width.into()), info);
             let old = solver.declare_bitvector(width, info);
             for i in 0..n {
-                let expected =
-                    if width == 128 { Exp::Var(sum) } else { Exp::Extract(width - 1, 0, Box::new(Exp::Var(sum))) };
+                let expected = match width.cmp(&count_width) {
+                    std::cmp::Ordering::Less => Exp::Extract(width - 1, 0, Box::new(Exp::Var(sum))),
+                    std::cmp::Ordering::Equal => Exp::Var(sum),
+                    std::cmp::Ordering::Greater => Exp::ZeroExtend(width - count_width, Box::new(Exp::Var(sum))),
+                };
                 let cond =
                     Exp::Eq(Box::new(Exp::Extract(i, i, Box::new(Exp::Var(mask)))), Box::new(smt_u64_width(1, 1)));
                 let actual = Exp::Ite(
@@ -150,19 +156,15 @@ fn vector_bits_prefix_symbolic_old_integer_invariant_and_mask() -> Result<(), Ex
                     Box::new(smt_value(&result[i as usize], info)?),
                     Box::new(Exp::Var(old)),
                 );
-                let expected = Exp::Ite(Box::new(cond.clone()), Box::new(expected), Box::new(Exp::Var(old)));
+                let expected = Exp::Ite(Box::new(cond), Box::new(expected), Box::new(Exp::Var(old)));
                 assert_eq!(
                     solver.check_sat_with(&Exp::Neq(Box::new(actual), Box::new(expected)), info),
                     SmtResult::Unsat,
                     "N={n},M={width},i={i}"
                 );
-                // 原Sail在活动位置、源位为1时才增加128位整数sum。
-                let bit = Exp::Bvand(
-                    Box::new(Exp::Extract(i, i, Box::new(Exp::Var(source)))),
-                    Box::new(Exp::Extract(i, i, Box::new(Exp::Var(mask)))),
-                );
+                let bit = Exp::Extract(i, i, Box::new(active_bits.clone()));
                 sum = solver.define_bitvector(
-                    Exp::Bvadd(Box::new(Exp::Var(sum)), Box::new(Exp::ZeroExtend(127, Box::new(bit)))),
+                    Exp::Bvadd(Box::new(Exp::Var(sum)), Box::new(Exp::ZeroExtend(count_width - 1, Box::new(bit)))),
                     info,
                 );
             }
@@ -299,17 +301,22 @@ fn vector_stable_pack_maximum_shape_and_tail() -> Result<(), ExecError> {
 fn vector_stable_pack_merge_invariant_at_actual_shapes() {
     let ctx = context();
     let loc = SourceLoc::unknown();
-    for width in [8u32, 16, 32, 64] {
-        for n in [2u32, 4, 8, 16, 32, 64, 128] {
-            if n * width > 1024 {
-                continue;
-            }
+    let shapes = [8u32, 16, 32, 64]
+        .into_iter()
+        .flat_map(|width| [2u32, 4, 8, 16, 32, 64, 128].into_iter().map(move |n| (width, n)));
+    for (width, n) in shapes.filter(|(width, n)| width * n <= 1024) {
+        let half = n / 2;
+        // 大形状逐个证明左半段的合法计数，避免对整个宽移位网络做单次证明。
+        let left_counts = if n * width >= 512 { (0..=half).map(Some).collect() } else { vec![None] };
+        for left_count in left_counts {
             let mut solver = Solver::<B129>::new(&ctx);
             let cw = u32::BITS - n.leading_zeros();
-            let half = n / 2;
             let part = half * width;
             let total = n * width;
-            let cl = solver.declare_bitvector(cw, loc);
+            let cl = match left_count {
+                Some(count) => solver.define_bitvector(smt_u64_width(count.into(), cw), loc),
+                None => solver.declare_bitvector(cw, loc),
+            };
             let cr = solver.declare_bitvector(cw, loc);
             let i = solver.declare_bitvector(cw, loc);
             solver.assert(Exp::Bvule(Box::new(Exp::Var(cl)), Box::new(smt_u64_width(half as u64, cw))));
@@ -363,8 +370,10 @@ fn vector_stable_pack_merge_invariant_at_actual_shapes() {
                     Box::new(offset(i, total)),
                 )),
             );
+            // 选中右半段的条件保证 i >= cl。
+            let right_lane = Exp::Bvsub(Box::new(Exp::Var(i)), Box::new(Exp::Var(cl)));
             let right_offset = Exp::Bvmul(
-                Box::new(Exp::Bvsub(Box::new(resize(i, total)), Box::new(resize(cl, total)))),
+                Box::new(Exp::ZeroExtend(total - cw, Box::new(right_lane))),
                 Box::new(smt_u64_width(width as u64, total)),
             );
             let from_right = Exp::Extract(
@@ -383,7 +392,7 @@ fn vector_stable_pack_merge_invariant_at_actual_shapes() {
             assert_eq!(
                 solver.check_sat_with(&Exp::Neq(Box::new(actual), Box::new(expected)), loc),
                 SmtResult::Unsat,
-                "merge N={n},W={width}"
+                "merge N={n},W={width},left_count={left_count:?}"
             );
         }
     }

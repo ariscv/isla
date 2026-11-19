@@ -40,26 +40,31 @@ cargo build --release
 
 ### Z3
 
-By default we require that [z3](https://github.com/Z3Prover/z3)
-is available as a shared library.
+Isla 需要 Z3 5.4.0.0 或更高版本的共享库。原生 x86-64 GNU/Linux 构建默认读取
+`~/.local/opt/z3-official-d6c9b4fbb/lib/libz3.so`。请先安装[官方 Z3 源码](https://github.com/Z3Prover/z3)
+提交 `d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f`，或在 Cargo 中指定已有安装的绝对前缀。
 
-If running isla-axiomatic, `z3` must also be available on the `PATH`.
-
-It should be available in the usual places, currently tested with Z3 4.12.6:
+```sh
+cargo test --workspace --no-fail-fast -- --test-threads=1
+cargo --config 'env.ISLA_Z3_PREFIX="/path/to/installed/z3"' test -p isla-lib --lib
+make build-isarch Z3_PREFIX=/path/to/installed/z3
 ```
-apt install libz3-dev  # on Ubuntu 20.04 LTS and later
-opam install z3 # alterantively, opam usually has an up-to-date version
+
+常用的自定义前缀也可以写入本机的 `.cargo/config.toml`。
+
+```toml
+[env]
+ISLA_Z3_PREFIX = "/path/to/installed/z3"
 ```
 
-However the version of z3 that is available in older Ubuntu LTS versions
-(and likely other linux distros) is quite old,
-so you may experience link errors in that case.
-The build.rs script is configured so it can use a `libz3.so` shared library
-placed in the root directory of this repository.
-If this is done then `LD_LIBRARY_PATH` must also be set when
-executing so that the more recent z3 library is used.
-In those cases a version of z3 can be obtained from the sources
-[https://github.com/Z3Prover/z3](https://github.com/Z3Prover/z3).
+该配置只用于构建。构建脚本读取该前缀中共享库的版本，并把库目录写入可执行文件的
+RUNPATH。目录及版本有误会在构建时报告。直接运行测试和 `isarch` 时无需设置
+`LD_LIBRARY_PATH` 或 `LD_PRELOAD`。可用 `ldd target/release/isarch` 核对所加载的库。
+运行 `isla-axiomatic` 或重放 Sail property 时还需在 `PATH` 中提供 `z3` 命令。
+工作区测试中的 RISC-V 编解码集成测试需要在 Isla 根目录放置兼容的 `rv64d.ir`
+（可以链接到已生成的 IR）。
+Sail 场景需要 Sail 和 `make isla-sail` 生成的插件，文件名以 `nested_merge_` 开头的 property
+由 `ruby test/run_tests.rb --property-filter '^nested_merge_'` 运行。
 
 ## Model snapshots
 
@@ -770,7 +775,7 @@ isarch 在执行前检查正常／压缩编码映射。只有当前配置、初�
 `d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f`（版本 5.4.0.0）。所有 Isla 程序首次创建 Z3 上下文时检查运行时版本，
 低于 5.4.0.0 会 panic，并报告实际版本和最低版本。需先将该官方构建安装到此前缀，
 或用 `make build-isarch Z3_PREFIX=/path/to/installed/z3` 指定实际安装位置。
-Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/release/isarch --version`
+Cargo 构建脚本同时设置链接搜索路径和运行时 RUNPATH；直接检查 `target/release/isarch --version`
 可确认实际加载版本。CLI 的默认策略和 Make 的各 Clause 策略保持独立。
 
 ### 指令 JSON 的三种表示

@@ -1687,8 +1687,6 @@ pub fn solve_state_main<'ir, B: BV>(
 fn symbolic_args_from_types<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
     solver: &mut Solver<B>,
 ) -> Result<Val<B>, ExecError> {
     // 查找指令的构造函数名称
@@ -1899,10 +1897,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?
     } else {
         let ctor_name = shared_state.symtab.lookup(instruction_name);
-        Val::<B>::Ctor(
-            ctor_name,
-            Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
-        )
+        Val::<B>::Ctor(ctor_name, Box::new(symbolic_args_from_types(instruction_name, shared_state, &mut solver)?))
     };
     let fun_args = vec![instruction];
     log!(log::SYM_EXEC, &format!("fun_args:{:?}", fun_args));
@@ -2597,8 +2592,6 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     }
                                     model.set_complete_model(true);
                                     log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
-                                    let test = Sym::from_u32(6);
-                                    // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                     // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                     match model.get_val(&fun_args[0]) {
                                         Ok(arg_val) => {
@@ -3542,7 +3535,6 @@ mod tests {
         // 模拟 setup_pre_state：在主 solver 里符号化 mstatus
         let symbolic_mstatus = symbolic(&Ty::Bits(64), &shared_state, &mut main_solver, SourceLoc::unknown()).unwrap();
         let mut symbolic_regs = RegisterBindings::new();
-        let ty = Ty::<Name>::Bits(64);
         symbolic_regs.insert(mstatus_name, false, UVal::Init(symbolic_mstatus));
 
         // 在 fresh solver（concrete_function_result 内部自建）里执行：符号未声明 → panic
@@ -3558,7 +3550,6 @@ mod tests {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let (shared_state, mstatus_name) = decode_probe_shared_state();
         let mut regs = RegisterBindings::new();
-        let ty = Ty::<Name>::Bits(64);
         regs.insert(mstatus_name, false, UVal::Init(Val::Bits(B64::new(0x600, 64))));
         let outcome =
             concrete_function_result("zdecode_probe", Val::Unit, &shared_state, &regs, &Bindings::default()).unwrap();
@@ -5684,7 +5675,7 @@ mod tests {
             std::fs::read_to_string("rv64d.ir").expect("测试需要从仓库根目录运行，读 rv64d.ir").into_boxed_str(),
         );
         let mut symtab = Symtab::new();
-        let mut arch: &'static mut [Def<Name, B129>] = Box::leak(
+        let arch: &'static mut [Def<Name, B129>] = Box::leak(
             isla_lib::ir_parser::IrParser::new()
                 .parse(&mut symtab, isla_lib::ir_lexer::new_ir_lexer(contents))
                 .expect("解析 rv64d.ir 失败")

@@ -13,7 +13,7 @@ fn limits(strategy: MergeStrategy) -> ExecutionLimits {
     limits
 }
 
-fn width_candidates(frame: &mut LocalFrame<'static, B64>, solver: &mut Solver<B64>) {
+fn width_candidates(frame: &mut LocalFrame<'static, B64>) {
     let guard = |frame: &LocalFrame<B64>, i: u32| match &frame.vars()[&test_name(900 + i)] {
         UVal::Init(Val::Symbolic(symbol)) => *symbol,
         _ => unreachable!(),
@@ -43,7 +43,7 @@ fn region_consumer_four_widths_check_and_continue_once() {
             2,
             limits(strategy),
             crate::memory::Memory::new(),
-            width_candidates,
+            |frame, _| width_candidates(frame),
             false,
         );
         let expected = paths(
@@ -73,7 +73,7 @@ fn region_consumer_mixed_integer_and_strict_operand_read() {
             settings,
             crate::memory::Memory::new(),
             |frame, solver| {
-                width_candidates(frame, solver);
+                width_candidates(frame);
                 let threshold = solver.declare_bitvector(64, info());
                 frame.regs_mut().assign(test_name(1801), Val::Symbolic(threshold), &shared);
                 solver.assert(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(threshold)), Box::new(smtlib::bits64(40, 64))));
@@ -198,7 +198,7 @@ fn region_consumer_preserves_candidate_assertion_failure() {
             let sym = solver.declare_const(smtlib::Ty::Bool, info());
             frame.vars_mut().insert(test_name(900 + i), UVal::Init(Val::Symbolic(sym)));
         }
-        width_candidates(&mut frame, &mut solver);
+        width_candidates(&mut frame);
         let state = TaskState::new().with_execution_limits(limits(strategy));
         let outcomes = Mutex::new(Vec::new());
         start_single(

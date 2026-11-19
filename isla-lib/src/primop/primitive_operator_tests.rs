@@ -173,10 +173,15 @@ fn primitive_gf_symbolic_and_mixed_match_original_loop() -> Result<(), ExecError
                     info,
                 );
             }
-            assert_eq!(
-                solver.check_sat_with(&Exp::Neq(Box::new(smt_value(&result, info)?), Box::new(Exp::Var(z))), info),
-                SmtResult::Unsat
-            );
+            let actual = smt_value(&result, info)?;
+            for output in 0..width {
+                let lane = |value| Box::new(Exp::Extract(output, output, Box::new(value)));
+                assert_eq!(
+                    solver.check_sat_with(&Exp::Neq(lane(actual.clone()), lane(Exp::Var(z))), info),
+                    SmtResult::Unsat,
+                    "GF W={width}, mode={mode}, bit={output}"
+                );
+            }
         }
     }
     Ok(())
@@ -316,7 +321,7 @@ fn primitive_gf_modulus_step_matches_polynomial_division() {
 fn primitive_popcount_prefix_invariant_and_encoding() -> Result<(), ExecError> {
     let ctx = context();
     let info = SourceLoc::unknown();
-    for width in [0, 1, 8, 16, 32, 64, 128] {
+    for width in [0, 1, 2, 4, 8, 16, 32, 64, 128] {
         let mut solver = Solver::<B129>::new(&ctx);
         assert_eq!(isla_count_ones(Val::Bits(B129::ones(width)), &mut solver, info)?, Val::I128(width.into()));
         if width == 0 {

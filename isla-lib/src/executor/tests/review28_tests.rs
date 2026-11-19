@@ -310,6 +310,9 @@ fn 混合特殊寄存器读取与普通写入不得改变轨迹() {
             let mut shared = empty_shared_state();
             let encoded = zencode::encode(name);
             let source = shared.symtab.intern(&encoded);
+            if name == "_TLB" {
+                shared.untraced_registers.insert(source);
+            }
             let encoded = zencode::encode("目标寄存器");
             let dest = shared.symtab.intern(&encoded);
             let cond = test_name(680);

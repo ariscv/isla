@@ -271,13 +271,16 @@ fn review37_diamond_extremes_preserve_values_and_register_dependencies() {
     use std::sync::Mutex;
     for width in [1, 8, 64, 128, 129] {
         for name in ["_TLB", "core_TLB", "_TLB_cache", "rdata"] {
-            for merge in [false, true] {
+            for (merge, filtered) in [(false, false), (true, false), (false, true), (true, true)] {
                 let mut symtab = Symtab::new();
                 let function = symtab.intern("zreview37_diamond");
                 let encoded = isla_lib::zencode::encode(name);
                 let reg = symtab.intern(&encoded);
                 let flag = symtab.intern("zflag");
-                let shared = SharedState::<B129>::empty(symtab);
+                let mut shared = SharedState::<B129>::empty(symtab);
+                if filtered {
+                    shared.untraced_registers.insert(reg);
+                }
                 let data_ty = Ty::Bits(width);
                 let instrs = [
                     Instr::Jump(IrExp::Id(flag), 3, info()),
@@ -323,9 +326,9 @@ fn review37_diamond_extremes_preserve_values_and_register_dependencies() {
                         .unwrap());
                     let events: Vec<_> = s.trace().to_vec().into_iter().cloned().collect();
                     let reads = events.iter().filter(|e| matches!(e,Event::ReadReg(id,_,_) if *id==reg)).count();
-                    assert_eq!(reads, usize::from(name != "_TLB"));
+                    assert_eq!(reads, usize::from(!filtered), "width={width} register={name} merge={merge}");
                     let refs = isla_lib::simplify::EventReferences::from_events(&events);
-                    assert_eq!(refs.value_taints(&v, &events).registers.contains(&(reg, vec![])), name != "_TLB");
+                    assert_eq!(refs.value_taints(&v, &events).registers.contains(&(reg, vec![])), !filtered);
                     let mut got = out.lock().unwrap();
                     got.0 += 1;
                     got.1 += events.iter().filter(|e| matches!(e, Event::Merge(..))).count();
