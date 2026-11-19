@@ -76,7 +76,7 @@ pub struct PathMergeConfig {
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,
-    /// 分支入口只用表达式结构识别布尔恒值；默认关闭。
+    /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
     /// 用守卫保留不同的具体字符串和机器整数，缺省开启。
@@ -107,7 +107,7 @@ impl Default for PathMergeConfig {
             merge_poison_slots: false,
             step_budget: None,
             defer_exit_check: false,
-            prune_constant_branches: false,
+            prune_constant_branches: true,
             arm_error_leaf: false,
             merge_concrete_values: true,
             defer_call_effect_checks: false,

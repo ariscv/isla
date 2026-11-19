@@ -6,7 +6,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("merge_poison_slots", "merge-poison-slots", "只合并已证明不可观察的未初始化槽位；默认关闭"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
-    ("prune_constant_branches", "prune-constant-branches", "分支入口识别结构化布尔恒值；默认关闭"),
+    ("prune_constant_branches", "prune-constant-branches", "分支入口识别布尔恒值；默认开启"),
     ("arm_error_leaf", "arm-error-leaf", "保留带到达条件的臂内执行错误；默认关闭"),
     ("merge_concrete_values", "merge-concrete-values", "延后拆分区域具体字符串和机器整数；默认开启"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),

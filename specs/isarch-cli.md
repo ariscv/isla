@@ -451,11 +451,11 @@ isarch [原 J1 探索参数] \
 
 ## 分段合并候选与诊断配置
 
-这些选项放在主配置或 `--execution-limits-config` 文件中：功能字段放 `[execution_limits.path_merge]`，只读诊断放 `[execution_limits.path_merge.diagnostics]`，`bool_proof_rlimit` 放 `[execution_limits.solver]`。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。所有选项默认保持原执行行为，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
+这些选项放在主配置或 `--execution-limits-config` 文件中：功能字段放 `[execution_limits.path_merge]`，只读诊断放 `[execution_limits.path_merge.diagnostics]`，`bool_proof_rlimit` 放 `[execution_limits.solver]`。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。缺省值见表，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
 
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
-| `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `false` | Jump 入口识别符号表达式的布尔恒值；不查询 SMT |
+| `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
