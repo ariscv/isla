@@ -1754,7 +1754,8 @@ pub fn subrange_internal<B: BV>(
                 Box::new(Exp::Bvsgt(Box::new(low), Box::new(high))),
             )),
         );
-        if !solver.no_smt_safety(&Exp::Not(Box::new(out_of_bounds.clone())), info)
+        if solver.finite_domain_predicate(&out_of_bounds) != Some(false)
+            && !solver.no_smt_safety(&Exp::Not(Box::new(out_of_bounds.clone())), info)
             && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?
         {
             if solver.check_sat_with(&Exp::Not(Box::new(out_of_bounds)), info).is_unsat()? {

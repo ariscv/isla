@@ -1,6 +1,7 @@
 //! 从当前路径提取位向量的有限值域。只化简表达式，不做 SMT 查询。
 use super::*;
 
+mod arithmetic;
 mod prefix_index;
 use prefix_index::{BranchCandidates, Candidate, PathConditions};
 pub(super) use prefix_index::{PrefixIndex, BUFFERED};
@@ -129,8 +130,17 @@ impl<B: BV> PathConditions<'_, B> {
 
 impl<'ctx> Ast<'ctx> {
     fn substitute(&self, old: &Self, new: &Self) -> Self {
+        self.substitute_many(&[old.z3_ast], &[new.z3_ast])
+    }
+
+    fn substitute_many(&self, old: &[Z3_ast], new: &[Z3_ast]) -> Self {
+        if old.is_empty() {
+            return self.clone();
+        }
+        assert_eq!(old.len(), new.len());
         unsafe {
-            let z3_ast = Z3_substitute(self.ctx.z3_ctx, self.z3_ast, 1, &old.z3_ast, &new.z3_ast);
+            let z3_ast =
+                Z3_substitute(self.ctx.z3_ctx, self.z3_ast, old.len().try_into().unwrap(), old.as_ptr(), new.as_ptr());
             Z3_inc_ref(self.ctx.z3_ctx, z3_ast);
             Self { z3_ast, ctx: self.ctx }
         }
@@ -243,6 +253,23 @@ impl<B: BV> Solver<'_, B> {
         None
     }
 
+    /// 在需要证明原语联合边界时，按同一组输入检查整个谓词。
+    pub(crate) fn finite_domain_predicate(&self, exp: &Exp<Sym>) -> Option<bool> {
+        let prefix = PathConditions::new(self)?;
+        let mut answer = None;
+        self.combined_values(&prefix, exp, |mut value, _| {
+            let current = value.structural_bool().expect("有限域谓词必须为布尔常量");
+            if answer.is_some_and(|previous| previous != current) {
+                answer = None;
+                false
+            } else {
+                answer = Some(current);
+                true
+            }
+        })?;
+        answer
+    }
+
     pub(crate) fn note_finite_domain_use(&self, category: &'static str, info: SourceLoc) {
         if self.no_smt() && crate::config::RegionOptions::current().progress {
             no_smt::record(category, info);
@@ -276,7 +303,30 @@ impl<B: BV> Solver<'_, B> {
                 FiniteDomain::Unknown => (),
             }
         }
-        best
+        if !matches!(best, FiniteDomain::Unknown) {
+            return best;
+        }
+        let mut exact = true;
+        let mut values = Vec::new();
+        let mut seen = HashMap::new();
+        if self
+            .combined_values(&prefix, &Exp::Var(sym), |mut value, certified| {
+                exact &= certified;
+                let constant = value.finite_bits().expect("有限域表达式必须为位向量常量");
+                if seen.insert(value.z3_ast, value).is_none() {
+                    values.push(constant);
+                }
+                true
+            })
+            .is_none()
+        {
+            return FiniteDomain::Unknown;
+        }
+        if exact {
+            FiniteDomain::Known(values)
+        } else {
+            FiniteDomain::Bounded(values)
+        }
     }
 
     /// 原生化简可能把锚点改写到不再是目标的子表达式。沿原定义逐层代入已知值。
@@ -411,3 +461,6 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod arithmetic_tests;
