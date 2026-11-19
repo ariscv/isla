@@ -54,6 +54,35 @@ fn constant(exp: &Exp<Sym>) -> Option<Exp<Sym>> {
     }
 }
 
+// 掩码覆盖目标切片的每一位时，等式给出切片的唯一候选。
+fn masked_slice<B: BV>(
+    target: &Exp<Sym>,
+    masked: &Exp<Sym>,
+    result: &Exp<Sym>,
+    prefix: &PathConditions<'_, B>,
+) -> Option<Exp<Sym>> {
+    let Exp::Extract(high, low, source) = target else { return None };
+    let Exp::Bvand(lhs, rhs) = masked else { return None };
+    let (lhs, rhs, source) = (resolve(lhs, prefix), resolve(rhs, prefix), resolve(source, prefix));
+    let mask = if lhs == source {
+        rhs
+    } else if rhs == source {
+        lhs
+    } else {
+        return None;
+    };
+    match mask {
+        Exp::Bits64(bits) if bits.extract(*high, *low).is_some_and(|slice| slice == B64::ones(slice.len())) => (),
+        Exp::Bits(bits) if bits.get(*low as usize..=*high as usize)?.iter().all(|bit| *bit) => (),
+        _ => return None,
+    }
+    match result {
+        Exp::Bits64(bits) => bits.extract(*high, *low).map(Exp::Bits64),
+        Exp::Bits(bits) => constant(&Exp::Bits(bits.get(*low as usize..=*high as usize)?.to_vec())),
+        _ => None,
+    }
+}
+
 // 只识别能产生有限上界的布尔形式。排除项与其他谓词在代入候选后检查。
 fn bound<B: BV>(exp: &Exp<Sym>, target: &Exp<Sym>, prefix: &PathConditions<'_, B>, negated: bool) -> Bound {
     use Exp::*;
@@ -63,13 +92,13 @@ fn bound<B: BV>(exp: &Exp<Sym>, target: &Exp<Sym>, prefix: &PathConditions<'_, B
         Eq(lhs, rhs) | Neq(lhs, rhs) if matches!(exp, Eq(..)) != negated => {
             let (lhs, rhs) = (resolve(lhs, prefix), resolve(rhs, prefix));
             let value = if lhs == target {
-                rhs
+                constant(rhs)
             } else if rhs == target {
-                lhs
+                constant(lhs)
             } else {
-                return None;
+                masked_slice(target, lhs, rhs, prefix).or_else(|| masked_slice(target, rhs, lhs, prefix))
             };
-            constant(value).map(|value| vec![value])
+            value.map(|value| vec![value])
         }
         Not(inner) => visit(inner, !negated),
         And(lhs, rhs) | Or(lhs, rhs) => {
@@ -105,7 +134,10 @@ impl<B: BV> PathConditions<'_, B> {
         for assertion in self.assertions() {
             candidates = intersect(candidates, bound(assertion, subject, self, false));
         }
-        candidates
+        candidates.or_else(|| match subject {
+            Exp::Ite(_, yes, no) => union(self.bounds(yes), self.bounds(no)),
+            _ => None,
+        })
     }
 
     fn comparison_subjects<'a>(&'a self, exp: &'a Exp<Sym>, subjects: &mut Vec<&'a Exp<Sym>>) {

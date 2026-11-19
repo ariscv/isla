@@ -127,6 +127,8 @@ isarch -A <ir> -C <config> --slow-query-dump-dir queries \
 
 SMT2 包含已发布／事务缓冲断言、活动臂条件及临时查询条件，可以离线重放。JSON 记录源位置、结果、solver／Context／线程身份、是否主 solver、检查前后 statistics、断言来源与依赖、展开定义后的共享 DAG／树节点数及导出耗时。树节点数饱和会明确标记，不代表实际分配大小。只记录真正提交给 Z3 且正常返回的检查；缓存命中和中断错误不导出，中断错误仍走已有 timeout SMT 输出。
 
+JSON 的 `resources` 记录查询线程的 CPU 时间。在 Linux 上还记录用户态／内核态 CPU、上下文切换和缺页计数差，以及查询前后的进程 RSS。RSS 会受同进程其他线程影响。资源采集随慢查询导出开启。
+
 ## 子命令
 
 ### `list-instructions`
@@ -431,13 +433,21 @@ isarch [原 J1 探索参数] \
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。
 
+## 见证随机化
+
+`solve-state --witness-randomization 42` 使用固定随机种子具体化 `gen` 中的指令代表。`auto` 随机选取并打印种子，`off` 关闭。也可以在 ISA 配置顶层设置 `witness_randomization = 42` 或布尔值，CLI 优先，缺省关闭。记录的 `witness-randomization` 含种子、尝试的偏好数和实际满足的偏好数。
+
+只有满足完整路径与编码约束的模型才会替换原见证。代表的前态、后态和返回值使用同一个求解模型。路径枚举、样本导出、缓存和 judge 沿用原语义。
+
 ## 合并拒绝诊断
 
 `--merge-diagnostics off|summary|detail` 默认关闭。`summary` 每 15 秒及正常收尾时，按位置、槽和差异类别输出累计汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
 
 记录包含 `stage`、尝试编号、父尝试编号、函数／IR pc、槽名与声明类型、原始初始化状态、正常初始化后的值形态、失败字段／元素路径及原错误。执行臂内无法取得双臂槽的错误使用 `stage=execute_arm`，槽和值填 `null`；嵌套传播另记 `merge_value_propagated`。
 
-细节每个汇总键最多 3 条，全进程最多 1000 条，每行最多 4096 字节，路径最多 8 层。汇总最多保留 4096 个键，每键最多 1024 字节，超出计入 `other`。`details_suppressed` 和 `oversized` 明确记录未输出的细节，采样行数不代表拒绝总数。
+在 `detail` 模式下，`merge_root_start` 记录每次最外层尝试的入口、Sail 位置和 IR 调用链。`merge_root_end` 记录同一尝试的结果、耗时及拒绝信息。嵌套拒绝沿原拒绝位置传播时，记录最内层的原因和阶段。局部汇合拒绝后仍交付分开的片段时，结果为 `separate`。
+
+值比较细节每个汇总键最多 3 条，全进程最多 1000 条，每行最多 4096 字节，路径最多 8 层。汇总最多保留 4096 个键，每键最多 1024 字节，超出计入 `other`。`details_suppressed` 和 `oversized` 明确记录未输出的细节，采样行数不代表拒绝总数。
 
 每组汇总带同一个 `snapshot`，末行 `merge_value_summary` 表示该组输出完整；`trigger` 区分 `periodic`、`final` 和 `signal`。计数不清空，比较时应选完整的一组，不能跨组累加。开启诊断后，收到 SIGINT／SIGTERM 会尽力补写汇总，再恢复原信号行为；SIGKILL 不会触发补写。关闭诊断时不注册这些信号处理器；诊断与 `ISLA_STATS` 均关闭时不创建统计线程。
 

@@ -75,10 +75,10 @@ pub fn sym_solve_str<B: BV>(sym: &Sym, point: &Checkpoint<B>, shared_state: &Sha
                 // let val = execute::eval_exp(exp, local_state, shared_state, solver, info)?.into_owned();
                 match &exp {
                     Exp::Var(v) => format!("{}", sym_solve_str(v, point, shared_state)),
-                    Exp::Bits(vec) => format!("{:?}", &exp),
+                    Exp::Bits(_) => format!("{:?}", &exp),
                     Exp::Bits64(b64) => format!("{:?}", b64),
-                    Exp::Enum(enum_member) => format!("{:?}", &exp),
-                    Exp::Bool(b) => format!("{:?}", &exp),
+                    Exp::Enum(_) => format!("{:?}", &exp),
+                    Exp::Bool(_) => format!("{:?}", &exp),
                     _ => panic!("不知道怎么处理的符号表达式Exp:{:?}", &exp),
                 }
             }
@@ -143,7 +143,7 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<args::ArgStruct<'ir, B>> {
                     arg_struct.clause_name, &arg_struct
                 );
             }
-            let ArgStruct { arg_value, clause_name, checkpoint: point, shared_state } = arg_struct;
+            let ArgStruct { arg_value, checkpoint: point, shared_state, .. } = arg_struct;
             match arg_value {
                 Val::Struct(map) => {
                     let yaml_map = map
@@ -153,7 +153,7 @@ impl<'ir, B: BV> ToYAMLSerializer<'ir, B> for Vec<args::ArgStruct<'ir, B>> {
                             (
                                 k.to_str(&shared_state),
                                 match &v {
-                                    Val::Symbolic(sym) => val_sym_solve_str(v, &point, &shared_state),
+                                    Val::Symbolic(_) => val_sym_solve_str(v, &point, &shared_state),
                                     _ => panic!("TODO:还要加其他类型的实现：{:#?}", v),
                                 },
                             )
@@ -227,7 +227,7 @@ pub fn test_clause_args_yaml_main<B: BV>(
 ) {
     println!("test_clause_args_yaml_main");
 
-    for (n, ty) in shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap().iter() {
+    for (n, _) in shared_state.type_info.unions.get(&shared_state.symtab.lookup("zinstruction")).unwrap() {
         let inst_union_name_str = shared_state.symtab.to_str(*n);
         let clause_name = &inst_union_name_str;
 

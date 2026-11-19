@@ -5,6 +5,7 @@ authors = ["Alasdair <alasdair.armstrong@cl.cam.ac.uk>"]
 edition = "2021"
 license = "BSD-2-Clause"
 build = "build.rs"
+links = "isla_z3"
 readme = "../README.md"
 homepage = "https://github.com/rems-project/isla"
 repository = "https://github.com/rems-project/isla"
@@ -25,6 +26,9 @@ default = []
 
 [build-dependencies]
 lalrpop = { version = "0.20.2", features = ["lexer"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.build-dependencies]
+libloading = "0.7.4"
 
 [dependencies]
 ahash = "0.8.11"

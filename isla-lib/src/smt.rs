@@ -191,10 +191,12 @@ mod dump;
 mod logical_arm;
 mod proof_budget;
 mod transaction;
+mod witness;
 mod witness_shadow;
 pub(crate) use logical_arm::LogicalArm;
 pub use transaction::SolverTransaction;
 use transaction::{DeclarationUndo, SolverSavepoint};
+pub use witness::WitnessRandomization;
 mod dependencies;
 pub mod smtlib;
 mod tactic;
@@ -206,6 +208,7 @@ pub(crate) use finite_domain::FiniteDomain;
 pub mod no_smt;
 mod query;
 mod z3_timeout;
+mod z3_version;
 pub use dump::configure_slow_query_dump;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
@@ -213,6 +216,7 @@ use z3_timeout::{
     timeout_Z3_model_eval, timeout_Z3_solver_check, timeout_Z3_solver_check_assumptions,
     timeout_Z3_solver_check_deadline, timeout_error as z3_timeout_error, Z3TimeoutError,
 };
+use z3_version::MIN_Z3_VERSION;
 
 /// Snapshot of interaction with underlying solver that can be
 /// efficiently cloned and shared between threads.
@@ -664,11 +668,9 @@ impl<B: BV> Trace<B> {
     }
 
     fn record_event_guards(&mut self, offset: usize, events: &[(Option<Exp<Sym>>, Event<B>)]) {
-        if TRACE_EVENT_GUARDS.get().is_none() {
-            return;
-        }
+        let register_reads = TRACE_EVENT_GUARDS.get().is_some();
         self.event_guards.extend(events.iter().enumerate().filter_map(|(index, (guard, event))| {
-            if matches!(event, Event::ReadReg(..)) || event.is_memory_read_or_write() {
+            if event.is_memory_read_or_write() || (register_reads && matches!(event, Event::ReadReg(..))) {
                 guard.as_ref().map(|guard| (offset + index, guard.clone()))
             } else {
                 None
@@ -698,7 +700,7 @@ impl<B: BV> Trace<B> {
 
 static TRACE_EVENT_GUARDS: OnceLock<()> = OnceLock::new();
 
-/// 在启动 worker 前开启，诊断导出才需要保留已发布的事件条件。
+/// 在启动 worker 前开启寄存器读取条件的诊断记录。访存条件始终保存。
 pub fn enable_trace_event_guards() {
     TRACE_EVENT_GUARDS.get_or_init(|| ());
 }
@@ -795,9 +797,6 @@ pub struct Context {
     z3_ctx: Z3_context,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
-
-// 最低运行时版本对应官方提交 d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f。
-const MIN_Z3_VERSION: (c_uint, c_uint, c_uint, c_uint) = (5, 4, 0, 0);
 
 fn z3_version_supported(version: (c_uint, c_uint, c_uint, c_uint)) -> bool {
     version >= MIN_Z3_VERSION
@@ -2627,6 +2626,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let n = self.next_var;
         self.next_var += 1;
         Sym { id: n }
+    }
+
+    pub(crate) fn next_join_symbol(&self) -> u32 {
+        self.next_var
+    }
+
+    /// 计划完成后预留定义编号，发布各步时可与正常事务产生的编号交错。
+    pub(crate) fn reserve_join_symbols(&mut self, start: u32, end: u32) {
+        assert_eq!(self.next_var, start, "汇合计划期间不得修改求解器");
+        assert!(end >= start);
+        self.next_var = end;
+    }
+
+    pub(crate) fn add_join_definition(&mut self, def: Def, bits: bool, info: SourceLoc) {
+        if bits {
+            self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.add_with_location(def, info));
+        } else {
+            self.add_with_location(def, info);
+        }
     }
 
     fn translate_exp(&self, exp: &Exp<Sym>) -> Ast<'ctx> {

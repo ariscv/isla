@@ -21,7 +21,9 @@ use isla_lib::log;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::smtlib::Exp;
-use isla_lib::smt::{Config, Context, Event, Model, ModelVal, Trace};
+#[cfg(test)]
+use isla_lib::smt::Trace;
+use isla_lib::smt::{Config, Context, Event, Model, ModelVal};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::value_parser;
@@ -412,6 +414,7 @@ struct MemorySpanJson {
 ///
 /// `smt.rs` 的 `Trace::to_vec` 先访问最新段、段内反向遍历，整体是逆时间序
 /// （事件 push 在段 head 末尾）；这里先取出再整体反转，恢复事件发生的先后顺序。
+#[cfg(test)]
 fn memory_events_chronological<B: BV>(trace: &Trace<B>) -> Vec<&Event<B>> {
     let mut events = trace.to_vec();
     events.reverse();
@@ -607,7 +610,7 @@ fn memory_spans_json<B: BV>(bytes: &BTreeMap<u64, Option<u8>>, shared_state: &Sh
 /// 一次模型求值同时取得访存事件及其前后态。只有首次写入且从未读过的旧字节
 /// 没有观测值；地址、读值、写数据和写入结果均是必需字段。
 fn materialize_memory_witness<B: BV>(
-    events: &[Event<B>],
+    events: &[(Event<B>, Option<Exp<Sym>>)],
     model: &mut Model<'_, B>,
     shared_state: &SharedState<B>,
 ) -> Result<(Vec<MemoryEventJson>, Vec<MemorySpanJson>, Vec<MemorySpanJson>), ExecError> {
@@ -616,7 +619,14 @@ fn materialize_memory_witness<B: BV>(
     };
     let mut memory_events = Vec::with_capacity(events.len());
     let mut replay_accesses = Vec::with_capacity(events.len());
-    for (index, event) in events.iter().enumerate() {
+    for (index, (event, guard)) in events.iter().enumerate() {
+        if let Some(guard) = guard {
+            match model.get_exp(guard)? {
+                ModelVal::Exp(Exp::Bool(true)) => (),
+                ModelVal::Exp(Exp::Bool(false)) => continue,
+                _ => return Err(invalid(index, "guard")),
+            }
+        }
         match event {
             Event::ReadMem { value, address, bytes, region, opts, .. } => {
                 let access = materialize_replay_access(true, false, None, value, address, *bytes, model)?;
@@ -731,6 +741,8 @@ struct AssemGenJsonItem {
     encoding_slice: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     merge_enumeration: Option<serde_json::Value>,
+    #[serde(default, rename = "witness-randomization", skip_serializing_if = "Option::is_none")]
+    witness_randomization: Option<isla_lib::smt::WitnessRandomization>,
     #[serde(rename = "requested-instruction")]
     requested_instruction: String,
     #[serde(rename = "isa-state-complete")]
@@ -809,6 +821,7 @@ impl AssemGenJsonItem {
             value_hint: None,
             encoding_slice: None,
             merge_enumeration: None,
+            witness_randomization: None,
         }
     }
 
@@ -1674,8 +1687,6 @@ pub fn solve_state_main<'ir, B: BV>(
 fn symbolic_args_from_types<B: BV>(
     instruction_name: &str,
     shared_state: &SharedState<B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
     solver: &mut Solver<B>,
 ) -> Result<Val<B>, ExecError> {
     // 查找指令的构造函数名称
@@ -1886,10 +1897,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         .map_err(|error| ExecError::Type(error, SourceLoc::command_line()))?
     } else {
         let ctor_name = shared_state.symtab.lookup(instruction_name);
-        Val::<B>::Ctor(
-            ctor_name,
-            Box::new(symbolic_args_from_types(instruction_name, shared_state, &symbolic_regs, lets, &mut solver)?),
-        )
+        Val::<B>::Ctor(ctor_name, Box::new(symbolic_args_from_types(instruction_name, shared_state, &mut solver)?))
     };
     let fun_args = vec![instruction];
     log!(log::SYM_EXEC, &format!("fun_args:{:?}", fun_args));
@@ -2547,8 +2555,21 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
-                            let trace_events: Vec<Event<B>> =
-                                memory_events_chronological(solver.trace()).into_iter().cloned().collect();
+                            let witness_randomization = samples.witness_randomization_seed.map(|seed| {
+                                let mut symbols = Default::default();
+                                for (_, value) in target.pre_state().iter() {
+                                    value.collect_symbolic_variables(&mut symbols);
+                                }
+                                let symbols: Vec<_> = symbols.into_iter().collect();
+                                solver.randomize_witness(&symbols, seed, frame.path_signature())
+                            });
+                            let mut trace_events: Vec<_> = solver
+                                .trace()
+                                .events_with_guards_rev()
+                                .filter(|(event, _)| event.is_memory_read_or_write())
+                                .map(|(event, guard)| (event.clone(), guard.cloned()))
+                                .collect();
+                            trace_events.reverse();
                             let (memory_events, pre_memory, post_memory);
                             {
                                 {
@@ -2573,8 +2594,6 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     }
                                     model.set_complete_model(true);
                                     log!(log::PATH_RESULT, &format!("2. === ISA State (Thread {}) ===", thread));
-                                    let test = Sym::from_u32(6);
-                                    // dlog!("model.get_var({:?})={:?}", test, model.get_var(test));
                                     // dlog!("fun_args={:#?}", model.get_val(&fun_args[0]));
                                     match model.get_val(&fun_args[0]) {
                                         Ok(arg_val) => {
@@ -2915,6 +2934,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             .with_hint_label(hint_label)
                             .with_slice_label(slice_label);
                             single_instruction_json.merge_enumeration = sample_enumeration.clone();
+                            single_instruction_json.witness_randomization = witness_randomization;
                             collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                                 path_signature: frame.path_signature(),
                                 item: single_instruction_json,
@@ -3517,7 +3537,6 @@ mod tests {
         // 模拟 setup_pre_state：在主 solver 里符号化 mstatus
         let symbolic_mstatus = symbolic(&Ty::Bits(64), &shared_state, &mut main_solver, SourceLoc::unknown()).unwrap();
         let mut symbolic_regs = RegisterBindings::new();
-        let ty = Ty::<Name>::Bits(64);
         symbolic_regs.insert(mstatus_name, false, UVal::Init(symbolic_mstatus));
 
         // 在 fresh solver（concrete_function_result 内部自建）里执行：符号未声明 → panic
@@ -3533,7 +3552,6 @@ mod tests {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
         let (shared_state, mstatus_name) = decode_probe_shared_state();
         let mut regs = RegisterBindings::new();
-        let ty = Ty::<Name>::Bits(64);
         regs.insert(mstatus_name, false, UVal::Init(Val::Bits(B64::new(0x600, 64))));
         let outcome =
             concrete_function_result("zdecode_probe", Val::Unit, &shared_state, &regs, &Bindings::default()).unwrap();
@@ -5226,7 +5244,7 @@ mod tests {
         if let Event::WriteMem { value, .. } = &mut write {
             *value = write_result;
         }
-        let (events, pre, post) = materialize_memory_witness(&[write], &mut model, &shared_state).unwrap();
+        let (events, pre, post) = materialize_memory_witness(&[(write, None)], &mut model, &shared_state).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(pre.len(), 1);
         assert_eq!(pre[0].value, None);
@@ -5235,7 +5253,7 @@ mod tests {
         if let Event::ReadMem { address, .. } = &mut invalid_read {
             *address = Val::Symbolic(Sym::from_u32(999));
         }
-        assert!(materialize_memory_witness(&[invalid_read], &mut model, &shared_state).is_err());
+        assert!(materialize_memory_witness(&[(invalid_read, None)], &mut model, &shared_state).is_err());
     }
 
     /// 轨迹是逆时间序（smt.rs Trace::to_vec 先最新段、段内反向），
@@ -5557,6 +5575,7 @@ mod tests {
                 value_hint: None,
                 encoding_slice: None,
                 merge_enumeration: None,
+                witness_randomization: None,
                 requested_instruction: String::new(),
                 isa_state_complete: BTreeMap::new(),
                 isa_state_post: BTreeMap::new(),
@@ -5658,7 +5677,7 @@ mod tests {
             std::fs::read_to_string("rv64d.ir").expect("测试需要从仓库根目录运行，读 rv64d.ir").into_boxed_str(),
         );
         let mut symtab = Symtab::new();
-        let mut arch: &'static mut [Def<Name, B129>] = Box::leak(
+        let arch: &'static mut [Def<Name, B129>] = Box::leak(
             isla_lib::ir_parser::IrParser::new()
                 .parse(&mut symtab, isla_lib::ir_lexer::new_ir_lexer(contents))
                 .expect("解析 rv64d.ir 失败")

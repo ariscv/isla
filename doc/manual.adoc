@@ -92,6 +92,7 @@ NOTE: The above options can be passed together, e.g. `-D fmp`
 
 * `-P` Partially linearise a function.
 
+* TOML 中的 `[linearize]` 可逐函数配置改写和等价验证。参见 link:linearize_strategy.md[线性化策略]。
 * `--test-linearize` After linearising a function, using the SMT
   solver to check the linearised version is equivalent to the
   original.

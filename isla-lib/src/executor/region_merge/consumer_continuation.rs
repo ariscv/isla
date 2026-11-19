@@ -115,7 +115,7 @@ pub(super) fn try_join_after_last_use<'ir, 'task, B: BV>(
         base.vars_mut().remove(&dest);
         for part in &mut reached {
             part.vars_mut().remove(&dest);
-            promote_initials(&mut base, part, shared, solver);
+            promote_initials(&mut base, part, solver);
         }
         finish_arrivals(
             next_region_record(),

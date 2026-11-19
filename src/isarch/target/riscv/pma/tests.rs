@@ -686,14 +686,15 @@ fn normalized(value: &Val<B64>, symtab: &Symtab) -> serde_json::Value {
 }
 
 #[test]
-fn pma_regions_real_nine_regions_match_original_encoding() {
+fn pma_regions_real_nine_regions_match_configured_encoding() {
     let text = include_str!("../../../../../configs/riscv64_xiangshan_fullsym.toml");
     let old: Value = text.parse().unwrap();
     let legacy = get_pma_regions(&old).unwrap().unwrap();
     assert_eq!(legacy.len(), 9);
     let (mut symtab, types) = pma_type_fixture();
     let register = symtab.intern("zpma_regions");
-    let expected: serde_json::Value = serde_json::from_str(include_str!("original-nine-regions.json")).unwrap();
+    // 56bae3f2 将香山的六个设备区改为 AccessFault（夹具枚举成员 1）。
+    let expected: serde_json::Value = serde_json::from_str(include_str!("xiangshan-nine-regions.json")).unwrap();
     let value = encoded(&legacy, &symtab, &types);
     assert_eq!(normalized(&value, &symtab), expected);
     use crate::isarch::target::{Target, RV64};

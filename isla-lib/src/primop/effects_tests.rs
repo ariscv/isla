@@ -38,7 +38,7 @@ fn effect_representatives_and_conservative_cases() {
         ("elf_entry", Effect::ReadsState),
         ("assume", Effect::WritesState),
         ("mark_register", Effect::WritesState),
-        ("platform_write_mem", Effect::WritesState),
+        ("platform_write_mem", Effect::WritesMemory),
         ("read_mem", Effect::ReadsMemory),
         ("undefined_nat", Effect::WritesState),
         ("internal_pick", Effect::WritesState),

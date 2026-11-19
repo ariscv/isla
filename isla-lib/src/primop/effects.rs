@@ -23,9 +23,10 @@ pub enum Effect {
     /// 读取寄存器、内存、配置、周期数等外部状态。
     ReadsState,
     /// 读取内存并发布 ReadMem；与普通状态读分开，推演还需检查设备区域。
-    /// 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
     /// 仅适用于本项目可审计的 RAM / 顺序数组内存回调；约束必须经 solver 带条件提交。
     ReadsMemory,
+    /// 普通 RAM 写，必须在设备分派前确认回调支持可回滚版本。
+    WritesMemory,
     /// 写寄存器、内存、约束、事件、IO，或无法证明安全的不透明实现。
     WritesState,
     /// 仅用于原语内部直接分叉/建检查点，且不经过执行器操作数重试路径的实现。
@@ -274,7 +275,7 @@ pub fn effect(name: &str) -> Option<Effect> {
         | "fp64_undefined" => Some(Effect::WritesState),
         // 这两个向量辅助原语会直接对既有实参加范围断言，可能删除路径。
         "isla_fixed_rounding_incr" | "isla_mask_from_low_bits" => Some(Effect::WritesState),
-        // RAM 读取在推演中按并集发布；设备区域在运行时预检拒绝，写和 IO 仍拒绝。
+        // RAM 访存按实际发生的臂保存，设备与不可回滚回调在执行前拦截。
         "platform_read_mem"
         | "platform_read_mem_ifetch"
         | "platform_read_mem_exclusive"
@@ -282,12 +283,11 @@ pub fn effect(name: &str) -> Option<Effect> {
         | "read_mem"
         | "read_mem_ifetch"
         | "read_mem_exclusive" => Some(Effect::ReadsMemory),
-        // 写内存/标签或同步寄存器。
-        "platform_write_mem"
-        | "platform_write_mem_exclusive"
+        "platform_write_mem" | "write_mem" => Some(Effect::WritesMemory),
+        // 独占、标签和同步效应保留原执行边界。
+        "platform_write_mem_exclusive"
         | "platform_write_memt"
         | "platform_write_tag"
-        | "write_mem"
         | "write_mem_exclusive"
         | "platform_synchronize_registers"
         | "synchronize_registers" => Some(Effect::WritesState),
@@ -304,7 +304,7 @@ pub fn effect(name: &str) -> Option<Effect> {
 }
 
 // 三种函数指针接口复用同一分类表。优化器可能合并契约不同的相同函数体，
-// 故同地址取 Pure < Unknown < ReadsState < ReadsMemory < WritesState < MayFork 的最大值，与遍历顺序无关。
+// 故同地址取 Pure < Unknown < ReadsState < ReadsMemory < WritesMemory < WritesState < MayFork 的最大值，与遍历顺序无关。
 macro_rules! pointer_effect {
     ($query:ident, $kind:ident, $registry:ident) => {
         /// 按实现指针查询副作用；未注册的指针返回 `None`。

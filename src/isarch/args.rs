@@ -133,7 +133,7 @@ pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &Regist
 
         dlog!("{:?}", (func_args, ret, instr.len()));
     } */
-    let assembly_names = get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
+    get_symbolic_arg_all("zRTYPE", shared_state, regs, lets);
     // let assembly_names = get_assembly_names_all("zSTORE", shared_state, regs, lets);
 
     /* assembly_names.iter().for_each(|name| {
@@ -150,7 +150,7 @@ pub fn test_clause_args_main<B: BV>(shared_state: &SharedState<B>, regs: &Regist
     //.unwrap();
     //println!("{}", yaml);
 
-    let out = ir_assembly_names_to_InstructionMap("zSTORE", shared_state, regs, lets);
+    ir_assembly_names_to_InstructionMap("zSTORE", shared_state, regs, lets);
 
     ()
 }

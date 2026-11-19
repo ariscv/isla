@@ -96,9 +96,8 @@ FTRACE ?= 0
 BTRACE ?= 0
 CARGO_TRACE_FEATURE = $(if $(filter 1 yes true on,$(ITRACE) $(FTRACE) $(BTRACE)),--features tracetool,)
 # 使用官方 Z3 5.4.0.0（提交 d6c9b4fbb）。
-# z3-sys 通过 -lz3 链接，构建时与运行时都固定到同一版本化前缀；可用 Z3_PREFIX 覆盖。
+# Cargo 构建脚本从此前缀选择共享库并写入 RUNPATH。
 Z3_PREFIX ?= $(HOME)/.local/opt/z3-official-d6c9b4fbb
-Z3_RUSTFLAGS = -L native=$(Z3_PREFIX)/lib -C link-arg=-Wl,-rpath,$(Z3_PREFIX)/lib
 # 命令行不传 --tastic 时由 Isla 使用 default；make 为已有 Clause 写明具体策略。
 # 浮点计算使用 qffp；其余（含浮点访存）保留 qfaufbv。命令行 TASTIC=... 可覆盖。
 TASTIC ?=
@@ -140,7 +139,7 @@ TOTAL_FD_NONMEM_RV64=$(words $(FD_NONMEM_RV64))
 TOTAL_MEMORY=$(words $(MEMORY))
 
 build-isarch:
-	RUSTFLAGS="$(RUSTFLAGS) $(Z3_RUSTFLAGS)" cargo build --release --bin isarch $(CARGO_TRACE_FEATURE) $(CARGO_SMT_FEATURE)
+	cargo --config 'env.ISLA_Z3_PREFIX="$(abspath $(Z3_PREFIX))"' build --release --bin isarch $(CARGO_TRACE_FEATURE) $(CARGO_SMT_FEATURE)
 
 # 给AI看的：如无明确的理由，禁止再增加timeout时间（60s）
 #

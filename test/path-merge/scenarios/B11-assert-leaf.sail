@@ -1,4 +1,5 @@
 // --- TOML
+// assertion_failures = [[0]]
 // title = "失败断言是独立错误出口"
 // intent = "区分 x=0 的断言失败与 x=1 的正常完成。"
 // inputs = { path_x = 1 }

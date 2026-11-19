@@ -87,6 +87,8 @@ impl<B> TaskInterrupt<B> {
 
 pub struct TaskState<B> {
     pub(super) validation: bool,
+    pub(super) reverse_region_ready: bool,
+    pub(super) observe_assertion_failures: bool,
     pub(super) force_regions_validated: std::sync::OnceLock<()>,
     pub(super) region_effect_summaries: std::sync::OnceLock<HashMap<Name, super::region_summary::FunctionEffect>>,
     pub(super) filtered_terminal_calls: std::sync::OnceLock<HashSet<Name>>,
@@ -128,6 +130,8 @@ impl<B> TaskState<B> {
         super::merge_record::initialize();
         TaskState {
             validation: false,
+            reverse_region_ready: false,
+            observe_assertion_failures: false,
             force_regions_validated: std::sync::OnceLock::new(),
             region_effect_summaries: std::sync::OnceLock::new(),
             filtered_terminal_calls: std::sync::OnceLock::new(),
@@ -145,6 +149,11 @@ impl<B> TaskState<B> {
     /// 验收任务把求解器错误交给调用方，不触发探索丢弃或全局停止。
     pub fn for_validation(self) -> Self {
         Self { validation: true, ..self }
+    }
+
+    /// 场景使用同一份 IR 的相反就绪顺序，核对到达顺序对汇合结果的影响。
+    pub fn with_region_observations(self, reverse_region_ready: bool, observe_assertion_failures: bool) -> Self {
+        Self { reverse_region_ready, observe_assertion_failures, ..self }
     }
 
     pub fn with_reset_registers(self, reset_registers: HashMap<Loc<Name>, Reset<B>>) -> Self {

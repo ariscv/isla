@@ -178,6 +178,9 @@ fn 边界菱形和回边必须保持单态化候选与特殊寄存器事件() {
                 let encoded = zencode::encode(register_name);
                 let mut shared = empty_shared_state();
                 let reg = shared.symtab.intern(&encoded);
+                if register_name == "_TLB" {
+                    shared.untraced_registers.insert(reg);
+                }
                 let condition = test_name(760);
                 let value = test_name(761);
                 let iterations = test_name(762);

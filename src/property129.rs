@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use std::process::exit;
 
 use isla_lib::bitvector::b129::B129;
-use isla_lib::executor::{ExecutionLimits, LocalFrame, TaskId, TaskState};
+use isla_lib::executor::{ExecutionLimits, LocalFrame, TaskState};
 use isla_lib::init::{initialize_architecture, Initialized};
 use isla_lib::ir::*;
 use isla_lib::zencode;
@@ -95,9 +95,9 @@ fn isla_main() -> i32 {
     };
     let enabled = limits.path_merging;
     let task_state = TaskState::new().with_execution_limits(limits.with_region_loop_analysis(enabled));
-    let task = LocalFrame::new(function_id, args, ret_ty, None, instrs)
-        .add_lets(&lets)
-        .add_regs(&regs)
-        .task(TaskId::fresh(), &task_state);
+    let task_state = path_options.task_state(task_state);
+    let mut frame = LocalFrame::new(function_id, args, ret_ty, None, instrs);
+    frame.add_lets(&lets).add_regs(&regs);
+    let task = path_options.task(&mut frame, &task_state);
     path_options.run(num_threads, task, &shared_state)
 }

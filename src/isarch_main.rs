@@ -171,14 +171,14 @@ fn print_usage(opts: &getopts::Options, code: i32) -> ! {
 #[allow(dead_code)]
 fn cmd_tree<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
-    shared_state: &&isla_lib::ir::SharedState<B>,
-    regs: &isla_lib::register::RegisterBindings<B>,
-    lets: &Bindings<B>,
-    iarch_config: isla_lib::init::InitArchWithConfig<B>,
-    source_path: Option<std::path::PathBuf>,
+    _: &&isla_lib::ir::SharedState<B>,
+    _: &isla_lib::register::RegisterBindings<B>,
+    _: &Bindings<B>,
+    _: isla_lib::init::InitArchWithConfig<B>,
+    _: Option<std::path::PathBuf>,
 ) -> i32 {
     let instruction = &matches.free[1];
-    let graphviz = matches.opt_present("graphviz");
+    matches.opt_present("graphviz");
 
     log!(log::VERBOSE, &format!("Analyzing instruction: {}", instruction));
 
@@ -247,13 +247,13 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
 #[allow(dead_code)]
 fn cmd_solve_state<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
-    iarch: &isla_lib::init::Initialized<B>,
-    arch: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
-    isa_config: isla_lib::config::ISAConfig<B>,
-    source_path: Option<std::path::PathBuf>,
+    _: &isla_lib::init::Initialized<B>,
+    _: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
+    _: isla_lib::config::ISAConfig<B>,
+    _: Option<std::path::PathBuf>,
 ) -> i32 {
     let instruction = &matches.free[1];
-    let init_isa_with_config = matches.opt_present("init-isa-with-config");
+    matches.opt_present("init-isa-with-config");
 
     log!(log::VERBOSE, &format!("Solving state for instruction: {}", instruction));
 
@@ -403,6 +403,26 @@ fn parse_trace_options(matches: &getopts::Matches) -> Result<isla_lib::tracetool
     Ok(options)
 }
 
+fn resolve_witness_randomization(cli: Option<&str>, config: Option<&toml::Value>) -> Result<Option<u64>, String> {
+    let seed = match cli {
+        Some("off") => None,
+        Some("auto") => Some(rand::random()),
+        Some(seed) => Some(seed.parse().map_err(|_| "--witness-randomization 需要 off、auto 或 u64")?),
+        None => match config {
+            Some(toml::Value::Boolean(true)) => Some(rand::random()),
+            Some(toml::Value::Integer(seed)) => {
+                Some(u64::try_from(*seed).map_err(|_| "witness_randomization 需要非负的固定随机种子")?)
+            }
+            None | Some(toml::Value::Boolean(false)) => None,
+            Some(_) => return Err("witness_randomization 需要布尔值或非负整数".into()),
+        },
+    };
+    if let Some(seed) = seed {
+        eprintln!("见证随机种子 {seed}");
+    }
+    Ok(seed)
+}
+
 fn isla_main() -> i32 {
     let mut opts = opts::common_opts();
     isarch::path_cache::Options::add_cli(&mut opts);
@@ -491,6 +511,12 @@ fn isla_main() -> i32 {
     opts.optopt("", "itrace", "把完整逐指令轨迹写入文件，可与 ftrace/btrace 组合", "<path>");
     opts.optflag("", "ftrace", "记录函数调用和返回");
     opts.optflag("", "btrace", "输出静态分支清单和实际条件分支轨迹");
+    opts.optopt(
+        "",
+        "witness-randomization",
+        "solve-state 的 gen 代表值随机化，接受 off、auto 或固定随机种子",
+        "<mode>",
+    );
     opts.optopt("", "trace-output", "ftrace/btrace 的输出文件；与 --itrace 共用时路径须一致", "<path>");
 
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
@@ -558,6 +584,10 @@ fn isla_main() -> i32 {
         }
     };
 
+    if matches.opt_present("witness-randomization") && !matches!(subcommand, Subcommand::SolveState { .. }) {
+        eprintln!("--witness-randomization 仅用于 solve-state");
+        return 1;
+    }
     let fuzz_options = if matches!(subcommand, Subcommand::Fuzz { .. }) {
         match isarch::fuzz::Options::parse(&matches) {
             Ok(options) => Some(options),
@@ -625,6 +655,21 @@ fn isla_main() -> i32 {
 
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, merged_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
+
+    let witness_randomization_seed = if matches!(subcommand, Subcommand::SolveState { .. }) {
+        match resolve_witness_randomization(
+            matches.opt_str("witness-randomization").as_deref(),
+            merged_config.get("witness_randomization"),
+        ) {
+            Ok(seed) => seed,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
 
     if matches!(subcommand, Subcommand::SolveState { .. } | Subcommand::Fuzz { .. }) {
         // solve-state 必须同时保留符号 assert 的 true/false 两臂。
@@ -827,6 +872,7 @@ fn isla_main() -> i32 {
             }
             let fixed_inputs = isarch::exec::FixedSolveInputs { instruction, prestate };
             let sample_options = isarch::samples::SampleOptions {
+                witness_randomization_seed,
                 filter_model_exceptions: if matches.opt_present("filter-model-exception") {
                     matches.opt_strs("filter-model-exception")
                 } else {

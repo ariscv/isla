@@ -198,6 +198,16 @@ pub trait MemoryCallbacks<B>: fmt::Debug + MemoryCallbacksClone<B> + Send + Sync
         false
     }
 
+    /// 返回当前 RAM 数组版本即声明写入仅更新 solver 和此版本。
+    /// 除版本和传入 solver 外，推演写不得修改回调状态或产生宿主副作用。
+    fn ram_version(&self) -> Option<Sym> {
+        None
+    }
+
+    fn set_ram_version(&mut self, _version: Sym) {
+        panic!("支持推演写的内存回调必须能设置 RAM 版本");
+    }
+
     /// 回调若会用区域约束排除非符号内存的写入，可直接处理尚未收窄的符号地址。
     /// Custom 区域始终先经 Memory 检查，唯一地址调用设备，否则拆分重试。
     /// 默认仍由 Memory 提前检查可能与具体区域重叠的地址。
@@ -326,9 +336,63 @@ impl<B: Clone> Memory<B> {
     }
 }
 
+mod sequential;
+pub use sequential::{install_seq_memory, SeqMemory};
+
 impl<B: BV> Memory<B> {
     pub fn new() -> Self {
         Memory { regions: Vec::new(), client_info: None }
+    }
+
+    pub(crate) fn ram_version(&self) -> Option<Sym> {
+        self.client_info.as_ref().and_then(|client| client.ram_version())
+    }
+
+    pub(crate) fn set_ram_version(&mut self, version: Sym) {
+        self.client_info.as_mut().expect("RAM 版本必须有内存回调").set_ram_version(version);
+    }
+
+    /// 已声明可回滚的回调才可推演写。设备或任意生成器覆盖的字节仍须走设备边界。
+    pub(crate) fn speculative_ram_write(
+        &self,
+        address: &Val<B>,
+        data: &Val<B>,
+        solver: &mut Solver<B>,
+    ) -> Result<bool, ExecError> {
+        if self.ram_version().is_none() {
+            return Ok(false);
+        }
+        let bytes = data_bytes(data, solver)?;
+        if bytes == 0 {
+            return Ok(false);
+        }
+        let opaque = self.regions.iter().filter_map(|region| match region {
+            Region::Custom(range, _) | Region::Constrained(range, _) => Some(range),
+            _ => None,
+        });
+        if opaque.clone().next().is_none() {
+            return Ok(true);
+        }
+        let loc = SourceLoc::unknown();
+        match address {
+            Val::Bits(address) if address.len() >= 64 => {
+                Ok(!opaque.into_iter().any(|range| access_overlaps(range, address.lower_u64(), bytes)))
+            }
+            _ => {
+                let address = replace_mixed_bits(address.clone(), solver, loc)?;
+                let address = crate::primop_util::smt_value(&address, loc)?;
+                let disjoint = smt_disjoint_ranges(opaque, &address, bytes, solver).unwrap();
+                if let Some(disjoint) = solver.structural_bool(&disjoint) {
+                    return Ok(disjoint);
+                }
+                let overlaps = crate::smt::smtlib::Exp::Not(Box::new(disjoint));
+                match solver.check_candidate_sat_with(&overlaps, loc) {
+                    Some(SmtResult::Unsat) => Ok(true),
+                    None | Some(SmtResult::Sat | SmtResult::Unknown) => Ok(false),
+                    Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
+                }
+            }
+        }
     }
 
     pub fn regions(&self) -> &[Region<B>] {
@@ -1197,7 +1261,7 @@ impl<B: BV> Memory<B> {
 
 /// 访问起点已在区域内，或沿模地址空间到区域起点的距离小于访问长度，即触碰区域。
 /// 这一判断等价于逐字节检查，且不会为超大访问长度线性枚举。
-fn excluded_overlap(range: &Range<Address>, address: Address, bytes: u32) -> bool {
+fn access_overlaps(range: &Range<Address>, address: Address, bytes: u32) -> bool {
     bytes != 0
         && range.start < range.end
         && (range.contains(&address) || range.start.wrapping_sub(address) < u64::from(bytes))
@@ -1206,7 +1270,7 @@ fn excluded_overlap(range: &Range<Address>, address: Address, bytes: u32) -> boo
 /// 具体地址（读或写）是否落在任一判死区域内。
 fn excluded_concrete_hit<B: BV>(regions: &[Region<B>], address: Address, bytes: u32) -> bool {
     regions.iter().any(|region| match region {
-        Region::Excluded(range) => excluded_overlap(range, address, bytes),
+        Region::Excluded(range) => access_overlaps(range, address, bytes),
         _ => false,
     })
 }
@@ -1294,10 +1358,22 @@ pub fn smt_excluded_constraint<B: BV>(
     bytes: u32,
     solver: &mut Solver<B>,
 ) -> Option<Exp<Sym>> {
+    let excluded = regions.iter().filter_map(|region| match region {
+        Region::Excluded(range) => Some(range),
+        _ => None,
+    });
+    smt_disjoint_ranges(excluded, address, bytes, solver)
+}
+
+fn smt_disjoint_ranges<'a, B: BV>(
+    ranges: impl Iterator<Item = &'a Range<Address>>,
+    address: &Exp<Sym>,
+    bytes: u32,
+    solver: &mut Solver<B>,
+) -> Option<Exp<Sym>> {
     use crate::smt::smtlib::Exp::*;
-    if !regions.iter().any(|region| matches!(region, Region::Excluded(_))) {
-        return None;
-    }
+    let mut ranges = ranges.peekable();
+    ranges.peek()?;
     if bytes == 0 {
         return Some(Bool(true));
     }
@@ -1313,8 +1389,7 @@ pub fn smt_excluded_constraint<B: BV>(
         if cmp_size < 64 { ZeroExtend(64 - cmp_size, Box::new(addr_exp.clone())) } else { addr_exp.clone() };
     let domain_end = 1u128 << cmp_size;
     let mut allowed = Bool(true);
-    for region in regions {
-        let Region::Excluded(range) = region else { continue };
+    for range in ranges {
         // 窄地址空间无法命中域外区域，跨越域末端的区域只保留域内部分。
         let end = u128::from(range.end).min(domain_end);
         if u128::from(range.start) >= end {

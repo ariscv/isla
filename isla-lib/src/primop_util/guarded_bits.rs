@@ -3,10 +3,14 @@ use super::*;
 
 /// SMT 也用位向量表示整数和构造子标签。用已有的 Sail 位向量标记区分这些值。
 pub(crate) fn is_bits<B: BV>(value: &Val<B>, solver: &Solver<B>) -> bool {
+    is_bits_with(value, solver)
+}
+
+pub(super) fn is_bits_with<B: BV>(value: &Val<B>, solver: &dyn MergeTerms<B>) -> bool {
     match value {
         Val::Bits(_) | Val::MixedBits(_) => true,
         Val::Symbolic(sym) => solver.is_sail_bitvector(*sym),
-        Val::Guarded(_, values) => is_bits(&values.0, solver) && is_bits(&values.1, solver),
+        Val::Guarded(_, values) => is_bits_with(&values.0, solver) && is_bits_with(&values.1, solver),
         _ => false,
     }
 }
@@ -15,7 +19,7 @@ pub(super) fn merge<B: BV>(
     cond: Sym,
     left: &Val<B>,
     right: &Val<B>,
-    solver: &mut Solver<B>,
+    solver: &mut dyn MergeTerms<B>,
     info: SourceLoc,
 ) -> Val<B> {
     fn collect<'a, B: BV>(value: &'a Val<B>, guard: Exp<Sym>, leaves: &mut Vec<(Exp<Sym>, &'a Val<B>)>) {
@@ -37,7 +41,7 @@ pub(super) fn merge<B: BV>(
     let (_, last) = leaves.pop().unwrap();
     leaves.into_iter().rev().fold(last.clone(), |rest, (predicate, leaf)| {
         let guard = solver.define_const(predicate, info);
-        crate::executor::concrete_values::created();
+        solver.record_guarded_value();
         Val::Guarded(guard, Box::new((leaf.clone(), rest)))
     })
 }

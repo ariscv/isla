@@ -20,7 +20,7 @@ fn equivalent(context: &Context, a: &Ast, b: &Ast) {
 
 #[test]
 fn mask_identity_all_symbolic_values_and_operand_orders() {
-    configure_tastic(Tactic::Default);
+    configure_tastic(Tactic::Qfaufbv);
     for width in [1, 2, 3, 8, 64, 128] {
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -41,7 +41,7 @@ fn mask_identity_all_symbolic_values_and_operand_orders() {
 
 #[test]
 fn sign_bound_exhaustive_small_widths_and_rejected_boundaries() {
-    configure_tastic(Tactic::Default);
+    configure_tastic(Tactic::Qfaufbv);
     for m in 1..=4 {
         for n in m + 1..=6 {
             let context = Context::new(Config::new());
@@ -66,7 +66,7 @@ fn sign_bound_exhaustive_small_widths_and_rejected_boundaries() {
 
 #[test]
 fn data_ite_nested_shared_dag_is_equivalent_and_linear() {
-    configure_tastic(Tactic::Default);
+    configure_tastic(Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let info = SourceLoc::unknown();
@@ -107,7 +107,7 @@ fn data_ite_nested_shared_dag_is_equivalent_and_linear() {
 
 #[test]
 fn sign_bound_wide_and_non_sign_extension_inputs() {
-    configure_tastic(Tactic::Default);
+    configure_tastic(Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let x = variable(&mut solver, 12);
@@ -128,7 +128,7 @@ fn sign_bound_wide_and_non_sign_extension_inputs() {
 
 #[test]
 fn definitions_published_buffered_guards_goals_and_no_smt_share_rewrite() {
-    configure_tastic(Tactic::Default);
+    configure_tastic(Tactic::Qfaufbv);
     for no_smt in [false, true] {
         let mut config = Config::new();
         config.solver_options.no_smt = no_smt;
@@ -157,7 +157,7 @@ fn definitions_published_buffered_guards_goals_and_no_smt_share_rewrite() {
 
 #[test]
 fn data_ite_equality_is_also_rewritten_inside_neq_translation() {
-    configure_tastic(Tactic::Default);
+    configure_tastic(Tactic::Qfaufbv);
     let mut cfg = Config::new();
     cfg.solver_options.bv_rewrite = BvRewrite::parse("data-ite-eq").unwrap();
     let context = Context::new(cfg);

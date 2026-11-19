@@ -31,6 +31,7 @@ class ProjectEvents(unittest.TestCase):
     scene = {
         "inputs": {"path_x": 1}, "observe": "out_value", "registers": [],
         "ordered_events": False, "ordered_memory_events": True, "register_reads": {},
+        "initialized_registers": [], "assertion_failures": [],
     }
     selected = "(= x #b1)"
     bound = "(assert (=> (= x #b1) (= byte #x2a)))"

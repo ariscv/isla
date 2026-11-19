@@ -131,7 +131,7 @@ pub(super) fn finish_catch<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Size
         if !matches!(part.lets().get(&HAVE_EXCEPTION), Some(UVal::Init(Val::Bool(false)))) {
             return Err(reject(part, SpeculativeRejectReason::ExceptionCheck));
         }
-        promote_initials(&mut caller, part, shared, solver);
+        promote_initials(&mut caller, part, solver);
     }
     let limits = state.execution_limits.as_ref().unwrap();
     let summaries = state.region_effect_summaries.get().expect("被调区域必须已建立效应摘要");

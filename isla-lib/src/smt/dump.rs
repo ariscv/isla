@@ -106,6 +106,33 @@ mod tests {
     use crate::source_loc::SourceLoc;
 
     #[test]
+    fn slow_query_dump_records_thread_resources() {
+        let args = ["slow_query_dump_records_thread_resources", "--nocapture", "--test-threads=1"];
+        if !std::env::args().skip(1).eq(args.map(str::to_owned)) {
+            let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!("isla-slow-query-resources-{}", std::process::id()));
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        configure_slow_query_dump(directory.clone(), std::time::Duration::from_nanos(1), 1);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let x = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.assert(Var(x));
+        assert!(solver.check_sat(SourceLoc::unknown()).is_sat().unwrap());
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("query-000.json")).unwrap()).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(metadata["resources"]["thread_cpu_seconds"].as_f64().unwrap() >= 0.0);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(metadata["resources"]["rss_after_bytes"].as_u64().unwrap() > 0);
+            assert!(metadata["resources"]["voluntary_context_switches"].is_number());
+        }
+    }
+
+    #[test]
     fn slow_query_dump_assertion_indices_match_unconditional_check() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let ctx = Context::new(Config::new());
@@ -614,7 +641,7 @@ fn ast_size(ctx: Z3_context, roots: &[Z3_ast]) -> serde_json::Value {
 /// 完整快照复用已有命名和重放。逐条保留断言以支持离线分量分析及来源检查。
 fn slow_query_artifact<B: BV>(checkpoint: Checkpoint<B>, exp: Option<&Exp<Sym>>) -> (String, serde_json::Value) {
     let ctx = Context::new_smtlib2_dump(Config::new());
-    let mut solver = Solver::from_checkpoint_for_smtlib2_dump(&ctx, checkpoint, SmtDumpNames::default());
+    let solver = Solver::from_checkpoint_for_smtlib2_dump(&ctx, checkpoint, SmtDumpNames::default());
     let mut preceding = super::SourceLoc::unknown();
     let locations: Vec<_> = solver
         .trace
@@ -698,9 +725,64 @@ fn slow_query_artifact<B: BV>(checkpoint: Checkpoint<B>, exp: Option<&Exp<Sym>>)
     }
 }
 
+/// 仅显式慢查询导出启用时采样。RSS属于全进程，不能分摊给当前solver。
+struct QueryResources {
+    cpu: std::time::Duration,
+    #[cfg(target_os = "linux")]
+    usage: libc::rusage,
+    #[cfg(target_os = "linux")]
+    rss_bytes: u64,
+}
+
+impl QueryResources {
+    fn capture() -> Self {
+        let cpu = crate::timing::thread_cpu_time();
+        #[cfg(not(target_os = "linux"))]
+        return Self { cpu };
+        #[cfg(target_os = "linux")]
+        {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) }, 0, "读取线程资源失败");
+            let status = std::fs::read_to_string("/proc/self/status").expect("读取进程RSS失败");
+            let rss_bytes = status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .expect("缺少VmRSS")
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                * 1024;
+            Self { cpu, usage: unsafe { usage.assume_init() }, rss_bytes }
+        }
+    }
+
+    fn delta(&self, before: &Self) -> serde_json::Value {
+        let cpu = (self.cpu - before.cpu).as_secs_f64();
+        #[cfg(not(target_os = "linux"))]
+        return serde_json::json!({"thread_cpu_seconds": cpu});
+        #[cfg(target_os = "linux")]
+        serde_json::json!({
+            "thread_cpu_seconds": cpu,
+            "thread_user_cpu_seconds": (self.usage.ru_utime.tv_sec - before.usage.ru_utime.tv_sec) as f64
+                + (self.usage.ru_utime.tv_usec - before.usage.ru_utime.tv_usec) as f64 / 1_000_000.0,
+            "thread_system_cpu_seconds": (self.usage.ru_stime.tv_sec - before.usage.ru_stime.tv_sec) as f64
+                + (self.usage.ru_stime.tv_usec - before.usage.ru_stime.tv_usec) as f64 / 1_000_000.0,
+            "voluntary_context_switches": self.usage.ru_nvcsw - before.usage.ru_nvcsw,
+            "involuntary_context_switches": self.usage.ru_nivcsw - before.usage.ru_nivcsw,
+            "minor_page_faults": self.usage.ru_minflt - before.usage.ru_minflt,
+            "major_page_faults": self.usage.ru_majflt - before.usage.ru_majflt,
+            "rss_before_bytes": before.rss_bytes,
+            "rss_after_bytes": self.rss_bytes,
+        })
+    }
+}
+
 pub(super) struct SlowQueryToken {
     started: std::time::Instant,
     before: serde_json::Value,
+    resources: QueryResources,
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -710,7 +792,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             return None;
         }
         let before = self.diagnostic_solver_stats(solver);
-        Some(SlowQueryToken { started: std::time::Instant::now(), before })
+        let resources = QueryResources::capture();
+        Some(SlowQueryToken { started: std::time::Instant::now(), before, resources })
     }
 
     pub(super) fn slow_query_finish(
@@ -729,6 +812,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let Some(index) = config.reserve(elapsed) else {
             return;
         };
+        let resources = QueryResources::capture().delta(&token.resources);
         let after = self.diagnostic_solver_stats(solver);
         let dump_started = std::time::Instant::now();
         let (text, mut metadata) = slow_query_artifact(self.checkpoint_snapshot(), exp);
@@ -745,6 +829,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         metadata["solver"] = serde_json::json!(format!("{:p}", solver));
         metadata["context"] = serde_json::json!(format!("{:p}", self.ctx.z3_ctx));
         metadata["thread"] = serde_json::json!(format!("{:?}", std::thread::current().id()));
+        metadata["resources"] = resources;
         metadata["uses_main_solver"] = serde_json::json!(solver == self.z3_solver);
         metadata["statistics_before"] = token.before;
         metadata["statistics_after"] = after;

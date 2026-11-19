@@ -6,7 +6,7 @@ use crate::ir::{Symtab, Ty, UVal, Val};
 use crate::primop_util::merge_val;
 use crate::smt::{smtlib, Config, Context, Solver};
 use crate::source_loc::SourceLoc;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[test]
 fn merge_diagnostics_value_failures_and_paths() {
@@ -186,4 +186,43 @@ fn merge_diagnostics_sigterm_flushes_before_exit() {
             .any(|s| s["kind"] == "merge_value_summary" && s["total"] == 1 && s["trigger"] == "signal"),
         "{text}"
     );
+}
+
+#[test]
+fn merge_diagnostics_root_preserves_nested_rejection() {
+    use crate::error::ExecError;
+    use crate::executor::SpeculativeRejectReason;
+
+    let args = ["merge_diagnostics_root_preserves_nested_rejection", "--nocapture", "--test-threads=1"];
+    if std::env::args().skip(1).eq(args.map(str::to_owned)) {
+        configure("detail").unwrap();
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zcaller");
+        let info = SourceLoc::unknown();
+        let rejection = ExecError::SpeculativeReject {
+            reason: SpeculativeRejectReason::StateEffect,
+            function,
+            pc: 20,
+            location: info,
+        };
+        let mut root = AttemptGuard::start(1, function, 10, &symtab, info, &[(function, 8)]);
+        {
+            let mut child = AttemptGuard::start(1, function, 20, &symtab, info, &[]);
+            child.finish_rejected(FailurePhase::ArmExecution, &rejection, &rejection, &symtab);
+        }
+        root.finish_rejected(FailurePhase::ArmExecution, &rejection, &rejection, &symtab);
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stderr).unwrap();
+    let rows: Vec<Value> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let started = rows.iter().find(|row| row["kind"] == "merge_root_start").expect(&text);
+    let ended = rows.iter().find(|row| row["kind"] == "merge_root_end").expect(&text);
+    assert_eq!(started["attempt"], ended["attempt"]);
+    assert_eq!(started["origin"]["pc"], 10);
+    assert_eq!(started["callers"][0]["pc"], 8);
+    assert_eq!(ended["outcome"], "rejected");
+    assert_eq!(ended["failure"]["origin"]["pc"], 20);
+    assert_eq!(ended["failure"]["reason"], "state_effect");
 }

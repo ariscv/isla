@@ -615,7 +615,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut guards = Vec::new();
         for (guard, event) in effects.events {
             if event.is_memory_read_or_write() {
-                if let (true, Some(guard)) = (event.is_memory_read(), guard) {
+                if let Some(guard) = guard {
                     guards.push((index, guard));
                 }
                 index += 1;
@@ -751,6 +751,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 内层整理请求无副作用：只追加事件，不修改父层偏移，也不提前跨臂移动读取。
     /// 最外层提交前的请求延迟到发布时执行；内层调用方在最外层另行请求整理。
     /// 同时保留旧执行器在提交后补发合并寄存器事件、再调用此方法的契约。
+    #[cfg(test)]
     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
         if tx.depth != 1 {
             return;
