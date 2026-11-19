@@ -1,13 +1,12 @@
 // --- TOML
 // title = "改变五片段到达次序后守卫分组一致"
-// intent = "五个互斥叶子各给出 a、b、a、b、c，核对完整的三组输入。"
+// intent = "置换同一棵树的片段到达次序，每次都应得到覆盖全部输入的一条守卫。"
 // inputs = { path_x = 3 }
 // expect_paths_unmerged = 5
-// expect_paths_merged = 3
-// must_merge = "两个 a 同组，两个 b 同组。"
-// must_not_merge = "严格字符串下 a、b、c 各有一个继续执行的出口。"
+// expect_paths_merged = 1
+// must_merge = "五个叶子的 a、b、c 可按原输入选择。所有八个输入覆盖同一条路径，字符串比较仍能区分三个值。"
 // status = "todo"
-// reason = "需在同一逻辑树上置换汇合点收到的片段，并逐次核对相同守卫集合；CLI 未提供该控制。"
+// reason = "merge-principle-audit.md §2（到达次序）：property CLI 缺少控制同一棵树片段到达排列的开关。"
 // ---
 default Order dec
 $include <prelude.sail>

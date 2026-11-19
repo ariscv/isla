@@ -3,9 +3,10 @@
 // intent = "在汇合后辨别不同位宽，用输入核对结果。"
 // inputs = { path_x = 1 }
 // expect_paths_unmerged = 2
-// expect_paths_merged = 2
-// must_not_merge = "宽度是后续 length 的输入；固定宽度的 ITE 不能同时保留两种宽度。"
-// status = "ready"
+// expect_paths_merged = 1
+// must_merge = "按 x 保留位宽和值。length 在 x=0 时读到 4，在 x=1 时读到 8。"
+// status = "xfail"
+// reason = "total-merge-design.md §2（变宽位向量）：当前值合并要求位宽相同，4 位和 8 位分别完成。"
 // ---
 default Order dec
 $include <prelude.sail>

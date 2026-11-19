@@ -4,7 +4,7 @@
 // inputs = { path_x = 1 }
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
-// must_merge = "每个寄存器在未写分支都有确定的入口值。"
+// must_merge = "两笔共同初始化后，每个输入恰好执行原分支的一笔写。x=0 写 R，x=1 写 S，另一寄存器保持入口值。"
 // status = "ready"
 // registers = ["R", "S"]
 // ---

@@ -1,11 +1,10 @@
 // --- TOML
-// title = "五个叶子按 a、b、c 分三组"
-// intent = "五个互斥叶子各给出 a、b、a、b、c，核对完整的三组输入。"
+// title = "五个叶子的三个不同字符串合成一组"
+// intent = "核对五个叶子的字符串投影和覆盖全部输入的一条守卫。"
 // inputs = { path_x = 3 }
 // expect_paths_unmerged = 5
-// expect_paths_merged = 3
-// must_merge = "两个 a 同组，两个 b 同组。"
-// must_not_merge = "严格字符串下 a、b、c 各有一个继续执行的出口。"
+// expect_paths_merged = 1
+// must_merge = "五个叶子的 a、b、c 可按原输入选择。所有八个输入覆盖同一条路径，字符串比较仍能区分三个值。"
 // status = "ready"
 // ---
 default Order dec

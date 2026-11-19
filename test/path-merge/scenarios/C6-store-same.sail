@@ -4,9 +4,9 @@
 // inputs = { path_x = 1 }
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
-// must_merge = "两臂写请求同宽、同种类，差异字段可以带守卫。"
+// must_merge = "按输入选择写请求的数据，每个输入恰好产生原地址、原字节的一笔写。"
 // status = "xfail"
-// reason = "默认配置保留两条写路径，地址与各自写入的字节均与 off 一致。"
+// reason = "merge-principle-audit.md §2（直接内存写）：两笔候选请求的数据不同，当前模型保留两条写路径。"
 // ---
 default Order dec
 $include <prelude.sail>

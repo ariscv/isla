@@ -1,4 +1,2 @@
 (declare-const path_x (_ BitVec 3))
-(and (= ((_ extract 2 2) path_x) #b0) (= ((_ extract 0 0) path_x) #b0))
-(and (= ((_ extract 2 2) path_x) #b0) (= ((_ extract 0 0) path_x) #b1))
-(= ((_ extract 2 2) path_x) #b1)
+true

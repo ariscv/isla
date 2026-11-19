@@ -3,10 +3,10 @@
 // intent = "以 y 指定可读字节的低位，比较实际读事件及返回字节。"
 // inputs = { path_x = 1, path_y = 1 }
 // expect_paths_unmerged = 2
-// expect_paths_merged = 2
-// must_not_merge = "另一臂没有读事件，无条件读会改变执行迹。"
+// expect_paths_merged = 1
+// must_merge = "目标为每个输入按事件守卫投影，x=1 恰好读一次，x=0 零次。"
 // status = "todo"
-// reason = "两种位宽实跑时 off 通过；合并路径的 JSON 缺每笔读的生效守卫，未执行那笔读的数据也被要求唯一。需按输入过滤事件后对照。"
+// reason = "total-merge-design.md §4（条件访存）：现有正文在 x=0 读、x=1 跳过，与裁定的输入极性相反。导出还缺每笔读的生效守卫，须分别核实次数、地址和读值。"
 // ---
 default Order dec
 $include <prelude.sail>

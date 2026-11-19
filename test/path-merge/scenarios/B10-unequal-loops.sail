@@ -6,7 +6,7 @@
 // expect_paths_merged = 1
 // must_merge = "循环结束后只保留最终一位，且没有外部效应。"
 // status = "xfail"
-// reason = "两种迭代次数结束后仍有两条完成路径，最终翻转位核对通过。"
+// reason = "merge-principle-audit.md §5（循环出口）：两臂分别完成一次和两次翻转，离开循环后仍各自完成。"
 // ---
 default Order dec
 $include <prelude.sail>
