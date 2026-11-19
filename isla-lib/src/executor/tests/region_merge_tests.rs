@@ -5785,3 +5785,187 @@ fn unify_characterization_region_exit_in_both_modes() {
         assert_eq!(solver.has_stashed_model(), !no_smt);
     }
 }
+
+#[path = "prune_constant_branch_tests.rs"]
+mod prune_constant_branch_tests;
+// 子进程只通过测试名称选择模式，不引入运行时环境变量。
+#[test]
+fn arm_error_leaf_modes() {
+    for mode in ["normal", "deferred_dead", "deferred_live", "nosmt", "flat", "disabled", "structural_dead", "rollback"]
+    {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("executor::tests::region_merge_tests::arm_error_leaf_{mode}_child"),
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{mode}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+fn arm_error_leaf_fixture(mode: &str) {
+    crate::config::RegionOptions {
+        arm_error_leaf: mode != "disabled",
+        defer_exit_check: mode.starts_with("deferred"),
+        no_smt: mode == "nosmt",
+        ..Default::default()
+    }
+    .configure();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.no_smt = ["nosmt", "flat", "structural_dead", "rollback"].contains(&mode);
+    let ctx = Context::new(config);
+    let mut solver = Solver::<B64>::new(&ctx);
+    let condition = if mode == "structural_dead" {
+        solver.define_const(smtlib::Exp::Bool(false), info())
+    } else {
+        solver.declare_const(smtlib::Ty::Bool, info())
+    };
+    if !["deferred_live", "nosmt", "flat"].contains(&mode) {
+        solver.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition))));
+    }
+    let read = |address| {
+        Instr::PrimopVariadic(
+            Loc::Id(test_name(999)),
+            primop::variadic_primops()["platform_read_mem"],
+            vec![Exp::Unit, Exp::I128(64), Exp::Bits(B64::new(address, 64)), Exp::I128(1)],
+            info(),
+        )
+    };
+    let mut frame = make_frame(vec![
+        Instr::Jump(input(0), 4, info()),
+        read(0x1000),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(7),
+        read(0x1008),
+        Instr::PrimopUnary(Loc::Id(RETURN), primop::not_bool::<B64>, Exp::I128(1), info()),
+        Instr::Goto(7),
+        Instr::End,
+    ]);
+    frame.memory_mut().add_symbolic_region(0x1000..0x1010);
+    frame.vars_mut().insert(test_name(999), UVal::Uninit(&Ty::Bits(8)));
+    frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(condition)));
+    if mode == "rollback" {
+        // 先缓冲 then 的失败叶子，再由 else 的未实现调用触发整体拒绝。
+        // 使用已分类的真实原语构成错误，拒绝用运行时控制信号直接传给白名单。
+        let mut instrs = frame.instrs.to_vec();
+        instrs[1] = Instr::Copy(Loc::Id(RETURN), Exp::Id(test_name(7777)), info());
+        frame.instrs = Box::leak(instrs.into_boxed_slice());
+    }
+    let mut shared = empty_shared_state();
+    shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+    let mut limits = ExecutionLimits::default().with_path_merging(true);
+    if mode == "flat" {
+        limits.merge_strategy = crate::config::MergeStrategy::Flat;
+    }
+    let state = TaskState::new().with_execution_limits(limits);
+    let queue = Worker::new_lifo();
+    let sink = SingleForkSink { queue: &queue };
+    let stats_sink = stats::StatsForkSink { inner: &sink, stats: &shared.execution_stats };
+    let result = region_merge::try_region(
+        condition,
+        4,
+        0,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::unlimited(),
+        None,
+        &stats_sink,
+        &mut frame,
+        &state,
+        &shared,
+        &mut solver,
+        info(),
+    )
+    .unwrap();
+    if ["nosmt", "flat"].contains(&mode) {
+        assert!(matches!(result, region_merge::RegionResult::Merged));
+        let leaf = queue.pop().expect("无SMT必须保存失败叶子");
+        assert!(matches!(leaf.fork_cond, Some((_, Event::Fork(_, _, 0, _)))), "失败前沿须走真实分叉提交接口");
+        let error_frame = unfreeze_frame(&leaf.frame);
+        assert!(matches!(error_frame.arm_error(), Some(ExecError::Type(..))));
+        assert_ne!(error_frame.path_signature(), frame.path_signature(), "失败与正常前沿签名不可相同");
+        let checked_context = Context::new(Config::new());
+        let mut replay = Solver::from_checkpoint(&checked_context, leaf.checkpoint);
+        let addresses = |solver: &Solver<B64>| {
+            solver
+                .trace()
+                .to_vec()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::ReadMem { address: Val::Bits(address), .. } => Some(address.lower_u64()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(addresses(&solver), [0x1000]);
+        assert_eq!(addresses(&replay), [0x1008]);
+        // 独立快照不应被正常域的 !condition 排除。
+        assert!(replay.check_sat(info()).is_sat().unwrap());
+        assert!(replay
+            .check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition))), info())
+            .is_unsat()
+            .unwrap());
+        assert!(queue.is_empty());
+    } else if mode == "deferred_dead" || mode == "structural_dead" {
+        assert!(matches!(result, region_merge::RegionResult::Merged), "不可行错误臂应在出口丢弃");
+        assert!(queue.is_empty());
+    } else {
+        assert!(matches!(result, region_merge::RegionResult::Rejected), "普通模式/关闭/可达错误保持拒绝");
+        assert!(queue.is_empty());
+        assert_eq!(frame.pc, 0);
+    }
+}
+#[test]
+#[ignore]
+fn arm_error_leaf_normal_child() {
+    arm_error_leaf_fixture("normal")
+}
+#[test]
+#[ignore]
+fn arm_error_leaf_deferred_dead_child() {
+    arm_error_leaf_fixture("deferred_dead")
+}
+#[test]
+#[ignore]
+fn arm_error_leaf_deferred_live_child() {
+    arm_error_leaf_fixture("deferred_live")
+}
+#[test]
+#[ignore]
+fn arm_error_leaf_nosmt_child() {
+    arm_error_leaf_fixture("nosmt")
+}
+#[test]
+#[ignore]
+fn arm_error_leaf_disabled_child() {
+    arm_error_leaf_fixture("disabled")
+}
+
+#[test]
+#[ignore]
+fn arm_error_leaf_structural_dead_child() {
+    arm_error_leaf_fixture("structural_dead")
+}
+
+#[test]
+#[ignore]
+fn arm_error_leaf_rollback_child() {
+    arm_error_leaf_fixture("rollback")
+}
+
+#[test]
+#[ignore]
+fn arm_error_leaf_flat_child() {
+    arm_error_leaf_fixture("flat")
+}
+
+#[path = "region_concrete_values_tests.rs"]
+mod region_concrete_values_tests;

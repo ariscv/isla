@@ -134,6 +134,8 @@ pub enum ExecError {
     IntegerConversion(crate::smt::smtlib::Exp<crate::smt::Sym>, SourceLoc),
     /// 消费者需要按条件分叉后重试，保留成功和错误路径。
     RetryCondition(crate::smt::smtlib::Exp<crate::smt::Sym>, SourceLoc),
+    /// 具体消费者要求按候选值的守卫重试。
+    ConcreteChoice(crate::smt::Sym, SourceLoc),
     /// SMTLIB only supports fixed-length bitvectors. This error is
     /// raised if a bitvector width would become symbolic.
     SymbolicLength(&'static str, SourceLoc),
@@ -181,6 +183,7 @@ impl IslaError for ExecError {
             | Type(_, info)
             | AssertionFailure(_, info)
             | NoFunction(_, info)
+            | ConcreteChoice(_, info)
             | RetryCondition(_, info)
             | IntegerConversion(_, info)
             | SymbolicLength(_, info)
@@ -236,6 +239,7 @@ impl fmt::Display for ExecError {
             AssertionFailure(Some(msg), _) => write!(f, "Assertion failure: {}", msg),
             NoFunction(func, _) => write!(f, "Function {} does not exist", func),
             Overflow => write!(f, "Integer overflow"),
+            ConcreteChoice(_, _) => write!(f, "消费者需要拆分具体候选值"),
             RetryCondition(_, _) => write!(f, "消费者需要按条件分叉重试"),
             IntegerConversion(_, _) => write!(f, "整数转换需要分叉检查范围"),
             SymbolicLength(func, _) => write!(f, "Symbolic (bit)vector length in {}", func),

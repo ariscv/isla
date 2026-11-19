@@ -46,7 +46,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
-use crate::smt::{Checkpoint, Solver, Sym};
+use crate::smt::{smtlib, Checkpoint, Solver, Sym};
 use crate::timeout::{SmtCallStats, SmtDumpNames};
 #[cfg(feature = "tracetool")]
 use crate::tracetool::TracePerPath;
@@ -70,6 +70,8 @@ pub struct LocalState<'ir, B> {
     pub(super) pure_definitions: Vec<(u32, u32)>,
     pub(super) enumerate_merges: bool,
     pub(super) speculative_access: Option<super::region_merge::AccessLog<B>>,
+    // 只保存本路径断言过的具体候选决定。
+    pub(super) concrete_choices: Option<HashMap<Sym, bool>>,
     // 表达式地址在 IR 生命周期内稳定；缓存只跨同一条指令的分叉重试。
     pub(super) expression_values: HashMap<usize, Val<B>>,
     pub(super) expression_retry_operands: Option<Vec<Val<B>>>,
@@ -138,6 +140,8 @@ pub struct Frame<'ir, B> {
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) region_merge_records: super::MergeHistory<B>,
+    pub(super) arm_error: Option<ExecError>,
+    pub(super) arm_error_memory_guards: Arc<[(usize, smtlib::Exp<Sym>)]>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -178,6 +182,8 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         region_merge_records: frame.region_merge_records.clone(),
         region_arrivals: Vec::new(),
         region_arm: None,
+        arm_error: frame.arm_error.clone(),
+        arm_error_memory_guards: frame.arm_error_memory_guards.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::clone(&frame.execution_limit_state),
         local_state: Arc::clone(&frame.local_state),
@@ -210,7 +216,8 @@ pub struct LocalFrame<'ir, B> {
     pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
     pub(super) region_arm: Option<crate::smt::LogicalArm>,
     pub(super) region_merge_records: super::MergeHistory<B>,
-    // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
+    pub(super) arm_error: Option<ExecError>,
+    pub(super) arm_error_memory_guards: Arc<[(usize, smtlib::Exp<Sym>)]>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -264,6 +271,8 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
             region_arrivals: Vec::new(),
             region_arm: self.region_arm,
             region_merge_records: self.region_merge_records.clone(),
+            arm_error: self.arm_error.clone(),
+            arm_error_memory_guards: self.arm_error_memory_guards.clone(),
             pending_retry_operand: self.pending_retry_operand.clone(),
             execution_limit_state: self.execution_limit_state.clone(),
             local_state: self.local_state.clone(),
@@ -292,6 +301,8 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         region_execution: frame.region_execution.clone(),
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
+        arm_error: frame.arm_error.clone(),
+        arm_error_memory_guards: frame.arm_error_memory_guards.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::clone(&frame.execution_limit_state),
         local_state: Arc::clone(&frame.local_state),
@@ -309,6 +320,14 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    pub fn arm_error_memory_guards(&self) -> &[(usize, smtlib::Exp<Sym>)] {
+        &self.arm_error_memory_guards
+    }
+
+    pub fn arm_error(&self) -> Option<&ExecError> {
+        self.arm_error.as_ref()
+    }
+
     pub fn region_merge_records(&self) -> &super::MergeHistory<B> {
         &self.region_merge_records
     }
@@ -543,6 +562,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             region_arm: None,
             region_replay: None,
             region_merge_records: super::MergeHistory::default(),
+            arm_error: None,
+            arm_error_memory_guards: Arc::from([]),
             pending_retry_operand: None,
             execution_limit_state: Arc::new(ExecutionLimitPathState::default()),
             local_state: Arc::new(LocalState {
@@ -560,6 +581,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 speculative_access: None,
                 pure_definitions: Vec::new(),
                 enumerate_merges: false,
+                concrete_choices: None,
                 expression_values: HashMap::new(),
                 expression_retry_operands: None,
             }),
@@ -610,6 +632,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         instrs: &'ir [Instr<Name, B>],
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
+        cost::make_mut(&mut new_frame.local_state).concrete_choices = self.local_state.concrete_choices.clone();
         new_frame.speculation_mode = self.speculation_mode;
         new_frame.region_execution = self.region_execution.clone();
         new_frame.region_arm = self.region_arm;

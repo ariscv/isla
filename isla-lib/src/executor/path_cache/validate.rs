@@ -441,6 +441,11 @@ impl Validator<'_> {
 
     fn value<B: BV>(&mut self, value: &Val<B>) {
         match value {
+            Val::Guarded(guard, values) => {
+                self.constant(*guard);
+                self.value(&values.0);
+                self.value(&values.1);
+            }
             Val::Symbolic(s) => self.constant(*s),
             Val::MixedBits(parts) => {
                 for p in parts {

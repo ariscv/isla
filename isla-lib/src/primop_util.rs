@@ -816,20 +816,66 @@ pub fn merge_val<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let result = merge_val_inner(cond, val_a, val_b, solver, info);
+    let result = merge_val_inner_mode::<B, false>(cond, val_a, val_b, solver, info);
     if let Err(error) = &result {
         crate::executor::stats::merge_diagnostics::failed(val_a, val_b, solver, error);
     }
     result
 }
 
-fn merge_val_inner<B: BV>(
+/// 仅区域开关启用时调用；普通合并保持原有严格行为。
+pub fn merge_concrete_val<B: BV>(
+    cond: Sym,
+    a: &Val<B>,
+    b: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    merge_val_mode::<B, true>(cond, a, b, solver, info)
+}
+
+fn concrete_kind<B>(value: &Val<B>) -> Option<bool> {
+    match value {
+        Val::String(_) => Some(true),
+        Val::I64(_) => Some(false),
+        Val::Guarded(_, values) => {
+            let kind = concrete_kind(&values.0)?;
+            assert_eq!(Some(kind), concrete_kind(&values.1), "候选具体值必须同类型");
+            Some(kind)
+        }
+        _ => None,
+    }
+}
+
+fn merge_val_mode<B: BV, const CONCRETE: bool>(
+    cond: Sym,
+    a: &Val<B>,
+    b: &Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    let result = merge_val_inner_mode::<B, CONCRETE>(cond, a, b, solver, info);
+    if let Err(error) = &result {
+        crate::executor::stats::merge_diagnostics::failed(a, b, solver, error);
+    }
+    result
+}
+
+fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
     cond: Sym,
     val_a: &Val<B>,
     val_b: &Val<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if CONCRETE && concrete_kind(val_a).is_some() && concrete_kind(val_a) == concrete_kind(val_b) {
+        if val_a == val_b {
+            return Ok(val_a.clone());
+        }
+        let guard = solver.define_const(smtlib::Exp::Var(cond), info);
+        crate::executor::concrete_values::created();
+        return Ok(Val::Guarded(guard, Box::new((val_a.clone(), val_b.clone()))));
+    }
     if merge_bit_width(val_a, solver, info)? != merge_bit_width(val_b, solver, info)? {
         return Err(ExecError::IncompatibleMerge);
     }
@@ -858,7 +904,7 @@ fn merge_val_inner<B: BV>(
                         *field,
                         crate::executor::stats::merge_diagnostics::with_path(
                             crate::executor::stats::merge_diagnostics::PathPart::Field(*field),
-                            || merge_val(cond, a_val, b_val, solver, info),
+                            || merge_val_mode::<B, CONCRETE>(cond, a_val, b_val, solver, info),
                         )?,
                     )),
                     None => Err(ExecError::Type(format!("merge_val missing struct field {:?}", field), info)),
@@ -873,14 +919,17 @@ fn merge_val_inner<B: BV>(
         | (Val::SymbolicCtor(_, _), Val::SymbolicCtor(_, _)) => {
             // 沿用联合值的既有标签 ITE 与 possibilities 编码；重叠标签的载荷仍
             // 递归走严格合并，不把不同类型、机器整数等不可表示的载荷强行合并。
-            build_ite_with(cond, val_a, val_b, solver, info, merge_val).map_err(|error| match error {
+            build_ite_with(cond, val_a, val_b, solver, info, merge_val_mode::<B, CONCRETE>).map_err(|error| match error
+            {
                 ExecError::Smt(_) | ExecError::Timeout => error,
                 _ => ExecError::IncompatibleUnionPayload,
             })
         }
 
         // 向量长度保持具体，元素递归沿用路径合流的严格类型与整数限制。
-        (Val::Vector(_), Val::Vector(_)) => build_ite_with(cond, val_a, val_b, solver, info, merge_val),
+        (Val::Vector(_), Val::Vector(_)) => {
+            build_ite_with(cond, val_a, val_b, solver, info, merge_val_mode::<B, CONCRETE>)
+        }
 
         (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
 

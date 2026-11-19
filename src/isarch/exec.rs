@@ -1737,7 +1737,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         samples.fuzz.as_ref().map_or(std::path::Path::new("output"), |session| session.output()),
     );
     if let Some(directory) = &samples.path_cache.read {
-        let mut loaded = super::path_cache::load(
+        let judge_candidates = samples.fuzz.is_none()
+            && samples.writer.is_none()
+            && (samples.checker.is_some() || samples.resident.is_some());
+        let load = if judge_candidates { super::path_cache::load_for_judge } else { super::path_cache::load };
+        let mut loaded = load(
             directory,
             samples.path_cache.encoding.unwrap(),
             samples.path_cache.crosscheck,
@@ -1753,8 +1757,23 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         cache.loaded = Some(loaded);
         if let Some(session) = &samples.fuzz {
             super::fuzz::run(session, paths, shared_state, target, num_threads, 0.0, cache, execution_limits);
+        } else if let Some(checker) = &samples.resident {
+            super::resident::run(
+                paths,
+                checker,
+                shared_state,
+                target,
+                num_threads,
+                0.0,
+                samples.resident_fast,
+                samples.resident_batch_size,
+            );
         } else {
-            let context = Context::new(Config::new());
+            let mut config = Config::new();
+            if judge_candidates {
+                config.solver_options = Default::default();
+            }
+            let context = Context::new(config);
             for path in paths {
                 let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
                 super::samples::export_cached_path(
@@ -1983,6 +2002,70 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                         next_frame,
                         checkpoint(&mut solver),
                     ));
+                    return;
+                }
+            }
+            if let Err((error, frame)) = &exec_result {
+                if frame.arm_error().is_some() {
+                    assert!(solver.no_smt(), "有 SMT 的错误臂必须在区域出口证明不可达或拒绝提交");
+                    let mut state = collected.lock().expect("solve collector mutex poisoned");
+                    state.summary.uncertified = true;
+                    state.diagnostics.push(serde_json::json!({
+                        "status":"uncertified", "reason":"arm-error-leaf",
+                        "path-signature":frame.path_signature(), "error":error.to_string(),
+                        "source":error.source_loc().location_string(shared_state.symtab.files()),
+                    }));
+                    drop(state);
+                    if samples.checker.is_some() || samples.resident.is_some() || samples.path_cache.write.is_some() {
+                        let sample_path = super::samples::path(
+                            target,
+                            &symbolic_regs,
+                            frame,
+                            shared_state,
+                            &fun_args[0],
+                            &Val::Unit,
+                            solver.trace(),
+                        );
+                        let resident = super::resident::ResidentPath {
+                            checkpoint: checkpoint(&mut solver),
+                            path: sample_path,
+                            records: frame.region_merge_records().clone(),
+                            signature: frame.path_signature(),
+                            pure_definitions: frame.pure_definitions().to_vec(),
+                        };
+                        if let Some(checker) = &samples.checker {
+                            let mut config = Config::new();
+                            config.solver_options = Default::default();
+                            let context = Context::new(config);
+                            let mut judge = Solver::from_checkpoint(&context, resident.checkpoint.clone());
+                            checker
+                                .check_path_with_judge(
+                                    &resident.path,
+                                    &mut judge,
+                                    shared_state,
+                                    resident.signature,
+                                    &resident.records,
+                                    |_, _| panic!("执行错误叶子不得具体化为样本"),
+                                )
+                                .expect("执行错误叶子检查失败");
+                        }
+                        if samples.resident.is_some() || samples.path_cache.write.is_some() {
+                            isla_lib::executor::stats::memory_stats::retain(
+                                &resident.checkpoint,
+                                &resident.path,
+                                &resident.records,
+                                resident.pure_definitions.capacity() * std::mem::size_of::<(u32, u32)>()
+                                    + std::mem::size_of_val(&resident)
+                                    - std::mem::size_of_val(&resident.checkpoint)
+                                    - std::mem::size_of_val(&resident.path),
+                            );
+                            resident_paths.lock().unwrap().push(resident);
+                            shared_state.execution_stats.terminal_path_retained(frame.region_merge_records().len());
+                        }
+                    }
+                    eprintln!("[PATH_CACHE_TERMINAL] paths={} terminal=execution_error certification=uncertified source={} error={}",
+                        resident_paths.lock().unwrap().len(),error.source_loc().location_string(shared_state.symtab.files()),error);
+                    isla_lib::executor::submit_trace_for_local_frame_with_diagnostics(frame, shared_state, Vec::new());
                     return;
                 }
             }

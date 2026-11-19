@@ -283,6 +283,8 @@ pub enum Val<B> {
     Bits(B),
     MixedBits(Vec<BitsSegment<B>>),
     String(String),
+    /// 不同具体值的守卫选择；复制和内部返回保留，具体消费者再拆分。
+    Guarded(Sym, Box<(Val<B>, Val<B>)>),
     Unit,
     Vector(Vec<Val<B>>),
     List(Vec<Val<B>>),
@@ -336,6 +338,11 @@ impl<B: BV> Val<B> {
     pub fn collect_symbolic_variables(&self, vars: &mut HashSet<Sym, ahash::RandomState>) {
         use Val::*;
         match self {
+            Guarded(guard, values) => {
+                vars.insert(*guard);
+                values.0.collect_symbolic_variables(vars);
+                values.1.collect_symbolic_variables(vars);
+            }
             Symbolic(v) => {
                 vars.insert(*v);
             }
@@ -408,6 +415,13 @@ impl<B: BV> Val<B> {
                         write!(buf, " @ ")?
                     }
                 }
+                write!(buf, ")")
+            }
+            Guarded(guard, values) => {
+                write!(buf, "(ite v{} ", guard)?;
+                values.0.write(buf, shared_state)?;
+                write!(buf, " ")?;
+                values.1.write(buf, shared_state)?;
                 write!(buf, ")")
             }
             String(s) => write!(buf, "\"{}\"", s),

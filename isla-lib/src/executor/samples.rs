@@ -136,6 +136,11 @@ pub enum Terminal {
     SailException {
         throw_location: String,
     },
+    /// 执行失败的候选叶子；只保存到达条件，不可导出为模型样本。
+    ExecutionError {
+        message: String,
+        location: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -299,6 +304,12 @@ impl<B: BV> SamplePath<B> {
         signature: u64,
         class_id: Option<usize>,
     ) -> Result<Sample, ExecError> {
+        if let Terminal::ExecutionError { message, location } = &self.terminal {
+            return Err(ExecError::Type(
+                format!("执行错误叶子不能导出样本：{message}（{location}）"),
+                SourceLoc::unknown(),
+            ));
+        }
         model.set_complete_model(true);
         let mut registers = |values: &BTreeMap<String, Val<B>>| -> Result<BTreeMap<String, Value>, ExecError> {
             values.iter().map(|(name, value)| Ok((name.clone(), materialized(value, model, shared)?))).collect()
@@ -426,6 +437,10 @@ impl<B: BV> SamplePath<B> {
         }
         if !sat(solver)? {
             return Ok(false);
+        }
+        // 先证明具体输入能到达，再报告真实错误；不可达叶子不参与接纳计数。
+        if let Terminal::ExecutionError { message, location } = &self.terminal {
+            return Err(ExecError::Type(format!("可达执行错误叶子：{message}（{location}）"), SourceLoc::unknown()));
         }
         Ok(true)
     }
@@ -932,6 +947,55 @@ mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::smt::{Config, Context};
+
+    #[test]
+    fn arm_error_leaf_judge_ignores_unsat_and_never_accepts_sat() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
+        let mut path = SamplePath {
+            terminal: Terminal::Normal,
+            pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
+            post: BTreeMap::new(),
+            result: Val::Unit,
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        assert!(sat(&mut solver).unwrap());
+        let mut sample = path.materialize(&mut Model::new(&solver), &shared, "fork", 1, None).unwrap();
+        sample.pre_registers.insert("x".into(), json!({"bool":false}));
+        let checker = SampleChecker::new(vec![sample]);
+        path.terminal =
+            Terminal::ExecutionError { message: "臂内类型错误".into(), location: "test.sail:4".into() };
+        solver.assert(Exp::Var(input));
+        assert!(checker
+            .judge_only(0, &path, &mut solver, &shared, 1, &[], |_, _| panic!("失败叶子不得具体化"))
+            .unwrap()
+            .is_none());
+        assert!(path.check(&mut solver, &shared, &checker.samples[0]).unwrap().is_none());
+        let mut reachable = checker.samples[0].clone();
+        reachable.pre_registers.insert("x".into(), json!({"bool":true}));
+        let error =
+            path.judge(&mut solver, &shared, &reachable, &[], 1, |_, _| panic!("失败叶子不得具体化")).err().unwrap();
+        assert!(error.to_string().contains("可达执行错误叶子"));
+        assert!(path.check(&mut solver, &shared, &reachable).is_err());
+        assert_eq!(solver.transaction_depth(), 0);
+        assert_eq!(checker.report()["samples"][0]["accepted_paths"], 0);
+        let facts: fast::FastFacts =
+            crate::executor::path_cache::Facts { guard_unique: true, post_unique: true, simple_pre: true }.into();
+        assert!(path
+            .classify(&mut solver, &shared, &checker.samples[0], &[], 1, &facts, |_, _| panic!("失败叶子不得具体化"))
+            .unwrap()
+            .is_none());
+        assert!(path
+            .classify(&mut solver, &shared, &reachable, &[], 1, &facts, |_, _| panic!("失败叶子不得具体化"))
+            .is_err());
+        assert_eq!(path.export_dag(&solver, &shared, &[], 1)["certification"], "uncertified");
+        assert!(sat(&mut solver).unwrap());
+        assert!(path.materialize(&mut Model::new(&solver), &shared, "fork", 1, None).is_err());
+    }
 
     #[test]
     fn samples_流式写出后原位补齐截断且不改变编号和文件长度() {

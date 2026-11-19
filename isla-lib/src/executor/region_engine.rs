@@ -47,12 +47,67 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     info: SourceLoc,
 ) -> Result<Option<bool>, ExecError> {
     let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
+    if crate::config::RegionOptions::current().arm_error_leaf && solver.region_queries_deferred() {
+        if let Err(error) = &result {
+            if is_arm_execution_error(error) {
+                let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
+                if solver.structural_bool(&reach) == Some(false) {
+                    solver.commit_dead_transaction();
+                } else {
+                    let owner = arm.region_arm.expect("失败前沿必须有逻辑臂");
+                    let location = error.source_loc();
+                    let selector = solver.define_const(reach, location);
+                    let (checkpoint, memory_guards) = solver.arm_error_snapshot(owner);
+                    let mut failed = arm.clone();
+                    failed.arm_error = Some(error.clone());
+                    failed.arm_error_memory_guards = memory_guards.into();
+                    failed.speculation_mode = SpeculationMode::Off;
+                    failed.region_execution = None;
+                    failed.region_replay = None;
+                    failed.capture_path_smt_stats();
+                    sink.submit(Task {
+                        id: task_id,
+                        fraction: fraction.clone(),
+                        frame: freeze_frame(&failed),
+                        checkpoint,
+                        fork_cond: Some((
+                            smtlib::Def::Assert(smtlib::Exp::Var(selector)),
+                            Event::Fork(0, selector, 0, location),
+                        )),
+                        state,
+                        stop_conditions: stop,
+                    });
+                    // 保留已冻结的义务和定义。退出逻辑臂作用域后按归属撤去事件。
+                    solver.defer_assertion(smtlib::Exp::Bool(false), location);
+                    solver.commit_transaction();
+                }
+                return Ok(Some(false));
+            }
+        }
+    }
     if arm.region_arrivals.is_empty() {
         close_arm(result, tx, arm, shared, solver, info).map(Some)
     } else {
         assert!(matches!(result, Ok(Run::Suspended)), "只有区域挂起点可以交付未合并片段");
         Ok(None)
     }
+}
+
+/// 只接纳执行值或原语错误；控制信号、求解失败与不变量走既有出口。
+fn is_arm_execution_error(error: &ExecError) -> bool {
+    matches!(
+        error,
+        ExecError::Type(..)
+            | ExecError::MatchFailure(..)
+            | ExecError::Overflow
+            | ExecError::SymbolicLength(..)
+            | ExecError::NoSymbolicType
+            | ExecError::Unmapped
+            | ExecError::BadRead(..)
+            | ExecError::BadWrite(..)
+            | ExecError::OutOfBounds(..)
+            | ExecError::Unimplemented
+    )
 }
 
 /// true 表示可作为到达前沿或待展开片段保留；延迟模式的保留不代表已认证。
@@ -716,6 +771,9 @@ fn merge_states<'ir, B: BV>(
             let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
             let value = match (a, b) {
                 (Val::I128(_), Val::I128(_)) => crate::primop_util::build_ite(condition, a, b, solver, info),
+                _ if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) => {
+                    crate::primop_util::merge_concrete_val(condition, a, b, solver, info)
+                }
                 _ => crate::primop_util::merge_val(condition, a, b, solver, info),
             }
             .map_err(|error| {

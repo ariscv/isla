@@ -80,6 +80,77 @@ mod tests {
     }
 
     #[test]
+    fn arm_error_leaf_cache_preserves_type_and_excludes_normal_count() {
+        use super::super::target::RV64;
+        use isla_lib::{
+            executor::samples::{SamplePath, Terminal},
+            ir::Val,
+            smt::{self, checkpoint},
+        };
+        smt::configure_tastic(smt::Tactic::Qfaufbv);
+        let shared = SharedState::<B64>::empty(Symtab::new());
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let path = SamplePath {
+            terminal: Terminal::ExecutionError { message: "失败臂".into(), location: "fixture.sail:42".into() },
+            pre: Default::default(),
+            post: Default::default(),
+            result: Val::Unit,
+            memory: vec![],
+            memory_guards: Default::default(),
+        };
+        let paths = vec![ResidentPath {
+            signature: 42,
+            checkpoint: checkpoint(&mut solver),
+            path,
+            records: Vec::new().into(),
+            pure_definitions: vec![],
+        }];
+        let directory =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("output/arm-error-cache-{}", std::process::id()));
+        assert!(!directory.exists());
+        let options = Options {
+            write: Some(directory.clone()),
+            format: vec![Encoding::Json, Encoding::Bin],
+            ..Default::default()
+        };
+        let summary = super::super::solve_summary::SolveSummary { uncertified: true, ..Default::default() }.json();
+        save(
+            &options,
+            "generic",
+            &paths,
+            &[Facts { guard_unique: false, post_unique: false, simple_pre: false }.into()],
+            &shared,
+            &RV64::default(),
+            &summary,
+            &json!({"command":[],"inputs":{},"binary":{"path":"fixture","sha256":"fixture"}}),
+            &mut Timing::default(),
+            &Stages::new(None, Instant::now()),
+        );
+        let manifest: Value = serde_json::from_reader(File::open(directory.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["normal_paths"], 0);
+        assert_eq!(manifest["execution_error_paths"], 1);
+        assert_eq!(manifest["certification"], "uncertified");
+        let restored = load_for_judge::<B64>(
+            &directory,
+            Encoding::Bin,
+            true,
+            &shared,
+            "generic",
+            &Stages::new(None, Instant::now()),
+        );
+        assert!(restored.manifest.errors.uncertified);
+        assert_eq!(restored.manifest.execution_error_paths, 1);
+        let json_paths: Envelope<dto::CachedPath<B64>> =
+            serde_json::from_reader(File::open(directory.join("paths.json")).unwrap()).unwrap();
+        let bin_paths: Envelope<dto::CachedPath<B64>> =
+            bincode::deserialize_from(File::open(directory.join("paths.bin")).unwrap()).unwrap();
+        assert_eq!(json_paths.entries, bin_paths.entries);
+        assert!(matches!(json_paths.entries[0].path.terminal, Terminal::ExecutionError { .. }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn sail_exception_terminal_dual_encoding_and_old_schema_rejection() {
         use super::super::target::RV64;
         use isla_lib::{
@@ -617,6 +688,8 @@ pub struct Manifest<B> {
     pub path_signatures: Vec<u64>,
     pub normal_paths: u64,
     pub model_exception_paths: u64,
+    #[serde(default)]
+    pub execution_error_paths: u64,
     pub pre_state: Vec<(Name, dto::value::Val<B>)>,
     pub pma_sizes: Vec<(String, u32)>,
     pub names: NameEnvironment,
@@ -780,6 +853,30 @@ pub fn load<B: BV>(
     clause: &str,
     stages: &Stages,
 ) -> Loaded<B> {
+    load_inner(dir, encoding, crosscheck, shared, clause, stages, false)
+}
+
+/// 候选缓存只能送入真正重新求解的 judge；导样本和 fuzz 继续使用 load。
+pub fn load_for_judge<B: BV>(
+    dir: &Path,
+    encoding: Encoding,
+    crosscheck: bool,
+    shared: &SharedState<B>,
+    clause: &str,
+    stages: &Stages,
+) -> Loaded<B> {
+    load_inner(dir, encoding, crosscheck, shared, clause, stages, true)
+}
+
+fn load_inner<B: BV>(
+    dir: &Path,
+    encoding: Encoding,
+    crosscheck: bool,
+    shared: &SharedState<B>,
+    clause: &str,
+    stages: &Stages,
+    allow_uncertified: bool,
+) -> Loaded<B> {
     let started = Instant::now();
     let raw: Value =
         serde_json::from_reader(File::open(dir.join("manifest.json")).expect("缓存 manifest 缺失，目录尚未发布"))
@@ -794,9 +891,13 @@ pub fn load<B: BV>(
         "路径缓存结果作废，拒绝用于 judge、--check-samples 或 fuzz：{}",
         raw["invalid_reasons"]
     );
-    assert_ne!(raw["certification"], json!("uncertified"), "未认证候选缓存必须先离线检查，不能直接用于样例或fuzz");
+    if !allow_uncertified {
+        assert_ne!(raw["certification"], json!("uncertified"), "未认证候选缓存必须先离线检查，不能直接用于样例或fuzz");
+    }
     let manifest: Manifest<B> = serde_json::from_value(raw).expect("缓存 manifest 字段损坏");
-    assert!(!manifest.errors.uncertified, "未认证候选摘要不能作为已检查缓存读入");
+    if !allow_uncertified {
+        assert!(!manifest.errors.uncertified, "未认证候选摘要不能作为已检查缓存读入");
+    }
     assert_eq!(manifest.bit_width, B::MAX_WIDTH, "缓存位宽不兼容");
     assert_eq!(manifest.current_ir_review, "未做当前 IR 复核", "缓存 IR 复核标注无效");
     assert!(matches!(manifest.completeness.as_str(), "complete" | "partial"), "缓存完整性标注无效");
@@ -823,7 +924,13 @@ pub fn load<B: BV>(
         .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::SailException { .. }))
         .count() as u64;
     assert_eq!(manifest.model_exception_paths, exception_count, "缓存异常终态计数不一致");
-    assert_eq!(manifest.normal_paths, paths.len() as u64 - exception_count, "缓存正常终态计数不一致");
+    let error_count = paths
+        .iter()
+        .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::ExecutionError { .. }))
+        .count() as u64;
+    assert_eq!(manifest.execution_error_paths, error_count, "缓存执行错误叶子计数不一致");
+    assert!(error_count == 0 || manifest.errors.uncertified, "执行错误叶子不得标为已认证终态");
+    assert_eq!(manifest.normal_paths, paths.len() as u64 - exception_count - error_count, "缓存正常终态计数不一致");
     assert_eq!(manifest.errors.model_exception_paths, exception_count, "缓存摘要异常终态计数不一致");
     let parse_seconds = parsing.elapsed().as_secs_f64();
     stages.record(
@@ -992,7 +1099,12 @@ pub fn save<B: BV>(
         .iter()
         .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::SailException { .. }))
         .count() as u64;
-    let normal_paths = cached.len() as u64 - model_exception_paths;
+    let execution_error_paths = cached
+        .iter()
+        .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::ExecutionError { .. }))
+        .count() as u64;
+    let normal_paths = cached.len() as u64 - model_exception_paths - execution_error_paths;
+    assert!(execution_error_paths == 0 || summary["uncertified"] == json!(true), "执行错误叶子缓存必须保留未认证标记");
     assert_eq!(summary["model-exception-paths"].as_u64(), Some(model_exception_paths), "缓存摘要异常终态计数不一致");
     let paths = write_data(dir, "paths", cached, &options.format, &batch_id, timing, stages);
     let complete = summary["status"] == "finished"
@@ -1012,6 +1124,7 @@ pub fn save<B: BV>(
         path_signatures,
         normal_paths,
         model_exception_paths,
+        execution_error_paths,
         pre_state,
         pma_sizes,
         names,

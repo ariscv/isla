@@ -453,6 +453,7 @@ isarch [原 J1 探索参数] \
 
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
+| `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `false` | Jump 入口识别符号表达式的布尔恒值；不查询 SMT |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
@@ -522,6 +523,15 @@ progress = true
 
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
+
+### 臂内执行错误叶子
+
+`[execution_limits.path_merge].arm_error_leaf` 默认关闭，`--arm-error-leaf=true|false` 可覆盖。
+延迟区域检查下，位置和到达条件随错误保留。执行器按逻辑臂冻结访存前缀并撤销该臂的正常出口，兄弟臂继续参与汇合。启用 SMT 时，区域出口证明错误不可达后才提交。无 SMT 时，缓存写出未认证的 `ExecutionError` 终态，支持用 `--path-cache-read` 配合 `--check-samples` 或 `--judge-resident` 重新判定。不可达的错误终态不影响正常路径接纳，可达的执行错误会使签收失败。
+
+### 区域合并具体值
+
+`[execution_limits.path_merge].merge_concrete_values` 默认关闭，`--merge-concrete-values=true|false` 可覆盖。区域出口可用同一个守卫保留两臂不同的具体字符串或 I64。若消费者需要具体值，执行器沿原守卫重试该指令。区域内的重试通过共用汇合入口交回正常前沿。
 
 ## 投影枚举与样本输出
 
