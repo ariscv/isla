@@ -80,6 +80,8 @@ pub struct PathMergeConfig {
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
     pub merge_concrete_values: bool,
+    /// 在实际到达指令时检查普通被调函数的传递效应。
+    pub defer_call_effect_checks: bool,
     /// 仅在延迟出口检查内生效。
     pub lazy_z3_scope: bool,
     pub finite_domain_enumeration: bool,

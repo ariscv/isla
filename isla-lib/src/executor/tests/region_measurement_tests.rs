@@ -111,7 +111,7 @@ fn regions_loop_merge_real_ir_measurement() {
                 // 与 try_region 的静态预检完全相同，按原始 pc 顺序检查区域全部节点。
                 for node in &region.nodes {
                     if let Some(rejection) =
-                        region_summary::instruction_effect(function, *node, &body[*node], &shared, &summaries)
+                        region_summary::instruction_effect(function, *node, &body[*node], &shared, &summaries, false)
                     {
                         let callee = match &body[*node] {
                             Instr::Call(_, _, callee, _, _) => {

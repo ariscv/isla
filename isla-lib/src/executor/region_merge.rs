@@ -340,9 +340,16 @@ pub(super) fn preflight<B: BV>(
     {
         return Err(reject(frame, SpeculativeRejectReason::StateEffect));
     }
-    if let Some(rejection) =
-        instruction_effect(frame.function_name, frame.pc, &frame.instrs[frame.pc], shared, summaries)
-    {
+    let defer_call_effect_checks =
+        state.execution_limits.as_ref().is_some_and(|limits| limits.defer_call_effect_checks);
+    if let Some(rejection) = instruction_effect(
+        frame.function_name,
+        frame.pc,
+        &frame.instrs[frame.pc],
+        shared,
+        summaries,
+        defer_call_effect_checks,
+    ) {
         return Err(rejection.error());
     }
     Ok(())
@@ -453,6 +460,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
 ) -> Result<RegionResult, ExecError> {
     let mode = policy(frame, state, info);
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
+    let defer_call_effect_checks =
+        state.execution_limits.as_ref().is_some_and(|limits| limits.defer_call_effect_checks);
     assert_ne!(mode, MergeMode::Off, "Off 不能进入区域合并");
     let nested = frame.region_execution.is_some();
     // 同一调用层、同一出口的有环分叉属于当前展开，不另开递归事务。
@@ -523,6 +532,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         &frame.instrs[*pc],
                         shared,
                         state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state)),
+                        defer_call_effect_checks,
                     ) {
                         return Err(rejection.error());
                     }

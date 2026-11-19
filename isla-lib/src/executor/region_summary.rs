@@ -190,7 +190,7 @@ pub(super) fn function_effect_summaries<B: BV>(
             {
                 None
             } else {
-                instruction_effect(*function, pc, instr, shared, &HashMap::new())
+                instruction_effect(*function, pc, instr, shared, &HashMap::new(), false)
             };
             let mut reads = HashSet::new();
             let mut destination = None;
@@ -276,13 +276,18 @@ pub(super) fn instruction_effect<B: BV>(
     instr: &Instr<Name, B>,
     shared: &SharedState<B>,
     summaries: &HashMap<Name, FunctionEffect>,
+    defer_call_effect_checks: bool,
 ) -> Option<CachedReject> {
     match instr {
         Instr::PrimopUnary(_, f, _, _) if constraint_unary(*f) => return None,
         Instr::PrimopBinary(_, f, _, _, _) if constraint_binary(*f) => return None,
         Instr::Call(_, _, function, _, _) if shared.functions.contains_key(function) => {
             let summary = summaries.get(function).expect("IR 函数必须有收敛的效应摘要");
-            return if summary.non_returning { None } else { summary.rejection };
+            // 只延后普通函数的传递效应。直接原语和特殊调用仍在执行前拦截。
+            return summary.rejection.filter(|rejection| {
+                !summary.non_returning
+                    && !(defer_call_effect_checks && rejection.reason == SpeculativeRejectReason::StateEffect)
+            });
         }
         Instr::Call(
             _,
