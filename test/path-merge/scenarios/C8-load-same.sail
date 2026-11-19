@@ -5,8 +5,6 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "每臂恰好一次读；相同种类和宽度允许按守卫选择地址与数据。"
-// status = "todo"
-// reason = "两种位宽实跑时 off 通过；合并路径的 JSON 缺每笔读的生效守卫，未执行那笔读的数据也被要求唯一。需按输入过滤事件后对照。"
 // ---
 default Order dec
 $include <prelude.sail>

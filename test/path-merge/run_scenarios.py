@@ -32,6 +32,8 @@ DEFAULTS = {
     "registers": [],
     "observe": "out_value",
     "ordered_events": False,
+    "ordered_memory_events": True,
+    "register_reads": {},
     "merge_concrete_values": None,
 }
 
@@ -64,7 +66,12 @@ def read_scene(path):
             and all(mode in scene["modes"] for mode in MODES), "modes 必须包含 off、recursive、flat 各一次")
     for key in ("expect_paths_unmerged", "expect_paths_merged"):
         require(type(scene[key]) is int and scene[key] >= 0, f"{key} 须是非负整数")
-    require(type(scene["ordered_events"]) is bool, "ordered_events 须是布尔值")
+    for key in ("ordered_events", "ordered_memory_events"):
+        require(type(scene[key]) is bool, f"{key} 须是布尔值")
+    reads = scene["register_reads"]
+    require(isinstance(reads, dict) and all(NAME.fullmatch(name) and type(count) is int and count >= 0
+                                            for name, count in reads.items()),
+            "register_reads 须是寄存器名到非负读取次数的表")
     merge_concrete = scene["merge_concrete_values"]
     require(merge_concrete is None or type(merge_concrete) is bool, "merge_concrete_values 须是布尔值")
     inputs = scene["inputs"]
@@ -109,20 +116,25 @@ def register_term(registers, name):
     return registers[name]
 
 
-def path_outcomes(path, inputs, names, domain, seconds):
+def model_values(guard, requests, seconds):
+    script = "".join(query(cond, f"(get-value ({' '.join(terms)}))") for cond, terms in requests)
+    raw = replay(guard, script, seconds)
+    models = re.split(r"(?m)^sat\s*\n", raw)
+    require(models[0] == "" and len(models) == len(requests) + 1, f"Z3 观测结果异常\n{raw}")
+    for (_, terms), model in zip(requests, models[1:]):
+        pattern = r"\(\s*" + rf"\((?:{TERM.pattern})\s+({SCALAR})\)\s*" * len(terms) + r"\)"
+        match = re.fullmatch(pattern, model.strip())
+        require(match, f"Z3 观测值须为布尔值或位向量\n{model}")
+        yield match.groups()
+
+
+def path_outcomes(path, scene, domain, seconds):
+    inputs = scene["inputs"]
+    names = [scene["observe"], *scene["registers"]]
     registers = path["register_values"]
     input_terms = [register_term(registers, name) for name in inputs]
-    output_terms = [path["return_value"], *(register_term(registers, name) for name in names)]
-    memory = []
-    for event in path["memory_events"]:
-        fields = event.copy()
-        require(fields["kind"] is not None, "场景的访存 kind 须为具体值")
-        for key in ("address", "data", "tag"):
-            term = fields.pop(key)
-            if term is not None:
-                output_terms.append(term)
-        memory.append((fields, event["tag"] is not None))
-    require(all(TERM.fullmatch(term) for term in input_terms + output_terms),
+    state_terms = [path["return_value"], *(register_term(registers, name) for name in names)]
+    require(all(TERM.fullmatch(term) for term in input_terms + state_terms),
             "场景观测须为可重放的布尔值或位向量，请在 Sail 中投影复合值")
     guard = path["guard_smtlib"]
     conditions = [
@@ -135,40 +147,80 @@ def path_outcomes(path, inputs, names, domain, seconds):
     reachable = [(values, cond) for values, cond, reply in zip(domain, conditions, replies) if reply == "sat"]
     require(reachable, "导出的可满足路径在观测输入域中没有对应取值")
 
-    # 先取一份观测，再用第二次 SMT 检查排除该观测，证明每个输入的结果唯一。
-    terms = " ".join(output_terms)
-    raw = replay(guard, "".join(query(cond, f"(get-value ({terms}))") for _, cond in reachable), seconds)
-    models = re.split(r"(?m)^sat\s*\n", raw)
-    require(models[0] == "" and len(models) == len(reachable) + 1, f"Z3 观测结果异常\n{raw}")
+    memory = path["memory_events"]
+    reads = [event for event in path["register_reads"] if event["register"] in scene["register_reads"]]
+    events = memory + reads
+    predicates = path["memory_event_guards"]
+    require(len(predicates) == len(memory), "访存事件与逐事件守卫数量不符")
+    predicates = predicates + [event["guard_smtlib"] for event in reads]
+    guard_terms = []
+    for index, predicate in enumerate(predicates):
+        if predicate in ("true", "false"):
+            guard_terms.append(predicate)
+        else:
+            alias = f"isla_observed_event_guard_{index}"
+            guard += f"\n(define-fun {alias} () Bool {predicate})"
+            guard_terms.append(alias)
+    requests = [(cond, guard_terms) for _, cond in reachable]
+    enabled = model_values(guard, requests, seconds) if events else itertools.repeat(())
+    projections = []
+    requests = []
+    for (_, cond), evaluated in zip(reachable, enabled):
+        require(set(evaluated) <= {"true", "false"}, "事件条件须为布尔值")
+        active_memory, active_reads = [], []
+        terms = state_terms.copy()
+        for index, (event, active) in enumerate(zip(events, evaluated)):
+            if active == "true":
+                fields = {key: value for key, value in event.items() if key != "guard_smtlib"}
+                if index < len(memory):
+                    require(fields["kind"] is not None, "场景的访存 kind 须为具体值")
+                    active_memory.append(fields)
+                    keys = ("address", "data", "tag")
+                else:
+                    active_reads.append(fields)
+                    keys = ("data",)
+                terms.extend(fields[key] for key in keys if fields[key] is not None)
+        require(all(TERM.fullmatch(term) for term in terms),
+                "生效事件的观测值须为可重放的布尔值或位向量")
+        guard_equalities = [f"(= {term} {value})" for term, value in zip(guard_terms, evaluated)]
+        projections.append((active_memory, active_reads, guard_equalities))
+        requests.append((smt_and([cond, *guard_equalities]), terms))
+
+    # 只取生效事件的值，再证明事件是否生效及其观测值都由输入唯一决定。
     mismatches = []
     outcomes = {}
-    for (values, cond), model in zip(reachable, models[1:]):
-        pattern = r"\(\s*" + rf"\((?:{TERM.pattern})\s+({SCALAR})\)\s*" * len(output_terms) + r"\)"
-        match = re.fullmatch(pattern, model.strip())
-        require(match, f"Z3 观测值须为布尔值或位向量\n{model}")
-        values_smt = match.groups()
-        equalities = [f"(= {term} {value})" for term, value in zip(output_terms, values_smt)]
+    for ((values, cond), (_, terms), (active_memory, active_reads, equalities), observed) in zip(
+            reachable, requests, projections, model_values(guard, requests, seconds)):
+        equalities.extend(f"(= {term} {value})" for term, value in zip(terms, observed))
         mismatches.append(f"(and {cond} (not {smt_and(equalities)}))")
-        state_count = 1 + len(names)
-        accesses = iter(values_smt[state_count:])
-        observed_memory = [
-            {**fields, "address": next(accesses), "data": next(accesses),
-             "tag": next(accesses) if tagged else None}
-            for fields, tagged in memory
-        ]
-        outcomes[values] = {"值": dict(zip(["prop", *names], values_smt)), "访存": observed_memory}
+        accesses = iter(observed[len(state_terms):])
+        for event in active_memory:
+            event["address"] = next(accesses)
+            event["data"] = next(accesses)
+            if event["tag"] is not None:
+                event["tag"] = next(accesses)
+        for event in active_reads:
+            event["data"] = next(accesses)
+        if not scene["ordered_memory_events"]:
+            active_memory.sort(key=lambda event: json.dumps(event, sort_keys=True))
+        if not scene["ordered_events"]:
+            active_reads.sort(key=lambda event: (event["register"], event["accessors"], event["data"]))
+        outcomes[values] = {"值": dict(zip(["prop", *names], observed)), "访存": active_memory, "ReadReg": active_reads}
     result = replay(guard, f"(assert (or {' '.join(mismatches)}))\n(check-sat)", seconds)
-    require(result == "unsat", f"观测无法证明唯一（{result}）。把自由选择或访存读值登记为输入")
+    require(result == "unsat", f"观测或事件生效条件无法证明唯一（{result}）。把自由选择或访存读值登记为输入")
+    for values, outcome in outcomes.items():
+        for name, count in scene["register_reads"].items():
+            actual = sum(event["register"] == name for event in outcome["ReadReg"])
+            require(actual == count, f"输入 {values} 的 ReadReg({name}) 期望 {count} 次，实际 {actual} 次")
     return outcomes
 
 
 def summarize_paths(paths, scene, seconds):
     inputs = scene["inputs"]
-    names = [scene["observe"], *scene["registers"]]
     domain = list(itertools.product(*(range(1 << width) for width in inputs.values())))
     outcomes, partition = {}, []
     for path in paths:
-        values = path_outcomes(path, inputs, names, domain, seconds)
+        values = path_outcomes(path, scene, domain, seconds)
         partition.append(tuple(sorted(values)))
         for key, value in values.items():
             require(key not in outcomes or outcomes[key] == value, f"同一输入 {key} 有不同完成结果")

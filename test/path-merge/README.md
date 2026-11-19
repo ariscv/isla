@@ -19,7 +19,13 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
   --output-dir "$scenario_out/runs" --markdown "$scenario_out/scenarios.md"
 ```
 
-`--path-merge-filter '^D'` 只选 D 组。默认运行 B64，`--bitvector 129` 选 B129，`--bitvector both` 运行两种位向量实现。每次 property 执行固定 `-T 2`。`--timeout` 给每个 Sail、property、Z3 或形状检查命令设墙钟外限，默认 30 秒。`--scenarios-dir` 可指定独立场景目录。`--plugin` 可选已构建的兼容插件。每个实际运行的场景保留 Sail 编译日志、IR、三种配置、路径 JSON 和日志。
+`--path-merge-filter '^(C8|C9|C10|D6)-'` 只运行逐事件守卫的四个场景。`--path-merge-filter '^D'` 只选 D 组。默认运行 B64，`--bitvector 129` 选 B129，`--bitvector both` 运行两种位向量实现。每次 property 执行固定 `-T 2`。`--timeout` 给每个 Sail、property、Z3 或形状检查命令设墙钟外限，默认 30 秒。`--scenarios-dir` 可指定独立场景目录。`--plugin` 可选已构建的兼容插件。每个实际运行的场景保留 Sail 编译日志、IR、三种配置、路径 JSON 和日志。
+
+纯 JSON 夹具可用同一个 Z3 运行，无需编译 Sail 或 property。
+
+```sh
+python3 -m unittest discover -s test/path-merge
+```
 
 ## 新增场景
 
@@ -38,15 +44,25 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 | `expect_paths_unmerged`、`expect_paths_merged` | 关闭合并和开启合并的可满足完成路径数。默认 2 和 1。 |
 | `must_merge`、`must_not_merge` | 应该合并或分开保留的语义原因。都默认留空，部分分组可同时填两项。 |
 | `modes` | 默认 `["off", "recursive", "flat"]`，三种都运行。 |
-| `ordered_events` | 测试配置是否要求合并时保留访问次序，默认 `false`。 |
+| `ordered_events` | 要求合并器保留访问次序，也按次序比较选定的寄存器读，默认 `false`。 |
+| `ordered_memory_events` | 按次序比较访存事件，默认 `true`。`false` 时比较包含重复项的无序集合。 |
+| `register_reads` | 寄存器名到预期读次数的表，默认空表。对每条路径的每个可达输入检查所列寄存器的生效读次数，并与 off 比较字段路径和读值。 |
 | `merge_concrete_values` | 省略时使用执行器缺省值。本组场景使用缺省开启的具体值合并。 |
 | `status`、`reason` | 默认 `ready`。标 `todo` 或 `xfail` 时填写原因。 |
 
-访存场景中的真实 `ReadMem`、`WriteMem` 按事件次序比较，包括地址、宽度、读写数据、标签及访问类型。遇到抽象内存的读值时，把能决定该字节的自由量登记为输入。[符号读值样例](scenarios/C3-symbolic-memory-read.sail) 把高七位限制为零，将最低位作为输入。[不同访存序列样例](scenarios/C2-different-memory-events.sail) 检查两臂的一次写与两次写。访存种类使用具体值。寄存器语义比较使用完成时的选定寄存器值。需要测试寄存器事件顺序的路径准入时，用 `ordered_events` 加计数和守卫断言表达。
+访存事件比较地址、宽度、读写数据、标签及访问类型。遇到抽象内存的读值时，把能决定该字节的自由量登记为输入。C3 把高七位限制为零，将最低位作为输入。C10 检查 `x=1` 恰好有一笔读，`x=0` 的访存序列为空。D6 检查四个路径组的每个可达输入都恰好读一次 `R`。[C3](scenarios/C3-symbolic-memory-read.sail) · [C10](scenarios/C10-load-conditional.sail) · [D6](scenarios/D6-four-register-reads.sail)
+
+## 路径 JSON
+
+运行器使用 `--dump-paths <文件> --scenario-observations` 导出观测。同一条路径中的新增字段与外层 `guard_smtlib` 共用 SMT-LIB 符号。
+
+- `memory_event_guards[i]` 是 `memory_events[i]` 的生效条件，两数组等长，均按执行迹顺序记录。既有 `memory_events` 对象的字段保持原样。
+- `register_reads` 按执行迹顺序列出主迹的 `ReadReg`，每项有 `register`、`accessors`、`data` 和 `guard_smtlib`。寄存器读反映执行器发布的访问事件，默认合并策略可折叠重复访问。
+- 守卫为 `true` 时，该事件在这条路径的全部可达输入上生效。其余条件可以是由外层 SMT-LIB 声明并约束的布尔别名。条件访存并集中，每一笔读都有自己对应的条件。
 
 ## 读结果
 
-每格显示模式结果和实际完成路径数。Z3 对每个输入核对可完成性，证明返回值、选定寄存器和访存观测在该输入下唯一，再和 off 的结果比较。自由量未登记导致非唯一时，该场景报 FAIL。平铺和递归还比较由各条守卫覆盖的输入集合，忽略路径输出顺序。当前 property CLI 没有控制片段到达顺序的开关。
+每格显示模式结果和实际完成路径数。Z3 对每个输入核对可完成性及各事件是否生效，证明返回值、选定寄存器和生效事件的观测在该输入下唯一，再和 off 比较。自由量未登记导致非唯一时，该场景报 FAIL。平铺和递归还比较由各条守卫覆盖的输入集合，忽略路径输出顺序。当前 property CLI 没有控制片段到达顺序的开关。
 
 | 结果 | 含义 |
 | --- | --- |

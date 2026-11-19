@@ -1,12 +1,11 @@
 // --- TOML
-// title = "四个叶子各自读取 R 后合并"
-// intent = "核对全域合并后每个输入的寄存器读足迹和读值。"
+// title = "四个结果组各自读取 R"
+// intent = "每个叶子先读同一 R，再写互异字符串；每组都应保留自己的读事件。"
 // inputs = { path_x = 1, path_y = 1, path_z = 1 }
 // expect_paths_unmerged = 4
 // expect_paths_merged = 1
+// register_reads = { R = 1 }
 // must_merge = "四个字符串按 x、y 选择，每个输入仍恰好产生原分支的一笔 ReadReg(R)，读值与 path_z 相同。"
-// status = "todo"
-// reason = "total-merge-design.md §4（寄存器读足迹）：当前 property 导出寄存器后态，缺少逐输入核对 ReadReg(R) 次数与发生条件的记录。"
 // ---
 default Order dec
 $include <prelude.sail>

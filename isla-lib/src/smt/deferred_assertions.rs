@@ -200,8 +200,12 @@ impl<B: BV> Solver<'_, B> {
             0
         };
         let count = definitions.len();
-        let trace =
-            Arc::new(Some(Trace { checkpoints: state.entry.num, head: definitions, tail: state.entry.trace.clone() }));
+        let trace = Arc::new(Some(Trace {
+            checkpoints: state.entry.num,
+            head: definitions,
+            event_guards: Vec::new(),
+            tail: state.entry.trace.clone(),
+        }));
         let point = Checkpoint { num: state.entry.num + 1, next_var: self.next_var, trace, cycles: 0 };
         if diagnostic {
             eprintln!(

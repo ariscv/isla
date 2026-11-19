@@ -250,8 +250,11 @@ impl<B: BV> Checkpoint<B> {
         let inputs = instruction.symbolic_variables();
         let mut pure_symbols = HashSet::new();
         let mut events = Vec::new();
+        let mut event_guards = Vec::new();
         if let Some(trace) = self.trace.as_ref().as_ref() {
-            for mut event in trace.to_vec().into_iter().rev().cloned() {
+            let events_with_guards: Vec<_> = trace.events_with_guards_rev().collect();
+            for (event, guard) in events_with_guards.into_iter().rev() {
+                let mut event = event.clone();
                 let keep = match &mut event {
                     Event::Smt(Def::DeclareConst(sym, _), _, _) => {
                         if inputs.contains(sym) {
@@ -270,6 +273,9 @@ impl<B: BV> Checkpoint<B> {
                     _ => true,
                 };
                 if keep {
+                    if let Some(guard) = guard {
+                        event_guards.push((events.len(), guard.clone()));
+                    }
                     events.push(event);
                 }
             }
@@ -277,7 +283,7 @@ impl<B: BV> Checkpoint<B> {
         Checkpoint {
             num: 1,
             next_var: self.next_var,
-            trace: Arc::new(Some(Trace { checkpoints: 0, head: events, tail: Arc::new(None) })),
+            trace: Arc::new(Some(Trace { checkpoints: 0, head: events, event_guards, tail: Arc::new(None) })),
             cycles: 0,
         }
     }
@@ -291,14 +297,14 @@ impl<B: BV> Checkpoint<B> {
         let mut cursor = candidate.trace.clone();
         while !Arc::ptr_eq(&cursor, &base.trace) {
             let segment = cursor.as_ref().as_ref().expect("候选 checkpoint 缺少辅助基点祖先");
-            suffix.push(segment.head.clone());
+            suffix.push((segment.head.clone(), segment.event_guards.clone()));
             cursor = segment.tail.clone();
         }
         assert_eq!(suffix.len(), candidate.num - base.num, "候选 checkpoint 链长度不一致");
         let mut trace = self.trace.clone();
         let mut num = self.num;
-        for head in suffix.into_iter().rev() {
-            trace = Arc::new(Some(Trace { checkpoints: num, head, tail: trace }));
+        for (head, event_guards) in suffix.into_iter().rev() {
+            trace = Arc::new(Some(Trace { checkpoints: num, head, event_guards, tail: trace }));
             num += 1;
         }
         Checkpoint { num, next_var: candidate.next_var, trace, cycles: candidate.cycles }
@@ -627,19 +633,26 @@ pub type EvPath<B> = Vec<Event<B>>;
 pub struct Trace<B> {
     checkpoints: usize,
     head: Vec<Event<B>>,
+    // 仅诊断开启时保存，按本段主迹位置排序，随检查点跨线程共享。
+    event_guards: Vec<(usize, Exp<Sym>)>,
     tail: Arc<Option<Trace<B>>>,
 }
 
 impl<B: BV> Trace<B> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Trace { checkpoints: 0, head: Vec::new(), tail: Arc::new(None) }
+        Trace { checkpoints: 0, head: Vec::new(), event_guards: Vec::new(), tail: Arc::new(None) }
     }
 
     pub fn checkpoint(&mut self, next_var: u32) -> Checkpoint<B> {
         let mut head = Vec::new();
         mem::swap(&mut self.head, &mut head);
-        let tail = Arc::new(Some(Trace { checkpoints: self.checkpoints, head, tail: self.tail.clone() }));
+        let tail = Arc::new(Some(Trace {
+            checkpoints: self.checkpoints,
+            head,
+            event_guards: mem::take(&mut self.event_guards),
+            tail: self.tail.clone(),
+        }));
         self.checkpoints += 1;
         self.tail = tail.clone();
         Checkpoint { num: self.checkpoints, trace: tail, next_var, cycles: 0 }
@@ -650,9 +663,44 @@ impl<B: BV> Trace<B> {
             .flat_map(|trace| trace.head.iter().rev())
     }
 
+    fn record_event_guards(&mut self, offset: usize, events: &[(Option<Exp<Sym>>, Event<B>)]) {
+        if TRACE_EVENT_GUARDS.get().is_none() {
+            return;
+        }
+        self.event_guards.extend(events.iter().enumerate().filter_map(|(index, (guard, event))| {
+            if matches!(event, Event::ReadReg(..)) || event.is_memory_read_or_write() {
+                guard.as_ref().map(|guard| (offset + index, guard.clone()))
+            } else {
+                None
+            }
+        }));
+    }
+
+    /// 返回逆时间顺序的主迹及已记录的事件条件。
+    pub fn events_with_guards_rev(&self) -> impl Iterator<Item = (&Event<B>, Option<&Exp<Sym>>)> {
+        std::iter::successors(Some(self), |trace| trace.tail.as_ref().as_ref()).flat_map(|trace| {
+            let mut guards = trace.event_guards.iter().rev().peekable();
+            trace.head.iter().enumerate().rev().map(move |(index, event)| {
+                let guard = if guards.peek().is_some_and(|(position, _)| *position == index) {
+                    guards.next().map(|(_, guard)| guard)
+                } else {
+                    None
+                };
+                (event, guard)
+            })
+        })
+    }
+
     pub fn to_vec(&self) -> Vec<&Event<B>> {
         self.events_rev().collect()
     }
+}
+
+static TRACE_EVENT_GUARDS: OnceLock<()> = OnceLock::new();
+
+/// 在启动 worker 前开启，诊断导出才需要保留已发布的事件条件。
+pub fn enable_trace_event_guards() {
+    TRACE_EVENT_GUARDS.get_or_init(|| ());
 }
 
 /// 求解选项；有限域识别和枚举沿用路径合并配置的缺省值。
@@ -4949,7 +4997,7 @@ impl<B> Trace<B> {
         (self.checkpoints, &self.head, &self.tail)
     }
     pub(crate) fn from_path_cache_parts(checkpoints: usize, head: Vec<Event<B>>, tail: Arc<Option<Trace<B>>>) -> Self {
-        Self { checkpoints, head, tail }
+        Self { checkpoints, head, event_guards: Vec::new(), tail }
     }
 }
 

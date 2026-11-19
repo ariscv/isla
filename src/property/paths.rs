@@ -11,7 +11,7 @@ use isla_lib::executor::{self, LocalFrame, Run, Task, TaskId};
 use isla_lib::ir::{SharedState, Val};
 use isla_lib::primop_util::{replace_mixed_bits, smt_value};
 use isla_lib::smt::{
-    checkpoint,
+    checkpoint, enable_trace_event_guards,
     smtlib::{Def, Exp, Ty},
     Config, Context, Event, SmtResult, Solver, Sym,
 };
@@ -24,7 +24,7 @@ pub fn add_options(opts: &mut getopts::Options) {
     opts.optopt("", "expect-paths", "要求可满足的完成路径数恰好为指定值", "<N>");
     opts.optflag("", "print-paths", "打印完成路径数、守卫与返回值");
     opts.optopt("", "dump-paths", "将完成路径的守卫、返回值和合并记录数写入 JSON", "<文件>");
-    opts.optflag("", "scenario-observations", "在路径 JSON 中保留场景观测和访存事件");
+    opts.optflag("", "scenario-observations", "在路径 JSON 中保留场景观测、访存和寄存器读事件");
 }
 
 pub struct PathOptions {
@@ -59,6 +59,9 @@ impl PathOptions {
             executor::start_multi(threads, None, vec![task], shared, result.clone(), &executor::all_unsat_collector);
             (result.load(Ordering::Acquire), 0)
         } else {
+            if self.scenario_observations {
+                enable_trace_event_guards();
+            }
             let collected = Arc::new(PathResults {
                 passed: AtomicBool::new(true),
                 incomplete: AtomicBool::new(false),
@@ -128,6 +131,10 @@ struct PathSummary {
     register_values: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_events: Option<Vec<MemoryEvent>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_event_guards: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    register_reads: Option<Vec<RegisterRead>>,
 }
 
 #[derive(Serialize)]
@@ -141,6 +148,14 @@ struct MemoryEvent {
     exclusive: bool,
     ifetch: bool,
     region: &'static str,
+}
+
+#[derive(Serialize)]
+struct RegisterRead {
+    register: String,
+    accessors: Vec<String>,
+    data: String,
+    guard_smtlib: String,
 }
 
 struct PathResults {
@@ -208,11 +223,39 @@ fn path_summary<B: BV>(
             _ => None,
         })
         .collect();
-    let memory_trace = scenario_observations.then(|| {
-        events.iter().rev().copied().filter(|event| event.is_memory_read_or_write()).cloned().collect::<Vec<_>>()
-    });
-    let memory_events = memory_trace
-        .map(|events| events.iter().filter_map(|event| memory_event(event, solver, shared, &mut observed)).collect());
+    let mut memory_events = scenario_observations.then(Vec::new);
+    let mut memory_event_guards = scenario_observations.then(Vec::new);
+    let mut register_reads = scenario_observations.then(Vec::new);
+    if scenario_observations {
+        let event_trace: Vec<_> = solver
+            .trace()
+            .events_with_guards_rev()
+            .filter(|(event, _)| event.is_memory_read_or_write() || matches!(event, Event::ReadReg(..)))
+            .map(|(event, guard)| (event.clone(), guard.cloned()))
+            .collect();
+        for (event, guard) in event_trace.iter().rev() {
+            let guard_smtlib = if let Some(guard) = guard {
+                // 别名的等式让 Z3 在守卫文本中保留事件条件所需的全部符号。
+                let alias = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+                solver.add(Def::Assert(Exp::Eq(Box::new(Exp::Var(alias)), Box::new(guard.clone()))));
+                solver.exp_to_str(&Exp::Var(alias))
+            } else {
+                "true".to_string()
+            };
+            match event {
+                Event::ReadReg(reg, accessors, value) => register_reads.as_mut().unwrap().push(RegisterRead {
+                    register: zencode::decode(shared.symtab.to_str(*reg)),
+                    accessors: accessors.iter().map(|accessor| accessor.to_string(&shared.symtab)).collect(),
+                    data: value_expression(value, solver, shared, &mut observed),
+                    guard_smtlib,
+                }),
+                _ => {
+                    memory_events.as_mut().unwrap().push(memory_event(event, solver, shared, &mut observed));
+                    memory_event_guards.as_mut().unwrap().push(guard_smtlib);
+                }
+            }
+        }
+    }
     let mut register_writes = BTreeMap::new();
     for (reg, value) in writes {
         let name = zencode::decode(shared.symtab.to_str(reg));
@@ -242,6 +285,8 @@ fn path_summary<B: BV>(
         register_writes,
         register_values,
         memory_events,
+        memory_event_guards,
+        register_reads,
     }
 }
 
@@ -250,7 +295,7 @@ fn memory_event<B: BV>(
     solver: &mut Solver<B>,
     shared: &SharedState<B>,
     observed: &mut Option<HashMap<Sym, Sym>>,
-) -> Option<MemoryEvent> {
+) -> MemoryEvent {
     let (operation, kind, address, bytes, data, tag, exclusive, ifetch, region) = match event {
         Event::ReadMem { value, read_kind, address, bytes, tag_value, opts, region } => {
             ("read", read_kind, address, bytes, value, tag_value, opts.is_exclusive, opts.is_ifetch, region)
@@ -258,9 +303,9 @@ fn memory_event<B: BV>(
         Event::WriteMem { write_kind, address, data, bytes, tag_value, opts, region, .. } => {
             ("write", write_kind, address, bytes, data, tag_value, opts.is_exclusive(), false, region)
         }
-        _ => return None,
+        _ => unreachable!("观测事件必须为访存读写"),
     };
-    Some(MemoryEvent {
+    MemoryEvent {
         operation,
         kind: kind.symbolic_variables().is_empty().then(|| kind.to_string(shared)),
         address: value_expression(address, solver, shared, observed),
@@ -270,7 +315,7 @@ fn memory_event<B: BV>(
         exclusive,
         ifetch,
         region,
-    })
+    }
 }
 
 fn collect_path<'ir, B: BV>(
