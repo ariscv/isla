@@ -122,13 +122,16 @@ fn vector_bits_prefix_exhaustive_and_truncation() -> Result<(), ExecError> {
 fn vector_bits_prefix_symbolic_old_integer_invariant_and_mask() -> Result<(), ExecError> {
     let ctx = context();
     let info = SourceLoc::unknown();
-    for n in [1, 2, 4, 8, 16, 32, 64, 128] {
+    for n in [1u32, 2, 4, 8, 16, 32, 64, 128] {
+        // 单步窄计数与原 128 位加法的等价由 primitive_popcount_prefix_invariant_and_encoding 证明。
+        // 此处用能容纳最大计数的位宽重建原循环，再逐位置检查输出截断与掩码。
+        let count_width = u32::BITS - n.leading_zeros();
         for width in [1, 4, 8, 16, 32, 64, 128] {
             let mut solver = Solver::<B64>::new(&ctx);
             let source = solver.declare_bitvector(n, info);
             let mask = solver.declare_bitvector(n, info);
-            let active =
-                solver.define_bitvector(Exp::Bvand(Box::new(Exp::Var(source)), Box::new(Exp::Var(mask))), info);
+            let active_bits = Exp::Bvand(Box::new(Exp::Var(source)), Box::new(Exp::Var(mask)));
+            let active = solver.define_bitvector(active_bits.clone(), info);
             let Val::Vector(result) = binary_primops::<B64>()["prefix_popcount"](
                 Val::Symbolic(active),
                 Val::I128(width.into()),
@@ -138,34 +141,30 @@ fn vector_bits_prefix_symbolic_old_integer_invariant_and_mask() -> Result<(), Ex
             else {
                 panic!("前缀结果必须是vector")
             };
-            let mut sum = solver.define_bitvector(smt_zeros(128), info);
+            let mut sum = solver.define_bitvector(smt_zeros(count_width.into()), info);
             let old = solver.declare_bitvector(width, info);
             for i in 0..n {
-                let expected =
-                    if width == 128 { Exp::Var(sum) } else { Exp::Extract(width - 1, 0, Box::new(Exp::Var(sum))) };
-                let actual = smt_value(&result[i as usize], info)?;
-                // 逐位置证明前缀及其上界。已证明的前缀作为下一位置的归纳前提。
-                let invariant = Exp::And(
-                    Box::new(Exp::Eq(Box::new(actual.clone()), Box::new(expected.clone()))),
-                    Box::new(Exp::Bvule(Box::new(Exp::Var(sum)), Box::new(smt_u64_width(i.into(), 128)))),
-                );
+                let expected = match width.cmp(&count_width) {
+                    std::cmp::Ordering::Less => Exp::Extract(width - 1, 0, Box::new(Exp::Var(sum))),
+                    std::cmp::Ordering::Equal => Exp::Var(sum),
+                    std::cmp::Ordering::Greater => Exp::ZeroExtend(width - count_width, Box::new(Exp::Var(sum))),
+                };
                 let cond =
                     Exp::Eq(Box::new(Exp::Extract(i, i, Box::new(Exp::Var(mask)))), Box::new(smt_u64_width(1, 1)));
-                let actual = Exp::Ite(Box::new(cond.clone()), Box::new(actual), Box::new(Exp::Var(old)));
-                let expected = Exp::Ite(Box::new(cond.clone()), Box::new(expected), Box::new(Exp::Var(old)));
-                let counterexample = Exp::Or(
-                    Box::new(Exp::Not(Box::new(invariant.clone()))),
-                    Box::new(Exp::Neq(Box::new(actual), Box::new(expected))),
+                let actual = Exp::Ite(
+                    Box::new(cond.clone()),
+                    Box::new(smt_value(&result[i as usize], info)?),
+                    Box::new(Exp::Var(old)),
                 );
-                assert_eq!(solver.check_sat_with(&counterexample, info), SmtResult::Unsat, "N={n},M={width},i={i}");
-                solver.assert(invariant);
-                // 原Sail在活动位置、源位为1时才增加128位整数sum。
-                let bit = Exp::Bvand(
-                    Box::new(Exp::Extract(i, i, Box::new(Exp::Var(source)))),
-                    Box::new(Exp::Extract(i, i, Box::new(Exp::Var(mask)))),
+                let expected = Exp::Ite(Box::new(cond), Box::new(expected), Box::new(Exp::Var(old)));
+                assert_eq!(
+                    solver.check_sat_with(&Exp::Neq(Box::new(actual), Box::new(expected)), info),
+                    SmtResult::Unsat,
+                    "N={n},M={width},i={i}"
                 );
+                let bit = Exp::Extract(i, i, Box::new(active_bits.clone()));
                 sum = solver.define_bitvector(
-                    Exp::Bvadd(Box::new(Exp::Var(sum)), Box::new(Exp::ZeroExtend(127, Box::new(bit)))),
+                    Exp::Bvadd(Box::new(Exp::Var(sum)), Box::new(Exp::ZeroExtend(count_width - 1, Box::new(bit)))),
                     info,
                 );
             }

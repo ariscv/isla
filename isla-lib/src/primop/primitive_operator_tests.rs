@@ -321,7 +321,7 @@ fn primitive_gf_modulus_step_matches_polynomial_division() {
 fn primitive_popcount_prefix_invariant_and_encoding() -> Result<(), ExecError> {
     let ctx = context();
     let info = SourceLoc::unknown();
-    for width in [0, 1, 8, 16, 32, 64, 128] {
+    for width in [0, 1, 2, 4, 8, 16, 32, 64, 128] {
         let mut solver = Solver::<B129>::new(&ctx);
         assert_eq!(isla_count_ones(Val::Bits(B129::ones(width)), &mut solver, info)?, Val::I128(width.into()));
         if width == 0 {
