@@ -143,7 +143,7 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
         Ok(Output::Complete { sides, pair })
     }
 
-    fn partition(&mut self) -> Result<Vec<usize>, ExecError> {
+    fn partition(&mut self) -> Result<(Vec<usize>, Option<ExecError>), ExecError> {
         let mut members: Vec<_> = (0..self.arrivals.len()).collect();
         if !self.state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) {
             // 严格模式中，一个已有的 SMT 整数可承载多个具体值。优先用此表示，再按来源坐标排列。
@@ -162,6 +162,7 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
             });
         }
         let mut groups = Vec::new();
+        let mut first_rejection = None;
         for member in members {
             let mut selected = None;
             for group in &mut groups {
@@ -171,7 +172,9 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
                         selected = Some(node);
                         break;
                     }
-                    Err(ExecError::SpeculativeReject { reason, .. }) if is_join_rejection(reason) => (),
+                    Err(error @ ExecError::SpeculativeReject { reason, .. }) if is_join_rejection(reason) => {
+                        first_rejection.get_or_insert(error);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -180,7 +183,7 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
             }
         }
         groups.sort_unstable_by_key(|&node| self.earliest(node));
-        Ok(groups)
+        Ok((groups, first_rejection))
     }
 }
 
@@ -210,20 +213,26 @@ impl<'ir, B: BV> JoinPlan<'ir, B> {
             shared,
             info,
         };
-        let output = match planner.complete(condition) {
-            Ok(output) => output,
-            Err(ExecError::SpeculativeReject { reason, .. }) if keep_separate && is_join_rejection(reason) => {
-                // 丢弃的是未发布的计划，求解器和区域事件始终保持原状。
-                planner.folds.clear();
-                planner.terms.discard(0);
-                let nodes = planner.partition()?;
-                if nodes.len() == 1 {
-                    Output::Complete { sides: [Some(nodes[0]), None], pair: None }
-                } else {
-                    Output::Groups { nodes, reason }
+        let output = if arrivals.len() <= 2 {
+            match planner.complete(condition) {
+                Ok(output) => output,
+                Err(ExecError::SpeculativeReject { reason, .. }) if keep_separate && is_join_rejection(reason) => {
+                    Output::Groups { nodes: vec![0, 1], reason }
                 }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        } else {
+            let (nodes, rejection) = planner.partition()?;
+            if nodes.len() == 1 {
+                Output::Complete { sides: [Some(nodes[0]), None], pair: None }
+            } else {
+                let error = rejection.expect("分开的汇合组必须有明确原因");
+                let ExecError::SpeculativeReject { reason, .. } = error else { unreachable!() };
+                if !keep_separate {
+                    return Err(error);
+                }
+                Output::Groups { nodes, reason }
+            }
         };
         let symbols = planner.terms.symbol_range();
         let folds = planner.folds;
