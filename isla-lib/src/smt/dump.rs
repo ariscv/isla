@@ -72,7 +72,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         Checkpoint { num, next_var, trace, .. }: Checkpoint<B>,
         names: SmtDumpNames,
     ) -> Self {
-        let mut solver = Self::new_with_symbol_namer(ctx, Z3SymbolNamer::Smtlib2(names), None);
+        let mut solver = Self::new_with_mode(ctx, Z3SymbolNamer::Smtlib2(names), None, super::SolverMode::Incremental);
         solver.replay(num, trace);
         solver.next_var = next_var;
         solver

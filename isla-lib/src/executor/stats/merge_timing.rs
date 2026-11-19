@@ -192,6 +192,7 @@ impl Counts {
         json!({"schema":1,"kind":"merge_timing_summary","started":self.started,"finished":self.finished,
             "in_flight":self.started.checked_sub(self.finished).expect("结束尝试不能多于开始尝试"),"outcomes":self.rows(),
             "outside_smt":self.outside.json(),"all_smt":self.all_smt.json(),"other_sites":self.other_sites.json(),
+            "z3_check":crate::smt::native_check_metrics(),"on_demand":crate::smt::on_demand::metrics(),
             "note":"线程墙钟秒；inclusive含嵌套不可相加，exclusive扣子区域，root按最外结果归属；只含已返回调用和已结束尝试"})
     }
 }

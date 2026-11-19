@@ -1580,6 +1580,7 @@ impl std::str::FromStr for MergeStrategy {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionLimitsConfig {
+    pub solver_mode: crate::smt::SolverMode,
     pub solver: SolverConfig,
     pub path_merge: PathMergeConfig,
     /// resident judge 同时恢复的路径上限，默认使用线程数。
@@ -2657,6 +2658,21 @@ end_column = 0
             assert!(merge_config(&format!("[execution_limits.solver]\n{text}")).is_err());
         }
         merge_config("[execution_limits.solver]\nno_smt=true\nno_smt_keep_bool_proofs=true").unwrap();
+    }
+
+    #[test]
+    fn solver_mode_config_default_and_validation() {
+        use crate::smt::SolverMode;
+        assert_eq!(merge_config("[execution_limits]").unwrap().solver_mode, SolverMode::Incremental);
+        for (value, expected) in [("incremental", SolverMode::Incremental), ("on_demand", SolverMode::OnDemand)] {
+            assert_eq!(
+                merge_config(&format!("[execution_limits]\nsolver_mode=\"{value}\"")).unwrap().solver_mode,
+                expected
+            );
+        }
+        for value in ["\"fresh\"", "1", "true"] {
+            assert!(merge_config(&format!("[execution_limits]\nsolver_mode={value}")).is_err());
+        }
     }
 
     #[test]

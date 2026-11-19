@@ -228,6 +228,9 @@ pub fn initialize_architecture<'ir, B: BV>(
             options.configure();
         }
     }
+    crate::smt::SolverMode::configure(
+        isa_config.execution_limits.as_ref().map_or_else(crate::smt::SolverMode::default, |limits| limits.solver_mode),
+    );
     insert_monomorphize(arch);
     insert_primops(arch, &symtab, mode, isa_config);
 

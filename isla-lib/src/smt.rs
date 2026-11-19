@@ -189,6 +189,8 @@ impl fmt::Debug for EnumMember {
 }
 mod dump;
 mod logical_arm;
+pub(crate) mod on_demand;
+pub use on_demand::SolverMode;
 mod proof_budget;
 mod transaction;
 mod witness_shadow;
@@ -1779,6 +1781,7 @@ pub struct Solver<'ctx, B> {
     func_decls: HashMap<Sym, FuncDecl<'ctx>>,
     enums: Enums<'ctx>,
     z3_solver: Z3_solver,
+    on_demand: Option<on_demand::State<'ctx>>,
     seed: Option<u32>,
     incremental_checks: bool,
     region_query: Option<query::RegionQuery<'ctx>>,
@@ -1817,7 +1820,9 @@ pub struct Solver<'ctx, B> {
 impl<B> Drop for Solver<'_, B> {
     fn drop(&mut self) {
         unsafe {
-            Z3_solver_dec_ref(self.ctx.z3_ctx, self.z3_solver);
+            if !self.z3_solver.is_null() {
+                Z3_solver_dec_ref(self.ctx.z3_ctx, self.z3_solver);
+            }
             if let Some(model) = self.stashed_model.take() {
                 Z3_model_dec_ref(self.ctx.z3_ctx, model);
             }
@@ -2499,16 +2504,30 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: Option<u32>) -> Self {
+        Self::new_with_mode(ctx, symbol_namer, seed, SolverMode::current())
+    }
+
+    #[cfg(test)]
+    fn new_in_mode(ctx: &'ctx Context, mode: SolverMode) -> Self {
+        Self::new_with_mode(ctx, Z3SymbolNamer::Integer, None, mode)
+    }
+
+    fn new_with_mode(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: Option<u32>, mode: SolverMode) -> Self {
         let config = SMT_CONFIG.get().expect("SMT 尚未初始化，请在程序启动时调用 smt::configure_tastic");
         unsafe {
             // Default 使用原生 solver，其余策略仍显式指定 tactic；均不按 logic 限制枚举支持。
             let seed = seed.or_else(|| (config.tactic != Tactic::Default).then(fresh_random_seed));
-            let z3_solver =
-                new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str(), seed.map(|value| (config.seed_param, value)));
+            let z3_solver = match mode {
+                SolverMode::Incremental => {
+                    new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str(), seed.map(|value| (config.seed_param, value)))
+                }
+                SolverMode::OnDemand => std::ptr::null_mut(),
+            };
 
             Solver {
                 ctx,
                 z3_solver,
+                on_demand: (mode == SolverMode::OnDemand).then(on_demand::State::default),
                 seed,
                 incremental_checks: false,
                 region_query: None,
@@ -2728,8 +2747,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::ReplayAssert, 1, 0);
         let mut ast = self.translate_exp(exp);
         ast.simplify();
-        unsafe {
-            Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, ast.z3_ast);
+        if let Some(state) = &mut self.on_demand {
+            state.published.push(ast);
+        } else {
+            unsafe { Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, ast.z3_ast) };
         }
     }
 
@@ -3271,13 +3292,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.performance_info.assign_cost(exp);
             return Sat;
         }
+        let cache_key = self.on_demand_key(&assumptions);
+        if let Some(result) = self.on_demand_lookup(cache_key.as_deref()) {
+            if matches!(result, Sat) {
+                self.knowledge.literal = dedup::literal(exp);
+            }
+            self.performance_info.assign_cost(exp);
+            return result;
+        }
         let query = if let Some(limit) = proof_limit {
             let setup = WorkTimer::start(WorkKind::QuerySetup);
             let query = self.independent_query(&assumptions, Some(limit));
             drop(setup);
             query
         } else {
-            self.query_solver(&assumptions, purpose.requests_snapshot(self, &ast))
+            self.query_solver(&assumptions, self.on_demand.is_none() && purpose.requests_snapshot(self, &ast))
         };
         let diagnostic_dump = self.diagnostic_query_dump(exp);
         let diagnostic_pair = diagnostic_dump.as_ref().is_some_and(dump::wants_same_context_pair);
@@ -3352,7 +3381,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             unknown_result(info, check_elapsed, None)
         };
 
-        self.record_check_result(&result, query.z3_solver);
+        self.record_check_result(&result, query.z3_solver, cache_key);
         if matches!(result, Sat) {
             self.knowledge.literal = dedup::literal(exp);
         }
@@ -3386,6 +3415,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.witness_fast_sat(&assumptions) {
             return Sat;
         }
+        let cache_key = self.on_demand_key(&assumptions);
+        if let Some(result) = self.on_demand_lookup(cache_key.as_deref()) {
+            return result;
+        }
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let slow_query = self.slow_query_begin(query.z3_solver);
@@ -3415,7 +3448,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             unknown_result(info, check_started.elapsed(), None)
         };
         self.slow_query_finish(slow_query, query.z3_solver, None, info, z3_result);
-        self.record_check_result(&result, query.z3_solver);
+        self.record_check_result(&result, query.z3_solver, cache_key);
         drop(query_scope);
         result
     }
@@ -3424,7 +3457,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// `take_stashed_model`）；同时重置断言计数。Unsat/Unknown 不会让既有
     /// 缓存失效——缓存模型满足的是当前断言集（自缓存以来没有新增
     /// `Def::Assert`），与这次探测的假设和结果无关。
-    fn record_check_result(&mut self, result: &SmtResult, queried_solver: Z3_solver) {
+    fn record_check_result(
+        &mut self,
+        result: &SmtResult,
+        queried_solver: Z3_solver,
+        cache_key: Option<Vec<Ast<'ctx>>>,
+    ) {
+        let mut fresh_model = None;
         self.last_check_sat = matches!(result, Sat);
         self.asserts_since_check = 0;
         if self.last_check_sat {
@@ -3435,12 +3474,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     Z3_model_inc_ref(self.ctx.z3_ctx, model);
                     self.clear_stashed_model();
                     self.stashed_model = Some(model);
+                    fresh_model = Some(model);
                     if witness_shadow::enabled() {
                         self.shadow_witnesses.remember(model);
                     }
                 }
             }
         }
+        self.on_demand_remember(cache_key, result, fresh_model);
     }
 
     fn clear_stashed_model(&mut self) {
@@ -3515,6 +3556,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.witness_fast_sat(&assumptions) {
             return Sat;
         }
+        let cache_key = self.on_demand_key(&assumptions);
+        if let Some(result) = self.on_demand_lookup(cache_key.as_deref()) {
+            return result;
+        }
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let _query_scope = crate::executor::stats::region_progress::QueryScope::fallback("terminal_model");
@@ -3548,14 +3593,24 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else {
             unknown_result(info, check_started.elapsed(), Some(deadline))
         };
-        self.record_check_result(&result, query.z3_solver);
+        self.record_check_result(&result, query.z3_solver, cache_key);
         result
     }
 
     /// 输出当前求解器的声明与断言，供外部工具重放。
     pub fn write_smtlib(&self, mut output: impl Write) -> std::io::Result<()> {
+        let pending;
+        let temporary;
+        let solver = if self.on_demand.is_some() {
+            pending = self.transaction_assertions();
+            let assumptions = pending.iter().map(|ast| ast.z3_ast).collect::<Vec<_>>();
+            temporary = self.independent_query(&assumptions, None);
+            temporary.z3_solver
+        } else {
+            self.z3_solver
+        };
         unsafe {
-            let text = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
+            let text = Z3_solver_to_string(self.ctx.z3_ctx, solver);
             output.write_all(CStr::from_ptr(text).to_bytes())
         }
     }
@@ -3567,12 +3622,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub fn dump_solver_with(&mut self, filename: &str, exp: &Exp<Sym>) {
         let mut file = std::fs::File::create(filename).expect("Failed to open solver dump file");
-        unsafe {
-            let s = Z3_solver_to_string(self.ctx.z3_ctx, self.z3_solver);
-            let cs = CStr::from_ptr(s);
-            file.write_all(cs.to_bytes()).expect("Failed to write solver dump");
-            writeln!(file, "{}", self.exp_to_str(exp)).expect("Failed to write exp");
-        }
+        self.write_smtlib(&mut file).expect("Failed to write solver dump");
+        writeln!(file, "{}", self.exp_to_str(exp)).expect("Failed to write exp");
     }
 
     pub fn exp_to_str(&mut self, exp: &Exp<Sym>) -> String {
@@ -4964,4 +5015,9 @@ impl<B: BV> Solver<'_, B> {
 }
 
 // 有界短探针的只读逐查询诊断。
-pub(crate) use z3_timeout::{path_smt_check_count, probe_query_event, probe_query_timings_enabled};
+pub(crate) use z3_timeout::{
+    native_check_metrics, path_smt_check_count, probe_query_event, probe_query_timings_enabled,
+};
+
+#[cfg(test)]
+mod on_demand_tests;

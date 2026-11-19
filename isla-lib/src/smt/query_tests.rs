@@ -670,7 +670,8 @@ fn default_boolean_proofs_keep_small_incremental_and_unknown_behavior() {
 fn default_region_queries_reuse_complete_prefix_without_leaking_assumptions() {
     in_default_process("default_region_queries_reuse_complete_prefix_without_leaking_assumptions", || {
         let context = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new_seeded(&context, 117);
+        let mut solver =
+            Solver::<B64>::new_with_mode(&context, Z3SymbolNamer::Integer, Some(117), SolverMode::Incremental);
         let info = SourceLoc::unknown();
         let fixed = solver.declare_const(smtlib::Ty::Bool, info);
         let guard = solver.declare_const(smtlib::Ty::Bool, info);

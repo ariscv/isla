@@ -21,6 +21,8 @@ btrace = ["tracetool"]
 smtperf = []
 tracetool = []
 smt-thread-interrupt = []
+# 只用于库单测及其子进程。
+test-on-demand = []
 default = []
 
 [build-dependencies]

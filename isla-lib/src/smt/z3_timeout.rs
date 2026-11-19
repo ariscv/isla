@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::convert::TryInto;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -120,11 +121,33 @@ pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
     }
 }
 
-fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
+static Z3_CHECKS: AtomicU64 = AtomicU64::new(0);
+static Z3_CHECK_NS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn native_check_metrics() -> serde_json::Value {
+    serde_json::json!({
+        "count":Z3_CHECKS.load(Ordering::Relaxed),
+        "seconds":Z3_CHECK_NS.load(Ordering::Relaxed) as f64 * 1e-9
+    })
+}
+
+fn record_path_smt_call(
+    operation: SmtOperation,
+    source_loc: SourceLoc,
+    wall: Duration,
+    timed_out: bool,
+    native: Option<Duration>,
+) {
+    if let Some(native) = native {
+        Z3_CHECK_NS.fetch_add(native.as_nanos() as u64, Ordering::Relaxed);
+        Z3_CHECKS.fetch_add(1, Ordering::Relaxed);
+    }
     if matches!(operation, SmtOperation::CheckSat | SmtOperation::CheckSatAssuming) {
-        probe_query_event(
-            || serde_json::json!({"type":"check", "operation":format!("{operation:?}"), "seconds":wall.as_secs_f64(), "source":source_loc, "timed_out":timed_out}),
-        );
+        probe_query_event(|| {
+            serde_json::json!({"type":"check", "operation":format!("{operation:?}"), "seconds":wall.as_secs_f64(),
+                "z3_check_seconds":native.map(|duration| duration.as_secs_f64()), "source":source_loc,
+                "query":crate::executor::stats::region_progress::query_metadata(), "timed_out":timed_out})
+        });
     }
     PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out));
     crate::executor::stats::merge_timing::record_smt_call(operation, wall);
@@ -331,6 +354,7 @@ fn thread_interrupt_call_with_timeout<T>(
 macro_rules! interruptible_z3_call {
     ($operation:expr, $source_loc:expr, $context:expr, $call:expr) => {{
         let started = Instant::now();
+        let native = std::cell::Cell::new(None);
         let result = interruptible_z3_call!($context, {
             let timer = crate::executor::stats::region_progress::WorkTimer::start(
                 if matches!($operation, SmtOperation::ModelEval) {
@@ -339,12 +363,16 @@ macro_rules! interruptible_z3_call {
                     crate::executor::stats::region_progress::WorkKind::Z3Check
                 },
             );
+            let native_started = (!matches!($operation, SmtOperation::ModelEval)
+                && (crate::executor::stats::region_progress::enabled() || probe_query_timings_enabled()))
+            .then(Instant::now);
             let value = $call;
+            native.set(native_started.map(|clock| clock.elapsed()));
             drop(timer);
             value
         });
         let elapsed = started.elapsed();
-        record_path_smt_call($operation, $source_loc, elapsed, result.is_err());
+        record_path_smt_call($operation, $source_loc, elapsed, result.is_err(), native.get());
         #[cfg(feature = "smtperf")]
         record_solve_result($operation, elapsed, &result);
         result
@@ -409,15 +437,19 @@ pub(super) fn timeout_Z3_solver_check_deadline(
         return Ok(result);
     }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
+    let native = std::cell::Cell::new(None);
     let check = || unsafe {
         let timer = crate::executor::stats::region_progress::WorkTimer::start(
             crate::executor::stats::region_progress::WorkKind::Z3Check,
         );
+        let native_started =
+            (crate::executor::stats::region_progress::enabled() || probe_query_timings_enabled()).then(Instant::now);
         let result = if assumptions.is_empty() {
             Z3_solver_check(context, solver)
         } else {
             Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
         };
+        native.set(native_started.map(|clock| clock.elapsed()));
         drop(timer);
         result
     };
@@ -432,7 +464,7 @@ pub(super) fn timeout_Z3_solver_check_deadline(
             Ok(check())
         }
     };
-    record_path_smt_call(SmtOperation::CheckSat, source_loc, started.elapsed(), result.is_err());
+    record_path_smt_call(SmtOperation::CheckSat, source_loc, started.elapsed(), result.is_err(), native.get());
     #[cfg(feature = "smtperf")]
     record_solve_result(SmtOperation::CheckSat, started.elapsed(), &result);
     result

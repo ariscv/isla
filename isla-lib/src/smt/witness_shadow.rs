@@ -496,33 +496,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             return false;
         }
         let metadata = crate::executor::stats::region_progress::query_metadata();
-        unsafe {
-            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
-            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
-            let mut terms = (0..Z3_ast_vector_size(self.ctx.z3_ctx, assertions))
-                .map(|i| Z3_ast_vector_get(self.ctx.z3_ctx, assertions, i))
-                .collect::<Vec<_>>();
-            terms.extend_from_slice(assumptions);
-            let (evaluation, model) = self.shadow_witnesses.prove(&terms);
-            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
-            let Some(mut model) = model else {
-                return false;
-            };
-            self.clear_stashed_model();
-            self.stashed_model = Some(model.model);
-            self.shadow_witnesses.remember(model.model);
-            model.model = std::ptr::null_mut();
-            self.knowledge.sat = true;
-            self.last_check_sat = true;
-            self.asserts_since_check = 0;
-            if let Some(metadata) = metadata {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"kind":"region_witness_fast","query":metadata,"evaluation":evaluation})
-                );
-            }
-            true
+        let (evaluation, model) = self.with_assertion_terms(assumptions, |terms| self.shadow_witnesses.prove(terms));
+        let Some(mut model) = model else {
+            return false;
+        };
+        self.clear_stashed_model();
+        self.stashed_model = Some(model.model);
+        self.shadow_witnesses.remember(model.model);
+        model.model = std::ptr::null_mut();
+        self.knowledge.sat = true;
+        self.last_check_sat = true;
+        self.asserts_since_check = 0;
+        if let Some(metadata) = metadata {
+            eprintln!("{}", serde_json::json!({"kind":"region_witness_fast","query":metadata,"evaluation":evaluation}));
         }
+        true
     }
     pub(super) fn shadow_probe(&self, solver: Z3_solver, assumptions: &[Z3_ast]) -> Option<Token> {
         if !shadow_enabled() && !local_shadow_enabled() {

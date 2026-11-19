@@ -5408,6 +5408,7 @@ fn lazy_scope_t3_query_exit_materialization() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
+    let incremental = crate::smt::SolverMode::current() == crate::smt::SolverMode::Incremental;
     let a = solver.declare_const(smtlib::Ty::Bool, info());
     let b = solver.declare_const(smtlib::Ty::Bool, info());
     let root = solver.start_transaction();
@@ -5415,7 +5416,7 @@ fn lazy_scope_t3_query_exit_materialization() {
         solver.start_transaction_with_guard(Some(Formula::Var(a)));
         assert_eq!(
             solver.probe_transaction_snapshot()["native_condition_scopes"],
-            usize::from(!lazy),
+            usize::from(incremental && !lazy),
             "延迟路径不应创建 native scope"
         );
         solver.assert(Formula::Var(b));
@@ -5452,13 +5453,14 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
+    let incremental = crate::smt::SolverMode::current() == crate::smt::SolverMode::Incremental;
     let a = solver.declare_const(smtlib::Ty::Bool, info());
     let root = solver.start_transaction();
     let native = solver.start_transaction_with_guard(Some(Formula::Var(a)));
     assert_eq!(
         solver.probe_transaction_snapshot()["native_condition_scopes"],
-        1,
-        "即使 lazy 开启，defer 外仍创建 native scope"
+        usize::from(incremental),
+        "增量模式在 defer 外创建 native scope"
     );
     solver.with_deferred_region_queries(|solver| {
         // 创建时是 native，关闭时在 defer 内，仍须 pop。
@@ -5467,7 +5469,10 @@ fn lazy_scope_t5_native_pairing_and_guard_binding() {
             let arm = solver.start_transaction_with_guard(Some(Formula::Var(a)));
             solver.add(smtlib::Def::DefineConst(a, Formula::Bool(false)));
             solver.rollback_transaction(arm);
-            assert_eq!(solver.probe_transaction_snapshot()["native_condition_scopes"], usize::from(!lazy));
+            assert_eq!(
+                solver.probe_transaction_snapshot()["native_condition_scopes"],
+                usize::from(incremental && !lazy)
+            );
         });
     });
     // 内层改绑回滚后，原始 a 两值都可达。
@@ -5764,7 +5769,8 @@ fn unify_characterization_region_exit_in_both_modes() {
         let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
         let shared = empty_shared_state();
         let queue = Worker::new_lifo();
-        crate::smt::reset_path_smt_stats();
+        // 路径统计会随保存点撤销。完整约束缓存可能复用撤销前的真实查询。
+        let queries_before = crate::smt::test_query_count();
         assert!(matches!(
             run_loop(
                 0,
@@ -5782,7 +5788,7 @@ fn unify_characterization_region_exit_in_both_modes() {
         ));
         assert!(queue.is_empty());
         assert!(!frame.region_merge_records().is_empty());
-        assert_eq!(crate::smt::path_smt_stats().calls == 0, no_smt);
+        assert_eq!(crate::smt::test_query_count() == queries_before, no_smt);
         assert_eq!(solver.has_stashed_model(), !no_smt);
     }
 }

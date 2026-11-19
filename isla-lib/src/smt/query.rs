@@ -101,6 +101,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.profile_query_footprint(assumptions);
         }
         let setup = WorkTimer::start(WorkKind::QuerySetup);
+        if self.on_demand.is_some() {
+            return self.independent_query(assumptions, None);
+        }
         let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
         // 实验性的原生快照边界：同一完整公式在首次check前批量装入，不预先push。
         // 只改变求解调用形态；结果及模型仍须满足全部已发布/缓冲/活动臂前提。
@@ -192,16 +195,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.seed.map(|seed| (config.seed_param, seed)),
             );
             let query = QuerySolver { ctx: self.ctx, z3_solver, independent: true };
-            // 当前solver包括活动臂条件；缓冲断言与本次条件由调用方补齐。
-            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
-            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
-            for index in 0..Z3_ast_vector_size(self.ctx.z3_ctx, assertions) {
-                Z3_solver_assert(self.ctx.z3_ctx, z3_solver, Z3_ast_vector_get(self.ctx.z3_ctx, assertions, index));
-            }
-            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
-            for assumption in assumptions {
-                Z3_solver_assert(self.ctx.z3_ctx, z3_solver, *assumption);
-            }
+            // 增量主 solver 可能已断言活动臂；其余活动条件与缓冲由调用方补齐。
+            self.with_assertion_terms(assumptions, |terms| {
+                for term in terms {
+                    Z3_solver_assert(self.ctx.z3_ctx, z3_solver, *term);
+                }
+            });
             if let Some(limit) = limit {
                 let params = Z3_mk_params(self.ctx.z3_ctx);
                 Z3_params_inc_ref(self.ctx.z3_ctx, params);
@@ -215,6 +214,27 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 Z3_params_dec_ref(self.ctx.z3_ctx, params);
             }
             query
+        }
+    }
+
+    /// 在当前断言的 AST 引用有效期间读取主约束与调用方提供的其余条件。
+    pub(super) fn with_assertion_terms<T>(&self, assumptions: &[Z3_ast], read: impl FnOnce(&[Z3_ast]) -> T) -> T {
+        if let Some(state) = &self.on_demand {
+            let mut terms = Vec::with_capacity(state.published.len() + assumptions.len());
+            terms.extend(state.published.iter().map(|ast| ast.z3_ast));
+            terms.extend_from_slice(assumptions);
+            return read(&terms);
+        }
+        unsafe {
+            // solver 持有每项断言；获取的向量只用于收集裸指针。
+            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
+            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
+            let count = Z3_ast_vector_size(self.ctx.z3_ctx, assertions);
+            let mut terms = Vec::with_capacity(count as usize + assumptions.len());
+            terms.extend((0..count).map(|index| Z3_ast_vector_get(self.ctx.z3_ctx, assertions, index)));
+            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
+            terms.extend_from_slice(assumptions);
+            read(&terms)
         }
     }
 
@@ -233,14 +253,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
         }
         assert!(assumptions.len() >= buffered, "查询必须包含全部缓冲断言");
-        unsafe {
-            let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
-            Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);
-            let active = Z3_ast_vector_size(self.ctx.z3_ctx, assertions);
-            let mut context =
-                (0..active).map(|i| Z3_ast_vector_get(self.ctx.z3_ctx, assertions, i)).collect::<Vec<_>>();
-            context.extend_from_slice(&assumptions[..buffered]);
-            let (context_nodes, context_truncated) = self.profile_ast_nodes(context);
+        self.with_assertion_terms(&assumptions[..buffered], |context| unsafe {
+            let active = context.len() - buffered;
+            let (context_nodes, context_truncated) = self.profile_ast_nodes(context.to_vec());
             let (goal_nodes, goal_truncated) = self.profile_ast_nodes(assumptions[buffered..].to_vec());
             crate::executor::stats::region_progress::footprint(serde_json::json!({
                 "active_assertions":active,"buffered_assertions":buffered,
@@ -248,8 +263,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 "context_ast_dag_nodes":context_nodes,"context_ast_truncated":context_truncated,
                 "goal_ast_dag_nodes":goal_nodes,"goal_ast_truncated":goal_truncated,
                 "note":"每轮第一条真实查询之前；bytes为Rust表达式载荷，nodes分别为原始树/展开DAG；不等于Z3/RSS字节"}));
-            Z3_ast_vector_dec_ref(self.ctx.z3_ctx, assertions);
-        }
+        });
         drop(timer);
     }
 
@@ -303,7 +317,7 @@ mod tests {
         }
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&context);
+        let mut solver = Solver::<B64>::new_in_mode(&context, SolverMode::Incremental);
         let info = SourceLoc::unknown();
         let value = solver.declare_const(Ty::Bool, info);
         solver.start_transaction();
@@ -323,7 +337,7 @@ mod tests {
         }
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&context);
+        let mut solver = Solver::<B64>::new_in_mode(&context, SolverMode::Incremental);
         let info = SourceLoc::unknown();
         let value = solver.declare_const(Ty::Bool, info);
         let outer = solver.start_transaction();
@@ -525,7 +539,7 @@ mod tests {
         crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&context);
+        let mut solver = Solver::<B64>::new_in_mode(&context, SolverMode::Incremental);
         let info = SourceLoc::unknown();
         let parent = solver.declare_const(Ty::Bool, info);
         let target = solver.declare_const(Ty::Bool, info);
@@ -573,7 +587,7 @@ mod tests {
         crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
         configure_tastic(Tactic::Default);
         let context = Context::new(Config::new());
-        let mut solver = Solver::<B64>::new(&context);
+        let mut solver = Solver::<B64>::new_in_mode(&context, SolverMode::Incremental);
         let info = SourceLoc::unknown();
         let guard = solver.declare_const(Ty::Bool, info);
         let x = solver.declare_const(Ty::Bool, info);
