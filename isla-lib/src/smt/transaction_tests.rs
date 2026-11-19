@@ -165,6 +165,7 @@ fn smt_savepoint_assert_after_inner_commit_is_buffered_in_parent() {
 
 #[test]
 fn smt_savepoint_restores_model_and_check_state() {
+    configure_tastic(Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
@@ -173,6 +174,7 @@ fn smt_savepoint_restores_model_and_check_state() {
     let original = solver.stashed_model;
     let outer = solver.start_transaction();
     solver.with_transaction_condition(&Not(Box::new(Var(sym))), |solver| {
+        assert!(!solver.has_stashed_model(), "臂内不能使用与臂条件矛盾的调用者模型");
         assert_eq!(solver.check_sat_with(&Var(other), SourceLoc::unknown()), Sat);
         let inner_model = solver.stashed_model;
         let inner = solver.start_transaction();
@@ -186,7 +188,9 @@ fn smt_savepoint_restores_model_and_check_state() {
         let mut model = solver.take_stashed_model().unwrap();
         assert_eq!(model.get_var(other).unwrap().unwrap_exp(), Bool(true));
     });
-    assert!(!solver.has_stashed_model());
+    // 只读臂退出时恢复调用者的见证和查询状态。
+    assert_eq!(solver.stashed_model, original);
+    assert!(solver.last_check_sat);
     solver.rollback_transaction(outer);
     assert_eq!(solver.stashed_model, original);
     assert!(solver.last_check_sat);

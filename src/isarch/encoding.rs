@@ -181,6 +181,7 @@ mod tests {
     use isla_lib::bitvector::b64::B64;
     use isla_lib::ir::ExitCause;
     use isla_lib::ir::{Def, Exp, IRTypeInfo, Instr, Loc, Name, SharedState, Symtab, Ty, UVal, RETURN};
+    use isla_lib::ir::{CURRENT_EXCEPTION, HAVE_EXCEPTION, THROW_LOCATION};
     use isla_lib::smt::smtlib::{self, Exp as SmtExp};
     use isla_lib::smt::Tactic;
     use std::collections::HashSet;
@@ -192,15 +193,15 @@ mod tests {
         let mut symtab = Symtab::new();
         let normal = symtab.intern("zencdec_forwards");
         let arg = symtab.intern("zargument");
-        let exception = symtab.intern("zcurrent_exception");
         let defs: Vec<Def<Name, B64>> = vec![
-            Def::Register(exception, Ty::String, vec![]),
             Def::Val(normal, vec![Ty::Unit], Ty::Bits(32)),
             Def::Fn(
                 normal,
                 vec![arg],
                 vec![
-                    Instr::Copy(Loc::Id(exception), Exp::String("core/types.sail:61: 非法架构".to_string()), loc),
+                    Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(true), loc),
+                    Instr::Copy(Loc::Id(CURRENT_EXCEPTION), Exp::String("非法架构".to_string()), loc),
+                    Instr::Copy(Loc::Id(THROW_LOCATION), Exp::String("core/types.sail:61".to_string()), loc),
                     Instr::Arbitrary,
                 ],
             ),
@@ -216,9 +217,12 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let mut regs = RegisterBindings::new();
-        regs.insert(exception, false, UVal::Init(Val::String(String::new())));
-        let error = encoding_paths(&Val::Unit, &shared, &regs, &Bindings::default(), Checkpoint::new())
+        let lets = Bindings::from_iter([
+            (HAVE_EXCEPTION, UVal::Init(Val::Bool(false))),
+            (CURRENT_EXCEPTION, UVal::Init(Val::String(String::new()))),
+            (THROW_LOCATION, UVal::Init(Val::String(String::new()))),
+        ]);
+        let error = encoding_paths(&Val::Unit, &shared, &RegisterBindings::new(), &lets, Checkpoint::new())
             .err()
             .unwrap()
             .to_string();

@@ -61,6 +61,8 @@ ISLA_Z3_PREFIX = "/path/to/installed/z3"
 RUNPATH。目录及版本有误会在构建时报告。直接运行测试和 `isarch` 时无需设置
 `LD_LIBRARY_PATH` 或 `LD_PRELOAD`。可用 `ldd target/release/isarch` 核对所加载的库。
 运行 `isla-axiomatic` 或重放 Sail property 时还需在 `PATH` 中提供 `z3` 命令。
+工作区测试中的 RISC-V 编解码集成测试需要在 Isla 根目录放置兼容的 `rv64d.ir`
+（可以链接到已生成的 IR）。
 Sail 场景需要 Sail 和 `make isla-sail` 生成的插件，文件名以 `nested_merge_` 开头的 property
 由 `ruby test/run_tests.rb --property-filter '^nested_merge_'` 运行。
 
