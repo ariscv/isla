@@ -53,33 +53,35 @@ pub(super) fn eval_operands<'exp, 'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Vec<Val<B>>, ExecError> {
-    let mut values = if let Some((pc, operand)) = &frame.pending_retry_operand {
-        assert_eq!(*pc, frame.pc, "重试操作数必须属于当前指令");
-        if let Val::Vector(operands) = operand {
-            Some(operands.clone())
-        } else {
-            assert!(matches!(operand, Val::Unit));
-            None
-        }
-    } else {
-        None
-    };
-    if values.is_none() {
-        values = Some(
-            operands
-                .into_iter()
-                .map(|operand| {
-                    super::eval_exp(operand, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)
-                        .map(|v| v.into_owned())
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-    }
-    let mut values = values.unwrap();
+    let mut values = eval_operands_before_concrete_choice(operands, frame, shared_state, solver, info)?;
     for value in &mut values {
         super::concrete_values::resolve(value, &frame.local_state.concrete_choices, solver, info)?;
     }
     Ok(values)
+}
+
+/// 仍能计算带守卫操作数的原语直接使用这一层。
+pub(super) fn eval_operands_before_concrete_choice<'exp, 'ir, B: BV>(
+    operands: impl IntoIterator<Item = &'exp Exp<Name>>,
+    frame: &mut LocalFrame<'ir, B>,
+    shared_state: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Vec<Val<B>>, ExecError> {
+    if let Some((pc, operand)) = &frame.pending_retry_operand {
+        assert_eq!(*pc, frame.pc, "重试操作数必须属于当前指令");
+        if let Val::Vector(operands) = operand {
+            return Ok(operands.clone());
+        }
+        assert!(matches!(operand, Val::Unit));
+    }
+    operands
+        .into_iter()
+        .map(|operand| {
+            super::eval_exp(operand, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)
+                .map(|v| v.into_owned())
+        })
+        .collect()
 }
 
 /// 返回 true 时保持当前 pc 重试，false 表示当前约束不可满足。
@@ -169,11 +171,6 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         return Ok(false);
     }
 
-    let extension_source_width = if finite_enabled && op == "extension" {
-        Some(crate::primop_util::length_bits(&operands[0], solver, info)?)
-    } else {
-        None
-    };
     for &index in indices {
         let mut symbols = Vec::new();
         if op == "eq_anything" {
@@ -424,9 +421,30 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 // 不可满足的探测会使当前模型失效，单值枚举前须重新建立前缀模型。
                 assert!(solver.check_sat(info).is_sat()?, "边界探测不得改变路径可满足性");
             }
+            // 扩展及切片会按选中的具体位宽执行。整组候选都满足原语边界时，
+            // 允许上界集合参与拆分，保留原守卫和其余路径约束。
+            let bounds = if finite_enabled {
+                use crate::primop_util::length_bits;
+                match (op, index, operands) {
+                    ("extension", 1, [bits, ..]) => {
+                        Some(i128::from(length_bits(bits, solver, info)?)..=i128::from(u32::MAX))
+                    }
+                    ("subrange_internal" | "vector_subrange", 1, [bits, _, Val::I128(low)]) if *low >= 0 => {
+                        Some(*low..=i128::from(length_bits(bits, solver, info)?) - 1)
+                    }
+                    ("subrange_internal" | "vector_subrange", 2, [bits, Val::I128(high), _])
+                        if *high < i128::from(length_bits(bits, solver, info)?) =>
+                    {
+                        Some(0..=*high)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             match fork_symbolic_value(
                 sym,
-                extension_source_width,
+                bounds,
                 operands,
                 info,
                 task_id,
@@ -458,7 +476,7 @@ pub(super) enum ValueRetry {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
-    extension_source_width: Option<u32>,
+    safe_bounds: Option<std::ops::RangeInclusive<i128>>,
     operands: &[Val<B>],
     info: SourceLoc,
     task_id: TaskId,
@@ -485,16 +503,16 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     let bounded = matches!(domain, FiniteDomain::Bounded(_));
     let values = match &domain {
         FiniteDomain::Known(values) => Some(values),
-        // 未认证的候选也可能被执行。仅当所有候选都满足扩展原语的位宽前提时才拆分。
+        // 未认证的候选也可能被执行。仅在所有候选满足原语边界时拆分。
         FiniteDomain::Bounded(values)
-            if extension_source_width.is_some_and(|minimum| {
+            if safe_bounds.is_some_and(|bounds| {
                 values.iter().all(|value| {
                     let length = match value {
                         Bits64(bits) => Some(i128::from(bits.signed())),
                         Bits(bits) => primop::i128_from_model_bits(bits),
                         _ => unreachable!("有限域只含位向量常量"),
                     };
-                    length.and_then(|length| u32::try_from(length).ok()).is_some_and(|length| length >= minimum)
+                    length.is_some_and(|length| bounds.contains(&length))
                 })
             }) =>
         {

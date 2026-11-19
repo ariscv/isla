@@ -2,8 +2,7 @@
 use super::*;
 
 fn candidate(program: Vec<Instr<Name, B64>>, shared: &SharedState<'static, B64>) -> Vec<Path> {
-    let mut limits = ExecutionLimits::default().with_path_merging(true);
-    limits.merge_concrete_values = true;
+    let limits = ExecutionLimits::default().with_path_merging(true);
     paths_with_state(program, shared, 1, limits, crate::memory::Memory::new(), |_| ())
 }
 
@@ -69,6 +68,7 @@ fn region_concrete_values_string_comparison_differential() {
     let forked = paths(code.clone(), &shared, 1, false);
     let merged = candidate(code, &shared);
     assert!(merged.iter().all(|path| !path.records.is_empty()));
+    assert_eq!(merged.len(), 1, "字符串比较直接生成带守卫的布尔结果");
     equivalent_paths(&forked, &merged, 1, true);
 }
 
@@ -140,8 +140,7 @@ fn region_concrete_values_nested_consumer_differential() {
         Instr::End,
     ];
     let forked = paths(code.clone(), &shared, 2, false);
-    let mut limits = ExecutionLimits::default().with_path_merging(true);
-    limits.merge_concrete_values = true;
+    let limits = ExecutionLimits::default().with_path_merging(true);
     let merged = paths_with_state(code, &shared, 2, limits, crate::memory::Memory::new(), |_| ());
     assert_eq!(merged.len(), 1, "嵌套消费者应在区域内拆分再汇合");
     equivalent_paths(&forked, &merged, 2, true);
@@ -155,7 +154,10 @@ fn region_concrete_values_model_and_frozen_guard() {
     let left = Val::I64(3);
     let right = Val::I64(9);
     let value = crate::primop_util::merge_concrete_val(guard, &left, &right, &mut solver, info()).unwrap();
-    assert!(crate::primop_util::merge_val(guard, &left, &right, &mut solver, info()).is_err(), "默认严格合并保持");
+    assert!(
+        crate::primop_util::merge_val(guard, &left, &right, &mut solver, info()).is_err(),
+        "严格值合并仍拒绝不同具体值"
+    );
     solver.assert(smtlib::Exp::Var(guard));
     assert!(solver.check_sat(info()).is_sat().unwrap());
     let mut model = Model::new(&solver);
@@ -191,8 +193,7 @@ fn region_concrete_values_comparison_branch_inside_region() {
         Instr::End,
     ];
     let forked = paths(code.clone(), &shared, 2, false);
-    let mut limits = ExecutionLimits::default().with_path_merging(true);
-    limits.merge_concrete_values = true;
+    let limits = ExecutionLimits::default().with_path_merging(true);
     let merged = paths_with_state(code, &shared, 2, limits, crate::memory::Memory::new(), |_| ());
     assert_eq!(merged.len(), 1);
     equivalent_paths(&forked, &merged, 2, true);

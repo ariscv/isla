@@ -2522,6 +2522,23 @@ r0 = "0x0000000000000000"
     }
 
     #[test]
+    fn merge_concrete_values_defaults_on_and_accepts_explicit_false() {
+        use crate::executor::ExecutionLimits;
+        let symtab = Symtab::new();
+        assert!(ExecutionLimits::default().merge_concrete_values);
+        for (text, expected) in [
+            ("[execution_limits]", true),
+            ("[execution_limits.path_merge]", true),
+            ("[execution_limits.path_merge]\nmerge_concrete_values=true", true),
+            ("[execution_limits.path_merge]\nmerge_concrete_values=false", false),
+        ] {
+            let config = merge_config(text).unwrap();
+            assert_eq!(config.path_merge.merge_concrete_values, expected);
+            assert_eq!(ExecutionLimits::default().with_config(&config, &symtab).merge_concrete_values, expected);
+        }
+    }
+
+    #[test]
     fn prune_constant_branches_config_scope_and_type() {
         let defaults = merge_config("[execution_limits.path_merge]").unwrap();
         assert!(!RegionOptions::from_config(&defaults).prune_constant_branches);

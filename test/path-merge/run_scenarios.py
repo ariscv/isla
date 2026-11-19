@@ -32,6 +32,7 @@ DEFAULTS = {
     "registers": [],
     "observe": "out_value",
     "ordered_events": False,
+    "merge_concrete_values": None,
 }
 
 
@@ -64,6 +65,8 @@ def read_scene(path):
     for key in ("expect_paths_unmerged", "expect_paths_merged"):
         require(type(scene[key]) is int and scene[key] >= 0, f"{key} 须是非负整数")
     require(type(scene["ordered_events"]) is bool, "ordered_events 须是布尔值")
+    merge_concrete = scene["merge_concrete_values"]
+    require(merge_concrete is None or type(merge_concrete) is bool, "merge_concrete_values 须是布尔值")
     inputs = scene["inputs"]
     require(isinstance(inputs, dict) and all(NAME.fullmatch(name) and type(width) is int and width > 0
                                              for name, width in inputs.items()), "inputs 须是寄存器名到正位宽的表")
@@ -198,10 +201,14 @@ def run_mode(scene, shape, mode, binary, directory, seconds):
     expected = scene["expect_paths_merged" if enabled else "expect_paths_unmerged"]
     strategy = mode if enabled else "recursive"
     ordered = str(scene["ordered_events"]).lower()
-    config.write_text(f"includes = [{json.dumps(str(ROOT / 'configs/plain.toml'))}]\n"
-                      "[execution_limits.path_merge]\n"
-                      f"enabled = {str(enabled).lower()}\nstrategy = {json.dumps(strategy)}\n"
-                      f"ordered_events = {ordered}\n", encoding="utf-8")
+    settings = (f"includes = [{json.dumps(str(ROOT / 'configs/plain.toml'))}]\n"
+                "[execution_limits.path_merge]\n"
+                f"enabled = {str(enabled).lower()}\nstrategy = {json.dumps(strategy)}\n"
+                f"ordered_events = {ordered}\n")
+    merge_concrete = scene["merge_concrete_values"]
+    if merge_concrete is not None:
+        settings += f"merge_concrete_values = {str(merge_concrete).lower()}\n"
+    config.write_text(settings, encoding="utf-8")
     try:
         process = run([str(binary), "-A", str(directory / "model.ir"), "-C", str(config), "-p", "prop", "-T", "2",
                        "--expect-paths", str(expected), "--dump-paths", str(target), "--scenario-observations"],

@@ -2,6 +2,8 @@
 
 核心用例可以用 Sail 表达。验收要求 S1 从 9 条路径合成 2 条，并保留两个指定的输入集合。当前共享合并核心有整批退回的可能，须保留这两项断言，用运行结果判断能力。
 
+本页记录场景架子建立时的设计。缺省开启具体值合并后的验收见 [README](README.md)及[内层合并验收](../property/README-nested-merge.md)。
+
 ## 骨架核对
 
 - **a. 具体值。** [值合并](../../isla-lib/src/primop_util.rs)中，等宽不同 bitvector 可用 ITE 合并，不同具体 `I64` 或字符串会产生 `IncompatibleMerge`。普通 Sail 局部整数可能是 `I128`，[帧合并](../../isla-lib/src/executor/region_engine.rs)会为两个 `I128` 构建 ITE，也可能删除不再活跃的局部槽位。选用字符串 `k`，在待测汇合点之后用 `eq_string` 消费它。该原语要求两边都是具体字符串。不同字符串触发 `IncompatibleState`。不同联合体标签本身可以合并，有重叠标签且载荷无法合并时才会得到 `UnionPayload`。

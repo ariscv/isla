@@ -109,7 +109,9 @@ fn region_four_way_top_merge_honors_explicit_fragment_limit() {
     check_symmetric_top_merge(limits);
 }
 
-pub(super) fn check_symmetric_top_merge(limits: ExecutionLimits) {
+pub(super) fn check_symmetric_top_merge(mut limits: ExecutionLimits) {
+    // 让内层活跃字符串阻止局部合并，检查外层可以继续合并。
+    limits.merge_concrete_values = false;
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let text = test_name(1900);
