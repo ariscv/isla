@@ -24,6 +24,7 @@ pub fn add_options(opts: &mut getopts::Options) {
     opts.optopt("", "expect-paths", "要求可满足的完成路径数恰好为指定值", "<N>");
     opts.optflag("", "print-paths", "打印完成路径数、守卫与返回值");
     opts.optopt("", "dump-paths", "将完成路径的守卫、返回值和合并记录数写入 JSON", "<文件>");
+    opts.optopt("", "dump-assertions", "将失败断言的守卫和观测寄存器写入 JSON", "<文件>");
     opts.optflag("", "scenario-observations", "在路径 JSON 中保留场景观测、访存和寄存器读事件");
 }
 
@@ -31,15 +32,20 @@ pub struct PathOptions {
     expected: Option<usize>,
     print: bool,
     dump: Option<PathBuf>,
+    dump_assertions: Option<PathBuf>,
     scenario_observations: bool,
 }
 
 impl PathOptions {
     pub fn parse(matches: &getopts::Matches) -> Result<Self, String> {
         let dump = matches.opt_str("dump-paths").map(PathBuf::from);
+        let dump_assertions = matches.opt_str("dump-assertions").map(PathBuf::from);
         let scenario_observations = matches.opt_present("scenario-observations");
         if scenario_observations && dump.is_none() {
             return Err("--scenario-observations 需要 --dump-paths".to_string());
+        }
+        if dump_assertions.is_some() && !scenario_observations {
+            return Err("--dump-assertions 需要 --scenario-observations".to_string());
         }
         Ok(Self {
             expected: matches
@@ -49,6 +55,7 @@ impl PathOptions {
                 .map_err(|error| format!("--expect-paths 需要非负整数：{error}"))?,
             print: matches.opt_present("print-paths"),
             dump,
+            dump_assertions,
             scenario_observations,
         })
     }
@@ -66,6 +73,7 @@ impl PathOptions {
                 passed: AtomicBool::new(true),
                 incomplete: AtomicBool::new(false),
                 paths: Mutex::new(Vec::new()),
+                assertions: self.dump_assertions.as_ref().map(|_| Mutex::new(Vec::new())),
                 scenario_observations: self.scenario_observations,
             });
             executor::start_multi(threads, None, vec![task], shared, collected.clone(), &collect_path);
@@ -108,6 +116,17 @@ impl PathOptions {
                 .and_then(|file| serde_json::to_writer_pretty(file, &*paths));
             if let Err(error) = result {
                 eprintln!("无法写入路径 JSON {}：{error}", file.display());
+                return 3;
+            }
+        }
+        if let Some(file) = &self.dump_assertions {
+            let mut assertions = collected.assertions.as_ref().unwrap().lock().unwrap();
+            assertions.sort_by(|a, b| a.guard_smtlib.cmp(&b.guard_smtlib));
+            let result = File::create(file)
+                .map_err(serde_json::Error::io)
+                .and_then(|file| serde_json::to_writer_pretty(file, &*assertions));
+            if let Err(error) = result {
+                eprintln!("无法写入失败断言 JSON {}：{error}", file.display());
                 return 3;
             }
         }
@@ -162,6 +181,7 @@ struct PathResults {
     passed: AtomicBool,
     incomplete: AtomicBool,
     paths: Mutex<Vec<PathSummary>>,
+    assertions: Option<Mutex<Vec<PathSummary>>>,
     scenario_observations: bool,
 }
 
@@ -348,6 +368,19 @@ fn collect_path<'ir, B: BV>(
         },
         Ok((Run::Dead, _)) => (),
         Ok((Run::Exit | Run::Suspended { .. }, _)) => collected.incomplete.store(true, Ordering::Release),
+        Err((ExecError::AssertionFailure(..), frame)) if collected.assertions.is_some() => {
+            match solver.check_sat(SourceLoc::unknown()) {
+                SmtResult::Sat => {
+                    let context = Context::new(Config::new());
+                    let mut replay = Solver::from_checkpoint(&context, checkpoint(&mut solver));
+                    let summary = path_summary(&Val::Unit, frame, shared, &mut replay, true);
+                    collected.assertions.as_ref().unwrap().lock().unwrap().push(summary);
+                }
+                SmtResult::Unsat => (),
+                SmtResult::Unknown | SmtResult::Error(_) => collected.incomplete.store(true, Ordering::Release),
+            }
+            return;
+        }
         Err((error, _)) => {
             eprintln!("路径执行失败：{error:?}");
             collected.incomplete.store(true, Ordering::Release);
