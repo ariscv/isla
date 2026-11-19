@@ -82,15 +82,13 @@ impl Observation {
     }
 }
 
-fn observe(
-    mut shared: SharedState<'static, B64>,
-    program: Program,
-    inputs: usize,
-    limits: ExecutionLimits,
-) -> Observation {
+fn observe(mut shared: SharedState<'static, B64>, program: Program, inputs: usize, strategy: Strategy) -> Observation {
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let run = |code, limits| paths_with_state(code, &shared, inputs, limits, crate::memory::Memory::new(), |_| ());
     let forked = run(program.clone(), ExecutionLimits::default().with_path_merging(false));
+    // 保留字符串不兼容作为局部失败夹具，检查祖先合并和守卫不受影响。
+    let mut limits = strategy.limits();
+    limits.merge_concrete_values = false;
     let merged = run(program, limits);
     let paths = equivalent_paths(&forked, &merged, inputs, true);
     Observation {
@@ -190,7 +188,7 @@ fn load_shape(strategy: Strategy, different: bool) -> Observation {
         Instr::Goto(11),
         Instr::End,
     ];
-    let observed = observe(shared, program, 4, strategy.limits());
+    let observed = observe(shared, program, 4, strategy);
     if different {
         observed.assert_local_rejection(ACCESS_NAME, 1, "incompatible_state");
     }
@@ -232,7 +230,7 @@ fn check_three_levels(different: bool) {
         ];
         program.extend(string_region(9, input(3), slot, different));
         program.extend([Instr::Goto(16), Instr::Goto(17), Instr::Goto(18), Instr::End]);
-        let observed = observe(shared, program, 4, strategy.limits());
+        let observed = observe(shared, program, 4, strategy);
         if different {
             observed.assert_local_rejection(&observed.root_function, 10, "incompatible_state");
         }
@@ -265,9 +263,7 @@ fn check_callee(different: bool) {
             call_access(callee, 2, 1, 2),
             Instr::End,
         ];
-        let mut limits = strategy.limits();
-        limits.merge_concrete_values = false;
-        let observed = observe(shared, program, 3, limits);
+        let observed = observe(shared, program, 3, strategy);
         if different {
             observed.assert_local_rejection(ACCESS_NAME, 1, "incompatible_state");
         }
@@ -327,7 +323,7 @@ fn check_failure_reasons(different: bool) {
                 vec![Instr::Jump(input(0), 3, info()), copy_return(input(1)), Instr::Goto(3 + body.len())];
             program.extend(body);
             program.push(Instr::End);
-            let observed = observe(shared, program, 2, strategy.limits());
+            let observed = observe(shared, program, 2, strategy);
             if different {
                 observed.assert_local_rejection(&observed.root_function, 4, reason);
             } else {
@@ -387,7 +383,7 @@ fn boundary_program(shared: &mut SharedState<'static, B64>, wrapped: bool, diffe
 fn observe_boundary(strategy: Strategy, wrapped: bool, different: bool) -> Observation {
     let mut shared = empty_shared_state();
     let program = boundary_program(&mut shared, wrapped, different);
-    observe(shared, program, 3, strategy.limits())
+    observe(shared, program, 3, strategy)
 }
 
 #[test]
