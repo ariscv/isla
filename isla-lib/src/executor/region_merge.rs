@@ -1774,19 +1774,23 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                         .expect("合并记录编号溢出");
                     let mut next = original_base.clone();
-                    let result = solver.with_transaction_condition(&guard, |solver| {
-                        finish_region(
-                            prefix_id,
-                            returned,
-                            &prefix_region,
-                            &original_base,
-                            vec![None, Some(arm)],
-                            &mut next,
-                            state,
-                            shared,
-                            solver,
-                            info,
-                        )
+                    let owner = solver.new_logical_arm(original_base.region_arm);
+                    next.region_arm = Some(owner);
+                    let result = solver.with_logical_arm(owner, |solver| {
+                        solver.with_transaction_condition(&guard, |solver| {
+                            finish_region(
+                                prefix_id,
+                                returned,
+                                &prefix_region,
+                                &original_base,
+                                vec![None, Some(arm)],
+                                &mut next,
+                                state,
+                                shared,
+                                solver,
+                                info,
+                            )
+                        })
                     })?;
                     assert!(matches!(result, RegionResult::Merged));
                     solver.compact_region_query_prefix();
@@ -1822,7 +1826,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         arms: [Vec::new(), Vec::new()],
                         completed: 0,
                         continuations: ReadyFragments::new(state),
-                        parent_arm: work.parent_arm,
+                        parent_arm: Some(owner),
                         active_arm: None,
                     };
                     // 预算由实际回边更新；此处只收敛前沿，避免半轮重复授予预算。

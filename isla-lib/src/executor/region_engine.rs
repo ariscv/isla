@@ -902,7 +902,9 @@ fn merge_states<'ir, B: BV>(
             register_value_enums(a, &shared.type_info, solver);
             register_value_enums(b, &shared.type_info, solver);
             let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
-            let merge = if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
+            let merge = if region.has_back_edge && matches!((a, b), (Val::I128(_), Val::I128(_))) && a != b {
+                crate::primop_util::build_ite
+            } else if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
                 && (matches!(a, Val::MixedBits(_)) || matches!(b, Val::MixedBits(_)))
             {
                 crate::primop_util::merge_concrete_val
