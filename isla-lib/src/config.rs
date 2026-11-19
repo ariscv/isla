@@ -2752,11 +2752,26 @@ end_column = 0
 
     #[test]
     fn bv_rewrite_config_bool_lists_and_strict_location() {
-        for value in ["true", "false", "[]", "[\"mask-and\"]", "[\"data-ite-eq\",\"sign-bound\"]"] {
-            let config = merge_config(&format!("[execution_limits.solver]\nbv_rewrite={value}")).unwrap();
-            assert_eq!(RegionOptions::from_config(&config).bv_rewrite, config.solver.bv_rewrite);
+        use crate::smt::rewrite::BvRewrite;
+
+        let all = BvRewrite::parse("true").unwrap();
+        for text in ["[execution_limits]\n", "[execution_limits.solver]\n"] {
+            let config = merge_config(text).unwrap();
+            assert_eq!(config.solver.bv_rewrite, all);
+            assert_eq!(RegionOptions::from_config(&config).bv_rewrite, all);
         }
-        assert!(!SolverConfig::default().bv_rewrite.enabled());
+        for (value, rules) in [
+            ("true", "true"),
+            ("false", "false"),
+            ("[]", "false"),
+            ("[\"mask-and\"]", "mask-and"),
+            ("[\"data-ite-eq\",\"sign-bound\"]", "data-ite-eq,sign-bound"),
+        ] {
+            let config = merge_config(&format!("[execution_limits.solver]\nbv_rewrite={value}")).unwrap();
+            let expected = BvRewrite::parse(rules).unwrap();
+            assert_eq!(config.solver.bv_rewrite, expected);
+            assert_eq!(RegionOptions::from_config(&config).bv_rewrite, expected);
+        }
         for text in
             ["[execution_limits.solver]\nbv_rewrite=[\"oops\"]", "[execution_limits.path_merge]\nbv_rewrite=true"]
         {

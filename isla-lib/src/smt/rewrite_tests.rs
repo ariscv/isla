@@ -32,7 +32,7 @@ fn mask_identity_all_symbolic_values_and_operand_orders() {
                 let rewritten = apply(original.clone(), BvRewrite::parse("mask-and").unwrap());
                 assert!(unsafe { Z3_is_eq_ast(context.z3_ctx, rewritten.z3_ast, a.mk_bvand(&b).z3_ast) });
                 equivalent(&context, &original, &rewritten);
-                let unchanged = apply(original.clone(), BvRewrite::default());
+                let unchanged = apply(original.clone(), BvRewrite::parse("false").unwrap());
                 assert_eq!(original.z3_ast, unchanged.z3_ast);
             }
         }
@@ -132,7 +132,6 @@ fn definitions_published_buffered_guards_goals_and_no_smt_share_rewrite() {
     for no_smt in [false, true] {
         let mut config = Config::new();
         config.solver_options.no_smt = no_smt;
-        config.solver_options.bv_rewrite = BvRewrite::parse("true").unwrap();
         let context = Context::new(config);
         let mut solver = Solver::<B64>::new(&context);
         let info = SourceLoc::unknown();
