@@ -270,7 +270,14 @@ impl<B: BV> SamplePath<B> {
                 }
             }
         }
-        if !facts.is_complete() || !functional {
+        // 整段快档依赖每个读取字节均由入口前态决定。写后的读取由逐字节绑定认证，
+        // 包括旧缓存中仍声明快档可用的路径。
+        let mut writes = false;
+        let reads_after_writes = self.memory.iter().any(|event| {
+            writes |= event.is_memory_write();
+            writes && event.is_memory_read()
+        });
+        if !facts.is_complete() || !functional || reads_after_writes {
             return self.judge(solver, shared, input, records, signature, consume);
         }
         for name in self.pre.keys() {

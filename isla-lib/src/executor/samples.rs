@@ -23,6 +23,9 @@ pub mod fast;
 #[cfg(test)]
 #[path = "sample_fast_tests.rs"]
 mod fast_tests;
+#[cfg(test)]
+#[path = "sample_memory_write_tests.rs"]
+mod memory_write_tests;
 #[path = "sample_mutation.rs"]
 pub mod mutation;
 #[cfg(test)]
@@ -189,7 +192,7 @@ pub struct SamplePath<B: BV> {
     pub post: BTreeMap<String, Val<B>>,
     pub result: Val<B>,
     pub memory: Vec<Event<B>>,
-    /// 主迹访存序号对应的读条件；主迹保留并集，导出/成员检查仅绑定实际臂。
+    /// 主迹访存序号对应的读写条件；主迹保留并集，导出/成员检查仅绑定实际臂。
     pub memory_guards: BTreeMap<usize, Exp<Sym>>,
 }
 
@@ -302,7 +305,7 @@ fn bytes<B: BV>(event: &Event<B>) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
 impl<B: BV> SamplePath<B> {
     fn accesses(&self) -> Vec<(Exp<Sym>, Exp<Sym>, Exp<Sym>, bool)> {
         for index in self.memory_guards.keys() {
-            assert!(self.memory.get(*index).expect("读取条件的访存序号必须存在").is_memory_read());
+            assert!(self.memory.get(*index).expect("访存条件的序号必须存在").is_memory_read_or_write());
         }
         self.memory
             .iter()
@@ -310,10 +313,7 @@ impl<B: BV> SamplePath<B> {
             .flat_map(|(index, event)| {
                 bytes(event).into_iter().map(move |(address, value, commit, read)| {
                     let commit = match self.memory_guards.get(&index) {
-                        Some(guard) => {
-                            assert!(read, "带条件的访存必须是读取");
-                            Exp::And(Box::new(guard.clone()), Box::new(commit))
-                        }
+                        Some(guard) => Exp::And(Box::new(guard.clone()), Box::new(commit)),
                         None => commit,
                     };
                     (address, value, commit, read)
@@ -357,7 +357,7 @@ impl<B: BV> SamplePath<B> {
         let mut pre = BTreeMap::new();
         let mut post = BTreeMap::new();
         for index in self.memory_guards.keys() {
-            assert!(self.memory.get(*index).expect("读取条件的访存序号必须存在").is_memory_read());
+            assert!(self.memory.get(*index).expect("访存条件的序号必须存在").is_memory_read_or_write());
         }
         // 每个事件一次取提交条件、基址、整段数据；不对每个字节重复查询模型。
         // 拆字节及地址回绕与 accesses 的 SMT Extract/Bvadd 完全一致。
@@ -439,7 +439,7 @@ impl<B: BV> SamplePath<B> {
             }
         }
         let accesses = self.accesses();
-        for (address, value, commit, read) in &accesses {
+        for (index, (address, value, commit, read)) in accesses.iter().enumerate() {
             if !read {
                 continue;
             }
@@ -456,6 +456,21 @@ impl<B: BV> SamplePath<B> {
                             )),
                             Box::new(Exp::Eq(Box::new(value.clone()), Box::new(Exp::Bits64(B64::new(byte as u64, 8))))),
                         )),
+                    )
+                },
+            );
+            // 较晚的已提交写覆盖较早的写。每个未覆盖的字节才绑定入口内存。
+            let condition = accesses[..index].iter().filter(|(_, _, _, read)| !read).fold(
+                condition,
+                |initial, (write_address, data, written, _)| {
+                    let hit = Exp::And(
+                        Box::new(written.clone()),
+                        Box::new(Exp::Eq(Box::new(address.clone()), Box::new(write_address.clone()))),
+                    );
+                    Exp::Ite(
+                        Box::new(hit),
+                        Box::new(Exp::Eq(Box::new(value.clone()), Box::new(data.clone()))),
+                        Box::new(initial),
                     )
                 },
             );
@@ -1391,9 +1406,8 @@ mod tests {
         std::fs::remove_file(file).unwrap();
     }
 
-    /// 规格将每次读绑定初始内存；改写后的再次读取无法满足该协议，明确保留证据。
     #[test]
-    fn samples_initial_memory_protocol_rejects_read_after_changed_write() {
+    fn samples_reads_after_changed_write_use_written_byte() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
@@ -1433,7 +1447,7 @@ mod tests {
         let sample = path.materialize(&mut Model::new(&mut solver), &shared, "fork", 0, None).unwrap();
         assert_eq!(sample.pre_memory[0].value, Some(0));
         assert_eq!(sample.post_memory[0].value, Some(1));
-        assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), None);
+        assert_eq!(path.check(&mut solver, &shared, &sample).unwrap(), Some(true));
     }
 
     #[test]

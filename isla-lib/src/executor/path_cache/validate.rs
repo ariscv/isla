@@ -637,7 +637,7 @@ pub fn validate_paths<B: BV>(
             }
             for (i, g, e) in &record.memory_reads {
                 assert!(*i < path.path.memory.len() as u64, "缓存记录访存索引越界");
-                assert!(matches!(e, Event::ReadMem { .. }), "缓存记录不是读取事件");
+                assert!(matches!(e, Event::ReadMem { .. } | Event::WriteMem { .. }), "缓存记录不是访存事件");
                 validator.exp(g);
                 validator.event(e);
             }

@@ -21,7 +21,9 @@ use isla_lib::log;
 use isla_lib::primop_util::symbolic;
 use isla_lib::register::RegisterBindings;
 use isla_lib::smt::smtlib::Exp;
-use isla_lib::smt::{Config, Context, Event, Model, ModelVal, Trace};
+#[cfg(test)]
+use isla_lib::smt::Trace;
+use isla_lib::smt::{Config, Context, Event, Model, ModelVal};
 use isla_lib::smt::{Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::value_parser;
@@ -412,6 +414,7 @@ struct MemorySpanJson {
 ///
 /// `smt.rs` 的 `Trace::to_vec` 先访问最新段、段内反向遍历，整体是逆时间序
 /// （事件 push 在段 head 末尾）；这里先取出再整体反转，恢复事件发生的先后顺序。
+#[cfg(test)]
 fn memory_events_chronological<B: BV>(trace: &Trace<B>) -> Vec<&Event<B>> {
     let mut events = trace.to_vec();
     events.reverse();
@@ -607,7 +610,7 @@ fn memory_spans_json<B: BV>(bytes: &BTreeMap<u64, Option<u8>>, shared_state: &Sh
 /// 一次模型求值同时取得访存事件及其前后态。只有首次写入且从未读过的旧字节
 /// 没有观测值；地址、读值、写数据和写入结果均是必需字段。
 fn materialize_memory_witness<B: BV>(
-    events: &[Event<B>],
+    events: &[(Event<B>, Option<Exp<Sym>>)],
     model: &mut Model<'_, B>,
     shared_state: &SharedState<B>,
 ) -> Result<(Vec<MemoryEventJson>, Vec<MemorySpanJson>, Vec<MemorySpanJson>), ExecError> {
@@ -616,7 +619,14 @@ fn materialize_memory_witness<B: BV>(
     };
     let mut memory_events = Vec::with_capacity(events.len());
     let mut replay_accesses = Vec::with_capacity(events.len());
-    for (index, event) in events.iter().enumerate() {
+    for (index, (event, guard)) in events.iter().enumerate() {
+        if let Some(guard) = guard {
+            match model.get_exp(guard)? {
+                ModelVal::Exp(Exp::Bool(true)) => (),
+                ModelVal::Exp(Exp::Bool(false)) => continue,
+                _ => return Err(invalid(index, "guard")),
+            }
+        }
         match event {
             Event::ReadMem { value, address, bytes, region, opts, .. } => {
                 let access = materialize_replay_access(true, false, None, value, address, *bytes, model)?;
@@ -2545,8 +2555,13 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
-                            let trace_events: Vec<Event<B>> =
-                                memory_events_chronological(solver.trace()).into_iter().cloned().collect();
+                            let mut trace_events: Vec<_> = solver
+                                .trace()
+                                .events_with_guards_rev()
+                                .filter(|(event, _)| event.is_memory_read_or_write())
+                                .map(|(event, guard)| (event.clone(), guard.cloned()))
+                                .collect();
+                            trace_events.reverse();
                             let (memory_events, pre_memory, post_memory);
                             {
                                 {
@@ -5224,7 +5239,7 @@ mod tests {
         if let Event::WriteMem { value, .. } = &mut write {
             *value = write_result;
         }
-        let (events, pre, post) = materialize_memory_witness(&[write], &mut model, &shared_state).unwrap();
+        let (events, pre, post) = materialize_memory_witness(&[(write, None)], &mut model, &shared_state).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(pre.len(), 1);
         assert_eq!(pre[0].value, None);
@@ -5233,7 +5248,7 @@ mod tests {
         if let Event::ReadMem { address, .. } = &mut invalid_read {
             *address = Val::Symbolic(Sym::from_u32(999));
         }
-        assert!(materialize_memory_witness(&[invalid_read], &mut model, &shared_state).is_err());
+        assert!(materialize_memory_witness(&[(invalid_read, None)], &mut model, &shared_state).is_err());
     }
 
     /// 轨迹是逆时间序（smt.rs Trace::to_vec 先最新段、段内反向），
