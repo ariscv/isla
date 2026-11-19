@@ -134,6 +134,8 @@ pub struct ExecutionLimits {
     pub region_global_state: bool,
     /// 启用断言死端过滤、重新声明槽位活跃性和预算内含回边区域推演。
     pub region_loop_analysis: bool,
+    /// 延后拆分区域中的不同具体字符串和机器整数。
+    pub merge_concrete_values: bool,
     pub merge_enumeration: crate::config::MergeEnumerationConfig,
     /// 缓存即使暂不枚举，也必须保存纯计算定义来源。
     pub collect_merge_definitions: bool,
@@ -166,6 +168,7 @@ impl Default for ExecutionLimits {
             merge_poison_slots: false,
             region_global_state: false,
             region_loop_analysis: false,
+            merge_concrete_values: false,
             merge_enumeration: Default::default(),
             collect_merge_definitions: false,
             merge_policy: Vec::new(),
@@ -281,6 +284,7 @@ impl ExecutionLimits {
 
         self.filter_model_exceptions = config.filter_model_exceptions.clone().into();
         self.filter_match_failures = config.filter_match_failures;
+        self.merge_concrete_values = config.path_merge.merge_concrete_values;
         if let Some(value) = config.max_forks_per_branch {
             self = self.with_max_forks_per_branch(value);
         }

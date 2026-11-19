@@ -771,6 +771,9 @@ fn merge_states<'ir, B: BV>(
             let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
             let value = match (a, b) {
                 (Val::I128(_), Val::I128(_)) => crate::primop_util::build_ite(condition, a, b, solver, info),
+                _ if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) => {
+                    crate::primop_util::merge_concrete_val(condition, a, b, solver, info)
+                }
                 _ => crate::primop_util::merge_val(condition, a, b, solver, info),
             }
             .map_err(|error| {

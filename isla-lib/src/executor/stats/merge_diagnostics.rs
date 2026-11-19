@@ -257,6 +257,7 @@ fn sort_name(sort: &smtlib::Ty) -> String {
 }
 fn shape<B: BV>(value: &Val<B>, solver: &Solver<B>) -> Value {
     let kind = match value {
+        Val::Guarded(..) => "Guarded",
         Val::Symbolic(_) => "Symbolic",
         Val::I64(_) => "I64",
         Val::I128(_) => "I128",
@@ -289,13 +290,18 @@ fn shape<B: BV>(value: &Val<B>, solver: &Solver<B>) -> Value {
             result["width"] = json!(bits.len());
             result["sort"] = json!(format!("BV{}", bits.len()));
         }
-        Val::I64(_) => {
+        Val::I64(value) => {
+            result["literal"] = json!(value);
             result["width"] = json!(64);
             result["sort"] = json!("BV64");
         }
         Val::I128(_) => {
             result["width"] = json!(128);
             result["sort"] = json!("BV128");
+        }
+        Val::String(value) => {
+            result["literal"] = json!(value.chars().take(192).collect::<String>());
+            result["literal_truncated"] = json!(value.chars().count() > 192);
         }
         Val::Bool(_) => result["sort"] = json!("Bool"),
         Val::MixedBits(parts) => {
@@ -779,6 +785,7 @@ fn print_with_trigger(trigger: &str, stats: &super::ExecutionStats) {
     let mut totals = counts.totals();
     totals["snapshot"] = json!(snapshot);
     totals["trigger"] = json!(trigger);
+    totals["concrete_values"] = super::super::concrete_values::snapshot();
     writeln!(out, "{totals}").unwrap();
     out.flush().unwrap();
 }

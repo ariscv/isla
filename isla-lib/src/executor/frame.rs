@@ -70,6 +70,8 @@ pub struct LocalState<'ir, B> {
     pub(super) pure_definitions: Vec<(u32, u32)>,
     pub(super) enumerate_merges: bool,
     pub(super) speculative_access: Option<super::region_merge::AccessLog<B>>,
+    // 只保存本路径断言过的具体候选决定。
+    pub(super) concrete_choices: Option<HashMap<Sym, bool>>,
     // 表达式地址在 IR 生命周期内稳定；缓存只跨同一条指令的分叉重试。
     pub(super) expression_values: HashMap<usize, Val<B>>,
     pub(super) expression_retry_operands: Option<Vec<Val<B>>>,
@@ -579,6 +581,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
                 speculative_access: None,
                 pure_definitions: Vec::new(),
                 enumerate_merges: false,
+                concrete_choices: None,
                 expression_values: HashMap::new(),
                 expression_retry_operands: None,
             }),
@@ -629,6 +632,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         instrs: &'ir [Instr<Name, B>],
     ) -> Self {
         let mut new_frame = LocalFrame::new(name, args, ret_ty, vals, instrs);
+        cost::make_mut(&mut new_frame.local_state).concrete_choices = self.local_state.concrete_choices.clone();
         new_frame.speculation_mode = self.speculation_mode;
         new_frame.region_execution = self.region_execution.clone();
         new_frame.region_arm = self.region_arm;

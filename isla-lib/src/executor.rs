@@ -59,6 +59,7 @@ use crate::source_loc::SourceLoc;
 use crate::timeout::PathTimeoutDiagnostic;
 use crate::zencode;
 
+pub(crate) mod concrete_values;
 mod execution_limits;
 mod frame;
 mod merge_history;
@@ -719,6 +720,9 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
             for arg in unevaluated_args {
                 args.push(eval_exp(arg, local_state, shared_state, solver, info)?.into_owned());
             }
+            for value in &mut args {
+                concrete_values::resolve(value, &local_state.concrete_choices, solver, info)?;
+            }
             let result = match op {
                 Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info),
                 Op::Gt => primop::op_gt(args[0].clone(), args[1].clone(), solver, info),
@@ -875,12 +879,18 @@ fn eval_exp<'state, 'ir, B: BV>(
     info: SourceLoc,
 ) -> Result<Cow<'state, Val<B>>, ExecError> {
     let key = exp as *const Exp<Name> as usize;
-    if let Some(value) = local_state.expression_values.get(&key) {
-        return Ok(Cow::Owned(value.clone()));
+    let mut value = if let Some(value) = local_state.expression_values.get(&key) {
+        value.clone()
+    } else {
+        let value = eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)?.into_owned();
+        local_state.expression_values.insert(key, value.clone());
+        value
+    };
+    if let Some(choices) = &local_state.concrete_choices {
+        if !choices.is_empty() {
+            concrete_values::select_known(&mut value, choices);
+        }
     }
-    let value = eval_exp_with_accessor(exp, local_state, shared_state, solver, &mut Vec::new(), info)?.into_owned();
-    // 任一后续子表达式或操作数都可能要求重试，成功求值的读取副作用只执行一次。
-    local_state.expression_values.insert(key, value.clone());
     Ok(Cow::Owned(value))
 }
 
@@ -1564,6 +1574,10 @@ fn run_special_primop<'ir, B: BV>(
                     ))
                 })
                 .collect::<Result<Vec<(Sym, Val<B>)>, _>>()?;
+            let mut symbolics = symbolics;
+            for (_, value) in &mut symbolics {
+                concrete_values::resolve(value, &frame.local_state.concrete_choices, solver, info)?;
+            }
             let result = ite_phi(&symbolics[0], &symbolics[1..], solver, info)?;
             assign(tid, loc, result, cost::make_mut(&mut frame.local_state), shared_state, solver, info)?
         }
@@ -1589,12 +1603,7 @@ fn run_special_primop<'ir, B: BV>(
         };
         frame.pc += 1
     } else if (f == ABSTRACT_CALL || f == ABSTRACT_PRIMOP) && !args.is_empty() {
-        let mut args = args
-            .iter()
-            .map(|arg| {
-                eval_exp(arg, cost::make_mut(&mut frame.local_state), shared_state, solver, info).map(Cow::into_owned)
-            })
-            .collect::<Result<Vec<Val<B>>, _>>()?;
+        let mut args = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
         let abstracted_fn = match args.pop().unwrap() {
             Val::Ref(f) => f,
             _ => panic!("Invalid abstract call (no function name provided)"),
@@ -2020,6 +2029,11 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     if let Some(error) = frame.arm_error() {
         return Err(error.clone());
     }
+    if frame.local_state.concrete_choices.is_none()
+        && task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
+    {
+        cost::make_mut(&mut frame.local_state).concrete_choices = Some(HashMap::new());
+    }
     let cost_scope = cost::Scope::enter(cost::Category::Interpreter);
     let _ = &cost_scope;
     let fork_sink: &dyn ForkSink<'ir, 'task, B> =
@@ -2051,27 +2065,45 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         {
             return Ok(Run::Dead);
         }
-        let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
-        if matches!(
-            &error,
-            ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..) | ExecError::RetryCondition(..)
-        ) {
-            if frame.region_execution.is_none() {
+        let retry = if let ExecError::ConcreteChoice(guard, info) = error {
+            concrete_values::retry(
+                guard,
+                info,
+                tid,
+                task_id,
+                task_fraction,
+                timeout,
+                stop_conditions,
+                fork_sink,
+                frame,
+                task_state,
+                shared_state,
+                solver,
+            )
+        } else {
+            let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
+            if matches!(
+                &error,
+                ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..) | ExecError::RetryCondition(..)
+            ) && frame.region_execution.is_none()
+            {
                 branch_decision(frame, task_state, SpeculativeRejectReason::ExpressionRetry)?;
             }
-        }
-        match symbolic_length::retry_symbolic_length(
-            error,
-            &operands,
-            task_id,
-            task_fraction,
-            stop_conditions,
-            fork_sink,
-            frame,
-            task_state,
-            solver,
-            shared_state,
-        ) {
+            symbolic_length::retry_symbolic_length(
+                error,
+                &operands,
+                task_id,
+                task_fraction,
+                stop_conditions,
+                fork_sink,
+                frame,
+                task_state,
+                solver,
+                shared_state,
+            )
+        };
+        match retry {
+            Ok(true) if !frame.region_arrivals.is_empty() => return Ok(Run::Suspended),
             Ok(true) => (),
             Ok(false) | Err(ExecError::SolverDroppedPath) => return Ok(Run::Dead),
             Err(error)
@@ -2471,8 +2503,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 frame.pc = *target;
             }
             Instr::Copy(loc, exp, info) => {
-                let value =
+                let mut value =
                     eval_exp(exp, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
+                if shared_state.registers.contains_key(&loc.id()) || matches!(loc, Loc::Addr(_)) {
+                    concrete_values::resolve(&mut value, &frame.local_state.concrete_choices, solver, *info)?;
+                }
                 assign(tid, loc, value, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
                 // Sail 的 throw 先写 current_exception，再把 have_exception 设为 true。
                 // 在异常状态生效时结束本路径，区域和普通执行都不执行后续传播。
@@ -2892,6 +2927,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             })
                             .collect::<Result<Vec<Val<B>>, _>>()?;
 
+                        if frame.function_assumptions.contains_key(f) {
+                            for arg in &mut args {
+                                concrete_values::resolve(arg, &frame.local_state.concrete_choices, solver, *info)?;
+                            }
+                        }
                         if frame.local_state.should_probe(shared_state, f) {
                             log_from!(tid, log::PROBE, probe::call_info(*f, &args, shared_state, *info));
                             probe::args_info(tid, &args, shared_state, solver)
@@ -3041,39 +3081,46 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 }
             }
 
-            Instr::End => {
-                stats::call_census::returned(frame.local_state.call_instance);
-                stats::region_progress::loop_return(frame, &shared_state.symtab);
-                match frame.vars().get(&RETURN) {
-                    None => panic!("Return variable missing at end of function"),
-                    Some(value) => {
-                        let value = match value {
-                            UVal::Uninit(ty) => symbolic(ty, shared_state, solver, SourceLoc::unknown())?,
-                            UVal::Init(value) => value.clone(),
-                        };
+            Instr::End => match frame.vars().get(&RETURN) {
+                None => panic!("Return variable missing at end of function"),
+                Some(value) => {
+                    let mut value = match value {
+                        UVal::Uninit(ty) => symbolic(ty, shared_state, solver, SourceLoc::unknown())?,
+                        UVal::Init(value) => value.clone(),
+                    };
 
-                        if frame.local_state.should_probe(shared_state, &frame.function_name) {
-                            let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
-                            log_from!(
-                                tid,
-                                log::PROBE,
-                                &format!("Returning {} = {}", symbol, value.to_string(shared_state))
-                            );
-                            probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
-                        }
-
-                        if shared_state.trace_functions.contains(&frame.function_name) {
-                            solver.trace_return(frame.function_name)
-                        }
-
-                        let caller = match &frame.stack_call {
-                            None => return Ok(Run::Finished(value)),
-                            Some(caller) => Arc::clone(caller),
-                        };
-                        (*caller)(value, frame, shared_state, solver)?
+                    if frame.stack_call.is_none() {
+                        concrete_values::resolve(
+                            &mut value,
+                            &frame.local_state.concrete_choices,
+                            solver,
+                            SourceLoc::unknown(),
+                        )?;
                     }
+                    stats::call_census::returned(frame.local_state.call_instance);
+                    stats::region_progress::loop_return(frame, &shared_state.symtab);
+
+                    if frame.local_state.should_probe(shared_state, &frame.function_name) {
+                        let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
+                        log_from!(
+                            tid,
+                            log::PROBE,
+                            &format!("Returning {} = {}", symbol, value.to_string(shared_state))
+                        );
+                        probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
+                    }
+
+                    if shared_state.trace_functions.contains(&frame.function_name) {
+                        solver.trace_return(frame.function_name)
+                    }
+
+                    let caller = match &frame.stack_call {
+                        None => return Ok(Run::Finished(value)),
+                        Some(caller) => Arc::clone(caller),
+                    };
+                    (*caller)(value, frame, shared_state, solver)?
                 }
-            }
+            },
 
             // The idea beind the Monomorphize operation is it takes a
             // bitvector identifier, and if that identifer has a
@@ -3083,7 +3130,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             // certain bitvectors are non-symbolic, at the cost of
             // increasing the number of paths.
             Instr::Monomorphize(id, ty, info) => {
-                let val = get_id_and_initialize(
+                let mut val = get_id_and_initialize(
                     *id,
                     cost::make_mut(&mut frame.local_state),
                     shared_state,
@@ -3091,10 +3138,12 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     &mut Vec::new(),
                     *info,
                     false,
-                )?;
-                let val = match val.as_ref() {
+                )?
+                .into_owned();
+                concrete_values::resolve(&mut val, &frame.local_state.concrete_choices, solver, *info)?;
+                let val = match &val {
                     Val::MixedBits(_) => {
-                        let normalized = replace_mixed_bits(val.as_ref().clone(), solver, *info)?;
+                        let normalized = replace_mixed_bits(val.clone(), solver, *info)?;
                         // 分叉快照必须引用规范化后的同一符号，重入时继续枚举其剩余取值。
                         assign(
                             tid,

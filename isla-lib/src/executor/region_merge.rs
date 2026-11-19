@@ -591,6 +591,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     let output = execute_region(
                         condition,
                         target,
+                        frame.pc + 1,
+                        false,
                         region,
                         depth,
                         mode,
@@ -1101,6 +1103,8 @@ fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     condition: Sym,
     target: usize,
+    fallthrough: usize,
+    consumer: bool,
     region: Arc<Region>,
     depth: usize,
     mode: MergeMode,
@@ -1127,11 +1131,19 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     }
     let mut arms = [Vec::new(), Vec::new()];
     let mut ready = ReadyFragments::new(state);
-    ready.extend([(target, Var(condition)), (frame.pc + 1, Not(Box::new(Var(condition))))].into_iter().enumerate());
+    ready.extend([(target, Var(condition)), (fallthrough, Not(Box::new(Var(condition))))].into_iter().enumerate());
     while let Some((side, (pc, guard))) = ready.pop() {
         let owner = solver.new_logical_arm(solver.current_logical_arm());
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
         let mut arm = branch_arm(&base, pc, guard, owner);
+        if consumer {
+            cost::make_mut(&mut arm.local_state)
+                .concrete_choices
+                .as_mut()
+                .expect("消费者拆分必须已启用")
+                .insert(condition, side == 0);
+            arm.pending_retry_operand.get_or_insert((pc, Val::Unit));
+        }
         if solver.with_logical_arm(owner, |solver| {
             advance_region_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info)
         })? {
@@ -1799,5 +1811,78 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             work.completed += 1;
             work.active_arm = None;
         }
+    }
+}
+
+/// 具体消费者的两次执行只跨过当前指令；仍由真实解释器及完整臂事务处理。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+    condition: Sym,
+    info: SourceLoc,
+    tid: usize,
+    task_id: TaskId,
+    fraction: &mut Fraction,
+    timeout: PathTimeout,
+    stop: Option<&'task StopConditions>,
+    sink: &S,
+    frame: &mut LocalFrame<'ir, B>,
+    state: &'task TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<bool, ExecError> {
+    let pc = frame.pc;
+    let parent = frame.region_execution.as_ref().expect("消费者区域必须嵌套于推演");
+    if crate::config::RegionOptions::current().merge_depth_limit().is_some_and(|limit| parent.depth >= limit) {
+        return Err(reject(frame, SpeculativeRejectReason::NestingLimit));
+    }
+    let region = if matches!(&frame.instrs[pc], Instr::Jump(..)) {
+        let global = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
+        let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global));
+        let candidate = region(frame, shared, summaries, false)?;
+        if candidate.has_back_edge {
+            return Err(reject(frame, SpeculativeRejectReason::HasBackEdge));
+        }
+        let mut candidate = (*candidate).clone();
+        candidate.nodes.insert(pc);
+        Arc::new(candidate)
+    } else {
+        Arc::new(Region {
+            branch_pc: pc,
+            has_back_edge: false,
+            join: RegionPoint::Instruction(pc + 1),
+            nodes: [pc].into_iter().collect(),
+            kind: crate::ir::regions::RegionKind::Reconvergent,
+            local_variables: Default::default(),
+        })
+    };
+    let output = execute_region(
+        condition,
+        pc,
+        pc,
+        true,
+        region,
+        parent.depth + 1,
+        parent.mode,
+        tid,
+        task_id,
+        fraction,
+        timeout,
+        stop,
+        sink,
+        frame,
+        state,
+        shared,
+        solver,
+        info,
+    )?;
+    assert!(output.continuation.is_none());
+    match output.result {
+        RegionResult::Merged => {
+            frame.pending_retry_operand = None;
+            Ok(true)
+        }
+        RegionResult::Separate { .. } => Ok(true),
+        RegionResult::Dead => Ok(false),
+        _ => panic!("具体消费者区域必须完成或全死"),
     }
 }

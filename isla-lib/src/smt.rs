@@ -2049,6 +2049,12 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         let complete_model = self.complete_model;
         self.complete_model = true;
         let result = (|| match var {
+            Guarded(guard, values) => {
+                let Val::Bool(selected) = self.get_val(&Val::Symbolic(*guard))? else {
+                    panic!("具体候选的守卫必须为布尔值")
+                };
+                self.get_val(if selected { &values.0 } else { &values.1 })
+            }
             Symbolic(sym) => {
                 let model_val = self.get_var(*sym)?;
                 match model_val {

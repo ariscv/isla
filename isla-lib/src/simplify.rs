@@ -113,6 +113,11 @@ where
 {
     use Val::*;
     match val {
+        Guarded(guard, values) => {
+            *guard = Sym { id: f(guard.id) };
+            renumber_val(&mut values.0, f);
+            renumber_val(&mut values.1, f);
+        }
         Symbolic(v) => *v = Sym { id: f(v.id) },
         MixedBits(segments) => segments.iter_mut().for_each(|segment| match segment {
             BitsSegment::Symbolic(v) => *v = Sym { id: f(v.id) },
@@ -240,6 +245,11 @@ fn uses_in_exp(uses: &mut HashMap<Sym, u32>, exp: &Exp<Sym>) {
 fn uses_in_value<B>(uses: &mut HashMap<Sym, u32>, val: &Val<B>) {
     use Val::*;
     match val {
+        Guarded(guard, values) => {
+            uses.insert(*guard, uses.get(guard).unwrap_or(&0) + 1);
+            uses_in_value(uses, &values.0);
+            uses_in_value(uses, &values.1);
+        }
         Symbolic(v) => {
             uses.insert(*v, uses.get(v).unwrap_or(&0) + 1);
         }

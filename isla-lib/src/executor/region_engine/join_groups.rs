@@ -36,7 +36,11 @@ pub(super) fn merge_compatible<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Vec<(Frame<'ir, B>, bool)>, ExecError> {
-    let slots = string_slots(&arrivals, base, region);
+    let slots = if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) {
+        Vec::new()
+    } else {
+        string_slots(&arrivals, base, region)
+    };
     let mut buckets = HashMap::<Vec<String>, Vec<usize>>::new();
     let mut groups: Vec<(Frame<'ir, B>, bool)> = Vec::new();
     for arrival in arrivals {

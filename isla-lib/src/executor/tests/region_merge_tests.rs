@@ -5966,3 +5966,6 @@ fn arm_error_leaf_rollback_child() {
 fn arm_error_leaf_flat_child() {
     arm_error_leaf_fixture("flat")
 }
+
+#[path = "region_concrete_values_tests.rs"]
+mod region_concrete_values_tests;

@@ -249,6 +249,13 @@ impl<B: BV> Val<B> {
     fn to_str_internal(&self, shared_state: &SharedState<B>, indent: usize, multi_line: bool) -> String {
         let indent_str = "  ".repeat(indent);
         match self {
+            Val::Guarded(guard, values) => format!(
+                "{}ite(v{}, {}, {})",
+                indent_str,
+                guard,
+                values.0.to_str_internal(shared_state, 0, false),
+                values.1.to_str_internal(shared_state, 0, false)
+            ),
             Val::Symbolic(sym) => format!("{}Sym({})", indent_str, sym),
             Val::I64(n) => format!("{}{}i64", indent_str, n),
             Val::I128(n) => format!("{}{}i128", indent_str, n),
@@ -443,6 +450,7 @@ impl<B: BV> Val<B> {
     pub fn type_string(&self) -> String {
         use Val::*;
         match self {
+            Guarded(_, _) => "Guarded".to_string(),
             Symbolic(_) => "Symbolic".to_string(),
             I64(_) => "I64".to_string(),
             I128(_) => "I128".to_string(),

@@ -53,20 +53,33 @@ pub(super) fn eval_operands<'exp, 'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Vec<Val<B>>, ExecError> {
-    if let Some((pc, operand)) = &frame.pending_retry_operand {
+    let mut values = if let Some((pc, operand)) = &frame.pending_retry_operand {
         assert_eq!(*pc, frame.pc, "重试操作数必须属于当前指令");
         if let Val::Vector(operands) = operand {
-            return Ok(operands.clone());
+            Some(operands.clone())
+        } else {
+            assert!(matches!(operand, Val::Unit));
+            None
         }
-        assert!(matches!(operand, Val::Unit), "表达式重试必须使用独立的缓存");
+    } else {
+        None
+    };
+    if values.is_none() {
+        values = Some(
+            operands
+                .into_iter()
+                .map(|operand| {
+                    super::eval_exp(operand, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)
+                        .map(|v| v.into_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
     }
-    operands
-        .into_iter()
-        .map(|operand| {
-            super::eval_exp(operand, Arc::make_mut(&mut frame.local_state), shared_state, solver, info)
-                .map(|v| v.into_owned())
-        })
-        .collect()
+    let mut values = values.unwrap();
+    for value in &mut values {
+        super::concrete_values::resolve(value, &frame.local_state.concrete_choices, solver, info)?;
+    }
+    Ok(values)
 }
 
 /// 返回 true 时保持当前 pc 重试，false 表示当前约束不可满足。

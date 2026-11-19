@@ -364,6 +364,7 @@ impl ExecutionStats {
                 stats.as_object_mut().unwrap().extend(counts);
             }
         }
+        stats["concrete_values"] = super::concrete_values::snapshot();
         stats
     }
     pub fn fork_json(&self, symtab: &Symtab<'_>) -> Value {

@@ -43,6 +43,7 @@ pub enum Val<B> {
     SymbolicCtor(u32, Vec<(Name, Val<B>)>),
     Ref(Name),
     Poison,
+    Guarded(u32, Box<(Val<B>, Val<B>)>),
 }
 impl<B> From<crate::ir::Val<B>> for Val<B> {
     fn from(value: crate::ir::Val<B>) -> Self {
@@ -70,6 +71,10 @@ impl<B> From<crate::ir::Val<B>> for Val<B> {
                 fields
             }),
             crate::ir::Val::Ref(field0) => Val::Ref(field0),
+            crate::ir::Val::Guarded(guard, values) => {
+                let (left, right) = *values;
+                Val::Guarded(guard.id, Box::new((left.into(), right.into())))
+            }
             crate::ir::Val::Poison => Val::Poison,
         }
     }
@@ -105,7 +110,35 @@ impl<B> From<Val<B>> for crate::ir::Val<B> {
                 >>(),
             ),
             Val::Ref(field0) => crate::ir::Val::Ref(field0),
+            Val::Guarded(guard, values) => {
+                let (left, right) = *values;
+                crate::ir::Val::Guarded(crate::smt::Sym::from_u32(guard), Box::new((left.into(), right.into())))
+            }
             Val::Poison => crate::ir::Val::Poison,
         }
+    }
+}
+
+#[cfg(test)]
+mod concrete_tests {
+    use super::*;
+    #[test]
+    fn region_concrete_values_guarded_cache_round_trip() {
+        use crate::bitvector::b64::B64;
+        let guard = crate::smt::Sym::from_u32(7);
+        let original = crate::ir::Val::<B64>::Guarded(
+            guard,
+            Box::new((crate::ir::Val::String("左".into()), crate::ir::Val::String("右".into()))),
+        );
+        let dto = Val::from(original.clone());
+        for bytes in [serde_json::to_vec(&dto).unwrap(), bincode::serialize(&dto).unwrap()] {
+            let restored: Val<B64> = if bytes[0] == b'{' {
+                serde_json::from_slice(&bytes).unwrap()
+            } else {
+                bincode::deserialize(&bytes).unwrap()
+            };
+            assert_eq!(original, restored.into());
+        }
+        assert!(original.symbolic_variables().contains(&guard));
     }
 }
