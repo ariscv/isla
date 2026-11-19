@@ -85,6 +85,7 @@ pub struct PathMergeConfig {
     pub defer_call_effect_checks: bool,
     /// 仅在延迟出口检查内生效。
     pub lazy_z3_scope: bool,
+    /// 需要具体值时按精确有限域枚举；默认开启。
     pub finite_domain_enumeration: bool,
     pub witness_eval: bool,
     pub prefix_compact: bool,
@@ -112,7 +113,7 @@ impl Default for PathMergeConfig {
             merge_concrete_values: true,
             defer_call_effect_checks: true,
             lazy_z3_scope: false,
-            finite_domain_enumeration: false,
+            finite_domain_enumeration: true,
             witness_eval: false,
             prefix_compact: false,
             diagnostics: PathMergeDiagnostics::default(),

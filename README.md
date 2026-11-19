@@ -810,7 +810,7 @@ witness_eval = true
 
 区域合并默认用守卫保留不同的具体字符串和机器整数。字符串相等比较直接生成符号布尔值，需要具体操作数的指令按守卫重试。可用 `--merge-concrete-values=false` 或在 `[execution_limits.path_merge]` 设置 `merge_concrete_values = false` 关闭。
 
-具体值消费者的有限域枚举默认关闭。使用 `--finite-domain-enumeration=true`，或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = true`。候选数量由路径约束给出的集合决定，旧字段 `finite_domain_max` 会产生配置错误。执行器优先从可见路径约束确认候选，也用同一批约束剪去不可达的条件分支，并推导纯位向量运算产生的具体长度或索引。结构层无法确认时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。
+精确有限域识别默认开启，只在长度、索引等消费者需要具体值时枚举。已确认的候选可以直接复用，有穷上界内的每个候选仍受完整路径约束。结构层不能确定上界时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。候选数量没有隐式上限。可用 `--finite-domain-enumeration=false` 或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = false` 关闭。旧字段 `finite_domain_max` 会产生配置错误。
 
 Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
 

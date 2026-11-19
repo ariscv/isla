@@ -2,7 +2,7 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
-    ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认关闭"),
+    ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
     ("merge_poison_slots", "merge-poison-slots", "只合并已证明不可观察的未初始化槽位；默认关闭"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),

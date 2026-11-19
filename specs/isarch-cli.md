@@ -455,6 +455,7 @@ isarch [原 J1 探索参数] \
 | --- | --- | --- | --- |
 | `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
 | `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `StateEffect` 检查 |
+| `path_merge.finite_domain_enumeration` | `--finite-domain-enumeration=true/false` | `true` | 从路径条件识别有限域，具体值消费者按需枚举 |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
@@ -536,7 +537,7 @@ progress = true
 
 `[execution_limits.path_merge].merge_concrete_values` 默认开启，`--merge-concrete-values=true|false` 可覆盖。区域出口用守卫保留两臂不同的具体字符串或 I64。字符串相等比较直接计算对应的符号布尔值。需要具体操作数的指令沿原守卫重试，区域内重试通过共用汇合入口交回正常前沿。
 
-开启 `[execution_limits.path_merge].finite_domain_enumeration` 后，零扩展和符号扩展可按已知的有限目标位宽拆分。每个候选至少与源位向量等宽，并且必须能用原语的 `u32` 表示。分支保留完整路径约束。无 SMT 时，尚未确认可达的候选仍带守卫并等待认证。
+有限域识别与枚举默认开启。零扩展和符号扩展可按已知的有限目标位宽拆分。每个候选至少与源位向量等宽，并且必须能用原语的 `u32` 表示。分支保留完整路径约束。无 SMT 时，尚未确认可达的候选仍带守卫并等待认证。
 
 
 ## 投影枚举与样本输出

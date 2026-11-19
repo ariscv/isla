@@ -2696,9 +2696,12 @@ end_column = 0
     #[test]
     fn region_merge_finite_domain_config() {
         let defaults = merge_config("[execution_limits.path_merge]").unwrap().path_merge;
-        assert!(!defaults.finite_domain_enumeration);
-        let config = merge_config("[execution_limits.path_merge]\nfinite_domain_enumeration=true").unwrap();
-        assert!(config.path_merge.finite_domain_enumeration);
+        assert!(defaults.finite_domain_enumeration);
+        for enabled in [false, true] {
+            let config =
+                merge_config(&format!("[execution_limits.path_merge]\nfinite_domain_enumeration={enabled}")).unwrap();
+            assert_eq!(config.path_merge.finite_domain_enumeration, enabled);
+        }
         for section in ["execution_limits", "execution_limits.path_merge", "execution_limits.solver"] {
             assert!(merge_config(&format!("[{section}]\nfinite_domain_max=64")).is_err());
         }
