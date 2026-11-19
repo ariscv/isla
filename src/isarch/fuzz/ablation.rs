@@ -3,7 +3,7 @@ mod baseline;
 mod classify;
 mod eligibility;
 mod emu;
-mod input_domain;
+pub(super) mod input_domain;
 mod lineage;
 mod observe;
 mod perf;
@@ -132,6 +132,10 @@ pub fn case_main() {
     io::write_json(&output.join("summary.json"), &summary);
 }
 
+pub(super) fn check_constructible(sample: &Sample, platform: &testcase::Platform) -> Result<(), Value> {
+    eligibility::check(sample, platform).map(|_| ()).map_err(|exclusion| serde_json::to_value(exclusion).unwrap())
+}
+
 /// 在指定路径上核对既有父输入并抽查随机取点的硬件接纳率；不计入正式消融。
 pub(super) fn mutation_probe<B: BV>(
     options: &Options,
@@ -182,9 +186,10 @@ pub(super) fn mutation_probe<B: BV>(
             guard_vector: row["guard_vector"].as_str().unwrap().into(),
         };
         let mutator = super::mutator::SolverMutator::new(path, &context, shared, target, &options.mutation_config)
-            .with_input_domain(input_domain.as_ref().map_or(isla_lib::smt::smtlib::Exp::Bool(true), |domain| {
-                domain.compile(&path.path, shared).expect("探针输入域无效")
-            }));
+            .with_input_domain(
+                input_domain::InputDomain::compile_optional(input_domain.as_ref(), &path.path, shared)
+                    .expect("探针输入域无效"),
+            );
         for i in 0..options.budget.min(16) {
             let id = attempted as u64;
             let mut rng = random_stream(options.random_seed, &options.scenario, id);
@@ -514,11 +519,7 @@ fn campaign<B: BV>(
         target,
         threads,
         &options.mutation_config,
-        |path| {
-            runtime.input_domain.as_ref().map_or(isla_lib::smt::smtlib::Exp::Bool(true), |domain| {
-                domain.compile(&path.path, shared).expect("硬件输入域配置无效")
-            })
-        },
+        runtime.input_domain.as_ref(),
         |generator| {
             while cases < runtime.budget
                 && !(runtime.first_request_only && attempts > 0)

@@ -1,11 +1,13 @@
 //! 目标类固定归属一个队列；同类请求按编号串行，不同类可以并行。
-use super::{mutator::SolverMutator, Executor, Mutator};
+use super::{ablation::input_domain::InputDomain, mutator::SolverMutator, Executor, Mutator};
 use crate::isarch::{resident::ResidentPath, target::Target};
 use isla_lib::{
     bitvector::BV,
-    executor::samples::Sample,
+    error::{ExecError, SmtError},
+    executor::samples::{mutation::PathMutator, Sample},
     ir::SharedState,
-    smt::{smtlib::Exp, Config, Context, Sym},
+    smt::{smtlib::Exp, Config, Context, Model, SmtResult, Solver, Sym},
+    source_loc::SourceLoc,
 };
 use rand_chacha::ChaCha8Rng;
 use serde_json::{json, Value};
@@ -51,7 +53,7 @@ impl GenerationPool {
         mutation_config: &super::MutationConfig,
         run: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        Self::with_domain(paths, shared, target, threads, mutation_config, |_| Exp::Bool(true), run)
+        Self::with_domain(paths, shared, target, threads, mutation_config, None, run)
     }
     pub(super) fn with_domain<B: BV, R>(
         paths: &[ResidentPath<B>],
@@ -59,7 +61,7 @@ impl GenerationPool {
         target: &dyn Target<B>,
         threads: usize,
         mutation_config: &super::MutationConfig,
-        domain: impl Fn(&ResidentPath<B>) -> Exp<Sym> + Sync,
+        domain: Option<&InputDomain>,
         run: impl FnOnce(&mut Self) -> R,
     ) -> R {
         assert!(threads > 0);
@@ -70,7 +72,6 @@ impl GenerationPool {
                 let (input_tx, input_rx) = crossbeam::channel::bounded::<Job>(2);
                 inputs.push(input_tx);
                 let output_tx = output_tx.clone();
-                let domain = &domain;
                 scope.spawn(move || {
                     let mut config = Config::new();
                     config.set_param_value("model", "true");
@@ -80,8 +81,9 @@ impl GenerationPool {
                         let signature = job.parent.path_signature;
                         let mutator = mutators.entry(signature).or_insert_with(|| {
                             let path = paths.iter().find(|p| p.signature == signature).unwrap();
-                            SolverMutator::new(path, &context, shared, target, mutation_config)
-                                .with_input_domain(domain(path))
+                            SolverMutator::new(path, &context, shared, target, mutation_config).with_input_domain(
+                                InputDomain::compile_optional(domain, &path.path, shared).expect("硬件输入域配置无效"),
+                            )
                         });
                         let sample = mutator.try_mutate(&job.parent, &job.record, &mut job.rng);
                         job.record["changes"] = json!(*mutator.changes.borrow());
@@ -99,6 +101,60 @@ impl GenerationPool {
             let mut pool = Self { inputs, output, pending: 0 };
             run(&mut pool)
         })
+    }
+}
+
+pub(super) enum Replacement {
+    Found(Sample),
+    EmptyInDomain,
+    BudgetExhausted,
+}
+
+pub(super) fn replace_witness<B: BV>(
+    path: &ResidentPath<B>,
+    shared: &SharedState<B>,
+    target: &dyn Target<B>,
+    original: &Sample,
+    class: Exp<Sym>,
+    domain: Exp<Sym>,
+    attempts: usize,
+    timeout_ms: u32,
+    mut random: impl FnMut() -> u64,
+    constructible: impl Fn(&Sample) -> bool,
+) -> Result<Replacement, ExecError> {
+    let mut config = Config::new();
+    config.set_param_value("timeout", &timeout_ms.to_string());
+    let context = Context::new(config);
+    let solve = || {
+        let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
+        // 枚举器已给出完整的活动守卫条件。先锁定此类，再复用整输入排重取点。
+        solver.assert(class);
+        // 证明空交集时不排除原代表或已拒绝的具体输入。
+        match solver.check_sat_with(&domain, SourceLoc::unknown()) {
+            SmtResult::Unsat => return Ok(Replacement::EmptyInDomain),
+            SmtResult::Sat => (),
+            SmtResult::Unknown => return Ok(Replacement::BudgetExhausted),
+            SmtResult::Error(error) => return Err(ExecError::Smt(error)),
+        }
+        let mut mutator = PathMutator::new(&path.path, &mut solver, &[]).with_input_domain(domain);
+        for _ in 0..attempts {
+            let Some(mutation) = mutator.generate(&path.path, &mut solver, shared, original, "", false, &mut random)?
+            else {
+                break;
+            };
+            let mut sample = mutation.sample;
+            sample.class_id = original.class_id;
+            sample.isa_state = crate::isarch::samples::isa_state(target, &sample, &mut Model::new(&solver), shared)?;
+            if constructible(&sample) {
+                sample.truncated = original.truncated;
+                return Ok(Replacement::Found(sample));
+            }
+        }
+        Ok(Replacement::BudgetExhausted)
+    };
+    match solve() {
+        Err(ExecError::Z3Unknown | ExecError::Smt(SmtError::Timeout(_))) => Ok(Replacement::BudgetExhausted),
+        result => result,
     }
 }
 
