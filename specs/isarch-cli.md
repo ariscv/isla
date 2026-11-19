@@ -127,6 +127,8 @@ isarch -A <ir> -C <config> --slow-query-dump-dir queries \
 
 SMT2 包含已发布／事务缓冲断言、活动臂条件及临时查询条件，可以离线重放。JSON 记录源位置、结果、solver／Context／线程身份、是否主 solver、检查前后 statistics、断言来源与依赖、展开定义后的共享 DAG／树节点数及导出耗时。树节点数饱和会明确标记，不代表实际分配大小。只记录真正提交给 Z3 且正常返回的检查；缓存命中和中断错误不导出，中断错误仍走已有 timeout SMT 输出。
 
+JSON 的 `resources` 记录查询线程的 CPU 时间。在 Linux 上还记录用户态／内核态 CPU、上下文切换和缺页计数差，以及查询前后的进程 RSS。RSS 会受同进程其他线程影响。资源采集随慢查询导出开启。
+
 ## 子命令
 
 ### `list-instructions`
