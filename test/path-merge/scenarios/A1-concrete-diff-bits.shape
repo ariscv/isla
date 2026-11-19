@@ -1,0 +1,2 @@
+(declare-const path_x (_ BitVec 1))
+true
