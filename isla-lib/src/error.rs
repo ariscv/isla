@@ -139,6 +139,14 @@ pub enum ExecError {
     /// SMTLIB only supports fixed-length bitvectors. This error is
     /// raised if a bitvector width would become symbolic.
     SymbolicLength(&'static str, SourceLoc),
+    /// 原语需要一个具体的自然数，且能接纳范围内的每个候选。
+    SymbolicNatural {
+        symbol: crate::smt::Sym,
+        minimum: u32,
+        maximum: u32,
+        operation: &'static str,
+        location: SourceLoc,
+    },
     /// Returned when there is no symbolic representation for a
     /// specific type. Certain types like strings are always assumed
     /// to be concrete.
@@ -180,6 +188,7 @@ impl IslaError for ExecError {
         use ExecError::*;
         match self {
             SpeculativeReject { location: info, .. }
+            | SymbolicNatural { location: info, .. }
             | Type(_, info)
             | AssertionFailure(_, info)
             | NoFunction(_, info)
@@ -242,7 +251,9 @@ impl fmt::Display for ExecError {
             ConcreteChoice(_, _) => write!(f, "消费者需要拆分具体候选值"),
             RetryCondition(_, _) => write!(f, "消费者需要按条件分叉重试"),
             IntegerConversion(_, _) => write!(f, "整数转换需要分叉检查范围"),
-            SymbolicLength(func, _) => write!(f, "Symbolic (bit)vector length in {}", func),
+            SymbolicLength(func, _) | SymbolicNatural { operation: func, .. } => {
+                write!(f, "Symbolic (bit)vector length in {}", func)
+            }
             NoSymbolicType => write!(f, "No symbolic representation for type"),
             Unreachable(msg) => write!(f, "Unreachable: {}", msg),
             Unmapped => write!(f, "Unmapped memory"),

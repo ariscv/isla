@@ -134,7 +134,12 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             shared,
         );
     }
-    let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
+    let (op, info) = match error {
+        ExecError::SymbolicLength(operation, location) | ExecError::SymbolicNatural { operation, location, .. } => {
+            (operation, location)
+        }
+        _ => return Err(error),
+    };
     if consumer.is_some()
         && !solver.finite_domain_enabled()
         && task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
@@ -159,6 +164,27 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     let finite_enabled = solver.finite_domain_enabled();
     if !finite_enabled && solver.no_smt() {
         return Err(ExecError::Smt(solver.no_smt_cannot_continue(op, info)));
+    }
+    if let ExecError::SymbolicNatural { symbol, minimum, maximum, .. } = error {
+        return match fork_symbolic_value(
+            symbol,
+            Some(OperandBounds::RequireWithin(i128::from(minimum)..=i128::from(maximum))),
+            consumer,
+            operands,
+            info,
+            task_id,
+            task_fraction,
+            stop_conditions,
+            fork_sink,
+            frame,
+            task_state,
+            solver,
+            shared,
+        )? {
+            ValueRetry::Forked => Ok(true),
+            ValueRetry::Dead => Ok(false),
+            ValueRetry::Unique => Err(error),
+        };
     }
     // 两个端点都可继续保持符号时，按两者的差拆分即可。只有原语已经
     // 检查过联合端点范围，才会以 subrange_internal 报告长度重试。
@@ -223,9 +249,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         "isla_read_vreg" => &[0, 1, 2],
         "extension" | "replicate_bits" | "sail_truncate" | "sail_truncateLSB" | "pow_int" | "vector_access"
         | "vector_update" | "string_take" | "string_drop" => &[1],
-        "slice_internal" | "platform_read_memt" | "read_mem_address" | "write_mem_address" => &[2],
+        "slice_internal" | "read_mem_address" | "write_mem_address" => &[2],
         "read_memt_address" | "write_memt_address" => &[1],
-        "read_mem" | "read_mem_ifetch" | "read_mem_exclusive" => &[3],
         "subrange_internal" | "vector_subrange" => &[1, 2],
         "eq_anything" => &[0, 1],
         _ => return Err(error),

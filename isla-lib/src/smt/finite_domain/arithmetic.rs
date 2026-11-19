@@ -73,6 +73,7 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
             Bvadd(lhs, rhs)
             | Bvsub(lhs, rhs)
             | Bvmul(lhs, rhs)
+            | Bvshl(lhs, rhs)
             | Eq(lhs, rhs)
             | Neq(lhs, rhs)
             | Bvult(lhs, rhs)
@@ -120,6 +121,7 @@ impl<'ctx> Expression<'_, 'ctx> {
                         Bvadd(..) => lhs.mk_bvadd(&rhs),
                         Bvsub(..) => lhs.mk_bvsub(&rhs),
                         Bvmul(..) => lhs.mk_bvmul(&rhs),
+                        Bvshl(..) => lhs.mk_bvshl(&rhs),
                         Eq(..) => lhs.mk_eq(&rhs),
                         Neq(..) => lhs.mk_eq(&rhs).mk_not(),
                         Bvult(..) => lhs.mk_bvult(&rhs),

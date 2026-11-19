@@ -2710,6 +2710,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if matches!(
                             &error,
                             ExecError::SymbolicLength(..)
+                                | ExecError::SymbolicNatural { .. }
                                 | ExecError::IntegerConversion(..)
                                 | ExecError::RetryCondition(..)
                         ) {
@@ -4265,6 +4266,7 @@ mod tests {
     mod merge_history_tests;
     mod nested_enum_tests;
     mod nested_merge_failure_tests;
+    mod read_size_tests;
     mod region_measurement_tests;
     mod region_merge_tests;
     mod review27_tests;
