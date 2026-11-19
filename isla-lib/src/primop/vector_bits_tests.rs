@@ -299,17 +299,22 @@ fn vector_stable_pack_maximum_shape_and_tail() -> Result<(), ExecError> {
 fn vector_stable_pack_merge_invariant_at_actual_shapes() {
     let ctx = context();
     let loc = SourceLoc::unknown();
-    for width in [8u32, 16, 32, 64] {
-        for n in [2u32, 4, 8, 16, 32, 64, 128] {
-            if n * width > 1024 {
-                continue;
-            }
+    let shapes = [8u32, 16, 32, 64]
+        .into_iter()
+        .flat_map(|width| [2u32, 4, 8, 16, 32, 64, 128].into_iter().map(move |n| (width, n)));
+    for (width, n) in shapes.filter(|(width, n)| width * n <= 1024) {
+        let half = n / 2;
+        // 大形状逐个证明左半段的合法计数，避免对整个宽移位网络做单次证明。
+        let left_counts = if n * width >= 512 { (0..=half).map(Some).collect() } else { vec![None] };
+        for left_count in left_counts {
             let mut solver = Solver::<B129>::new(&ctx);
             let cw = u32::BITS - n.leading_zeros();
-            let half = n / 2;
             let part = half * width;
             let total = n * width;
-            let cl = solver.declare_bitvector(cw, loc);
+            let cl = match left_count {
+                Some(count) => solver.define_bitvector(smt_u64_width(count.into(), cw), loc),
+                None => solver.declare_bitvector(cw, loc),
+            };
             let cr = solver.declare_bitvector(cw, loc);
             let i = solver.declare_bitvector(cw, loc);
             solver.assert(Exp::Bvule(Box::new(Exp::Var(cl)), Box::new(smt_u64_width(half as u64, cw))));
@@ -363,8 +368,10 @@ fn vector_stable_pack_merge_invariant_at_actual_shapes() {
                     Box::new(offset(i, total)),
                 )),
             );
+            // 选中右半段的条件保证 i >= cl。
+            let right_lane = Exp::Bvsub(Box::new(Exp::Var(i)), Box::new(Exp::Var(cl)));
             let right_offset = Exp::Bvmul(
-                Box::new(Exp::Bvsub(Box::new(resize(i, total)), Box::new(resize(cl, total)))),
+                Box::new(Exp::ZeroExtend(total - cw, Box::new(right_lane))),
                 Box::new(smt_u64_width(width as u64, total)),
             );
             let from_right = Exp::Extract(
@@ -383,7 +390,7 @@ fn vector_stable_pack_merge_invariant_at_actual_shapes() {
             assert_eq!(
                 solver.check_sat_with(&Exp::Neq(Box::new(actual), Box::new(expected)), loc),
                 SmtResult::Unsat,
-                "merge N={n},W={width}"
+                "merge N={n},W={width},left_count={left_count:?}"
             );
         }
     }
