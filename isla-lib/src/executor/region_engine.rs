@@ -130,6 +130,7 @@ fn is_arm_execution_error(error: &ExecError) -> bool {
             | ExecError::MatchFailure(..)
             | ExecError::Overflow
             | ExecError::SymbolicLength(..)
+            | ExecError::SymbolicNatural { .. }
             | ExecError::NoSymbolicType
             | ExecError::Unmapped
             | ExecError::BadRead(..)

@@ -4233,6 +4233,10 @@ fn expect_concrete_len<B: BV>(
     info: SourceLoc,
 ) -> Result<usize, ExecError> {
     let value = concretize_proven_i128(value, solver, info)?;
+    concrete_len(value, name, info)
+}
+
+fn concrete_len<B: BV>(value: Val<B>, name: &'static str, info: SourceLoc) -> Result<usize, ExecError> {
     panic_if_negative_concretized_nat(name, &value);
     match value {
         Val::I128(value) => usize::try_from(value).map_err(|_| ExecError::Overflow),
@@ -4721,21 +4725,34 @@ fn choice<B: BV>(xs: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
     }
 }
 
+fn read_mem_byte_count<B: BV>(
+    value: Val<B>,
+    operation: &'static str,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<i128, ExecError> {
+    let value = concretize_proven_i128(value, solver, info)?;
+    if let Val::Symbolic(symbol) = value {
+        // 符号内存使用非空位向量保存读数据，按字节展开后位宽须能用 u32 表示。
+        return Err(ExecError::SymbolicNatural {
+            symbol,
+            minimum: 1,
+            maximum: u32::MAX / 8,
+            operation,
+            location: info,
+        });
+    }
+    Ok(i128::try_from(concrete_len(value, operation, info)?).unwrap())
+}
+
 fn read_mem<B: BV>(
     args: Vec<Val<B>>,
     solver: &mut Solver<B>,
     frame: &mut LocalFrame<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let bytes = expect_concrete_len(args[3].clone(), "read_mem", solver, info)?;
-    frame.memory().read(
-        args[0].clone(),
-        args[2].clone(),
-        Val::I128(bytes.try_into().unwrap()),
-        solver,
-        false,
-        ReadOpts::default(),
-    )
+    let bytes = read_mem_byte_count(args[3].clone(), "read_mem", solver, info)?;
+    frame.memory().read(args[0].clone(), args[2].clone(), Val::I128(bytes), solver, false, ReadOpts::default())
 }
 
 fn read_mem_ifetch<B: BV>(
@@ -4744,15 +4761,8 @@ fn read_mem_ifetch<B: BV>(
     frame: &mut LocalFrame<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let bytes = expect_concrete_len(args[3].clone(), "read_mem_ifetch", solver, info)?;
-    frame.memory().read(
-        args[0].clone(),
-        args[2].clone(),
-        Val::I128(bytes.try_into().unwrap()),
-        solver,
-        false,
-        ReadOpts::ifetch(),
-    )
+    let bytes = read_mem_byte_count(args[3].clone(), "read_mem_ifetch", solver, info)?;
+    frame.memory().read(args[0].clone(), args[2].clone(), Val::I128(bytes), solver, false, ReadOpts::ifetch())
 }
 
 fn read_mem_exclusive<B: BV>(
@@ -4761,15 +4771,8 @@ fn read_mem_exclusive<B: BV>(
     frame: &mut LocalFrame<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let bytes = expect_concrete_len(args[3].clone(), "read_mem_exclusive", solver, info)?;
-    frame.memory().read(
-        args[0].clone(),
-        args[2].clone(),
-        Val::I128(bytes.try_into().unwrap()),
-        solver,
-        false,
-        ReadOpts::exclusive(),
-    )
+    let bytes = read_mem_byte_count(args[3].clone(), "read_mem_exclusive", solver, info)?;
+    frame.memory().read(args[0].clone(), args[2].clone(), Val::I128(bytes), solver, false, ReadOpts::exclusive())
 }
 
 fn read_memt<B: BV>(
@@ -4778,15 +4781,8 @@ fn read_memt<B: BV>(
     frame: &mut LocalFrame<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let bytes = expect_concrete_len(args[2].clone(), "platform_read_memt", solver, info)?;
-    frame.memory().read(
-        args[0].clone(),
-        args[1].clone(),
-        Val::I128(bytes.try_into().unwrap()),
-        solver,
-        true,
-        ReadOpts::default(),
-    )
+    let bytes = read_mem_byte_count(args[2].clone(), "platform_read_memt", solver, info)?;
+    frame.memory().read(args[0].clone(), args[1].clone(), Val::I128(bytes), solver, true, ReadOpts::default())
 }
 
 fn bad_read<B: BV>(_: Val<B>, _: &mut Solver<B>, _: SourceLoc) -> Result<Val<B>, ExecError> {
