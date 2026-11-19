@@ -102,7 +102,11 @@ fn run_case(defer: bool, no_smt: bool, skip_checks: bool, enabled: bool) {
             assert_eq!(report["failures"], 0);
         } else {
             assert_eq!(folded, 0, "非恒值或关闭时不得折叠");
-            assert_eq!(values.len(), if defer || (!no_smt && !skip_checks && constant.is_some()) { 1 } else { 2 });
+            // 关闭预先折叠仍允许查询入口识别恒假的一侧，即使配置关闭 SMT。
+            assert_eq!(values.len(), if defer || constant.is_some() { 1 } else { 2 });
+            if let Some(value) = constant {
+                assert_eq!(values[0], Val::Bool(value));
+            }
         }
     }
 }
