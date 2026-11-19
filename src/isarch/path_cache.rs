@@ -1,5 +1,8 @@
 //! isarch 缓存适配：来源、文件发布、Target 数据和常驻路径。
 #[cfg(test)]
+#[path = "path_cache_memory_write_tests.rs"]
+mod memory_write_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use isla_lib::{bitvector::b64::B64, ir::Symtab};
