@@ -173,13 +173,13 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             let source_width = crate::primop_util::length_bits(bits, solver, info)?;
             let valid = 1..=i128::from(source_width);
             let finite = match solver.finite_domain(width) {
-                FiniteDomain::Known(values) | FiniteDomain::Bounded(values) => finite_values_in_bounds(&values, &valid),
+                FiniteDomain::Known(_) | FiniteDomain::Bounded(_) => true,
                 FiniteDomain::Unknown => false,
             };
             if finite {
                 match fork_symbolic_value(
                     width,
-                    Some(valid),
+                    Some(OperandBounds::Established(valid)),
                     consumer,
                     operands,
                     info,
@@ -463,7 +463,13 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 _ => None,
             };
             if let Some((selected, remainder)) = partition {
-                if solver.check_sat_with(&selected, info).is_sat()?
+                let is_index = matches!(
+                    op,
+                    "vector_access" | "vector_update" | "read_register_from_vector" | "write_register_from_vector"
+                );
+                let structurally_in_bounds = is_index && solver.finite_domain_predicate(&selected) == Some(true);
+                if !structurally_in_bounds
+                    && solver.check_sat_with(&selected, info).is_sat()?
                     && solver.check_sat_with(&remainder, info).is_sat()?
                 {
                     // 先完整分离两类候选，再由消费者拒绝非法索引或处理默认符号内存。
@@ -486,13 +492,19 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     );
                 }
                 // 不可满足的探测会使当前模型失效，单值枚举前须重新建立前缀模型。
-                assert!(solver.check_sat(info).is_sat()?, "边界探测不得改变路径可满足性");
+                if !structurally_in_bounds {
+                    assert!(solver.check_sat(info).is_sat()?, "边界探测不得改变路径可满足性");
+                }
             }
             // 扩展及切片会按选中的具体位宽执行。整组候选都满足原语边界时，
             // 允许上界集合参与拆分，保留原守卫和其余路径约束。
             let bounds = if finite_enabled || consumer.is_some() {
                 use crate::primop_util::length_bits;
                 match (op, index, operands) {
+                    ("slice_internal", _, _) => Some(0..=i128::from(u32::MAX)),
+                    ("vector_access" | "vector_update", 1, [Val::Vector(elements), ..]) => {
+                        Some(0..=i128::try_from(elements.len()).unwrap() - 1)
+                    }
                     ("extension", 1, [bits, ..]) => {
                         Some(i128::from(length_bits(bits, solver, info)?)..=i128::from(u32::MAX))
                     }
@@ -506,6 +518,13 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     }
                     _ => None,
                 }
+                .map(|range| {
+                    if op == "subrange_internal" {
+                        OperandBounds::Established(range)
+                    } else {
+                        OperandBounds::RequireWithin(range)
+                    }
+                })
             } else {
                 None
             };
@@ -540,22 +559,26 @@ pub(super) enum ValueRetry {
     Dead,
 }
 
-fn finite_values_in_bounds(values: &[smtlib::Exp<crate::smt::Sym>], bounds: &std::ops::RangeInclusive<i128>) -> bool {
-    values.iter().all(|value| {
-        let length = match value {
-            smtlib::Exp::Bits64(bits) => Some(i128::from(bits.signed())),
-            smtlib::Exp::Bits(bits) => primop::i128_from_model_bits(bits),
-            _ => unreachable!("有限域只含位向量常量"),
-        };
-        length.is_some_and(|length| bounds.contains(&length))
-    })
+pub(super) enum OperandBounds {
+    // 原语已经在当前路径证明边界，或在无 SMT 下把边界加入了路径。
+    Established(std::ops::RangeInclusive<i128>),
+    RequireWithin(std::ops::RangeInclusive<i128>),
+}
+
+fn candidate_in_bounds(value: &smtlib::Exp<crate::smt::Sym>, bounds: &std::ops::RangeInclusive<i128>) -> bool {
+    let length = match value {
+        smtlib::Exp::Bits64(bits) => Some(i128::from(bits.signed())),
+        smtlib::Exp::Bits(bits) => primop::i128_from_model_bits(bits),
+        _ => unreachable!("有限域只含位向量常量"),
+    };
+    length.is_some_and(|length| bounds.contains(&length))
 }
 
 /// 将符号值拆为当前候选和剩余候选；唯一值不需要分叉。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
-    safe_bounds: Option<std::ops::RangeInclusive<i128>>,
+    bounds: Option<OperandBounds>,
     consumer: Option<(usize, super::PathTimeout)>,
     operands: &[Val<B>],
     info: SourceLoc,
@@ -581,18 +604,35 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
     let domain = solver.finite_domain(sym);
     let bounded = matches!(domain, FiniteDomain::Bounded(_));
-    let values = match &domain {
-        FiniteDomain::Known(values) => Some(values),
-        // 未认证的候选也可能被执行。仅在所有候选满足原语边界时拆分。
-        FiniteDomain::Bounded(values) if safe_bounds.is_some_and(|bounds| finite_values_in_bounds(values, &bounds)) => {
+    let mut restricted = false;
+    let values = match (domain, bounds) {
+        (FiniteDomain::Known(values), _) => Some(values),
+        (FiniteDomain::Bounded(mut values), Some(OperandBounds::Established(range))) => {
+            let old_len = values.len();
+            // 切片的联合边界已生效，只能留下区间内的值。原前缀和选择等式继续参与重试。
+            values.retain(|value| candidate_in_bounds(value, &range));
+            restricted = values.len() != old_len;
+            Some(values)
+        }
+        (FiniteDomain::Bounded(values), Some(OperandBounds::RequireWithin(range)))
+            if values.iter().all(|value| candidate_in_bounds(value, &range)) =>
+        {
             Some(values)
         }
         _ => None,
     };
     if let Some(values) = values {
-        let [candidate, _, ..] = values.as_slice() else {
-            return Ok(if values.is_empty() { ValueRetry::Dead } else { ValueRetry::Unique });
-        };
+        let Some(candidate) = values.first() else { return Ok(ValueRetry::Dead) };
+        if values.len() == 1 {
+            if !restricted {
+                return Ok(ValueRetry::Unique);
+            }
+            let guard = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
+            cache_retry_operand(frame, operands);
+            solver.assert(guard.clone());
+            btrace_push_branch_condition!(frame, guard);
+            return Ok(ValueRetry::Forked);
+        }
         let in_region = frame.region_execution.is_some();
         if !bounded
             && in_region

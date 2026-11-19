@@ -29,7 +29,7 @@ python3 -m unittest discover -s test/path-merge
 
 ## 新增场景
 
-用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–F 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
+用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–G 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
 
 1. 把输入位写到专用寄存器。在 TOML 的 `inputs` 中按位宽登记这些寄存器。符号条件和影响观测的自由选择都应有对应输入。场景会穷举登记的有限输入域，通常只需几位。
 2. 在 `prop` 中执行候选代码，把它的返回值写入 `out_value`，再返回布尔性质。可以用无分叉的独立规格校验候选返回值。复合值在 Sail 里投影成可区别各结果的整数、布尔值或位向量。把要比较的后态寄存器写入 `registers`。这些寄存器在每条完成路径上都应已初始化。
@@ -166,3 +166,9 @@ A3 在旧缺省下有两条完成路径，标为 XFAIL。缺省开启且字符�
 
 - [F1 调用者只检查 Ok 标签](scenarios/F1-union-width-tag.sail)
 - [F2 解包后检查长度、拼接并扩展至固定宽度](scenarios/F2-union-width-append.sail)
+
+## G 组 有限域算术与具体整数消费者
+
+- [G1 乘加端点的同宽切片](scenarios/G1-affine-slice.sail)
+- [G2 独立选择层号和每级位数](scenarios/G2-chosen-slice-size.sail)
+- [G3 层号递减循环中的组合下标](scenarios/G3-descending-index.sail)

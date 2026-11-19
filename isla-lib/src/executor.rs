@@ -4275,6 +4275,7 @@ mod tests {
     mod review32_tests;
     mod review33_tests;
     mod review35_tests;
+    mod slice_endpoint_tests;
     mod symbolic_ctor_unwrap_tests;
     mod symbolic_finite_domain_tests;
     mod task_queue_tests;
