@@ -549,7 +549,8 @@ pub(super) fn finish_region<'ir, B: BV>(
             arm
         }
         (Some(left), Some(right)) => {
-            merge_states(record_id, condition, &base, left, right, &region, state, shared, solver, info)?
+            merge_states(record_id, condition, &base, left, right, &region, state, shared, solver, info)
+                .inspect_err(|error| diagnostics::note_failure_phase(diagnostics::FailurePhase::StateMerge, error))?
         }
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
