@@ -34,6 +34,7 @@ DEFAULTS = {
     "ordered_events": False,
     "ordered_memory_events": True,
     "register_reads": {},
+    "assertion_inputs": None,
     "merge_concrete_values": None,
 }
 
@@ -77,6 +78,12 @@ def read_scene(path):
     inputs = scene["inputs"]
     require(isinstance(inputs, dict) and all(NAME.fullmatch(name) and type(width) is int and width > 0
                                              for name, width in inputs.items()), "inputs 须是寄存器名到正位宽的表")
+    assertion_inputs = scene["assertion_inputs"]
+    require(assertion_inputs is None or (isinstance(assertion_inputs, list)
+            and all(isinstance(row, list) and len(row) == len(inputs)
+                    and all(type(value) is int and 0 <= value < (1 << width)
+                            for value, width in zip(row, inputs.values()))
+                    for row in assertion_inputs)), "assertion_inputs 须列出失败断言的完整输入取值")
     registers = scene["registers"]
     require(isinstance(registers, list) and all(isinstance(name, str) and NAME.fullmatch(name) for name in registers),
             "registers 须是观测寄存器名列表")
@@ -215,6 +222,25 @@ def path_outcomes(path, scene, domain, seconds):
     return outcomes
 
 
+def assertion_partition(assertions, scene, seconds):
+    inputs = scene["inputs"]
+    domain = list(itertools.product(*(range(1 << width) for width in inputs.values())))
+    reached = set()
+    for leaf in assertions:
+        terms = [register_term(leaf["register_values"], name) for name in inputs]
+        require(all(TERM.fullmatch(term) for term in terms), "失败断言的输入须可重放")
+        probes = [query(smt_and([f"(= {term} (_ bv{value} {width}))"
+                                for term, value, width in zip(terms, values, inputs.values())]))
+                  for values in domain]
+        replies = replay(leaf["guard_smtlib"], "".join(probes), seconds).splitlines()
+        require(len(replies) == len(domain) and set(replies) <= {"sat", "unsat"},
+                f"失败断言守卫结果异常 {replies}")
+        members = {values for values, reply in zip(domain, replies) if reply == "sat"}
+        require(members and reached.isdisjoint(members), "失败断言须各自可达且守卫互斥")
+        reached.update(members)
+    return reached
+
+
 def summarize_paths(paths, scene, seconds):
     inputs = scene["inputs"]
     domain = list(itertools.product(*(range(1 << width) for width in inputs.values())))
@@ -262,9 +288,14 @@ def run_mode(scene, shape, mode, binary, directory, seconds):
         settings += f"merge_concrete_values = {str(merge_concrete).lower()}\n"
     config.write_text(settings, encoding="utf-8")
     try:
-        process = run([str(binary), "-A", str(directory / "model.ir"), "-C", str(config), "-p", "prop", "-T", "2",
-                       "--expect-paths", str(expected), "--dump-paths", str(target), "--scenario-observations"],
-                      seconds, cwd=directory)
+        command = [str(binary), "-A", str(directory / "model.ir"), "-C", str(config), "-p", "prop", "-T", "2",
+                   "--expect-paths", str(expected), "--dump-paths", str(target), "--scenario-observations"]
+        expected_failures = scene["assertion_inputs"]
+        if expected_failures is not None:
+            assertions = directory / f"{mode}.assertions.json"
+            assertions.unlink(missing_ok=True)
+            command.extend(["--dump-assertions", str(assertions)])
+        process = run(command, seconds, cwd=directory)
         log = directory / f"{mode}.log"
         log.write_text(process.stdout + process.stderr, encoding="utf-8")
         require(process.returncode in (0, 2) and "ok" in process.stdout.splitlines(),
@@ -275,6 +306,10 @@ def run_mode(scene, shape, mode, binary, directory, seconds):
             result.assertions.append(f"期望 {expected} 条完成路径，实际 {result.count} 条")
         require(process.returncode == (2 if result.count != expected else 0), "property 退出码与路径计数不符")
         result.observations = summarize_paths(paths, scene, seconds)
+        if expected_failures is not None:
+            failures = assertion_partition(json.loads(assertions.read_text(encoding="utf-8")), scene, seconds)
+            require(failures == set(map(tuple, expected_failures)), f"失败断言输入不符，实际 {sorted(failures)}")
+            require(failures.isdisjoint(result.observations[0]), "失败断言输入也到达了正常出口")
         if enabled and shape.is_file():
             checked = run(["ruby", str(PROPERTY / "include/check_paths.rb"), str(target), str(shape)], seconds)
             (directory / f"{mode}.shape.log").write_text(checked.stdout + checked.stderr, encoding="utf-8")
