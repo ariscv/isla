@@ -92,7 +92,16 @@ impl Dependencies {
             Val::Vector(values) | Val::List(values) => {
                 values.iter().fold(Exp::Bool(true), |a, v| and(a, self.value(v)))
             }
-            Val::SymbolicCtor(..) => Exp::Bool(false),
+            Val::Guarded(guard, values) => {
+                let active = Exp::Ite(
+                    Box::new(Exp::Var(*guard)),
+                    Box::new(self.value(&values.0)),
+                    Box::new(self.value(&values.1)),
+                )
+                .eval();
+                and(self.symbol(*guard), active)
+            }
+            Val::SymbolicCtor(..) | Val::Poison => Exp::Bool(false),
             _ => value.symbolic_variables().into_iter().fold(Exp::Bool(true), |a, symbol| and(a, self.symbol(symbol))),
         }
     }
@@ -100,7 +109,7 @@ impl Dependencies {
 
 fn simple<B: BV>(value: &Val<B>) -> bool {
     match value {
-        Val::SymbolicCtor(..) | Val::Poison => false,
+        Val::Guarded(..) | Val::SymbolicCtor(..) | Val::Poison => false,
         Val::Struct(fields) => fields.values().all(simple),
         Val::Ctor(_, value) => simple(value),
         Val::Vector(values) | Val::List(values) => values.iter().all(simple),

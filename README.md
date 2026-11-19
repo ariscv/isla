@@ -794,7 +794,7 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 单 binary 后端且 `sample_stride=1` 时使用 schema 2 流式落盘，`max_output_bytes` 缺省不限。显式字节限额和同名 `.stop` 文件的停止原因写入汇总。预测缺省精确计数，显式设置 `predict_probes` 和 `predict_domain_cap` 后可使用近似探测。配置及代表输出见 [投影枚举与样本输出](specs/isarch-cli.md#投影枚举与样本输出)。
 
 
-路径缓存使用 schema 4，fork ID 为 64 位。schema 3 的 JSON 可用 `--path-cache-encoding=json` 读取，须省略 `--path-cache-crosscheck`。schema 3 的二进制及 schema 1/2 需要重新生成。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。
+路径缓存使用 schema 5，支持带守卫的不同位宽值。schema 4 的 JSON 和二进制仍可读取。fork ID 为 64 位。schema 3 的 JSON 可用 `--path-cache-encoding=json` 读取，须省略 `--path-cache-crosscheck`。schema 3 的二进制及 schema 1/2 需要重新生成。每条路径和导出的样本都带 `terminal`：`Normal` 的 `result` 是正常返回值；`SailException { throw_location }` 的 `result` 是模型异常值。后者保存原约束及异常发生时的状态，能由 judge／corpus 重新认证，不表示正常指令退休。没有明确 Sail 异常的 Poison、执行器错误及求解失败仍按失败统计。
 
 ### 分段合并的可选配置
 

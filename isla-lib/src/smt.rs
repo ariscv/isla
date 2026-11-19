@@ -2107,6 +2107,17 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.get_ast(ast, SmtDumpRequest::GetValues { expressions: vec![exp.clone()] })
     }
 
+    pub(crate) fn select_guarded<'a>(
+        &mut self,
+        guard: Sym,
+        values: &'a (Val<B>, Val<B>),
+    ) -> Result<&'a Val<B>, ExecError> {
+        let Val::Bool(selected) = self.get_val(&Val::Symbolic(guard))? else {
+            panic!("备选值的守卫必须为布尔值")
+        };
+        Ok(if selected { &values.0 } else { &values.1 })
+    }
+
     pub fn get_val(&mut self, var: &Val<B>) -> Result<Val<B>, ExecError> {
         use crate::ir::Val::*;
         // 物化必须为自由变量补全模型，不能把未约简的 ITE 当作任意值。
@@ -2114,10 +2125,8 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         self.complete_model = true;
         let result = (|| match var {
             Guarded(guard, values) => {
-                let Val::Bool(selected) = self.get_val(&Val::Symbolic(*guard))? else {
-                    panic!("具体候选的守卫必须为布尔值")
-                };
-                self.get_val(if selected { &values.0 } else { &values.1 })
+                let selected = self.select_guarded(*guard, values)?;
+                self.get_val(selected)
             }
             Symbolic(sym) => {
                 let model_val = self.get_var(*sym)?;

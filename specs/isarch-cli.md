@@ -398,7 +398,7 @@ isarch list-instructions 实际输出
 
 `--path-cache-read <目录> --path-cache-encoding bin` 直接恢复完成路径，跳过符号探索。省略 `--fuzz-corpus` 时，沿用现场枚举器，显式使用 `class_cap=1`、`sample_stride=1`，为每个成功遍历的守卫类生成一个代表。路径上限缺省不限。初始 corpus 写入 `initial-corpus.jsonl`，完整枚举元数据写入 `initial-corpus-enumeration.json`。生成的 corpus 经完整 judge 认证后才进入 loop。提供 `--fuzz-corpus` 时跳过生成，认证并复用指定的 corpus。缓存读取也支持普通 `solve-state` 的样本导出和 `--check-samples`。
 
-路径缓存使用 schema 4，保存 64 位 fork ID、纯原语定义的符号区间 `pure_definitions` 和终态。JSON 和二进制均保存这些字段，可用 `--path-cache-crosscheck` 交叉核对。schema 3 的 JSON 可单独读取，须省略 `--path-cache-crosscheck`。schema 3 二进制及 schema 1/2 需要重新生成。初始 corpus 通过恢复路径的完整 judge 认证，检查其输入与后态，不重新执行当前 IR 的 clause。本轮保持 IR／配置不变；跨 IR／配置的语义兼容仍需独立复验。manifest 的来源哈希只作记录，不是准入门槛。partial 缓存只代表已完成路径，完整性和错误数量以 manifest 为准。
+路径缓存使用 schema 5，支持带守卫的不同位宽值。schema 4 的 JSON 和二进制仍可读取。缓存保存 64 位 fork ID、纯原语定义的符号区间 `pure_definitions` 和终态。JSON 和二进制均保存这些字段，可用 `--path-cache-crosscheck` 交叉核对。schema 3 的 JSON 可单独读取，须省略 `--path-cache-crosscheck`。schema 3 二进制及 schema 1/2 需要重新生成。初始 corpus 通过恢复路径的完整 judge 认证，检查其输入与后态，不重新执行当前 IR 的 clause。本轮保持 IR／配置不变；跨 IR／配置的语义兼容仍需独立复验。manifest 的来源哈希只作记录，不是准入门槛。partial 缓存只代表已完成路径，完整性和错误数量以 manifest 为准。
 
 ```sh
 isarch [原探索参数] \

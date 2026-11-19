@@ -274,6 +274,13 @@ mod tests {
             )))
             .is_err());
         }
+        manifest["schema_version"] = json!(4);
+        fs::write(directory.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let legacy =
+            load::<B64>(&directory, Encoding::Bin, true, &shared, "generic", &Stages::new(None, Instant::now()));
+        assert_eq!(legacy.manifest.schema_version, 4);
+        manifest["schema_version"] = json!(3);
+        fs::write(directory.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
         // 旧 JSON 的窄编号可直接读入；旧二进制的字段宽度不兼容。
         let loaded =
             load::<B64>(&directory, Encoding::Json, false, &shared, "generic", &Stages::new(None, Instant::now()));
@@ -552,7 +559,8 @@ impl Stages {
     }
 }
 
-const CACHE_SCHEMA_VERSION: u32 = 4;
+// schema 5 允许 Guarded 载荷使用不同位宽。与 schema 4 共用 JSON 和 bincode 布局。
+const CACHE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Encoding {
@@ -883,6 +891,7 @@ fn load_inner<B: BV>(
             .expect("缓存 manifest 损坏");
     assert!(
         raw["schema_version"] == json!(CACHE_SCHEMA_VERSION)
+            || raw["schema_version"] == json!(4)
             || (raw["schema_version"] == json!(3) && encoding == Encoding::Json && !crosscheck),
         "缓存 schema 不兼容。schema 3 请显式读取 JSON 且关闭双格式核对，或重新生成缓存"
     );
