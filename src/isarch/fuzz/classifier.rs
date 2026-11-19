@@ -1,6 +1,7 @@
 //! 从已有检查点恢复一次，认证与快档共用同一批常驻求解器。
 use super::corpus::Directory;
 use super::io::{canonical_coordinates, write_json, write_lines};
+use super::sampling::{Sampling, WitnessExport, WitnessStats};
 use super::{Executor, LogFeedback, Mode, ReplayScheduler, Scheduler, Session};
 use crate::isarch::resident::ResidentPath;
 use crate::isarch::target::Target;
@@ -98,6 +99,7 @@ pub fn run<B: BV>(
     let options = &session.options;
     let output = &options.output;
     let generated;
+    let mut domain_witness = WitnessStats::default();
     let corpus = if options.corpus.is_some() {
         &session.corpus
     } else {
@@ -110,11 +112,13 @@ pub fn run<B: BV>(
                 path: path.clone(),
             }]);
         let sampling_input = if matches!(options.mode, Mode::ExportCorpus) { options.inputs.as_ref() } else { None };
-        let sampling: super::sampling::Sampling = if let Some(input) = sampling_input {
+        let sampling: Sampling = if let Some(input) = sampling_input {
             serde_json::from_reader(std::fs::File::open(input).expect("读取抽样配置失败")).expect("抽样配置非法")
         } else {
             Default::default()
         };
+        let witnesses =
+            sampling.domain_witness.then(|| WitnessExport::open(&sampling, sampling_input.unwrap(), output));
         let limits = super::sampling::limits(execution_limits);
         let next = std::sync::atomic::AtomicUsize::new(0);
         let results = std::sync::Mutex::new(Vec::new());
@@ -125,6 +129,7 @@ pub fn run<B: BV>(
             for _ in 0..threads {
                 let (paths, writer, limits, next, results, sampling, excluded_errors) =
                     (&paths, &writer, &limits, &next, &results, &sampling, &excluded_errors);
+                let witnesses = witnesses.as_ref();
                 scope.spawn(move || {
                     let context=Context::new(Config::new());
                     loop {
@@ -137,35 +142,49 @@ pub fn run<B: BV>(
                         }
                         let began=Instant::now();
                         let mut solver=Solver::from_checkpoint(&context,resident.checkpoint.clone());
-                        // 初始corpus只需要类内一个满足解；沿已有接口省去逐位最小化。
-                        // 不向模型添加前态约束；未约束位仍由原生model completion给值。
-                        let representative=isla_lib::executor::samples::SampleRandomization{seed:&|_,_|0,prepare:&|_,_,_,_|Ok(())};
-                        let enumeration=crate::isarch::samples::export_cached_path_randomized(resident,&mut solver,shared,target,limits,Some(writer),None,Some(&representative))
-                            .expect("缓存初始corpus枚举失败").expect("初始corpus必须开启枚举");
+                        let (enumeration, stats) = if let Some(witnesses) = witnesses {
+                            witnesses.export_path(resident, &mut solver, shared, target, limits, writer, options.random_seed)
+                                .expect("缓存初始 corpus 域内见证导出失败")
+                        } else {
+                            // 初始 corpus 只需要类内一个满足解；沿已有接口省去逐位最小化。
+                            let representative = isla_lib::executor::samples::SampleRandomization{seed:&|_,_|0,prepare:&|_,_,_,_|Ok(())};
+                            let enumeration = crate::isarch::samples::export_cached_path_randomized(
+                                resident, &mut solver, shared, target, limits, Some(writer), None, Some(&representative)
+                            ).expect("缓存初始 corpus 枚举失败").expect("初始 corpus 必须开启枚举");
+                            (enumeration, WitnessStats::default())
+                        };
                         let row=json!({"path_signature":resident.signature,"enumeration":enumeration,"seconds":began.elapsed().as_secs_f64()});
                         eprintln!("[CORPUS_EXPORT] {}",json!({"path_index":i,"paths":paths.len(),"path_signature":resident.signature,"classes":enumeration["counted_classes"],"exported":enumeration["exported_samples"],"seconds":began.elapsed().as_secs_f64()}));
                         write_json(&output.join(format!("export-path-{}.json",resident.signature)),&row);
-                        results.lock().unwrap().push(row);
+                        results.lock().unwrap().push((row, stats));
                     }
                 });
             }
         });
-        let mut enumerations = results.into_inner().unwrap();
+        let mut enumerations = Vec::new();
+        for (row, stats) in results.into_inner().unwrap() {
+            domain_witness.add(stats);
+            enumerations.push(row);
+        }
+        if let Some(witnesses) = witnesses {
+            witnesses.finish();
+        }
         enumerations.sort_by_key(|row| row["path_signature"].as_u64().unwrap());
         writer.finish();
-        write_json(
-            &output.join("sampling-summary.json"),
-            &json!({
-                "method":"路径签名排序后等步长选路，每条选中路径最多path_cap个解，class_cap=1",
-                "sampling":sampling,"cache_paths":paths.len(),"selected_paths":selected_paths,
-                "exported_paths":enumerations.len(),"excluded_model_error_paths":excluded_errors.load(std::sync::atomic::Ordering::Relaxed),
-                "class_cap":1,"path_cap":limits.merge_enumeration.path_cap,"sample_stride":limits.merge_enumeration.sample_stride,
-                "full_guard_class_corpus":false,"seconds":started.elapsed().as_secs_f64()
-            }),
-        );
+        let mut sampling_summary = json!({
+            "method":"路径签名排序后等步长选路，每条选中路径最多path_cap个解，class_cap=1",
+            "sampling":sampling,"cache_paths":paths.len(),"selected_paths":selected_paths,
+            "exported_paths":enumerations.len(),"excluded_model_error_paths":excluded_errors.load(std::sync::atomic::Ordering::Relaxed),
+            "class_cap":1,"path_cap":limits.merge_enumeration.path_cap,"sample_stride":limits.merge_enumeration.sample_stride,
+            "full_guard_class_corpus":false,"seconds":started.elapsed().as_secs_f64()
+        });
+        if matches!(options.mode, Mode::ExportCorpus) {
+            sampling_summary["domain_witness"] = json!(domain_witness);
+        }
+        write_json(&output.join("sampling-summary.json"), &sampling_summary);
         generated =
             isla_lib::executor::samples::SampleChecker::load(&path, None).expect("读取生成的初始 corpus 失败").samples;
-        assert!(!generated.is_empty(), "缓存未生成任何 corpus entry");
+        assert!(!generated.is_empty() || sampling.domain_witness, "缓存未生成任何 corpus entry");
         write_json(&output.join("initial-corpus-enumeration.json"), &enumerations);
         cache.stages.record(
             "initial_corpus_enumeration",
@@ -185,7 +204,7 @@ pub fn run<B: BV>(
     if matches!(options.mode, Mode::ExportCorpus) {
         write_json(
             &output.join("export-complete.json"),
-            &json!({"complete":true,"entries":corpus.len(),"paths":paths.len(),"class_cap":1,"full_guard_class_corpus":false,"seconds":cache.started.elapsed().as_secs_f64()}),
+            &json!({"complete":true,"entries":corpus.len(),"paths":paths.len(),"class_cap":1,"full_guard_class_corpus":false,"seconds":cache.started.elapsed().as_secs_f64(),"domain_witness":domain_witness}),
         );
         return;
     }
