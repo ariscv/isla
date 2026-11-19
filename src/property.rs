@@ -83,7 +83,9 @@ fn isla_main() -> i32 {
     let task_state = TaskState::new();
     let task_state = match &isa_config.execution_limits {
         Some(config) => {
-            task_state.with_execution_limits(ExecutionLimits::default().with_config(config, &shared_state.symtab))
+            let limits = ExecutionLimits::default().with_config(config, &shared_state.symtab);
+            let enabled = limits.path_merging;
+            task_state.with_execution_limits(limits.with_region_loop_analysis(enabled))
         }
         None => task_state,
     };

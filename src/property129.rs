@@ -85,7 +85,8 @@ fn isla_main() -> i32 {
         Some(config) => limits.with_config(config, &shared_state.symtab),
         None => limits,
     };
-    let task_state = TaskState::new().with_execution_limits(limits);
+    let enabled = limits.path_merging;
+    let task_state = TaskState::new().with_execution_limits(limits.with_region_loop_analysis(enabled));
     let task = LocalFrame::new(function_id, args, ret_ty, None, instrs)
         .add_lets(&lets)
         .add_regs(&regs)

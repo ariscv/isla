@@ -2216,9 +2216,20 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
 
             Instr::Jump(exp, target, info) => {
-                // 条件可能要求分叉重试；求值成功后再计入控制流和回跳预算。
-                let value =
-                    eval_exp(exp, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned();
+                // 已到循环头的续配帧保留同一次求值的条件和控制流计数。
+                let resumed = match &frame.pending_retry_operand {
+                    Some((pc, Val::Symbolic(value))) => {
+                        assert_eq!(*pc, frame.pc, "续配条件必须属于当前分支");
+                        Some(*value)
+                    }
+                    _ => None,
+                };
+                let value = match resumed {
+                    Some(value) => Val::Symbolic(value),
+                    None => {
+                        eval_exp(exp, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?.into_owned()
+                    }
+                };
                 // 只对本次条件做结构判定，可读取有限域前缀。不查询 SMT，也不重复求值 IR。
                 let value = if crate::config::RegionOptions::current().prune_constant_branches {
                     match value {
@@ -2242,18 +2253,22 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     cost::make_mut(&mut frame.local_state).expression_retry_operands = None;
                 }
                 let jump_pc = frame.pc;
-                let decision = match limit_handler.as_ref() {
-                    Some(handler) => handler.on_conditional_jump(
-                        cost::make_mut(&mut frame.execution_limit_state),
-                        frame.function_name,
-                        frame.pc,
-                        *target,
-                        &frame.backtrace,
-                        *info,
-                    ),
-                    None => {
-                        cost::make_mut(&mut frame.execution_limit_state).advance_control_flow();
-                        ExecutionLimitDecision::Continue
+                let decision = if resumed.is_some() {
+                    ExecutionLimitDecision::Continue
+                } else {
+                    match limit_handler.as_ref() {
+                        Some(handler) => handler.on_conditional_jump(
+                            cost::make_mut(&mut frame.execution_limit_state),
+                            frame.function_name,
+                            frame.pc,
+                            *target,
+                            &frame.backtrace,
+                            *info,
+                        ),
+                        None => {
+                            cost::make_mut(&mut frame.execution_limit_state).advance_control_flow();
+                            ExecutionLimitDecision::Continue
+                        }
                     }
                 };
                 match decision {
@@ -2363,6 +2378,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     region_merge::RegionResult::Suspended
                                     | region_merge::RegionResult::Separate { .. } => return Ok(Run::Suspended),
                                     region_merge::RegionResult::Rejected => (),
+                                    region_merge::RegionResult::GuardedExits => unreachable!("根区域必须发布分组出口"),
                                 }
                             }
 
@@ -13109,7 +13125,9 @@ fn zcaller(za, zb) {
         Ok(match result {
             region_merge::RegionResult::Merged => Some(frame.pc),
             region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
-            region_merge::RegionResult::Suspended | region_merge::RegionResult::Separate { .. } => {
+            region_merge::RegionResult::Suspended
+            | region_merge::RegionResult::GuardedExits
+            | region_merge::RegionResult::Separate { .. } => {
                 panic!("最外层不能挂起区域片段")
             }
         })

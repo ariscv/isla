@@ -42,7 +42,7 @@ impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ArmErrorSink<'ir, 'task, B> 
     }
 }
 
-/// 普通区域的两臂与调用共享预算；可收敛的只读循环按完整轮核算，单轮仍受限。
+/// 普通区域的两臂与调用共享预算；可收敛的循环按完整轮核算，单轮仍受限。
 /// 这只限制一次合并尝试，不截断普通符号执行的路径；配置 -1 时不创建或续配计数器。
 pub const DEFAULT_REGION_STEP_BUDGET: Option<usize> = None;
 pub(super) static NEXT_RECORD: AtomicUsize = AtomicUsize::new(0);
@@ -317,8 +317,8 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
     // 即使后续条件已具体化、不再产生pending_branch，也不能丢掉轮次边界。
     if let Some(budget) = execution.iteration_budget {
         if depth == execution.entry_depth
-            && log.writes.modified_regs.is_empty()
-            && matches!(frame.instrs.get(frame.pc), Some(Instr::Goto(target)) if *target < frame.pc)
+            && (!log.ordered_events || log.global_state || log.writes.modified_regs.is_empty())
+            && matches!(frame.instrs.get(frame.pc), Some(Instr::Goto(target)) if *target <= frame.pc)
         {
             execution.remaining.as_ref().expect("逐轮续配必须有有限预算").store(budget, Ordering::Relaxed);
         }
@@ -438,7 +438,7 @@ pub(super) fn region<'ir, B: BV>(
     )
 }
 
-/// 只有最外层、无架构写出、无控制流采样限制的有环函数出口区域才能分段。
+/// 只有最外层、无控制流采样限制的有环函数出口区域才能分段。
 /// 分段本身不猜测循环是否终止；它只将同一有限展开的前缀变成两个普通前沿。
 fn can_segment<B: BV>(frame: &LocalFrame<B>, state: &TaskState<B>, mode: MergeMode) -> bool {
     frame.region_execution.is_none() && can_fold_iterations(state, mode)
@@ -459,17 +459,8 @@ fn can_fold_iterations<B: BV>(state: &TaskState<B>, mode: MergeMode) -> bool {
     })
 }
 
-pub(super) struct RegionOutput<'ir, B> {
-    result: RegionResult,
-    continuation: Option<(Sym, LocalFrame<'ir, B>)>,
-}
-impl<'ir, B> RegionOutput<'ir, B> {
-    pub(super) fn complete(result: RegionResult) -> Self {
-        Self { result, continuation: None }
-    }
-}
-
 pub(super) enum RegionResult {
+    GuardedExits,
     Merged,
     Dead,
     Rejected,
@@ -687,46 +678,41 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result = if defer
-                    && !nested
-                    && result.as_ref().is_ok_and(|output| !matches!(output.result, RegionResult::Dead))
-                {
-                    log_phase("exit_check_start", None);
-                    let _scope = stats::region_progress::QueryScope::enter("region_exit");
-                    let checked = solver.check_candidate_sat(info);
-                    log_phase("exit_check_end", checked.as_ref());
-                    match checked {
-                        None | Some(SmtResult::Sat) => result,
-                        // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
-                        // 保守回滚，让普通执行分别判断两个前沿。
-                        Some(SmtResult::Unsat)
-                            if result.as_ref().unwrap().continuation.is_none()
-                                && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
-                        {
-                            Ok(RegionOutput::complete(RegionResult::Dead))
+                let result =
+                    if defer && !nested && result.as_ref().is_ok_and(|output| !matches!(output, RegionResult::Dead)) {
+                        log_phase("exit_check_start", None);
+                        let _scope = stats::region_progress::QueryScope::enter("region_exit");
+                        let checked = solver.check_candidate_sat(info);
+                        log_phase("exit_check_end", checked.as_ref());
+                        match checked {
+                            None | Some(SmtResult::Sat) => result,
+                            // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
+                            // 保守回滚，让普通执行分别判断两个前沿。
+                            Some(SmtResult::Unsat)
+                                if !matches!(result, Ok(RegionResult::GuardedExits))
+                                    && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
+                            {
+                                Ok(RegionResult::Dead)
+                            }
+                            Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                            Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                                if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Dead) =>
+                            {
+                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                            }
+                            Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
                         }
-                        Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-                        Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-                        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-                            if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Dead) =>
-                        {
-                            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                        }
-                        Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
-                    }
-                } else {
-                    result
-                };
-                let mut continuation = None;
-                let result = result.map(|output| {
-                    continuation = output.continuation;
-                    output.result
-                });
+                    } else {
+                        result
+                    };
                 match &result {
                     Ok(_) => {
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         log_phase("commit_start", None);
-                        let grouped_root = !nested && matches!(result, Ok(RegionResult::Separate { .. }));
+                        segmented = matches!(result, Ok(RegionResult::GuardedExits));
+                        let grouped_root =
+                            !nested && (segmented || matches!(result, Ok(RegionResult::Separate { .. })));
                         if !grouped_root {
                             solver.commit_transaction();
                         }
@@ -737,7 +723,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         if !nested {
                             publish_arm_errors(
                                 frame,
-                                continuation.as_mut().map(|(_, frame)| frame),
                                 std::mem::take(pending_errors.tasks.get_mut().unwrap()),
                                 solver,
                                 fraction,
@@ -745,7 +730,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             );
                         }
                         if grouped_root {
-                            assert!(continuation.is_none(), "分组出口和预算续配不能共用调度");
                             publish_join_groups(
                                 frame,
                                 record_start,
@@ -766,40 +750,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             );
                             if !grouped_root {
                                 publish_committed_records(frame, record_start, task_id, shared, solver);
-                            }
-                            if let Some((returned, mut continued)) = continuation.take() {
-                                segmented = true;
-                                publish_committed_records(&mut continued, record_start, task_id, shared, solver);
-                                let fork_id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
-                                let other = cost::make_mut(&mut continued.execution_limit_state).record_fork();
-                                assert_eq!(fork_id, other, "同一分段的两前沿必须继承相同fork计数");
-                                cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(true);
-                                cost::make_mut(&mut continued.execution_limit_state).advance_path_signature(false);
-                                frame.capture_path_smt_stats();
-                                continued.capture_path_smt_stats();
-                                let point = checkpoint(solver);
-                                let condition = smtlib::Exp::Not(Box::new(smtlib::Exp::Var(returned)));
-                                let frozen = super::trace_fork_frame_with_branch_condition!(
-                                    &continued,
-                                    continued.pc,
-                                    condition.clone()
-                                );
-                                fraction.halve();
-                                sink.submit(Task {
-                                    id: task_id,
-                                    fraction: fraction.clone(),
-                                    frame: frozen,
-                                    checkpoint: point,
-                                    fork_cond: Some((
-                                        smtlib::Def::Assert(condition),
-                                        Event::Fork(fork_id, returned, 1, info),
-                                    )),
-                                    state,
-                                    stop_conditions: stop,
-                                });
-                                solver.add_event(Event::Fork(fork_id, returned, 0, info));
-                                solver.assert(smtlib::Exp::Var(returned));
-                                super::btrace_push_branch_condition!(frame, smtlib::Exp::Var(returned));
                             }
                         }
                     }
@@ -835,7 +785,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
             shared.execution_stats.merge_finished(true);
             shared.execution_stats.rule_finished(rule, None);
-            Ok(result)
+            Ok(if segmented { RegionResult::Merged } else { result })
         }
         Err(error) => {
             if shared.execution_stats.enabled() {
@@ -902,7 +852,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
 /// 失败叶在根保存点提交后才可交给调度器。继续组继承同一次路径拆分。
 fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     frame: &mut LocalFrame<'ir, B>,
-    mut continued: Option<&mut LocalFrame<'ir, B>>,
     errors: Vec<Task<'ir, 'task, B>>,
     solver: &Solver<B>,
     fraction: &mut Fraction,
@@ -921,7 +870,7 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         task.frame.execution_limit_state = frame.execution_limit_state.clone();
         cost::make_mut(&mut task.frame.execution_limit_state).advance_path_signature(true);
         cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(false);
-        for group in frame.region_arrivals.iter_mut().chain(continued.iter_mut().map(|frame| &mut **frame)) {
+        for group in &mut frame.region_arrivals {
             let limits = cost::make_mut(&mut group.execution_limit_state);
             assert_eq!(limits.record_fork(), *id, "继续前沿继承同一区域的分叉计数");
             limits.advance_path_signature(false);
@@ -1182,7 +1131,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-) -> Result<RegionOutput<'ir, B>, ExecError> {
+) -> Result<RegionResult, ExecError> {
     use smtlib::Exp::{Not, Var};
     let record_id = next_region_record();
     let mut base = prepare_region_base(frame, &region, depth, mode, state, info);
@@ -1256,12 +1205,10 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             return exception_continuation::finish_catch(
                 catcher, record_id, condition, base, arms, tid, task_id, fraction, timeout, stop, sink, frame, state,
                 shared, solver, info,
-            )
-            .map(RegionOutput::complete);
+            );
         }
     }
     finish_arrivals(record_id, condition, &region, consumer.is_some(), &base, arms, frame, state, shared, solver, info)
-        .map(RegionOutput::complete)
 }
 
 /// 执行前只校验显式 Force 命中的结构；调用方负责配置名称、源码范围和哈希校验。
@@ -1388,8 +1335,9 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     for exit in [&previous, &next] {
+        let access = exit.local_state.speculative_access.as_ref().unwrap();
         if !matches!(exit.instrs.get(exit.pc), Some(Instr::End))
-            || !exit.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty()
+            || (access.ordered_events && !access.global_state && !access.writes.modified_regs.is_empty())
             || solver.transaction_has_memory_writes()
         {
             return Err(reject(exit, SpeculativeRejectReason::StateEffect));
@@ -1529,7 +1477,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
-) -> Result<RegionOutput<'ir, B>, ExecError> {
+) -> Result<RegionResult, ExecError> {
     use smtlib::Exp::{And, Not, Var};
     let eligible = can_segment(frame, state, base.region_execution.as_ref().unwrap().mode)
         && match region.join {
@@ -1550,7 +1498,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let original_frame = frame.clone();
     let mut last_boundary = 0;
     let mut largest_round = 0;
-    let mut continuation = None;
+    let mut continuation: Option<LocalFrame<'ir, B>> = None;
     let mut return_guard = None;
     let live_forks = stats::merge_timing::LiveForks::start();
     let (mut pending, mut frontier) = LoopDependencies::new(LoopWork {
@@ -1581,6 +1529,15 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         super::stats::memory_stats::poll(frame, solver);
         if pending.work(frontier).completed == 2 {
             let (mut work, parent) = pending.complete(frontier);
+            let segmented_root = parent.is_none() && continuation.is_some();
+            if segmented_root {
+                // 暂保留退出组的访问记录，交由根分组出口统一投影。
+                work.original.region_execution = work.base.region_execution.clone();
+                work.original.region_arm = Some(solver.new_logical_arm(work.parent_arm));
+                let mut access = work.base.local_state.speculative_access.as_ref().unwrap().clone();
+                access.guard = Some(Var(return_guard.unwrap()));
+                cost::make_mut(&mut work.original.local_state).speculative_access = Some(access);
+            }
             // 子循环段已提交为完整条件保护的约束；汇合时也保留所属臂条件。
             let finish = |solver: &mut Solver<B>| {
                 finish_arrivals(
@@ -1630,7 +1587,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             parent.arms[side].push(fragment);
                         }
                     }
-                    RegionResult::Rejected | RegionResult::Suspended => panic!("汇合结果必须已经收尾"),
+                    RegionResult::Rejected | RegionResult::Suspended | RegionResult::GuardedExits => {
+                        panic!("子循环汇合结果必须已经收尾")
+                    }
                 }
                 if let Some(next) = take_loop_continuation(parent, state) {
                     frontier = pending.attach(frontier, side, next);
@@ -1639,10 +1598,25 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     parent.active_arm = None;
                 }
             } else {
-                if let RegionResult::Separate { reason, .. } = result {
-                    if continuation.is_some() {
-                        return Err(reject(&original_frame, reason));
+                if let Some(mut continued) = continuation.take() {
+                    assert!(exit_prefix.is_empty(), "预算续配时累计出口须仍在循环依赖中");
+                    let mut groups = match result {
+                        RegionResult::Merged => vec![work.original],
+                        RegionResult::Dead => Vec::new(),
+                        RegionResult::Separate { .. } => std::mem::take(&mut work.original.region_arrivals),
+                        _ => panic!("分段出口必须已经收尾"),
+                    };
+                    continued.region_execution = None;
+                    continued.speculation_mode = original_frame.speculation_mode;
+                    for group in &mut groups {
+                        group.region_execution = None;
+                        group.speculation_mode = original_frame.speculation_mode;
                     }
+                    groups.push(continued);
+                    frame.region_arrivals = groups;
+                    return Ok(RegionResult::GuardedExits);
+                }
+                if let RegionResult::Separate { .. } = result {
                     if original_frame.region_execution.is_none() {
                         for exit in &mut exit_prefix {
                             record_projected_arrival(exit, &original_base, &root_region, solver, info);
@@ -1654,7 +1628,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         part.speculation_mode = original_frame.speculation_mode;
                     }
                     *frame = work.original;
-                    return Ok(RegionOutput::complete(result));
+                    return Ok(result);
                 }
                 if !exit_prefix.is_empty() {
                     match result {
@@ -1698,16 +1672,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         solver,
                         info,
                     )?;
-                    if let RegionResult::Separate { reason, .. } = result {
-                        if continuation.is_some() {
-                            return Err(reject(&original_frame, reason));
-                        }
-                    }
                     *frame = restored;
-                    return Ok(RegionOutput::complete(result));
+                    return Ok(result);
                 }
                 *frame = work.original;
-                return Ok(RegionOutput { result, continuation });
+                return Ok(result);
             }
             continue;
         }
@@ -1719,8 +1688,10 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 work.completed == 1
                     && work.arms[0].len() == 1
                     && work.arms[0].first().is_some_and(|arm| {
-                        matches!(arm.instrs.get(arm.pc), Some(Instr::End))
-                            && arm.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty()
+                        matches!(arm.instrs.get(arm.pc), Some(Instr::End)) && {
+                            let access = arm.local_state.speculative_access.as_ref().unwrap();
+                            !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty()
+                        }
                     })
             });
         let work = pending.work_mut(frontier);
@@ -1768,12 +1739,14 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         last_boundary = used;
                     }
                 }
-                let no_writes = arm.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty();
+                let access = arm.local_state.speculative_access.as_ref().unwrap();
+                let fold_writes =
+                    !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty();
                 if iterative
                     && single_work
                     && exit_spine
                     && region.branch_pc == root_branch
-                    && no_writes
+                    && fold_writes
                     && !solver.transaction_has_memory_writes()
                 {
                     let exit = work.arms[0].pop().expect("退出脊柱必须已有存活前沿");
@@ -1863,7 +1836,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 if eligible
                     && exit_spine
                     && region.branch_pc == root_branch
-                    && no_writes
+                    && fold_writes
                     && !solver.transaction_has_memory_writes()
                     && largest_round > 0
                     && remaining
@@ -1879,40 +1852,14 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         .clone()
                         .expect("继续臂必须有完整条件");
                     let returned = solver.define_const(Not(Box::new(continued_guard.clone())), info);
-                    let continuation_region = Region {
-                        branch_pc: root_branch,
-                        has_back_edge: false,
-                        join: RegionPoint::Instruction(arm.pc),
-                        nodes: root_region.nodes.clone(),
-                        kind: crate::ir::regions::RegionKind::Reconvergent,
-                        local_variables: Default::default(),
-                    };
-                    let prefix_record = NEXT_RECORD
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-                        .expect("合并记录编号溢出");
-                    let mut continued = original_frame.clone();
-                    let result = solver.with_transaction_condition(&continued_guard, |solver| {
-                        finish_region(
-                            prefix_record,
-                            returned,
-                            &continuation_region,
-                            &original_base,
-                            vec![None, Some(arm)],
-                            &mut continued,
-                            state,
-                            shared,
-                            solver,
-                            info,
-                        )
-                    })?;
-                    assert!(matches!(result, RegionResult::Merged), "已证可行的继续臂必须保留");
                     if diagnostics::enabled() {
                         eprintln!(
                             "{}",
-                            serde_json::json!({"kind":"loop_segment","function":diagnostics::name_string(original_frame.function_name,&shared.symtab),"pc":root_branch,"call_instance":original_frame.local_state.call_instance,"steps":used,"remaining":remaining.as_ref().map(|remaining| remaining.load(Ordering::Relaxed)),"completed_exits":completed_exits,"continuation_pc":continued.pc})
+                            serde_json::json!({"kind":"loop_segment","function":diagnostics::name_string(original_frame.function_name,&shared.symtab),"pc":root_branch,"call_instance":original_frame.local_state.call_instance,"steps":used,"remaining":remaining.as_ref().map(|remaining| remaining.load(Ordering::Relaxed)),"completed_exits":completed_exits,"continuation_pc":arm.pc})
                         );
                     }
-                    continuation = Some((returned, continued));
+                    arm.pending_retry_operand = Some((arm.pc, Val::Symbolic(condition)));
+                    continuation = Some(arm);
                     return_guard = Some(returned);
                     // 继续臂已单独保存；这里只折叠已完成出口，补集将在最外层提交后成为普通任务。
                     work.completed += 1;
@@ -2028,7 +1975,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
         ConsumerRetry::Choice(guard) => *guard,
         ConsumerRetry::Operand([selected, _]) => solver.define_const(selected.clone(), info),
     };
-    let mut output = match execute_region(
+    let mut result = match execute_region(
         condition,
         pc,
         pc,
@@ -2058,8 +2005,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
             return Ok(None);
         }
     };
-    assert!(output.continuation.is_none());
-    if matches!(output.result, RegionResult::Separate { reason: SpeculativeRejectReason::IncompatibleState, .. }) {
+    if matches!(result, RegionResult::Separate { reason: SpeculativeRejectReason::IncompatibleState, .. }) {
         match consumer_continuation::try_join_after_last_use(
             condition,
             info,
@@ -2074,7 +2020,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
             shared,
             solver,
         ) {
-            Ok(Some(result)) => output.result = result,
+            Ok(Some(joined)) => result = joined,
             Ok(None) => (),
             Err(error) => {
                 solver.rollback_transaction(tx);
@@ -2082,7 +2028,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
             }
         }
     }
-    let grouped_root = !nested && matches!(output.result, RegionResult::Separate { .. });
+    let grouped_root = !nested && matches!(result, RegionResult::Separate { .. });
     if !grouped_root {
         solver.commit_transaction();
     }
@@ -2090,14 +2036,14 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
     if nested {
         pending_errors.forward(sink);
     } else {
-        publish_arm_errors(frame, None, pending_errors.tasks.into_inner().unwrap(), solver, fraction, sink);
+        publish_arm_errors(frame, pending_errors.tasks.into_inner().unwrap(), solver, fraction, sink);
         if grouped_root {
             publish_join_groups(frame, record_start, task_id, fraction, stop, sink, state, shared, solver, info);
         } else {
             publish_committed_records(frame, record_start, task_id, shared, solver);
         }
     }
-    match output.result {
+    match result {
         RegionResult::Merged => {
             frame.pending_retry_operand = None;
             let local = cost::make_mut(&mut frame.local_state);
