@@ -283,7 +283,7 @@ pub enum Val<B> {
     Bits(B),
     MixedBits(Vec<BitsSegment<B>>),
     String(String),
-    /// 不同具体值的守卫选择；复制和内部返回保留，具体消费者再拆分。
+    /// 布尔守卫选取备选值。不同位宽的备选各自保留原生位宽。
     Guarded(Sym, Box<(Val<B>, Val<B>)>),
     Unit,
     Vector(Vec<Val<B>>),

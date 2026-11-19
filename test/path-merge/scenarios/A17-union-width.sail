@@ -5,8 +5,6 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "保留 P 标签，在其负载内按 x 选择位宽。解包后 length 在 x=0 时为 4，在 x=1 时为 8。"
-// status = "xfail"
-// reason = "total-merge-design.md §2（union 负载）：P 的两种负载宽度无法构造同宽 ITE，解包后仍分别完成。"
 // ---
 default Order dec
 $include <prelude.sail>

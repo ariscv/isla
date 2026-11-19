@@ -29,7 +29,7 @@ python3 -m unittest discover -s test/path-merge
 
 ## 新增场景
 
-用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–E 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
+用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–F 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
 
 1. 把输入位写到专用寄存器。在 TOML 的 `inputs` 中按位宽登记这些寄存器。符号条件和影响观测的自由选择都应有对应输入。场景会穷举登记的有限输入域，通常只需几位。
 2. 在 `prop` 中执行候选代码，把它的返回值写入 `out_value`，再返回布尔性质。可以用无分叉的独立规格校验候选返回值。复合值在 Sail 里投影成可区别各结果的整数、布尔值或位向量。把要比较的后态寄存器写入 `registers`。这些寄存器在每条完成路径上都应已初始化。
@@ -161,3 +161,8 @@ python3 -m unittest discover -s test/path-merge
 S1–S6、S6 边界、S1 控制及故意写错的规格继续使用 [property 的内层合并索引](../property/README-nested-merge.md)。该索引给出每项的守卫目标与独立运行命令。
 
 A3 在旧缺省下有两条完成路径，标为 XFAIL。缺省开启且字符串比较能直接读带守卫值后，递归和平铺在 B64 和 B129 下都得到一条完成路径，实测 XPASS 后已移除标记。
+
+## F 组 不同位宽的备选值
+
+- [F1 调用者只检查 Ok 标签](scenarios/F1-union-width-tag.sail)
+- [F2 解包后检查长度、拼接并扩展至固定宽度](scenarios/F2-union-width-append.sail)

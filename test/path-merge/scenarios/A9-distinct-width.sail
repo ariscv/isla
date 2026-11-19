@@ -5,8 +5,6 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "按 x 保留位宽和值。length 在 x=0 时读到 4，在 x=1 时读到 8。"
-// status = "xfail"
-// reason = "total-merge-design.md §2（变宽位向量）：当前值合并要求位宽相同，4 位和 8 位分别完成。"
 // ---
 default Order dec
 $include <prelude.sail>
