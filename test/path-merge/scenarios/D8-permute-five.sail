@@ -1,12 +1,11 @@
 // --- TOML
+// reverse_region_ready = true
 // title = "改变五片段到达次序后守卫分组一致"
 // intent = "置换同一棵树的片段到达次序，每次都应得到覆盖全部输入的一条守卫。"
 // inputs = { path_x = 3 }
 // expect_paths_unmerged = 5
 // expect_paths_merged = 1
 // must_merge = "五个叶子的 a、b、c 可按原输入选择。所有八个输入覆盖同一条路径，字符串比较仍能区分三个值。"
-// status = "todo"
-// reason = "merge-principle-audit.md §2（到达次序）：property CLI 缺少控制同一棵树片段到达排列的开关。"
 // ---
 default Order dec
 $include <prelude.sail>

@@ -1,10 +1,9 @@
 // --- TOML
+// sequential_ram = true
 // title = "写入一或两字节"
 // intent = "同一条写操作通过符号长度选取待写数据，事件保留相应字节。"
 // inputs = { path_mode = 1 }
 // must_merge = "两种输入各写一次，同一地址的不同长度和数据由守卫区分。"
-// status = "xfail"
-// reason = "直接内存的异长写仍分成两条路径。两种合并策略均逐输入核对写事件。"
 // ---
 default Order dec
 $include <prelude.sail>

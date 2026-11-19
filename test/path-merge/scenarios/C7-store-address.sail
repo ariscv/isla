@@ -1,12 +1,11 @@
 // --- TOML
+// sequential_ram = true
 // title = "不同地址写相同字节"
 // intent = "核对每个输入恰好一次写及其地址和字节。"
 // inputs = { path_x = 1 }
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "按输入选择写请求的地址，每个输入恰好产生原地址、原字节的一笔写。"
-// status = "xfail"
-// reason = "merge-principle-audit.md §2（直接内存写）：两笔候选请求的地址不同，当前模型保留两条写路径。"
 // ---
 default Order dec
 $include <prelude.sail>

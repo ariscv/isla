@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
-use isla_lib::executor::{self, LocalFrame, Run, Task, TaskId};
+use isla_lib::executor::{self, LocalFrame, Run, Task, TaskId, TaskState};
 use isla_lib::ir::{SharedState, Val};
 use isla_lib::primop_util::{replace_mixed_bits, smt_value};
 use isla_lib::smt::{
@@ -24,6 +24,9 @@ pub fn add_options(opts: &mut getopts::Options) {
     opts.optopt("", "expect-paths", "要求可满足的完成路径数恰好为指定值", "<N>");
     opts.optflag("", "print-paths", "打印完成路径数、守卫与返回值");
     opts.optopt("", "dump-paths", "将完成路径的守卫、返回值和合并记录数写入 JSON", "<文件>");
+    opts.optflag("", "reverse-region-ready", "逆转同一分叉片段的就绪顺序");
+    opts.optflag("", "observe-assertion-failures", "将可达断言失败导出为独立场景终态");
+    opts.optflag("", "sequential-ram", "用顺序字节数组建模 RAM 读写");
     opts.optflag("", "scenario-observations", "在路径 JSON 中保留场景观测、访存和寄存器读事件");
 }
 
@@ -32,12 +35,19 @@ pub struct PathOptions {
     print: bool,
     dump: Option<PathBuf>,
     scenario_observations: bool,
+    sequential_ram: bool,
+    reverse_region_ready: bool,
+    observe_assertion_failures: bool,
 }
 
 impl PathOptions {
     pub fn parse(matches: &getopts::Matches) -> Result<Self, String> {
         let dump = matches.opt_str("dump-paths").map(PathBuf::from);
         let scenario_observations = matches.opt_present("scenario-observations");
+        let observe_assertion_failures = matches.opt_present("observe-assertion-failures");
+        if observe_assertion_failures && !scenario_observations {
+            return Err("--observe-assertion-failures 需要 --scenario-observations".into());
+        }
         if scenario_observations && dump.is_none() {
             return Err("--scenario-observations 需要 --dump-paths".to_string());
         }
@@ -50,7 +60,30 @@ impl PathOptions {
             print: matches.opt_present("print-paths"),
             dump,
             scenario_observations,
+            sequential_ram: matches.opt_present("sequential-ram"),
+            reverse_region_ready: matches.opt_present("reverse-region-ready"),
+            observe_assertion_failures,
         })
+    }
+
+    pub fn task_state<B>(&self, state: TaskState<B>) -> TaskState<B> {
+        state.with_region_observations(self.reverse_region_ready, self.observe_assertion_failures)
+    }
+
+    pub fn task<'ir, 'task, B: BV>(
+        &self,
+        frame: &mut LocalFrame<'ir, B>,
+        state: &'task TaskState<B>,
+    ) -> Task<'ir, 'task, B> {
+        let id = TaskId::fresh();
+        if self.sequential_ram {
+            let context = Context::new(Config::new());
+            let mut solver = Solver::new(&context);
+            isla_lib::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver);
+            frame.task_with_checkpoint(id, state, checkpoint(&mut solver))
+        } else {
+            frame.task(id, state)
+        }
     }
 
     pub fn run<'ir, B: BV>(&self, threads: usize, task: Task<'ir, '_, B>, shared: &SharedState<'ir, B>) -> i32 {
@@ -67,6 +100,7 @@ impl PathOptions {
                 incomplete: AtomicBool::new(false),
                 paths: Mutex::new(Vec::new()),
                 scenario_observations: self.scenario_observations,
+                observe_assertion_failures: self.observe_assertion_failures,
             });
             executor::start_multi(threads, None, vec![task], shared, collected.clone(), &collect_path);
             (collected.passed.load(Ordering::Acquire), self.report(&collected))
@@ -82,9 +116,10 @@ impl PathOptions {
     fn report(&self, collected: &PathResults) -> i32 {
         let mut paths = collected.paths.lock().unwrap();
         paths.sort_by(|a, b| (&a.guard_smtlib, &a.return_value).cmp(&(&b.guard_smtlib, &b.return_value)));
-        let wrong_count = self.expected.is_some_and(|n| n != paths.len());
+        let complete = paths.iter().filter(|path| path.terminal.is_none()).count();
+        let wrong_count = self.expected.is_some_and(|n| n != complete);
         let incomplete = collected.incomplete.load(Ordering::Acquire);
-        println!("Paths: {}", paths.len());
+        println!("Paths: {complete}");
         if self.print || wrong_count || incomplete {
             for (i, path) in paths.iter().enumerate() {
                 println!(
@@ -97,7 +132,7 @@ impl PathOptions {
             }
         }
         if wrong_count {
-            eprintln!("期望 {} 条完成路径，实际 {} 条", self.expected.unwrap(), paths.len());
+            eprintln!("期望 {} 条完成路径，实际 {} 条", self.expected.unwrap(), complete);
         }
         if incomplete {
             eprintln!("至少一条路径未完成或求解失败");
@@ -129,6 +164,10 @@ struct PathSummary {
     register_writes: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     register_values: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    register_initialized: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_events: Option<Vec<MemoryEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,6 +202,7 @@ struct PathResults {
     incomplete: AtomicBool,
     paths: Mutex<Vec<PathSummary>>,
     scenario_observations: bool,
+    observe_assertion_failures: bool,
 }
 
 fn value_expression<B: BV>(
@@ -275,6 +315,14 @@ fn path_summary<B: BV>(
             .map(|(name, value)| (name, value_expression(value, solver, shared, &mut observed)))
             .collect()
     });
+    let register_initialized = scenario_observations.then(|| {
+        let registers: BTreeMap<_, _> =
+            frame.regs().into_iter().map(|(reg, value)| (zencode::decode(shared.symtab.to_str(*reg)), value)).collect();
+        registers
+            .into_iter()
+            .map(|(name, register)| (name, value_expression(&register.initialization(), solver, shared, &mut observed)))
+            .collect()
+    });
     let return_value = value_expression(value, solver, shared, &mut observed);
     let mut guard = Vec::new();
     solver.write_smtlib(&mut guard).unwrap();
@@ -284,6 +332,8 @@ fn path_summary<B: BV>(
         merge_records: frame.region_merge_records().len(),
         register_writes,
         register_values,
+        register_initialized,
+        terminal: None,
         memory_events,
         memory_event_guards,
         register_reads,
@@ -348,6 +398,20 @@ fn collect_path<'ir, B: BV>(
         },
         Ok((Run::Dead, _)) => (),
         Ok((Run::Exit | Run::Suspended { .. }, _)) => collected.incomplete.store(true, Ordering::Release),
+        Err((ExecError::AssertionFailure(..), frame)) if collected.observe_assertion_failures => {
+            match solver.check_sat(SourceLoc::unknown()) {
+                SmtResult::Sat => {
+                    let context = Context::new(Config::new());
+                    let mut replay = Solver::from_checkpoint(&context, checkpoint(&mut solver));
+                    let mut summary = path_summary(&Val::Bool(false), frame, shared, &mut replay, true);
+                    summary.terminal = Some("assertion_failure");
+                    collected.paths.lock().unwrap().push(summary);
+                }
+                SmtResult::Unsat => (),
+                SmtResult::Unknown | SmtResult::Error(_) => collected.incomplete.store(true, Ordering::Release),
+            }
+            return;
+        }
         Err((error, _)) => {
             eprintln!("路径执行失败：{error:?}");
             collected.incomplete.store(true, Ordering::Release);

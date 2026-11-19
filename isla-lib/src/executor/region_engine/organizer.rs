@@ -5,37 +5,39 @@ use crate::config::MergeStrategy;
 use std::collections::VecDeque;
 
 pub(in crate::executor) enum ReadyFragments<T> {
-    Stack(Vec<T>),
-    Queue(VecDeque<T>),
+    Stack(Vec<T>, bool),
+    Queue(VecDeque<T>, bool),
 }
 
 impl<T> ReadyFragments<T> {
     pub(in crate::executor) fn new<B>(state: &TaskState<B>) -> Self {
         match state.execution_limits.as_ref().map(|limits| limits.merge_strategy).unwrap_or_default() {
-            MergeStrategy::Recursive => Self::Stack(Vec::new()),
-            MergeStrategy::Flat => Self::Queue(VecDeque::new()),
+            MergeStrategy::Recursive => Self::Stack(Vec::new(), state.reverse_region_ready),
+            MergeStrategy::Flat => Self::Queue(VecDeque::new(), state.reverse_region_ready),
         }
     }
 
     /// 同一组片段的原始顺序由分叉决定。栈把新发现的一组放到旧工作之前。
     pub(in crate::executor) fn extend(&mut self, fragments: impl DoubleEndedIterator<Item = T>) {
         match self {
-            Self::Stack(stack) => stack.extend(fragments.rev()),
-            Self::Queue(queue) => queue.extend(fragments),
+            Self::Stack(stack, false) => stack.extend(fragments.rev()),
+            Self::Stack(stack, true) => stack.extend(fragments),
+            Self::Queue(queue, false) => queue.extend(fragments),
+            Self::Queue(queue, true) => queue.extend(fragments.rev()),
         }
     }
 
     pub(in crate::executor) fn len(&self) -> usize {
         match self {
-            Self::Stack(stack) => stack.len(),
-            Self::Queue(queue) => queue.len(),
+            Self::Stack(stack, _) => stack.len(),
+            Self::Queue(queue, _) => queue.len(),
         }
     }
 
     pub(in crate::executor) fn pop(&mut self) -> Option<T> {
         match self {
-            Self::Stack(stack) => stack.pop(),
-            Self::Queue(queue) => queue.pop_front(),
+            Self::Stack(stack, _) => stack.pop(),
+            Self::Queue(queue, _) => queue.pop_front(),
         }
     }
 }

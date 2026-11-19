@@ -58,12 +58,13 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
         let deferred_error = crate::config::RegionOptions::current().arm_error_leaf
             && solver.region_queries_deferred()
             && is_arm_execution_error(error);
-        let consumer_error =
-            consumer && (is_arm_execution_error(error) || matches!(error, ExecError::AssertionFailure(..)));
-        if consumer_error || deferred_error {
+        let assertion = matches!(error, ExecError::AssertionFailure(..));
+        let isolated_error = (consumer && (is_arm_execution_error(error) || assertion))
+            || (state.observe_assertion_failures && assertion);
+        if isolated_error || deferred_error {
             let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
             let mut dead = solver.structural_bool(&reach) == Some(false);
-            if consumer_error && !dead {
+            if isolated_error && !dead {
                 let checked = solver.check_candidate_sat(error.source_loc());
                 if let Some(result) = checked {
                     match super::region_merge::path_is_feasible(result, arm, solver, shared) {
@@ -101,7 +102,7 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
                     state,
                     stop_conditions: stop,
                 };
-                if consumer_error {
+                if isolated_error {
                     sink.submit_consumer_error(task);
                     solver.commit_dead_transaction();
                 } else {
