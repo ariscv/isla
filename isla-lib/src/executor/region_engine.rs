@@ -307,6 +307,14 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
     let count = arms.iter().map(Vec::len).sum::<usize>();
+    if crate::config::RegionOptions::current().progress && diagnostics::enabled() {
+        super::stats::merge_timing::live_sample(
+            base.function_name,
+            region.branch_pc,
+            &shared.symtab,
+            "finish_arrivals",
+        );
+    }
     let nested = frame.region_execution.is_some();
     let keep_separate = (nested || count > 2)
         && frame.region_execution.as_ref().is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)

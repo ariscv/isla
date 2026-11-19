@@ -193,8 +193,8 @@ mod proof_budget;
 mod transaction;
 mod witness_shadow;
 pub(crate) use logical_arm::LogicalArm;
-use transaction::SolverSavepoint;
 pub use transaction::SolverTransaction;
+use transaction::{DeclarationUndo, SolverSavepoint};
 mod dependencies;
 pub mod smtlib;
 mod tactic;
@@ -1802,6 +1802,7 @@ pub struct Solver<'ctx, B> {
     stashed_model: Option<Z3_model>,
     shadow_witnesses: witness_shadow::Bank<'ctx>,
     savepoints: Vec<SolverSavepoint<'ctx>>,
+    declaration_undo: Vec<DeclarationUndo<'ctx>>,
     transaction_events: Vec<Event<B>>,
     logical_arms: logical_arm::LogicalArms,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
@@ -2531,6 +2532,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 stashed_model: None,
                 shadow_witnesses: witness_shadow::Bank::new(ctx),
                 savepoints: Vec::new(),
+                declaration_undo: Vec::new(),
                 transaction_events: Vec::new(),
                 logical_arms: logical_arm::LogicalArms::default(),
                 transaction_event_guards: Vec::new(),
@@ -2772,12 +2774,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
-                if self.decls.insert(*v, Ast::mk_constant(&fd)).is_some() {
-                    self.knowledge.constrain();
-                    self.clear_stashed_model();
-                }
+                self.bind_constant(*v, Ast::mk_constant(&fd));
                 if self.def_attrs.attrs & 2 != 0 {
-                    self.sail_bitvectors.insert(*v);
+                    self.tag_bitvector(*v);
                 }
             }
             Def::DeclareFun(v, arg_tys, result_ty) => {
@@ -2788,9 +2787,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.performance_info.add_var_node(*v, info);
                 }
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, arg_tys, result_ty, &self.symbol_namer);
-                if self.func_decls.insert(*v, fd).is_some() {
+                let previous = self.func_decls.insert(*v, fd);
+                if previous.is_some() {
                     self.knowledge.constrain();
                     self.clear_stashed_model();
+                }
+                if !self.savepoints.is_empty() {
+                    self.declaration_undo.push(DeclarationUndo::Function(*v, previous));
                 }
             }
             Def::DefineConst(v, exp) => {
@@ -2807,12 +2810,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 let mut ast = self.translate_exp(exp);
                 ast.simplify();
                 // 改绑已有符号可能改变缓冲断言的含义，不能沿用改绑前的见证。
-                if self.decls.insert(*v, ast).is_some() {
-                    self.knowledge.constrain();
-                    self.clear_stashed_model();
-                }
+                self.bind_constant(*v, ast);
                 if self.def_attrs.attrs & 2 != 0 {
-                    self.sail_bitvectors.insert(*v);
+                    self.tag_bitvector(*v);
                 }
             }
             Def::DefineEnum(name, size) => {
@@ -2935,6 +2935,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.define_const(exp, info))
     }
 
+    fn bind_constant(&mut self, sym: Sym, ast: Ast<'ctx>) {
+        let previous = self.decls.insert(sym, ast);
+        if previous.is_some() {
+            self.knowledge.constrain();
+            self.clear_stashed_model();
+        }
+        if !self.savepoints.is_empty() {
+            self.declaration_undo.push(DeclarationUndo::Constant(sym, previous));
+        }
+    }
+
+    fn tag_bitvector(&mut self, sym: Sym) {
+        if self.sail_bitvectors.insert(sym) && !self.savepoints.is_empty() {
+            self.declaration_undo.push(DeclarationUndo::Bitvector(sym));
+        }
+    }
+
     /// 标记已有位向量，并同步定义属性，使检查点重放保留类别。
     pub fn mark_bitvector(&mut self, sym: Sym) {
         assert!(self.length(sym).is_some(), "只能标记已定义的位向量");
@@ -2947,7 +2964,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.transaction_events[savepoint.events_len..].iter_mut().rev().find(defines_sym)
             {
                 *attrs = attrs.sail_bitvector();
-                self.sail_bitvectors.insert(sym);
+                self.tag_bitvector(sym);
             } else {
                 // 不支持改写本层之外的定义属性：这会修改父层或已发布的日志，
                 // 无法通过本层缓冲回滚。因此保留 invalid，而非拒绝普通 Assert。
@@ -2963,7 +2980,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
             trace = Arc::make_mut(&mut trace.tail).as_mut().expect("已定义符号必须存在于轨迹中");
         }
-        self.sail_bitvectors.insert(sym);
+        self.tag_bitvector(sym);
     }
 
     pub fn is_sail_bitvector(&self, sym: Sym) -> bool {

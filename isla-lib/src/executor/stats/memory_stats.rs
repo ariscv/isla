@@ -32,7 +32,7 @@ static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 thread_local! { static TASK: Cell<Option<(usize, usize)>> = const { Cell::new(None) }; }
 #[derive(Default)]
 struct State {
-    active: HashMap<usize, (usize, Option<(Instant, usize, usize, SolverMemory)>)>,
+    active: HashMap<usize, (usize, Option<(Instant, usize, usize, SolverMemory, Option<usize>)>)>,
     queue: Option<(Instant, usize, usize, usize, usize)>,
     resident_seen: HashSet<usize>,
     resident_bytes: usize,
@@ -43,6 +43,8 @@ pub struct SolverMemory {
     pub bytes: usize,
     pub layers: Vec<Value>,
     pub model_caches: usize,
+    pub buffered_events_bytes: usize,
+    pub event_guard_bytes: usize,
 }
 pub fn configure(enabled: bool) {
     if enabled {
@@ -93,7 +95,7 @@ pub fn poll<B: BV>(frame: &LocalFrame<B>, solver: &Solver<B>) {
         let checkpoint_bytes = solver.estimated_trace_bytes(&mut seen);
         let tables = solver.memory_stats();
         STATE.get().unwrap().lock().unwrap().active.get_mut(&id).unwrap().1 =
-            Some((Instant::now(), frame_bytes, checkpoint_bytes, tables));
+            Some((Instant::now(), frame_bytes, checkpoint_bytes, tables, super::merge_timing::live_attempt()));
     }
 }
 pub(crate) fn queue_sample<'a, 'ir, 'task, B: BV + 'a>(
@@ -146,12 +148,15 @@ pub fn snapshot() -> Value {
     let mut models = 0;
     let mut samples = Vec::new();
     for (execution, (id, sample)) in &state.active {
-        if let Some((at, frames, checkpoints, solver)) = sample {
+        if let Some((at, frames, checkpoints, solver, attempt)) = sample {
             frame_bytes += frames;
             checkpoint_bytes += checkpoints;
             solver_bytes += solver.bytes;
             models += solver.model_caches;
-            samples.push(json!({"execution":execution,"task":id,"age_seconds":now.duration_since(*at).as_secs_f64(),"savepoint_depth":solver.layers.len()-1,"layers":solver.layers}));
+            samples.push(json!({"execution":execution,"task":id,"attempt":attempt,"age_seconds":now.duration_since(*at).as_secs_f64(),
+                "frame_bytes":frames,"checkpoint_bytes":checkpoints,"solver_container_bytes":solver.bytes,
+                "buffered_events_bytes":solver.buffered_events_bytes,"event_guard_bytes":solver.event_guard_bytes,
+                "savepoint_depth":solver.layers.len()-1,"layers":solver.layers}));
         }
     }
     let queue = state.queue.map(|(at,active,count,frames,checkpoints)| json!({"age_seconds":now.duration_since(at).as_secs_f64(),"active_at_census":active,"tasks":count,"frame_bytes":frames,"checkpoint_bytes":checkpoints}));
@@ -474,7 +479,8 @@ mod tests {
             Instant::now(),
             10,
             20,
-            SolverMemory { bytes: 30, layers: vec![json!({"layer":0})], model_caches: 1 },
+            SolverMemory { bytes: 30, layers: vec![json!({"layer":0})], model_caches: 1, ..Default::default() },
+            None,
         ));
         let frame = LocalFrame::<B64>::new(crate::ir::RETURN, &[], &crate::ir::Ty::Unit, None, &[]);
         let task_state = crate::executor::TaskState::new();

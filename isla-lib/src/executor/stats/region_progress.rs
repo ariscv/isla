@@ -242,6 +242,7 @@ pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab, solver: &crate
     if !enabled() || frame.region_execution.is_none() {
         return;
     }
+    super::merge_timing::live_step(frame.function_name, frame.pc, symtab);
     ROOT.with(|r| {
         let mut r=r.borrow_mut();let Some(p)=r.as_mut() else{return};
         let function=crate::zencode::decode(symtab.to_str(frame.function_name));
