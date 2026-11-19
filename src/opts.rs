@@ -413,6 +413,28 @@ pub fn parse_with_arch<'ir, B: BV>(
         }
     });
 
+    if merged_config.get("linearize").is_some() {
+        let cli_targets: Vec<_> = matches
+            .opt_strs("partial-linearize")
+            .into_iter()
+            .chain(matches.opt_strs("linearize"))
+            .filter_map(|name| symtab.get(&zencode::encode(&name)))
+            .collect();
+        if let Err(error) = ir::linearize_policy::rewrite_configured(
+            &mut arch,
+            &mut symtab,
+            &type_info,
+            &isa_config,
+            &merged_config,
+            &cli_targets,
+            matches.opt_present("test-linearize"),
+            num_threads,
+        ) {
+            eprintln!("{error}");
+            exit(1);
+        }
+    }
+
     if matches.opt_present("fork-assertions") {
         ir::assertions_to_jumps(&mut arch)
     }

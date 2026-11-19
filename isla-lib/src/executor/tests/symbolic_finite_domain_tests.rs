@@ -485,3 +485,40 @@ fn symbolic_finite_domain_projects_through_integer_conversions() {
     assert_eq!(concrete, [(32, vec![4]), (64, vec![8])]);
     assert_eq!(queries, 0);
 }
+#[test]
+fn symbolic_finite_domain_projects_masked_slices_through_ite() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    use Formula::*;
+    let bits = smtlib::bits64;
+    let equal = |lhs, rhs| Eq(Box::new(lhs), Box::new(rhs));
+    let slice = |sym, high, low| Extract(high, low, Box::new(Var(sym)));
+
+    for no_smt in [false, true] {
+        let mut cfg = Config::new();
+        cfg.solver_options.no_smt = no_smt;
+        cfg.solver_options.finite_domain_enumeration = true;
+        let context = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&context);
+        let a = solver.declare_bitvector(64, info());
+        let b = solver.declare_bitvector(64, info());
+        let condition = solver.declare_const(smtlib::Ty::Bool, info());
+        let pin = |sym, mask, value| equal(Bvand(Box::new(bits(mask, 64)), Box::new(Var(sym))), bits(value, 64));
+        solver.assert(pin(a, 0x0f00_0000_0000_0000, 0x0a00_0000_0000_0000));
+        solver.assert(pin(b, 0x0000_000f_0000_0000, 0x0000_000a_0000_0000));
+        let merged = solver.define_bitvector(
+            Ite(Box::new(Var(condition)), Box::new(slice(a, 59, 58)), Box::new(slice(b, 33, 32))),
+            info(),
+        );
+        let start = crate::smt::test_query_count();
+        assert_eq!(solver.finite_domain_bool(&equal(Var(merged), bits(0, 2))), Some(false));
+        assert_eq!(solver.finite_domain_bool(&equal(Var(merged), bits(2, 2))), Some(true));
+        assert_eq!(solver.finite_domain_bool(&equal(slice(a, 56, 55), bits(0, 2))), None);
+
+        let c = solver.declare_bitvector(64, info());
+        let guard = solver.start_transaction_with_guard(Some(pin(c, 3, 2)));
+        assert_eq!(solver.finite_domain_bool(&equal(slice(c, 1, 0), bits(2, 2))), Some(true));
+        solver.rollback_transaction(guard);
+        assert_eq!(solver.finite_domain_bool(&equal(slice(c, 1, 0), bits(2, 2))), None);
+        assert_eq!(crate::smt::test_query_count() - start, 0);
+    }
+}

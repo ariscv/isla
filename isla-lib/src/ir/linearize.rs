@@ -440,8 +440,9 @@ pub fn self_test<B: BV>(
     instrs1: Vec<Instr<Name, B>>,
     instrs2: Vec<Instr<Name, B>>,
 ) -> bool {
-    use crate::executor;
+    use crate::executor::{self, Run};
     use crate::init::{initialize_architecture, Initialized};
+    use crate::smt::{smtlib, SmtResult};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let fn1 = symtab.intern("self_test_fn1#");
@@ -479,9 +480,46 @@ pub fn self_test<B: BV>(
         .add_lets(&lets)
         .add_regs(&regs)
         .task(executor::TaskId::fresh(), &task_state);
-    let result = Arc::new(AtomicBool::new(true));
-
-    executor::start_multi(num_threads, None, vec![task], &shared_state, result.clone(), &executor::all_unsat_collector);
-
-    result.load(Ordering::Acquire)
+    // 至少存在一条正常且可满足的路径，所有可满足的路径均须等价。
+    let check = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+    executor::start_multi(
+        num_threads,
+        None,
+        vec![task],
+        &shared_state,
+        check.clone(),
+        &|_, _, result, _, mut solver, check| {
+            let value = match result {
+                Ok((Run::Finished(value), _)) => value,
+                Ok((Run::Dead, _)) => return,
+                _ => {
+                    check.1.store(true, Ordering::Release);
+                    return;
+                }
+            };
+            let info = SourceLoc::unknown();
+            match solver.check_sat(info) {
+                SmtResult::Unsat => return,
+                SmtResult::Sat => (),
+                _ => {
+                    check.1.store(true, Ordering::Release);
+                    return;
+                }
+            }
+            let proven = match value {
+                Val::Bool(true) => true,
+                Val::Symbolic(value) if solver.is_bool(value) => {
+                    solver.check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(value))), info)
+                        == SmtResult::Unsat
+                }
+                _ => false,
+            };
+            if proven {
+                check.0.store(true, Ordering::Release);
+            } else {
+                check.1.store(true, Ordering::Release);
+            }
+        },
+    );
+    check.0.load(Ordering::Acquire) && !check.1.load(Ordering::Acquire)
 }

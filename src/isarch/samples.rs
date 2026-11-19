@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct SampleOptions {
+    pub witness_randomization_seed: Option<u64>,
     pub filter_model_exceptions: Vec<String>,
     pub path_cache: super::path_cache::Options,
     pub fuzz: Option<super::fuzz::Options>,
@@ -82,6 +83,7 @@ impl SampleOptions {
 }
 
 pub struct SampleSession {
+    pub witness_randomization_seed: Option<u64>,
     pub filter_model_exceptions: Vec<String>,
     pub path_cache: super::path_cache::Options,
     pub fuzz: Option<super::fuzz::Session>,
@@ -156,6 +158,7 @@ impl SampleSession {
             }
         });
         Ok(Self {
+            witness_randomization_seed: options.witness_randomization_seed,
             filter_model_exceptions: options.filter_model_exceptions.clone(),
             path_cache: options.path_cache.clone(),
             fuzz: options.fuzz.as_ref().map(super::fuzz::Session::new).transpose()?,

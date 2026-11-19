@@ -529,8 +529,18 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
         }
     }
-    let mut diagnostics_attempt = diagnostics::enabled()
-        .then(|| diagnostics::AttemptGuard::start(task_id.as_usize(), frame.function_name, frame.pc, &shared.symtab));
+    use diagnostics::FailurePhase;
+    let mut diagnostics_attempt = diagnostics::enabled().then(|| {
+        diagnostics::AttemptGuard::start(
+            task_id.as_usize(),
+            frame.function_name,
+            frame.pc,
+            &shared.symtab,
+            info,
+            &frame.backtrace,
+        )
+    });
+    let mut failure_phase = FailurePhase::Admission;
     let depth = frame.region_execution.as_ref().map_or(1, |execution| execution.depth + 1);
     if diagnostics::enabled() {
         diagnostics::record_depth(depth, frame.backtrace.len(), solver.transaction_depth());
@@ -623,6 +633,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
                 let record_start = frame.region_merge_records.len();
+                failure_phase = FailurePhase::ArmExecution;
                 let mut candidate_frame = solver.validates_candidates().then(|| frame.clone());
                 let tx = solver.start_transaction();
                 let defer = solver.defer_region_checks();
@@ -667,6 +678,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     );
                     log_phase("execute_end", None);
                     if defer && !nested && output.is_ok() {
+                        failure_phase = FailurePhase::ExitObligation;
                         log_phase("obligation_start", None);
                         let _scope = stats::region_progress::QueryScope::enter("exit_obligations");
                         let checked = solver.check_deferred_assertions(info);
@@ -711,6 +723,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     && !nested
                     && result.as_ref().is_ok_and(|output| !matches!(output.result, RegionResult::Dead))
                 {
+                    failure_phase = FailurePhase::ExitCertification;
                     log_phase("exit_check_start", None);
                     let _scope = stats::region_progress::QueryScope::enter("region_exit");
                     let checked = solver.check_candidate_sat(info);
@@ -848,7 +861,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
         Ok(result) => {
             if let Some(attempt) = diagnostics_attempt.as_mut() {
-                attempt.finish(None);
+                attempt.finish_success(matches!(result, RegionResult::Dead));
                 if segmented {
                     attempt.finish_segmented();
                 }
@@ -884,7 +897,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 &site
             };
             if diagnostics_active {
-                diagnostics_attempt.as_mut().unwrap().finish(Some(reason));
+                diagnostics_attempt.as_mut().unwrap().finish_rejected(failure_phase, rejection, &error, &shared.symtab);
                 if matches!(reason, SpeculativeRejectReason::IncompatibleState | SpeculativeRejectReason::UnionPayload)
                 {
                     diagnostics::unattributed_error(frame.function_name, frame.pc, &error, &shared.symtab);
@@ -1392,7 +1405,9 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
             || !exit.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty()
             || solver.transaction_has_memory_writes()
         {
-            return Err(reject(exit, SpeculativeRejectReason::StateEffect));
+            let error = reject(exit, SpeculativeRejectReason::StateEffect);
+            diagnostics::note_failure_phase(diagnostics::FailurePhase::LoopFold, &error);
+            return Err(error);
         }
     }
     fold_exit_frontiers(previous, next, history_ids, base, region, state, shared, solver, info)

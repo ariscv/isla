@@ -548,7 +548,8 @@ pub(super) fn finish_prepared_region<'ir, B: BV>(
                 join_terms::emit(prepared.operations, solver);
                 assemble_state(prepared.state, record_id, condition, base, left, right, region, info)
             }
-            None => merge_states(record_id, condition, base, left, right, region, state, shared, solver, info)?,
+            None => merge_states(record_id, condition, base, left, right, region, state, shared, solver, info)
+                .inspect_err(|error| diagnostics::note_failure_phase(diagnostics::FailurePhase::StateMerge, error))?,
         },
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");

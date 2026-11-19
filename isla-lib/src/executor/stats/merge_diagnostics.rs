@@ -1,6 +1,6 @@
 //! 显式开启的通用合并诊断；不发查询，不初始化值，不参与事务或缓存。
 use crate::bitvector::BV;
-use crate::error::ExecError;
+use crate::error::{ExecError, IslaError};
 use crate::executor::model_exception::FilteredPath;
 use crate::ir::{BitsSegment, Name, Symtab, Ty, UVal, Val};
 use crate::smt::smtlib;
@@ -487,48 +487,166 @@ fn difference(left: &Value, right: &Value) -> &'static str {
     "unsupported_value"
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FailurePhase {
+    Admission,
+    ArmExecution,
+    StateMerge,
+    LoopFold,
+    ExitObligation,
+    ExitCertification,
+    BudgetOrDepth,
+}
+
 struct Attempt {
     id: usize,
     parent: Option<usize>,
     task: usize,
     origin: Value,
     root: Option<usize>,
+    trace_start: Option<(Instant, SourceLoc)>,
+    outcome: &'static str,
+    failure: Option<Value>,
+    nested_failure: Option<Value>,
+    phase_at: Option<(super::SpeculativeRejectReason, Name, usize, FailurePhase)>,
 }
+
 pub(crate) struct AttemptGuard {
     timing: super::merge_timing::AttemptGuard,
 }
 impl AttemptGuard {
-    pub fn start(task: usize, function: Name, pc: usize, symtab: &Symtab) -> Self {
+    pub fn start(
+        task: usize,
+        function: Name,
+        pc: usize,
+        symtab: &Symtab,
+        info: SourceLoc,
+        callers: &[(Name, usize)],
+    ) -> Self {
         let origin = json!({"function":name_string(function,symtab),"function_id":function.as_u32(),"pc":pc});
         let id = NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let timing = super::merge_timing::AttemptGuard::start(id, task, origin.clone());
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
             let parent = stack.last().map(|attempt| attempt.id);
-            stack.push(Attempt { id, parent, task, origin, root: None });
+            let trace_start = (parent.is_none() && MODE.load(Ordering::Relaxed) == 2).then(|| (Instant::now(), info));
+            if trace_start.is_some() {
+                let callers: Vec<_> =
+                    callers.iter().map(|(name, pc)| json!({"function":name_string(*name,symtab),"pc":pc})).collect();
+                eprintln!(
+                    "{}",
+                    json!({"schema":1,"kind":"merge_root_start","attempt":id,"task":task,
+                    "origin":origin,"location":info,"callers":callers})
+                );
+            }
+            stack.push(Attempt {
+                id,
+                parent,
+                task,
+                origin,
+                root: None,
+                trace_start,
+                outcome: "unfinished",
+                failure: None,
+                nested_failure: None,
+                phase_at: None,
+            });
         });
         Self { timing }
     }
+
     pub fn finish_local_rejection(&mut self, reason: super::SpeculativeRejectReason) {
-        self.finish(Some(reason));
-        // 当前汇合的候选已撤销，保留下来的片段继续。这个诊断不能作为祖先的传播原因。
-        ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().root = None);
+        self.timing.finish(reason.to_string());
+        ATTEMPTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let attempt = stack.last_mut().unwrap();
+            attempt.root = None;
+            attempt.outcome = "separate";
+        });
     }
 
     pub fn finish_segmented(&mut self) {
         self.timing.finish("segmented".into());
+        ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().outcome = "segmented");
     }
-    pub fn finish(&mut self, reason: Option<super::SpeculativeRejectReason>) {
-        self.timing.finish(reason.map_or_else(|| "success".into(), |reason| reason.to_string()));
+
+    pub fn finish_success(&mut self, dead: bool) {
+        self.timing.finish("success".into());
+        ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().outcome = if dead { "dead" } else { "success" });
+    }
+
+    pub fn finish_rejected(&mut self, phase: FailurePhase, rejection: &ExecError, error: &ExecError, symtab: &Symtab) {
+        let ExecError::SpeculativeReject { reason, function, pc, .. } = rejection else {
+            unreachable!("区域拒绝必须携带执行位置");
+        };
+        self.timing.finish(reason.to_string());
+        if MODE.load(Ordering::Relaxed) != 2 {
+            return;
+        }
+        let location = if error.source_loc().is_unknown() { rejection.source_loc() } else { error.source_loc() };
+        let phase = match reason {
+            super::SpeculativeRejectReason::StepBudget | super::SpeculativeRejectReason::NestingLimit => {
+                FailurePhase::BudgetOrDepth
+            }
+            _ => phase,
+        };
+        let site = json!({"function":name_string(*function,symtab),"pc":pc,"location":location});
+        ATTEMPTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let depth = stack.len();
+            let attempt = stack.last_mut().unwrap();
+            let phase = attempt
+                .phase_at
+                .filter(|(r, name, at, _)| (r, name, at) == (reason, function, pc))
+                .map_or(phase, |(_, _, _, phase)| phase);
+            let reason = json!(reason);
+            attempt.outcome = "rejected";
+            // 只沿同一次拒绝向外关联，已处理的子区域失败不能覆盖外层的退出认证。
+            attempt.failure = attempt
+                .nested_failure
+                .take()
+                .filter(|failure| failure["reason"] == reason && failure["at"] == site)
+                .or_else(|| {
+                    Some(json!({"attempt":attempt.id,"origin":attempt.origin,
+                    "depth":depth,"stage":phase,"reason":reason,"at":site,"error":bounded_debug(error,256)}))
+                });
+        });
     }
 }
+
+pub(crate) fn note_failure_phase(phase: FailurePhase, error: &ExecError) {
+    if MODE.load(Ordering::Relaxed) == 2 {
+        if let ExecError::SpeculativeReject { reason, function, pc, .. } = error {
+            ATTEMPTS.with(|stack| {
+                if let Some(attempt) = stack.borrow_mut().last_mut() {
+                    attempt.phase_at = Some((*reason, *function, *pc, phase));
+                }
+            });
+        }
+    }
+}
+
 impl Drop for AttemptGuard {
     fn drop(&mut self) {
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
             let attempt = stack.pop().unwrap();
-            if let (Some(parent), Some(root)) = (stack.last_mut(), attempt.root) {
-                parent.root = Some(root);
+            if let Some(parent) = stack.last_mut() {
+                if let Some(root) = attempt.root {
+                    parent.root = Some(root);
+                }
+                if attempt.failure.is_some() {
+                    parent.nested_failure = attempt.failure;
+                }
+            } else if let Some((started, location)) = attempt.trace_start {
+                eprintln!(
+                    "{}",
+                    json!({"schema":1,"kind":"merge_root_end",
+                    "attempt":attempt.id,"task":attempt.task,"origin":attempt.origin,"location":location,
+                    "outcome":attempt.outcome,"elapsed_seconds":started.elapsed().as_secs_f64(),
+                    "failure":attempt.failure})
+                );
             }
         });
     }
