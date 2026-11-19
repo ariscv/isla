@@ -63,4 +63,21 @@ mod tests {
         assert!(!coverage.observe(&result, &selected));
         assert_eq!(coverage.bins.len(), 2);
     }
+    #[test]
+    fn admission_records_the_signal_that_added_coverage() {
+        use super::super::{admission_reason, AdmissionReason};
+
+        let selected = vec!["counter".into()];
+        let counters = BTreeMap::from([("counter".into(), 2)]);
+        let mut coverage = Coverage::default();
+        assert_eq!(
+            admission_reason("T", false, || unreachable!(), || coverage.observe(&counters, &selected)),
+            Some(AdmissionReason::NewPerfSignature)
+        );
+        assert_eq!(
+            admission_reason("T", true, || unreachable!(), || coverage.observe(&counters, &selected)),
+            Some(AdmissionReason::NewMismatch)
+        );
+        assert_eq!(admission_reason("B1", true, || true, || unreachable!()), Some(AdmissionReason::NewModelCoverage));
+    }
 }

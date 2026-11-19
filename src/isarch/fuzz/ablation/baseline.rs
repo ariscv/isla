@@ -305,7 +305,7 @@ mod tests {
                 let mut sample = super::super::super::tests::example_sample();
                 sample.sample_id = input["id"].as_u64().unwrap();
                 sample.pre_memory[0].value = Some(input["pre"].as_u64().unwrap() as u8);
-                Entry { sample, identity: identity.clone(), selections: 0, score: 1 }
+                Entry { sample, identity: identity.clone(), selections: 0, score: 1, generation: 0 }
             })
             .collect::<Vec<_>>();
         let mut runtime: Runtime = serde_json::from_value(json!({

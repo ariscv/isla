@@ -267,6 +267,34 @@ pub(super) fn complete_probe(result: &Value) -> bool {
         && (result["xs_cause"].is_u64() || observation["xs_result_observed"] == true)
 }
 
+/// 只有完整的主硬件观察才能进入有效预算和后续反馈。
+pub(super) fn record_mutant(
+    record: &Value,
+    result: &Value,
+    log: &mut std::fs::File,
+    cases: &mut usize,
+    infrastructure: &mut usize,
+) -> Option<super::lineage::Observation> {
+    if complete_probe(result) {
+        *cases += 1;
+        return Some(super::lineage::Observation::from_fixed(result));
+    }
+    *infrastructure += 1;
+    let failure = match result["bucket"].as_str() {
+        Some(bucket @ ("timeout" | "limit" | "framework-abort" | "other-failure")) => bucket,
+        _ => "incomplete_observation",
+    };
+    super::append(
+        log,
+        &json!({"infrastructure_failure":{
+            "mutant_sample_id":record["sample_id"],"parent_entry":record["parent_entry"],
+            "parent_sample_id":record["parent_sample_id"],"operator":record["operator"],
+            "failure":failure,"agree":result["agree"],"bucket":result["bucket"],"reason":result["reason"]
+        }}),
+    );
+    None
+}
+
 fn update_agreement(result: &mut Value, observation: &Value) {
     let side = &observation["isla_consistent_side"];
     let agree = result["agree"] == true && side == "both";

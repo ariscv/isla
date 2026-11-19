@@ -4,6 +4,7 @@ mod classify;
 mod eligibility;
 mod emu;
 mod input_domain;
+mod lineage;
 mod observe;
 mod perf;
 pub(super) mod reproducibility;
@@ -15,6 +16,7 @@ use super::{
 };
 use crate::isarch::{resident::ResidentPath, target::Target};
 use isla_lib::{bitvector::BV, executor::samples::Sample, ir::SharedState};
+use lineage::AdmissionReason;
 use rand::{seq::SliceRandom, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -49,7 +51,22 @@ pub fn case_main() {
     disable_core_dumps();
     use std::io::BufRead;
     let args = std::env::args().collect::<Vec<_>>();
-    assert_eq!(args.len(), 5, "用法：ablation-case inspect|filter|run 输入.jsonl runtime.json 输出目录");
+    if args.get(1).is_some_and(|mode| mode == "lineage") {
+        assert_eq!(args.len(), 3, "用法：ablation-case lineage 运行目录");
+        match lineage::summarize(Path::new(&args[2])) {
+            Ok(summary) => println!("{}", serde_json::to_string_pretty(&summary).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    assert_eq!(
+        args.len(),
+        5,
+        "用法：ablation-case inspect|filter|run 输入.jsonl runtime.json 输出目录，或 ablation-case lineage 运行目录"
+    );
     assert!(matches!(args[1].as_str(), "inspect" | "filter" | "run"), "未知检查模式");
     let runtime = Runtime::read(Path::new(&args[3]));
     let platform: testcase::Platform = serde_json::from_reader(fs::File::open(&runtime.platform).unwrap()).unwrap();
@@ -304,12 +321,54 @@ struct Signals {
     universe: Vec<String>,
     random_selection_seed: u64,
 }
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Entry {
     sample: Sample,
     identity: ClassIdentity,
     selections: usize,
     score: usize,
+    #[serde(default)]
+    generation: usize,
+}
+
+fn admission_reason(
+    arm: &str,
+    novel_mismatch: bool,
+    novel_model: impl FnOnce() -> bool,
+    novel_perf: impl FnOnce() -> bool,
+) -> Option<AdmissionReason> {
+    let mismatch = novel_mismatch.then_some(AdmissionReason::NewMismatch);
+    match arm {
+        "B0" => None,
+        "B1" => novel_model().then_some(AdmissionReason::NewModelCoverage).or(mismatch),
+        "B2" | "T" => novel_perf().then_some(AdmissionReason::NewPerfSignature).or(mismatch),
+        _ => unreachable!(),
+    }
+}
+
+fn admit(
+    entries: &mut Vec<Entry>,
+    bursts: &mut VecDeque<(usize, bool)>,
+    parent: usize,
+    sample: &Sample,
+    identity: &ClassIdentity,
+    reason: Option<AdmissionReason>,
+) -> Option<usize> {
+    reason?;
+    let index = entries.len();
+    entries[parent].score = (entries[parent].score + 1).min(5);
+    // 父 entry 奖励独立保存，连发四次按 A/B/A/B 请求，邻类不存在时沿用既有 A 规则。
+    for form in [false, true, false, true] {
+        bursts.push_back((parent, form));
+    }
+    entries.push(Entry {
+        sample: sample.clone(),
+        identity: identity.clone(),
+        selections: 0,
+        score: 1,
+        generation: entries[parent].generation + 1,
+    });
+    Some(index)
 }
 
 fn choose(entries: &[Entry], guided: bool) -> usize {
@@ -402,6 +461,7 @@ fn campaign<B: BV>(
     fs::create_dir(&output).unwrap();
     let mut events = fs::File::create(output.join("attempts.jsonl")).unwrap();
     let mut accepted_log = fs::File::create(output.join("certified.jsonl")).unwrap();
+    let mut lineage_log = fs::File::create(output.join("lineage.jsonl")).unwrap();
     let mut curves = fs::File::create(output.join("curves.csv")).unwrap();
     writeln!(curves, "cases,heldout_signal_bins,heldout_signatures,corpus_entries,known_first,seconds").unwrap();
     let mut entries = initial.to_vec();
@@ -552,40 +612,39 @@ fn campaign<B: BV>(
                         )
                     });
                 for (hardware, record, identity, certification) in hardware {
-                    if !complete_observation(&hardware.fixed) {
-                        infrastructure += 1;
+                    let Some(observation) = observe::record_mutant(
+                        &record,
+                        &hardware.fixed,
+                        &mut lineage_log,
+                        &mut cases,
+                        &mut infrastructure,
+                    ) else {
                         append(
                             &mut events,
                             &json!({"record":record,"accepted":false,"phase":"hardware_infrastructure","fixed":hardware.fixed}),
                         );
                         continue;
-                    }
-                    cases += 1;
+                    };
                     last_progress = Instant::now();
                     *form_counts.entry(record["operator"].as_str().unwrap().to_owned()).or_default() += 1;
                     let parent = record["parent_entry"].as_u64().unwrap() as usize;
-                    let mismatch = mismatch_feature(&hardware.fixed);
+                    let mismatch = &observation.mismatch_signature;
                     let novel_mismatch = mismatch.as_ref().is_some_and(|key| mismatches.insert(key.clone()));
                     let (buckets, potential) = super::value_features::extract(&hardware.sample);
                     let feature =
                         super::feedback::Feature { identity: identity.clone(), buckets, potential, mismatch: None };
-                    let novel = match arm {
-                        "B0" => false,
-                        "B1" => coverage.is_novel(&feature) || novel_mismatch,
-                        "B2" | "T" => {
-                            (!hardware.perf.is_empty() && feedback_perf.observe(&hardware.perf, selected))
-                                || novel_mismatch
-                        }
-                        _ => unreachable!(),
-                    };
+                    let reason = admission_reason(
+                        arm,
+                        novel_mismatch,
+                        || coverage.is_novel(&feature),
+                        || !hardware.perf.is_empty() && feedback_perf.observe(&hardware.perf, selected),
+                    );
                     coverage.observe(hardware.sample.sample_id, &feature);
                     if !hardware.perf.is_empty() {
                         heldout.observe(&hardware.perf, &signals.holdout);
                     }
-                    if hardware.fixed["agree"] == true {
+                    if observation.agree {
                         agree += 1;
-                    } else if mismatch.is_none() {
-                        infrastructure += 1;
                     }
                     let case_dir = hardware.built.elf.parent().unwrap();
                     // 已知问题必须同时满足独立NEMU窄规则、修复版一致和未修版重放。
@@ -609,7 +668,7 @@ fn campaign<B: BV>(
                         }
                     }
                     let mut confirmed_candidate = false;
-                    if let Some(key) = &mismatch {
+                    if let Some(key) = mismatch {
                         if !initial_mismatches.contains(key) && !new_candidates.contains(key) {
                             let replay = emu::probe(
                                 runtime,
@@ -628,25 +687,25 @@ fn campaign<B: BV>(
                             }
                         }
                     }
-                    if novel {
-                        entries[parent].score = (entries[parent].score + 1).min(5);
-                        // 父entry奖励独立保存；连发四次按A/B/A/B请求，邻类不存在时沿用既有A规则。
-                        for form in [false, true, false, true] {
-                            bursts.push_back((parent, form));
-                        }
-                        entries.push(Entry {
-                            sample: hardware.sample.clone(),
-                            identity: identity.clone(),
-                            selections: 0,
-                            score: 1,
-                        });
-                    }
+                    let new_entry_index = admit(&mut entries, &mut bursts, parent, &hardware.sample, &identity, reason);
+                    append(
+                        &mut lineage_log,
+                        &lineage::Mutant::new(
+                            &record,
+                            &entries[parent],
+                            &identity,
+                            observation,
+                            arm,
+                            reason,
+                            new_entry_index,
+                        ),
+                    );
                     if let Some(index) = classes.iter().position(|class| class == &identity) {
                         hits[index] += 1;
                     }
                     append(
                         &mut accepted_log,
-                        &json!({"case":cases,"record":record,"certification":certification,"sample":hardware.sample,"fixed":hardware.fixed,"baseline":hardware.baseline,"new_feedback":novel,"new_divergence_candidate_replayed":confirmed_candidate,"corpus_entries":entries.len()}),
+                        &json!({"case":cases,"record":record,"certification":certification,"sample":hardware.sample,"fixed":hardware.fixed,"baseline":hardware.baseline,"new_feedback":reason.is_some(),"new_divergence_candidate_replayed":confirmed_candidate,"corpus_entries":entries.len()}),
                     );
                     writeln!(
                         curves,
@@ -673,6 +732,7 @@ fn campaign<B: BV>(
             }
         },
     );
+    assert!(arm != "B0" || entries.len() == initial.len(), "B0 不应新增 corpus entry");
     let summary = json!({"arm":arm,"seed":seed,"budget":runtime.budget,"cases":cases,"attempts":attempts,"complete":if runtime.first_request_only {attempts==1}else{cases==runtime.budget},"first_request_only":runtime.first_request_only,"seconds":began.elapsed().as_secs_f64(),"agree":agree,"infrastructure":infrastructure,"initial_corpus":initial.len(),"final_corpus":entries.len(),"corpus_added":entries.len()-initial.len(),"heldout":heldout.summary(),"R_XS_001_first":known_first,"replayed_new_divergence_signature_candidates":new_candidates,"forms":form_counts,"rejected_attempt_reasons":rejected,"rejected_reasons_may_overlap":true,"stop_without_progress_seconds":last_progress.elapsed().as_secs_f64()});
     io::write_json(&output.join("summary.json"), &summary);
     summary
@@ -731,7 +791,7 @@ pub(super) fn run<B: BV>(
                     &mut filter_log,
                     &json!({"sample_id":input.sample_id,"identity":identity,"accepted":true,"reasons":[]}),
                 );
-                entries.push(Entry { sample, identity, selections: 0, score: 1 });
+                entries.push(Entry { sample, identity, selections: 0, score: 1, generation: 0 });
             }
             Err(exclusion) => {
                 *primary.entry(exclusion.reasons.first().unwrap().clone()).or_default() += 1;
@@ -860,8 +920,8 @@ mod tests {
         let sample = super::super::tests::example_sample();
         let identity = ClassIdentity { scenario_config_id: "test".into(), path_signature: 1, guard_vector: "0".into() };
         let mut entries = vec![
-            Entry { sample: sample.clone(), identity: identity.clone(), selections: 0, score: 1 },
-            Entry { sample, identity, selections: 0, score: 4 },
+            Entry { sample: sample.clone(), identity: identity.clone(), selections: 0, score: 1, generation: 0 },
+            Entry { sample, identity, selections: 0, score: 4, generation: 0 },
         ];
         assert_eq!(choose(&entries, false), 0);
         assert_eq!(choose(&entries, true), 1);
