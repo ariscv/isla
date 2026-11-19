@@ -5959,6 +5959,14 @@ fn region_merge_checks_callee_state_effect_when_reached() {
     use crate::config::ExecutionLimitsConfig;
 
     let mut shared = empty_shared_state();
+    let library = ExecutionLimits::default();
+    assert!(!library.path_merging);
+    assert!(library.defer_call_effect_checks);
+    let defaults = ExecutionLimitsConfig::default();
+    for config in [None, Some(&defaults)] {
+        let limits = ExecutionLimits::for_symbolic_dag(config, &shared.symtab);
+        assert!(limits.path_merging && limits.defer_call_effect_checks);
+    }
     let callee = helper(&mut shared);
     let (params, ty, body) = shared.functions.get_mut(&callee).unwrap();
     let argument = params[0].0;
@@ -5986,8 +5994,8 @@ fn region_merge_checks_callee_state_effect_when_reached() {
     for strategy in ["recursive", "flat"] {
         for no_smt in [false, true] {
             for (option, effect, merge) in [
-                ("", Some(false), false),
-                ("defer_call_effect_checks = true", Some(false), true),
+                ("defer_call_effect_checks = false", Some(false), false),
+                ("", Some(false), true),
                 ("defer_call_effect_checks = true", Some(true), false),
                 ("defer_call_effect_checks = true", None, false),
             ] {

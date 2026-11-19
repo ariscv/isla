@@ -9,6 +9,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("prune_constant_branches", "prune-constant-branches", "分支入口识别布尔恒值；默认开启"),
     ("arm_error_leaf", "arm-error-leaf", "保留带到达条件的臂内执行错误；默认关闭"),
     ("merge_concrete_values", "merge-concrete-values", "延后拆分区域具体字符串和机器整数；默认开启"),
+    ("defer_call_effect_checks", "defer-call-effect-checks", "延后普通被调函数的传递状态效应检查；默认开启"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
     ("lazy_z3_scope", "region-lazy-z3-scope", "延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用"),
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
@@ -71,6 +72,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
                 "prune_constant_branches" => updated.path_merge.prune_constant_branches = value,
                 "arm_error_leaf" => updated.path_merge.arm_error_leaf = value,
                 "merge_concrete_values" => updated.path_merge.merge_concrete_values = value,
+                "defer_call_effect_checks" => updated.path_merge.defer_call_effect_checks = value,
                 "defer_exit_check" => updated.path_merge.defer_exit_check = value,
                 "finite_domain_enumeration" => updated.path_merge.finite_domain_enumeration = value,
                 "lazy_z3_scope" => updated.path_merge.lazy_z3_scope = value,
@@ -186,6 +188,7 @@ mod tests {
         cli(&mut limits, &[]).unwrap();
         assert_eq!(limits, ExecutionLimitsConfig::default());
         assert!(limits.path_merge.merge_concrete_values);
+        assert!(limits.path_merge.defer_call_effect_checks);
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
                 "prune_constant_branches",
@@ -194,6 +197,7 @@ mod tests {
                 "merge_poison_slots",
                 "defer_ctor_checks",
                 "defer_range_proofs",
+                "defer_call_effect_checks",
                 "defer_exit_check",
                 "lazy_z3_scope",
                 "finite_domain_enumeration",

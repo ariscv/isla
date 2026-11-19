@@ -814,6 +814,8 @@ witness_eval = true
 
 Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
 
+区域合并默认在实际到达时检查普通被调函数的传递 `StateEffect`。直接原语仍在执行前检查，`CalleeStateWrite` 和未实现 extern 仍拒绝。可用 `--defer-call-effect-checks=false` 或在 `[execution_limits.path_merge]` 设置 `defer_call_effect_checks = false` 关闭。
+
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
 
 区域嵌套和片段数均缺省不限，显式 `-1` 与省略等价。有限深度对照可用 `[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16`。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布与最大深度。保存点深度不限，调用深度另计。正整数 `max_fragments` 限制每次根区域尝试因局部汇合失败保留的片段，超限计为 `fragment_limit`，后续可走普通分叉。

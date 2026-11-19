@@ -431,8 +431,6 @@ isarch [原 J1 探索参数] \
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。
 
-`[execution_limits.path_merge].defer_call_effect_checks` 默认关闭，保留原有的静态准入行为。开启后，普通被调函数摘要中的 `state_effect` 由实际到达的指令检查。区域直接包含的不支持效应仍由准入检查拦截。递归与平铺合并共用这一规则。
-
 ## 合并拒绝诊断
 
 `--merge-diagnostics off|summary|detail` 默认关闭。`summary` 每 15 秒及正常收尾时，按位置、槽和差异类别输出累计汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
@@ -456,6 +454,7 @@ isarch [原 J1 探索参数] \
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
 | `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
+| `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `StateEffect` 检查 |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
@@ -525,6 +524,8 @@ progress = true
 
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
+
+递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `StateEffect`。区域准入仍检查直接效应和 `CalleeStateWrite`，到达未实现的 extern 时仍拒绝推演。
 
 ### 臂内执行错误叶子
 

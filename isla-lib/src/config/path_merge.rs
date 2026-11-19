@@ -81,7 +81,7 @@ pub struct PathMergeConfig {
     pub arm_error_leaf: bool,
     /// 用守卫保留不同的具体字符串和机器整数，缺省开启。
     pub merge_concrete_values: bool,
-    /// 在实际到达指令时检查普通被调函数的传递效应。
+    /// 默认在实际到达指令时检查普通被调函数的传递效应。
     pub defer_call_effect_checks: bool,
     /// 仅在延迟出口检查内生效。
     pub lazy_z3_scope: bool,
@@ -110,7 +110,7 @@ impl Default for PathMergeConfig {
             prune_constant_branches: true,
             arm_error_leaf: false,
             merge_concrete_values: true,
-            defer_call_effect_checks: false,
+            defer_call_effect_checks: true,
             lazy_z3_scope: false,
             finite_domain_enumeration: false,
             witness_eval: false,
