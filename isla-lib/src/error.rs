@@ -128,6 +128,10 @@ pub enum ExecError {
     VariableNotFound(String, SourceLoc),
     Unimplemented,
     AssertionFailure(Option<String>, SourceLoc),
+    ReachableExecutionError {
+        message: String,
+        location: String,
+    },
     NoFunction(String, SourceLoc),
     Overflow,
     /// 内部整数转换需要由执行器保留可表示与溢出两条路径。
@@ -220,6 +224,7 @@ impl IslaError for ExecError {
             | InconsistentRegisterReset
             | BadInterrupt(_)
             | IncompatibleMerge
+            | ReachableExecutionError { .. }
             | IncompatibleUnionPayload => SourceLoc::unknown(),
         }
     }
@@ -246,6 +251,7 @@ impl fmt::Display for ExecError {
             }
             AssertionFailure(None, _) => write!(f, "Assertion failure"),
             AssertionFailure(Some(msg), _) => write!(f, "Assertion failure: {}", msg),
+            ReachableExecutionError { message, location } => write!(f, "可达执行错误叶子：{message}（{location}）"),
             NoFunction(func, _) => write!(f, "Function {} does not exist", func),
             Overflow => write!(f, "Integer overflow"),
             ConcreteChoice(_, _) => write!(f, "消费者需要拆分具体候选值"),

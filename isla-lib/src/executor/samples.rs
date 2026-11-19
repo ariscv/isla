@@ -466,7 +466,7 @@ impl<B: BV> SamplePath<B> {
         }
         // 先证明具体输入能到达，再报告真实错误；不可达叶子不参与接纳计数。
         if let Terminal::ExecutionError { message, location } = &self.terminal {
-            return Err(ExecError::Type(format!("可达执行错误叶子：{message}（{location}）"), SourceLoc::unknown()));
+            return Err(ExecError::ReachableExecutionError { message: message.clone(), location: location.clone() });
         }
         Ok(true)
     }
@@ -774,6 +774,7 @@ pub struct SampleChecker {
     pub samples: Vec<Sample>,
     counts: Mutex<Vec<(usize, usize, usize)>>,
     inconsistent: Mutex<Vec<(u64, u64)>>,
+    execution_errors: Mutex<Vec<(u64, u64, String, String)>>,
     judge_output: Option<Mutex<std::fs::File>>,
 }
 impl SampleChecker {
@@ -782,6 +783,7 @@ impl SampleChecker {
             counts: Mutex::new(vec![(0, 0, 0); samples.len()]),
             samples,
             inconsistent: Mutex::new(Vec::new()),
+            execution_errors: Mutex::new(Vec::new()),
             judge_output: None,
         }
     }
@@ -852,7 +854,11 @@ impl SampleChecker {
         records: &[super::RegionMergeRecord<B>],
         consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<Option<JudgedSample>, ExecError> {
-        let judged = path.judge(solver, shared, &self.samples[index], records, signature, consume)?;
+        let judged = self.record_execution_error(
+            index,
+            signature,
+            path.judge(solver, shared, &self.samples[index], records, signature, consume),
+        )?;
         self.record_judged(index, judged.as_ref(), false)?;
         Ok(judged)
     }
@@ -868,9 +874,29 @@ impl SampleChecker {
         facts: &fast::FastFacts,
         consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<Option<JudgedSample>, ExecError> {
-        let judged = path.classify(solver, shared, &self.samples[index], records, signature, facts, consume)?;
+        let judged = self.record_execution_error(
+            index,
+            signature,
+            path.classify(solver, shared, &self.samples[index], records, signature, facts, consume),
+        )?;
         self.record_judged(index, judged.as_ref(), true)?;
         Ok(judged)
+    }
+
+    fn record_execution_error<T>(
+        &self,
+        index: usize,
+        signature: u64,
+        result: Result<Option<T>, ExecError>,
+    ) -> Result<Option<T>, ExecError> {
+        match result {
+            Err(ExecError::ReachableExecutionError { message, location }) => {
+                let sample_id = self.samples[index].sample_id;
+                self.execution_errors.lock().unwrap().push((sample_id, signature, message, location));
+                Ok(None)
+            }
+            result => result,
+        }
     }
 
     fn record_judged(&self, index: usize, judged: Option<&JudgedSample>, buffered: bool) -> Result<(), ExecError> {
@@ -930,7 +956,9 @@ impl SampleChecker {
                     }
                 }
             }
-            if let Some(consistent) = path.check(solver, shared, sample)? {
+            if let Some(consistent) =
+                self.record_execution_error(index, signature, path.check(solver, shared, sample))?
+            {
                 if let Some(output) = &self.judge_output {
                     let judged = path
                         .judge(solver, shared, sample, records, signature, &mut consume)?
@@ -955,7 +983,18 @@ impl SampleChecker {
         let counts = self.counts.lock().unwrap();
         let mut inconsistent = self.inconsistent.lock().unwrap().clone();
         inconsistent.sort();
-        json!({"schema_version":1,"sample_total":self.samples.len(),"samples":self.samples.iter().zip(counts.iter()).map(|(sample,(accepted,consistent,inconsistent))|json!({"sample_id":sample.sample_id,"accepted_paths":accepted,"consistent_paths":consistent,"inconsistent_paths":inconsistent})).collect::<Vec<_>>(),"unaccepted_sample_ids":self.samples.iter().zip(counts.iter()).filter(|(_,count)|count.0==0).map(|(sample,_)|sample.sample_id).collect::<Vec<_>>(),"inconsistent":inconsistent})
+        let mut errors = self.execution_errors.lock().unwrap().clone();
+        errors.sort_unstable();
+        let mut report = json!({"schema_version":1,"sample_total":self.samples.len(),"samples":self.samples.iter().zip(counts.iter()).map(|(sample,(accepted,consistent,inconsistent))|json!({"sample_id":sample.sample_id,"accepted_paths":accepted,"consistent_paths":consistent,"inconsistent_paths":inconsistent})).collect::<Vec<_>>(),"unaccepted_sample_ids":self.samples.iter().zip(counts.iter()).filter(|(_,count)|count.0==0).map(|(sample,_)|sample.sample_id).collect::<Vec<_>>(),"inconsistent":inconsistent});
+        if !errors.is_empty() {
+            report["execution_errors"] = json!(errors
+                .into_iter()
+                .map(|(sample_id, signature, message, location)| {
+                    json!({"sample_id":sample_id,"path_signature":signature,"message":message,"location":location})
+                })
+                .collect::<Vec<_>>());
+        }
+        report
     }
 }
 
@@ -1007,6 +1046,19 @@ mod tests {
             path.judge(&mut solver, &shared, &reachable, &[], 1, |_, _| panic!("失败叶子不得具体化")).err().unwrap();
         assert!(error.to_string().contains("可达执行错误叶子"));
         assert!(path.check(&mut solver, &shared, &reachable).is_err());
+        reachable.sample_id = 7;
+        let both = SampleChecker::new(vec![checker.samples[0].clone(), reachable.clone()]);
+        assert!(both
+            .judge_only(1, &path, &mut solver, &shared, 17, &[], |_, _| panic!("失败叶子不得具体化"))
+            .unwrap()
+            .is_none());
+        assert_eq!(both.report()["samples"][1]["accepted_paths"], 0);
+        assert_eq!(
+            both.report()["execution_errors"][0],
+            json!({
+                "sample_id":7, "path_signature":17, "message":"臂内类型错误", "location":"test.sail:4"
+            })
+        );
         assert_eq!(solver.transaction_depth(), 0);
         assert_eq!(checker.report()["samples"][0]["accepted_paths"], 0);
         let facts: fast::FastFacts =
