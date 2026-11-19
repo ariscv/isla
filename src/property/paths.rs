@@ -1,5 +1,5 @@
 //! property 的路径计数与诊断。性质判定沿用执行器的原收集器。
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +9,12 @@ use isla_lib::bitvector::BV;
 use isla_lib::error::ExecError;
 use isla_lib::executor::{self, LocalFrame, Run, Task, TaskId};
 use isla_lib::ir::{SharedState, Val};
-use isla_lib::smt::{smtlib::Exp, Event, SmtResult, Solver};
+use isla_lib::primop_util::{replace_mixed_bits, smt_value};
+use isla_lib::smt::{
+    checkpoint,
+    smtlib::{Def, Exp, Ty},
+    Config, Context, Event, SmtResult, Solver, Sym,
+};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 use serde::Serialize;
@@ -19,16 +24,23 @@ pub fn add_options(opts: &mut getopts::Options) {
     opts.optopt("", "expect-paths", "要求可满足的完成路径数恰好为指定值", "<N>");
     opts.optflag("", "print-paths", "打印完成路径数、守卫与返回值");
     opts.optopt("", "dump-paths", "将完成路径的守卫、返回值和合并记录数写入 JSON", "<文件>");
+    opts.optflag("", "scenario-observations", "在路径 JSON 中保留场景观测和访存事件");
 }
 
 pub struct PathOptions {
     expected: Option<usize>,
     print: bool,
     dump: Option<PathBuf>,
+    scenario_observations: bool,
 }
 
 impl PathOptions {
     pub fn parse(matches: &getopts::Matches) -> Result<Self, String> {
+        let dump = matches.opt_str("dump-paths").map(PathBuf::from);
+        let scenario_observations = matches.opt_present("scenario-observations");
+        if scenario_observations && dump.is_none() {
+            return Err("--scenario-observations 需要 --dump-paths".to_string());
+        }
         Ok(Self {
             expected: matches
                 .opt_str("expect-paths")
@@ -36,7 +48,8 @@ impl PathOptions {
                 .transpose()
                 .map_err(|error| format!("--expect-paths 需要非负整数：{error}"))?,
             print: matches.opt_present("print-paths"),
-            dump: matches.opt_str("dump-paths").map(PathBuf::from),
+            dump,
+            scenario_observations,
         })
     }
 
@@ -50,6 +63,7 @@ impl PathOptions {
                 passed: AtomicBool::new(true),
                 incomplete: AtomicBool::new(false),
                 paths: Mutex::new(Vec::new()),
+                scenario_observations: self.scenario_observations,
             });
             executor::start_multi(threads, None, vec![task], shared, collected.clone(), &collect_path);
             (collected.passed.load(Ordering::Acquire), self.report(&collected))
@@ -110,20 +124,153 @@ struct PathSummary {
     return_value: String,
     merge_records: usize,
     register_writes: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    register_values: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_events: Option<Vec<MemoryEvent>>,
+}
+
+#[derive(Serialize)]
+struct MemoryEvent {
+    operation: &'static str,
+    kind: Option<String>,
+    address: String,
+    bytes: u32,
+    data: String,
+    tag: Option<String>,
+    exclusive: bool,
+    ifetch: bool,
+    region: &'static str,
 }
 
 struct PathResults {
     passed: AtomicBool,
     incomplete: AtomicBool,
     paths: Mutex<Vec<PathSummary>>,
+    scenario_observations: bool,
 }
 
-fn value_expression<B: BV>(value: &Val<B>, solver: &mut Solver<B>, shared: &SharedState<B>) -> String {
+fn value_expression<B: BV>(
+    value: &Val<B>,
+    solver: &mut Solver<B>,
+    shared: &SharedState<B>,
+    observed: &mut Option<HashMap<Sym, Sym>>,
+) -> String {
+    if observed.is_some() {
+        match value {
+            Val::MixedBits(_) => {
+                let value = replace_mixed_bits(value.clone(), solver, SourceLoc::unknown()).unwrap();
+                return value_expression(&value, solver, shared, observed);
+            }
+            Val::I64(_) | Val::I128(_) => {
+                return solver.exp_to_str(&smt_value(value, SourceLoc::unknown()).unwrap());
+            }
+            _ => (),
+        }
+    }
     match value {
-        Val::Symbolic(sym) => solver.exp_to_str(&Exp::Var(*sym)),
+        Val::Symbolic(sym) => {
+            // 别名把观测值引用的符号带进 SMT 导出，也让重放器只需读取一个标量。
+            let sym = observed.as_mut().map_or(*sym, |aliases| {
+                *aliases.entry(*sym).or_insert_with(|| {
+                    let ty = if solver.is_bool(*sym) {
+                        Ty::Bool
+                    } else if let Some(width) = solver.length(*sym) {
+                        Ty::BitVec(width)
+                    } else {
+                        return *sym;
+                    };
+                    let alias = solver.declare_const(ty, SourceLoc::unknown());
+                    solver.add(Def::Assert(Exp::Eq(Box::new(Exp::Var(alias)), Box::new(Exp::Var(*sym)))));
+                    alias
+                })
+            });
+            solver.exp_to_str(&Exp::Var(sym))
+        }
         Val::Bits(bits) => solver.exp_to_str(&Exp::Bits(bits.to_vec())),
         _ => value.to_string(shared),
     }
+}
+
+fn path_summary<B: BV>(
+    value: &Val<B>,
+    frame: &LocalFrame<B>,
+    shared: &SharedState<B>,
+    solver: &mut Solver<B>,
+    scenario_observations: bool,
+) -> PathSummary {
+    let mut observed = scenario_observations.then(HashMap::new);
+    let events = solver.trace().to_vec();
+    let writes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::WriteReg(reg, accessors, value) if accessors.is_empty() => Some((*reg, value.clone())),
+            _ => None,
+        })
+        .collect();
+    let memory_trace = scenario_observations.then(|| {
+        events.iter().rev().copied().filter(|event| event.is_memory_read_or_write()).cloned().collect::<Vec<_>>()
+    });
+    let memory_events = memory_trace
+        .map(|events| events.iter().filter_map(|event| memory_event(event, solver, shared, &mut observed)).collect());
+    let mut register_writes = BTreeMap::new();
+    for (reg, value) in writes {
+        let name = zencode::decode(shared.symtab.to_str(reg));
+        register_writes.entry(name).or_insert_with(|| value_expression(&value, solver, shared, &mut observed));
+    }
+    let register_values = scenario_observations.then(|| {
+        let initialized: BTreeMap<_, _> = frame
+            .regs()
+            .into_iter()
+            .filter_map(|(reg, value)| {
+                let name = zencode::decode(shared.symtab.to_str(*reg));
+                value.read_last_if_initialized().map(|value| (name, value))
+            })
+            .collect();
+        initialized
+            .into_iter()
+            .map(|(name, value)| (name, value_expression(value, solver, shared, &mut observed)))
+            .collect()
+    });
+    let return_value = value_expression(value, solver, shared, &mut observed);
+    let mut guard = Vec::new();
+    solver.write_smtlib(&mut guard).unwrap();
+    PathSummary {
+        guard_smtlib: String::from_utf8(guard).unwrap(),
+        return_value,
+        merge_records: frame.region_merge_records().len(),
+        register_writes,
+        register_values,
+        memory_events,
+    }
+}
+
+fn memory_event<B: BV>(
+    event: &Event<B>,
+    solver: &mut Solver<B>,
+    shared: &SharedState<B>,
+    observed: &mut Option<HashMap<Sym, Sym>>,
+) -> Option<MemoryEvent> {
+    let (operation, kind, address, bytes, data, tag, exclusive, ifetch, region) = match event {
+        Event::ReadMem { value, read_kind, address, bytes, tag_value, opts, region } => {
+            ("read", read_kind, address, bytes, value, tag_value, opts.is_exclusive, opts.is_ifetch, region)
+        }
+        Event::WriteMem { write_kind, address, data, bytes, tag_value, opts, region, .. } => {
+            ("write", write_kind, address, bytes, data, tag_value, opts.is_exclusive(), false, region)
+        }
+        _ => return None,
+    };
+    Some(MemoryEvent {
+        operation,
+        kind: kind.symbolic_variables().is_empty().then(|| kind.to_string(shared)),
+        address: value_expression(address, solver, shared, observed),
+        bytes: *bytes,
+        data: value_expression(data, solver, shared, observed),
+        tag: tag.as_ref().map(|tag| value_expression(tag, solver, shared, observed)),
+        exclusive,
+        ifetch,
+        region,
+    })
 }
 
 fn collect_path<'ir, B: BV>(
@@ -137,28 +284,15 @@ fn collect_path<'ir, B: BV>(
     match &result {
         Ok((Run::Finished(value), frame)) => match solver.check_sat(SourceLoc::unknown()) {
             SmtResult::Sat => {
-                let writes: Vec<_> = solver
-                    .trace()
-                    .to_vec()
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        Event::WriteReg(reg, accessors, value) if accessors.is_empty() => Some((*reg, value.clone())),
-                        _ => None,
-                    })
-                    .collect();
-                let mut register_writes = BTreeMap::new();
-                for (reg, value) in writes {
-                    let name = zencode::decode(shared.symtab.to_str(reg));
-                    register_writes.entry(name).or_insert_with(|| value_expression(&value, &mut solver, shared));
-                }
-                let mut guard = Vec::new();
-                solver.write_smtlib(&mut guard).unwrap();
-                collected.paths.lock().unwrap().push(PathSummary {
-                    guard_smtlib: String::from_utf8(guard).unwrap(),
-                    return_value: value_expression(value, &mut solver, shared),
-                    merge_records: frame.region_merge_records().len(),
-                    register_writes,
-                });
+                let summary = if collected.scenario_observations {
+                    // 单独重放到未求解的 solver，避免把 Z3 的模型转换器写进守卫。
+                    let context = Context::new(Config::new());
+                    let mut replay = Solver::from_checkpoint(&context, checkpoint(&mut solver));
+                    path_summary(value, frame, shared, &mut replay, true)
+                } else {
+                    path_summary(value, frame, shared, &mut solver, false)
+                };
+                collected.paths.lock().unwrap().push(summary);
             }
             SmtResult::Unsat => (),
             SmtResult::Unknown => collected.incomplete.store(true, Ordering::Release),

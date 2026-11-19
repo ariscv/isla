@@ -1,0 +1,4 @@
+(declare-const path_x (_ BitVec 1))
+(declare-const path_y (_ BitVec 1))
+(= path_y #b0)
+(= path_y #b1)
