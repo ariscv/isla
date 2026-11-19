@@ -6065,6 +6065,8 @@ fn arm_error_leaf_flat_child() {
 
 #[path = "region_concrete_values_tests.rs"]
 mod region_concrete_values_tests;
+#[path = "region_consumer_tests.rs"]
+mod region_consumer_tests;
 
 #[test]
 fn region_merge_checks_callee_state_effect_when_reached() {
