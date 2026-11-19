@@ -1,4 +1,5 @@
 // --- TOML
+// reverse_region_ready = true
 // title = "改变五片段到达次序后守卫分组一致"
 // intent = "置换同一棵树的片段到达次序，每次都应得到覆盖全部输入的一条守卫。"
 // inputs = { path_x = 3 }

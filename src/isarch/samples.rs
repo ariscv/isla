@@ -320,8 +320,7 @@ pub fn path<B: BV>(
         .collect();
     pre.insert("$instruction".into(), instruction.clone());
     // 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
-    // 样本按保存的 guard 过滤未执行臂；实际发生的每次读仍绑定 pre_memory，
-    // 沿用既有初始内存规则及“写后读不同值”限制。原始主迹本身仍是并集。
+    // 按访存条件投影实际执行的读写。写后读取由样本校验按字节绑定最近一次写。
     let memory_guards = frame
         .region_merge_records()
         .iter()

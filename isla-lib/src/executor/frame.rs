@@ -513,6 +513,19 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         cost::make_mut(&mut self.memory)
     }
 
+    pub(crate) fn write_ram(
+        &mut self,
+        kind: Val<B>,
+        address: Val<B>,
+        data: Val<B>,
+        solver: &mut Solver<B>,
+    ) -> Result<Val<B>, ExecError> {
+        if self.region_execution.is_some() && !self.memory.speculative_ram_write(&address, &data, solver)? {
+            return Err(super::region_merge::reject(self, super::SpeculativeRejectReason::StateEffect));
+        }
+        self.memory_mut().write(kind, address, data, solver, None, crate::smt::WriteOpts::default())
+    }
+
     pub fn set_memory(&mut self, memory: Memory<B>) -> &mut Self {
         self.memory = Arc::new(memory);
         self

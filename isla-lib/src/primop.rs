@@ -4795,7 +4795,7 @@ fn write_mem<B: BV>(
     frame: &mut LocalFrame<B>,
     _: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    frame.memory_mut().write(args[0].clone(), args[2].clone(), args[4].clone(), solver, None, WriteOpts::default())
+    frame.write_ram(args[0].clone(), args[2].clone(), args[4].clone(), solver)
 }
 
 fn write_mem_exclusive<B: BV>(

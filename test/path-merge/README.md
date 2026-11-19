@@ -47,6 +47,10 @@ python3 -m unittest discover -s test/path-merge
 | `ordered_events` | 要求合并器保留访问次序，也按次序比较选定的寄存器读，默认 `false`。 |
 | `ordered_memory_events` | 按次序比较访存事件，默认 `true`。`false` 时比较包含重复项的无序集合。 |
 | `register_reads` | 寄存器名到预期读次数的表，默认空表。对每条路径的每个可达输入检查所列寄存器的生效读次数，并与 off 比较字段路径和读值。 |
+| `sequential_ram` | 开启顺序 RAM，关闭合并时也用同一数组模型。缺省关闭。 |
+| `initialized_registers` | 比较所列寄存器的逐输入初始化位。缺省为空。 |
+| `assertion_failures` | 断言失败对应的完整输入列表，顺序与 `inputs` 相同。失败叶独立导出，完成路径计数只统计正常返回。 |
+| `reverse_region_ready` | 另用同一份 IR 逆序选择每次同时就绪的片段，比较守卫划分和观测。缺省关闭。 |
 | `merge_concrete_values` | 省略时使用执行器缺省值。本组场景使用缺省开启的具体值合并。 |
 | `status`、`reason` | 默认 `ready`。标 `todo` 或 `xfail` 时填写原因。 |
 
@@ -58,11 +62,13 @@ python3 -m unittest discover -s test/path-merge
 
 - `memory_event_guards[i]` 是 `memory_events[i]` 的生效条件，两数组等长，均按执行迹顺序记录。既有 `memory_events` 对象的字段保持原样。
 - `register_reads` 按执行迹顺序列出主迹的 `ReadReg`，每项有 `register`、`accessors`、`data` 和 `guard_smtlib`。寄存器读反映执行器发布的访问事件，默认合并策略可折叠重复访问。
-- 守卫为 `true` 时，该事件在这条路径的全部可达输入上生效。其余条件可以是由外层 SMT-LIB 声明并约束的布尔别名。条件访存并集中，每一笔读都有自己对应的条件。
+- 守卫为 `true` 时，该事件在这条路径的全部可达输入上生效。其余条件可以是由外层 SMT-LIB 声明并约束的布尔别名。条件访存并集中，每一笔读写都有自己对应的条件。
+- `register_initialized` 保存寄存器的布尔初始化位，可引用同一守卫文本中的符号。
+- `terminal: "assertion_failure"` 标记启用断言观测时导出的失败叶。失败叶同样保存到达条件和失败前的访存事件。
 
 ## 读结果
 
-每格显示模式结果和实际完成路径数。Z3 对每个输入核对可完成性及各事件是否生效，证明返回值、选定寄存器和生效事件的观测在该输入下唯一，再和 off 比较。自由量未登记导致非唯一时，该场景报 FAIL。平铺和递归还比较由各条守卫覆盖的输入集合，忽略路径输出顺序。当前 property CLI 没有控制片段到达顺序的开关。
+每格显示模式结果和实际完成路径数。Z3 对每个输入核对可完成性及各事件是否生效，证明返回值、选定寄存器和生效事件的观测在该输入下唯一，再和 off 比较。自由量未登记导致非唯一时，该场景报 FAIL。平铺和递归还比较由各条守卫覆盖的输入集合，忽略路径输出顺序。D8 另外通过 `--reverse-region-ready` 验证同一棵树的相反就绪次序。
 
 | 结果 | 含义 |
 | --- | --- |

@@ -1,9 +1,10 @@
 // --- TOML
+// sequential_ram = true
 // title = "保留不同数量的访存事件"
 // intent = "保留一臂的一次写和另一臂的两次写，以及各自的地址和数据。"
 // inputs = { path_x = 1 }
-// expect_paths_merged = 2
-// must_not_merge = "两臂访存事件数量不同，合成无条件访存序列会改变行为。"
+// expect_paths_merged = 1
+// must_merge = "一条路径保留各臂的一笔或两笔写，以及原有次序。"
 // ---
 default Order dec
 $include <prelude.sail>

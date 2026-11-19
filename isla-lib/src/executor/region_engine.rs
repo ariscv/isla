@@ -61,12 +61,13 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
         let deferred_error = crate::config::RegionOptions::current().arm_error_leaf
             && solver.region_queries_deferred()
             && is_arm_execution_error(error);
-        let consumer_error =
-            consumer && (is_arm_execution_error(error) || matches!(error, ExecError::AssertionFailure(..)));
-        if consumer_error || deferred_error {
+        let assertion = matches!(error, ExecError::AssertionFailure(..));
+        let isolated_error = (consumer && (is_arm_execution_error(error) || assertion))
+            || (state.observe_assertion_failures && assertion);
+        if isolated_error || deferred_error {
             let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
             let mut dead = solver.structural_bool(&reach) == Some(false);
-            if consumer_error && !dead {
+            if isolated_error && !dead {
                 let checked = solver.check_candidate_sat(error.source_loc());
                 if let Some(result) = checked {
                     match super::region_merge::path_is_feasible(result, arm, solver, shared) {
@@ -104,7 +105,7 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
                     state,
                     stop_conditions: stop,
                 };
-                if consumer_error {
+                if isolated_error {
                     sink.submit_consumer_error(task);
                     solver.commit_dead_transaction();
                 } else {
@@ -244,13 +245,7 @@ pub(super) fn publish_committed_records<B: BV>(
             .iter()
             .filter(|(_, event)| event.is_memory_read_or_write())
             .enumerate()
-            .filter_map(|(i, (guard, event))| {
-                if event.is_memory_read() {
-                    guard.as_ref().map(|guard| (offset + i, guard.clone(), event.clone()))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(i, (guard, event))| guard.as_ref().map(|guard| (offset + i, guard.clone(), event.clone())))
             .collect();
     }
     if super::merge_record::enabled() {
@@ -745,6 +740,25 @@ fn prepare_state<'ir, B: BV>(
         return Err(incompatible());
     }
     let mut merged = base.clone();
+    if !Arc::ptr_eq(&left.memory, &right.memory) {
+        match (left.memory.ram_version(), right.memory.ram_version()) {
+            (None, None) => (),
+            (Some(a), Some(b)) => {
+                let version = if a == b {
+                    a
+                } else {
+                    use smtlib::Exp::{Ite, Var};
+                    solver.define_const(Ite(Box::new(Var(condition)), Box::new(Var(a)), Box::new(Var(b))), info)
+                };
+                if merged.memory.ram_version() != Some(version) {
+                    merged.memory_mut().set_ram_version(version);
+                }
+            }
+            _ => panic!("同一分支区域的内存回调必须具有相同的版本契约"),
+        }
+    } else {
+        merged.memory = left.memory.clone();
+    }
     let lhs = left.local_state.speculative_access.as_ref().unwrap();
     let rhs = right.local_state.speculative_access.as_ref().unwrap();
     if let Some(limits) = &state.execution_limits {
@@ -915,7 +929,7 @@ fn prepare_state<'ir, B: BV>(
     let mut retained_initials = Vec::new();
     let read_or_written: std::collections::BTreeSet<_> =
         lhs.writes.read_regs.union(&rhs.writes.read_regs).chain(registers.iter()).collect();
-    for reg in read_or_written {
+    for &reg in &read_or_written {
         if lhs.ordered_events && (base.regs().is_relaxed(*reg) || base.regs().has_old_writes(*reg)) {
             return Err(reject(base, SpeculativeRejectReason::RelaxedRegister));
         }
@@ -999,6 +1013,9 @@ fn prepare_state<'ir, B: BV>(
             })?
         };
         merged.regs_mut().assign(*reg, value, shared);
+    }
+    for reg in read_or_written {
+        merged.regs_mut().merge_initialization(*reg, condition, left.regs(), right.regs(), solver, info);
     }
     let merge_read_footprint = lhs.global_state || !lhs.ordered_events;
     let shared_regs: HashSet<_> = if merge_read_footprint {

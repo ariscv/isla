@@ -281,6 +281,11 @@ pub(super) fn instruction_effect<B: BV>(
     match instr {
         Instr::PrimopUnary(_, f, _, _) if constraint_unary(*f) => return None,
         Instr::PrimopBinary(_, f, _, _, _) if constraint_binary(*f) => return None,
+        Instr::PrimopVariadic(_, f, args, _)
+            if args.len() == 5 && effects::variadic_effect(*f) == Some(Effect::WritesMemory) =>
+        {
+            return None
+        }
         Instr::Call(_, _, function, _, _) if shared.functions.contains_key(function) => {
             let summary = summaries.get(function).expect("IR 函数必须有收敛的效应摘要");
             // 只延后普通函数的传递效应。直接原语和特殊调用仍在执行前拦截。

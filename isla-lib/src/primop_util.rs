@@ -414,9 +414,10 @@ fn build_ite_with_inner<B: BV>(
     if lhs == rhs {
         return Ok(lhs.clone());
     }
+    let is_list = matches!(lhs, Val::List(_));
     match (lhs, rhs) {
         (Val::Unit, Val::Unit) => Ok(Val::Unit),
-        (Val::Vector(lhs), Val::Vector(rhs)) if lhs.len() == rhs.len() => lhs
+        (Val::Vector(lhs), Val::Vector(rhs)) | (Val::List(lhs), Val::List(rhs)) if lhs.len() == rhs.len() => lhs
             .iter()
             .zip(rhs)
             .enumerate()
@@ -427,7 +428,7 @@ fn build_ite_with_inner<B: BV>(
                 )
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(Val::Vector),
+            .map(|values| if is_list { Val::List(values) } else { Val::Vector(values) }),
         (Val::Vector(_), Val::Vector(_))
         | (Val::String(_), Val::String(_))
         | (Val::Ref(_), Val::Ref(_))
@@ -915,6 +916,14 @@ pub(crate) fn merge_val_mode<B: BV, const CONCRETE: bool>(
     result
 }
 
+fn list_choice<B>(value: &Val<B>) -> bool {
+    match value {
+        Val::List(_) => true,
+        Val::Guarded(_, choices) => list_choice(&choices.0) && list_choice(&choices.1),
+        _ => false,
+    }
+}
+
 fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
     cond: Sym,
     val_a: &Val<B>,
@@ -944,6 +953,19 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
             );
             return Ok(Val::Symbolic(solver.define_const(expr, info)));
         }
+    }
+    if CONCRETE && list_choice(val_a) && list_choice(val_b) {
+        return match (val_a, val_b) {
+            _ if val_a == val_b => Ok(val_a.clone()),
+            (Val::List(a), Val::List(b)) if a.len() == b.len() => {
+                build_ite_with(cond, val_a, val_b, solver, info, merge_val_mode::<B, CONCRETE>)
+            }
+            _ => {
+                let guard = solver.define_const(smtlib::Exp::Var(cond), info);
+                crate::executor::concrete_values::created();
+                Ok(Val::Guarded(guard, Box::new((val_a.clone(), val_b.clone()))))
+            }
+        };
     }
     let a_width = merge_bit_width(val_a, solver, info)?;
     let b_width = merge_bit_width(val_b, solver, info)?;

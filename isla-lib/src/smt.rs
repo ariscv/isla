@@ -666,11 +666,9 @@ impl<B: BV> Trace<B> {
     }
 
     fn record_event_guards(&mut self, offset: usize, events: &[(Option<Exp<Sym>>, Event<B>)]) {
-        if TRACE_EVENT_GUARDS.get().is_none() {
-            return;
-        }
+        let register_reads = TRACE_EVENT_GUARDS.get().is_some();
         self.event_guards.extend(events.iter().enumerate().filter_map(|(index, (guard, event))| {
-            if matches!(event, Event::ReadReg(..)) || event.is_memory_read_or_write() {
+            if event.is_memory_read_or_write() || (register_reads && matches!(event, Event::ReadReg(..))) {
                 guard.as_ref().map(|guard| (offset + index, guard.clone()))
             } else {
                 None
@@ -700,7 +698,7 @@ impl<B: BV> Trace<B> {
 
 static TRACE_EVENT_GUARDS: OnceLock<()> = OnceLock::new();
 
-/// 在启动 worker 前开启，诊断导出才需要保留已发布的事件条件。
+/// 在启动 worker 前开启寄存器读取条件的诊断记录。访存条件始终保存。
 pub fn enable_trace_event_guards() {
     TRACE_EVENT_GUARDS.get_or_init(|| ());
 }
