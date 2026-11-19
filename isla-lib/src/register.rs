@@ -394,7 +394,7 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         condition: Sym,
         left: &Self,
         right: &Self,
-        solver: &mut Solver<B>,
+        solver: &mut dyn crate::primop_util::merge_terms::MergeTerms<B>,
         info: SourceLoc,
     ) {
         let terms = [left, right].map(|bindings| match bindings.map[&id].initialization() {
