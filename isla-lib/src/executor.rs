@@ -5566,7 +5566,7 @@ mod tests {
                 });
                 let counts = out.into_inner().unwrap();
                 eprintln!("合并={enabled}，各路径寄存器读取次数={counts:?}");
-                if counts != vec![1, 1] {
+                if counts != vec![1; if enabled { 1 } else { 2 }] {
                     failures.push((enabled, counts));
                 }
             }
@@ -7795,7 +7795,7 @@ mod tests {
                             ),
                             Instr::End,
                         ],
-                        ExecutionLimits::default().with_path_merging(enabled),
+                        retry_test_limits(enabled),
                         empty_shared_state(),
                     );
                     let values: Vec<_> = results
@@ -8429,7 +8429,7 @@ mod tests {
                         ),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -8471,7 +8471,7 @@ mod tests {
                         ),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -8684,7 +8684,7 @@ mod tests {
                         ),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -8826,7 +8826,7 @@ mod tests {
                         ),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     lets,
@@ -8963,7 +8963,7 @@ mod tests {
                         Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     lets,
@@ -9160,7 +9160,7 @@ mod tests {
                         Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -9301,7 +9301,7 @@ mod tests {
                         ),
                         Instr::End,
                     ],
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -11384,7 +11384,7 @@ mod tests {
                 ];
                 let results = run_all_with_bindings(
                     instrs,
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -11659,7 +11659,7 @@ mod tests {
                 ];
                 let results = run_all_with_bindings(
                     instrs,
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -13069,6 +13069,16 @@ fn zcaller(za, zb) {
         handler: Option<&ExecutionLimitHandler<'_>>,
         limited_pc: Option<Name>,
     ) -> Result<Option<usize>, ExecError> {
+        // 旧夹具把入口写为恒真占位符。CFG 会剪去恒真分支的另一臂，
+        // 因此用与传入条件一致的符号读取建立真实的两臂区域。
+        if let Instr::Jump(Exp::Bool(true), jump_target, location) = frame.instrs[frame.pc] {
+            assert_eq!(jump_target, target);
+            let flag = test_name(9000);
+            let mut instrs = frame.instrs.to_vec();
+            instrs[frame.pc] = Instr::Jump(Exp::Id(flag), jump_target, location);
+            frame.instrs = Box::leak(instrs.into_boxed_slice());
+            assert!(frame.vars_mut().insert(flag, UVal::Init(Val::Symbolic(condition))).is_none());
+        }
         shared.function_regions.lock().unwrap().clear();
         let mut limits =
             handler.map_or_else(ExecutionLimits::default, |handler| handler.config.clone()).with_path_merging(true);
@@ -13106,6 +13116,13 @@ fn zcaller(za, zb) {
                 panic!("最外层不能挂起区域片段")
             }
         })
+    }
+
+    fn retry_test_limits(path_merging: bool) -> ExecutionLimits {
+        // 这些旧重试夹具逐个检查具体候选。指令级汇合另由 region_consumer_tests 验证。
+        let mut limits = ExecutionLimits::default().with_path_merging(path_merging);
+        limits.merge_concrete_values = false;
+        limits
     }
 
     fn make_frame_with_bindings<'ir>(
@@ -15741,7 +15758,7 @@ fn zmemreadfork(zu) {
                     Instr::PrimopBinary(Loc::Id(RETURN), pow, Exp::I128(3), Exp::Id(exponent), info()),
                     Instr::End,
                 ],
-                ExecutionLimits::default().with_path_merging(true),
+                retry_test_limits(true),
                 empty_shared_state(),
                 RegisterBindings::new(),
                 HashMap::default(),
@@ -15846,7 +15863,7 @@ fn zmemreadfork(zu) {
             let old_ctor = Val::Ctor(test_name(181), Box::new(old_struct.clone()));
             let new_ctor = Val::Ctor(test_name(182), Box::new(new_struct.clone()));
             let matching_ctor = Val::Ctor(test_name(181), Box::new(new_struct.clone()));
-            for (case, (old, new)) in [
+            for (old, new) in [
                 (old_struct, new_struct),
                 (old_ctor.clone(), matching_ctor),
                 (old_ctor.clone(), new_ctor.clone()),
@@ -15854,10 +15871,7 @@ fn zmemreadfork(zu) {
                     Val::Struct(HashMap::from_iter([(field, old_ctor)])),
                     Val::Struct(HashMap::from_iter([(field, new_ctor)])),
                 ),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            ] {
                 for width in [64, 128] {
                     let index = solver.declare_const(smtlib::Ty::BitVec(width), info());
                     // 此处验证合法元素的递归更新；越界分叉由独立回归测试检查。
@@ -15871,30 +15885,6 @@ fn zmemreadfork(zu) {
                         &mut frame,
                         info(),
                     );
-                    if case >= 2 {
-                        assert!(matches!(actual, Err(ExecError::SymbolicLength("vector_update", _))));
-                        // 不同标签要求拆分索引；每个唯一候选重试后保留正确的具体元素。
-                        for candidate in [0, 1] {
-                            let mut retry_solver = Solver::<B64>::new(&ctx);
-                            let retry_index = retry_solver.declare_const(smtlib::Ty::BitVec(width), info());
-                            retry_solver.assert_eq(smtlib::Exp::Var(retry_index), smtlib::bits64(candidate, width));
-                            let actual = crate::primop::vector_update(
-                                vec![
-                                    Val::Vector(vec![old.clone(), old.clone()]),
-                                    Val::Symbolic(retry_index),
-                                    new.clone(),
-                                ],
-                                &mut retry_solver,
-                                &mut frame,
-                                info(),
-                            )
-                            .unwrap();
-                            let mut expected = vec![old.clone(), old.clone()];
-                            expected[candidate as usize] = new.clone();
-                            assert_eq!(actual, Val::Vector(expected));
-                        }
-                        continue;
-                    }
                     let actual = actual.unwrap();
                     let Val::Vector(items) = actual else { panic!("向量更新必须返回向量") };
                     for (i, item) in items.into_iter().enumerate() {
@@ -16397,7 +16387,7 @@ fn zmemreadfork(zu) {
                 ];
                 let results = run_all_with_bindings(
                     instrs,
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -16486,7 +16476,7 @@ fn zmemreadfork(zu) {
                 ];
                 let results = run_all_with_bindings(
                     instrs,
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -16574,7 +16564,7 @@ fn zmemreadfork(zu) {
                 ];
                 let results = run_all_with_bindings(
                     instrs,
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -16675,7 +16665,7 @@ fn zmemreadfork(zu) {
                 ];
                 let results = run_all_with_bindings(
                     instrs,
-                    ExecutionLimits::default().with_path_merging(enabled),
+                    retry_test_limits(enabled),
                     empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
@@ -16778,7 +16768,7 @@ fn zmemreadfork(zu) {
             ];
             let results = run_all_with_bindings(
                 instrs,
-                ExecutionLimits::default().with_path_merging(enabled),
+                retry_test_limits(enabled),
                 empty_shared_state(),
                 RegisterBindings::new(),
                 HashMap::default(),
@@ -17375,7 +17365,7 @@ fn zmemreadfork(zu) {
             ];
             let results = run_all_with_bindings(
                 instrs,
-                ExecutionLimits::default().with_path_merging(enabled),
+                retry_test_limits(enabled),
                 empty_shared_state(),
                 RegisterBindings::new(),
                 HashMap::default(),

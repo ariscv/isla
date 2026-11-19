@@ -316,6 +316,9 @@ fn 极端菱形回边与连续寄存器事件必须逐输入一致() {
                 let mut shared = empty_shared_state();
                 let encoded = zencode::encode(special_name);
                 let source = shared.symtab.intern(&encoded);
+                if special_name == "_TLB" {
+                    shared.untraced_registers.insert(source);
+                }
                 let dest = shared.symtab.intern("zreview32_dest");
                 let condition = test_name(786);
                 let counter = test_name(787);

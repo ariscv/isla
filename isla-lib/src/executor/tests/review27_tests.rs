@@ -308,6 +308,9 @@ fn 合并写事件必须与普通赋值的过滤规则一致() {
             let mut shared = empty_shared_state();
             let encoded = zencode::encode(name);
             let reg = shared.symtab.intern(&encoded);
+            if name == "_TLB" {
+                shared.untraced_registers.insert(reg);
+            }
             let cond = test_name(650);
             let mut frame = make_frame(vec![
                 Instr::Decl(cond, Ty::Bool, info()),
