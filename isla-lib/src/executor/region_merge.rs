@@ -90,10 +90,11 @@ impl<B: BV> AccessLog<B> {
             }
             if let Some(index) = self.reads.iter().position(|(name, path, _)| *name == reg && *path == accessor) {
                 // 内层仅一臂读取后，汇合点之后的读取可以扩大原足迹的条件。
-                self.read_guards[index] = smtlib::Exp::Or(
-                    Box::new(self.read_guards[index].clone()),
-                    Box::new(self.guard.clone().expect("区域读取必须有臂条件")),
-                );
+                let guard = self.guard.as_ref().expect("区域读取必须有臂条件");
+                if &self.read_guards[index] != guard {
+                    self.read_guards[index] =
+                        smtlib::Exp::Or(Box::new(self.read_guards[index].clone()), Box::new(guard.clone()));
+                }
                 return Ok(());
             }
         } else if !self.writes.register_write_order.is_empty() {

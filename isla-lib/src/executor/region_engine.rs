@@ -959,12 +959,13 @@ fn merge_states<'ir, B: BV>(
                 reads
                     .entry(key)
                     .and_modify(|(_, old_guard): &mut (Val<B>, smtlib::Exp<Sym>)| {
-                        // 两臂包含同一读取前缀；用已有 SMT 定义共享条件，避免连续汇合把树复制成指数大小。
-                        *old_guard =
-                            smtlib::Exp::Var(solver.define_const(
+                        // 两臂继承同一个读取条件时，直接保留它。新的条件才需要共享定义。
+                        if old_guard != guard {
+                            *old_guard = smtlib::Exp::Var(solver.define_const(
                                 smtlib::Exp::Or(Box::new(old_guard.clone()), Box::new(guard.clone())),
                                 info,
                             ));
+                        }
                     })
                     .or_insert_with(|| (value.clone(), guard.clone()));
             }
@@ -1022,9 +1023,13 @@ fn merge_states<'ir, B: BV>(
         for ((reg, _, _), guard) in access.reads.iter().zip(&mut access.read_guards) {
             if shared_regs.contains(reg) {
                 let (_, right_guard) = right_common.next().expect("共同读取序列必须对齐");
-                *guard = smtlib::Exp::Var(
-                    solver.define_const(smtlib::Exp::Or(Box::new(guard.clone()), Box::new(right_guard.clone())), info),
-                );
+                if guard != right_guard {
+                    *guard =
+                        smtlib::Exp::Var(solver.define_const(
+                            smtlib::Exp::Or(Box::new(guard.clone()), Box::new(right_guard.clone())),
+                            info,
+                        ));
+                }
             }
         }
         for (read, guard) in rhs.reads.iter().zip(&rhs.read_guards) {
