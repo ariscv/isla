@@ -28,7 +28,7 @@ const NO_SMT_OPTIONS: &[(&str, &str)] = &[
 ];
 
 pub fn add_cli(opts: &mut getopts::Options) {
-    opts.optflagopt("", "bv-rewrite", "通用等价改写；默认关闭；裸flag启用三条规则", "true|false|规则名列表");
+    opts.optflagopt("", "bv-rewrite", "通用等价改写，缺省启用三条规则，false 关闭", "true|false|规则名列表");
     for (_, flag) in NO_SMT_OPTIONS {
         opts.optflagopt("", flag, "无 SMT 实验选项；裸 flag 等于 true，覆盖 TOML，默认 false", "true|false");
     }
@@ -157,8 +157,14 @@ mod tests {
     #[test]
     fn bv_rewrite_cli_overrides_toml_and_rejects_unknown_rules() {
         let mut config = ExecutionLimitsConfig::default();
+        let all = isla_lib::smt::rewrite::BvRewrite::parse("true").unwrap();
+        cli(&mut config, &[]).unwrap();
+        assert_eq!(config.solver.bv_rewrite, all);
+        let mut config: ExecutionLimitsConfig = toml::from_str("[solver]\nbv_rewrite=false").unwrap();
+        cli(&mut config, &[]).unwrap();
+        assert!(!config.solver.bv_rewrite.enabled());
         cli(&mut config, &["--bv-rewrite"]).unwrap();
-        assert_eq!(config.solver.bv_rewrite, isla_lib::smt::rewrite::BvRewrite::parse("true").unwrap());
+        assert_eq!(config.solver.bv_rewrite, all);
         cli(&mut config, &["--bv-rewrite=false"]).unwrap();
         assert!(!config.solver.bv_rewrite.enabled());
         cli(&mut config, &["--bv-rewrite=mask-and,sign-bound"]).unwrap();

@@ -1,5 +1,7 @@
 # 当前任务
 
+- 2026-11-19 [SMT 等价改写缺省开启](../agents/bv_rewrite_default_20261119/status.md)。基于 `c652949e` 的独立分支通过定向测试和本机 PMP=2 两输入有限签收，待合入。
+
 - 2026-11-08 [isarch 原生 fuzz 闭环烟雾测试](../agents/path_merge_call_support/fuzz-isarch-loop-smoke.md)：Sv39 generic STORE 原生闭环跑通（PASS）。完成 216 条 DAG 导出（12,690 守卫）；初始 corpus 认证 20/20 达成 100%；形态 A（16 例）与形态 B（4 例）全部成功生成并经快档与认证档双重接纳；退出码 0，总耗时 198.79s（变异判定循环 6.92s）。彻底封禁 `--fuzz-avoid-known-ppn-overflow` 与 `ordered_symbolic_retries`，修复初态 $x0$ 非唯一性与退出码逻辑。
 
 - 2026-11-08 [fuzz 序列 S1](../agents/path_merge_call_support/fuzz-seq-s1.md)：移除旧机器码与 x1 特例；纯 clause 加路径合并已见证全部 32 个寄存器编号。待处理：通用构造子原始样本含不可编码宽度、排除内存区域错误、make 验收译码 Poison；Sv39 180 秒预算未收敛。

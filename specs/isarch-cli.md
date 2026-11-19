@@ -537,7 +537,7 @@ progress = true
 
 ### 通用 SMT 等价改写
 
-`[execution_limits.solver] bv_rewrite` 缺省为 `false`。`true` 启用全部规则；列表可选 `data-ite-eq`（数据 ITE 相等展开）、`mask-and`（位掩码恒等式）、`sign-bound`（符号扩展与常量比较）。空列表关闭。
+`[execution_limits.solver] bv_rewrite` 缺省为 `true`，启用全部规则。可用列表选择 `data-ite-eq`（数据 ITE 相等展开）、`mask-and`（位掩码恒等式）、`sign-bound`（符号扩展与常量比较）。`false` 或空列表关闭。
 
 CLI `--bv-rewrite` 等价于 `--bv-rewrite=true`。`--bv-rewrite=false` 关闭，`--bv-rewrite=data-ite-eq,sign-bound` 独立选择规则；CLI 整体覆盖 TOML。没有开启新的 SMT 查询，同一改写也用于 `--no-smt`。`--memory-stats` 输出 `bv_rewrite_hits`，统计本进程各规则累计改写次数。
 

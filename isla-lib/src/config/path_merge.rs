@@ -22,7 +22,7 @@ pub enum SolverOnUnknown {
 #[serde(default, deny_unknown_fields)]
 pub struct SolverConfig {
     pub on_unknown: SolverOnUnknown,
-    /// 通用等价改写；默认关闭，可按规则名独立启用。
+    /// 通用等价改写。缺省启用全部规则，可显式关闭或指定规则。
     pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
     pub skip_branch_checks: bool,

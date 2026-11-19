@@ -1,5 +1,9 @@
 # Findings
 
+## SMT 等价改写的缺省值
+
+`BvRewrite::default()` 同时供 TOML 求解配置、区域选项和直接构造的求解配置使用。空规则列表显式解析为禁用值。普通求解和无 SMT 的结构判定共用 `Solver::translate_exp`，所以无需各自设置缺省。 [实现与验证](bv_rewrite_default_20261119/result.md)
+
 ## 寄存器向量选择与自约束符号读
 
 - `primop_util::build_vector_ite` 在递归合并时拒绝不同构造子标签及 `SymbolicCtor`，返回 `IncompatibleMerge`。寄存器向量读写与普通向量读写应使用此接口，以便沿用索引拆分并保留错误标签解包路径；通用 `build_ite` 仍用于允许符号构造子的寄存器历史选择等场景。

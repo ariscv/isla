@@ -3,17 +3,26 @@ use super::*;
 use serde::{Deserialize, Deserializer};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BvRewrite(u8);
 
+impl Default for BvRewrite {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 impl BvRewrite {
+    const NONE: Self = Self(0);
+    const ALL: Self = Self(7);
+
     pub fn enabled(self) -> bool {
         self.0 != 0
     }
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "true" => Ok(Self(7)),
-            "false" => Ok(Self(0)),
+            "true" => Ok(Self::ALL),
+            "false" => Ok(Self::NONE),
             _ => {
                 let mut bits = 0;
                 for rule in value.split(',') {
@@ -43,8 +52,8 @@ impl<'de> Deserialize<'de> for BvRewrite {
             Rules(Vec<String>),
         }
         match Setting::deserialize(d)? {
-            Setting::Bool(b) => Ok(Self(if b { 7 } else { 0 })),
-            Setting::Rules(rules) if rules.is_empty() => Ok(Self::default()),
+            Setting::Bool(b) => Ok(if b { Self::ALL } else { Self::NONE }),
+            Setting::Rules(rules) if rules.is_empty() => Ok(Self::NONE),
             Setting::Rules(rules) => Self::parse(&rules.join(",")).map_err(serde::de::Error::custom),
         }
     }

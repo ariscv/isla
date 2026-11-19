@@ -845,4 +845,4 @@ no_smt = true
 
 区域步数、嵌套深度与片段数缺省不限。循环的可配置步数预算及切段规则由两个组织者共用。旧 `[execution_limits]` 下的策略字段和旧 `region_options` 配置位置报错。
 
-`--bv-rewrite` 启用三条通用等价改写，默认关闭。可用 `--bv-rewrite=mask-and,sign-bound` 单独选规则，或用 `--bv-rewrite=false` 覆盖 TOML。TOML 在 `[execution_limits.solver]` 下接受 `bv_rewrite = true`、`false` 或规则名列表；规则名为 `data-ite-eq`、`mask-and`、`sign-bound`。加 `--memory-stats` 可查看进程累计命中次数。
+缺省启用三条通用等价改写 `data-ite-eq`、`mask-and` 和 `sign-bound`。可用 `--bv-rewrite=mask-and,sign-bound` 选择规则，或用 `--bv-rewrite=false` 关闭。TOML 在 `[execution_limits.solver]` 下接受 `bv_rewrite = true`、`false` 或规则名列表，空列表也可关闭。CLI 的显式值覆盖 TOML。加 `--memory-stats` 可查看进程累计命中次数。
