@@ -169,6 +169,11 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         return Ok(false);
     }
 
+    let extension_source_width = if finite_enabled && op == "extension" {
+        Some(crate::primop_util::length_bits(&operands[0], solver, info)?)
+    } else {
+        None
+    };
     for &index in indices {
         let mut symbols = Vec::new();
         if op == "eq_anything" {
@@ -262,6 +267,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                             } else {
                                 return match fork_symbolic_value(
                                     *bytes_sym,
+                                    None,
                                     operands,
                                     info,
                                     task_id,
@@ -420,6 +426,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             }
             match fork_symbolic_value(
                 sym,
+                extension_source_width,
                 operands,
                 info,
                 task_id,
@@ -451,6 +458,7 @@ pub(super) enum ValueRetry {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
+    extension_source_width: Option<u32>,
     operands: &[Val<B>],
     info: SourceLoc,
     task_id: TaskId,
@@ -473,13 +481,56 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     };
     let width = solver.length(sym).expect("长度参数必须是位向量");
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
-    if let FiniteDomain::Known(values) = solver.finite_domain(sym) {
+    let domain = solver.finite_domain(sym);
+    let bounded = matches!(domain, FiniteDomain::Bounded(_));
+    let values = match &domain {
+        FiniteDomain::Known(values) => Some(values),
+        // 未认证的候选也可能被执行。仅当所有候选都满足扩展原语的位宽前提时才拆分。
+        FiniteDomain::Bounded(values)
+            if extension_source_width.is_some_and(|minimum| {
+                values.iter().all(|value| {
+                    let length = match value {
+                        Bits64(bits) => Some(i128::from(bits.signed())),
+                        Bits(bits) => primop::i128_from_model_bits(bits),
+                        _ => unreachable!("有限域只含位向量常量"),
+                    };
+                    length.and_then(|length| u32::try_from(length).ok()).is_some_and(|length| length >= minimum)
+                })
+            }) =>
+        {
+            Some(values)
+        }
+        _ => None,
+    };
+    if let Some(values) = values {
         let [candidate, _, ..] = values.as_slice() else {
             return Ok(if values.is_empty() { ValueRetry::Dead } else { ValueRetry::Unique });
         };
-        if frame.region_execution.is_some() {
+        let in_region = frame.region_execution.is_some();
+        if !bounded && in_region {
             // 事务只拥有当前推演臂，两边可行时交回区域外重放。
             return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
+        }
+        let equal = Eq(Box::new(Var(sym)), Box::new(candidate.clone()));
+        let remainder = Neq(Box::new(Var(sym)), Box::new(candidate.clone()));
+        if bounded {
+            solver.note_finite_domain_use("finite_domain_bounded_width", info);
+        }
+        if bounded && !in_region {
+            // 有限上界覆盖全部可行长度。候选仍须带上完整路径条件，用共用判定入口排除死侧。
+            let selected = super::region_merge::feasible(frame, solver, &equal, info, shared)?;
+            let other = super::region_merge::feasible(frame, solver, &remainder, info, shared)?;
+            match (selected, other) {
+                (false, false) => return Ok(ValueRetry::Dead),
+                (true, true) => (),
+                _ => {
+                    let guard = if selected { equal } else { remainder };
+                    cache_retry_operand(frame, operands);
+                    solver.assert(guard.clone());
+                    btrace_push_branch_condition!(frame, guard);
+                    return Ok(ValueRetry::Forked);
+                }
+            }
         }
         if diagnostics {
             STRUCTURAL_CANDIDATES.fetch_add(1, Relaxed);
@@ -487,8 +538,8 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         return Ok(
             if fork_retry_operand(
                 sym,
-                Eq(Box::new(Var(sym)), Box::new(candidate.clone())),
-                Neq(Box::new(Var(sym)), Box::new(candidate.clone())),
+                equal,
+                remainder,
                 operands,
                 info,
                 task_id,

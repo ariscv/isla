@@ -42,7 +42,8 @@ fn constant_false_call_does_not_make_unreachable_io_a_static_rejection() {
     let summary = function_effect_summaries(&shared, true)[&caller];
     assert!(summary.rejection.is_none(), "已证明不可能到达的打印不能阻止区域合并");
     assert_eq!(summary.effect, Effect::Pure);
-    let actual_io = instruction_effect(caller, 6, &shared.functions[&caller].2[6], &shared, &HashMap::new()).unwrap();
+    let actual_io =
+        instruction_effect(caller, 6, &shared.functions[&caller].2[6], &shared, &HashMap::new(), false).unwrap();
     assert_eq!(actual_io.reason, SpeculativeRejectReason::StateEffect, "实际到达打印时仍须在执行前拒绝");
 }
 

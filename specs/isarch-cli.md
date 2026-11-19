@@ -431,6 +431,8 @@ isarch [原 J1 探索参数] \
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。
 
+`[execution_limits.path_merge].defer_call_effect_checks` 默认关闭，保留原有的静态准入行为。开启后，普通被调函数摘要中的 `state_effect` 由实际到达的指令检查。区域直接包含的不支持效应仍由准入检查拦截。递归与平铺合并共用这一规则。
+
 ## 合并拒绝诊断
 
 `--merge-diagnostics off|summary|detail` 默认关闭。`summary` 每 15 秒及正常收尾时，按位置、槽和差异类别输出累计汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
@@ -532,6 +534,9 @@ progress = true
 ### 区域合并具体值
 
 `[execution_limits.path_merge].merge_concrete_values` 默认关闭，`--merge-concrete-values=true|false` 可覆盖。区域出口可用同一个守卫保留两臂不同的具体字符串或 I64。若消费者需要具体值，执行器沿原守卫重试该指令。区域内的重试通过共用汇合入口交回正常前沿。
+
+开启 `[execution_limits.path_merge].finite_domain_enumeration` 后，零扩展和符号扩展可按已知的有限目标位宽拆分。每个候选至少与源位向量等宽，并且必须能用原语的 `u32` 表示。分支保留完整路径约束。无 SMT 时，尚未确认可达的候选仍带守卫并等待认证。
+
 
 ## 投影枚举与样本输出
 

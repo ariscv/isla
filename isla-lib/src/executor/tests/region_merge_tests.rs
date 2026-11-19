@@ -606,7 +606,7 @@ fn region_merge_undeclared_call_rejected_only_when_reached() {
     let summaries = region_summary::function_effect_summaries(&shared, false);
     assert_eq!(summaries[&function].effect, primop::Effect::Unknown);
     for instr in [call, Instr::Call(Loc::Id(RETURN), false, function, vec![Exp::Bool(true)], info())] {
-        assert!(region_summary::instruction_effect(TOP_LEVEL_LET, 0, &instr, &shared, &summaries).is_none());
+        assert!(region_summary::instruction_effect(TOP_LEVEL_LET, 0, &instr, &shared, &summaries, false).is_none());
         let mut frame = make_frame(vec![
             Instr::Jump(input(0), 3, info()),
             Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
@@ -2065,7 +2065,8 @@ fn region_merge_real_ir_effects() {
                 if let Instr::Call(_, _, callee, _, _) = instr {
                     if shared.type_info.union_ctors.contains(callee) {
                         constructors += 1;
-                        let rejection = region_summary::instruction_effect(function, pc, instr, &shared, &summaries);
+                        let rejection =
+                            region_summary::instruction_effect(function, pc, instr, &shared, &summaries, false);
                         eprintln!(
                             "构造子 const_primops={configured} {name} pc={pc} {}: {rejection:?}",
                             shared.symtab.to_str(*callee)
@@ -4236,7 +4237,7 @@ fn region_merge_f4_special_calls_still_rejected_statically() {
     let shared = empty_shared_state();
     for name in [RESET_REGISTERS, INTERRUPT_PENDING, INSTR_ANNOUNCE, ABSTRACT_CALL, ABSTRACT_PRIMOP] {
         let instr = Instr::Call(Loc::Id(RETURN), false, name, Vec::new(), info());
-        let reject = region_summary::instruction_effect(TOP_LEVEL_LET, 0, &instr, &shared, &HashMap::new());
+        let reject = region_summary::instruction_effect(TOP_LEVEL_LET, 0, &instr, &shared, &HashMap::new(), false);
         assert!(reject.is_some(), "可执行特殊调用不能当成无实现 Unknown：{name:?}");
     }
 }
@@ -5969,3 +5970,72 @@ fn arm_error_leaf_flat_child() {
 
 #[path = "region_concrete_values_tests.rs"]
 mod region_concrete_values_tests;
+
+#[test]
+fn region_merge_checks_callee_state_effect_when_reached() {
+    use crate::config::ExecutionLimitsConfig;
+
+    let mut shared = empty_shared_state();
+    let callee = helper(&mut shared);
+    let (params, ty, body) = shared.functions.get_mut(&callee).unwrap();
+    let argument = params[0].0;
+    let print = primop::unary_primops()["print"];
+    let action = Instr::PrimopUnary(Loc::Id(RETURN), print, Exp::String("不应输出".into()), info());
+    *body = Box::leak(
+        vec![
+            Instr::Jump(Exp::Id(argument), 2, info()),
+            Instr::Goto(3),
+            action.clone(),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ]
+        .into_boxed_slice(),
+    );
+    let (params, ty) = (params.clone(), *ty);
+    let wrapper = shared.symtab.intern("zregion_effect_wrapper");
+    let wrapper_body = Box::leak(
+        vec![Instr::Call(Loc::Id(RETURN), false, callee, vec![Exp::Id(argument)], info()), Instr::End]
+            .into_boxed_slice(),
+    );
+    shared.functions.insert(wrapper, (params, ty, wrapper_body));
+
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for strategy in ["recursive", "flat"] {
+        for no_smt in [false, true] {
+            for (option, effect, merge) in [
+                ("", Some(false), false),
+                ("defer_call_effect_checks = true", Some(false), true),
+                ("defer_call_effect_checks = true", Some(true), false),
+                ("defer_call_effect_checks = true", None, false),
+            ] {
+                let toml = format!("[path_merge]\nstrategy = \"{strategy}\"\n{option}");
+                let config: ExecutionLimitsConfig = toml::from_str(&toml).unwrap();
+                let limits = ExecutionLimits::default().with_config(&config, &shared.symtab);
+                let handler = ExecutionLimitHandler::new(&limits);
+                let mut solver_config = Config::new();
+                solver_config.solver_options.no_smt = no_smt;
+                let context = Context::new(solver_config);
+                let mut solver = Solver::new(&context);
+                let condition = solver.declare_const(smtlib::Ty::Bool, info());
+                let mut frame = make_frame(vec![
+                    Instr::Jump(input(0), 3, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+                    Instr::Goto(4),
+                    effect.map_or_else(
+                        || action.clone(),
+                        |reaches| Instr::Call(Loc::Id(RETURN), false, wrapper, vec![Exp::Bool(reaches)], info()),
+                    ),
+                    Instr::End,
+                ]);
+                let result =
+                    merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), Some(&handler), None)
+                        .unwrap();
+                assert_eq!(result, merge.then_some(4), "{strategy} no_smt={no_smt} {option} effect={effect:?}");
+                if !merge {
+                    assert!(frame.region_merge_records().is_empty());
+                    assert_eq!(frame.pc, 0, "原推演回滚到分支入口");
+                }
+            }
+        }
+    }
+}

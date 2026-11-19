@@ -182,7 +182,9 @@ fn region_m2_vector_update_preflight_and_merge() {
     let program = diamond(update(0), update(1), vec![Instr::End]);
     let summaries = region_summary::function_effect_summaries(&shared, true);
     for (pc, instruction) in program.iter().enumerate() {
-        assert!(region_summary::instruction_effect(TOP_LEVEL_LET, pc, instruction, &shared, &summaries).is_none());
+        assert!(
+            region_summary::instruction_effect(TOP_LEVEL_LET, pc, instruction, &shared, &summaries, false).is_none()
+        );
     }
     let initial = Val::Vector(vec![Val::Bool(false), Val::Bool(false)]);
     let configure = |frame: &mut LocalFrame<'static, B64>| {

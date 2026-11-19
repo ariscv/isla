@@ -2766,6 +2766,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     branch_decision(frame, task_state, SpeculativeRejectReason::AnnouncePc)?;
                                     match symbolic_length::fork_symbolic_value(
                                         sym,
+                                        None,
                                         operands.as_ref().unwrap(),
                                         *info,
                                         task_id,
@@ -13260,6 +13261,7 @@ fn zcaller(za, zb) {
             assert!(matches!(
                 symbolic_length::fork_symbolic_value(
                     symbol,
+                    None,
                     &[Val::Symbolic(symbol)],
                     info(),
                     TaskId::fresh(),
@@ -13780,6 +13782,7 @@ fn zcaller(za, zb) {
                     ),
                     SymbolicValueEnumeration => symbolic_length::fork_symbolic_value(
                         sym,
+                        None,
                         &[],
                         info(),
                         TaskId::fresh(),
