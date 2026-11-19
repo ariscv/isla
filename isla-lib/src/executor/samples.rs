@@ -439,8 +439,10 @@ impl<B: BV> SamplePath<B> {
             }
         }
         let accesses = self.accesses();
-        for (index, (address, value, commit, read)) in accesses.iter().enumerate() {
+        let mut writes = Vec::new();
+        for (address, value, commit, read) in &accesses {
             if !read {
+                writes.push((address, value, commit));
                 continue;
             }
             let condition = sample.pre_memory.iter().filter_map(|cell| cell.value.map(|byte| (cell, byte))).fold(
@@ -460,20 +462,17 @@ impl<B: BV> SamplePath<B> {
                 },
             );
             // 较晚的已提交写覆盖较早的写。每个未覆盖的字节才绑定入口内存。
-            let condition = accesses[..index].iter().filter(|(_, _, _, read)| !read).fold(
-                condition,
-                |initial, (write_address, data, written, _)| {
-                    let hit = Exp::And(
-                        Box::new(written.clone()),
-                        Box::new(Exp::Eq(Box::new(address.clone()), Box::new(write_address.clone()))),
-                    );
-                    Exp::Ite(
-                        Box::new(hit),
-                        Box::new(Exp::Eq(Box::new(value.clone()), Box::new(data.clone()))),
-                        Box::new(initial),
-                    )
-                },
-            );
+            let condition = writes.iter().copied().fold(condition, |initial, (write_address, data, written)| {
+                let hit = Exp::And(
+                    Box::new(written.clone()),
+                    Box::new(Exp::Eq(Box::new(address.clone()), Box::new(write_address.clone()))),
+                );
+                Exp::Ite(
+                    Box::new(hit),
+                    Box::new(Exp::Eq(Box::new(value.clone()), Box::new(data.clone()))),
+                    Box::new(initial),
+                )
+            });
             solver.assert(Exp::Or(Box::new(Exp::Not(Box::new(commit.clone()))), Box::new(condition)));
         }
         if !sat(solver)? {
