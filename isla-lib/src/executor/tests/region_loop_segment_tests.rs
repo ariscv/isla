@@ -1,7 +1,7 @@
 //! 有限逐项搜索带提前返回：切段必须保存全部输入/结果关系及完整状态。
 use super::*;
 
-fn segment_paths(
+pub(super) fn segment_paths(
     instrs: Vec<Instr<Name, B64>>,
     shared: &SharedState<'static, B64>,
     inputs: usize,
