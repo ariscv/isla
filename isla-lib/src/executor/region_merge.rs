@@ -317,7 +317,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
     // 即使后续条件已具体化、不再产生pending_branch，也不能丢掉轮次边界。
     if let Some(budget) = execution.iteration_budget {
         if depth == execution.entry_depth
-            && (!log.ordered_events || log.global_state || log.writes.modified_regs.is_empty())
+            && log.writes.modified_regs.is_empty()
             && matches!(frame.instrs.get(frame.pc), Some(Instr::Goto(target)) if *target <= frame.pc)
         {
             execution.remaining.as_ref().expect("逐轮续配必须有有限预算").store(budget, Ordering::Relaxed);
@@ -1814,6 +1814,12 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             "continuation_records":next.region_merge_records.len(),
                             "savepoint_depth":solver.transaction_depth()})
                         );
+                    }
+                    // 写入回边本身不续配。只有本轮已交付新的退出域才允许下一轮继续。
+                    if !next.local_state.speculative_access.as_ref().unwrap().writes.modified_regs.is_empty() {
+                        if let (Some(remaining), Some(budget)) = (&remaining, state.region_step_budget()) {
+                            remaining.store(budget, Ordering::Relaxed);
+                        }
                     }
                     *work = LoopWork {
                         original: next.clone(),
