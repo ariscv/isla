@@ -46,7 +46,17 @@ fn region_exception_catch_resumes_each_call_with_its_own_return_slot() {
         let mut limits = ExecutionLimits::default().with_path_merging(true);
         limits.merge_strategy = strategy;
         let on = paths_with_state(program.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
-        assert_eq!(equivalent_paths(&off, &on, 1, true), (2, 1));
+        assert_eq!((off.len(), on.len()), (2, 1));
         assert!(on[0].exception.is_none());
+        // 直接从执行检查点重放。这里有两次定义借用同一输入，
+        // 需保留 Z3 中的所有原始定义及断言。
+        let context = Context::new(Config::new());
+        let mut solver = Solver::from_checkpoint(&context, on[0].checkpoint.clone());
+        let returned = smt_value(&on[0].value, info()).unwrap();
+        let input = smtlib::Exp::Var(Sym { id: 0 });
+        assert!(
+            solver.check_sat_with(&smtlib::Exp::Neq(Box::new(returned), Box::new(input)), info()).is_unsat().unwrap(),
+            "两次调用分别向自己的目的槽写入，最终结果应等于输入"
+        );
     }
 }

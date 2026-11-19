@@ -2772,6 +2772,7 @@ fn f2_error(case: &str) -> ExecError {
 #[test]
 fn region_merge_f2_force_and_adaptive_errors() {
     if let Ok(case) = std::env::var("ISLA_F2_ERROR_CHILD") {
+        crate::config::RegionOptions { arm_error_leaf: false, ..Default::default() }.configure();
         let mut shared = empty_shared_state();
         let root = shared.symtab.intern("zf2errors");
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
