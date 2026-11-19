@@ -109,7 +109,7 @@ fn scan_paths(
     scan_paths_with_limits(shared, n, budget, reg, ExecutionLimits::default().with_path_merging(merge))
 }
 
-fn scan_paths_with_limits(
+pub(super) fn scan_paths_with_limits(
     shared: &SharedState<'static, B64>,
     n: usize,
     budget: usize,
