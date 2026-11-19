@@ -22,6 +22,8 @@
 
 `--expect-paths N` 核对可满足的最终完成路径数，计数失败退出 2 并列出路径。`--print-paths` 打印路径摘要。`--dump-paths <文件>` 导出 JSON，包含求解器声明与守卫断言 `guard_smtlib`、`return_value`、`merge_records` 和整寄存器写入 `register_writes`。形状文件开头声明观测寄存器和有限位宽，接着每行一个期望守卫。框架调用 Z3 核对每条路径可满足的输入集合，并比较完整集合列表。配置专用的 `.shape` 优先于同名公共文件，也可用 `ruby test/property/include/check_paths.rb <JSON> <shape>` 单独核对。
 
+加 `--scenario-observations` 时还可导出访存和寄存器读的生效守卫。字段定义和逐输入重放入口见[场景运行器](../path-merge/README.md#路径-json)。
+
 ### 预期失败标记
 
 `<basename>.<variant>.xfail` 用一行说明预期失败的原因。性质成立且路径断言不符时报告 XFAIL，计入成功退出。路径断言和性质均通过时报告 XPASS，整组返回非零，要求移除标记。性质不符、执行或求解出错、超时和守卫重放错误均照常失败。递归和平铺都检查路径数。S1 额外检查整域守卫。

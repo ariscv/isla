@@ -6,6 +6,7 @@
 // expect_paths_merged = 3
 // must_merge = "两个 c 有相同活跃字符串，合成一条。"
 // must_not_merge = "严格字符串口径保留 b 与 d 各一条，二者都不能进入 c 组。"
+// merge_concrete_values = false
 // status = "ready"
 // ---
 default Order dec

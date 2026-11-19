@@ -5,6 +5,7 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 2
 // must_not_merge = "严格字符串口径下，同一 P 的互异负载各保留一条。"
+// merge_concrete_values = false
 // status = "ready"
 // ---
 default Order dec

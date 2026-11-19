@@ -4,9 +4,9 @@
 // inputs = { path_x = 1, path_y = 1, path_z = 1 }
 // expect_paths_unmerged = 4
 // expect_paths_merged = 4
-// must_not_merge = "四个活跃标签各一组，每组的迹都必须出现 ReadReg(R)。"
-// status = "todo"
-// reason = "运行器导出访存事件与最终寄存器值；缺逐组的 ReadReg(R)、守卫与事件次序，后态正确仍可能漏读事件。"
+// register_reads = { R = 1 }
+// merge_concrete_values = false
+// must_not_merge = "关闭具体值合并时四个活跃标签各一组，每个输入必须恰好产生一次 ReadReg(R)。"
 // ---
 default Order dec
 $include <prelude.sail>

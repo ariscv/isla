@@ -493,6 +493,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.committed_transaction_events =
                 self.transaction_event_guards.drain(..).zip(self.transaction_events.iter().cloned()).collect();
             let start = self.trace.head.len();
+            self.trace.record_event_guards(start, &self.committed_transaction_events);
             self.trace.head.append(&mut self.transaction_events);
             self.index_published_suffix(start);
             self.last_committed_transaction = Some((savepoint.token, self.trace.head.len()));
@@ -509,6 +510,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.commit_transaction();
         self.remove_published_suffix(prefix);
         self.trace.head.truncate(prefix);
+        self.trace.event_guards.retain(|(index, _)| *index < prefix);
         self.trace.checkpoint(self.next_var);
         self.last_committed_transaction = None;
         groups
@@ -607,7 +609,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn arm_error_snapshot(&self, arm: LogicalArm) -> (Checkpoint<B>, Vec<(usize, Exp<Sym>)>) {
         assert_eq!(self.current_logical_arm(), Some(arm));
         let effects = self.project_logical_arm(arm);
-        let mut head = self.trace.head.clone();
+        let mut trace = self.trace.clone();
+        trace.record_event_guards(trace.head.len(), &effects.events);
         let mut index = self.trace.to_vec().iter().filter(|event| event.is_memory_read_or_write()).count();
         let mut guards = Vec::new();
         for (guard, event) in effects.events {
@@ -617,22 +620,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 index += 1;
             }
-            head.push(event);
+            trace.head.push(event);
         }
-        head.extend(
+        trace.head.extend(
             self.transaction_conditions
                 .iter()
                 .cloned()
                 .map(|guard| Event::Smt(Def::Assert(guard), DefAttrs::default(), SourceLoc::unknown())),
         );
-        let trace = Arc::new(Some(Trace { checkpoints: self.trace.checkpoints, head, tail: self.trace.tail.clone() }));
-        (Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace, cycles: effects.cycles }, guards)
+        let mut point = trace.checkpoint(self.next_var);
+        point.cycles = effects.cycles;
+        (point, guards)
     }
 
     /// 各组共用事务前的迹和已提交 SMT 约束，分别发布组内非 SMT 事件。
     pub(crate) fn select_region_group(&mut self, effects: RegionGroupEffects<B>) {
         self.remove_published_suffix(0);
         self.trace.head = effects.events.iter().map(|(_, event)| event.clone()).collect();
+        self.trace.event_guards.clear();
+        self.trace.record_event_guards(0, &effects.events);
         self.index_published_suffix(0);
         self.committed_transaction_events = effects.events;
         self.cycles = effects.cycles;
@@ -760,13 +766,39 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 随后再补发合并写入。commit 出口本身始终发布全部缓冲事件。
         // 只清理本次提交区间的寄存器事件，保留其他事件和真正重复的合并读取。
         self.remove_published_suffix(tx.head_len);
+        let start = tx.head_len;
+        let mut removed = 0;
+        let mut previous_guards = self
+            .trace
+            .event_guards
+            .split_off(self.trace.event_guards.partition_point(|(index, _)| *index < start))
+            .into_iter()
+            .peekable();
         let published: Vec<_> = self
             .trace
             .head
-            .drain(tx.head_len..published_end)
-            .filter(|event| !matches!(event, Event::ReadReg(..) | Event::WriteReg(..)))
+            .drain(start..published_end)
+            .enumerate()
+            .filter_map(|(offset, event)| {
+                let index = start + offset;
+                let guard = if previous_guards.peek().is_some_and(|(position, _)| *position == index) {
+                    previous_guards.next()
+                } else {
+                    None
+                };
+                if matches!(event, Event::ReadReg(..) | Event::WriteReg(..)) {
+                    removed += 1;
+                    None
+                } else {
+                    if let Some((_, guard)) = guard {
+                        self.trace.event_guards.push((index - removed, guard));
+                    }
+                    Some(event)
+                }
+            })
             .collect();
-        self.trace.head.splice(tx.head_len..tx.head_len, published);
+        self.trace.event_guards.extend(previous_guards.map(|(index, guard)| (index - removed, guard)));
+        self.trace.head.splice(start..start, published);
         self.last_committed_transaction = None;
         // 发布后的兼容整理不修改发布时快照；主迹的新增合并事件没有臂条件。
         let mut guards = vec![None; self.trace.head.len()];

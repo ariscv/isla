@@ -6,6 +6,7 @@
 // expect_paths_merged = 3
 // must_merge = "两个 a 同组，两个 b 同组。"
 // must_not_merge = "严格字符串下 a、b、c 各有一个继续执行的出口。"
+// merge_concrete_values = false
 // status = "ready"
 // ---
 default Order dec

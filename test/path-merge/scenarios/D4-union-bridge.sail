@@ -5,6 +5,7 @@
 // expect_paths_unmerged = 3
 // expect_paths_merged = 3
 // must_not_merge = "待用户审核：严格标签与负载下 P 的两种字符串各占一组，Q 单独一组，避免任选一个 P 接纳 Q。"
+// merge_concrete_values = false
 // status = "xfail"
 // reason = "实测 Q 与 P(「a」) 同组，P(「c」) 独立；守卫划分少一组。"
 // ---

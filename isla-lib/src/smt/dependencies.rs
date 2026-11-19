@@ -35,7 +35,12 @@ impl<B: BV> Checkpoint<B> {
         Checkpoint {
             num: 1,
             next_var: self.next_var,
-            trace: Arc::new(Some(Trace { checkpoints: 0, head: events, tail: Arc::new(None) })),
+            trace: Arc::new(Some(Trace {
+                checkpoints: 0,
+                head: events,
+                event_guards: Vec::new(),
+                tail: Arc::new(None),
+            })),
             cycles: 0,
         }
     }

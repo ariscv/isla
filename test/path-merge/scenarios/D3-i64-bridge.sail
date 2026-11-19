@@ -5,8 +5,6 @@
 // expect_paths_unmerged = 3
 // expect_paths_merged = 3
 // must_not_merge = "待用户审核：3 与 7 在严格整数口径下互斥，符号成员独立归类；三组的归属不依赖到达顺序。"
-// status = "xfail"
-// reason = "实测全部三个片段进入一组；IR 中汇合后消费的整数槽为 %i64。"
 // ---
 default Order dec
 $include <prelude.sail>

@@ -86,7 +86,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         head.extend(self.transaction_conditions.iter().cloned().map(|condition| {
             super::Event::Smt(super::Def::Assert(condition), super::DefAttrs::default(), super::SourceLoc::unknown())
         }));
-        let trace = Arc::new(Some(Trace { checkpoints: self.trace.checkpoints, head, tail: self.trace.tail.clone() }));
+        let trace = Arc::new(Some(Trace {
+            checkpoints: self.trace.checkpoints,
+            head,
+            event_guards: self.trace.event_guards.clone(),
+            tail: self.trace.tail.clone(),
+        }));
         Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace, cycles: self.cycles }
     }
 }
