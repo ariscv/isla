@@ -531,7 +531,7 @@ progress = true
 
 ### 臂内执行错误叶子
 
-`[execution_limits.path_merge].arm_error_leaf` 默认开启，`--arm-error-leaf=false` 恢复原有处理。
+`[execution_limits.path_merge].arm_error_leaf` 默认关闭。使用 `--arm-error-leaf=true` 或在该表显式设置 `arm_error_leaf = true` 启用。
 即时与延后区域共用失败点的执行迹和完整守卫。正常组继续执行，已证可达的执行错误单独交付。无 SMT 或求解结果未知时，错误叶标记为未认证。只有已证不可达的错误叶会被筛除。judge 在 `execution_errors` 记录具体输入命中的错误叶及源码位置，并继续核对正常路径。
 
 ### 区域合并具体值

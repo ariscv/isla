@@ -78,7 +78,7 @@ pub struct PathMergeConfig {
     pub defer_exit_check: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
-    /// 保留独立执行错误叶，默认开启。
+    /// 保留独立执行错误叶，默认关闭。
     pub arm_error_leaf: bool,
     /// 用守卫保留不同的具体字符串和机器整数，缺省开启。
     pub merge_concrete_values: bool,
@@ -110,7 +110,7 @@ impl Default for PathMergeConfig {
             step_budget: None,
             defer_exit_check: false,
             prune_constant_branches: true,
-            arm_error_leaf: true,
+            arm_error_leaf: false,
             merge_concrete_values: true,
             defer_call_effect_checks: true,
             lazy_z3_scope: false,

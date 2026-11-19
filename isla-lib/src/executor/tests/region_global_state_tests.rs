@@ -379,6 +379,11 @@ fn region_m2_vector_update_symbolic_length_rollback() {
 
 #[test]
 fn region_m2_vector_update_out_of_bounds_keeps_error_leaf() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::region_m2_vector_update_out_of_bounds_keeps_error_leaf"))
+    {
+        return;
+    }
+    crate::config::RegionOptions { arm_error_leaf: true, ..Default::default() }.configure();
     check_vector_update_error_rollback(false);
 }
 

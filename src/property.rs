@@ -68,6 +68,14 @@ fn isla_main() -> i32 {
     if matches.opt_present("path-merging") {
         isa_config.execution_limits.get_or_insert_with(Default::default).path_merge.enabled = Some(true);
     }
+    if let Some(config) = &isa_config.execution_limits {
+        let options = isla_lib::config::RegionOptions::from_config(config);
+        if let Err(error) = options.validate() {
+            eprintln!("{error}");
+            return 3;
+        }
+        options.configure();
+    }
     let use_model_reg_init = !matches.opt_present("no-model-reg-init");
 
     let assertion_mode =

@@ -286,11 +286,13 @@ def run_mode(scene, shape, mode, binary, directory, seconds):
     merge_concrete = scene["merge_concrete_values"]
     if merge_concrete is not None:
         settings += f"merge_concrete_values = {str(merge_concrete).lower()}\n"
+    expected_failures = scene["assertion_inputs"]
+    if expected_failures is not None:
+        settings += "arm_error_leaf = true\n"
     config.write_text(settings, encoding="utf-8")
     try:
         command = [str(binary), "-A", str(directory / "model.ir"), "-C", str(config), "-p", "prop", "-T", "2",
                    "--expect-paths", str(expected), "--dump-paths", str(target), "--scenario-observations"]
-        expected_failures = scene["assertion_inputs"]
         if expected_failures is not None:
             assertions = directory / f"{mode}.assertions.json"
             assertions.unlink(missing_ok=True)
