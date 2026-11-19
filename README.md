@@ -822,7 +822,7 @@ Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false
 
 `defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。
 
-`[execution_limits.path_merge]` 的 `merge_poison_slots` 默认关闭，可用 `--merge-poison-slots=true/false` 覆盖。开启后，已证明不活动且后续通过标签检查读取的联合载荷可保留另一臂的有效值。普通局部槽仅在原内容于读取前必被覆盖、重建或随帧结束时跳过合并。
+局部未初始化槽位和 Poison 载荷的消除默认开启，可用 `--merge-poison-slots=false` 或在 `[execution_limits.path_merge]` 设置 `merge_poison_slots = false` 关闭。普通局部槽的默认初始化结果为 Poison，且静态证明旧内容不会被读取时，才跳过合并。可正常初始化的槽保留带守卫的值。联合载荷须先证明不活动，且后续读取必须受标签检查保护。返回值、地址被引用的槽位、全局状态和其余活跃槽沿用原合并规则。
 ### 无 SMT 候选 DAG 实验
 
 以下开关默认关闭，供定位求解成本使用。它们不修改 Sail 模型或区域步数预算。

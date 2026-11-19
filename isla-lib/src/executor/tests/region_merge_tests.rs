@@ -4878,14 +4878,14 @@ fn merge_diagnostics_execution_is_observational() {
         );
     }
     shared.function_regions.lock().unwrap().clear();
-    // 一臂仍为原始 Uninit，正常初始化成为 Poison 后不能和字符串合流。
+    // 汇合后要读取这个槽。一臂仍为原始 Uninit，正常初始化成为 Poison 后不能和字符串合流。
     diag::configure("detail").unwrap();
     let uninit = vec![
         Instr::Jump(input(0), 3, info()),
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::Goto(4),
         Instr::Copy(Loc::Id(slot), Exp::String("value".into()), info()),
-        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Id(slot), info()),
         Instr::End,
     ];
     let result = paths_with_state(uninit, &shared, 1, limits.clone(), crate::memory::Memory::new(), |frame| {

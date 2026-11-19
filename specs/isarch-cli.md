@@ -96,7 +96,7 @@ isarch -A <ir> -C <config> solve-state --clause=STORE
 `setup_pre_state` 已为 x1–x31 建立独立初态符号，x0 遵循模型的常零语义。
 无需额外声明某个通用寄存器，也不传固定通用寄存器的 `--prestate` 或附加地址掩码。
 `--instruction-bits` 仍供用户明确要求固定机器码时使用，通用探索脚本不依赖它。
-完整 DAG 入口 `solve-state` 缺省尝试自适应区域合并，并启用循环区域分析。`isla-execute-function` 同样采用该缺省。可用 `[execution_limits.path_merge] enabled = false` 或 `--no-path-merging` 关闭。CLI 显式选项覆盖 TOML，局部 `off` 和 `force` 在启用合并时继续生效。fuzz 等通用库入口沿用各自的配置。
+完整 DAG 入口 `solve-state` 缺省尝试自适应区域合并，并启用循环区域分析。`isla-execute-function` 同样采用该缺省。可用 `[execution_limits.path_merge] enabled = false` 或 `--no-path-merging` 关闭。CLI 显式选项覆盖 TOML，局部 `off` 和 `force` 在启用合并时继续生效。库的 `ExecutionLimits::default()` 关闭区域合并，显式启用时沿用本节各项合并缺省。
 通用探索省略分支、路径、回跳、比例及区域额度即不限。只有在有限预算的对照实验中才需要 `branch_limit` 或 `fork_limit`。加载 workaround 时，其中显式设置的额度仍可生效。有限额度触发时，省略 `on_limit_reached` 沿用截断，显式 `concretize` 会保留一个可行方向或当前模型。报告里应记录截断与具体化导致的覆盖收缩。
 当符号下标引起算子重试拆分时，默认沿用求解模型的候选顺序。跨进程由完整语义判定对齐。
 
@@ -456,6 +456,7 @@ isarch [原 J1 探索参数] \
 | `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
 | `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `StateEffect` 检查 |
 | `path_merge.finite_domain_enumeration` | `--finite-domain-enumeration=true/false` | `true` | 从路径条件识别有限域，具体值消费者按需枚举 |
+| `path_merge.merge_poison_slots` | `--merge-poison-slots=true/false` | `true` | 只消除已证明不可观察的局部槽位或联合载荷 |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |

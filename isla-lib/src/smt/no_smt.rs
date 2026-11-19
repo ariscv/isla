@@ -59,7 +59,7 @@ impl<B: BV> Solver<'_, B> {
         SmtError::NoSmt { reason, source_loc: info }
     }
 
-    /// 只用表达式本身，不使用路径可满足性或模型；上限递推不会把回绕当成数学加法。
+    /// 先化简表达式，再用已启用的有限域前缀证明蕴含，不查询 SMT 或读取模型。
     pub(crate) fn structural_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
         self.translate_exp(exp).structural_bool().or_else(|| self.finite_domain_bool(exp))
     }

@@ -19,17 +19,26 @@ fn region_merge_poison_slots_local_overwrite_and_default() {
         Instr::End,
     ];
     let reference = paths(program.clone(), &shared, 1, false);
+    let defaults = crate::config::ExecutionLimitsConfig::default();
+    assert!(defaults.path_merge.merge_poison_slots);
+    let explicit_off = toml::from_str("[path_merge]\nmerge_poison_slots=false").unwrap();
+    for (config, enabled) in [(None, true), (Some(&defaults), true), (Some(&explicit_off), false)] {
+        let limits = ExecutionLimits::for_symbolic_dag(config, &shared.symtab);
+        assert!(limits.path_merging);
+        assert_eq!(limits.merge_poison_slots, enabled);
+    }
+
     for strategy in strategies() {
         let run = |limits| paths_with_state(program.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
         let mut limits = strategy.limits();
         let default = run(limits.clone());
-        assert_eq!(equivalent_paths(&reference, &default, 1, true), (2, 2), "{strategy:?}");
-        assert!(default.iter().all(|path| path.records.is_empty()), "{strategy:?}");
+        assert_eq!(equivalent_paths(&reference, &default, 1, true), (2, 1), "{strategy:?}");
+        assert!(default[0].records.iter().any(|record| record.branch_pc == 1), "{strategy:?}");
 
-        limits.merge_poison_slots = true;
-        let enabled = run(limits);
-        assert_eq!(equivalent_paths(&reference, &enabled, 1, true), (2, 1), "{strategy:?}");
-        assert!(enabled[0].records.iter().any(|record| record.branch_pc == 1), "{strategy:?}");
+        limits.merge_poison_slots = false;
+        let disabled = run(limits);
+        assert_eq!(equivalent_paths(&reference, &disabled, 1, true), (2, 2), "{strategy:?}");
+        assert!(disabled.iter().all(|path| path.records.is_empty()), "{strategy:?}");
     }
 }
 

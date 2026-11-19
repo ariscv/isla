@@ -167,7 +167,7 @@ impl Default for ExecutionLimits {
             filter_model_exceptions: Arc::from([]),
             filter_match_failures: false,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
-            merge_poison_slots: false,
+            merge_poison_slots: merge.merge_poison_slots,
             region_global_state: false,
             region_loop_analysis: false,
             merge_concrete_values: merge.merge_concrete_values,

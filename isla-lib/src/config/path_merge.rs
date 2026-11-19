@@ -71,7 +71,7 @@ pub struct PathMergeConfig {
     pub defer_range_proofs: bool,
     /// 构造子解包标签转为出口待证义务；默认关闭。
     pub defer_ctor_checks: bool,
-    /// 只消除已证明不可观察的未初始化槽位；默认关闭。
+    /// 只消除已证明不可观察的局部未初始化槽位或载荷；默认开启。
     pub merge_poison_slots: bool,
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
@@ -105,7 +105,7 @@ impl Default for PathMergeConfig {
             max_fragments: None,
             defer_range_proofs: false,
             defer_ctor_checks: false,
-            merge_poison_slots: false,
+            merge_poison_slots: true,
             step_budget: None,
             defer_exit_check: false,
             prune_constant_branches: true,

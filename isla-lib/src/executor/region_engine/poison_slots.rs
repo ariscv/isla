@@ -61,16 +61,19 @@ fn prune_inactive<B: BV>(
     }
 }
 
-/// 仅使用当前帧的局部槽。让寄存器、全局槽及会逃逸的局部值沿用严格规则。
+/// 仅使用当前帧的局部槽。可正常初始化的槽位继续保留带守卫的值。
 pub(super) fn prepare_local<'ir, B: BV>(
     a: &mut Option<UVal<'ir, B>>,
     b: &mut Option<UVal<'ir, B>>,
+    uninit_is_poison: bool,
     condition: Sym,
     solver: &Solver<B>,
     reads_guarded: impl Fn(Option<(&[SlotProjection], Name)>) -> bool,
 ) -> Option<&'ir Ty<Name>> {
     match (a, b) {
-        (Some(UVal::Init(_)), Some(UVal::Uninit(ty))) | (Some(UVal::Uninit(ty)), Some(UVal::Init(_))) => {
+        (Some(UVal::Init(value)), Some(UVal::Uninit(ty))) | (Some(UVal::Uninit(ty)), Some(UVal::Init(value)))
+            if uninit_is_poison && !matches!(value, Val::Poison) =>
+        {
             reads_guarded(None).then_some(*ty)
         }
         (Some(UVal::Init(a)), Some(UVal::Init(b))) => {

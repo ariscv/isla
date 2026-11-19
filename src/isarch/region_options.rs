@@ -3,7 +3,7 @@ use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
-    ("merge_poison_slots", "merge-poison-slots", "只合并已证明不可观察的未初始化槽位；默认关闭"),
+    ("merge_poison_slots", "merge-poison-slots", "只消除已证明不可观察的局部未初始化槽位或载荷；默认开启"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
     ("prune_constant_branches", "prune-constant-branches", "分支入口识别布尔恒值；默认开启"),
@@ -231,7 +231,7 @@ mod tests {
         }
         let mut limits = ExecutionLimitsConfig::default();
         assert!(cli(&mut limits, &["--merge-poison-slots=yes"]).is_err());
-        assert!(!limits.path_merge.merge_poison_slots);
+        assert!(limits.path_merge.merge_poison_slots);
     }
 
     #[test]
