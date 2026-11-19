@@ -86,7 +86,10 @@ fn observe(mut shared: SharedState<'static, B64>, program: Program, inputs: usiz
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let run = |code, limits| paths_with_state(code, &shared, inputs, limits, crate::memory::Memory::new(), |_| ());
     let forked = run(program.clone(), ExecutionLimits::default().with_path_merging(false));
-    let merged = run(program, strategy.limits());
+    // 保留字符串不兼容作为局部失败夹具，检查祖先合并和守卫不受影响。
+    let mut limits = strategy.limits();
+    limits.merge_concrete_values = false;
+    let merged = run(program, limits);
     let paths = equivalent_paths(&forked, &merged, inputs, true);
     Observation {
         paths,

@@ -3,8 +3,8 @@ use super::*;
 
 type Frame<'ir, B> = LocalFrame<'ir, B>;
 
-/// 只以所有片段都含有的活跃具体字符串槽分桶。
-/// 两个不同的具体字符串在现有值合并中一定失败，等值合并也不会改变其签名。
+/// 显式关闭具体值合并时，按所有片段都含有的活跃字符串槽分桶。
+/// 严格合并要求字符串相等，合并后签名不变。
 fn string_slots<B: BV>(arrivals: &[Frame<B>], base: &Frame<B>, region: &Region) -> Vec<(bool, Name)> {
     let mut keys = Vec::new();
     for (lets, slots) in [(false, arrivals[0].vars()), (true, arrivals[0].lets())] {
@@ -36,27 +36,29 @@ pub(super) fn merge_compatible<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Vec<(Frame<'ir, B>, bool)>, ExecError> {
-    let slots = if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) {
-        Vec::new()
-    } else {
-        string_slots(&arrivals, base, region)
-    };
+    let slots = (!state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values))
+        .then(|| string_slots(&arrivals, base, region))
+        .filter(|slots| !slots.is_empty());
     let mut buckets = HashMap::<Vec<String>, Vec<usize>>::new();
     let mut groups: Vec<(Frame<'ir, B>, bool)> = Vec::new();
     for arrival in arrivals {
-        let signature = slots
-            .iter()
-            .map(|&(lets, name)| {
-                let values = if lets { arrival.lets() } else { arrival.vars() };
-                let UVal::Init(Val::String(value)) = &values[&name] else {
-                    unreachable!("字符串分桶槽必须存在")
-                };
-                value.clone()
-            })
-            .collect();
-        let candidates = buckets.entry(signature).or_default();
+        let candidates = slots.as_ref().map(|slots| {
+            let signature = slots
+                .iter()
+                .map(|&(lets, name)| {
+                    let values = if lets { arrival.lets() } else { arrival.vars() };
+                    let UVal::Init(Val::String(value)) = &values[&name] else {
+                        unreachable!("字符串分桶槽必须存在")
+                    };
+                    value.clone()
+                })
+                .collect();
+            buckets.entry(signature).or_default()
+        });
         let mut combined = false;
-        for &index in candidates.iter() {
+        let candidate_count = candidates.as_ref().map_or(groups.len(), |indices| indices.len());
+        for candidate in 0..candidate_count {
+            let index = candidates.as_ref().map_or(candidate, |indices| indices[candidate]);
             let tx = solver.start_transaction();
             let trial = fold_exit_frontiers(
                 groups[index].0.clone(),
@@ -84,7 +86,9 @@ pub(super) fn merge_compatible<'ir, B: BV>(
             }
         }
         if !combined {
-            candidates.push(groups.len());
+            if let Some(indices) = candidates {
+                indices.push(groups.len());
+            }
             groups.push((arrival, false));
         }
     }

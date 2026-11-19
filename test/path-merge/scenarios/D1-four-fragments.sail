@@ -4,8 +4,9 @@
 // inputs = { path_x = 1, path_y = 1 }
 // expect_paths_unmerged = 4
 // expect_paths_merged = 2
+// merge_concrete_values = false
 // must_merge = "对同一个内层输入，两臂的字符串相同且结果位宽一致。"
-// must_not_merge = "默认的具体值表示要求两个活跃字符串保持在各自的组内。"
+// must_not_merge = "显式关闭具体值合并后，不同的活跃字符串分属两个兼容组。"
 // ---
 default Order dec
 $include <prelude.sail>

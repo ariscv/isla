@@ -3017,11 +3017,32 @@ fn unimplemented<B: BV>(
     Err(ExecError::Unimplemented)
 }
 
-fn eq_string<B: BV>(lhs: Val<B>, rhs: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
-    match (lhs, rhs) {
-        (Val::String(lhs), Val::String(rhs)) => Ok(Val::Bool(lhs == rhs)),
-        (lhs, rhs) => Err(ExecError::Type(format!("eq_string {:?} {:?}", &lhs, &rhs), info)),
+pub(crate) fn eq_string<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    fn compare<B: BV>(
+        lhs: &Val<B>,
+        rhs: &Val<B>,
+        solver: &mut Solver<B>,
+        info: SourceLoc,
+    ) -> Result<Val<B>, ExecError> {
+        let (guard, yes, no) = match (lhs, rhs) {
+            (Val::String(lhs), Val::String(rhs)) => return Ok(Val::Bool(lhs == rhs)),
+            (Val::Guarded(left_guard, left), Val::Guarded(right_guard, right)) if left_guard == right_guard => {
+                (left_guard, (&left.0, &right.0), (&left.1, &right.1))
+            }
+            (Val::Guarded(guard, values), rhs) => (guard, (&values.0, rhs), (&values.1, rhs)),
+            (lhs, Val::Guarded(guard, values)) => (guard, (lhs, &values.0), (lhs, &values.1)),
+            _ => return Err(ExecError::Type(format!("eq_string {lhs:?} {rhs:?}"), info)),
+        };
+        let yes = compare(yes.0, yes.1, solver, info)?;
+        let no = compare(no.0, no.1, solver, info)?;
+        crate::primop_util::build_ite(*guard, &yes, &no, solver, info)
     }
+    compare(&lhs, &rhs, solver, info)
 }
 
 fn concat_str<B: BV>(lhs: Val<B>, rhs: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {

@@ -431,6 +431,8 @@ fn region_merge_grouped_arrivals_keep_guards_and_register_traces() {
         let ordinary = run(ExecutionLimits::default().with_path_merging(false));
         for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
             let mut limits = ExecutionLimits::default().with_path_merging(true);
+            // 显式关闭具体值合并，验证活跃字符串参与分组时的守卫和写入归属。
+            limits.merge_concrete_values = false;
             limits.merge_strategy = strategy;
             let grouped = run(limits);
             assert_eq!(equivalent_paths(&ordinary, &grouped, 2, true), (4, expected), "{strategy:?}");
@@ -4817,6 +4819,8 @@ fn merge_diagnostics_execution_is_observational() {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let slot = shared.symtab.intern("zdiagnostic_slot");
+    let mut limits = ExecutionLimits::default().with_path_merging(true);
+    limits.merge_concrete_values = false;
     let program = vec![
         Instr::Jump(input(0), 3, info()),
         Instr::Copy(Loc::Id(slot), Exp::I64(0), info()),
@@ -4826,17 +4830,10 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::End,
     ];
     let run = || {
-        paths_with_state(
-            program.clone(),
-            &shared,
-            1,
-            ExecutionLimits::default().with_path_merging(true),
-            crate::memory::Memory::new(),
-            |frame| {
-                frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
-                frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
-            },
-        )
+        paths_with_state(program.clone(), &shared, 1, limits.clone(), crate::memory::Memory::new(), |frame| {
+            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+        })
     };
     diag::configure("off").unwrap();
     let query_start = crate::smt::test_query_count();
@@ -4891,17 +4888,10 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::End,
     ];
-    let result = paths_with_state(
-        uninit,
-        &shared,
-        1,
-        ExecutionLimits::default().with_path_merging(true),
-        crate::memory::Memory::new(),
-        |frame| {
-            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::String));
-            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
-        },
-    );
+    let result = paths_with_state(uninit, &shared, 1, limits.clone(), crate::memory::Memory::new(), |frame| {
+        frame.vars_mut().insert(slot, UVal::Uninit(&Ty::String));
+        frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+    });
     assert_eq!(result.len(), 2);
     assert_eq!(diag::summary_for_test()["differences"]["init_mismatch"], 1);
     diag::configure("detail").unwrap();
@@ -4920,17 +4910,10 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::End,
     ];
     let run_nested = || {
-        paths_with_state(
-            nested.clone(),
-            &shared,
-            2,
-            ExecutionLimits::default().with_path_merging(true),
-            crate::memory::Memory::new(),
-            |frame| {
-                frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
-                frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
-            },
-        )
+        paths_with_state(nested.clone(), &shared, 2, limits.clone(), crate::memory::Memory::new(), |frame| {
+            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+            frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
+        })
     };
     diag::configure("off").unwrap();
     let without_diagnostics = run_nested();
@@ -4947,7 +4930,7 @@ fn merge_diagnostics_execution_is_observational() {
         program,
         &shared,
         1,
-        ExecutionLimits::default().with_path_merging(true).with_region_global_state(true),
+        limits.clone().with_region_global_state(true),
         crate::memory::Memory::new(),
         |_| (),
     );

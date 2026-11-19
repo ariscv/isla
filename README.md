@@ -798,7 +798,7 @@ Make 同时设置链接搜索路径和运行时 RPATH；直接检查 `target/rel
 
 ### 分段合并的可选配置
 
-分段去重线的候选及诊断使用 `[execution_limits.path_merge]` 的功能字段、其 `diagnostics` 子表或对应 CLI 参数，默认全部关闭；布尔参数使用 `=true`／`=false`，CLI 覆盖 TOML。例如：
+分段去重线的候选及诊断使用 `[execution_limits.path_merge]` 的功能字段、其 `diagnostics` 子表或对应 CLI 参数。下例的两个开关缺省关闭。布尔参数使用 `=true`／`=false`，CLI 覆盖 TOML。例如：
 
 ```toml
 [execution_limits.path_merge]
@@ -807,6 +807,8 @@ witness_eval = true
 ```
 
 运行时加 `--region-progress=true` 可打开进度诊断，加 `--region-defer-exit-check=false` 可覆盖上述候选配置。完整字段、导出目录约束与 CLI 对照见 [isarch CLI](specs/isarch-cli.md#分段合并候选与诊断配置)。原分支新增的功能／诊断环境变量已移除。
+
+区域合并默认用守卫保留不同的具体字符串和机器整数。字符串相等比较直接生成符号布尔值，需要具体操作数的指令按守卫重试。可用 `--merge-concrete-values=false` 或在 `[execution_limits.path_merge]` 设置 `merge_concrete_values = false` 关闭。
 
 具体值消费者的有限域枚举默认关闭。使用 `--finite-domain-enumeration=true`，或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = true`。候选数量由路径约束给出的集合决定，旧字段 `finite_domain_max` 会产生配置错误。执行器优先从可见路径约束确认候选，也用同一批约束剪去不可达的条件分支，并推导纯位向量运算产生的具体长度或索引。结构层无法确认时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。
 

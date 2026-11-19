@@ -8,7 +8,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
     ("prune_constant_branches", "prune-constant-branches", "分支入口识别结构化布尔恒值；默认关闭"),
     ("arm_error_leaf", "arm-error-leaf", "保留带到达条件的臂内执行错误；默认关闭"),
-    ("merge_concrete_values", "merge-concrete-values", "延后拆分区域具体字符串和机器整数；默认关闭"),
+    ("merge_concrete_values", "merge-concrete-values", "延后拆分区域具体字符串和机器整数；默认开启"),
     ("defer_exit_check", "region-defer-exit-check", "延迟区域出口检查；默认关闭"),
     ("lazy_z3_scope", "region-lazy-z3-scope", "延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用"),
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
@@ -185,6 +185,7 @@ mod tests {
         let mut limits = ExecutionLimitsConfig::default();
         cli(&mut limits, &[]).unwrap();
         assert_eq!(limits, ExecutionLimitsConfig::default());
+        assert!(limits.path_merge.merge_concrete_values);
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
                 "prune_constant_branches",
@@ -205,14 +206,16 @@ mod tests {
             } else {
                 "execution_limits.path_merge.diagnostics"
             };
-            let text = format!("[{section}]\n{field}=true");
-            let table: toml::Value = text.parse().unwrap();
-            let expected: ExecutionLimitsConfig = table["execution_limits"].clone().try_into().unwrap();
-            let mut limits = ExecutionLimitsConfig::default();
+            let config = |value| -> ExecutionLimitsConfig {
+                let text = format!("[{section}]\n{field}={value}");
+                let table: toml::Value = text.parse().unwrap();
+                table["execution_limits"].clone().try_into().unwrap()
+            };
+            let mut limits = config(false);
             cli(&mut limits, &[&format!("--{flag}=true")]).unwrap();
-            assert_eq!(limits, expected, "{flag}");
+            assert_eq!(limits, config(true), "{flag}");
             cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
-            assert_eq!(limits, ExecutionLimitsConfig::default(), "{flag}");
+            assert_eq!(limits, config(false), "{flag}");
         }
     }
 

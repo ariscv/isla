@@ -216,8 +216,9 @@ fn flat_keeps_entry_local_at_interior_join() {
         limits(true),
         |_| (),
         |merged| {
-            assert_eq!(equivalent_paths(&forked, merged, 2, true), (2, 2));
-            assert!(merged.iter().all(|path| path.variables.contains_key(&dead) && path.records.is_empty()));
+            assert_eq!(equivalent_paths(&forked, merged, 2, true), (2, 1));
+            assert!(matches!(merged[0].variables.get(&dead), Some(UVal::Init(Val::Guarded(..)))));
+            assert!(!merged[0].records.is_empty());
         },
     );
 }

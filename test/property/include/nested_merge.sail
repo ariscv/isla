@@ -13,9 +13,9 @@ function string_tag(k : string) -> bits(2) =
 function reference_tag(z : bits(2)) -> bits(2) =
   z[1 .. 1] @ not_vec(z[1 .. 1])
 
-// S1：三路 a × 三路 z。9→2，按 z=1 与 z∈{2,3} 分组。
+// S1：三路 a × 三路 z。9→1，三种 z 取值都进入合并结果。
 // c2、c3 的 k 相同，各自的 r 取 10、11，可用 ITE 合并。b1 的 k 与它们不同。
-// S2：三个 k 都是 b，9→1。S3：三个 k 两两不同，9→3，按 z 分组。
+// S2：三个 k 都是 b，9→1。S3：三个 k 两两不同，9→1，守卫区分三个字符串。
 // 控制：只将 S1 的 b1 改为与 c2、c3 相同的 c，9→1。
 function candidate_three(a : bits(2), z : bits(2), b : string, c : string, d : string) -> bits(8) = {
   assume(a != 0b00);
@@ -68,7 +68,7 @@ function candidate_three(a : bits(2), z : bits(2), b : string, c : string, d : s
   0b00 @ picked @ r @ string_tag(k)
 }
 
-// S4：w、a 两个二路外层与三路 z。12→2，按 z=1 与 z∈{2,3} 分组。
+// S4：w、a 两个二路外层与三路 z。12→1，守卫区分字符串。
 function candidate_three_levels(w : bits(1), a : bits(1), z : bits(2)) -> bits(8) = {
   assume(z != 0b00);
   var k : string = "initial";
@@ -140,7 +140,7 @@ function candidate_three_levels(w : bits(1), a : bits(1), z : bits(2)) -> bits(8
   0b00 @ outer @ middle @ r @ string_tag(k)
 }
 
-// S5：调用方三路 a，内层三路 z 位于被调函数。9→2，形状同 S1。
+// S5：调用方三路 a，内层三路 z 位于被调函数。9→1，形状同 S1。
 function inner_callee(z : bits(2)) -> (string, bits(2)) = {
   var k : string = "initial";
   var r : bits(2) = 0b00;
@@ -183,7 +183,7 @@ function candidate_callee(a : bits(2), z : bits(2)) -> bits(8) = {
   0b00 @ picked @ r @ string_tag(k)
 }
 
-// S6 边界：内层 z 可合并。中层自己的汇合点遇到不同字符串，4→2，按 m 分组。
+// S6 边界：内层 z 可合并。中层的汇合点用 m 的守卫合并不同字符串，4→1。
 function candidate_boundary(m : bits(1), z : bits(1)) -> bits(8) = {
   var k : string = "initial";
   var r : bits(1) = 0b0;
@@ -199,7 +199,7 @@ function candidate_boundary(m : bits(1), z : bits(1)) -> bits(8) = {
   0b0000 @ middle @ r @ string_tag(k)
 }
 
-// S6：再包一层 w，8→2。两条路径各自覆盖 w 的两个取值，仍按 m 分组。
+// S6：再包一层 w，8→1。合并路径覆盖 w、m 和 z 的全部取值。
 function candidate_wrapped(w : bits(1), m : bits(1), z : bits(1)) -> bits(8) = {
   var k : string = "initial";
   var r : bits(1) = 0b0;

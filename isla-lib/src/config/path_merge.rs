@@ -55,7 +55,7 @@ pub struct PathMergeDiagnostics {
     pub obligation_dump_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PathMergeConfig {
     pub strategy: Option<super::MergeStrategy>,
@@ -79,6 +79,7 @@ pub struct PathMergeConfig {
     /// 分支入口只用表达式结构识别布尔恒值；默认关闭。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
+    /// 用守卫保留不同的具体字符串和机器整数，缺省开启。
     pub merge_concrete_values: bool,
     /// 在实际到达指令时检查普通被调函数的传递效应。
     pub defer_call_effect_checks: bool,
@@ -91,6 +92,34 @@ pub struct PathMergeConfig {
     pub regions: Option<Vec<PathMergeRegionConfig>>,
     #[serde(deserialize_with = "deserialize_enumeration")]
     pub enumeration: Option<MergeEnumerationConfig>,
+}
+
+impl Default for PathMergeConfig {
+    fn default() -> Self {
+        Self {
+            strategy: None,
+            ordered_events: None,
+            enabled: None,
+            max_merge_depth: None,
+            max_fragments: None,
+            defer_range_proofs: false,
+            defer_ctor_checks: false,
+            merge_poison_slots: false,
+            step_budget: None,
+            defer_exit_check: false,
+            prune_constant_branches: false,
+            arm_error_leaf: false,
+            merge_concrete_values: true,
+            defer_call_effect_checks: false,
+            lazy_z3_scope: false,
+            finite_domain_enumeration: false,
+            witness_eval: false,
+            prefix_compact: false,
+            diagnostics: PathMergeDiagnostics::default(),
+            regions: None,
+            enumeration: None,
+        }
+    }
 }
 
 impl PathMergeConfig {

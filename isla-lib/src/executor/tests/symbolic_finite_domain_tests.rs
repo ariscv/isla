@@ -406,6 +406,49 @@ fn symbolic_finite_domain_zero_extend_with_bounded_width() {
 }
 
 #[test]
+fn symbolic_finite_domain_subrange_with_guarded_high_bound() {
+    for (no_smt, source_width) in [(true, 64), (false, 64), (true, 48)] {
+        let (results, queries) = run_length_consumer(no_smt, true, |solver, mode, high| {
+            let is_short = equal(mode, 1);
+            solver.assert(Formula::Or(Box::new(is_short.clone()), Box::new(equal(mode, 2))));
+            let other = solver.declare_bitvector(64, info());
+            solver.assert(Formula::Bvule(Box::new(Formula::Var(other)), Box::new(smtlib::bits64(100, 64))));
+            let width = solver.define_const(
+                Formula::Ite(Box::new(is_short), Box::new(smtlib::bits64(39, 64)), Box::new(smtlib::bits64(57, 64))),
+                info(),
+            );
+            let upper = solver.define_const(
+                Formula::Bvsub(
+                    Box::new(Formula::SignExtend(64, Box::new(Formula::Var(width)))),
+                    Box::new(smtlib::bits64(1, 128)),
+                ),
+                info(),
+            );
+            assert!(matches!(solver.finite_domain(upper), crate::smt::FiniteDomain::Bounded(v) if v.len() == 2));
+            (
+                upper,
+                Instr::PrimopVariadic(
+                    Loc::Id(RETURN),
+                    primop::variadic_primops()["vector_subrange"],
+                    vec![Exp::Bits(B64::ones(source_width)), Exp::Id(high), Exp::I128(0)],
+                    info(),
+                ),
+            )
+        });
+        if source_width == 64 {
+            let mut actual = results.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+            actual.sort();
+            assert_eq!(actual, [(39, vec![1]), (57, vec![2])]);
+        } else {
+            assert!(results.iter().all(|result| !matches!(result, Ok((57, _)))));
+        }
+        if no_smt {
+            assert_eq!(queries, 0);
+        }
+    }
+}
+
+#[test]
 fn symbolic_finite_domain_projects_through_integer_conversions() {
     let (results, queries) = run_length_consumer(true, true, |solver, bytes, variable| {
         let wide = solver.define_const(Formula::SignExtend(64, Box::new(Formula::Var(bytes))), info());

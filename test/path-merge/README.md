@@ -39,6 +39,7 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 | `must_merge`、`must_not_merge` | 应该合并或分开保留的语义原因。都默认留空，部分分组可同时填两项。 |
 | `modes` | 默认 `["off", "recursive", "flat"]`，三种都运行。 |
 | `ordered_events` | 测试配置是否要求合并时保留访问次序，默认 `false`。 |
+| `merge_concrete_values` | 省略时使用执行器缺省值。D1 显式设置 `false`，覆盖不同字符串仍需分组的情况。 |
 | `status`、`reason` | 默认 `ready`。标 `todo` 或 `xfail` 时填写原因。 |
 
 访存场景中的真实 `ReadMem`、`WriteMem` 按事件次序比较，包括地址、宽度、读写数据、标签及访问类型。遇到抽象内存的读值时，把能决定该字节的自由量登记为输入。[符号读值样例](scenarios/C3-symbolic-memory-read.sail) 把高七位限制为零，将最低位作为输入。[不同访存序列样例](scenarios/C2-different-memory-events.sail) 检查两臂的一次写与两次写。访存种类使用具体值。寄存器语义比较使用完成时的选定寄存器值。需要测试寄存器事件顺序的路径准入时，用 `ordered_events` 加计数和守卫断言表达。
@@ -131,3 +132,5 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 - [D9 P("a")、Q(())、P("c") 的分组](scenarios/D9-union-other-tree.sail)
 
 S1–S6、S6 边界、S1 控制及故意写错的规格继续使用 [property 的内层合并索引](../property/README-nested-merge.md)。该索引给出每项的守卫目标与独立运行命令。
+
+A3 在旧缺省下有两条完成路径，标为 XFAIL。缺省开启且字符串比较能直接读带守卫值后，递归和平铺在 B64 和 B129 下都得到一条完成路径，实测 XPASS 后已移除标记。

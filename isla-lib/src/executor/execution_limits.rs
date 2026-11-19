@@ -134,7 +134,7 @@ pub struct ExecutionLimits {
     pub region_global_state: bool,
     /// 启用断言死端过滤、重新声明槽位活跃性和预算内含回边区域推演。
     pub region_loop_analysis: bool,
-    /// 延后拆分区域中的不同具体字符串和机器整数。
+    /// 延后拆分区域中的不同具体字符串和机器整数，缺省开启。
     pub merge_concrete_values: bool,
     pub(super) defer_call_effect_checks: bool,
     pub merge_enumeration: crate::config::MergeEnumerationConfig,
@@ -169,7 +169,7 @@ impl Default for ExecutionLimits {
             merge_poison_slots: false,
             region_global_state: false,
             region_loop_analysis: false,
-            merge_concrete_values: false,
+            merge_concrete_values: crate::config::PathMergeConfig::default().merge_concrete_values,
             defer_call_effect_checks: false,
             merge_enumeration: Default::default(),
             collect_merge_definitions: false,

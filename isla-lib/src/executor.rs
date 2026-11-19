@@ -2590,7 +2590,17 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Assert)?;
                 }
-                let mut args = symbolic_length::eval_operands([arg1, arg2], frame, shared_state, solver, *info)?;
+                let mut args = if std::ptr::fn_addr_eq(*f, primop::eq_string::<B> as primop::Binary<B>) {
+                    symbolic_length::eval_operands_before_concrete_choice(
+                        [arg1, arg2],
+                        frame,
+                        shared_state,
+                        solver,
+                        *info,
+                    )?
+                } else {
+                    symbolic_length::eval_operands([arg1, arg2], frame, shared_state, solver, *info)?
+                };
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
                 let arg1 = args.pop().unwrap();

@@ -1,1 +1,1 @@
--C include/nested_merge_recursive.toml --path-merging --expect-paths 2
+-C include/nested_merge_recursive.toml --path-merging --expect-paths 1
