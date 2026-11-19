@@ -96,7 +96,7 @@ isarch -A <ir> -C <config> solve-state --clause=STORE
 `setup_pre_state` 已为 x1–x31 建立独立初态符号，x0 遵循模型的常零语义。
 无需额外声明某个通用寄存器，也不传固定通用寄存器的 `--prestate` 或附加地址掩码。
 `--instruction-bits` 仍供用户明确要求固定机器码时使用，通用探索脚本不依赖它。
-完整 DAG 入口 `solve-state` 缺省尝试自适应区域合并，并启用循环区域分析。`isla-execute-function` 同样采用该缺省。可用 `[execution_limits.path_merge] enabled = false` 或 `--no-path-merging` 关闭。CLI 显式选项覆盖 TOML，局部 `off` 和 `force` 在启用合并时继续生效。fuzz 等通用库入口沿用各自的配置。
+完整 DAG 入口 `solve-state` 缺省尝试自适应区域合并，并启用循环区域分析。`isla-execute-function` 同样采用该缺省。可用 `[execution_limits.path_merge] enabled = false` 或 `--no-path-merging` 关闭。CLI 显式选项覆盖 TOML，局部 `off` 和 `force` 在启用合并时继续生效。库的 `ExecutionLimits::default()` 关闭区域合并，显式启用时沿用本节各项合并缺省。
 通用探索省略分支、路径、回跳、比例及区域额度即不限。只有在有限预算的对照实验中才需要 `branch_limit` 或 `fork_limit`。加载 workaround 时，其中显式设置的额度仍可生效。有限额度触发时，省略 `on_limit_reached` 沿用截断，显式 `concretize` 会保留一个可行方向或当前模型。报告里应记录截断与具体化导致的覆盖收缩。
 当符号下标引起算子重试拆分时，默认沿用求解模型的候选顺序。跨进程由完整语义判定对齐。
 
@@ -431,8 +431,6 @@ isarch [原 J1 探索参数] \
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。
 
-`[execution_limits.path_merge].defer_call_effect_checks` 默认关闭，保留原有的静态准入行为。开启后，普通被调函数摘要中的 `state_effect` 由实际到达的指令检查。区域直接包含的不支持效应仍由准入检查拦截。递归与平铺合并共用这一规则。
-
 ## 合并拒绝诊断
 
 `--merge-diagnostics off|summary|detail` 默认关闭。`summary` 每 15 秒及正常收尾时，按位置、槽和差异类别输出累计汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。
@@ -451,11 +449,14 @@ isarch [原 J1 探索参数] \
 
 ## 分段合并候选与诊断配置
 
-这些选项放在主配置或 `--execution-limits-config` 文件中：功能字段放 `[execution_limits.path_merge]`，只读诊断放 `[execution_limits.path_merge.diagnostics]`，`bool_proof_rlimit` 放 `[execution_limits.solver]`。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。所有选项默认保持原执行行为，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
+这些选项放在主配置或 `--execution-limits-config` 文件中：功能字段放 `[execution_limits.path_merge]`，只读诊断放 `[execution_limits.path_merge.diagnostics]`，`bool_proof_rlimit` 放 `[execution_limits.solver]`。CLI 在加载配置后覆盖对应字段；布尔参数必须显式传 `true` 或 `false`，因此可以关闭 TOML 已开启的选项。未指定的 CLI 参数保留 TOML 值。缺省值见表，不再读取先前新增的 `ISLA_REGION_*` 等功能／诊断环境变量；本节表格给出完整范围，其他既有环境变量不受影响。
 
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
-| `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `false` | Jump 入口识别符号表达式的布尔恒值；不查询 SMT |
+| `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
+| `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `StateEffect` 检查 |
+| `path_merge.finite_domain_enumeration` | `--finite-domain-enumeration=true/false` | `true` | 从路径条件识别有限域，具体值消费者按需枚举 |
+| `path_merge.merge_poison_slots` | `--merge-poison-slots=true/false` | `true` | 只消除已证明不可观察的局部槽位或联合载荷 |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
@@ -526,6 +527,8 @@ progress = true
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
+递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `StateEffect`。区域准入仍检查直接效应和 `CalleeStateWrite`，到达未实现的 extern 时仍拒绝推演。
+
 ### 臂内执行错误叶子
 
 `[execution_limits.path_merge].arm_error_leaf` 默认关闭，`--arm-error-leaf=true|false` 可覆盖。
@@ -535,7 +538,7 @@ progress = true
 
 `[execution_limits.path_merge].merge_concrete_values` 默认开启，`--merge-concrete-values=true|false` 可覆盖。区域出口用守卫保留两臂不同的具体字符串或 I64。字符串相等比较直接计算对应的符号布尔值。需要具体操作数的指令沿原守卫重试，区域内重试通过共用汇合入口交回正常前沿。
 
-开启 `[execution_limits.path_merge].finite_domain_enumeration` 后，零扩展和符号扩展可按已知的有限目标位宽拆分。每个候选至少与源位向量等宽，并且必须能用原语的 `u32` 表示。分支保留完整路径约束。无 SMT 时，尚未确认可达的候选仍带守卫并等待认证。
+有限域识别与枚举默认开启。零扩展和符号扩展可按已知的有限目标位宽拆分。每个候选至少与源位向量等宽，并且必须能用原语的 `u32` 表示。分支保留完整路径约束。无 SMT 时，尚未确认可达的候选仍带守卫并等待认证。
 
 
 ## 投影枚举与样本输出

@@ -723,29 +723,38 @@ fn merge_states<'ir, B: BV>(
                 }
                 continue;
             }
+            let ty = match (original.get(&name), &va, &vb) {
+                (Some(UVal::Uninit(ty)), _, _) => Some(*ty),
+                (_, Some(UVal::Uninit(ty)), _) | (_, _, Some(UVal::Uninit(ty))) => Some(*ty),
+                _ => None,
+            };
+            let initial = ty
+                .filter(|_| matches!(va, Some(UVal::Uninit(_))) || matches!(vb, Some(UVal::Uninit(_))))
+                .map(|ty| symbolic(ty, shared, solver, info))
+                .transpose()?;
             if let Some(limits) = poison_limits.filter(|_| !lets) {
-                let dead_uninit = poison_slots::prepare_local(&mut va, &mut vb, condition, solver, |payload| {
-                    let cache = shared.function_regions.lock().unwrap();
-                    cache[&(base.function_name, limits.region_loop_analysis)].slot_reads_guarded(
-                        region.join,
-                        name,
-                        payload,
-                    )
-                });
+                let dead_uninit = poison_slots::prepare_local(
+                    &mut va,
+                    &mut vb,
+                    matches!(initial, Some(Val::Poison)),
+                    condition,
+                    solver,
+                    |payload| {
+                        let cache = shared.function_regions.lock().unwrap();
+                        cache[&(base.function_name, limits.region_loop_analysis)].slot_reads_guarded(
+                            region.join,
+                            name,
+                            payload,
+                        )
+                    },
+                );
                 if let Some(ty) = dead_uninit {
                     // 普通赋值需要原槽位，保留其类型和存在性，只跳过旧内容的合并。
                     merged.vars_mut().insert(name, UVal::Uninit(ty));
                     continue;
                 }
             }
-            let ty = match (original.get(&name), &va, &vb) {
-                (Some(UVal::Uninit(ty)), _, _) => Some(*ty),
-                (_, Some(UVal::Uninit(ty)), _) | (_, _, Some(UVal::Uninit(ty))) => Some(*ty),
-                _ => None,
-            };
-            if let Some(ty) = ty.filter(|_| matches!(va, Some(UVal::Uninit(_))) || matches!(vb, Some(UVal::Uninit(_))))
-            {
-                let initial = symbolic(ty, shared, solver, info)?;
+            if let Some(initial) = initial {
                 if matches!(va, Some(UVal::Uninit(_))) {
                     va = Some(UVal::Init(initial.clone()));
                 }

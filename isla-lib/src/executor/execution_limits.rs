@@ -147,6 +147,7 @@ pub struct ExecutionLimits {
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
+        let merge = crate::config::PathMergeConfig::default();
         ExecutionLimits {
             max_forks_per_branch: None,
             max_forks_per_path: None,
@@ -166,11 +167,11 @@ impl Default for ExecutionLimits {
             filter_model_exceptions: Arc::from([]),
             filter_match_failures: false,
             region_step_budget: super::region_merge::DEFAULT_REGION_STEP_BUDGET,
-            merge_poison_slots: false,
+            merge_poison_slots: merge.merge_poison_slots,
             region_global_state: false,
             region_loop_analysis: false,
-            merge_concrete_values: crate::config::PathMergeConfig::default().merge_concrete_values,
-            defer_call_effect_checks: false,
+            merge_concrete_values: merge.merge_concrete_values,
+            defer_call_effect_checks: merge.defer_call_effect_checks,
             merge_enumeration: Default::default(),
             collect_merge_definitions: false,
             merge_policy: Vec::new(),

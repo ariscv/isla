@@ -19,9 +19,7 @@ fn values(solver: &Solver<'_, B64>, symbol: Sym, expected: &[u64]) {
 #[test]
 fn finite_domain_prefix_shares_fork_candidates_and_does_not_revisit_events() {
     configure_tastic(Tactic::Qfaufbv);
-    let mut config = Config::new();
-    config.solver_options.finite_domain_enumeration = true;
-    let context = Context::new(config);
+    let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let x = solver.declare_bitvector(8, SourceLoc::unknown());
     let allowed = Exp::Or(Box::new(equal(x, 1)), Box::new(equal(x, 2)));

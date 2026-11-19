@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegionOptions {
     pub bv_rewrite: crate::smt::rewrite::BvRewrite,
@@ -23,7 +23,7 @@ pub struct RegionOptions {
     pub no_smt_keep_bool_proofs: bool,
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
-    /// 分支入口只用表达式结构识别布尔恒值；默认关闭。
+    /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
     /// 延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用。
@@ -58,6 +58,12 @@ pub struct RegionOptions {
 
 static OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
 static DEFAULT_OPTIONS: OnceLock<RegionOptions> = OnceLock::new();
+
+impl Default for RegionOptions {
+    fn default() -> Self {
+        Self::from_config(&super::ExecutionLimitsConfig::default())
+    }
+}
 
 impl RegionOptions {
     pub fn merge_depth_limit(&self) -> Option<usize> {
@@ -145,7 +151,7 @@ impl RegionOptions {
 mod tests {
     use super::*;
     #[test]
-    fn region_options_defaults_preserve_disabled_behavior() {
+    fn region_options_defaults_match_configuration() {
         assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
         assert_eq!(RegionOptions::current(), &RegionOptions::default());
         assert_eq!(RegionOptions::default().bool_proof_rlimit, 0);

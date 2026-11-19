@@ -655,8 +655,8 @@ impl<B: BV> Trace<B> {
     }
 }
 
-/// 求解实验选项；默认保持现有认证流程。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// 求解选项；有限域识别和枚举沿用路径合并配置的缺省值。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SolverOptions {
     pub on_unknown: crate::config::SolverOnUnknown,
     pub skip_branch_checks: bool,
@@ -665,6 +665,20 @@ pub struct SolverOptions {
     pub keep_bool_proofs: bool,
     pub finite_domain_enumeration: bool,
     pub bv_rewrite: rewrite::BvRewrite,
+}
+
+impl Default for SolverOptions {
+    fn default() -> Self {
+        Self {
+            on_unknown: Default::default(),
+            skip_branch_checks: false,
+            skip_bool_proofs: false,
+            no_smt: false,
+            keep_bool_proofs: false,
+            finite_domain_enumeration: crate::config::PathMergeConfig::default().finite_domain_enumeration,
+            bv_rewrite: Default::default(),
+        }
+    }
 }
 
 static SOLVER_OPTIONS: OnceLock<SolverOptions> = OnceLock::new();

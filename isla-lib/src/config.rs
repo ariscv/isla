@@ -2541,7 +2541,8 @@ r0 = "0x0000000000000000"
     #[test]
     fn prune_constant_branches_config_scope_and_type() {
         let defaults = merge_config("[execution_limits.path_merge]").unwrap();
-        assert!(!RegionOptions::from_config(&defaults).prune_constant_branches);
+        assert!(RegionOptions::from_config(&defaults).prune_constant_branches);
+        assert!(RegionOptions::default().prune_constant_branches);
         for enabled in [false, true] {
             let config =
                 merge_config(&format!("[execution_limits.path_merge]\nprune_constant_branches={enabled}")).unwrap();
@@ -2695,9 +2696,12 @@ end_column = 0
     #[test]
     fn region_merge_finite_domain_config() {
         let defaults = merge_config("[execution_limits.path_merge]").unwrap().path_merge;
-        assert!(!defaults.finite_domain_enumeration);
-        let config = merge_config("[execution_limits.path_merge]\nfinite_domain_enumeration=true").unwrap();
-        assert!(config.path_merge.finite_domain_enumeration);
+        assert!(defaults.finite_domain_enumeration);
+        for enabled in [false, true] {
+            let config =
+                merge_config(&format!("[execution_limits.path_merge]\nfinite_domain_enumeration={enabled}")).unwrap();
+            assert_eq!(config.path_merge.finite_domain_enumeration, enabled);
+        }
         for section in ["execution_limits", "execution_limits.path_merge", "execution_limits.solver"] {
             assert!(merge_config(&format!("[{section}]\nfinite_domain_max=64")).is_err());
         }
@@ -2835,7 +2839,7 @@ obligation_dump_dir = "obligations"
                 max_merge_depth: None,
                 defer_range_proofs: false,
                 defer_ctor_checks: false,
-                prune_constant_branches: false,
+                prune_constant_branches: true,
                 arm_error_leaf: false,
                 skip_branch_checks: true,
                 skip_bool_proofs: true,

@@ -810,9 +810,11 @@ witness_eval = true
 
 区域合并默认用守卫保留不同的具体字符串和机器整数。字符串相等比较直接生成符号布尔值，需要具体操作数的指令按守卫重试。可用 `--merge-concrete-values=false` 或在 `[execution_limits.path_merge]` 设置 `merge_concrete_values = false` 关闭。
 
-具体值消费者的有限域枚举默认关闭。使用 `--finite-domain-enumeration=true`，或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = true`。候选数量由路径约束给出的集合决定，旧字段 `finite_domain_max` 会产生配置错误。执行器优先从可见路径约束确认候选，也用同一批约束剪去不可达的条件分支，并推导纯位向量运算产生的具体长度或索引。结构层无法确认时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。
+精确有限域识别默认开启，只在长度、索引等消费者需要具体值时枚举。已确认的候选可以直接复用，有穷上界内的每个候选仍受完整路径约束。结构层不能确定上界时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。候选数量没有隐式上限。可用 `--finite-domain-enumeration=false` 或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = false` 关闭。旧字段 `finite_domain_max` 会产生配置错误。
 
-条件恒值折叠使用 `[execution_limits.path_merge] prune_constant_branches = true` 或 `--prune-constant-branches=true`，默认关闭。所有 Jump 在求值成功后只读本次符号条件的表达式；结构化简得到恒真／恒假时复用具体布尔的单臂执行，不能识别时沿用原处理。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
+Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
+
+区域合并默认在实际到达时检查普通被调函数的传递 `StateEffect`。直接原语仍在执行前检查，`CalleeStateWrite` 和未实现 extern 仍拒绝。可用 `--defer-call-effect-checks=false` 或在 `[execution_limits.path_merge]` 设置 `defer_call_effect_checks = false` 关闭。
 
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
 
@@ -820,7 +822,7 @@ witness_eval = true
 
 `defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。
 
-`[execution_limits.path_merge]` 的 `merge_poison_slots` 默认关闭，可用 `--merge-poison-slots=true/false` 覆盖。开启后，已证明不活动且后续通过标签检查读取的联合载荷可保留另一臂的有效值。普通局部槽仅在原内容于读取前必被覆盖、重建或随帧结束时跳过合并。
+局部未初始化槽位和 Poison 载荷的消除默认开启，可用 `--merge-poison-slots=false` 或在 `[execution_limits.path_merge]` 设置 `merge_poison_slots = false` 关闭。普通局部槽的默认初始化结果为 Poison，且静态证明旧内容不会被读取时，才跳过合并。可正常初始化的槽保留带守卫的值。联合载荷须先证明不活动，且后续读取必须受标签检查保护。返回值、地址被引用的槽位、全局状态和其余活跃槽沿用原合并规则。
 ### 无 SMT 候选 DAG 实验
 
 以下开关默认关闭，供定位求解成本使用。它们不修改 Sail 模型或区域步数预算。

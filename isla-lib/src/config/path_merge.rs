@@ -71,20 +71,21 @@ pub struct PathMergeConfig {
     pub defer_range_proofs: bool,
     /// 构造子解包标签转为出口待证义务；默认关闭。
     pub defer_ctor_checks: bool,
-    /// 只消除已证明不可观察的未初始化槽位；默认关闭。
+    /// 只消除已证明不可观察的局部未初始化槽位或载荷；默认开启。
     pub merge_poison_slots: bool,
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,
-    /// 分支入口只用表达式结构识别布尔恒值；默认关闭。
+    /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
     /// 用守卫保留不同的具体字符串和机器整数，缺省开启。
     pub merge_concrete_values: bool,
-    /// 在实际到达指令时检查普通被调函数的传递效应。
+    /// 默认在实际到达指令时检查普通被调函数的传递效应。
     pub defer_call_effect_checks: bool,
     /// 仅在延迟出口检查内生效。
     pub lazy_z3_scope: bool,
+    /// 需要具体值时按精确有限域枚举；默认开启。
     pub finite_domain_enumeration: bool,
     pub witness_eval: bool,
     pub prefix_compact: bool,
@@ -104,15 +105,15 @@ impl Default for PathMergeConfig {
             max_fragments: None,
             defer_range_proofs: false,
             defer_ctor_checks: false,
-            merge_poison_slots: false,
+            merge_poison_slots: true,
             step_budget: None,
             defer_exit_check: false,
-            prune_constant_branches: false,
+            prune_constant_branches: true,
             arm_error_leaf: false,
             merge_concrete_values: true,
-            defer_call_effect_checks: false,
+            defer_call_effect_checks: true,
             lazy_z3_scope: false,
-            finite_domain_enumeration: false,
+            finite_domain_enumeration: true,
             witness_eval: false,
             prefix_compact: false,
             diagnostics: PathMergeDiagnostics::default(),
