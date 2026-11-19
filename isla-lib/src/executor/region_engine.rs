@@ -43,46 +43,69 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     state: &'task TaskState<B>,
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
+    consumer: bool,
     tx: crate::smt::SolverTransaction,
     info: SourceLoc,
 ) -> Result<Option<bool>, ExecError> {
     let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
-    if crate::config::RegionOptions::current().arm_error_leaf && solver.region_queries_deferred() {
-        if let Err(error) = &result {
-            if is_arm_execution_error(error) {
-                let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
-                if solver.structural_bool(&reach) == Some(false) {
+    if let Err(error) = &result {
+        let deferred_error = crate::config::RegionOptions::current().arm_error_leaf
+            && solver.region_queries_deferred()
+            && is_arm_execution_error(error);
+        let consumer_error =
+            consumer && (is_arm_execution_error(error) || matches!(error, ExecError::AssertionFailure(..)));
+        if consumer_error || deferred_error {
+            let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
+            let mut dead = solver.structural_bool(&reach) == Some(false);
+            if consumer_error && !dead {
+                let checked = solver.check_candidate_sat(error.source_loc());
+                if let Some(result) = checked {
+                    match super::region_merge::path_is_feasible(result, arm, solver, shared) {
+                        Ok(feasible) => dead = !feasible,
+                        Err(error) => {
+                            solver.rollback_transaction(tx);
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            if dead {
+                solver.commit_dead_transaction();
+            } else {
+                let owner = arm.region_arm.expect("失败前沿必须有逻辑臂");
+                let location = error.source_loc();
+                let selector = solver.define_const(reach, location);
+                let (checkpoint, memory_guards) = solver.arm_error_snapshot(owner);
+                let mut failed = arm.clone();
+                failed.arm_error = Some(error.clone());
+                failed.arm_error_memory_guards = memory_guards.into();
+                failed.speculation_mode = SpeculationMode::Off;
+                failed.region_execution = None;
+                failed.region_replay = None;
+                failed.capture_path_smt_stats();
+                let task = Task {
+                    id: task_id,
+                    fraction: fraction.clone(),
+                    frame: freeze_frame(&failed),
+                    checkpoint,
+                    fork_cond: Some((
+                        smtlib::Def::Assert(smtlib::Exp::Var(selector)),
+                        Event::Fork(0, selector, 0, location),
+                    )),
+                    state,
+                    stop_conditions: stop,
+                };
+                if consumer_error {
+                    sink.submit_consumer_error(task);
                     solver.commit_dead_transaction();
                 } else {
-                    let owner = arm.region_arm.expect("失败前沿必须有逻辑臂");
-                    let location = error.source_loc();
-                    let selector = solver.define_const(reach, location);
-                    let (checkpoint, memory_guards) = solver.arm_error_snapshot(owner);
-                    let mut failed = arm.clone();
-                    failed.arm_error = Some(error.clone());
-                    failed.arm_error_memory_guards = memory_guards.into();
-                    failed.speculation_mode = SpeculationMode::Off;
-                    failed.region_execution = None;
-                    failed.region_replay = None;
-                    failed.capture_path_smt_stats();
-                    sink.submit(Task {
-                        id: task_id,
-                        fraction: fraction.clone(),
-                        frame: freeze_frame(&failed),
-                        checkpoint,
-                        fork_cond: Some((
-                            smtlib::Def::Assert(smtlib::Exp::Var(selector)),
-                            Event::Fork(0, selector, 0, location),
-                        )),
-                        state,
-                        stop_conditions: stop,
-                    });
-                    // 保留已冻结的义务和定义。退出逻辑臂作用域后按归属撤去事件。
+                    sink.submit(task);
+                    // 保留已冻结的义务和定义，由根区域认证。
                     solver.defer_assertion(smtlib::Exp::Bool(false), location);
                     solver.commit_transaction();
                 }
-                return Ok(Some(false));
             }
+            return Ok(Some(false));
         }
     }
     if arm.region_arrivals.is_empty() {
@@ -298,6 +321,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
     record_id: usize,
     condition: Sym,
     region: &Region,
+    consumer: bool,
     base: &LocalFrame<'ir, B>,
     arms: [Vec<LocalFrame<'ir, B>>; 2],
     frame: &mut LocalFrame<'ir, B>,
@@ -316,9 +340,13 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
         );
     }
     let nested = frame.region_execution.is_some();
-    let keep_separate = (nested || count > 2)
-        && frame.region_execution.as_ref().is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)
-        && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
+    let keep_separate = consumer
+        || (nested || count > 2)
+            && frame
+                .region_execution
+                .as_ref()
+                .is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)
+            && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
     let saved = keep_separate.then(|| arms.clone());
     let tx = keep_separate.then(|| solver.start_transaction());
     let finish = |solver: &mut Solver<B>| {
@@ -863,7 +891,14 @@ fn merge_states<'ir, B: BV>(
             register_value_enums(a, &shared.type_info, solver);
             register_value_enums(b, &shared.type_info, solver);
             let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
-            crate::primop_util::merge_val(condition, a, b, solver, info).map_err(|error| {
+            let merge = if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
+                && (matches!(a, Val::MixedBits(_)) || matches!(b, Val::MixedBits(_)))
+            {
+                crate::primop_util::merge_concrete_val
+            } else {
+                crate::primop_util::merge_val
+            };
+            merge(condition, a, b, solver, info).map_err(|error| {
                 if diagnostics::enabled() && !matches!(error, ExecError::Smt(_) | ExecError::Timeout) {
                     let declared = shared.registers.get(reg).expect("诊断寄存器必须有声明");
                     let raw_a = left

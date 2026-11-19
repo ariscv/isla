@@ -5,8 +5,7 @@
 // expect_paths_unmerged = 4
 // expect_paths_merged = 1
 // must_merge = "四个互斥输入抵达同一个返回点，一个带守卫的整数即可表示全部结果。"
-// status = "xfail"
-// reason = "严格合并保留四个整数，开启具体值合并后读回整数仍得到四条完成路径。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

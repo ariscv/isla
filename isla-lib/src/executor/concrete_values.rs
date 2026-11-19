@@ -61,6 +61,41 @@ fn resolve_value<B: BV>(
     }
 }
 
+pub(super) enum ConsumerRetry {
+    Choice(Sym),
+    Operand([smtlib::Exp<Sym>; 2]),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn retry_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+    retry: ConsumerRetry,
+    info: SourceLoc,
+    tid: usize,
+    task_id: TaskId,
+    fraction: &mut Fraction,
+    timeout: PathTimeout,
+    stop: Option<&'task StopConditions>,
+    sink: &S,
+    frame: &mut LocalFrame<'ir, B>,
+    state: &'task TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<Option<bool>, ExecError> {
+    let result = region_merge::concrete_consumer(
+        retry, info, tid, task_id, fraction, timeout, stop, sink, frame, state, shared, solver,
+    );
+    match &result {
+        Ok(Some(_)) => {
+            REGIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {
+            REJECTED.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(None) => (),
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retry<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     guard: Sym,
@@ -76,15 +111,21 @@ pub(super) fn retry<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<bool, ExecError> {
-    if frame.region_execution.is_some() {
-        REGIONS.fetch_add(1, Ordering::Relaxed);
-        let result = region_merge::concrete_consumer(
-            guard, info, tid, task_id, fraction, timeout, stop, sink, frame, state, shared, solver,
-        );
-        if result.is_err() {
-            REJECTED.fetch_add(1, Ordering::Relaxed);
-        }
-        return result;
+    if let Some(result) = retry_region(
+        ConsumerRetry::Choice(guard),
+        info,
+        tid,
+        task_id,
+        fraction,
+        timeout,
+        stop,
+        sink,
+        frame,
+        state,
+        shared,
+        solver,
+    )? {
+        return Ok(result);
     }
     let positive = smtlib::Exp::Var(guard);
     let negative = smtlib::Exp::Not(Box::new(positive.clone()));

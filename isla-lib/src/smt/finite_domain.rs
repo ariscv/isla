@@ -163,7 +163,28 @@ impl<'ctx> Ast<'ctx> {
 
 impl<B: BV> Solver<'_, B> {
     pub(crate) fn finite_domain_enabled(&self) -> bool {
-        self.ctx.solver_options.finite_domain_enumeration
+        self.finite_prefix.is_some()
+    }
+
+    /// 指令级重试也能利用已有的穷尽约束。默认不维护全路径索引时，
+    /// 只在这次重试的作用域内建立索引，后续的保存点操作走同一入口。
+    pub(crate) fn with_finite_domain<T>(&mut self, use_domain: impl FnOnce(&mut Self) -> T) -> T {
+        assert!(self.finite_prefix.is_none(), "有限域索引必须只安装一次");
+        let mut segments: Vec<_> =
+            std::iter::successors(Some(&self.trace), |trace| trace.tail.as_ref().as_ref()).collect();
+        let mut index = PrefixIndex::default();
+        for trace in segments.drain(..).rev() {
+            for (offset, event) in trace.head.iter().enumerate() {
+                index.push(trace.checkpoints, offset, event);
+            }
+        }
+        for (offset, event) in self.transaction_events.iter().enumerate() {
+            index.push(BUFFERED, offset, event);
+        }
+        self.finite_prefix = Some(index);
+        let result = use_domain(self);
+        self.finite_prefix = None;
+        result
     }
 
     /// 条件在所有剩余候选中同值时才折叠。只证明蕴含，完整前缀仍由原入口认证。

@@ -6,8 +6,7 @@
 // expect_paths_unmerged = 4
 // expect_paths_merged = 1
 // must_merge = "切片需要的四个位宽由同一输入决定，扩展后两个比较都产生固定位宽的结果。"
-// status = "xfail"
-// reason = "两种具体值配置均按四种模式完成，零扩展和符号扩展的比较结果逐输入正确。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

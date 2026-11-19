@@ -5,8 +5,7 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "两个三位非负整数都能无损表示为有守卫的整数。"
-// status = "xfail"
-// reason = "total-merge-design.md §3（整数消费）：3 和 7 已合并，切片前的整数转换在区域外按守卫重试，最终有两条路径。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

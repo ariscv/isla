@@ -5,8 +5,7 @@
 // expect_paths_unmerged = 3
 // expect_paths_merged = 1
 // must_merge = "3、unsigned(y)、7 按 x 选取。整数消费者均须使用活动守卫下的原整数，本例核对三位切片。"
-// status = "xfail"
-// reason = "total-merge-design.md §2–3（具体与符号 I64、整数消费）：外层汇合拒绝不兼容状态，已合并的整数又在切片前按守卫重试，三组分别完成。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

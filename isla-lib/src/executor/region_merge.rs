@@ -1,4 +1,5 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
+use super::concrete_values::ConsumerRetry;
 use super::region_engine::{
     advance_arm, append_loop_exit, branch_arm, finish_arrivals, finish_region, loop_exit_guard,
     publish_committed_records, publish_register_writes, record_projected_arrival, LoopDependencies, ReadyFragments,
@@ -10,15 +11,38 @@ use crate::config::MergeMode;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
+mod consumer_continuation;
+
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
 struct ArmErrorSink<'ir, 'task, B: BV> {
     tasks: Mutex<Vec<Task<'ir, 'task, B>>>,
+    consumer_errors: Mutex<Vec<Task<'ir, 'task, B>>>,
+}
+
+impl<'ir, 'task, B: BV> ArmErrorSink<'ir, 'task, B> {
+    fn new() -> Self {
+        Self { tasks: Mutex::new(Vec::new()), consumer_errors: Mutex::new(Vec::new()) }
+    }
+
+    fn forward(self, sink: &(impl ForkSink<'ir, 'task, B> + ?Sized)) {
+        for task in self.tasks.into_inner().unwrap() {
+            sink.submit(task);
+        }
+        for task in self.consumer_errors.into_inner().unwrap() {
+            sink.submit_consumer_error(task);
+        }
+    }
 }
 
 impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ArmErrorSink<'ir, 'task, B> {
     fn submit(&self, task: Task<'ir, 'task, B>) {
         assert!(task.frame.arm_error.is_some(), "区域内仅允许缓冲错误终态");
         self.tasks.lock().unwrap().push(task);
+    }
+
+    fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
+        assert!(task.frame.arm_error.is_some(), "候选错误必须携带错误终态");
+        self.consumer_errors.lock().unwrap().push(task);
     }
 }
 
@@ -362,12 +386,13 @@ pub(super) fn preflight<B: BV>(
     Ok(())
 }
 
-pub(super) fn region<'ir, B: BV>(
+fn with_function_regions<'ir, B: BV, T>(
     frame: &LocalFrame<'ir, B>,
     shared: &SharedState<'ir, B>,
     summaries: &HashMap<Name, FunctionEffect>,
     loop_analysis: bool,
-) -> Result<Arc<Region>, ExecError> {
+    f: impl FnOnce(&mut FunctionRegions<B>) -> T,
+) -> T {
     let mut cache = shared.function_regions.lock().unwrap();
     let analysis = cache.entry((frame.function_name, loop_analysis)).or_insert_with(|| {
         FunctionRegions::with_options(
@@ -390,18 +415,29 @@ pub(super) fn region<'ir, B: BV>(
                 .collect(),
         )
     });
-    analysis.region(frame.pc).map_err(|reason| {
-        reject(
-            frame,
-            match reason {
-                RegionRejection::NoJoin => SpeculativeRejectReason::NoJoin,
-                RegionRejection::HasBackEdge => SpeculativeRejectReason::HasBackEdge,
-                RegionRejection::ExceptionCheck => SpeculativeRejectReason::ExceptionCheck,
-                RegionRejection::ExitsRegion { .. } => SpeculativeRejectReason::RegionEscaped,
-                RegionRejection::NotJump => panic!("区域入口必须是 Jump"),
-            },
-        )
-    })
+    f(analysis)
+}
+
+pub(super) fn region<'ir, B: BV>(
+    frame: &LocalFrame<'ir, B>,
+    shared: &SharedState<'ir, B>,
+    summaries: &HashMap<Name, FunctionEffect>,
+    loop_analysis: bool,
+) -> Result<Arc<Region>, ExecError> {
+    with_function_regions(frame, shared, summaries, loop_analysis, |analysis| analysis.region(frame.pc)).map_err(
+        |reason| {
+            reject(
+                frame,
+                match reason {
+                    RegionRejection::NoJoin => SpeculativeRejectReason::NoJoin,
+                    RegionRejection::HasBackEdge => SpeculativeRejectReason::HasBackEdge,
+                    RegionRejection::ExceptionCheck => SpeculativeRejectReason::ExceptionCheck,
+                    RegionRejection::ExitsRegion { .. } => SpeculativeRejectReason::RegionEscaped,
+                    RegionRejection::NotJump => panic!("区域入口必须是 Jump"),
+                },
+            )
+        },
+    )
 }
 
 /// 只有最外层、无架构写出、无控制流采样限制的有环函数出口区域才能分段。
@@ -549,7 +585,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
     };
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
-    let mut pending_errors = ArmErrorSink { tasks: Mutex::new(Vec::new()) };
+    let mut pending_errors = ArmErrorSink::new();
     let mut publish_errors = false;
     let mut segmented = false;
     let result = match candidate {
@@ -609,7 +645,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         condition,
                         target,
                         frame.pc + 1,
-                        false,
+                        None,
                         region,
                         depth,
                         mode,
@@ -711,28 +747,21 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         if let Some(candidate_frame) = candidate_frame {
                             *frame = candidate_frame;
                         }
-                        if !nested && publish_errors {
-                            for mut task in std::mem::take(pending_errors.tasks.get_mut().unwrap()) {
-                                let Some((_, Event::Fork(id, _, _, _))) = &mut task.fork_cond else {
-                                    unreachable!("失败前沿必须有分叉元数据")
-                                };
-                                *id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
-                                task.frame.execution_limit_state = frame.execution_limit_state.clone();
-                                cost::make_mut(&mut task.frame.execution_limit_state).advance_path_signature(true);
-                                cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(false);
-                                for group in frame
-                                    .region_arrivals
-                                    .iter_mut()
-                                    .chain(continuation.iter_mut().map(|(_, frame)| frame))
-                                {
-                                    let limits = cost::make_mut(&mut group.execution_limit_state);
-                                    assert_eq!(limits.record_fork(), *id, "继续前沿继承同一区域的分叉计数");
-                                    limits.advance_path_signature(false);
-                                }
-                                fraction.halve();
-                                task.fraction = fraction.clone();
-                                sink.submit(task);
+                        if !nested {
+                            if publish_errors {
+                                pending_errors
+                                    .consumer_errors
+                                    .get_mut()
+                                    .unwrap()
+                                    .append(pending_errors.tasks.get_mut().unwrap());
                             }
+                            publish_arm_errors(
+                                frame,
+                                continuation.as_mut().map(|(_, frame)| frame),
+                                std::mem::take(pending_errors.consumer_errors.get_mut().unwrap()),
+                                fraction,
+                                sink,
+                            );
                         }
                         if grouped_root {
                             assert!(continuation.is_none(), "分组出口和预算续配不能共用调度");
@@ -800,9 +829,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
     };
     if nested && result.is_ok() {
-        for task in pending_errors.tasks.into_inner().unwrap() {
-            sink.submit(task);
-        }
+        pending_errors.forward(sink);
     }
     match result {
         Ok(RegionResult::Separate { reason, merged_groups }) => {
@@ -888,6 +915,33 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 Ok(RegionResult::Rejected)
             }
         }
+    }
+}
+
+/// 失败叶在根保存点提交后才可交给调度器。继续组继承同一次路径拆分。
+fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+    frame: &mut LocalFrame<'ir, B>,
+    mut continued: Option<&mut LocalFrame<'ir, B>>,
+    errors: Vec<Task<'ir, 'task, B>>,
+    fraction: &mut Fraction,
+    sink: &S,
+) {
+    for mut task in errors {
+        let Some((_, Event::Fork(id, _, _, _))) = &mut task.fork_cond else {
+            unreachable!("失败前沿必须有分叉元数据")
+        };
+        *id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
+        task.frame.execution_limit_state = frame.execution_limit_state.clone();
+        cost::make_mut(&mut task.frame.execution_limit_state).advance_path_signature(true);
+        cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(false);
+        for group in frame.region_arrivals.iter_mut().chain(continued.iter_mut().map(|frame| &mut **frame)) {
+            let limits = cost::make_mut(&mut group.execution_limit_state);
+            assert_eq!(limits.record_fork(), *id, "继续前沿继承同一区域的分叉计数");
+            limits.advance_path_signature(false);
+        }
+        fraction.halve();
+        task.fraction = fraction.clone();
+        sink.submit(task);
     }
 }
 
@@ -1049,10 +1103,12 @@ fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     state: &'task TaskState<B>,
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
+    consumer: bool,
     tx: crate::smt::SolverTransaction,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
-    if let Some(alive) = advance_arm(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver, tx, info)?
+    if let Some(alive) =
+        advance_arm(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver, consumer, tx, info)?
     {
         return Ok(alive);
     }
@@ -1080,6 +1136,7 @@ fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 state,
                 shared,
                 solver,
+                consumer,
                 part_tx,
                 info,
             )?;
@@ -1122,7 +1179,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     condition: Sym,
     target: usize,
     fallthrough: usize,
-    consumer: bool,
+    consumer: Option<ConsumerRetry>,
     region: Arc<Region>,
     depth: usize,
     mode: MergeMode,
@@ -1149,23 +1206,44 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     }
     let mut arms = [Vec::new(), Vec::new()];
     let mut ready = ReadyFragments::new(state);
-    ready.extend([(target, Var(condition)), (fallthrough, Not(Box::new(Var(condition))))].into_iter().enumerate());
+    let guards = match &consumer {
+        Some(ConsumerRetry::Operand(guards)) => guards.clone(),
+        _ => [Var(condition), Not(Box::new(Var(condition)))],
+    };
+    ready.extend([target, fallthrough].into_iter().zip(guards).enumerate());
     let live_forks = stats::merge_timing::LiveForks::start();
     while let Some((side, (pc, guard))) = ready.pop() {
         live_forks.set(if side == 0 { 1 } else { arms[0].len() });
+        if consumer.is_some() && !feasible(frame, solver, &guard, info, shared)? {
+            solver.assert(Not(Box::new(guard)));
+            continue;
+        }
         let owner = solver.new_logical_arm(solver.current_logical_arm());
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
         let mut arm = branch_arm(&base, pc, guard, owner);
-        if consumer {
+        if let Some(ConsumerRetry::Choice(guard)) = consumer {
             cost::make_mut(&mut arm.local_state)
                 .concrete_choices
                 .as_mut()
                 .expect("消费者拆分必须已启用")
-                .insert(condition, side == 0);
-            arm.pending_retry_operand.get_or_insert((pc, Val::Unit));
+                .insert(guard, side == 0);
         }
         if solver.with_logical_arm(owner, |solver| {
-            advance_region_arm(tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, info)
+            advance_region_arm(
+                tid,
+                task_id,
+                fraction,
+                timeout,
+                stop,
+                sink,
+                &mut arm,
+                state,
+                shared,
+                solver,
+                consumer.is_some(),
+                tx,
+                info,
+            )
         })? {
             if arm.region_arrivals.is_empty() {
                 promote_initials(&mut base, &arm, shared, solver);
@@ -1176,12 +1254,12 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     promote_initials(&mut base, fragment, shared, solver);
                 }
             }
-        } else if crate::config::RegionOptions::current().arm_error_leaf {
+        } else if consumer.is_some() || crate::config::RegionOptions::current().arm_error_leaf {
             solver.discard_logical_arm_effects(owner);
         }
     }
     live_forks.set(arms.iter().map(Vec::len).sum::<usize>().saturating_sub(1));
-    finish_arrivals(record_id, condition, &region, &base, arms, frame, state, shared, solver, info)
+    finish_arrivals(record_id, condition, &region, consumer.is_some(), &base, arms, frame, state, shared, solver, info)
         .map(RegionOutput::complete)
 }
 
@@ -1481,6 +1559,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     work.record_id,
                     work.condition,
                     &work.region,
+                    false,
                     &work.base,
                     work.arms,
                     &mut work.original,
@@ -1577,6 +1656,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         record_id,
                         condition,
                         &root_region,
+                        false,
                         &original_base,
                         [exit_prefix, Vec::new()],
                         &mut restored,
@@ -1621,7 +1701,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         let tx = solver.start_transaction_with_guard(Some(guard));
         if solver.with_logical_arm(owner, |solver| {
             advance_region_arm(
-                tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, tx, work.info,
+                tid, task_id, fraction, timeout, stop, sink, &mut arm, state, shared, solver, false, tx, work.info,
             )
         })? {
             if !arm.region_arrivals.is_empty() {
@@ -1850,10 +1930,10 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     }
 }
 
-/// 具体消费者的两次执行只跨过当前指令；仍由真实解释器及完整臂事务处理。
+/// 候选重试从当前操作数快照开始。只有真实 Jump 使用控制流的公共后支配点。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
-    condition: Sym,
+    retry: ConsumerRetry,
     info: SourceLoc,
     tid: usize,
     task_id: TaskId,
@@ -1865,60 +1945,135 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
     state: &'task TaskState<B>,
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
-) -> Result<bool, ExecError> {
-    let pc = frame.pc;
-    let parent = frame.region_execution.as_ref().expect("消费者区域必须嵌套于推演");
-    if crate::config::RegionOptions::current().merge_depth_limit().is_some_and(|limit| parent.depth >= limit) {
-        return Err(reject(frame, SpeculativeRejectReason::NestingLimit));
+) -> Result<Option<bool>, ExecError> {
+    let mode = policy(frame, state, info);
+    if mode == MergeMode::Off
+        || !state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
+        || frame.execution_limit_state.has_sampled_branch()
+    {
+        return Ok(None);
     }
-    let region = if matches!(&frame.instrs[pc], Instr::Jump(..)) {
-        let global = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
-        let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global));
-        let candidate = region(frame, shared, summaries, false)?;
-        if candidate.has_back_edge {
-            return Err(reject(frame, SpeculativeRejectReason::HasBackEdge));
+    let pc = frame.pc;
+    let nested = frame.region_execution.is_some();
+    let depth = frame.region_execution.as_ref().map_or(1, |parent| parent.depth + 1);
+    if crate::config::RegionOptions::current().merge_depth_limit().is_some_and(|limit| depth > limit) {
+        if nested {
+            return Err(reject(frame, SpeculativeRejectReason::NestingLimit));
         }
-        let mut candidate = (*candidate).clone();
-        candidate.nodes.insert(pc);
-        Arc::new(candidate)
-    } else {
-        Arc::new(Region {
+        return Ok(None);
+    }
+    let region = match &frame.instrs[pc] {
+        Instr::End => return Ok(None),
+        Instr::Jump(..) => {
+            let global = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
+            let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global));
+            let candidate = match region(frame, shared, summaries, false) {
+                Ok(candidate) if !candidate.has_back_edge => candidate,
+                Ok(_) if nested => return Err(reject(frame, SpeculativeRejectReason::HasBackEdge)),
+                Err(error) if nested => return Err(error),
+                _ => return Ok(None),
+            };
+            let mut candidate = (*candidate).clone();
+            candidate.nodes.insert(pc);
+            Arc::new(candidate)
+        }
+        _ => Arc::new(Region {
             branch_pc: pc,
             has_back_edge: false,
             join: RegionPoint::Instruction(pc + 1),
             nodes: [pc].into_iter().collect(),
             kind: crate::ir::regions::RegionKind::Reconvergent,
             local_variables: Default::default(),
-        })
+        }),
     };
-    let output = execute_region(
+    let record_start = frame.region_merge_records.len();
+    let pending_errors = ArmErrorSink::new();
+    let tx = solver.start_transaction();
+    let mut candidate = frame.clone();
+    candidate.pending_retry_operand.get_or_insert((pc, Val::Unit));
+    let condition = match &retry {
+        ConsumerRetry::Choice(guard) => *guard,
+        ConsumerRetry::Operand([selected, _]) => solver.define_const(selected.clone(), info),
+    };
+    let mut output = match execute_region(
         condition,
         pc,
         pc,
-        true,
+        Some(retry),
         region,
-        parent.depth + 1,
-        parent.mode,
+        depth,
+        mode,
         tid,
         task_id,
         fraction,
         timeout,
         stop,
-        sink,
-        frame,
+        &pending_errors,
+        &mut candidate,
         state,
         shared,
         solver,
         info,
-    )?;
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            solver.rollback_transaction(tx);
+            if nested || !matches!(error, ExecError::SpeculativeReject { .. }) {
+                return Err(error);
+            }
+            // 不可推演效应和控制流屏障沿用原来的执行入口。
+            return Ok(None);
+        }
+    };
     assert!(output.continuation.is_none());
+    if matches!(output.result, RegionResult::Separate { reason: SpeculativeRejectReason::IncompatibleState, .. }) {
+        match consumer_continuation::try_join_after_last_use(
+            condition,
+            info,
+            tid,
+            task_id,
+            fraction,
+            timeout,
+            stop,
+            &pending_errors,
+            &mut candidate,
+            state,
+            shared,
+            solver,
+        ) {
+            Ok(Some(result)) => output.result = result,
+            Ok(None) => (),
+            Err(error) => {
+                solver.rollback_transaction(tx);
+                return Err(error);
+            }
+        }
+    }
+    let grouped_root = !nested && matches!(output.result, RegionResult::Separate { .. });
+    if !grouped_root {
+        solver.commit_transaction();
+    }
+    *frame = candidate;
+    if nested {
+        pending_errors.forward(sink);
+    } else {
+        publish_arm_errors(frame, None, pending_errors.consumer_errors.into_inner().unwrap(), fraction, sink);
+        if grouped_root {
+            publish_join_groups(frame, record_start, task_id, fraction, stop, sink, state, shared, solver, info);
+        } else {
+            publish_committed_records(frame, record_start, task_id, shared, solver);
+        }
+    }
     match output.result {
         RegionResult::Merged => {
             frame.pending_retry_operand = None;
-            Ok(true)
+            let local = cost::make_mut(&mut frame.local_state);
+            local.expression_values.clear();
+            local.expression_retry_operands = None;
+            Ok(Some(true))
         }
-        RegionResult::Separate { .. } => Ok(true),
-        RegionResult::Dead => Ok(false),
+        RegionResult::Separate { .. } => Ok(Some(true)),
+        RegionResult::Dead => Ok(Some(false)),
         _ => panic!("具体消费者区域必须完成或全死"),
     }
 }
