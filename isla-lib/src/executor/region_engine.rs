@@ -308,6 +308,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
 ) -> Result<RegionResult, ExecError> {
     let count = arms.iter().map(Vec::len).sum::<usize>();
     if crate::config::RegionOptions::current().progress && diagnostics::enabled() {
+        super::stats::merge_timing::observe_join(count);
         super::stats::merge_timing::live_sample(
             base.function_name,
             region.branch_pc,
@@ -342,6 +343,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
             if tx.is_some() {
                 solver.commit_transaction();
             }
+            super::stats::merge_timing::observe_join_output(usize::from(!matches!(result, RegionResult::Dead)));
             Ok(result)
         }
         (Err(error), tx) => {
@@ -377,6 +379,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
                 separate.push(fragment);
             }
             assert!(frame.region_arrivals.is_empty());
+            super::stats::merge_timing::observe_join_output(separate.len());
             frame.region_arrivals = separate;
             Ok(RegionResult::Separate { reason, merged_groups })
         }

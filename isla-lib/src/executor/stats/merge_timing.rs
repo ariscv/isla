@@ -4,6 +4,7 @@ use crate::timeout::SmtOperation;
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -95,8 +96,12 @@ struct LiveAttempt {
     started: Instant,
     start_steps: u64,
     start_forks: usize,
+    start_branches: u64,
     steps: u64,
     forks: usize,
+    branches: u64,
+    call_instance: Option<usize>,
+    pte: Option<(Option<i64>, Option<i64>)>,
     position: Value,
     sampled: Instant,
 }
@@ -123,8 +128,12 @@ impl Counts {
                 started: now,
                 start_steps: steps,
                 start_forks: forks,
+                start_branches: BRANCHES.with(Cell::get),
                 steps: 0,
                 forks: 0,
+                branches: 0,
+                call_instance: None,
+                pte: None,
                 position,
                 sampled: now,
             },
@@ -135,12 +144,13 @@ impl Counts {
             let row = self.live.get_mut(id).unwrap();
             row.steps = steps - row.start_steps;
             row.forks = forks - row.start_forks;
+            row.branches = BRANCHES.with(Cell::get) - row.start_branches;
             row.position = position.clone();
             row.sampled = now;
         }
     }
-    fn end_live(&mut self, id: usize) {
-        self.live.remove(&id).expect("结束的区域必须曾登记为在途");
+    fn end_live(&mut self, id: usize) -> LiveAttempt {
+        self.live.remove(&id).expect("结束的区域必须曾登记为在途")
     }
     fn live_rows(&self, now: Instant) -> Vec<Value> {
         self.live
@@ -149,6 +159,7 @@ impl Counts {
                 json!({
                     "attempt":id, "parent_attempt":row.parent, "task":row.task, "origin":row.origin,
                     "current":row.position, "steps":row.steps, "live_forks":row.forks,
+                    "both_feasible_nested":row.branches,"call_instance":row.call_instance,"pte_width_level":row.pte,
                     "wall_seconds":now.duration_since(row.started).as_secs_f64(),
                     "sample_age_seconds":now.duration_since(row.sampled).as_secs_f64()
                 })
@@ -204,11 +215,33 @@ struct Attempt {
     outcome: String,
     direct: Measure,
     children: Measure,
+    translation: Option<usize>,
+    selected: bool,
+    joins: JoinCounts,
+    delivered: Option<usize>,
+}
+#[derive(Default, serde::Serialize)]
+struct JoinCounts {
+    joins_started: usize,
+    joins_delivered: usize,
+    arrivals: usize,
+    output_frames: usize,
+}
+impl JoinCounts {
+    fn arrivals(&mut self, count: usize) {
+        self.joins_started += 1;
+        self.arrivals += count;
+    }
+    fn delivered(&mut self, count: usize) {
+        self.joins_delivered += 1;
+        self.output_frames += count;
+    }
 }
 thread_local! {
     static ATTEMPTS: RefCell<Vec<Attempt>> = const { RefCell::new(Vec::new()) };
     static STEPS: Cell<u64> = const { Cell::new(0) };
     static FORKS: Cell<usize> = const { Cell::new(0) };
+    static BRANCHES: Cell<u64> = const { Cell::new(0) };
 }
 pub(super) fn reset() {
     *COUNTS.get_or_init(|| Mutex::new(Counts::default())).lock().unwrap() = Counts::default();
@@ -237,6 +270,16 @@ impl AttemptGuard {
                     FORKS.with(Cell::get),
                 );
             }
+            let translation = stack
+                .last()
+                .and_then(|attempt| attempt.translation)
+                .or_else(|| (tracked && origin["function"] == "translateAddr" && origin["pc"] == 13).then_some(id));
+            let selected = tracked
+                && (translation.is_some()
+                    || matches!(
+                        origin["function"].as_str(),
+                        Some("pmpCheck" | "pt_walk" | "translateAddr" | "translate_TLB_miss" | "translate_TLB_hit")
+                    ));
             stack.push(Attempt {
                 id,
                 tracked,
@@ -245,6 +288,10 @@ impl AttemptGuard {
                 outcome: "unfinished".into(),
                 direct: Measure::default(),
                 children: Measure::default(),
+                translation,
+                selected,
+                joins: JoinCounts::default(),
+                delivered: None,
             })
         });
         Self { progress }
@@ -270,11 +317,84 @@ impl Drop for AttemptGuard {
             (attempt, inclusive, exclusive, root)
         });
         let mut counts = COUNTS.get().unwrap().lock().unwrap();
-        if attempt.tracked {
-            counts.end_live(attempt.id);
-        }
+        let live = attempt.tracked.then(|| counts.end_live(attempt.id));
         counts.finish(&attempt.origin, &attempt.outcome, inclusive, exclusive, root);
+        drop(counts);
+        if attempt.selected {
+            static ROWS: AtomicUsize = AtomicUsize::new(0);
+            let row = ROWS.fetch_add(1, Ordering::Relaxed);
+            if row < 100_000 {
+                let live = live.unwrap();
+                eprintln!(
+                    "{}",
+                    json!({"kind":"translate_stats_attempt","attempt":attempt.id,
+                    "parent_attempt":live.parent,"translate_attempt":attempt.translation,"task":live.task,
+                    "origin":attempt.origin,"outcome":attempt.outcome,"call_instance":live.call_instance,
+                    "pte_width_level":live.pte,"steps":STEPS.with(Cell::get)-live.start_steps,
+                    "both_feasible_nested":BRANCHES.with(Cell::get)-live.start_branches,"joins":attempt.joins,
+                    "delivered_frames":attempt.delivered,"wall_seconds":inclusive.wall.as_secs_f64(),
+                    "exclusive_wall_seconds":exclusive.wall.as_secs_f64()})
+                );
+            } else if row == 100_000 {
+                eprintln!("{}", json!({"kind":"translate_stats_truncated","limit":100_000}));
+            }
+        }
     }
+}
+
+pub(crate) fn observe_frame<B: crate::bitvector::BV>(
+    frame: &crate::executor::LocalFrame<B>,
+    symtab: &crate::ir::Symtab,
+) {
+    ATTEMPTS.with(|stack| {
+        let stack = stack.borrow();
+        let Some(attempt) = stack.last().filter(|attempt| attempt.selected) else { return };
+        let pte = symtab.get("zpt_walk").and_then(|pt_walk| {
+            let vars = if frame.function_name == pt_walk {
+                &frame.local_state.vars
+            } else {
+                let index = frame.backtrace.iter().rposition(|(function, _)| *function == pt_walk)?;
+                &frame.stack_vars[index]
+            };
+            let integer = |name| match vars.get(&symtab.get(name)?) {
+                Some(crate::ir::UVal::Init(crate::ir::Val::I64(value))) => Some(*value),
+                _ => None,
+            };
+            Some((integer("zsv_width"), integer("zlevel")))
+        });
+        let mut counts = COUNTS.get().unwrap().lock().unwrap();
+        let live = counts.live.get_mut(&attempt.id).unwrap();
+        live.call_instance = Some(frame.local_state.call_instance);
+        live.pte = pte;
+    });
+}
+
+pub(crate) fn observe_join(arrivals: usize) {
+    ATTEMPTS.with(|stack| {
+        if let Some(attempt) = stack.borrow_mut().last_mut().filter(|attempt| attempt.selected) {
+            attempt.joins.arrivals(arrivals);
+        }
+    });
+}
+
+pub(crate) fn observe_join_output(frames: usize) {
+    ATTEMPTS.with(|stack| {
+        if let Some(attempt) = stack.borrow_mut().last_mut().filter(|attempt| attempt.selected) {
+            attempt.joins.delivered(frames);
+        }
+    });
+}
+
+pub(crate) fn observe_delivery(frames: usize) {
+    ATTEMPTS.with(|stack| {
+        if let Some(attempt) = stack.borrow_mut().last_mut().filter(|attempt| attempt.selected) {
+            attempt.delivered = Some(frames);
+        }
+    });
+}
+
+pub(crate) fn both_feasible_branch() {
+    BRANCHES.with(|count| count.set(count.get() + 1));
 }
 pub(crate) fn live_attempt() -> Option<usize> {
     ATTEMPTS.with(|stack| stack.borrow().last().filter(|attempt| attempt.tracked).map(|attempt| attempt.id))
@@ -384,6 +504,22 @@ pub(crate) fn summary_for_test() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translate_stats_counts_arrivals_and_outputs_separately() {
+        let mut joins = JoinCounts::default();
+        joins.arrivals(3);
+        joins.delivered(2);
+        joins.arrivals(2); // 没有成功交付的汇合
+        joins.arrivals(0);
+        joins.delivered(0);
+        assert_eq!(
+            json!(joins),
+            json!({
+                "joins_started":3, "joins_delivered":2, "arrivals":5, "output_frames":2
+            })
+        );
+    }
 
     #[test]
     fn region_inflight_snapshot_tracks_nested_attempts() {

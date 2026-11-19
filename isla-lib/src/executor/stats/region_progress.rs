@@ -307,6 +307,9 @@ pub(crate) fn smt(operation: SmtOperation, wall: Duration) {
 }
 pub(crate) fn branch_result(a: bool, b: bool) {
     if enabled() {
+        if a && b {
+            super::merge_timing::both_feasible_branch();
+        }
         ROOT.with(|r| {
             if let Some(p) = r.borrow_mut().as_mut() {
                 *p.branches.entry(format!("{a}/{b}")).or_default() += 1;

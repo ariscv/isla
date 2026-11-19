@@ -494,6 +494,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     }
     let mut diagnostics_attempt = diagnostics::enabled()
         .then(|| diagnostics::AttemptGuard::start(task_id.as_usize(), frame.function_name, frame.pc, &shared.symtab));
+    if diagnostics_attempt.is_some() {
+        stats::merge_timing::observe_frame(frame, &shared.symtab);
+    }
     let depth = frame.region_execution.as_ref().map_or(1, |execution| execution.depth + 1);
     if diagnostics::enabled() {
         diagnostics::record_depth(depth, frame.backtrace.len(), solver.transaction_depth());
@@ -700,8 +703,17 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     output.result
                 });
                 match &result {
-                    Ok(_) => {
+                    Ok(region_result) => {
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
+                        if diagnostics_active {
+                            let output_frame = candidate_frame.as_ref().unwrap_or(frame);
+                            let frames = match region_result {
+                                RegionResult::Dead => 0,
+                                RegionResult::Separate { .. } => output_frame.region_arrivals.len(),
+                                _ => 1,
+                            };
+                            stats::merge_timing::observe_delivery(frames + usize::from(continuation.is_some()));
+                        }
                         log_phase("commit_start", None);
                         let grouped_root = !nested && matches!(result, Ok(RegionResult::Separate { .. }));
                         if !grouped_root {
