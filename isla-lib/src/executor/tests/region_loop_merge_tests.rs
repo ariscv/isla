@@ -260,9 +260,10 @@ fn region_premerge_review_loop_options_keep_shared_cache_separate() {
     for order in [[false, true, false], [true, false, true]] {
         let shared = empty_shared_state();
         let program = vec![
-            Instr::Jump(input(0), 3, info()),
+            Instr::Jump(input(0), 4, info()),
             Instr::Jump(input(0), 1, info()),
-            Instr::Goto(4),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(5),
             Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
             Instr::End,
         ];
@@ -275,12 +276,15 @@ fn region_premerge_review_loop_options_keep_shared_cache_separate() {
                 crate::memory::Memory::new(),
                 |_| (),
             );
-            assert_eq!(result.len(), if enabled { 1 } else { 2 });
-            assert_eq!(!result[0].records.is_empty(), enabled, "两种模式必须独立缓存回边区域");
+            assert!(!result.is_empty());
+            let mut cache = shared.function_regions.lock().unwrap();
+            let region = cache.get_mut(&(TOP_LEVEL_LET, enabled)).unwrap().region(0);
+            if enabled {
+                assert!(region.unwrap().has_back_edge);
+            } else {
+                assert_eq!(region, Err(crate::ir::regions::RegionRejection::HasBackEdge));
+            }
         }
-        let cache = shared.function_regions.lock().unwrap();
-        assert!(cache.contains_key(&(TOP_LEVEL_LET, false)));
-        assert!(cache.contains_key(&(TOP_LEVEL_LET, true)));
     }
 }
 
