@@ -28,13 +28,13 @@ pub fn array_model_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isla_lib::bitvector::b64::B64;
+    use isla_lib::bitvector::{b64::B64, BV};
     use isla_lib::ir::Val;
     use isla_lib::memory::{Memory, Region};
-    use isla_lib::primop_util::{length_bits, smt_value};
+    use isla_lib::primop_util::smt_value;
     use isla_lib::smt::smtlib::{bits64, Def, Exp, Ty};
     use isla_lib::smt::{Config, Context, Event, SmtResult};
-    use isla_lib::smt::{ReadOpts, Solver, WriteOpts};
+    use isla_lib::smt::{ReadOpts, Solver, Sym, WriteOpts};
     use isla_lib::source_loc::SourceLoc;
 
     #[test]
