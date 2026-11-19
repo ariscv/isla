@@ -145,8 +145,17 @@ impl<B: BV> Solver<'_, B> {
             .collect();
         assert!(removed_cycles <= self.cycles, "撤销的周期不能超过当前计数");
         self.cycles -= removed_cycles;
+        let first_removed = remove.iter().position(|drop| *drop);
+        if let (Some(prefix), Some(start)) = (&mut self.finite_prefix, first_removed) {
+            prefix.remove_suffix(finite_domain::BUFFERED, &self.transaction_events, start);
+        }
         let mut drop = remove.iter();
         self.transaction_events.retain(|_| !drop.next().unwrap());
+        if let (Some(prefix), Some(start)) = (&mut self.finite_prefix, first_removed) {
+            for (index, event) in self.transaction_events.iter().enumerate().skip(start) {
+                prefix.push(finite_domain::BUFFERED, index, event);
+            }
+        }
         let mut drop = remove.iter();
         self.transaction_event_guards.retain(|_| !drop.next().unwrap());
         let mut drop = remove.iter();

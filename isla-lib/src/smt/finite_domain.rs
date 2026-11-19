@@ -1,6 +1,10 @@
 //! 从当前路径提取位向量的有限值域。只化简表达式，不做 SMT 查询。
 use super::*;
 
+mod prefix_index;
+use prefix_index::{BranchCandidates, Candidate, PathConditions};
+pub(super) use prefix_index::{PrefixIndex, BUFFERED};
+
 pub(crate) enum FiniteDomain {
     Known(Vec<Exp<Sym>>),
     /// 包含全部可行取值，个别候选还可能被残余约束排除。
@@ -9,7 +13,6 @@ pub(crate) enum FiniteDomain {
 }
 
 type Bound = Option<Vec<Exp<Sym>>>;
-type Definitions<'a> = HashMap<Sym, &'a Exp<Sym>>;
 
 fn intersect(lhs: Bound, rhs: Bound) -> Bound {
     match (lhs, rhs) {
@@ -31,9 +34,9 @@ fn union(lhs: Bound, rhs: Bound) -> Bound {
     Some(lhs)
 }
 
-fn resolve<'a>(mut exp: &'a Exp<Sym>, definitions: &Definitions<'a>) -> &'a Exp<Sym> {
+fn resolve<'a, B: BV>(mut exp: &'a Exp<Sym>, prefix: &'a PathConditions<'_, B>) -> &'a Exp<Sym> {
     while let Exp::Var(sym) = exp {
-        let Some(definition) = definitions.get(sym) else { break };
+        let Some(definition) = prefix.definition(*sym) else { break };
         exp = definition;
     }
     exp
@@ -51,13 +54,13 @@ fn constant(exp: &Exp<Sym>) -> Option<Exp<Sym>> {
 }
 
 // 只识别能产生有限上界的布尔形式。排除项与其他谓词在代入候选后检查。
-fn bound(exp: &Exp<Sym>, target: &Exp<Sym>, definitions: &Definitions<'_>, negated: bool) -> Bound {
+fn bound<B: BV>(exp: &Exp<Sym>, target: &Exp<Sym>, prefix: &PathConditions<'_, B>, negated: bool) -> Bound {
     use Exp::*;
-    let visit = |child, negated| bound(child, target, definitions, negated);
-    let exp = resolve(exp, definitions);
+    let visit = |child, negated| bound(child, target, prefix, negated);
+    let exp = resolve(exp, prefix);
     match exp {
         Eq(lhs, rhs) | Neq(lhs, rhs) if matches!(exp, Eq(..)) != negated => {
-            let (lhs, rhs) = (resolve(lhs, definitions), resolve(rhs, definitions));
+            let (lhs, rhs) = (resolve(lhs, prefix), resolve(rhs, prefix));
             let value = if lhs == target {
                 rhs
             } else if rhs == target {
@@ -82,40 +85,34 @@ fn bound(exp: &Exp<Sym>, target: &Exp<Sym>, definitions: &Definitions<'_>, negat
 }
 
 // 定义为 ITE 的位向量即使没有显式等式断言，两个值臂也可给出上界。
-fn value_bound(exp: &Exp<Sym>, definitions: &Definitions<'_>) -> Bound {
-    let exp = resolve(exp, definitions);
+fn value_bound<B: BV>(exp: &Exp<Sym>, prefix: &PathConditions<'_, B>) -> Bound {
+    let exp = resolve(exp, prefix);
     if let Exp::Ite(_, yes, no) = exp {
-        union(value_bound(yes, definitions), value_bound(no, definitions))
+        union(value_bound(yes, prefix), value_bound(no, prefix))
     } else {
         constant(exp).map(|value| vec![value])
     }
 }
 
-struct PathConditions<'a> {
-    definitions: Definitions<'a>,
-    assertions: Vec<&'a Exp<Sym>>,
-    bool_symbols: Vec<Sym>,
-}
-
-impl<'a> PathConditions<'a> {
+impl<B: BV> PathConditions<'_, B> {
     // 只从公式显式给出的有限集合取值。自由位向量的位宽不能作为枚举依据。
     fn bounds(&self, subject: &Exp<Sym>) -> Bound {
-        let subject = resolve(subject, &self.definitions);
-        let mut candidates = value_bound(subject, &self.definitions);
-        for assertion in &self.assertions {
-            candidates = intersect(candidates, bound(assertion, subject, &self.definitions, false));
+        #[cfg(test)]
+        BOUND_SEARCHES.set(BOUND_SEARCHES.get() + 1);
+        let subject = resolve(subject, self);
+        let mut candidates = value_bound(subject, self);
+        for assertion in self.assertions() {
+            candidates = intersect(candidates, bound(assertion, subject, self, false));
         }
         candidates
     }
 
-    fn comparison_subjects(&self, exp: &'a Exp<Sym>, subjects: &mut Vec<&'a Exp<Sym>>) {
+    fn comparison_subjects<'a>(&'a self, exp: &'a Exp<Sym>, subjects: &mut Vec<&'a Exp<Sym>>) {
         use Exp::*;
-        match resolve(exp, &self.definitions) {
+        match resolve(exp, self) {
             Eq(lhs, rhs) | Neq(lhs, rhs) => {
                 for (symbolic, concrete) in [(lhs, rhs), (rhs, lhs)] {
-                    if constant(resolve(concrete, &self.definitions)).is_some()
-                        && constant(resolve(symbolic, &self.definitions)).is_none()
-                    {
+                    if constant(resolve(concrete, self)).is_some() && constant(resolve(symbolic, self)).is_none() {
                         subjects.push(symbolic);
                     }
                 }
@@ -169,59 +166,44 @@ impl<B: BV> Solver<'_, B> {
         self.ctx.solver_options.finite_domain_enumeration
     }
 
-    fn finite_domain_prefix(&self) -> Option<PathConditions<'_>> {
-        if !self.finite_domain_enabled() {
-            return None;
-        }
-        // 提交的带守卫断言已改写为蕴含，活动守卫单独加入。回滚不留下缓存。
-        let mut symbols = HashSet::new();
-        let mut conditions =
-            PathConditions { definitions: HashMap::new(), bool_symbols: Vec::new(), assertions: Vec::new() };
-        for event in self.transaction_events.iter().rev().chain(self.trace.events_rev()) {
-            let defined = match event {
-                Event::Smt(Def::DefineConst(sym, exp), ..) => {
-                    conditions.definitions.insert(*sym, exp);
-                    *sym
-                }
-                Event::Smt(Def::DeclareConst(sym, ty), ..) => {
-                    if matches!(ty, Ty::Bool) {
-                        conditions.bool_symbols.push(*sym);
-                    }
-                    *sym
-                }
-                Event::Smt(Def::DeclareFun(sym, ..), ..) => *sym,
-                Event::Smt(Def::Assert(exp), ..) => {
-                    conditions.assertions.push(exp);
-                    continue;
-                }
-                _ => continue,
-            };
-            // 已发布断言保留发布时的绑定，不能用重绑后的符号表解释。
-            if !symbols.insert(defined) {
-                return None;
-            }
-        }
-        conditions.assertions.extend(&self.transaction_conditions);
-        Some(conditions)
-    }
-
     /// 条件在所有剩余候选中同值时才折叠。只证明蕴含，完整前缀仍由原入口认证。
     pub(crate) fn finite_domain_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
-        let prefix = self.finite_domain_prefix()?;
+        let prefix = PathConditions::new(self)?;
         let mut subjects = Vec::new();
         prefix.comparison_subjects(exp, &mut subjects);
         let predicate = self.translate_exp(exp);
-        for subject in subjects {
-            let Some(candidates) = prefix.bounds(subject) else { continue };
+        if subjects.is_empty() {
+            return None;
+        }
+
+        // 两侧仍分别化简各自的谓词。共享候选及排除结果，空域时两侧均可判死。
+        let mut branch_exp = exp;
+        while let Exp::Not(inner) = branch_exp {
+            branch_exp = inner;
+        }
+        let mut cache = prefix.index.branch.borrow_mut();
+        if cache.as_ref().is_none_or(|entry| &entry.predicate != branch_exp) {
+            *cache = Some(BranchCandidates { predicate: branch_exp.clone(), subjects: Vec::new() });
+        }
+        let prepared = &mut cache.as_mut().unwrap().subjects;
+        for (index, subject) in subjects.into_iter().enumerate() {
+            if index == prepared.len() {
+                prepared.push(prefix.bounds(subject).map(|candidates| {
+                    candidates.into_iter().map(|value| Candidate { value, excluded: None }).collect()
+                }));
+            }
+            let Some(candidates) = &mut prepared[index] else { continue };
             let anchor = self.translate_exp(subject);
             let mut result = None;
             let mut undecided = false;
             for candidate in candidates {
-                let value = self.translate_exp(&candidate);
-                if prefix.assertions.iter().any(|fact| {
-                    let original = self.translate_exp(fact);
-                    let mut narrowed = original.substitute(&anchor, &value);
-                    narrowed.z3_ast != original.z3_ast && narrowed.structural_bool() == Some(false)
+                let value = self.translate_exp(&candidate.value);
+                if *candidate.excluded.get_or_insert_with(|| {
+                    prefix.assertions().any(|fact| {
+                        let original = self.translate_exp(fact);
+                        let mut narrowed = original.substitute(&anchor, &value);
+                        narrowed.z3_ast != original.z3_ast && narrowed.structural_bool() == Some(false)
+                    })
                 }) {
                     continue;
                 }
@@ -247,7 +229,7 @@ impl<B: BV> Solver<'_, B> {
     }
 
     pub(crate) fn finite_domain(&self, sym: Sym) -> FiniteDomain {
-        let Some(prefix) = self.finite_domain_prefix() else { return FiniteDomain::Unknown };
+        let Some(prefix) = PathConditions::new(self) else { return FiniteDomain::Unknown };
         let mut pending = vec![sym];
         let mut seen = HashSet::new();
         let mut best = FiniteDomain::Unknown;
@@ -256,7 +238,7 @@ impl<B: BV> Solver<'_, B> {
                 continue;
             }
             let source = Exp::Var(subject);
-            if let Some(definition) = prefix.definitions.get(&subject) {
+            if let Some(definition) = prefix.definition(subject) {
                 let mut dependencies: Vec<_> = definition.variables().into_iter().collect();
                 dependencies.sort_by_key(|dep| dep.as_u32());
                 pending.extend(dependencies);
@@ -280,25 +262,23 @@ impl<B: BV> Solver<'_, B> {
     fn project_finite_definition(
         &self,
         sym: Sym,
-        definitions: &Definitions<'_>,
+        prefix: &PathConditions<'_, B>,
         projected: &mut HashMap<Sym, Option<Exp<Sym>>>,
     ) -> Option<Exp<Sym>> {
         if let Some(value) = projected.get(&sym) {
             return value.clone();
         }
-        let value = definitions.get(&sym).and_then(|definition| {
+        let value = prefix.definition(sym).and_then(|definition| {
             let mut changed = false;
             let expression = definition
                 .map_var(&mut |input| {
-                    Ok::<_, std::convert::Infallible>(
-                        match self.project_finite_definition(*input, definitions, projected) {
-                            Some(value) => {
-                                changed = true;
-                                value
-                            }
-                            None => Exp::Var(*input),
-                        },
-                    )
+                    Ok::<_, std::convert::Infallible>(match self.project_finite_definition(*input, prefix, projected) {
+                        Some(value) => {
+                            changed = true;
+                            value
+                        }
+                        None => Exp::Var(*input),
+                    })
                 })
                 .unwrap();
             if !changed {
@@ -313,24 +293,24 @@ impl<B: BV> Solver<'_, B> {
 
     fn project_finite_values(
         &self,
-        prefix: &PathConditions<'_>,
+        prefix: &PathConditions<'_, B>,
         target: Sym,
         source: Sym,
         candidates: Vec<Exp<Sym>>,
     ) -> FiniteDomain {
         // 对派生锚点代入时保留原等式，防止把它错误地当成独立自由变量。
         let source_var = Exp::Var(source);
-        let free = matches!(resolve(&source_var, &prefix.definitions), Exp::Var(_));
+        let free = matches!(resolve(&source_var, prefix), Exp::Var(_));
         let anchor = self.translate_exp(&source_var);
         let target_ast = self.translate_exp(&Exp::Var(target));
-        let assertions: Vec<_> = prefix.assertions.iter().map(|exp| self.translate_exp(exp)).collect();
+        let assertions: Vec<_> = prefix.assertions().map(|exp| self.translate_exp(exp)).collect();
         let mut bool_atoms = Vec::new();
         let mut bool_literals = HashMap::new();
-        for sym in &prefix.bool_symbols {
-            let atom = &self.decls[sym];
+        for sym in prefix.bool_symbols() {
+            let atom = &self.decls[&sym];
             let negative = Ast::mk_not(atom);
-            bool_literals.insert(atom.z3_ast, (*sym, true));
-            bool_literals.insert(negative.z3_ast, (*sym, false));
+            bool_literals.insert(atom.z3_ast, (sym, true));
+            bool_literals.insert(negative.z3_ast, (sym, false));
             bool_atoms.push(negative);
         }
         let mut admissible = Vec::new();
@@ -364,12 +344,11 @@ impl<B: BV> Solver<'_, B> {
                 Some(value) => value,
                 None if !free => {
                     let mut projected = HashMap::from([(source, Some(candidate))]);
-                    let Some(value) = self.project_finite_definition(target, &prefix.definitions, &mut projected)
-                    else {
+                    let Some(value) = self.project_finite_definition(target, prefix, &mut projected) else {
                         return FiniteDomain::Unknown;
                     };
                     // 重试的排除式可能引用遭化简的目标。先在原表达式中代入，再判是否必假。
-                    for assertion in &prefix.assertions {
+                    for assertion in prefix.assertions() {
                         let mut changed = false;
                         let substituted = assertion
                             .map_var(&mut |sym| {
@@ -402,3 +381,12 @@ impl<B: BV> Solver<'_, B> {
         }
     }
 }
+
+#[cfg(test)]
+thread_local! {
+    static PREFIX_EVENT_VISITS: Cell<usize> = const { Cell::new(0) };
+    static BOUND_SEARCHES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests;
