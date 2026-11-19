@@ -2,7 +2,7 @@
 use super::merge_diagnostics;
 use crate::timeout::SmtOperation;
 use serde_json::{json, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -81,13 +81,80 @@ impl Costs {
 pub(super) struct Counts {
     started: u64,
     finished: u64,
+    live: BTreeMap<usize, LiveAttempt>,
     outcomes: BTreeMap<String, Costs>,
     sites: BTreeMap<String, Costs>,
     other_sites: Costs,
     outside: Aggregate,
     all_smt: Aggregate,
 }
+struct LiveAttempt {
+    parent: Option<usize>,
+    task: usize,
+    origin: Value,
+    started: Instant,
+    start_steps: u64,
+    start_forks: usize,
+    steps: u64,
+    forks: usize,
+    position: Value,
+    sampled: Instant,
+}
 impl Counts {
+    #[allow(clippy::too_many_arguments)]
+    fn begin_live(
+        &mut self,
+        id: usize,
+        parent: Option<usize>,
+        task: usize,
+        origin: Value,
+        now: Instant,
+        steps: u64,
+        forks: usize,
+    ) {
+        let mut position = origin.clone();
+        position["phase"] = json!("admission");
+        self.live.insert(
+            id,
+            LiveAttempt {
+                parent,
+                task,
+                origin,
+                started: now,
+                start_steps: steps,
+                start_forks: forks,
+                steps: 0,
+                forks: 0,
+                position,
+                sampled: now,
+            },
+        );
+    }
+    fn sample_live(&mut self, ids: &[usize], steps: u64, forks: usize, position: Value, now: Instant) {
+        for id in ids {
+            let row = self.live.get_mut(id).unwrap();
+            row.steps = steps - row.start_steps;
+            row.forks = forks - row.start_forks;
+            row.position = position.clone();
+            row.sampled = now;
+        }
+    }
+    fn end_live(&mut self, id: usize) {
+        self.live.remove(&id).expect("结束的区域必须曾登记为在途");
+    }
+    fn live_rows(&self, now: Instant) -> Vec<Value> {
+        self.live
+            .iter()
+            .map(|(id, row)| {
+                json!({
+                    "attempt":id, "parent_attempt":row.parent, "task":row.task, "origin":row.origin,
+                    "current":row.position, "steps":row.steps, "live_forks":row.forks,
+                    "wall_seconds":now.duration_since(row.started).as_secs_f64(),
+                    "sample_age_seconds":now.duration_since(row.sampled).as_secs_f64()
+                })
+            })
+            .collect()
+    }
     pub(super) fn begin(&mut self) {
         self.started += 1;
     }
@@ -130,6 +197,8 @@ impl Counts {
 }
 static COUNTS: OnceLock<Mutex<Counts>> = OnceLock::new();
 struct Attempt {
+    id: usize,
+    tracked: bool,
     started: Instant,
     origin: Value,
     outcome: String,
@@ -138,6 +207,8 @@ struct Attempt {
 }
 thread_local! {
     static ATTEMPTS: RefCell<Vec<Attempt>> = const { RefCell::new(Vec::new()) };
+    static STEPS: Cell<u64> = const { Cell::new(0) };
+    static FORKS: Cell<usize> = const { Cell::new(0) };
 }
 pub(super) fn reset() {
     *COUNTS.get_or_init(|| Mutex::new(Counts::default())).lock().unwrap() = Counts::default();
@@ -146,12 +217,29 @@ pub(super) struct AttemptGuard {
     progress: super::region_progress::AttemptGuard,
 }
 impl AttemptGuard {
-    pub(super) fn start(origin: Value) -> Self {
+    pub(super) fn start(id: usize, task: usize, origin: Value) -> Self {
         let progress = super::region_progress::AttemptGuard::start(origin.clone());
         let started = Instant::now();
-        COUNTS.get().unwrap().lock().unwrap().begin();
+        let tracked = crate::config::RegionOptions::current().progress;
         ATTEMPTS.with(|stack| {
-            stack.borrow_mut().push(Attempt {
+            let mut stack = stack.borrow_mut();
+            let mut counts = COUNTS.get().unwrap().lock().unwrap();
+            counts.begin();
+            if tracked {
+                let parent = stack.last().filter(|attempt| attempt.tracked).map(|attempt| attempt.id);
+                counts.begin_live(
+                    id,
+                    parent,
+                    task,
+                    origin.clone(),
+                    started,
+                    STEPS.with(Cell::get),
+                    FORKS.with(Cell::get),
+                );
+            }
+            stack.push(Attempt {
+                id,
+                tracked,
                 started,
                 origin,
                 outcome: "unfinished".into(),
@@ -181,9 +269,65 @@ impl Drop for AttemptGuard {
             }
             (attempt, inclusive, exclusive, root)
         });
-        COUNTS.get().unwrap().lock().unwrap().finish(&attempt.origin, &attempt.outcome, inclusive, exclusive, root);
+        let mut counts = COUNTS.get().unwrap().lock().unwrap();
+        if attempt.tracked {
+            counts.end_live(attempt.id);
+        }
+        counts.finish(&attempt.origin, &attempt.outcome, inclusive, exclusive, root);
     }
 }
+pub(crate) fn live_attempt() -> Option<usize> {
+    ATTEMPTS.with(|stack| stack.borrow().last().filter(|attempt| attempt.tracked).map(|attempt| attempt.id))
+}
+
+/// 一个打开的二臂分叉保留一个备用前沿。嵌套分叉在退出时恢复外层值。
+pub(crate) struct LiveForks(Option<usize>);
+impl LiveForks {
+    pub(crate) fn start() -> Self {
+        Self(live_attempt().map(|_| FORKS.with(Cell::get)))
+    }
+
+    pub(crate) fn set(&self, additional: usize) {
+        if let Some(base) = self.0 {
+            FORKS.with(|forks| forks.set(base + additional));
+        }
+    }
+}
+impl Drop for LiveForks {
+    fn drop(&mut self) {
+        self.set(0);
+    }
+}
+
+pub(crate) fn live_step(function: crate::ir::Name, pc: usize, symtab: &crate::ir::Symtab) {
+    let steps = STEPS.with(|steps| {
+        let next = steps.get() + 1;
+        steps.set(next);
+        next
+    });
+    if steps % 256 == 0 {
+        live_sample(function, pc, symtab, "instruction");
+    }
+}
+
+pub(crate) fn live_sample(function: crate::ir::Name, pc: usize, symtab: &crate::ir::Symtab, phase: &'static str) {
+    ATTEMPTS.with(|stack| {
+        let stack = stack.borrow();
+        if !stack.last().is_some_and(|attempt| attempt.tracked) {
+            return;
+        }
+        let ids: Vec<_> = stack.iter().filter(|attempt| attempt.tracked).map(|attempt| attempt.id).collect();
+        let position = json!({"function":crate::zencode::decode(symtab.to_str(function)), "pc":pc, "phase":phase});
+        COUNTS.get().unwrap().lock().unwrap().sample_live(
+            &ids,
+            STEPS.with(Cell::get),
+            FORKS.with(Cell::get),
+            position,
+            Instant::now(),
+        );
+    });
+}
+
 /// 复用真实Z3调用已有计时，命中已有模型或常量化简不伪装成查询。
 #[inline]
 pub(crate) fn record_smt_call(operation: SmtOperation, wall: Duration) {
@@ -221,6 +365,12 @@ pub(super) fn write_snapshot(out: &mut impl std::io::Write, snapshot: usize, tri
         row["snapshot"] = json!(snapshot);
         writeln!(out, "{row}").unwrap();
     }
+    for mut row in counts.live_rows(Instant::now()) {
+        row["schema"] = json!(1);
+        row["kind"] = json!("merge_inflight");
+        row["snapshot"] = json!(snapshot);
+        writeln!(out, "{row}").unwrap();
+    }
     let mut summary = counts.summary();
     summary["snapshot"] = json!(snapshot);
     summary["trigger"] = json!(trigger);
@@ -229,4 +379,28 @@ pub(super) fn write_snapshot(out: &mut impl std::io::Write, snapshot: usize, tri
 #[cfg(test)]
 pub(crate) fn summary_for_test() -> Value {
     COUNTS.get().unwrap().lock().unwrap().summary()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_inflight_snapshot_tracks_nested_attempts() {
+        let mut counts = Counts::default();
+        let start = Instant::now();
+        counts.begin_live(10, None, 3, json!({"function":"outer","pc":5}), start, 4, 1);
+        counts.begin_live(11, Some(10), 3, json!({"function":"inner","pc":7}), start, 9, 2);
+        counts.sample_live(&[10, 11], 19, 4, json!({"function":"leaf","pc":13}), start);
+        let rows = counts.live_rows(start + Duration::from_secs(8));
+        assert_eq!(rows[0]["steps"], 15);
+        assert_eq!(rows[0]["live_forks"], 3);
+        assert_eq!(rows[1]["steps"], 10);
+        assert_eq!(rows[1]["live_forks"], 2);
+        assert_eq!(rows[1]["parent_attempt"], 10);
+        assert_eq!(rows[1]["current"]["pc"], 13);
+        assert_eq!(rows[1]["wall_seconds"], 8.0);
+        counts.end_live(11);
+        assert_eq!(counts.live_rows(start).len(), 1);
+    }
 }

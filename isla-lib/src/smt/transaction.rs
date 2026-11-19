@@ -700,11 +700,13 @@ impl<B: BV> Solver<'_, B> {
                 + point.guard.as_ref().map_or(0, exp_heap_bytes);
             models += usize::from(point.model.model.is_some());
         }
-        bytes += self.transaction_events.capacity() * size_of::<Event<B>>()
-            + self.transaction_events.iter().map(event_heap_bytes).sum::<usize>()
+        let buffered_events_bytes = self.transaction_events.capacity() * size_of::<Event<B>>()
+            + self.transaction_events.iter().map(event_heap_bytes).sum::<usize>();
+        let event_guard_bytes = self.transaction_event_guards.capacity() * size_of::<Option<Exp<Sym>>>()
+            + self.transaction_event_guards.iter().flatten().map(exp_heap_bytes).sum::<usize>();
+        bytes += buffered_events_bytes
+            + event_guard_bytes
             + self.logical_arms.heap_bytes()
-            + self.transaction_event_guards.capacity() * size_of::<Option<Exp<Sym>>>()
-            + self.transaction_event_guards.iter().flatten().map(exp_heap_bytes).sum::<usize>()
             + self.committed_transaction_events.capacity() * size_of::<(Option<Exp<Sym>>, Event<B>)>()
             + self
                 .committed_transaction_events
@@ -714,6 +716,6 @@ impl<B: BV> Solver<'_, B> {
             + self.transaction_condition_scopes.capacity() * size_of::<Option<Ast>>()
             + self.transaction_conditions.capacity() * size_of::<Exp<Sym>>()
             + self.transaction_conditions.iter().map(exp_heap_bytes).sum::<usize>();
-        SolverMemory { bytes, layers, model_caches: models }
+        SolverMemory { bytes, layers, model_caches: models, buffered_events_bytes, event_guard_bytes }
     }
 }

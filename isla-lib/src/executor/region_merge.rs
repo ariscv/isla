@@ -1056,7 +1056,9 @@ fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         std::mem::take(&mut arm.region_arrivals).into_iter().enumerate().map(|(index, frame)| (vec![index], frame)),
     );
     let mut reached = Vec::new();
+    let live_forks = stats::merge_timing::LiveForks::start();
     while let Some((branch, mut fragment)) = pending.pop() {
+        live_forks.set(pending.len() + reached.len());
         let owner = fragment.region_arm.expect("独立片段必须拥有逻辑臂");
         let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
         let part_tx = solver.start_transaction_with_guard(Some(guard));
@@ -1142,7 +1144,9 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let mut arms = [Vec::new(), Vec::new()];
     let mut ready = ReadyFragments::new(state);
     ready.extend([(target, Var(condition)), (fallthrough, Not(Box::new(Var(condition))))].into_iter().enumerate());
+    let live_forks = stats::merge_timing::LiveForks::start();
     while let Some((side, (pc, guard))) = ready.pop() {
+        live_forks.set(if side == 0 { 1 } else { arms[0].len() });
         let owner = solver.new_logical_arm(solver.current_logical_arm());
         let tx = solver.start_transaction_with_guard(Some(guard.clone()));
         let mut arm = branch_arm(&base, pc, guard, owner);
@@ -1170,6 +1174,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             solver.discard_logical_arm_effects(owner);
         }
     }
+    live_forks.set(arms.iter().map(Vec::len).sum::<usize>().saturating_sub(1));
     finish_arrivals(record_id, condition, &region, &base, arms, frame, state, shared, solver, info)
         .map(RegionOutput::complete)
 }
@@ -1322,6 +1327,9 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
     info: SourceLoc,
 ) -> Result<LocalFrame<'ir, B>, ExecError> {
     use smtlib::Exp::{Or, Var};
+    if crate::config::RegionOptions::current().progress && diagnostics::enabled() {
+        stats::merge_timing::live_sample(base.function_name, region.branch_pc, &shared.symtab, "fold_exit_frontiers");
+    }
     // 两前沿可能共享先前轮次的记录，但在本次不同臂条件下各有一份出现。
     // 只给尚未发布的重复后缀换新ID，保留符号与父子关系；已发布前缀不动。
     let prefix = base.region_merge_records.len();
@@ -1434,6 +1442,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let mut largest_round = 0;
     let mut continuation = None;
     let mut return_guard = None;
+    let live_forks = stats::merge_timing::LiveForks::start();
     let (mut pending, mut frontier) = LoopDependencies::new(LoopWork {
         original: frame.clone(),
         base,
@@ -1449,6 +1458,16 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         active_arm: None,
     });
     loop {
+        if crate::config::RegionOptions::current().progress && diagnostics::enabled() {
+            let suspended = pending
+                .ancestors(frontier)
+                .map(|work| {
+                    let slots = work.arms.iter().map(Vec::len).sum::<usize>();
+                    (1 - work.completed.min(1)).max(slots) + work.continuations.len()
+                })
+                .sum::<usize>();
+            live_forks.set(suspended + exit_prefix.len() + usize::from(continuation.is_some()));
+        }
         super::stats::memory_stats::poll(frame, solver);
         if pending.work(frontier).completed == 2 {
             let (mut work, parent) = pending.complete(frontier);

@@ -25,6 +25,13 @@ impl<T> ReadyFragments<T> {
         }
     }
 
+    pub(in crate::executor) fn len(&self) -> usize {
+        match self {
+            Self::Stack(stack) => stack.len(),
+            Self::Queue(queue) => queue.len(),
+        }
+    }
+
     pub(in crate::executor) fn pop(&mut self) -> Option<T> {
         match self {
             Self::Stack(stack) => stack.pop(),

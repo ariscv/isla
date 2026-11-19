@@ -483,11 +483,12 @@ pub(crate) struct AttemptGuard {
 impl AttemptGuard {
     pub fn start(task: usize, function: Name, pc: usize, symtab: &Symtab) -> Self {
         let origin = json!({"function":name_string(function,symtab),"function_id":function.as_u32(),"pc":pc});
-        let timing = super::merge_timing::AttemptGuard::start(origin.clone());
+        let id = NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+        let timing = super::merge_timing::AttemptGuard::start(id, task, origin.clone());
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
             let parent = stack.last().map(|attempt| attempt.id);
-            stack.push(Attempt { id: NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed), parent, task, origin, root: None });
+            stack.push(Attempt { id, parent, task, origin, root: None });
         });
         Self { timing }
     }
