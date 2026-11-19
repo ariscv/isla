@@ -39,7 +39,7 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 | `must_merge`、`must_not_merge` | 应该合并或分开保留的语义原因。都默认留空，部分分组可同时填两项。 |
 | `modes` | 默认 `["off", "recursive", "flat"]`，三种都运行。 |
 | `ordered_events` | 测试配置是否要求合并时保留访问次序，默认 `false`。 |
-| `merge_concrete_values` | 省略时使用执行器缺省值。D1 显式设置 `false`，覆盖不同字符串仍需分组的情况。 |
+| `merge_concrete_values` | 省略时使用执行器缺省值。本组场景使用缺省开启的具体值合并。 |
 | `status`、`reason` | 默认 `ready`。标 `todo` 或 `xfail` 时填写原因。 |
 
 访存场景中的真实 `ReadMem`、`WriteMem` 按事件次序比较，包括地址、宽度、读写数据、标签及访问类型。遇到抽象内存的读值时，把能决定该字节的自由量登记为输入。[符号读值样例](scenarios/C3-symbolic-memory-read.sail) 把高七位限制为零，将最低位作为输入。[不同访存序列样例](scenarios/C2-different-memory-events.sail) 检查两臂的一次写与两次写。访存种类使用具体值。寄存器语义比较使用完成时的选定寄存器值。需要测试寄存器事件顺序的路径准入时，用 `ordered_events` 加计数和守卫断言表达。
@@ -60,7 +60,7 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 
 ## 场景索引
 
-编号指向可独立运行的 Sail。D2 是架子保留的占位，五片段的可运行分组见 D7，同一棵树的到达次序置换见 D8。
+编号指向可独立运行的 Sail。D2 是架子保留的占位，D7 检查五个叶子能否共享一个覆盖全域的守卫，D8 要求在同一棵树的不同到达次序下得到相同划分。D4 和 D9 仅改变源码嵌套次序，均用相同的全域谓词验收。
 
 ### A 值种类
 
@@ -117,17 +117,17 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 - [C11 两笔写的顺序相反](scenarios/C11-memory-order.sail)
 - [C12 覆盖局部变量](scenarios/C12-local-reassign.sail)
 - [C13 分支内同名 let](scenarios/C13-let-scope.sail)
-- [C14 严格寄存器写序成环](scenarios/C14-register-order.sail)
+- [C14 交换独立寄存器的写序后合为一条](scenarios/C14-register-order.sail)
 
 ### D 汇合点分组
 
-- [D1 四个片段按兼容性汇合](scenarios/D1-four-fragments.sail)
+- [D1 四个片段的字符串按守卫合为一组](scenarios/D1-four-fragments.sail)
 - [D2 五个片段汇合](scenarios/D2-five-fragments.sail)
 - [D3 三个 I64 片段 3、符号值、7](scenarios/D3-i64-bridge.sail)
 - [D4 P("a")、Q(())、P("c") 的分组](scenarios/D4-union-bridge.sail)
 - [D5 外层两臂的标签集合分别是 {b,c} 和 {c,d}](scenarios/D5-overlap.sail)
-- [D6 四个结果组各自读取 R](scenarios/D6-four-register-reads.sail)
-- [D7 五个叶子按 a、b、c 分三组](scenarios/D7-five-labels.sail)
+- [D6 四个叶子各自读 R 后合为一组](scenarios/D6-four-register-reads.sail)
+- [D7 五个叶子的 a、b、c 按守卫合为一组](scenarios/D7-five-labels.sail)
 - [D8 改变五片段到达次序后守卫分组一致](scenarios/D8-permute-five.sail)
 - [D9 P("a")、Q(())、P("c") 的分组](scenarios/D9-union-other-tree.sail)
 

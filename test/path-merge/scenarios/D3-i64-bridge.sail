@@ -1,12 +1,12 @@
 // --- TOML
 // title = "三个 I64 片段 3、符号值、7"
-// intent = "检查含符号桥接成员的三个守卫是否各有确定归属。"
+// intent = "将具体与符号 I64 汇合，在切片时保留原值。"
 // inputs = { path_x = 2, path_y = 1 }
 // expect_paths_unmerged = 3
-// expect_paths_merged = 3
-// must_not_merge = "待用户审核：3 与 7 在严格整数口径下互斥，符号成员独立归类；三组的归属不依赖到达顺序。"
+// expect_paths_merged = 1
+// must_merge = "3、unsigned(y)、7 按 x 选取。整数消费者均须使用活动守卫下的原整数，本例核对三位切片。"
 // status = "xfail"
-// reason = "实测全部三个片段进入一组；IR 中汇合后消费的整数槽为 %i64。"
+// reason = "total-merge-design.md §2–3（具体与符号 I64、整数消费）：外层汇合拒绝不兼容状态，已合并的整数又在切片前按守卫重试，三组分别完成。"
 // ---
 default Order dec
 $include <prelude.sail>

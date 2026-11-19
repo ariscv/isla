@@ -6,7 +6,7 @@
 // expect_paths_merged = 1
 // must_merge = "两个列表都只有一个元素，其值可由守卫选择。"
 // status = "xfail"
-// reason = "严格列表合并要求整个列表相等，两个不同首项保留两条。"
+// reason = "total-merge-design.md §2（List）：当前合并要求列表整值相等，两个单元素列表的首项不同，出口仍有两条。"
 // ---
 default Order dec
 $include <prelude.sail>

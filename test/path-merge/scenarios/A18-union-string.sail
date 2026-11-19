@@ -3,8 +3,8 @@
 // intent = "在汇合后比较同一标签的不同字符串，用输入核对结果。"
 // inputs = { path_x = 1 }
 // expect_paths_unmerged = 2
-// expect_paths_merged = 2
-// must_not_merge = "严格字符串口径下，同一 P 的互异负载各保留一条。"
+// expect_paths_merged = 1
+// must_merge = "P 的负载按 x 选择原字符串，解包后与 c 比较仅在 x=1 时为真。"
 // status = "ready"
 // ---
 default Order dec

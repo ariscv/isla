@@ -1,12 +1,10 @@
 // --- TOML
 // title = "P(\"a\")、Q(())、P(\"c\") 的分组"
-// intent = "核对两个 P 负载冲突时 Q 的归属。"
+// intent = "改变源码嵌套次序后，四个输入仍共同覆盖同一条路径。"
 // inputs = { path_x = 2 }
 // expect_paths_unmerged = 3
-// expect_paths_merged = 3
-// must_not_merge = "待用户审核：严格标签与负载下 P 的两种字符串各占一组，Q 单独一组，避免任选一个 P 接纳 Q。"
-// status = "xfail"
-// reason = "实测 Q 与 P(「a」) 同组，P(「c」) 独立；守卫划分少一组。"
+// expect_paths_merged = 1
+// must_merge = "标签按输入选择；P 域内按守卫取 a 或 c，Q 取单位负载。与 D9 的路径数和输入划分完全相同，唯一守卫覆盖 x=0…3。"
 // ---
 default Order dec
 $include <prelude.sail>

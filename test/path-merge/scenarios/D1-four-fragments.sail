@@ -1,12 +1,10 @@
 // --- TOML
 // title = "四个片段按兼容性汇合"
-// intent = "两条结果路径各取两个外层臂的片段，并保留内层字符串区别。"
+// intent = "核对四个输入在共同出口各自得到 x @ y。"
 // inputs = { path_x = 1, path_y = 1 }
 // expect_paths_unmerged = 4
-// expect_paths_merged = 2
-// merge_concrete_values = false
-// must_merge = "对同一个内层输入，两臂的字符串相同且结果位宽一致。"
-// must_not_merge = "显式关闭具体值合并后，不同的活跃字符串分属两个兼容组。"
+// expect_paths_merged = 1
+// must_merge = "带守卫的字符串由 y 选择，结果高位由 x 选择，四个输入共用一条路径。"
 // ---
 default Order dec
 $include <prelude.sail>
