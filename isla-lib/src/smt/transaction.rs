@@ -1,5 +1,6 @@
 //! 求解器保存点及旧单层事务接口。日志共用一个缓冲，各层只保存起始偏移。
 use super::*;
+use finite_domain::BUFFERED;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
@@ -229,6 +230,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
             self.transaction_condition_scopes.push(if lazy { Some(condition) } else { None });
             self.transaction_conditions.push(self.savepoints.last().unwrap().guard.clone().unwrap());
+            if let Some(prefix) = &mut self.finite_prefix {
+                prefix.invalidate_candidates();
+            }
         }
         token
     }
@@ -289,6 +293,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             state.input_facts.truncate(savepoint.deferred_input_facts_len);
         }
         restore_path_smt_stats(savepoint.smt_stats);
+        if let Some(prefix) = &mut self.finite_prefix {
+            prefix.invalidate_candidates();
+            prefix.remove_suffix(BUFFERED, &self.transaction_events, savepoint.events_len);
+        }
         // 只保留本层的全局枚举定义；内层回滚也不能提前发布到迹。
         let enums: Vec<_> = self
             .transaction_events
@@ -345,6 +353,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         self.transaction_condition_scopes.push(deferred_ast);
         self.transaction_conditions.push(condition.clone());
+        if let Some(prefix) = &mut self.finite_prefix {
+            prefix.invalidate_candidates();
+        }
         let depth = self.transaction_depth();
         let events_len = self.transaction_events.len();
         // 翻译条件也可能 panic，必须一并纳入清理范围。
@@ -432,6 +443,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             // 最外层已提交，辅助solver的旧scope与学习状态不再属于活动区域。
             // 主solver和其模型各自持有引用；释放辅助资源不改变已提交约束。
             self.region_query = None;
+            if let Some(prefix) = &mut self.finite_prefix {
+                prefix.remove_suffix(BUFFERED, &self.transaction_events, 0);
+            }
             if savepoint.order_register_reads {
                 order_register_reads(&mut self.transaction_events, &mut self.transaction_event_guards, 0);
             }
@@ -453,7 +467,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
             self.committed_transaction_events =
                 self.transaction_event_guards.drain(..).zip(self.transaction_events.iter().cloned()).collect();
+            let start = self.trace.head.len();
             self.trace.head.append(&mut self.transaction_events);
+            self.index_published_suffix(start);
             self.last_committed_transaction = Some((savepoint.token, self.trace.head.len()));
             self.logical_arms.clear();
         }
@@ -466,6 +482,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let prefix = root.token.head_len;
         let groups = arms.iter().map(|arm| self.project_logical_arm(*arm)).collect();
         self.commit_transaction();
+        self.remove_published_suffix(prefix);
         self.trace.head.truncate(prefix);
         self.trace.checkpoint(self.next_var);
         self.last_committed_transaction = None;
@@ -517,7 +534,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 各组共用事务前的迹和已提交 SMT 约束，分别发布组内非 SMT 事件。
     pub(crate) fn select_region_group(&mut self, effects: RegionGroupEffects<B>) {
+        self.remove_published_suffix(0);
         self.trace.head = effects.events.iter().map(|(_, event)| event.clone()).collect();
+        self.index_published_suffix(0);
         self.committed_transaction_events = effects.events;
         self.cycles = effects.cycles;
     }
@@ -565,6 +584,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn guard_transaction_events(&mut self, start: usize, guard: &Exp<Sym>) {
+        if let Some(prefix) = &mut self.finite_prefix {
+            prefix.invalidate_candidates();
+        }
         let cost_scope =
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Guard);
         let _ = &cost_scope;
@@ -640,6 +662,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 旧执行器显式调用此整理口，用补发的合并读取替换两臂的原始读写，
         // 随后再补发合并写入。commit 出口本身始终发布全部缓冲事件。
         // 只清理本次提交区间的寄存器事件，保留其他事件和真正重复的合并读取。
+        self.remove_published_suffix(tx.head_len);
         let published: Vec<_> = self
             .trace
             .head
@@ -651,6 +674,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 发布后的兼容整理不修改发布时快照；主迹的新增合并事件没有臂条件。
         let mut guards = vec![None; self.trace.head.len()];
         order_register_reads(&mut self.trace.head, &mut guards, tx.head_len);
+        self.index_published_suffix(tx.head_len);
+    }
+
+    fn remove_published_suffix(&mut self, start: usize) {
+        if let Some(prefix) = &mut self.finite_prefix {
+            prefix.remove_suffix(self.trace.checkpoints, &self.trace.head, start);
+        }
+    }
+
+    fn index_published_suffix(&mut self, start: usize) {
+        if let Some(prefix) = &mut self.finite_prefix {
+            for (offset, event) in self.trace.head.iter().enumerate().skip(start) {
+                prefix.push(self.trace.checkpoints, offset, event);
+            }
+        }
     }
 }
 
@@ -713,6 +751,7 @@ impl<B: BV> Solver<'_, B> {
         bytes += buffered_events_bytes
             + event_guard_bytes
             + self.logical_arms.heap_bytes()
+            + self.finite_prefix.as_ref().map_or(0, finite_domain::PrefixIndex::heap_bytes)
             + self.committed_transaction_events.capacity() * size_of::<(Option<Exp<Sym>>, Event<B>)>()
             + self
                 .committed_transaction_events

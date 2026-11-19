@@ -1804,6 +1804,7 @@ pub struct Solver<'ctx, B> {
     savepoints: Vec<SolverSavepoint<'ctx>>,
     declaration_undo: Vec<DeclarationUndo<'ctx>>,
     transaction_events: Vec<Event<B>>,
+    finite_prefix: Option<finite_domain::PrefixIndex>,
     logical_arms: logical_arm::LogicalArms,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
     transaction_event_guards: Vec<Option<Exp<Sym>>>,
@@ -2534,6 +2535,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 savepoints: Vec::new(),
                 declaration_undo: Vec::new(),
                 transaction_events: Vec::new(),
+                finite_prefix: ctx.solver_options.finite_domain_enumeration.then(finite_domain::PrefixIndex::default),
                 logical_arms: logical_arm::LogicalArms::default(),
                 transaction_event_guards: Vec::new(),
                 committed_transaction_events: Vec::new(),
@@ -3025,14 +3027,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let _ = &cost_scope;
         self.add_event_internal(&event);
         if self.savepoints.is_empty() {
+            if let Some(prefix) = &mut self.finite_prefix {
+                prefix.push(self.trace.checkpoints, self.trace.head.len(), &event);
+            }
             self.trace.head.push(event);
         } else if !matches!(&event, Event::Smt(..))
             || !self.transaction_invalid()
             || matches!(&event, Event::Smt(Def::DefineEnum(..), ..))
         {
+            if let Some(prefix) = &mut self.finite_prefix {
+                prefix.push(finite_domain::BUFFERED, self.transaction_events.len(), &event);
+            }
             self.transaction_events.push(event);
             self.transaction_event_guards.push(None);
             self.logical_arms.record_event();
+        } else if let Some(prefix) = &mut self.finite_prefix {
+            // 即使失效保存点不记录 SMT 事件，add_event_internal 仍可能修改符号绑定。
+            prefix.invalidate_candidates();
         }
     }
 
@@ -3129,9 +3140,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
         }
         assert!(checkpoints.len() == num);
-        for events in checkpoints.iter().rev() {
-            for event in *events {
-                self.add_event_internal(event)
+        for (segment, events) in checkpoints.into_iter().rev().enumerate() {
+            for (offset, event) in events.iter().enumerate() {
+                self.add_event_internal(event);
+                if let Some(prefix) = &mut self.finite_prefix {
+                    prefix.push(segment, offset, event);
+                }
             }
         }
         self.trace.checkpoints = num;
