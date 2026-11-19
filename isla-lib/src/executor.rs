@@ -1253,6 +1253,11 @@ enum SpecialResult {
 
 trait ForkSink<'ir, 'task, B: BV> {
     fn submit(&self, task: Task<'ir, 'task, B>);
+
+    /// 错误叶跟随祖先区域事务，直到根区域提交才进入任务队列。
+    fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
+        self.submit(task);
+    }
 }
 
 struct SingleForkSink<'a, 'ir, 'task, B: BV> {
@@ -2080,6 +2085,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             symbolic_length::retry_symbolic_length(
                 error,
                 &operands,
+                Some((tid, timeout)),
                 task_id,
                 task_fraction,
                 stop_conditions,
@@ -2126,6 +2132,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        if !frame.region_arrivals.is_empty() {
+            return Ok(Run::Suspended);
+        }
         if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Error)
             && shared_state.execution_stats.solver_failed()
         {
@@ -2547,6 +2556,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if symbolic_length::retry_symbolic_length(
                             error,
                             &[arg],
+                            Some((tid, timeout)),
                             task_id,
                             task_fraction,
                             stop_conditions,
@@ -2639,6 +2649,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if symbolic_length::retry_symbolic_length(
                             error,
                             &[arg1, arg2],
+                            Some((tid, timeout)),
                             task_id,
                             task_fraction,
                             stop_conditions,
@@ -2681,6 +2692,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         if symbolic_length::retry_symbolic_length(
                             error,
                             &args,
+                            Some((tid, timeout)),
                             task_id,
                             task_fraction,
                             stop_conditions,
@@ -2764,6 +2776,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     branch_decision(frame, task_state, SpeculativeRejectReason::AnnouncePc)?;
                                     match symbolic_length::fork_symbolic_value(
                                         sym,
+                                        None,
                                         None,
                                         operands.as_ref().unwrap(),
                                         *info,
@@ -2899,6 +2912,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 if symbolic_length::retry_symbolic_length(
                                     error,
                                     &operands,
+                                    Some((tid, timeout)),
                                     task_id,
                                     task_fraction,
                                     stop_conditions,
@@ -4513,6 +4527,7 @@ mod tests {
                 assert!(symbolic_length::retry_symbolic_length(
                     ExecError::SymbolicLength(op, info()),
                     &operands,
+                    None,
                     TaskId::fresh(),
                     &mut fraction,
                     None,
@@ -4558,6 +4573,7 @@ mod tests {
             symbolic_length::retry_symbolic_length(
                 ExecError::SymbolicLength("read_mem_address", info()),
                 &operands,
+                None,
                 TaskId::fresh(),
                 &mut fraction,
                 None,
@@ -4760,6 +4776,7 @@ mod tests {
                     assert!(symbolic_length::retry_symbolic_length(
                         ExecError::SymbolicLength(op, info()),
                         &operands,
+                        None,
                         TaskId::fresh(),
                         &mut fraction,
                         None,
@@ -4816,6 +4833,7 @@ mod tests {
                 assert!(symbolic_length::retry_symbolic_length(
                     ExecError::SymbolicLength(op, info()),
                     &operands,
+                    None,
                     TaskId::fresh(),
                     &mut fraction,
                     None,
@@ -5046,6 +5064,7 @@ mod tests {
                     assert!(symbolic_length::retry_symbolic_length(
                         ExecError::SymbolicLength(op, info()),
                         &operands,
+                        None,
                         TaskId::fresh(),
                         &mut fraction,
                         None,
@@ -5110,6 +5129,7 @@ mod tests {
             let result = symbolic_length::retry_symbolic_length(
                 ExecError::SymbolicLength("read_mem_address", info()),
                 &[Val::Unit, Val::I128(64), Val::Symbolic(address), Val::I128(1)],
+                None,
                 TaskId::fresh(),
                 &mut fraction,
                 None,
@@ -13262,6 +13282,7 @@ fn zcaller(za, zb) {
                 symbolic_length::fork_symbolic_value(
                     symbol,
                     None,
+                    None,
                     &[Val::Symbolic(symbol)],
                     info(),
                     TaskId::fresh(),
@@ -13771,6 +13792,7 @@ fn zcaller(za, zb) {
                             ExecError::RetryCondition(condition, info())
                         },
                         &[],
+                        None,
                         TaskId::fresh(),
                         &mut fraction,
                         None,
@@ -13782,6 +13804,7 @@ fn zcaller(za, zb) {
                     ),
                     SymbolicValueEnumeration => symbolic_length::fork_symbolic_value(
                         sym,
+                        None,
                         None,
                         &[],
                         info(),

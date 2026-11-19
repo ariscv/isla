@@ -94,23 +94,26 @@ fn region_consumer_mixed_integer_and_strict_operand_read() {
     }
 }
 
-fn consume_known(operand: Val<B64>, solver: &mut Solver<B64>, info: SourceLoc) -> Result<Val<B64>, ExecError> {
-    match operand {
-        Val::Symbolic(sym) => match primop::proven_symbolic_i128(sym, solver, info)? {
-            Some(value) => Ok(Val::Bool(value == 32)),
-            None => Err(ExecError::SymbolicLength("zeros", info)),
-        },
-        _ => panic!("有限域测试必须沿用符号操作数"),
-    }
-}
-
 #[test]
 fn region_consumer_known_domain_joins_and_different_widths_stay_local() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     for strategy in strategies() {
         for no_smt in [false, true] {
-            for (consumer, expected) in
-                [(consume_known as primop::Unary<B64>, 1), (primop::unary_primops()["zeros"], 4)]
-            {
+            let width = Exp::Id(test_name(1800));
+            let consumers = [
+                (
+                    Instr::PrimopBinary(
+                        Loc::Id(RETURN),
+                        primop::binary_primops()["pow_int"],
+                        Exp::I128(-1),
+                        width.clone(),
+                        info(),
+                    ),
+                    1,
+                ),
+                (Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info()), 4),
+            ];
+            for (consumer, expected) in consumers {
                 let mut config = Config::new();
                 config.solver_options.no_smt = no_smt;
                 config.solver_options.finite_domain_enumeration = true;
@@ -118,29 +121,56 @@ fn region_consumer_known_domain_joins_and_different_widths_stay_local() {
                 let mut solver = Solver::new(&context);
                 let sym = solver.declare_bitvector(64, info());
                 use smtlib::Exp::*;
-                solver.assert([32, 39, 48, 57].into_iter().fold(Bool(false), |p, width| {
-                    Or(Box::new(p), Box::new(Eq(Box::new(Var(sym)), Box::new(smtlib::bits64(width, 64)))))
-                }));
-                let mut frame = make_frame(vec![
-                    Instr::PrimopUnary(Loc::Id(RETURN), consumer, Exp::Id(test_name(1800)), info()),
-                    Instr::End,
-                ]);
+                solver.assert(
+                    [32, 39, 48, 57]
+                        .into_iter()
+                        .map(|width| Eq(Box::new(Var(sym)), Box::new(smtlib::bits64(width, 64))))
+                        .reduce(|a, b| Or(Box::new(a), Box::new(b)))
+                        .unwrap(),
+                );
+                assert!(
+                    matches!(solver.finite_domain(sym), crate::smt::FiniteDomain::Known(values) if values.len() == 4)
+                );
+                let mut frame = make_frame(vec![consumer, Instr::End]);
                 frame.vars_mut().insert(test_name(1800), UVal::Init(Val::Symbolic(sym)));
                 let state = TaskState::new().with_execution_limits(limits(strategy));
-                let outputs = Mutex::new(Vec::new());
-                start_single(
-                    frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
-                    &empty_shared_state(),
-                    &outputs,
-                    &|_, _, result, _, _, outputs| {
-                        let Ok((Run::Finished(value), frame)) = result else {
-                            panic!("应正常完成");
-                        };
-                        assert!(frame.region_merge_records().iter().any(|record| record.branch_pc == 0));
-                        outputs.lock().unwrap().push(value);
-                    },
-                );
-                assert_eq!(outputs.into_inner().unwrap().len(), expected, "{strategy:?}, no_smt={no_smt}");
+                let shared = empty_shared_state();
+                let queue = Worker::new_lifo();
+                let sink = SingleForkSink { queue: &queue };
+                sink.queue.push(frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)));
+                let mut outputs = Vec::new();
+                let query_start = crate::smt::test_query_count();
+                while let Some(mut task) = sink.queue.pop() {
+                    let mut solver = Solver::from_checkpoint(&context, task.checkpoint);
+                    if let Some((def, event)) = task.fork_cond {
+                        solver.add_event(event);
+                        solver.add(def);
+                    }
+                    let mut frame = unfreeze_frame(&task.frame);
+                    let result = run_loop(
+                        0,
+                        task.id,
+                        &mut task.fraction,
+                        PathTimeout::unlimited(),
+                        None,
+                        &sink,
+                        &mut frame,
+                        &state,
+                        &shared,
+                        &mut solver,
+                    )
+                    .unwrap();
+                    let Run::Finished(value) = result else { panic!("应正常完成") };
+                    assert!(
+                        frame.region_merge_records().iter().any(|record| record.branch_pc == 0),
+                        "{strategy:?}, no_smt={no_smt}, expected={expected}, value={value:?}",
+                    );
+                    outputs.push(value);
+                }
+                assert_eq!(outputs.len(), expected, "{strategy:?}, no_smt={no_smt}");
+                if no_smt {
+                    assert_eq!(crate::smt::test_query_count() - query_start, 0);
+                }
             }
         }
     }
@@ -148,6 +178,7 @@ fn region_consumer_known_domain_joins_and_different_widths_stay_local() {
 
 #[test]
 fn region_consumer_preserves_candidate_assertion_failure() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     for strategy in strategies() {
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);

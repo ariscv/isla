@@ -206,6 +206,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
         symbolic_length::fork_symbolic_value(
             symbol,
             None,
+            None,
             &[Val::Symbolic(symbol)],
             info(),
             TaskId::fresh(),

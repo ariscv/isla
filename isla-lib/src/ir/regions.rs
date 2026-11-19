@@ -579,6 +579,13 @@ impl<B: BV> FunctionRegions<B> {
         &self.analysis().cfg
     }
 
+    /// 当前槽在后续指令中不再使用，也未通过地址逃逸。
+    pub(crate) fn slot_unused_at(&self, pc: usize, name: Name) -> bool {
+        assert!(self.recreated_slot_liveness, "必须计入普通赋值对现有槽位的使用");
+        let analysis = self.analysis();
+        !analysis.address_taken.contains(&name) && !analysis.future_reads[pc].contains(&name)
+    }
+
     fn analysis(&self) -> &FunctionAnalysis {
         self.analysis.get_or_init(|| {
             let mut cfg = RegionCfg::new(

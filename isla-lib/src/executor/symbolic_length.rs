@@ -89,6 +89,7 @@ pub(super) fn eval_operands_before_concrete_choice<'exp, 'ir, B: BV>(
 pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     error: ExecError,
     operands: &[Val<B>],
+    consumer: Option<(usize, super::PathTimeout)>,
     task_id: TaskId,
     task_fraction: &mut Fraction,
     stop_conditions: Option<&'task StopConditions>,
@@ -116,7 +117,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     }
     if let ExecError::IntegerConversion(in_range, info) | ExecError::RetryCondition(in_range, info) = error {
         let cond = solver.define_const(in_range, info);
-        return fork_retry_operand(
+        return retry_partition(
+            consumer,
             cond,
             Var(cond),
             Not(Box::new(Var(cond))),
@@ -133,6 +135,27 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         );
     }
     let ExecError::SymbolicLength(op, info) = error else { return Err(error) };
+    if consumer.is_some()
+        && !solver.finite_domain_enabled()
+        && task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
+        && super::region_merge::policy(frame, task_state, info) != crate::config::MergeMode::Off
+    {
+        return solver.with_finite_domain(|solver| {
+            retry_symbolic_length(
+                error,
+                operands,
+                consumer,
+                task_id,
+                task_fraction,
+                stop_conditions,
+                fork_sink,
+                frame,
+                task_state,
+                solver,
+                shared,
+            )
+        });
+    }
     let finite_enabled = solver.finite_domain_enabled();
     if !finite_enabled && solver.no_smt() {
         return Err(ExecError::Smt(solver.no_smt_cannot_continue(op, info)));
@@ -265,6 +288,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                                 return match fork_symbolic_value(
                                     *bytes_sym,
                                     None,
+                                    consumer,
                                     operands,
                                     info,
                                     task_id,
@@ -299,7 +323,8 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         if solver.check_sat_with(&allowed, info).is_sat()?
                             && solver.check_sat_with(&excluded, info).is_sat()?
                         {
-                            return fork_retry_operand(
+                            return retry_partition(
+                                consumer,
                                 sym,
                                 allowed,
                                 excluded,
@@ -402,7 +427,9 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     && solver.check_sat_with(&remainder, info).is_sat()?
                 {
                     // 先完整分离两类候选，再由消费者拒绝非法索引或处理默认符号内存。
-                    return fork_retry_operand(
+                    let local = consumer.filter(|_| matches!(solver.finite_domain(sym), FiniteDomain::Known(_)));
+                    return retry_partition(
+                        local,
                         sym,
                         selected,
                         remainder,
@@ -423,7 +450,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             }
             // 扩展及切片会按选中的具体位宽执行。整组候选都满足原语边界时，
             // 允许上界集合参与拆分，保留原守卫和其余路径约束。
-            let bounds = if finite_enabled {
+            let bounds = if finite_enabled || consumer.is_some() {
                 use crate::primop_util::length_bits;
                 match (op, index, operands) {
                     ("extension", 1, [bits, ..]) => {
@@ -445,6 +472,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             match fork_symbolic_value(
                 sym,
                 bounds,
+                consumer,
                 operands,
                 info,
                 task_id,
@@ -477,6 +505,7 @@ pub(super) enum ValueRetry {
 pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sym: crate::smt::Sym,
     safe_bounds: Option<std::ops::RangeInclusive<i128>>,
+    consumer: Option<(usize, super::PathTimeout)>,
     operands: &[Val<B>],
     info: SourceLoc,
     task_id: TaskId,
@@ -525,7 +554,11 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
             return Ok(if values.is_empty() { ValueRetry::Dead } else { ValueRetry::Unique });
         };
         let in_region = frame.region_execution.is_some();
-        if !bounded && in_region {
+        if !bounded
+            && in_region
+            && (consumer.is_none()
+                || !task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values))
+        {
             // 事务只拥有当前推演臂，两边可行时交回区域外重放。
             return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
         }
@@ -554,7 +587,8 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
             STRUCTURAL_CANDIDATES.fetch_add(1, Relaxed);
         }
         return Ok(
-            if fork_retry_operand(
+            if retry_partition(
+                consumer,
                 sym,
                 equal,
                 remainder,
@@ -661,6 +695,44 @@ fn cache_retry_operand<B: BV>(frame: &mut LocalFrame<'_, B>, operands: &[Val<B>]
     let cached =
         if frame.local_state.expression_retry_operands.is_some() { Val::Unit } else { Val::Vector(operands.to_vec()) };
     frame.pending_retry_operand = Some((frame.pc, cached));
+}
+
+/// 有限候选和原语给出的范围谓词共用指令级事务。没有穷尽结构域的
+/// 单点模型枚举仍由普通执行调度，允许其它路径在枚举期间继续。
+#[allow(clippy::too_many_arguments)]
+fn retry_partition<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+    consumer: Option<(usize, super::PathTimeout)>,
+    sym: crate::smt::Sym,
+    equal: smtlib::Exp<crate::smt::Sym>,
+    remainder: smtlib::Exp<crate::smt::Sym>,
+    operands: &[Val<B>],
+    info: SourceLoc,
+    task_id: TaskId,
+    fraction: &mut Fraction,
+    stop: Option<&'task StopConditions>,
+    sink: &S,
+    frame: &mut LocalFrame<'ir, B>,
+    state: &'task TaskState<B>,
+    solver: &mut Solver<B>,
+    shared: &SharedState<'ir, B>,
+) -> Result<bool, ExecError> {
+    if let Some((tid, timeout)) = consumer {
+        let previous = frame.pending_retry_operand.clone();
+        cache_retry_operand(frame, operands);
+        let retry = super::concrete_values::ConsumerRetry::Operand([equal.clone(), remainder.clone()]);
+        match super::concrete_values::retry_region(
+            retry, info, tid, task_id, fraction, timeout, stop, sink, frame, state, shared, solver,
+        ) {
+            Ok(Some(alive)) => return Ok(alive),
+            result => {
+                frame.pending_retry_operand = previous;
+                result?;
+            }
+        }
+    }
+    fork_retry_operand(
+        sym, equal, remainder, operands, info, task_id, fraction, stop, sink, frame, state, solver, shared,
+    )
 }
 
 /// 两种重试都保存操作数，并沿用同一套执行限制和检查点语义。

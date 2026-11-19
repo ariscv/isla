@@ -847,6 +847,18 @@ fn concrete_kind<B>(value: &Val<B>) -> Option<bool> {
     }
 }
 
+/// 当同一机器整数的一侧已为 SMT BV64 时，把带守卫的一侧也编码为 BV64。
+fn guarded_integer_expr<B: BV>(value: &Val<B>, info: SourceLoc) -> Result<Exp<Sym>, ExecError> {
+    match value {
+        Val::Guarded(guard, values) => Ok(Exp::Ite(
+            Box::new(Exp::Var(*guard)),
+            Box::new(guarded_integer_expr(&values.0, info)?),
+            Box::new(guarded_integer_expr(&values.1, info)?),
+        )),
+        _ => smt_value(value, info),
+    }
+}
+
 fn merge_val_mode<B: BV, const CONCRETE: bool>(
     cond: Sym,
     a: &Val<B>,
@@ -876,6 +888,21 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
         crate::executor::concrete_values::created();
         return Ok(Val::Guarded(guard, Box::new((val_a.clone(), val_b.clone()))));
     }
+    if CONCRETE {
+        let mut mixes_guarded_i64 = |guarded: &Val<B>, other: &Val<B>| {
+            matches!(guarded, Val::Guarded(..))
+                && concrete_kind(guarded) == Some(false)
+                && matches!(other, Val::Symbolic(sym) if solver.length(*sym) == Some(64))
+        };
+        if mixes_guarded_i64(val_a, val_b) || mixes_guarded_i64(val_b, val_a) {
+            let expr = Exp::Ite(
+                Box::new(Exp::Var(cond)),
+                Box::new(guarded_integer_expr(val_a, info)?),
+                Box::new(guarded_integer_expr(val_b, info)?),
+            );
+            return Ok(Val::Symbolic(solver.define_const(expr, info)));
+        }
+    }
     if merge_bit_width(val_a, solver, info)? != merge_bit_width(val_b, solver, info)? {
         return Err(ExecError::IncompatibleMerge);
     }
@@ -886,6 +913,10 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
             } else {
                 build_ite(cond, val_a, val_b, solver, info)
             }
+        }
+
+        (Val::MixedBits(_), Val::MixedBits(_) | Val::Bits(_)) | (Val::Bits(_), Val::MixedBits(_)) if CONCRETE => {
+            build_ite(cond, val_a, val_b, solver, info)
         }
 
         (Val::Unit, Val::Unit) => Ok(Val::Unit),

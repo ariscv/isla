@@ -180,7 +180,8 @@ fn import_values(path: &Path, inputs: &[Sym], solver: &mut Solver<B64>, values: 
             }
             Event::Smt(Def::Assert(exp), _, _) => {
                 if let Some((symbol, value)) = auxiliary(exp, inputs.len()) {
-                    definitions.insert(symbol, value);
+                    // 候选守卫可约束已经定义的中间值；它不能改写该值的定义。
+                    definitions.entry(symbol).or_insert(value);
                 }
             }
             _ => (),
@@ -1746,7 +1747,7 @@ fn default_symbolic_dag_merges_a_diamond_and_honors_explicit_disable() {
 }
 
 #[test]
-fn region_merge_retry_rejection_preserves_all_candidates() {
+fn region_merge_retry_joins_all_candidates() {
     let shared = empty_shared_state();
     let length = test_name(990);
     let result = test_name(991);
@@ -1768,7 +1769,7 @@ fn region_merge_retry_rejection_preserves_all_candidates() {
         Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(result), Exp::I128(3)]), info()),
         Instr::End,
     ];
-    assert_eq!(differential(program, &shared, 2, true), (3, 3));
+    assert_eq!(differential(program, &shared, 2, true), (3, 1));
 }
 
 #[test]
