@@ -535,6 +535,9 @@ progress = true
 
 `[execution_limits.path_merge].merge_concrete_values` 默认关闭，`--merge-concrete-values=true|false` 可覆盖。区域出口可用同一个守卫保留两臂不同的具体字符串或 I64。若消费者需要具体值，执行器沿原守卫重试该指令。区域内的重试通过共用汇合入口交回正常前沿。
 
+开启 `[execution_limits.path_merge].finite_domain_enumeration` 后，零扩展和符号扩展可按已知的有限目标位宽拆分。每个候选至少与源位向量等宽，并且必须能用原语的 `u32` 表示。分支保留完整路径约束。无 SMT 时，尚未确认可达的候选仍带守卫并等待认证。
+
+
 ## 投影枚举与样本输出
 
 在 `[execution_limits.path_merge.enumeration]` 设置 `enabled=true` 后开始枚举。每个守卫类的 `class_cap` 与每条完成路径的 `path_cap` 缺省均不限，可显式设置正整数。达到上限且仍有可行解时记录截断。`sample_stride` 缺省为 1，显式大于 1 时按步长选择输出，计数仍包含已枚举的解。

@@ -1265,7 +1265,7 @@ fn smt_i128_width<V>(value: i128, width: u32) -> Option<Exp<V>> {
 }
 
 /// 把模型里的位向量按二进制补码还原成 i128，是 `smt_i128_width` 的逆运算。
-fn i128_from_model_bits(bits: &[bool]) -> Option<i128> {
+pub(crate) fn i128_from_model_bits(bits: &[bool]) -> Option<i128> {
     let width = bits.len();
     if width == 0 || width > 128 {
         return None;

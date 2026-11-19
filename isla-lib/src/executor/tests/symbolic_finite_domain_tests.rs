@@ -10,6 +10,17 @@ fn lengths(
     enabled: bool,
     assertions: impl FnOnce(&mut Solver<B64>, Sym),
 ) -> (Vec<Result<(u32, Vec<u64>), ExecError>>, usize) {
+    run_length_consumer(no_smt, enabled, |solver, symbol, variable| {
+        assertions(solver, symbol);
+        (symbol, Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], Exp::Id(variable), info()))
+    })
+}
+
+fn run_length_consumer(
+    no_smt: bool,
+    enabled: bool,
+    consumer: impl FnOnce(&mut Solver<B64>, Sym, Name) -> (Sym, Instr<Name, B64>),
+) -> (Vec<Result<(u32, Vec<u64>), ExecError>>, usize) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut cfg = Config::new();
     cfg.solver_options.no_smt = no_smt;
@@ -18,14 +29,10 @@ fn lengths(
     let verification = Context::new(Config::new());
     let mut solver = Solver::new(&context);
     let symbol = solver.declare_bitvector(64, info());
-    assertions(&mut solver, symbol);
-
     let variable = test_name(745);
-    let mut frame = make_frame(vec![
-        Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops::<B64>()["zeros"], Exp::Id(variable), info()),
-        Instr::End,
-    ]);
-    frame.vars_mut().insert(variable, UVal::Init(Val::Symbolic(symbol)));
+    let (operand, instruction) = consumer(&mut solver, symbol, variable);
+    let mut frame = make_frame(vec![instruction, Instr::End]);
+    frame.vars_mut().insert(variable, UVal::Init(Val::Symbolic(operand)));
     let state = TaskState::new();
     let shared = empty_shared_state();
     let queue = Worker::new_lifo();
@@ -149,7 +156,6 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
         assert!(matches!(results.as_slice(), [Err(ExecError::Smt(crate::error::SmtError::NoSmt { .. }))]));
         assert_eq!(queries, 0);
     }
-
     let (results, queries) = lengths(true, true, |solver, symbol| {
         four_lengths(solver, symbol);
         let dependent = solver.declare_bitvector(64, info());
@@ -164,6 +170,7 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
 fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
     use crate::smt::FiniteDomain;
     use symbolic_length::ValueRetry;
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut cfg = Config::new();
     cfg.solver_options.no_smt = true;
     cfg.solver_options.finite_domain_enumeration = true;
@@ -198,6 +205,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
     let mut retry = |solver: &mut Solver<B64>| {
         symbolic_length::fork_symbolic_value(
             symbol,
+            None,
             &[Val::Symbolic(symbol)],
             info(),
             TaskId::fresh(),
@@ -332,5 +340,67 @@ fn symbolic_finite_domain_concretizes_scaled_length_and_range() {
     assert_eq!(crate::smt::test_query_count() - start, 0);
     for tx in txs.into_iter().rev() {
         solver.rollback_transaction(tx);
+    }
+}
+
+#[test]
+fn symbolic_finite_domain_zero_extend_with_bounded_width() {
+    for (no_smt, constrain_other, input_width, expected) in [
+        (true, false, 1, Some(vec![(32, vec![4]), (64, vec![8])])),
+        (false, false, 1, Some(vec![(32, vec![4]), (64, vec![8])])),
+        (true, true, 1, Some(vec![(32, vec![4]), (64, vec![])])),
+        (false, true, 1, Some(vec![(32, vec![4])])),
+        (true, true, 40, None),
+    ] {
+        let (results, queries) = run_length_consumer(no_smt, true, |solver, bytes, variable| {
+            let address = solver.declare_bitvector(64, info());
+            let is_device = equal(address, 4096);
+            // 设备臂的短路条件确保访问宽度是 4 或 8 字节。
+            solver.assert(Formula::Ite(
+                Box::new(is_device),
+                Box::new(Formula::Ite(
+                    Box::new(equal(bytes, 8)),
+                    Box::new(Formula::Bool(true)),
+                    Box::new(equal(bytes, 4)),
+                )),
+                Box::new(Formula::Bool(false)),
+            ));
+            let other = solver.declare_bitvector(64, info());
+            solver.assert_eq(
+                Formula::Bvadd(Box::new(Formula::Var(bytes)), Box::new(Formula::Var(other))),
+                smtlib::bits64(8192, 64),
+            );
+            if constrain_other {
+                solver.assert(equal(other, 8188));
+            }
+            let width = solver.define_const(
+                Formula::Bvmul(
+                    Box::new(Formula::SignExtend(64, Box::new(Formula::Var(bytes)))),
+                    Box::new(smtlib::bits64(8, 128)),
+                ),
+                info(),
+            );
+            assert!(matches!(solver.finite_domain(width), crate::smt::FiniteDomain::Bounded(v) if v.len() == 2));
+            (
+                width,
+                Instr::PrimopBinary(
+                    Loc::Id(RETURN),
+                    primop::binary_primops()["zero_extend"],
+                    Exp::Bits(B64::new(1, input_width)),
+                    Exp::Id(variable),
+                    info(),
+                ),
+            )
+        });
+        if let Some(expected) = expected {
+            let mut concrete: Vec<_> = results.into_iter().collect::<Result<_, _>>().unwrap();
+            concrete.sort();
+            assert_eq!(concrete, expected);
+        } else {
+            assert!(matches!(results.as_slice(), [Err(ExecError::Smt(crate::error::SmtError::NoSmt { .. }))]));
+        }
+        if no_smt {
+            assert_eq!(queries, 0);
+        }
     }
 }
