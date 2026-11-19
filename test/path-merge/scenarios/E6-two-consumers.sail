@@ -6,8 +6,7 @@
 // expect_paths_unmerged = 4
 // expect_paths_merged = 1
 // must_merge = "两个消费者共享一个模式，第二次消费只能沿用同一个宽度，四个互斥输入最终可共用一条路径。"
-// status = "xfail"
-// reason = "两次消费保持宽度一致，两种配置最终均为四条，尚未合回一条。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

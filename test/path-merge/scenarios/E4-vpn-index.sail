@@ -6,7 +6,7 @@
 // expect_paths_merged = 1
 // must_merge = "即使选择每级位数时需要分为两组，取出下标并扩展到 10 位后也能再次汇合。"
 // status = "xfail"
-// reason = "三个共用 9 位下标的模式仍分别完成，与 10 位模式合计四条。"
+// reason = "9 位的三个输入已合回一条。9 位和 10 位切片仍分别继续，最终有两条路径。"
 // ---
 default Order dec
 $include <prelude.sail>

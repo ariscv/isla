@@ -5,8 +5,7 @@
 // expect_paths_unmerged = 5
 // expect_paths_merged = 1
 // must_merge = "断言在所有合法位宽上成立，Bare 与三个翻译出口最终均返回带标签和负载的正常结果。"
-// status = "xfail"
-// reason = "严格模式最终有两条，开启具体值合并后有五条。两种配置均覆盖所有输入。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

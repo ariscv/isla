@@ -5,8 +5,7 @@
 // expect_paths_unmerged = 4
 // expect_paths_merged = 1
 // must_merge = "正向映射是全函数，四个整数可共用一个带守卫的返回槽。"
-// status = "xfail"
-// reason = "正向映射的四个整数在严格模式下分开，开启具体值合并后读回时仍有四条。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>

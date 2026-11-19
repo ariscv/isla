@@ -1,11 +1,10 @@
 // --- TOML
 // title = "外层两臂的标签集合分别是 {b,c} 和 {c,d}"
-// intent = "核对两个 c 跨外臂汇合且只覆盖(0,1) 和 (1,0)。"
+// intent = "核对两外臂的字符串都能在同一出口按原输入比较。"
 // inputs = { path_x = 1, path_y = 1 }
 // expect_paths_unmerged = 4
-// expect_paths_merged = 3
-// must_merge = "两个 c 有相同活跃字符串，合成一条。"
-// must_not_merge = "严格字符串口径保留 b 与 d 各一条，二者都不能进入 c 组。"
+// expect_paths_merged = 1
+// must_merge = "按 x、y 选择字符串 b、c 或 d，两个 c 取同一值，四个输入共用一个出口。"
 // status = "ready"
 // ---
 default Order dec

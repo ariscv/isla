@@ -5,8 +5,7 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "两个三位非负整数都能无损表示为有守卫的整数。"
-// status = "xfail"
-// reason = "默认严格整数表示保留具体 3、7；两条路径的读回值均正确。"
+// status = "ready"
 // ---
 default Order dec
 $include <prelude.sail>
