@@ -237,10 +237,8 @@ pub(super) fn record_write<B: BV>(state: &mut LocalState<B>, id: Name, register:
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     if let Some(log) = &mut state.speculative_access {
-        if register || state.lets.contains_key(&id) {
-            if !log.global_state && !log.writes_allowed {
-                return Err(log.reject(SpeculativeRejectReason::CalleeStateWrite));
-            }
+        if !register && state.lets.contains_key(&id) && !log.global_state && !log.writes_allowed {
+            return Err(log.reject(SpeculativeRejectReason::CalleeStateWrite));
         }
         if register {
             let first = log.writes.modified_regs.insert(id);
@@ -273,7 +271,7 @@ pub(super) fn policy<B: BV>(frame: &LocalFrame<B>, state: &TaskState<B>, info: S
     }
 }
 
-/// 本地校验每一步的真实栈深度；调用不会重新授予入口层的写许可。
+/// 本地校验每一步的真实栈深度，并跟踪全局 let 的写许可。
 pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> {
     if let Some((depth, join)) = frame.region_replay {
         if frame.backtrace.len() < depth

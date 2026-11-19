@@ -5,8 +5,6 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "两臂都写同一个一位寄存器一次。"
-// status = "xfail"
-// reason = "merge-principle-audit.md §2（被调函数的状态写）：臂内调用写 R，当前与直接写 R 的正常臂各自完成。"
 // registers = ["R"]
 // ---
 default Order dec

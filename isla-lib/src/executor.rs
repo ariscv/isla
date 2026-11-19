@@ -953,7 +953,7 @@ fn assign_with_accessor<'ir, B: BV>(
 
         Loc::Addr(loc) => {
             if let Some(access) = &local_state.speculative_access {
-                if access.global_state {
+                if access.global_state || !access.writes_allowed {
                     return Err(access.reject(SpeculativeRejectReason::StateEffect));
                 }
             }

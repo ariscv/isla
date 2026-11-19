@@ -228,12 +228,13 @@ pub(super) fn function_effect_summaries<B: BV>(
                 || destination.map_or(false, |loc| !locals.contains(&loc.id()) || matches!(loc, Loc::Addr(_)))
             {
                 effect = effect.max(Effect::WritesState);
-                // 普通全局写和向量寄存器写都由访问日志跟踪；地址写仍不能推演。
+                // 普通寄存器写共用调用者的访问日志；地址写仍不能推演。
                 let mut root = destination;
                 while let Some(Loc::Field(loc, _)) = root {
                     root = Some(loc);
                 }
-                if !global_state || matches!(root, Some(Loc::Addr(_))) {
+                let register_write = root.is_some_and(|loc| shared.registers.contains_key(&loc.id()));
+                if matches!(root, Some(Loc::Addr(_))) || (!global_state && !register_write) {
                     rejection = Some(CachedReject {
                         reason: SpeculativeRejectReason::CalleeStateWrite,
                         function: *function,
