@@ -433,6 +433,12 @@ isarch [原 J1 探索参数] \
 
 输出 `judged.jsonl` 为 judged v1，`classified.jsonl` 为完整 samples v1；类目录、变异记录、认证、覆盖和统计另存。旧缺 `fcsr` 的 P1b 输入通过 replay-log 从父 corpus entry 补齐并审计。完整命令、文件说明与四场景验收见 [第 2 步记录](../agents/path_merge_call_support/fuzz-step2.md)，也可运行 `isarch fuzz --help`。
 
+## 见证随机化
+
+`solve-state --witness-randomization 42` 使用固定随机种子具体化 `gen` 中的指令代表。`auto` 随机选取并打印种子，`off` 关闭。也可以在 ISA 配置顶层设置 `witness_randomization = 42` 或布尔值，CLI 优先，缺省关闭。记录的 `witness-randomization` 含种子、尝试的偏好数和实际满足的偏好数。
+
+只有满足完整路径与编码约束的模型才会替换原见证。代表的前态、后态和返回值使用同一个求解模型。路径枚举、样本导出、缓存和 judge 沿用原语义。
+
 ## 合并拒绝诊断
 
 `--merge-diagnostics off|summary|detail` 默认关闭。`summary` 每 15 秒及正常收尾时，按位置、槽和差异类别输出累计汇总；`detail` 另输出采样的单行 JSON。该选项独立于 `ISLA_STATS`，不改变合并准入或求解条件。

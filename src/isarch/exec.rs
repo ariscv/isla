@@ -731,6 +731,8 @@ struct AssemGenJsonItem {
     encoding_slice: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     merge_enumeration: Option<serde_json::Value>,
+    #[serde(default, rename = "witness-randomization", skip_serializing_if = "Option::is_none")]
+    witness_randomization: Option<isla_lib::smt::WitnessRandomization>,
     #[serde(rename = "requested-instruction")]
     requested_instruction: String,
     #[serde(rename = "isa-state-complete")]
@@ -809,6 +811,7 @@ impl AssemGenJsonItem {
             value_hint: None,
             encoding_slice: None,
             merge_enumeration: None,
+            witness_randomization: None,
         }
     }
 
@@ -2545,6 +2548,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 submit_trace(frame, &mut trace_diagnostics);
                                 return;
                             }
+                            let witness_randomization = samples.witness_randomization_seed.map(|seed| {
+                                let mut symbols = Default::default();
+                                for (_, value) in target.pre_state().iter() {
+                                    value.collect_symbolic_variables(&mut symbols);
+                                }
+                                let symbols: Vec<_> = symbols.into_iter().collect();
+                                solver.randomize_witness(&symbols, seed, frame.path_signature())
+                            });
                             let trace_events: Vec<Event<B>> =
                                 memory_events_chronological(solver.trace()).into_iter().cloned().collect();
                             let (memory_events, pre_memory, post_memory);
@@ -2913,6 +2924,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             .with_hint_label(hint_label)
                             .with_slice_label(slice_label);
                             single_instruction_json.merge_enumeration = sample_enumeration.clone();
+                            single_instruction_json.witness_randomization = witness_randomization;
                             collected.lock().expect("solve collector mutex poisoned").cases.push(CollectedCase {
                                 path_signature: frame.path_signature(),
                                 item: single_instruction_json,
@@ -5555,6 +5567,7 @@ mod tests {
                 value_hint: None,
                 encoding_slice: None,
                 merge_enumeration: None,
+                witness_randomization: None,
                 requested_instruction: String::new(),
                 isa_state_complete: BTreeMap::new(),
                 isa_state_post: BTreeMap::new(),
