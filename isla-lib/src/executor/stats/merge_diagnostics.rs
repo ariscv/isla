@@ -3,7 +3,7 @@ use crate::bitvector::BV;
 use crate::error::ExecError;
 use crate::executor::model_exception::FilteredPath;
 use crate::ir::{BitsSegment, Name, Symtab, Ty, UVal, Val};
-use crate::smt::{smtlib, Solver};
+use crate::smt::smtlib;
 use crate::source_loc::SourceLoc;
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
