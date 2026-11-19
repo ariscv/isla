@@ -5927,6 +5927,50 @@ fn arm_error_leaf_modes() {
         );
     }
 }
+#[test]
+fn arm_error_leaf_batch_checks_each_full_guard_in_one_solver() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "executor::tests::region_merge_tests::arm_error_leaf_batch_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+#[ignore]
+fn arm_error_leaf_batch_child() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Default);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let loc = info();
+    let input = solver.declare_const(smtlib::Ty::Bool, loc);
+    let entry = checkpoint(&mut solver);
+    let queries = solver.arm_error_queries(3).unwrap();
+    for (prefix, condition, expected) in
+        [(true, true, SmtResult::Sat), (false, false, SmtResult::Sat), (false, true, SmtResult::Unsat)]
+    {
+        let polarity = |positive| {
+            if positive {
+                smtlib::Exp::Var(input)
+            } else {
+                smtlib::Exp::Not(Box::new(smtlib::Exp::Var(input)))
+            }
+        };
+        let mut failed = Solver::from_checkpoint(&ctx, entry.clone());
+        failed.assert(polarity(prefix));
+        let guard = failed.define_const(polarity(condition), loc);
+        let failed_at = checkpoint(&mut failed);
+        let checked = solver.check_arm_error(guard, &failed_at, loc, Some(&queries));
+        assert_eq!(checked, Some(expected));
+        assert!(queries.used_for_last_check(), "独立错误域必须共用本批次的原生查询上下文");
+    }
+}
+
 fn arm_error_leaf_fixture(mode: &str) {
     crate::config::RegionOptions {
         arm_error_leaf: mode != "disabled",

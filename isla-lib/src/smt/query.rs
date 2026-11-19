@@ -79,6 +79,72 @@ pub(super) struct QuerySolver<'ctx> {
     independent: bool,
 }
 
+pub(crate) struct ArmErrorQueries<'ctx>(QuerySolver<'ctx>);
+
+impl<'ctx, B: BV> Solver<'ctx, B> {
+    pub(crate) fn arm_error_queries(&self, count: usize) -> Option<ArmErrorQueries<'ctx>> {
+        let config = SMT_CONFIG.get().unwrap();
+        (count > 1 && self.validates_candidates() && config.tactic == Tactic::Default).then(|| {
+            let ctx = self.ctx;
+            let z3_solver = unsafe { new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str(), None) };
+            ArmErrorQueries(QuerySolver { ctx, z3_solver, independent: false })
+        })
+    }
+}
+
+impl ArmErrorQueries<'_> {
+    /// 每个选择器只启用自己冻结的完整公式。其它选择器可以全为假，因此两条错误域无需相容。
+    pub(super) fn check<B: BV>(&self, verifier: &Solver<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        let native = self.0.z3_solver;
+        let ctx = self.0.ctx;
+        let _scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_error");
+        let goal = verifier.translate_exp(target);
+        let selector = unsafe {
+            let assertions = Z3_solver_get_assertions(ctx.z3_ctx, verifier.z3_solver);
+            Z3_ast_vector_inc_ref(ctx.z3_ctx, assertions);
+            let mut terms = (0..Z3_ast_vector_size(ctx.z3_ctx, assertions))
+                .map(|index| Z3_ast_vector_get(ctx.z3_ctx, assertions, index))
+                .collect::<Vec<_>>();
+            terms.push(goal.z3_ast);
+            let formula = Z3_mk_and(ctx.z3_ctx, terms.len().try_into().unwrap(), terms.as_ptr());
+            Z3_inc_ref(ctx.z3_ctx, formula);
+            let formula = Ast { ctx, z3_ast: formula };
+            let flag = Z3_mk_fresh_const(ctx.z3_ctx, c"isla_arm_error".as_ptr(), Z3_mk_bool_sort(ctx.z3_ctx));
+            Z3_inc_ref(ctx.z3_ctx, flag);
+            let selector = Ast { ctx, z3_ast: flag };
+            Z3_solver_assert(ctx.z3_ctx, native, Z3_mk_implies(ctx.z3_ctx, flag, formula.z3_ast));
+            Z3_ast_vector_dec_ref(ctx.z3_ctx, assertions);
+            selector
+        };
+        let slow = verifier.slow_query_begin(native);
+        let started = Instant::now();
+        let result = match timeout_Z3_solver_check_assumptions(ctx.z3_ctx, native, &[selector.z3_ast], info) {
+            Ok(result) => result,
+            Err(Z3TimeoutError::Interrupted(limit)) => {
+                let dump = timeout_dump_from_checkpoint(
+                    verifier.checkpoint_snapshot(),
+                    SmtDumpRequest::CheckSatWith(target.clone()),
+                );
+                return Error(z3_timeout_error(SmtOperation::CheckSatAssuming, info, started.elapsed(), limit, dump));
+            }
+        };
+        let elapsed = started.elapsed();
+        verifier.slow_query_finish(slow, native, Some(target), info, result);
+        match result {
+            Z3_L_TRUE => Sat,
+            Z3_L_FALSE => Unsat,
+            _ => unknown_result(info, elapsed, None),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ArmErrorQueries<'_> {
+    pub(crate) fn used_for_last_check(&self) -> bool {
+        z3_timeout::last_solver_query().0 == self.0.z3_solver as usize
+    }
+}
+
 impl QuerySolver<'_> {
     pub(super) fn assumptions<'a>(&self, conditions: &'a [Z3_ast]) -> &'a [Z3_ast] {
         if self.independent {

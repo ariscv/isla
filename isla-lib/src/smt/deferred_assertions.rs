@@ -148,11 +148,22 @@ impl<B: BV> Solver<'_, B> {
     }
 
     /// 使用失败点的前缀认证错误，后续正常域的约束不参与检查。
-    pub(crate) fn check_arm_error(&self, guard: Sym, point: &Checkpoint<B>, info: SourceLoc) -> Option<SmtResult> {
+    pub(crate) fn check_arm_error(
+        &self,
+        guard: Sym,
+        point: &Checkpoint<B>,
+        info: SourceLoc,
+        queries: Option<&ArmErrorQueries<'_>>,
+    ) -> Option<SmtResult> {
         if !self.validates_candidates() {
             return None;
         }
-        Solver::from_checkpoint(self.ctx, point.clone()).check_candidate_sat_with(&Exp::Var(guard), info)
+        let mut verifier = Solver::from_checkpoint(self.ctx, point.clone());
+        let target = Exp::Var(guard);
+        match queries {
+            Some(queries) => Some(queries.check(&verifier, &target, info)),
+            None => verifier.check_candidate_sat_with(&target, info),
+        }
     }
 
     pub(crate) fn check_deferred_assertions(&mut self, info: SourceLoc) -> Option<SmtResult> {

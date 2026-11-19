@@ -745,6 +745,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                 solver,
                                 fraction,
                                 sink,
+                                shared,
                             );
                         }
                         if grouped_root {
@@ -874,14 +875,23 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     solver: &Solver<B>,
     fraction: &mut Fraction,
     sink: &S,
+    shared: &SharedState<'ir, B>,
 ) {
+    let queries = solver.arm_error_queries(errors.len());
     for mut task in errors {
         let Some((_, Event::Fork(id, guard, _, location))) = &mut task.fork_cond else {
             unreachable!("失败前沿必须有分叉元数据")
         };
-        let checked = solver.check_arm_error(*guard, &task.checkpoint, *location);
+        let checked = solver.check_arm_error(*guard, &task.checkpoint, *location, queries.as_ref());
         if matches!(checked, Some(SmtResult::Unsat)) {
             continue;
+        }
+        if let Some(SmtResult::Error(error @ crate::error::SmtError::Timeout(_))) = &checked {
+            let error = ExecError::Smt(error.clone());
+            let failed = unfreeze_frame(&task.frame);
+            if stats::solver_failures::discard_solver_path(solver.exploration_on_unknown(), &error, &failed, shared) {
+                continue;
+            }
         }
         task.frame.arm_error.as_mut().unwrap().1 = matches!(checked, Some(SmtResult::Sat));
         *id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
@@ -2085,7 +2095,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
     if nested {
         pending_errors.forward(sink);
     } else {
-        publish_arm_errors(frame, pending_errors.tasks.into_inner().unwrap(), solver, fraction, sink);
+        publish_arm_errors(frame, pending_errors.tasks.into_inner().unwrap(), solver, fraction, sink, shared);
         if grouped_root {
             publish_join_groups(frame, record_start, task_id, fraction, stop, sink, state, shared, solver, info);
         } else {

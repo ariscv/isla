@@ -207,6 +207,7 @@ mod finite_domain;
 pub(crate) use finite_domain::FiniteDomain;
 pub mod no_smt;
 mod query;
+pub(crate) use query::ArmErrorQueries;
 mod z3_timeout;
 mod z3_version;
 pub use dump::configure_slow_query_dump;
