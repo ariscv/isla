@@ -1,0 +1,92 @@
+{
+  "actual": {
+    "saved": {
+      "paths": 4,
+      "exploration_seconds": 5.100464965,
+      "memory": [
+        "VmHWM:\t  416148 kB",
+        "VmRSS:\t  365020 kB"
+      ]
+    },
+    "measurements": {
+      "threads": 32,
+      "batch_size": 32,
+      "batches": 1,
+      "peak_resident_solvers": 4,
+      "paths": 4,
+      "restore_wall_seconds": 0.030217131,
+      "batch_wall_seconds": 0.045546078,
+      "total_wall_seconds": 0.087806693
+    },
+    "report": {
+      "schema_version": 1,
+      "sample_total": 2,
+      "samples": [
+        {
+          "sample_id": 0,
+          "accepted_paths": 0,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        },
+        {
+          "sample_id": 1,
+          "accepted_paths": 0,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        }
+      ],
+      "unaccepted_sample_ids": [
+        0,
+        1
+      ],
+      "inconsistent": []
+    }
+  },
+  "reference": {
+    "saved": {
+      "paths": 4,
+      "exploration_seconds": 6.140647381,
+      "memory": [
+        "VmHWM:\t  402744 kB",
+        "VmRSS:\t  356764 kB"
+      ]
+    },
+    "measurements": {
+      "threads": 32,
+      "batch_size": 32,
+      "batches": 1,
+      "peak_resident_solvers": 4,
+      "paths": 4,
+      "restore_wall_seconds": 0.031518871,
+      "batch_wall_seconds": 0.118504175,
+      "total_wall_seconds": 0.173676041
+    },
+    "report": {
+      "schema_version": 1,
+      "sample_total": 2,
+      "samples": [
+        {
+          "sample_id": 0,
+          "accepted_paths": 0,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        },
+        {
+          "sample_id": 1,
+          "accepted_paths": 0,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        }
+      ],
+      "unaccepted_sample_ids": [
+        0,
+        1
+      ],
+      "inconsistent": []
+    }
+  },
+  "reports_equal": true,
+  "actual_ids": [],
+  "reference_ids": [],
+  "samples": {}
+}

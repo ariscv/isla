@@ -1,0 +1,129 @@
+{
+  "actual": {
+    "saved": {
+      "paths": 4,
+      "exploration_seconds": 7.12087212,
+      "memory": [
+        "VmHWM:\t  490064 kB",
+        "VmRSS:\t  490064 kB"
+      ]
+    },
+    "measurements": {
+      "threads": 32,
+      "batch_size": 32,
+      "batches": 1,
+      "peak_resident_solvers": 4,
+      "paths": 4,
+      "restore_wall_seconds": 0.187109338,
+      "batch_wall_seconds": 0.459981163,
+      "total_wall_seconds": 0.68269079
+    },
+    "report": {
+      "schema_version": 1,
+      "sample_total": 2,
+      "samples": [
+        {
+          "sample_id": 0,
+          "accepted_paths": 0,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        },
+        {
+          "sample_id": 1,
+          "accepted_paths": 1,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        }
+      ],
+      "unaccepted_sample_ids": [
+        0
+      ],
+      "inconsistent": []
+    }
+  },
+  "reference": {
+    "saved": {
+      "paths": 4,
+      "exploration_seconds": 6.096187914,
+      "memory": [
+        "VmHWM:\t  490472 kB",
+        "VmRSS:\t  490472 kB"
+      ]
+    },
+    "measurements": {
+      "threads": 32,
+      "batch_size": 32,
+      "batches": 1,
+      "peak_resident_solvers": 4,
+      "paths": 4,
+      "restore_wall_seconds": 0.157746212,
+      "batch_wall_seconds": 0.501557023,
+      "total_wall_seconds": 0.695670954
+    },
+    "report": {
+      "schema_version": 1,
+      "sample_total": 2,
+      "samples": [
+        {
+          "sample_id": 0,
+          "accepted_paths": 0,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        },
+        {
+          "sample_id": 1,
+          "accepted_paths": 1,
+          "consistent_paths": 0,
+          "inconsistent_paths": 0
+        }
+      ],
+      "unaccepted_sample_ids": [
+        0
+      ],
+      "inconsistent": []
+    }
+  },
+  "reports_equal": true,
+  "actual_ids": [
+    1
+  ],
+  "reference_ids": [
+    1
+  ],
+  "samples": {
+    "1": {
+      "architectural_fields_equal": {
+        "pre_registers": true,
+        "post_registers": true,
+        "pre_memory": true,
+        "post_memory": true,
+        "isa_state": true,
+        "terminal": true,
+        "result": true,
+        "ret_val": true
+      },
+      "register_differences": {
+        "pre_registers": {},
+        "post_registers": {}
+      },
+      "sample_fields_differing": [],
+      "guard_unique": [
+        true,
+        true
+      ],
+      "post_unique": [
+        true,
+        true
+      ],
+      "guard_counts": [
+        2503,
+        2503
+      ],
+      "ordered_guards_equal": true,
+      "path_signatures": [
+        814277273372256191,
+        814277273372256191
+      ]
+    }
+  }
+}

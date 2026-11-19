@@ -1,0 +1,891 @@
+{
+  "original-load-120": {
+    "measure": {
+      "elapsed_s": "121.15",
+      "peak_rss_kib": "3409100",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 7,
+    "trigger": "signal",
+    "started": 44256,
+    "finished": 44104,
+    "native_checks": 0,
+    "in_flight": 152,
+    "roots_in_flight": 15,
+    "root_success": 24,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 45,
+        "root": 0
+      },
+      "success": {
+        "all": 44059,
+        "root": 24
+      }
+    },
+    "value_differences": {
+      "concrete_required": 180,
+      "local_join_rejected": 45
+    },
+    "finite_domain_uses": [],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 0,
+      "completed": 0,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 15,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 15,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 15,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 15,
+      "queue": {
+        "age_seconds": 11.301956207,
+        "active_at_census": 15,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t 3478448 kB",
+        "VmRSS:\t 3478448 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 15
+      }
+    },
+    "root_success_sites": {
+      "execute@52201": 24
+    },
+    "translation_in_flight_steps": [
+      83431,
+      88664
+    ],
+    "translation_in_flight_functions": [
+      "matching_pma_bits_range",
+      "phys_access_check",
+      "pmaCheck",
+      "pmpAddrMatchType_encdec_backwards",
+      "pmpCheck",
+      "pmpRangeMatch",
+      "pmpReadAddrReg"
+    ]
+  },
+  "reverted-load-120": {
+    "measure": {
+      "elapsed_s": "120.67",
+      "peak_rss_kib": "1357168",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 7,
+    "trigger": "signal",
+    "started": 26619,
+    "finished": 26548,
+    "native_checks": 0,
+    "in_flight": 71,
+    "roots_in_flight": 7,
+    "root_success": 110,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 21,
+        "root": 0
+      },
+      "success": {
+        "all": 26527,
+        "root": 110
+      }
+    },
+    "value_differences": {
+      "concrete_required": 84,
+      "local_join_rejected": 21
+    },
+    "finite_domain_uses": [
+      {
+        "category": "finite_domain_concrete_i128",
+        "source": {
+          "file": 14,
+          "line1": 93,
+          "char1": 21,
+          "line2": 93,
+          "char2": 34
+        },
+        "count": 7
+      }
+    ],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 17,
+      "completed": 17,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 7,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 7,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 7,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 7,
+      "queue": {
+        "age_seconds": 10.130240816,
+        "active_at_census": 7,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t 1413136 kB",
+        "VmRSS:\t 1413136 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 7
+      }
+    },
+    "root_success_sites": {
+      "effectivePrivilege@17": 7,
+      "execute@51694": 24,
+      "get_X@16": 24,
+      "split_misaligned@11": 24,
+      "split_misaligned@6": 24,
+      "translationMode@2": 7
+    },
+    "translation_in_flight_steps": [
+      108278,
+      116469
+    ],
+    "translation_in_flight_functions": [
+      "pmpAddrMatchType_encdec_backwards",
+      "pmpCheck",
+      "pmpRangeMatch",
+      "pmpReadAddrReg"
+    ]
+  },
+  "original-store-120": {
+    "measure": {
+      "elapsed_s": "120.63",
+      "peak_rss_kib": "1151272",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 7,
+    "trigger": "signal",
+    "started": 15402,
+    "finished": 15349,
+    "native_checks": 0,
+    "in_flight": 53,
+    "roots_in_flight": 4,
+    "root_success": 4,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 12,
+        "root": 0
+      },
+      "success": {
+        "all": 15337,
+        "root": 4
+      }
+    },
+    "value_differences": {
+      "concrete_required": 48,
+      "local_join_rejected": 12
+    },
+    "finite_domain_uses": [],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 0,
+      "completed": 0,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 4,
+      "queue": {
+        "age_seconds": 11.82942198,
+        "active_at_census": 4,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t 1193056 kB",
+        "VmRSS:\t 1193056 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 4
+      }
+    },
+    "root_success_sites": {
+      "execute@52205": 4
+    },
+    "translation_in_flight_steps": [
+      113869,
+      116677
+    ],
+    "translation_in_flight_functions": [
+      "pmpCheck",
+      "pmpRangeMatch",
+      "pmpReadAddrReg"
+    ]
+  },
+  "reverted-store-120": {
+    "measure": {
+      "elapsed_s": "120.54",
+      "peak_rss_kib": "709524",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 7,
+    "trigger": "signal",
+    "started": 16265,
+    "finished": 16224,
+    "native_checks": 0,
+    "in_flight": 41,
+    "roots_in_flight": 4,
+    "root_success": 28,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 12,
+        "root": 0
+      },
+      "success": {
+        "all": 16212,
+        "root": 28
+      }
+    },
+    "value_differences": {
+      "concrete_required": 48,
+      "local_join_rejected": 12
+    },
+    "finite_domain_uses": [
+      {
+        "category": "finite_domain_concrete_i128",
+        "source": {
+          "file": 77,
+          "line1": 322,
+          "char1": 13,
+          "line2": 322,
+          "char2": 39
+        },
+        "count": 4
+      }
+    ],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 0,
+      "completed": 0,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 4,
+      "queue": {
+        "age_seconds": 12.792545594,
+        "active_at_census": 4,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t  748432 kB",
+        "VmRSS:\t  748432 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 4
+      }
+    },
+    "root_success_sites": {
+      "effectivePrivilege@17": 4,
+      "execute@51698": 4,
+      "get_X@16": 8,
+      "split_misaligned@11": 4,
+      "split_misaligned@6": 4,
+      "translationMode@2": 4
+    },
+    "translation_in_flight_steps": [
+      121199,
+      123209
+    ],
+    "translation_in_flight_functions": [
+      "pmpAddrMatchType_encdec_backwards",
+      "pmpMatchAddr"
+    ]
+  },
+  "original-load-300": {
+    "measure": {
+      "elapsed_s": "301.47",
+      "peak_rss_kib": "4727068",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 19,
+    "trigger": "signal",
+    "started": 67883,
+    "finished": 67706,
+    "native_checks": 0,
+    "in_flight": 177,
+    "roots_in_flight": 15,
+    "root_success": 24,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 45,
+        "root": 0
+      },
+      "success": {
+        "all": 67661,
+        "root": 24
+      }
+    },
+    "value_differences": {
+      "concrete_required": 180,
+      "local_join_rejected": 45
+    },
+    "finite_domain_uses": [],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 0,
+      "completed": 0,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 15,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 15,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 15,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 15,
+      "queue": {
+        "age_seconds": 10.964281505,
+        "active_at_census": 15,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t 4793816 kB",
+        "VmRSS:\t 4793816 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 15
+      }
+    },
+    "root_success_sites": {
+      "execute@52201": 24
+    },
+    "translation_in_flight_steps": [
+      135238,
+      135323
+    ],
+    "translation_in_flight_functions": [
+      "MemoryOpResult_drop_meta<b>",
+      "checked_mem_read",
+      "mem_read_priv_meta"
+    ]
+  },
+  "reverted-load-300": {
+    "measure": {
+      "elapsed_s": "300.76",
+      "peak_rss_kib": "1893760",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 19,
+    "trigger": "signal",
+    "started": 41992,
+    "finished": 41901,
+    "native_checks": 0,
+    "in_flight": 91,
+    "roots_in_flight": 7,
+    "root_success": 110,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 21,
+        "root": 0
+      },
+      "success": {
+        "all": 41880,
+        "root": 110
+      }
+    },
+    "value_differences": {
+      "concrete_required": 84,
+      "local_join_rejected": 21
+    },
+    "finite_domain_uses": [
+      {
+        "category": "finite_domain_concrete_i128",
+        "source": {
+          "file": 14,
+          "line1": 93,
+          "char1": 21,
+          "line2": 93,
+          "char2": 34
+        },
+        "count": 7
+      }
+    ],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 17,
+      "completed": 17,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 7,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 7,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 7,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 7,
+      "queue": {
+        "age_seconds": 11.784046051,
+        "active_at_census": 7,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t 1943356 kB",
+        "VmRSS:\t 1943356 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 7
+      }
+    },
+    "root_success_sites": {
+      "effectivePrivilege@17": 7,
+      "execute@51694": 24,
+      "get_X@16": 24,
+      "split_misaligned@11": 24,
+      "split_misaligned@6": 24,
+      "translationMode@2": 7
+    },
+    "translation_in_flight_steps": [
+      179504,
+      180078
+    ],
+    "translation_in_flight_functions": [
+      "matching_pma_bits_range",
+      "phys_access_check",
+      "pmaCheck",
+      "range_subset"
+    ]
+  },
+  "original-store-300": {
+    "measure": {
+      "elapsed_s": "301.12",
+      "peak_rss_kib": "1681784",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 19,
+    "trigger": "signal",
+    "started": 22408,
+    "finished": 22348,
+    "native_checks": 0,
+    "in_flight": 60,
+    "roots_in_flight": 4,
+    "root_success": 4,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 12,
+        "root": 0
+      },
+      "success": {
+        "all": 22336,
+        "root": 4
+      }
+    },
+    "value_differences": {
+      "concrete_required": 48,
+      "local_join_rejected": 12
+    },
+    "finite_domain_uses": [],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 0,
+      "completed": 0,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 4,
+      "queue": {
+        "age_seconds": 12.847165601,
+        "active_at_census": 4,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t 1720728 kB",
+        "VmRSS:\t 1720728 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 4
+      }
+    },
+    "root_success_sites": {
+      "execute@52205": 4
+    },
+    "translation_in_flight_steps": [
+      165737,
+      171596
+    ],
+    "translation_in_flight_functions": [
+      "pmpCheck",
+      "pmpReadAddrReg"
+    ]
+  },
+  "reverted-store-300": {
+    "measure": {
+      "elapsed_s": "300.53",
+      "peak_rss_kib": "888496",
+      "exit_status": "124"
+    },
+    "exit": 124,
+    "snapshot": 19,
+    "trigger": "signal",
+    "started": 23657,
+    "finished": 23606,
+    "native_checks": 0,
+    "in_flight": 51,
+    "roots_in_flight": 4,
+    "root_success": 28,
+    "outcomes": {
+      "incompatible_state": {
+        "all": 12,
+        "root": 0
+      },
+      "success": {
+        "all": 23594,
+        "root": 28
+      }
+    },
+    "value_differences": {
+      "concrete_required": 48,
+      "local_join_rejected": 12
+    },
+    "finite_domain_uses": [
+      {
+        "category": "finite_domain_concrete_i128",
+        "source": {
+          "file": 77,
+          "line1": 322,
+          "char1": 13,
+          "line2": 322,
+          "char2": 39
+        },
+        "count": 4
+      }
+    ],
+    "last_finite_domain": {
+      "kind": "symbolic_value_enumeration_summary",
+      "trigger": "signal",
+      "calls": 0,
+      "completed": 0,
+      "solver_checks": 0,
+      "structural_candidates": 0,
+      "model_candidates": 0
+    },
+    "rejection_sites": [
+      {
+        "origin": "satp_mode_width_forwards@11",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@1",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      },
+      {
+        "origin": "satp_mode_width_forwards@6",
+        "outcome": "incompatible_state",
+        "all": 4,
+        "root": 0
+      }
+    ],
+    "errors": {},
+    "memory": {
+      "elapsed_seconds": null,
+      "active_tasks": 4,
+      "queue": {
+        "age_seconds": 9.765452466,
+        "active_at_census": 4,
+        "tasks": 0,
+        "frame_bytes": 0,
+        "checkpoint_bytes": 0
+      },
+      "process": [
+        "VmHWM:\t  948320 kB",
+        "VmRSS:\t  948320 kB"
+      ]
+    },
+    "translation": {
+      "translateAddr@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 0
+      },
+      "translateAddrWithPBMT@13": {
+        "finished": 0,
+        "root_finished": 0,
+        "success": 0,
+        "in_flight": 4
+      }
+    },
+    "root_success_sites": {
+      "effectivePrivilege@17": 4,
+      "execute@51698": 4,
+      "get_X@16": 8,
+      "split_misaligned@11": 4,
+      "split_misaligned@6": 4,
+      "translationMode@2": 4
+    },
+    "translation_in_flight_steps": [
+      176570,
+      180075
+    ],
+    "translation_in_flight_functions": [
+      "pmaCheck",
+      "pmpAddrMatchType_encdec_backwards",
+      "pmpCheck",
+      "pmpMatchAddr"
+    ]
+  }
+}

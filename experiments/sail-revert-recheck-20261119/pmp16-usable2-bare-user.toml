@@ -1,0 +1,13 @@
+# PMP 总数遵循 Sail 有限整数类型，前两项可用。
+includes=["base-frozen.toml"]
+[const_primops]
+sys_pmp_count="16 : %i64"
+sys_pmp_usable_count="2 : %i64"
+
+# 两份历史输入共有的前态。缩小补跑探索域，不改输入样本。
+[symbolic_registers.satp]
+pin_mask="0xffffffffffffffff"
+pin_value="0x0000000000000000"
+
+[symbolic_registers.cur_privilege]
+allowed=["User"]

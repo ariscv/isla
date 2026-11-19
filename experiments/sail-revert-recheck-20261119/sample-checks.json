@@ -1,0 +1,101 @@
+{
+  "load": {
+    "schema_version": 1,
+    "sample_total": 2,
+    "samples": [
+      {
+        "sample_id": 0,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 1,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      }
+    ],
+    "unaccepted_sample_ids": [],
+    "inconsistent": [],
+    "completed": true
+  },
+  "store": {
+    "schema_version": 1,
+    "sample_total": 2,
+    "samples": [
+      {
+        "sample_id": 0,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 1,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      }
+    ],
+    "unaccepted_sample_ids": [],
+    "inconsistent": [],
+    "completed": true
+  },
+  "amo": {
+    "schema_version": 1,
+    "sample_total": 2,
+    "samples": [
+      {
+        "sample_id": 0,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 1,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      }
+    ],
+    "unaccepted_sample_ids": [],
+    "inconsistent": [],
+    "completed": true
+  },
+  "vvtype": {
+    "schema_version": 1,
+    "sample_total": 1,
+    "samples": [
+      {
+        "sample_id": 0,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      }
+    ],
+    "unaccepted_sample_ids": [],
+    "inconsistent": [],
+    "completed": true
+  },
+  "vlsegtype": {
+    "schema_version": 1,
+    "sample_total": 2,
+    "samples": [
+      {
+        "sample_id": 0,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      },
+      {
+        "sample_id": 1,
+        "accepted_paths": 1,
+        "consistent_paths": 1,
+        "inconsistent_paths": 0
+      }
+    ],
+    "unaccepted_sample_ids": [],
+    "inconsistent": [],
+    "completed": true
+  }
+}

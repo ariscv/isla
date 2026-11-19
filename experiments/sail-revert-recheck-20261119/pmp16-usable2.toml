@@ -1,0 +1,5 @@
+# PMP 总数遵循 Sail 有限整数类型，前两项可用。
+includes=["base-frozen.toml"]
+[const_primops]
+sys_pmp_count="16 : %i64"
+sys_pmp_usable_count="2 : %i64"
