@@ -10,6 +10,18 @@ pub fn write_json(path: &Path, value: &impl Serialize) {
     writeln!(file).unwrap();
     file.flush().unwrap();
 }
+/// 调用方持有目录写锁，同一文件每次由一个 worker 提交。
+pub fn write_json_atomic(path: &Path, value: &impl Serialize) {
+    let temporary = path.with_extension("json.tmp");
+    let mut file = BufWriter::new(std::fs::File::create(&temporary).expect("创建临时 JSON 失败"));
+    serde_json::to_writer(&mut file, value).expect("序列化 JSON 失败");
+    writeln!(file).unwrap();
+    file.flush().unwrap();
+    file.get_ref().sync_all().unwrap();
+    std::fs::rename(temporary, path).expect("提交 JSON 失败");
+    std::fs::File::open(path.parent().unwrap()).unwrap().sync_all().unwrap();
+}
+
 pub fn write_lines<T: Serialize>(path: &Path, rows: &[T]) {
     let mut file = BufWriter::new(std::fs::File::create(path).expect("创建 JSONL 失败"));
     for row in rows {

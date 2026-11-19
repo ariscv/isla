@@ -1,7 +1,8 @@
 //! 本机Rust执行与独立NEMU观察；外部整场任务由scheduler约束。
 use super::super::testcase::{self, Built, Generated, Platform};
-use super::{classify, io, observe, perf, Runtime, STOP};
+use super::{baseline::Observation, classify, io, mismatch_feature, observe, perf, Runtime, STOP};
 use isla_lib::executor::samples::Sample;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -20,6 +21,7 @@ pub(super) struct ResultRow {
     pub fixed: Value,
     pub baseline: Value,
     pub perf: BTreeMap<String, u64>,
+    pub build_seconds: f64,
 }
 
 fn warmup(built: &Built, writes: usize) -> usize {
@@ -68,6 +70,12 @@ pub(super) fn probe(
         warmup.to_string(),
         "--force-dump-result".into(),
     ];
+    let trace_path = directory.join("native-nemu-trace.jsonl");
+    match fs::remove_file(&trace_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("清理上次观察追踪失败：{error}"),
+    }
     let started = Instant::now();
     let mut child = Command::new(&runtime.loader)
         .args(&arguments)
@@ -106,9 +114,8 @@ pub(super) fn probe(
     let err = fs::read_to_string(directory.join("stderr.log")).unwrap();
     let log = format!("{out}\n{err}");
     let mut result = classify::classify_log(&log, code, &built.symbols);
-    let trace = directory.join("native-nemu-trace.jsonl");
-    let trace = if trace.exists() {
-        fs::read_to_string(trace)
+    let trace = if !timed_out && log.contains("ECFG3_NATIVE child_status=0") && trace_path.exists() {
+        fs::read_to_string(trace_path)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).expect("NEMU追踪损坏"))
@@ -116,7 +123,7 @@ pub(super) fn probe(
     } else {
         Vec::new()
     };
-    if !timed_out && !trace.is_empty() && log.contains("ECFG3_NATIVE child_status=0") {
+    if !trace.is_empty() {
         result = observe::finish_result(
             sample,
             generated,
@@ -168,13 +175,85 @@ pub(super) fn run(
     fs::create_dir_all(directory).unwrap();
     let options =
         super::super::TestcaseOptions { compiler: runtime.compiler.clone(), entry_mode: testcase::EntryMode::Mprv };
+    let started = Instant::now();
     let built = testcase::build(&generated, &options, directory).expect("L1编译失败");
+    let build_seconds = started.elapsed().as_secs_f64();
     let (fixed, perf) =
         probe(runtime, &sample, platform, &generated, &built, &directory.join("fixed"), false, selected);
-    let unpatched = if baseline {
+    let unpatched = if baseline && !STOP.load(Ordering::SeqCst) {
         probe(runtime, &sample, platform, &generated, &built, &directory.join("unpatched"), true, &[]).0
     } else {
         Value::Null
     };
-    ResultRow { sample, generated, built, fixed, baseline: unpatched, perf }
+    ResultRow { sample, generated, built, fixed, baseline: unpatched, perf, build_seconds }
+}
+
+#[derive(Default, Serialize)]
+pub(super) struct InitialTiming {
+    pub compile_seconds: f64,
+    pub fixed_seconds: f64,
+    pub baseline_seconds: f64,
+    pub confirmation_seconds: f64,
+    pub worker_seconds: f64,
+    pub emu_runs: usize,
+}
+
+pub(super) fn observe_initial(
+    runtime: &Runtime,
+    platform: &Platform,
+    sample: &Sample,
+    generated: Generated,
+    directory: &Path,
+    selected: &[String],
+) -> (Observation, InitialTiming) {
+    let row = run(runtime, platform, sample.clone(), generated, directory, true, selected);
+    let known_replay = if Observation::needs_known_replay(&row.fixed, &row.baseline) && !STOP.load(Ordering::SeqCst) {
+        Some(
+            probe(
+                runtime,
+                &row.sample,
+                platform,
+                &row.generated,
+                &row.built,
+                &directory.join("known-replay"),
+                true,
+                &[],
+            )
+            .0,
+        )
+    } else {
+        None
+    };
+    let fixed_replay = if !STOP.load(Ordering::SeqCst) && mismatch_feature(&row.fixed).is_some() {
+        Some(
+            probe(
+                runtime,
+                &row.sample,
+                platform,
+                &row.generated,
+                &row.built,
+                &directory.join("fixed-replay"),
+                false,
+                selected,
+            )
+            .0,
+        )
+    } else {
+        None
+    };
+    let seconds = |result: &Value| result["elapsed_seconds"].as_f64().unwrap_or(0.0);
+    let timing = InitialTiming {
+        compile_seconds: row.build_seconds,
+        fixed_seconds: seconds(&row.fixed),
+        baseline_seconds: seconds(&row.baseline),
+        confirmation_seconds: known_replay.iter().chain(&fixed_replay).map(seconds).sum(),
+        emu_runs: 1
+            + usize::from(!row.baseline.is_null())
+            + usize::from(known_replay.is_some())
+            + usize::from(fixed_replay.is_some()),
+        ..InitialTiming::default()
+    };
+    let observation =
+        Observation { perf: row.perf, fixed: row.fixed, baseline: row.baseline, known_replay, fixed_replay };
+    (observation, timing)
 }

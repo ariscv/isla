@@ -244,6 +244,52 @@ pub(super) fn observe_run(
         "xs_result_observed":matches!(result["bucket"].as_str().unwrap(),"agree"|"xs!=expected")})
 }
 
+/// 基础设施失败没有三方证据。参考侧引导所得的分歧也可以是完整观察。
+pub(super) fn complete_probe(result: &Value) -> bool {
+    let observation = &result["observation"];
+    let side = result["isla_consistent_side"].as_str();
+    super::complete_observation(result)
+        && result["agree"].as_bool() == Some(side == Some("both"))
+        && matches!(
+            (result["bucket"].as_str(), side),
+            (Some("agree"), Some("both"))
+                | (
+                    Some("xs!=nemu" | "xs!=expected" | "nemu!=expected" | "xs+nemu!=expected"),
+                    Some("xs" | "nemu" | "neither")
+                )
+        )
+        && observation["isla_consistent_side"] == result["isla_consistent_side"]
+        && observation["native_guided_exec"] == false
+        && observation["native_result"]["event"] == "step"
+        && observation["native_result"]["mcause"] == result["nemu_cause"]
+        && result["native_exit_symbol"].is_string()
+        && result["nemu_cause"].is_u64()
+        && (result["xs_cause"].is_u64() || observation["xs_result_observed"] == true)
+}
+
+fn update_agreement(result: &mut Value, observation: &Value) {
+    let side = &observation["isla_consistent_side"];
+    let agree = result["agree"] == true && side == "both";
+    result["agree"] = json!(agree);
+    if !agree && result["bucket"] == "agree" {
+        let bucket = match side.as_str() {
+            Some("xs") => {
+                let reason = observation["native_exit_symbol"]
+                    .as_str()
+                    .and_then(|symbol| symbol.strip_prefix("fail_"))
+                    .and_then(|symbol| symbol.strip_suffix("_trap"))
+                    .expect("NEMU 分歧缺少已登记的失败出口");
+                result["reason"] = json!(reason);
+                "nemu!=expected"
+            }
+            Some("nemu") => "xs!=expected",
+            Some("neither") => "xs+nemu!=expected",
+            _ => unreachable!("初步一致结果缺少三方观察"),
+        };
+        result["bucket"] = json!(bucket);
+    }
+}
+
 pub(super) fn finish_result(
     sample: &Sample,
     generated: &Generated,
@@ -266,7 +312,7 @@ pub(super) fn finish_result(
     }
     let observation = observe_run(symbols, generated.expected.cause, &result, trace, log);
     result.as_object_mut().unwrap().extend(observation.as_object().unwrap().clone());
-    result["agree"] = json!(result["agree"] == true && observation["isla_consistent_side"] == "both");
+    update_agreement(&mut result, &observation);
     if result["agree"] != true {
         let mut table = MismatchTable::new(&known_mismatch_rules());
         result["mismatch"] = table.record(sample, generated, platform, &observation, id);
@@ -274,4 +320,30 @@ pub(super) fn finish_result(
     }
     result["observation"] = observation;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_only_disagreement_updates_bucket_and_keeps_complete_observation() {
+        let mut result = json!({"agree":true,"bucket":"agree","reason":null});
+        let observation = json!({"isla_consistent_side":"xs","native_exit_symbol":"fail_unexpected_trap_trap"});
+        update_agreement(&mut result, &observation);
+        assert_eq!(result["agree"], false);
+        assert_eq!(result["bucket"], "nemu!=expected");
+        assert_eq!(result["reason"], "unexpected_trap");
+        assert!(super::super::complete_observation(&result));
+    }
+
+    #[test]
+    fn keeps_three_way_agreement_and_existing_disagreement_buckets() {
+        for (agree, bucket, side) in [(true, "agree", "both"), (false, "xs!=expected", "nemu")] {
+            let mut result = json!({"agree":agree,"bucket":bucket});
+            update_agreement(&mut result, &json!({"isla_consistent_side":side}));
+            assert_eq!(result["agree"], agree);
+            assert_eq!(result["bucket"], bucket);
+        }
+    }
 }

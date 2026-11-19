@@ -386,6 +386,7 @@ pub fn run<B: BV>(
                 target,
                 &mut executor,
                 threads,
+                reconfirm_seconds,
             );
             return;
         }

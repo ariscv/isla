@@ -37,6 +37,13 @@ extern "C" fn stop(signal: i32) {
     STOP.store(true, Ordering::SeqCst);
 }
 
+fn install_stop_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTERM, stop as *const () as usize);
+        libc::signal(libc::SIGINT, stop as *const () as usize);
+    }
+}
+
 /// inspect只做前态初筛；filter验证L1可恢复性；run再执行硬件。三者都不替代模型认证。
 pub fn case_main() {
     disable_core_dumps();
@@ -226,6 +233,15 @@ pub(super) struct Runtime {
     pub first_request_only: bool,
     #[serde(default)]
     pub filter_only: bool,
+    /// 只准备第 0 例的观察。设置 reuse_initial 时在该目录恢复准备。
+    #[serde(default)]
+    pub prepare_only: bool,
+    /// 单臂只读的缓存目录，相对路径以 runtime 文件所在目录为基准。
+    #[serde(default)]
+    pub reuse_initial: Option<PathBuf>,
+    /// 声明会影响硬件观察的组件行为版本。
+    #[serde(default)]
+    pub initial_components: BTreeMap<String, String>,
     #[serde(default)]
     pub input_domain: Option<input_domain::InputDomain>,
 }
@@ -254,6 +270,21 @@ impl Runtime {
         }
         assert!(runtime.compiler.is_file(), "编译器不存在");
         assert!(!(runtime.filter_only && runtime.first_request_only), "过滤与首请求诊断不能同时开启");
+        if let Some(directory) = runtime.reuse_initial.as_mut() {
+            if !directory.is_absolute() {
+                *directory = base.join(&*directory);
+            }
+        }
+        if runtime.prepare_only || runtime.reuse_initial.is_some() {
+            assert!(!runtime.filter_only, "初始观察复用与过滤模式不能同时开启");
+            assert!(!runtime.prepare_only || !runtime.first_request_only, "准备模式不运行首请求");
+            assert!(
+                ["simulator", "comparison_simulator", "reference", "observer", "toolchain"].iter().all(|role| {
+                    runtime.initial_components.get(*role).is_some_and(|version| !version.trim().is_empty())
+                }),
+                "初始观察复用需要声明各组件的行为版本"
+            );
+        }
         assert!(
             !runtime.arms.is_empty()
                 && runtime.arms.iter().all(|arm| ["B0", "B1", "B2", "T"].contains(&arm.as_str()))
@@ -289,6 +320,24 @@ fn choose(entries: &[Entry], guided: bool) -> usize {
                 .then(a.cmp(b))
         })
         .unwrap()
+}
+
+fn select_request<'a>(
+    entries: &'a [Entry],
+    classes: &'a [ClassIdentity],
+    hits: &[usize],
+    burst: Option<(usize, bool)>,
+    guided: bool,
+    rng: &mut impl RngCore,
+) -> (usize, &'a ClassIdentity, &'static str) {
+    let parent = burst.map_or_else(|| choose(entries, guided), |(parent, _)| parent);
+    let neighbors = super::campaign::neighbors(&entries[parent].identity, classes, hits);
+    let use_neighbor = burst.map(|(_, use_b)| use_b).unwrap_or_else(|| rng.next_u64() & 1 != 0);
+    if use_neighbor && !neighbors.is_empty() {
+        (parent, &classes[neighbors[0]], "B")
+    } else {
+        (parent, &entries[parent].identity, "A")
+    }
 }
 
 fn complete_observation(result: &Value) -> bool {
@@ -416,16 +465,12 @@ fn campaign<B: BV>(
                     let stream = attempts as u64;
                     let id = first_mutant + stream;
                     let mut rng = random_stream(seed, &options.scenario, stream);
-                    let (parent, forced_b) = bursts
-                        .pop_front()
-                        .map(|(parent, form)| (parent, Some(form)))
-                        .unwrap_or_else(|| (choose(&entries, arm != "B0"), None));
-                    entries[parent].selections += 1;
-                    let neighbors = super::campaign::neighbors(&entries[parent].identity, &classes, &hits);
-                    let use_b = forced_b.unwrap_or_else(|| rng.next_u64() & 1 != 0) && !neighbors.is_empty();
-                    let identity = if use_b { &classes[neighbors[0]] } else { &entries[parent].identity };
+                    let burst = bursts.pop_front();
+                    let (parent, identity, operator) =
+                        select_request(&entries, &classes, &hits, burst, arm != "B0", &mut rng);
                     let path_index = paths.iter().position(|path| path.signature == identity.path_signature).unwrap();
-                    let record = json!({"sample_id":id,"attempt":attempts,"parent_entry":parent,"parent_sample_id":entries[parent].sample.sample_id,"parent_identity":entries[parent].identity,"target_identity":identity,"operator":if use_b {"B"}else{"A"},"forced_burst":forced_b.is_some(),"rng_stream":stream});
+                    let record = json!({"sample_id":id,"attempt":attempts,"parent_entry":parent,"parent_sample_id":entries[parent].sample.sample_id,"parent_identity":entries[parent].identity,"target_identity":identity,"operator":operator,"forced_burst":burst.is_some(),"rng_stream":stream});
+                    entries[parent].selections += 1;
                     jobs.push(Job { target_index: path_index, parent: entries[parent].sample.clone(), record, rng });
                     attempts += 1;
                 }
@@ -643,10 +688,13 @@ pub(super) fn run<B: BV>(
     target: &dyn Target<B>,
     executor: &mut impl Executor<Input = super::classifier::Job, Output = super::classifier::Outcome>,
     threads: usize,
+    judge_seconds: f64,
 ) {
     disable_core_dumps();
     let runtime = Runtime::read(options.inputs.as_ref().expect("ablation需要--fuzz-inputs runtime.json"));
-    let platform: testcase::Platform = serde_json::from_reader(fs::File::open(&runtime.platform).unwrap()).unwrap();
+    let platform_config = fs::read(&runtime.platform).unwrap();
+    let platform: testcase::Platform = serde_json::from_slice(&platform_config).unwrap();
+    let filter_started = Instant::now();
     let signals: Signals = serde_json::from_reader(fs::File::open(&runtime.signals).unwrap()).unwrap();
     let excluded_names = signals.treatment.iter().chain(&signals.holdout).cloned().collect::<BTreeSet<_>>();
     assert_eq!(excluded_names.len(), signals.treatment.len() + signals.holdout.len(), "T与留出信号必须互斥");
@@ -671,12 +719,14 @@ pub(super) fn run<B: BV>(
     let mut primary = BTreeMap::<String, usize>::new();
     let mut reasons = BTreeMap::<String, usize>::new();
     let mut entries = Vec::new();
+    let mut generated_inputs = Vec::new();
     for (input, row) in corpus.iter().zip(corpus_rows) {
         let row = row.as_ref().unwrap();
         let sample: Sample = serde_json::from_value(row["sample"].clone()).unwrap();
         let identity = directory.identity(&options.scenario, row);
         match eligibility::check(&sample, &platform) {
-            Ok(_) => {
+            Ok(generated) => {
+                generated_inputs.push(generated);
                 append(
                     &mut filter_log,
                     &json!({"sample_id":input.sample_id,"identity":identity,"accepted":true,"reasons":[]}),
@@ -710,76 +760,45 @@ pub(super) fn run<B: BV>(
         return;
     }
     assert!(!entries.is_empty(), "硬件过滤后corpus为空，详见filter-summary.json");
-    // 初始硬件观察同时检查未修版；已检出的已知问题属于第0例。
-    let initial_hardware =
-        execute_batches(entries.iter().enumerate().collect::<Vec<_>>(), runtime.workers, |(index, entry)| {
-            let output = options.output.join("initial-hardware").join(format!("{index:06}"));
-            let row = emu::run(
-                &runtime,
-                &platform,
-                entry.sample.clone(),
-                eligibility::check(&entry.sample, &platform).unwrap(),
-                &output,
-                true,
-                &all_selected,
-            );
-            let known_replay =
-                if row.fixed["agree"] == true && row.baseline["mismatch"]["known_rule"] == observe::KNOWN_RULE {
-                    Some(
-                        emu::probe(
-                            &runtime,
-                            &row.sample,
-                            &platform,
-                            &row.generated,
-                            &row.built,
-                            &output.join("known-replay"),
-                            true,
-                            &[],
-                        )
-                        .0,
-                    )
-                } else {
-                    None
-                };
-            let fixed_replay = mismatch_feature(&row.fixed).map(|_| {
-                emu::probe(
-                    &runtime,
-                    &row.sample,
-                    &platform,
-                    &row.generated,
-                    &row.built,
-                    &output.join("fixed-replay"),
-                    false,
-                    &all_selected,
-                )
-                .0
-            });
-            let observation = baseline::Observation {
-                perf: row.perf,
-                fixed: row.fixed,
-                baseline: row.baseline,
-                known_replay,
-                fixed_replay,
-            };
-            io::write_json(&output.join("initial-observation.json"), &observation);
-            eprintln!("[ABLATION_INITIAL] {}", json!({"entry":index,"total":entries.len()}));
-            observation
-        });
-    io::write_json(
-        &options.output.join("initial-hardware-summary.json"),
-        &json!({
-            "entries":initial_hardware.len(),
-            "R_XS_001_first":baseline::State::new(&initial_hardware, &signals.treatment, &signals.holdout).known_first,
-            "replayed_divergence_signatures":initial_hardware.iter().filter_map(|row| {
-                let key = mismatch_feature(&row.fixed)?;
-                (row.fixed_replay.as_ref().and_then(mismatch_feature).as_ref()==Some(&key)).then_some(key)
-            }).collect::<BTreeSet<_>>()
-        }),
-    );
-    unsafe {
-        libc::signal(libc::SIGTERM, stop as *const () as usize);
-        libc::signal(libc::SIGINT, stop as *const () as usize);
+    if runtime.prepare_only {
+        install_stop_handlers();
     }
+    let checkpointed = runtime.prepare_only || runtime.reuse_initial.is_some();
+    let conditions = if checkpointed {
+        json!({
+            "protocol":baseline::PROTOCOL,
+            "platform":serde_json::from_slice::<Value>(&platform_config).unwrap(),
+            "components":runtime.initial_components,
+            "timeout_seconds":runtime.timeout_seconds,
+        })
+    } else {
+        Value::Null
+    };
+    let initial_inputs = entries
+        .iter()
+        .zip(generated_inputs)
+        .map(|(entry, generated)| {
+            let input = checkpointed.then(|| baseline::input_reference(&entry.sample, &generated));
+            (input, (&entry.sample, generated))
+        })
+        .collect();
+    let initial_hardware = baseline::initial_observations(
+        &runtime,
+        &options.output,
+        initial_inputs,
+        &all_selected,
+        &signals,
+        conditions,
+        judge_seconds,
+        filter_started.elapsed().as_secs_f64(),
+        |(sample, generated), directory| {
+            emu::observe_initial(&runtime, &platform, sample, generated, directory, &all_selected)
+        },
+    );
+    if runtime.prepare_only {
+        return;
+    }
+    install_stop_handlers();
     let mut summaries = Vec::new();
     let mut first_comparisons = Vec::new();
     for seed in &runtime.seeds {
@@ -896,6 +915,19 @@ mod runtime_tests {
         io::write_json(&path, &config);
         let runtime = Runtime::read(&path);
         assert_eq!(runtime.compiler, compiler, "编译器别名决定nm／objdump的文件名前缀");
+        assert!(!runtime.prepare_only);
+        assert!(runtime.reuse_initial.is_none());
+
+        config["prepare_only"] = json!(true);
+        config["reuse_initial"] = json!("observations");
+        config["initial_components"] = json!({
+            "simulator":"fixed-v1","comparison_simulator":"baseline-v1","reference":"reference-v1",
+            "observer":"observer-v1","toolchain":"toolchain-v1",
+        });
+        io::write_json(&path, &config);
+        let runtime = Runtime::read(&path);
+        assert!(runtime.prepare_only);
+        assert_eq!(runtime.reuse_initial, Some(directory.join("observations")));
         fs::remove_dir_all(directory).unwrap();
     }
 }
