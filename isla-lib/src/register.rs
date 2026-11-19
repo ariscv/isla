@@ -339,6 +339,21 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         register.value.read_last(shared_state, solver, info).map(Some)
     }
 
+    pub(crate) fn merge_initial(
+        &mut self,
+        id: Name,
+        shared: &SharedState<'ir, B>,
+        terms: &mut dyn crate::primop_util::merge_terms::MergeTerms<B>,
+        info: SourceLoc,
+    ) -> Result<Val<B>, ExecError> {
+        let initial = match &self.map[&id].value {
+            RelaxedVal::Init { last_write, .. } => return Ok(last_write.clone()),
+            RelaxedVal::Uninit(ty) => crate::primop_util::symbolic_terms(ty, shared.typedefs(), terms, info)?,
+        };
+        self.assign(id, initial.clone(), shared);
+        Ok(initial)
+    }
+
     /// 外层可能继续用普通的 relaxed 读。历史逐项带合并守卫，缺项重复同臂的最新值。
     pub(crate) fn merge_relaxed(
         &mut self,
@@ -346,10 +361,10 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         condition: Sym,
         left: &Self,
         right: &Self,
-        solver: &mut Solver<B>,
+        solver: &mut dyn crate::primop_util::merge_terms::MergeTerms<B>,
         info: SourceLoc,
     ) -> Result<(), ExecError> {
-        use crate::primop_util::merge_val;
+        use crate::primop_util::{ite_choice_terms, merge_val_mode};
         let entry = self.map.get(&id).expect("区域基帧必须有寄存器");
         assert!(entry.relaxed && left.map[&id].relaxed && right.map[&id].relaxed);
         let [left, right] = [&left.map[&id].value, &right.map[&id].value].map(|value| match value {
@@ -362,22 +377,30 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         let RelaxedVal::Init { last_write: b, last_read: rb, old_writes: hb } = right else {
             panic!("汇合前必须补齐惰性入口值")
         };
-        let last_write = merge_val(condition, a, b, solver, info)?;
+        let last_write = merge_val_mode::<B, false>(condition, a, b, solver, info)?;
         let last_read = if ra.is_some() || rb.is_some() {
             let ra = match ra {
                 Some(read) => read.clone(),
-                None => ite_choice(a, ha, solver, info)?,
+                None => ite_choice_terms(a, ha, solver, info)?,
             };
             let rb = match rb {
                 Some(read) => read.clone(),
-                None => ite_choice(b, hb, solver, info)?,
+                None => ite_choice_terms(b, hb, solver, info)?,
             };
-            Some(merge_val(condition, &ra, &rb, solver, info)?)
+            Some(merge_val_mode::<B, false>(condition, &ra, &rb, solver, info)?)
         } else {
             None
         };
         let old_writes = (0..ha.len().max(hb.len()))
-            .map(|index| merge_val(condition, ha.get(index).unwrap_or(a), hb.get(index).unwrap_or(b), solver, info))
+            .map(|index| {
+                merge_val_mode::<B, false>(
+                    condition,
+                    ha.get(index).unwrap_or(a),
+                    hb.get(index).unwrap_or(b),
+                    solver,
+                    info,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         cost::make_mut(&mut self.map).get_mut(&id).unwrap().value =
             RelaxedVal::Init { last_write, last_read, old_writes };

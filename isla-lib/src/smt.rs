@@ -2629,6 +2629,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         Sym { id: n }
     }
 
+    pub(crate) fn next_join_symbol(&self) -> u32 {
+        self.next_var
+    }
+
+    /// 计划完成后预留定义编号，发布各步时可与正常事务产生的编号交错。
+    pub(crate) fn reserve_join_symbols(&mut self, start: u32, end: u32) {
+        assert_eq!(self.next_var, start, "汇合计划期间不得修改求解器");
+        assert!(end >= start);
+        self.next_var = end;
+    }
+
+    pub(crate) fn add_join_definition(&mut self, def: Def, bits: bool, info: SourceLoc) {
+        if bits {
+            self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.add_with_location(def, info));
+        } else {
+            self.add_with_location(def, info);
+        }
+    }
+
     fn translate_exp(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
         let cost_scope =
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Translate);

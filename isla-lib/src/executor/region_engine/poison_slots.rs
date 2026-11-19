@@ -18,7 +18,7 @@ fn prune_inactive<B: BV>(
     value: &mut Val<B>,
     guard: &smtlib::Exp<Sym>,
     path: &mut Vec<SlotProjection>,
-    solver: &Solver<B>,
+    solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
     reads_guarded: &impl Fn(&[SlotProjection], Name) -> bool,
 ) {
     match value {
@@ -67,7 +67,7 @@ pub(super) fn prepare_local<'ir, B: BV>(
     b: &mut Option<UVal<'ir, B>>,
     uninit_is_poison: bool,
     condition: Sym,
-    solver: &Solver<B>,
+    solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
     reads_guarded: impl Fn(Option<(&[SlotProjection], Name)>) -> bool,
 ) -> Option<&'ir Ty<Name>> {
     match (a, b) {

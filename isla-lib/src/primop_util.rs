@@ -43,6 +43,9 @@ use crate::smt::smtlib::{self, bits64, Exp};
 use crate::smt::{Solver, Sym};
 use crate::source_loc::SourceLoc;
 
+pub(crate) mod merge_terms;
+use merge_terms::MergeTerms;
+
 #[allow(clippy::needless_range_loop)]
 pub fn smt_i128<V>(i: i128) -> Exp<V> {
     let mut bitvec = [false; 128];
@@ -237,11 +240,20 @@ pub fn smt_value<B: BV>(v: &Val<B>, info: SourceLoc) -> Result<Exp<Sym>, ExecErr
 // 整数在 SMT 中也表示为位向量；非位向量值由后续结构化合并处理。
 pub(crate) fn merge_bit_width<B: BV>(
     value: &Val<B>,
-    solver: &mut Solver<B>,
+    solver: &dyn MergeTerms<B>,
     info: SourceLoc,
 ) -> Result<Option<u32>, ExecError> {
     Ok(match value {
-        Val::Bits(_) | Val::MixedBits(_) => Some(length_bits(value, solver, info)?),
+        Val::Bits(bits) => Some(bits.len()),
+        Val::MixedBits(segments) => Some(segments.iter().try_fold(0, |width, segment| {
+            match segment {
+                BitsSegment::Concrete(bits) => Ok(width + bits.len()),
+                BitsSegment::Symbolic(sym) => solver
+                    .length(*sym)
+                    .map(|length| width + length)
+                    .ok_or_else(|| ExecError::Type(format!("length (solver cannot determine length) {:?}", sym), info)),
+            }
+        })?),
         Val::I64(_) => Some(64),
         Val::I128(_) => Some(128),
         Val::Symbolic(sym) => solver.length(*sym),
@@ -256,7 +268,17 @@ pub fn build_ite<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    build_ite_with(b, lhs, rhs, solver, info, build_ite)
+    build_ite_terms(b, lhs, rhs, solver, info)
+}
+
+pub(crate) fn build_ite_terms<B: BV>(
+    b: Sym,
+    lhs: &Val<B>,
+    rhs: &Val<B>,
+    solver: &mut dyn MergeTerms<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    build_ite_with(b, lhs, rhs, solver, info, build_ite_terms)
 }
 
 // 只检查结构与已有 sort，不声明符号、不查询模型。先检查整组候选，
@@ -360,19 +382,19 @@ pub(crate) fn build_vector_ite<B: BV>(
         return Err(ExecError::IncompatibleMerge);
     }
     // 标签仍走既有 Kind / Unwrap 检查；不在此处假定任何标签已匹配。
-    build_ite_with(b, lhs, rhs, solver, info, build_ite)
+    build_ite_with(b, lhs, rhs, solver, info, build_ite_terms)
 }
 
 fn build_ite_with<B: BV>(
     b: Sym,
     lhs: &Val<B>,
     rhs: &Val<B>,
-    solver: &mut Solver<B>,
+    solver: &mut dyn MergeTerms<B>,
     info: SourceLoc,
-    merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut Solver<B>, SourceLoc) -> Result<Val<B>, ExecError>,
+    merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut dyn MergeTerms<B>, SourceLoc) -> Result<Val<B>, ExecError>,
 ) -> Result<Val<B>, ExecError> {
     let result = build_ite_with_inner(b, lhs, rhs, solver, info, merge_payload);
-    if let Err(error) = &result {
+    if let (Err(error), Some(solver)) = (&result, solver.diagnostics()) {
         crate::executor::stats::merge_diagnostics::failed(lhs, rhs, solver, error);
     }
     result
@@ -382,9 +404,9 @@ fn build_ite_with_inner<B: BV>(
     b: Sym,
     lhs: &Val<B>,
     rhs: &Val<B>,
-    solver: &mut Solver<B>,
+    solver: &mut dyn MergeTerms<B>,
     info: SourceLoc,
-    merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut Solver<B>, SourceLoc) -> Result<Val<B>, ExecError>,
+    merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut dyn MergeTerms<B>, SourceLoc) -> Result<Val<B>, ExecError>,
 ) -> Result<Val<B>, ExecError> {
     if merge_bit_width(lhs, solver, info)? != merge_bit_width(rhs, solver, info)? {
         return Err(ExecError::IncompatibleMerge);
@@ -502,7 +524,12 @@ fn build_ite_with_inner<B: BV>(
         }
 
         _ => {
-            let exp = Exp::Ite(Box::new(Exp::Var(b)), Box::new(smt_value(lhs, info)?), Box::new(smt_value(rhs, info)?));
+            let lhs_exp = smt_value(lhs, info)?;
+            let rhs_exp = smt_value(rhs, info)?;
+            if solver.expression_sort(&lhs_exp) != solver.expression_sort(&rhs_exp) {
+                return Err(ExecError::IncompatibleMerge);
+            }
+            let exp = Exp::Ite(Box::new(Exp::Var(b)), Box::new(lhs_exp), Box::new(rhs_exp));
             let is_bits = |value: &Val<B>| match value {
                 Val::Bits(_) | Val::MixedBits(_) => true,
                 Val::Symbolic(sym) => solver.is_sail_bitvector(*sym),
@@ -696,12 +723,21 @@ pub fn ite_choice<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    ite_choice_terms(v, vs, solver, info)
+}
+
+pub(crate) fn ite_choice_terms<B: BV>(
+    v: &Val<B>,
+    vs: &[Val<B>],
+    solver: &mut dyn MergeTerms<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     if vs.is_empty() {
         Ok(v.clone())
     } else {
-        let vr = ite_choice(&vs[0], &vs[1..], solver, info)?;
+        let vr = ite_choice_terms(&vs[0], &vs[1..], solver, info)?;
         let b = solver.declare_const(smtlib::Ty::Bool, info);
-        build_ite(b, v, &vr, solver, info)
+        build_ite_terms(b, v, &vr, solver, info)
     }
 }
 
@@ -726,6 +762,15 @@ pub fn symbolic_from_typedefs<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    symbolic_terms(ty, typedefs, solver, info)
+}
+
+pub(crate) fn symbolic_terms<B: BV>(
+    ty: &Ty<Name>,
+    typedefs: Typedefs,
+    solver: &mut dyn MergeTerms<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     let smt_ty = match ty {
         Ty::Unit => return Ok(Val::Unit),
         Ty::Bits(0) => return Ok(Val::Bits(B::zeros(0))),
@@ -740,7 +785,7 @@ pub fn symbolic_from_typedefs<B: BV>(
             if let Some(field_types) = typedefs.structs.get(name) {
                 let field_values = field_types
                     .iter()
-                    .map(|(f, ty)| match symbolic_from_typedefs(ty, typedefs, solver, info) {
+                    .map(|(f, ty)| match symbolic_terms(ty, typedefs, solver, info) {
                         Ok(value) => Ok((*f, value)),
                         Err(error) => Err(error),
                     })
@@ -767,7 +812,7 @@ pub fn symbolic_from_typedefs<B: BV>(
 
                 for (ctor, ty) in ctor_types {
                     name_exp = Or(Box::new(Eq(Box::new(Var(sym)), Box::new(ctor.to_smt()))), Box::new(name_exp));
-                    let value = symbolic_from_typedefs(ty, typedefs, solver, info)?;
+                    let value = symbolic_terms(ty, typedefs, solver, info)?;
                     possibilities.insert(*ctor, value);
                 }
 
@@ -779,8 +824,7 @@ pub fn symbolic_from_typedefs<B: BV>(
         }
 
         Ty::FixedVector(sz, ty) => {
-            let values =
-                (0..*sz).map(|_| symbolic_from_typedefs(ty, typedefs, solver, info)).collect::<Result<_, _>>()?;
+            let values = (0..*sz).map(|_| symbolic_terms(ty, typedefs, solver, info)).collect::<Result<_, _>>()?;
             return Ok(Val::Vector(values));
         }
 
@@ -818,11 +862,7 @@ pub fn merge_val<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let result = merge_val_inner_mode::<B, false>(cond, val_a, val_b, solver, info);
-    if let Err(error) = &result {
-        crate::executor::stats::merge_diagnostics::failed(val_a, val_b, solver, error);
-    }
-    result
+    merge_val_mode::<B, false>(cond, val_a, val_b, solver, info)
 }
 
 /// 仅区域开关启用时调用；普通合并保持原有严格行为。
@@ -861,15 +901,15 @@ fn guarded_integer_expr<B: BV>(value: &Val<B>, info: SourceLoc) -> Result<Exp<Sy
     }
 }
 
-fn merge_val_mode<B: BV, const CONCRETE: bool>(
+pub(crate) fn merge_val_mode<B: BV, const CONCRETE: bool>(
     cond: Sym,
     a: &Val<B>,
     b: &Val<B>,
-    solver: &mut Solver<B>,
+    solver: &mut dyn MergeTerms<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     let result = merge_val_inner_mode::<B, CONCRETE>(cond, a, b, solver, info);
-    if let Err(error) = &result {
+    if let (Err(error), Some(solver)) = (&result, solver.diagnostics()) {
         crate::executor::stats::merge_diagnostics::failed(a, b, solver, error);
     }
     result
@@ -879,7 +919,7 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
     cond: Sym,
     val_a: &Val<B>,
     val_b: &Val<B>,
-    solver: &mut Solver<B>,
+    solver: &mut dyn MergeTerms<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     if CONCRETE && concrete_kind(val_a).is_some() && concrete_kind(val_a) == concrete_kind(val_b) {
@@ -887,11 +927,11 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
             return Ok(val_a.clone());
         }
         let guard = solver.define_const(smtlib::Exp::Var(cond), info);
-        crate::executor::concrete_values::created();
+        solver.record_guarded_value();
         return Ok(Val::Guarded(guard, Box::new((val_a.clone(), val_b.clone()))));
     }
     if CONCRETE {
-        let mut mixes_guarded_i64 = |guarded: &Val<B>, other: &Val<B>| {
+        let mixes_guarded_i64 = |guarded: &Val<B>, other: &Val<B>| {
             matches!(guarded, Val::Guarded(..))
                 && concrete_kind(guarded) == Some(false)
                 && matches!(other, Val::Symbolic(sym) if solver.length(*sym) == Some(64))
@@ -909,8 +949,8 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
     let b_width = merge_bit_width(val_b, solver, info)?;
     if CONCRETE
         && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))
-        && guarded_bits::is_bits(val_a, solver)
-        && guarded_bits::is_bits(val_b, solver)
+        && guarded_bits::is_bits_with(val_a, solver)
+        && guarded_bits::is_bits_with(val_b, solver)
     {
         return Ok(if val_a == val_b { val_a.clone() } else { guarded_bits::merge(cond, val_a, val_b, solver, info) });
     }
@@ -922,12 +962,12 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
             if val_a == val_b {
                 Ok(val_a.clone())
             } else {
-                build_ite(cond, val_a, val_b, solver, info)
+                build_ite_terms(cond, val_a, val_b, solver, info)
             }
         }
 
         (Val::MixedBits(_), Val::MixedBits(_) | Val::Bits(_)) | (Val::Bits(_), Val::MixedBits(_)) if CONCRETE => {
-            build_ite(cond, val_a, val_b, solver, info)
+            build_ite_terms(cond, val_a, val_b, solver, info)
         }
 
         (Val::Unit, Val::Unit) => Ok(Val::Unit),
@@ -973,7 +1013,7 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
             build_ite_with(cond, val_a, val_b, solver, info, merge_val_mode::<B, CONCRETE>)
         }
 
-        (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite(cond, val_a, val_b, solver, info),
+        (Val::Symbolic(_), _) | (_, Val::Symbolic(_)) => build_ite_terms(cond, val_a, val_b, solver, info),
 
         // I64 和 I128 都可能用于长度、索引和位宽计算；不同整数必须保留具体值。
         (Val::I64(_), Val::I64(_))

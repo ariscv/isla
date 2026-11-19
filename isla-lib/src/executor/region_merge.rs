@@ -1,7 +1,7 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
 use super::concrete_values::ConsumerRetry;
 use super::region_engine::{
-    advance_arm, append_loop_exit, branch_arm, finish_arrivals, finish_region, loop_exit_guard,
+    advance_arm, append_loop_exit, branch_arm, finish_arrivals, finish_prepared_region, finish_region, loop_exit_guard,
     publish_committed_records, publish_register_writes, record_projected_arrival, LoopDependencies, ReadyFragments,
 };
 use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
@@ -1407,6 +1407,21 @@ thread_local! {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fold_exit_frontiers<'ir, B: BV>(
     previous: LocalFrame<'ir, B>,
+    next: LocalFrame<'ir, B>,
+    history_ids: &mut Option<HashSet<usize>>,
+    base: &LocalFrame<'ir, B>,
+    region: &Region,
+    state: &TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<LocalFrame<'ir, B>, ExecError> {
+    fold_prepared_exit_frontiers(previous, next, history_ids, base, region, state, shared, solver, info, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fold_prepared_exit_frontiers<'ir, B: BV>(
+    previous: LocalFrame<'ir, B>,
     mut next: LocalFrame<'ir, B>,
     history_ids: &mut Option<HashSet<usize>>,
     base: &LocalFrame<'ir, B>,
@@ -1415,6 +1430,7 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
+    planned: Option<super::region_engine::join_groups::PreparedFold<'ir, B>>,
 ) -> Result<LocalFrame<'ir, B>, ExecError> {
     use smtlib::Exp::{Or, Var};
     if crate::config::RegionOptions::current().progress && diagnostics::enabled() {
@@ -1456,17 +1472,24 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
             Some(record)
         });
     }
-    let a = previous.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
-    let b = next.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
-    let condition = solver.define_const(a.clone(), info);
-    let union = Var(solver.define_const(Or(Box::new(a), Box::new(b)), info));
+    let (condition, union, prepared) = match planned {
+        Some(plan) => plan.publish_guards(solver),
+        None => {
+            let a =
+                previous.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
+            let b = next.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
+            let condition = solver.define_const(a.clone(), info);
+            let union = Var(solver.define_const(Or(Box::new(a), Box::new(b)), info));
+            (condition, union, None)
+        }
+    };
     let id = next_region_record();
     let mut merged = base.clone();
     let owner = solver.new_logical_arm(base.region_arm);
     merged.region_arm = Some(owner);
     let result = solver.with_logical_arm(owner, |solver| {
         solver.with_transaction_condition(&union, |solver| {
-            finish_region(
+            finish_prepared_region(
                 id,
                 condition,
                 region,
@@ -1477,6 +1500,7 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
                 shared,
                 solver,
                 info,
+                prepared,
             )
         })
     })?;

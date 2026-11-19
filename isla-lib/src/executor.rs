@@ -4267,6 +4267,7 @@ mod tests {
     mod nested_enum_tests;
     mod nested_merge_failure_tests;
     mod read_size_tests;
+    mod region_join_plan_tests;
     mod region_measurement_tests;
     mod region_merge_tests;
     mod review27_tests;

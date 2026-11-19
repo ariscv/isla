@@ -1,12 +1,14 @@
 //! 区域引擎的执行、状态合并与记录边界，不决定待办的调度顺序。
-use super::region_merge::{fold_exit_frontiers, reject, AccessLog, RegionResult};
+use super::region_merge::{reject, AccessLog, RegionResult};
 use super::stats::merge_diagnostics as diagnostics;
 use super::*;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::Region;
+use crate::primop_util::{build_ite_terms, merge_terms::MergeTerms, merge_val_mode, symbolic_terms};
 
 mod dependencies;
-mod join_groups;
+pub(super) mod join_groups;
+mod join_terms;
 mod organizer;
 mod poison_slots;
 pub(super) use dependencies::LoopDependencies;
@@ -329,7 +331,7 @@ fn charge_fragment_growth<B: BV>(frame: &LocalFrame<B>, additional: usize) -> Re
     Ok(())
 }
 
-/// 先尝试完整汇合，失败后以原片段形成兼容组。
+/// 所有成员先形成纯计划，再发布已批准的汇合。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_arrivals<'ir, B: BV>(
     record_id: usize,
@@ -361,63 +363,33 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
                 .as_ref()
                 .is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)
             && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
-    let saved = keep_separate.then(|| arms.clone());
-    let tx = keep_separate.then(|| solver.start_transaction());
-    let finish = |solver: &mut Solver<B>| {
-        let mut sides = Vec::with_capacity(2);
-        for side in arms {
-            let mut combined = None;
-            let mut history_ids = None;
-            for fragment in side {
-                combined = Some(match combined {
-                    None => fragment,
-                    Some(previous) => fold_exit_frontiers(
-                        previous,
-                        fragment,
-                        &mut history_ids,
-                        base,
-                        region,
-                        state,
-                        shared,
-                        solver,
-                        info,
-                    )?,
-                });
-            }
-            sides.push(combined);
+    let arrivals = arms
+        .into_iter()
+        .enumerate()
+        .flat_map(|(side, arm)| {
+            arm.into_iter().enumerate().map(move |(index, frame)| join_groups::Arrival { source: (side, index), frame })
+        })
+        .collect();
+    let plan =
+        join_groups::JoinPlan::prepare(arrivals, condition, keep_separate, base, region, state, shared, solver, info)?;
+    if let Some(groups) = plan.separate_groups() {
+        charge_fragment_growth(base, groups - 1)?;
+    }
+    match plan.construct(base, region, state, shared, solver, info)? {
+        join_groups::Joined::Complete { arms, pair } => {
+            finish_prepared_region(record_id, condition, region, base, arms, frame, state, shared, solver, info, pair)
         }
-        finish_region(record_id, condition, region, base, sides, frame, state, shared, solver, info)
-    };
-    match (finish(solver), tx) {
-        (Ok(result), tx) => {
-            if tx.is_some() {
-                solver.commit_transaction();
+        join_groups::Joined::Groups { frames: groups, reason } => {
+            let error = reject(base, reason);
+            if let ExecError::SpeculativeReject { function, pc, location, .. } = &error {
+                diagnostics::emit(
+                    serde_json::json!({"stage":"local_join_rejected","difference":"local_join_rejected","reason":reason,
+                    "at":{"function":diagnostics::name_string(*function,&shared.symtab),"pc":pc,"location":location}}),
+                );
             }
-            Ok(result)
-        }
-        (Err(error), tx) => {
-            if let Some(tx) = tx {
-                solver.rollback_transaction(tx);
-            }
-            let ExecError::SpeculativeReject { reason, function, pc, location } = error else { return Err(error) };
-            if !is_join_rejection(reason) || !keep_separate {
-                return Err(error);
-            }
-            diagnostics::emit(
-                serde_json::json!({"stage":"local_join_rejected","difference":"local_join_rejected","reason":reason,
-                "at":{"function":diagnostics::name_string(function,&shared.symtab),"pc":pc,"location":location}}),
-            );
-            let arrivals: Vec<_> = saved.unwrap().into_iter().flatten().collect();
-            assert!(arrivals.len() >= 2, "局部汇合拒绝必须保留两条以上片段");
-            let groups = if count > 2 {
-                join_groups::merge_compatible(arrivals, base, region, state, shared, solver, info)?
-            } else {
-                arrivals.into_iter().map(|part| (part, false)).collect()
-            };
             let merged_groups = groups.len() < count;
             shared.execution_stats.merge_rejected(frame.function_name, region.branch_pc, &error);
             state.speculation_stats.record_reject(reason);
-            charge_fragment_growth(base, groups.len() - 1)?;
             let mut separate = Vec::with_capacity(groups.len());
             for (mut fragment, combined) in groups {
                 if !nested && !combined {
@@ -502,12 +474,34 @@ pub(super) fn finish_region<'ir, B: BV>(
     condition: Sym,
     region: &Region,
     base: &LocalFrame<'ir, B>,
+    arms: Vec<Option<LocalFrame<'ir, B>>>,
+    frame: &mut LocalFrame<'ir, B>,
+    state: &TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<RegionResult, ExecError> {
+    finish_prepared_region(record_id, condition, region, base, arms, frame, state, shared, solver, info, None)
+}
+
+pub(in crate::executor) struct PreparedPair<'ir, B> {
+    state: PreparedState<'ir, B>,
+    operations: Vec<join_terms::Operation<B>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_prepared_region<'ir, B: BV>(
+    record_id: usize,
+    condition: Sym,
+    region: &Region,
+    base: &LocalFrame<'ir, B>,
     mut arms: Vec<Option<LocalFrame<'ir, B>>>,
     frame: &mut LocalFrame<'ir, B>,
     state: &TaskState<B>,
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
+    prepared: Option<PreparedPair<'ir, B>>,
 ) -> Result<RegionResult, ExecError> {
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
@@ -548,9 +542,13 @@ pub(super) fn finish_region<'ir, B: BV>(
             record_single_arrival(&mut arm, base, region, record_id, condition, info);
             arm
         }
-        (Some(left), Some(right)) => {
-            merge_states(record_id, condition, &base, left, right, &region, state, shared, solver, info)?
-        }
+        (Some(left), Some(right)) => match prepared {
+            Some(prepared) => {
+                join_terms::emit(prepared.operations, solver);
+                assemble_state(prepared.state, record_id, condition, base, left, right, region, info)
+            }
+            None => merge_states(record_id, condition, base, left, right, region, state, shared, solver, info)?,
+        },
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
     Arc::make_mut(&mut record.value_symbols).insert(condition);
@@ -605,7 +603,7 @@ pub(super) fn publish_register_writes<B: BV>(
 }
 
 /// 配置注入的具体枚举可能从未经过 IR 常量读取；登记必须进入当前合并事务的事件迹。
-fn register_value_enums<B: BV>(value: &Val<B>, types: &IRTypeInfo, solver: &mut Solver<B>) {
+fn register_value_enums<B: BV>(value: &Val<B>, types: &IRTypeInfo, solver: &mut dyn MergeTerms<B>) {
     match value {
         Val::Enum(member) => {
             let name = member.enum_id.to_name();
@@ -691,6 +689,11 @@ fn diagnose_slot<B: BV>(
     }));
 }
 
+struct PreparedState<'ir, B> {
+    frame: LocalFrame<'ir, B>,
+    single_arm_reads: Vec<GuardedRegisterRead<B>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn merge_states<'ir, B: BV>(
     record_id: usize,
@@ -704,9 +707,36 @@ fn merge_states<'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<LocalFrame<'ir, B>, ExecError> {
+    let prepared = prepare_state(condition, base, &left, &right, region, state, shared, solver, info)?;
+    Ok(assemble_state(prepared, record_id, condition, base, left, right, region, info))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_state<'ir, B: BV>(
+    condition: Sym,
+    base: &LocalFrame<'ir, B>,
+    left: &LocalFrame<'ir, B>,
+    right: &LocalFrame<'ir, B>,
+    region: &Region,
+    state: &TaskState<B>,
+    shared: &SharedState<'ir, B>,
+    solver: &mut dyn MergeTerms<B>,
+    info: SourceLoc,
+) -> Result<PreparedState<'ir, B>, ExecError> {
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     let incompatible = || reject(base, SpeculativeRejectReason::IncompatibleState);
+    if left.pc != right.pc
+        || left.function_name != right.function_name
+        || !std::ptr::eq(left.instrs, right.instrs)
+        || !match (&left.stack_call, &right.stack_call) {
+            (None, None) => true,
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    {
+        return Err(incompatible());
+    }
     let mut merged = base.clone();
     let lhs = left.local_state.speculative_access.as_ref().unwrap();
     let rhs = right.local_state.speculative_access.as_ref().unwrap();
@@ -779,7 +809,7 @@ fn merge_states<'ir, B: BV>(
             };
             let initial = ty
                 .filter(|_| matches!(va, Some(UVal::Uninit(_))) || matches!(vb, Some(UVal::Uninit(_))))
-                .map(|ty| symbolic(ty, shared, solver, info))
+                .map(|ty| symbolic_terms(ty, shared.typedefs(), solver, info))
                 .transpose()?;
             if let Some(limits) = poison_limits.filter(|_| !lets) {
                 let dead_uninit = poison_slots::prepare_local(
@@ -812,7 +842,7 @@ fn merge_states<'ir, B: BV>(
                 }
             }
             let (Some(UVal::Init(a)), Some(UVal::Init(b))) = (&va, &vb) else {
-                if diagnostics::enabled() {
+                if let Some(solver) = solver.diagnostics() {
                     diagnose_slot(
                         base,
                         region,
@@ -834,16 +864,18 @@ fn merge_states<'ir, B: BV>(
             register_value_enums(b, &shared.type_info, solver);
             // 帧内普通Sail整数已固定为128位表示，可沿用通用ITE承载计数数据。
             // 机器整数、寄存器及复合载荷仍走严格合并，保持长度／位宽与载荷边界。
-            let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
+            let mut value_trace = solver.diagnostics().map(|_| diagnostics::ValueTrace::start());
             let value = match (a, b) {
-                (Val::I128(_), Val::I128(_)) => crate::primop_util::build_ite(condition, a, b, solver, info),
+                (Val::I128(_), Val::I128(_)) => build_ite_terms(condition, a, b, solver, info),
                 _ if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) => {
-                    crate::primop_util::merge_concrete_val(condition, a, b, solver, info)
+                    merge_val_mode::<B, true>(condition, a, b, solver, info)
                 }
-                _ => crate::primop_util::merge_val(condition, a, b, solver, info),
+                _ => merge_val_mode::<B, false>(condition, a, b, solver, info),
             }
             .map_err(|error| {
-                if diagnostics::enabled() && !matches!(error, ExecError::Smt(_) | ExecError::Timeout) {
+                if let Some(solver) =
+                    solver.diagnostics().filter(|_| !matches!(error, ExecError::Smt(_) | ExecError::Timeout))
+                {
                     diagnose_slot(
                         base,
                         region,
@@ -884,8 +916,8 @@ fn merge_states<'ir, B: BV>(
         let b = right.regs().get_last_if_initialized(*reg);
         if base.regs().is_relaxed(*reg) {
             if a.is_none() || b.is_none() {
-                let value = merged.regs_mut().get_latest(*reg, shared, solver, info)?.expect("寄存器必须存在").clone();
-                solver.add_event(Event::AssumeReg(*reg, Vec::new(), value.clone()));
+                let value = merged.regs_mut().merge_initial(*reg, shared, solver, info)?;
+                solver.assume_reg(*reg, value.clone());
                 retained_initials.push((*reg, value));
             }
             merged.regs_mut().merge_relaxed(*reg, condition, left.regs(), right.regs(), solver, info).map_err(
@@ -906,9 +938,9 @@ fn merge_states<'ir, B: BV>(
         }
         let value = {
             let initial = if a.is_none() || b.is_none() {
-                let value = merged.regs_mut().get(*reg, shared, solver, info)?.expect("写入寄存器必须存在").clone();
+                let value = merged.regs_mut().merge_initial(*reg, shared, solver, info)?;
                 // 未写臂保留的初值也是后态依赖；发布初态元数据，不伪造架构读取。
-                solver.add_event(Event::AssumeReg(*reg, Vec::new(), value.clone()));
+                solver.assume_reg(*reg, value.clone());
                 retained_initials.push((*reg, value.clone()));
                 Some(value)
             } else {
@@ -918,16 +950,18 @@ fn merge_states<'ir, B: BV>(
             let b = b.or(initial.as_ref()).unwrap();
             register_value_enums(a, &shared.type_info, solver);
             register_value_enums(b, &shared.type_info, solver);
-            let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
+            let mut value_trace = solver.diagnostics().map(|_| diagnostics::ValueTrace::start());
             let merge = if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
                 && (matches!(a, Val::MixedBits(_)) || matches!(b, Val::MixedBits(_)))
             {
-                crate::primop_util::merge_concrete_val
+                merge_val_mode::<B, true>
             } else {
-                crate::primop_util::merge_val
+                merge_val_mode::<B, false>
             };
             merge(condition, a, b, solver, info).map_err(|error| {
-                if diagnostics::enabled() && !matches!(error, ExecError::Smt(_) | ExecError::Timeout) {
+                if let Some(solver) =
+                    solver.diagnostics().filter(|_| !matches!(error, ExecError::Smt(_) | ExecError::Timeout))
+                {
                     let declared = shared.registers.get(reg).expect("诊断寄存器必须有声明");
                     let raw_a = left
                         .regs()
@@ -1123,6 +1157,21 @@ fn merge_states<'ir, B: BV>(
     access.writes.register_write_order = write_order;
     cost::make_mut(&mut merged.local_state).speculative_access = Some(access);
     merged.pc = left.pc;
+    Ok(PreparedState { frame: merged, single_arm_reads })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_state<'ir, B: BV>(
+    prepared: PreparedState<'ir, B>,
+    record_id: usize,
+    condition: Sym,
+    base: &LocalFrame<'ir, B>,
+    left: LocalFrame<'ir, B>,
+    right: LocalFrame<'ir, B>,
+    region: &Region,
+    info: SourceLoc,
+) -> LocalFrame<'ir, B> {
+    let PreparedState { frame: mut merged, single_arm_reads } = prepared;
     let prefix = base.region_merge_records.len();
     merged.region_merge_records.append_suffix(&left.region_merge_records, prefix);
     merged.region_merge_records.append_suffix(&right.region_merge_records, prefix);
@@ -1142,5 +1191,5 @@ fn merge_states<'ir, B: BV>(
         single_arm_reads: single_arm_reads.into(),
         memory_reads: Vec::new().into(),
     });
-    Ok(merged)
+    merged
 }
