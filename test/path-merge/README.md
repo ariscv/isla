@@ -56,3 +56,78 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 | TODO | 仅显示原因，跳过编译和执行。 |
 
 整次运行存在 FAIL 或 XPASS 时退出 1。入口参数或必需工具文件有误时退出 2。Markdown 可用于逐场景审阅，其中包含源码、预期、实测和诊断。
+
+## 场景索引
+
+编号指向可独立运行的 Sail。D2 是架子保留的占位，五片段的可运行分组见 D7，同一棵树的到达次序置换见 D8。
+
+### A 值种类
+
+- [A1 合并两个不同的等宽位向量](scenarios/A1-concrete-diff-bits.sail)
+- [A2 读回相同具体整数](scenarios/A2-equal-int.sail)
+- [A3 合并后继续消费不同的具体字符串](scenarios/A3-concrete-diff-string.sail)
+- [A4 读回不同具体整数](scenarios/A4-distinct-int.sail)
+- [A5 比较相同具体字符串](scenarios/A5-equal-string.sail)
+- [A6 区分两个符号表达式](scenarios/A6-two-symbols.sail)
+- [A7 区分常量位和符号位](scenarios/A7-mixed-bits.sail)
+- [A8 读回不同布尔值](scenarios/A8-boolean.sail)
+- [A9 辨别不同位宽](scenarios/A9-distinct-width.sail)
+- [A10 读取结构体的两个字段](scenarios/A10-struct.sail)
+- [A11 读取定长向量的元素](scenarios/A11-vector.sail)
+- [A12 读取等长列表的首项](scenarios/A12-list.sail)
+- [A13 辨别 Some 和 None](scenarios/A13-option-tag.sail)
+- [A14 区分 union 的相同标签与相同负载](scenarios/A14-union-equal.sail)
+- [A15 区分 union 的相同标签与不同负载](scenarios/A15-union-payload.sail)
+- [A16 区分 union 的不同标签与单位负载](scenarios/A16-union-tag.sail)
+- [A17 读取同一构造子的负载宽度](scenarios/A17-union-width.sail)
+- [A18 比较同一标签的不同字符串](scenarios/A18-union-string.sail)
+- [A19 比较不同枚举成员](scenarios/A19-enum.sail)
+- [A20 单臂初始化寄存器](scenarios/A20-init-slot.sail)
+- [A21 读回具体与符号整数](scenarios/A21-mixed-int.sail)
+- [A22 复用同一个符号值](scenarios/A22-equal-symbol.sail)
+
+### B 控制结构
+
+- [B1 合并两层菱形分叉](scenarios/B1-nested-diamond.sail)
+- [B2 单菱形的共同后继](scenarios/B2-diamond.sail)
+- [B3 单臂赋值](scenarios/B3-implicit-else.sail)
+- [B4 三路 match 共用后继](scenarios/B4-three-match.sail)
+- [B5 只在外层一臂再分叉](scenarios/B5-one-inner.sail)
+- [B6 臂内提前返回](scenarios/B6-early-return.sail)
+- [B7 单臂调用纯函数](scenarios/B7-pure-call.sail)
+- [B8 臂内调用写寄存器函数](scenarios/B8-write-call.sail)
+- [B9 臂内调用读寄存器函数](scenarios/B9-read-call.sail)
+- [B10 两臂执行不同次数的有界循环](scenarios/B10-unequal-loops.sail)
+- [B11 失败断言是独立错误出口](scenarios/B11-assert-leaf.sail)
+- [B12 调用方捕获臂内异常](scenarios/B12-caught-exception.sail)
+
+### C 状态与事件
+
+- [C1 同一寄存器接收两种值](scenarios/C1-same-register-diff-value.sail)
+- [C2 保留不同数量的访存事件](scenarios/C2-different-memory-events.sail)
+- [C3 保留符号访存读值](scenarios/C3-symbolic-memory-read.sail)
+- [C4 两臂写不同寄存器](scenarios/C4-disjoint-writes.sail)
+- [C5 从两臂读取不同寄存器](scenarios/C5-register-read.sail)
+- [C6 同地址写不同字节](scenarios/C6-store-same.sail)
+- [C7 不同地址写相同字节](scenarios/C7-store-address.sail)
+- [C8 两臂从同地址读取](scenarios/C8-load-same.sail)
+- [C9 两臂从不同地址读取](scenarios/C9-load-address.sail)
+- [C10 只在一个分支读取](scenarios/C10-load-conditional.sail)
+- [C11 两笔写的顺序相反](scenarios/C11-memory-order.sail)
+- [C12 覆盖局部变量](scenarios/C12-local-reassign.sail)
+- [C13 分支内同名 let](scenarios/C13-let-scope.sail)
+- [C14 严格寄存器写序成环](scenarios/C14-register-order.sail)
+
+### D 汇合点分组
+
+- [D1 四个片段按兼容性汇合](scenarios/D1-four-fragments.sail)
+- [D2 五个片段汇合](scenarios/D2-five-fragments.sail)
+- [D3 三个 I64 片段 3、符号值、7](scenarios/D3-i64-bridge.sail)
+- [D4 P("a")、Q(())、P("c") 的分组](scenarios/D4-union-bridge.sail)
+- [D5 外层两臂的标签集合分别是 {b,c} 和 {c,d}](scenarios/D5-overlap.sail)
+- [D6 四个结果组各自读取 R](scenarios/D6-four-register-reads.sail)
+- [D7 五个叶子按 a、b、c 分三组](scenarios/D7-five-labels.sail)
+- [D8 改变五片段到达次序后守卫分组一致](scenarios/D8-permute-five.sail)
+- [D9 P("a")、Q(())、P("c") 的分组](scenarios/D9-union-other-tree.sail)
+
+S1–S6、S6 边界、S1 控制及故意写错的规格继续使用 [property 的内层合并索引](../property/README-nested-merge.md)。该索引给出每项的守卫目标与独立运行命令。
